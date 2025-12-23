@@ -1091,7 +1091,140 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 	return entries
 }
 
-// loadWalletScanData retrieves all necessary data from the database.
+// handleScanReq processes a user-initiated rescan request.
+func (s *syncer) handleScanReq(ctx context.Context,
+	req *scanReq) error {
+
+	// If the wallet is already syncing or rescanning, we can't accept a
+	// full resync request. This prevents conflicting rescan operations.
+	if s.isRecoveryMode() {
+		return fmt.Errorf("%w: wallet is currently %s",
+			ErrStateForbidden, s.syncState())
+	}
+
+	if req.typ == scanTypeTargeted {
+		return s.scanWithTargets(ctx, req)
+	}
+
+	return s.scanWithRewind(ctx, req)
+}
+
+// scanWithRewind rewinds the wallet's sync status to the requested start block.
+func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
+	current := s.addrStore.SyncedTo()
+
+	if req.startBlock.Height >= current.Height {
+		// Requested start is ahead of or equal to current sync.
+		// Nothing to do (we are already synced past it).
+		return nil
+	}
+
+	log.Infof("Rewinding sync status from %d to %d for rescan",
+		current.Height, req.startBlock.Height)
+
+	// Rewind the database status.
+	err := s.DBPutRewind(ctx, req.startBlock)
+	if err != nil {
+		log.Errorf("Failed to rewind sync status: %v", err)
+
+		return err
+	}
+
+	return nil
+}
+
+// scanWithTargets performs a targeted rescan for specific accounts without
+// rewinding the global sync state.
+func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
+	scanState, err := s.loadTargetedScanState(ctx, req.targets)
+	if err != nil {
+		return err
+	}
+
+	s.state.Store(uint32(syncStateRescanning))
+	defer s.state.Store(uint32(syncStateSynced))
+
+	startHeight := req.startBlock.Height
+
+	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("get best block: %w", err)
+	}
+
+	log.Infof("Starting targeted rescan from height %d to %d for %d "+
+		"accounts", startHeight, bestHeight, len(req.targets))
+
+	// Loop until caught up.
+	for startHeight < bestHeight {
+		// Cap end height.
+		endHeight := min(
+			startHeight+int32(recoveryBatchSize)-1, bestHeight,
+		)
+
+		// Use fetchAndFilterBlocks directly.
+		results, err := s.fetchAndFilterBlocks(
+			ctx, scanState, startHeight, endHeight,
+		)
+		if err != nil {
+			return err
+		}
+
+		if len(results) == 0 {
+			return fmt.Errorf("%w: fetchAndFilterBlocks returned "+
+				"0 results", ErrScanBatchEmpty)
+		}
+
+		// Process results (update DB).
+		err = s.DBPutTargetedBatch(ctx, results)
+		if err != nil {
+			return err
+		}
+
+		// Advance startHeight.
+		//nolint:gosec // batch size is bounded.
+		startHeight += int32(len(results))
+	}
+
+	log.Infof("Targeted rescan complete")
+
+	return nil
+}
+
+// loadTargetedScanState initializes a recovery state for a targeted rescan of
+// specific accounts.
+func (s *syncer) loadTargetedScanState(ctx context.Context,
+	targets []waddrmgr.AccountScope) (*RecoveryState, error) {
+
+	horizonData, initialAddrs, initialUnspent, err :=
+		s.loadTargetedScanData(ctx, targets)
+	if err != nil {
+		return nil, err
+	}
+
+	state := NewRecoveryState(
+		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
+	)
+
+	err = state.Initialize(horizonData, initialAddrs, initialUnspent)
+	if err != nil {
+		return nil, fmt.Errorf("init scan state: %w", err)
+	}
+
+	return state, nil
+}
+
+// loadTargetedScanData retrieves all necessary data from the database to
+// initialize the recovery state for a targeted rescan.
+func (s *syncer) loadTargetedScanData(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties,
+	[]address.Address, []wtxmgr.Credit, error) {
+
+	return s.DBGetScanData(ctx, targets)
+}
+
+// loadWalletScanData retrieves all necessary data from the database to
+// initialize the recovery state. This includes account horizons, active
+// addresses, and unspent outputs to watch.
 func (s *syncer) loadWalletScanData(ctx context.Context) (
 	[]*waddrmgr.AccountProperties, []address.Address,
 	[]wtxmgr.Credit, error) {
