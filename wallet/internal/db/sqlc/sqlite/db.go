@@ -42,8 +42,23 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteKeyScopeSecretsStmt, err = db.PrepareContext(ctx, DeleteKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScopeSecrets: %w", err)
 	}
+	if q.deleteTransactionStmt, err = db.PrepareContext(ctx, DeleteTransaction); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteTransaction: %w", err)
+	}
+	if q.deleteUnconfirmedTransactionStmt, err = db.PrepareContext(ctx, DeleteUnconfirmedTransaction); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteUnconfirmedTransaction: %w", err)
+	}
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
+	}
+	if q.getAllConfirmedTransactionsByHashStmt, err = db.PrepareContext(ctx, GetAllConfirmedTransactionsByHash); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAllConfirmedTransactionsByHash: %w", err)
+	}
+	if q.getAllUnconfirmedTransactionHashesStmt, err = db.PrepareContext(ctx, GetAllUnconfirmedTransactionHashes); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAllUnconfirmedTransactionHashes: %w", err)
+	}
+	if q.getAllUnconfirmedTransactionsStmt, err = db.PrepareContext(ctx, GetAllUnconfirmedTransactions); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAllUnconfirmedTransactions: %w", err)
 	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
@@ -56,6 +71,18 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getKeyScopeSecretsStmt, err = db.PrepareContext(ctx, GetKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query GetKeyScopeSecrets: %w", err)
+	}
+	if q.getLatestConfirmedTransactionByHashStmt, err = db.PrepareContext(ctx, GetLatestConfirmedTransactionByHash); err != nil {
+		return nil, fmt.Errorf("error preparing query GetLatestConfirmedTransactionByHash: %w", err)
+	}
+	if q.getTransactionByHashStmt, err = db.PrepareContext(ctx, GetTransactionByHash); err != nil {
+		return nil, fmt.Errorf("error preparing query GetTransactionByHash: %w", err)
+	}
+	if q.getTransactionByHashAndBlockStmt, err = db.PrepareContext(ctx, GetTransactionByHashAndBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query GetTransactionByHashAndBlock: %w", err)
+	}
+	if q.getUnconfirmedTransactionByHashStmt, err = db.PrepareContext(ctx, GetUnconfirmedTransactionByHash); err != nil {
+		return nil, fmt.Errorf("error preparing query GetUnconfirmedTransactionByHash: %w", err)
 	}
 	if q.getWalletByIDStmt, err = db.PrepareContext(ctx, GetWalletByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletByID: %w", err)
@@ -72,6 +99,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertKeyScopeSecretsStmt, err = db.PrepareContext(ctx, InsertKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertKeyScopeSecrets: %w", err)
 	}
+	if q.insertTransactionStmt, err = db.PrepareContext(ctx, InsertTransaction); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertTransaction: %w", err)
+	}
 	if q.insertWalletSecretsStmt, err = db.PrepareContext(ctx, InsertWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSecrets: %w", err)
 	}
@@ -84,8 +114,26 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
 	}
+	if q.listTransactionsByHeightRangeStmt, err = db.PrepareContext(ctx, ListTransactionsByHeightRange); err != nil {
+		return nil, fmt.Errorf("error preparing query ListTransactionsByHeightRange: %w", err)
+	}
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
+	}
+	if q.transactionExistsStmt, err = db.PrepareContext(ctx, TransactionExists); err != nil {
+		return nil, fmt.Errorf("error preparing query TransactionExists: %w", err)
+	}
+	if q.unconfirmTransactionsFromHeightStmt, err = db.PrepareContext(ctx, UnconfirmTransactionsFromHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query UnconfirmTransactionsFromHeight: %w", err)
+	}
+	if q.unconfirmedTransactionExistsStmt, err = db.PrepareContext(ctx, UnconfirmedTransactionExists); err != nil {
+		return nil, fmt.Errorf("error preparing query UnconfirmedTransactionExists: %w", err)
+	}
+	if q.updateTransactionBlockStmt, err = db.PrepareContext(ctx, UpdateTransactionBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateTransactionBlock: %w", err)
+	}
+	if q.updateTransactionLabelStmt, err = db.PrepareContext(ctx, UpdateTransactionLabel); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateTransactionLabel: %w", err)
 	}
 	if q.updateWalletSecretsStmt, err = db.PrepareContext(ctx, UpdateWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateWalletSecrets: %w", err)
@@ -128,9 +176,34 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteKeyScopeSecretsStmt: %w", cerr)
 		}
 	}
+	if q.deleteTransactionStmt != nil {
+		if cerr := q.deleteTransactionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteTransactionStmt: %w", cerr)
+		}
+	}
+	if q.deleteUnconfirmedTransactionStmt != nil {
+		if cerr := q.deleteUnconfirmedTransactionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteUnconfirmedTransactionStmt: %w", cerr)
+		}
+	}
 	if q.getAddressTypeByIDStmt != nil {
 		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
+		}
+	}
+	if q.getAllConfirmedTransactionsByHashStmt != nil {
+		if cerr := q.getAllConfirmedTransactionsByHashStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAllConfirmedTransactionsByHashStmt: %w", cerr)
+		}
+	}
+	if q.getAllUnconfirmedTransactionHashesStmt != nil {
+		if cerr := q.getAllUnconfirmedTransactionHashesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAllUnconfirmedTransactionHashesStmt: %w", cerr)
+		}
+	}
+	if q.getAllUnconfirmedTransactionsStmt != nil {
+		if cerr := q.getAllUnconfirmedTransactionsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAllUnconfirmedTransactionsStmt: %w", cerr)
 		}
 	}
 	if q.getBlockByHeightStmt != nil {
@@ -151,6 +224,26 @@ func (q *Queries) Close() error {
 	if q.getKeyScopeSecretsStmt != nil {
 		if cerr := q.getKeyScopeSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getKeyScopeSecretsStmt: %w", cerr)
+		}
+	}
+	if q.getLatestConfirmedTransactionByHashStmt != nil {
+		if cerr := q.getLatestConfirmedTransactionByHashStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getLatestConfirmedTransactionByHashStmt: %w", cerr)
+		}
+	}
+	if q.getTransactionByHashStmt != nil {
+		if cerr := q.getTransactionByHashStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getTransactionByHashStmt: %w", cerr)
+		}
+	}
+	if q.getTransactionByHashAndBlockStmt != nil {
+		if cerr := q.getTransactionByHashAndBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getTransactionByHashAndBlockStmt: %w", cerr)
+		}
+	}
+	if q.getUnconfirmedTransactionByHashStmt != nil {
+		if cerr := q.getUnconfirmedTransactionByHashStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getUnconfirmedTransactionByHashStmt: %w", cerr)
 		}
 	}
 	if q.getWalletByIDStmt != nil {
@@ -178,6 +271,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertKeyScopeSecretsStmt: %w", cerr)
 		}
 	}
+	if q.insertTransactionStmt != nil {
+		if cerr := q.insertTransactionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertTransactionStmt: %w", cerr)
+		}
+	}
 	if q.insertWalletSecretsStmt != nil {
 		if cerr := q.insertWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertWalletSecretsStmt: %w", cerr)
@@ -198,9 +296,39 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listKeyScopesByWalletStmt: %w", cerr)
 		}
 	}
+	if q.listTransactionsByHeightRangeStmt != nil {
+		if cerr := q.listTransactionsByHeightRangeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listTransactionsByHeightRangeStmt: %w", cerr)
+		}
+	}
 	if q.listWalletsStmt != nil {
 		if cerr := q.listWalletsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
+		}
+	}
+	if q.transactionExistsStmt != nil {
+		if cerr := q.transactionExistsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing transactionExistsStmt: %w", cerr)
+		}
+	}
+	if q.unconfirmTransactionsFromHeightStmt != nil {
+		if cerr := q.unconfirmTransactionsFromHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing unconfirmTransactionsFromHeightStmt: %w", cerr)
+		}
+	}
+	if q.unconfirmedTransactionExistsStmt != nil {
+		if cerr := q.unconfirmedTransactionExistsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing unconfirmedTransactionExistsStmt: %w", cerr)
+		}
+	}
+	if q.updateTransactionBlockStmt != nil {
+		if cerr := q.updateTransactionBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateTransactionBlockStmt: %w", cerr)
+		}
+	}
+	if q.updateTransactionLabelStmt != nil {
+		if cerr := q.updateTransactionLabelStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateTransactionLabelStmt: %w", cerr)
 		}
 	}
 	if q.updateWalletSecretsStmt != nil {
@@ -250,59 +378,91 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                                DBTX
-	tx                                *sql.Tx
-	createKeyScopeStmt                *sql.Stmt
-	createWalletStmt                  *sql.Stmt
-	deleteBlockStmt                   *sql.Stmt
-	deleteBlocksFromHeightOnwardsStmt *sql.Stmt
-	deleteKeyScopeStmt                *sql.Stmt
-	deleteKeyScopeSecretsStmt         *sql.Stmt
-	getAddressTypeByIDStmt            *sql.Stmt
-	getBlockByHeightStmt              *sql.Stmt
-	getKeyScopeByIDStmt               *sql.Stmt
-	getKeyScopeByWalletAndScopeStmt   *sql.Stmt
-	getKeyScopeSecretsStmt            *sql.Stmt
-	getWalletByIDStmt                 *sql.Stmt
-	getWalletByNameStmt               *sql.Stmt
-	getWalletSecretsStmt              *sql.Stmt
-	insertBlockStmt                   *sql.Stmt
-	insertKeyScopeSecretsStmt         *sql.Stmt
-	insertWalletSecretsStmt           *sql.Stmt
-	insertWalletSyncStateStmt         *sql.Stmt
-	listAddressTypesStmt              *sql.Stmt
-	listKeyScopesByWalletStmt         *sql.Stmt
-	listWalletsStmt                   *sql.Stmt
-	updateWalletSecretsStmt           *sql.Stmt
-	updateWalletSyncStateStmt         *sql.Stmt
+	db                                      DBTX
+	tx                                      *sql.Tx
+	createKeyScopeStmt                      *sql.Stmt
+	createWalletStmt                        *sql.Stmt
+	deleteBlockStmt                         *sql.Stmt
+	deleteBlocksFromHeightOnwardsStmt       *sql.Stmt
+	deleteKeyScopeStmt                      *sql.Stmt
+	deleteKeyScopeSecretsStmt               *sql.Stmt
+	deleteTransactionStmt                   *sql.Stmt
+	deleteUnconfirmedTransactionStmt        *sql.Stmt
+	getAddressTypeByIDStmt                  *sql.Stmt
+	getAllConfirmedTransactionsByHashStmt   *sql.Stmt
+	getAllUnconfirmedTransactionHashesStmt  *sql.Stmt
+	getAllUnconfirmedTransactionsStmt       *sql.Stmt
+	getBlockByHeightStmt                    *sql.Stmt
+	getKeyScopeByIDStmt                     *sql.Stmt
+	getKeyScopeByWalletAndScopeStmt         *sql.Stmt
+	getKeyScopeSecretsStmt                  *sql.Stmt
+	getLatestConfirmedTransactionByHashStmt *sql.Stmt
+	getTransactionByHashStmt                *sql.Stmt
+	getTransactionByHashAndBlockStmt        *sql.Stmt
+	getUnconfirmedTransactionByHashStmt     *sql.Stmt
+	getWalletByIDStmt                       *sql.Stmt
+	getWalletByNameStmt                     *sql.Stmt
+	getWalletSecretsStmt                    *sql.Stmt
+	insertBlockStmt                         *sql.Stmt
+	insertKeyScopeSecretsStmt               *sql.Stmt
+	insertTransactionStmt                   *sql.Stmt
+	insertWalletSecretsStmt                 *sql.Stmt
+	insertWalletSyncStateStmt               *sql.Stmt
+	listAddressTypesStmt                    *sql.Stmt
+	listKeyScopesByWalletStmt               *sql.Stmt
+	listTransactionsByHeightRangeStmt       *sql.Stmt
+	listWalletsStmt                         *sql.Stmt
+	transactionExistsStmt                   *sql.Stmt
+	unconfirmTransactionsFromHeightStmt     *sql.Stmt
+	unconfirmedTransactionExistsStmt        *sql.Stmt
+	updateTransactionBlockStmt              *sql.Stmt
+	updateTransactionLabelStmt              *sql.Stmt
+	updateWalletSecretsStmt                 *sql.Stmt
+	updateWalletSyncStateStmt               *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                                tx,
-		tx:                                tx,
-		createKeyScopeStmt:                q.createKeyScopeStmt,
-		createWalletStmt:                  q.createWalletStmt,
-		deleteBlockStmt:                   q.deleteBlockStmt,
-		deleteBlocksFromHeightOnwardsStmt: q.deleteBlocksFromHeightOnwardsStmt,
-		deleteKeyScopeStmt:                q.deleteKeyScopeStmt,
-		deleteKeyScopeSecretsStmt:         q.deleteKeyScopeSecretsStmt,
-		getAddressTypeByIDStmt:            q.getAddressTypeByIDStmt,
-		getBlockByHeightStmt:              q.getBlockByHeightStmt,
-		getKeyScopeByIDStmt:               q.getKeyScopeByIDStmt,
-		getKeyScopeByWalletAndScopeStmt:   q.getKeyScopeByWalletAndScopeStmt,
-		getKeyScopeSecretsStmt:            q.getKeyScopeSecretsStmt,
-		getWalletByIDStmt:                 q.getWalletByIDStmt,
-		getWalletByNameStmt:               q.getWalletByNameStmt,
-		getWalletSecretsStmt:              q.getWalletSecretsStmt,
-		insertBlockStmt:                   q.insertBlockStmt,
-		insertKeyScopeSecretsStmt:         q.insertKeyScopeSecretsStmt,
-		insertWalletSecretsStmt:           q.insertWalletSecretsStmt,
-		insertWalletSyncStateStmt:         q.insertWalletSyncStateStmt,
-		listAddressTypesStmt:              q.listAddressTypesStmt,
-		listKeyScopesByWalletStmt:         q.listKeyScopesByWalletStmt,
-		listWalletsStmt:                   q.listWalletsStmt,
-		updateWalletSecretsStmt:           q.updateWalletSecretsStmt,
-		updateWalletSyncStateStmt:         q.updateWalletSyncStateStmt,
+		db:                                      tx,
+		tx:                                      tx,
+		createKeyScopeStmt:                      q.createKeyScopeStmt,
+		createWalletStmt:                        q.createWalletStmt,
+		deleteBlockStmt:                         q.deleteBlockStmt,
+		deleteBlocksFromHeightOnwardsStmt:       q.deleteBlocksFromHeightOnwardsStmt,
+		deleteKeyScopeStmt:                      q.deleteKeyScopeStmt,
+		deleteKeyScopeSecretsStmt:               q.deleteKeyScopeSecretsStmt,
+		deleteTransactionStmt:                   q.deleteTransactionStmt,
+		deleteUnconfirmedTransactionStmt:        q.deleteUnconfirmedTransactionStmt,
+		getAddressTypeByIDStmt:                  q.getAddressTypeByIDStmt,
+		getAllConfirmedTransactionsByHashStmt:   q.getAllConfirmedTransactionsByHashStmt,
+		getAllUnconfirmedTransactionHashesStmt:  q.getAllUnconfirmedTransactionHashesStmt,
+		getAllUnconfirmedTransactionsStmt:       q.getAllUnconfirmedTransactionsStmt,
+		getBlockByHeightStmt:                    q.getBlockByHeightStmt,
+		getKeyScopeByIDStmt:                     q.getKeyScopeByIDStmt,
+		getKeyScopeByWalletAndScopeStmt:         q.getKeyScopeByWalletAndScopeStmt,
+		getKeyScopeSecretsStmt:                  q.getKeyScopeSecretsStmt,
+		getLatestConfirmedTransactionByHashStmt: q.getLatestConfirmedTransactionByHashStmt,
+		getTransactionByHashStmt:                q.getTransactionByHashStmt,
+		getTransactionByHashAndBlockStmt:        q.getTransactionByHashAndBlockStmt,
+		getUnconfirmedTransactionByHashStmt:     q.getUnconfirmedTransactionByHashStmt,
+		getWalletByIDStmt:                       q.getWalletByIDStmt,
+		getWalletByNameStmt:                     q.getWalletByNameStmt,
+		getWalletSecretsStmt:                    q.getWalletSecretsStmt,
+		insertBlockStmt:                         q.insertBlockStmt,
+		insertKeyScopeSecretsStmt:               q.insertKeyScopeSecretsStmt,
+		insertTransactionStmt:                   q.insertTransactionStmt,
+		insertWalletSecretsStmt:                 q.insertWalletSecretsStmt,
+		insertWalletSyncStateStmt:               q.insertWalletSyncStateStmt,
+		listAddressTypesStmt:                    q.listAddressTypesStmt,
+		listKeyScopesByWalletStmt:               q.listKeyScopesByWalletStmt,
+		listTransactionsByHeightRangeStmt:       q.listTransactionsByHeightRangeStmt,
+		listWalletsStmt:                         q.listWalletsStmt,
+		transactionExistsStmt:                   q.transactionExistsStmt,
+		unconfirmTransactionsFromHeightStmt:     q.unconfirmTransactionsFromHeightStmt,
+		unconfirmedTransactionExistsStmt:        q.unconfirmedTransactionExistsStmt,
+		updateTransactionBlockStmt:              q.updateTransactionBlockStmt,
+		updateTransactionLabelStmt:              q.updateTransactionLabelStmt,
+		updateWalletSecretsStmt:                 q.updateWalletSecretsStmt,
+		updateWalletSyncStateStmt:               q.updateWalletSyncStateStmt,
 	}
 }

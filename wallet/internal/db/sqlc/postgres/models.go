@@ -35,6 +35,16 @@ type KeyScopeSecret struct {
 	EncryptedCoinPrivKey []byte
 }
 
+type Transaction struct {
+	ID                int32
+	TxHash            []byte
+	BlockHeight       sql.NullInt32
+	IsCoinbase        bool
+	ReceivedTimestamp int64
+	SerializedTx      []byte
+	TxLabel           string
+}
+
 type Wallet struct {
 	ID                      int64
 	WalletName              string

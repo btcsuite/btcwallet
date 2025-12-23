@@ -6,6 +6,7 @@ package sqlcpg
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Querier interface {
@@ -20,8 +21,22 @@ type Querier interface {
 	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
 	// Deletes the secrets for a key scope.
 	DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error)
+	// Deletes a specific confirmed transaction by hash and block height.
+	// Used during blockchain reorganizations.
+	DeleteTransaction(ctx context.Context, arg DeleteTransactionParams) error
+	// Deletes an unconfirmed transaction by its hash.
+	// Used when removing transactions from the mempool.
+	DeleteUnconfirmedTransaction(ctx context.Context, txHash []byte) error
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
+	// Gets all CONFIRMED transactions with a given hash.
+	// Used to find duplicates across blocks during reorganizations.
+	GetAllConfirmedTransactionsByHash(ctx context.Context, txHash []byte) ([]Transaction, error)
+	// Retrieves all unconfirmed transaction hashes only.
+	GetAllUnconfirmedTransactionHashes(ctx context.Context) ([][]byte, error)
+	// Retrieves all unconfirmed (mempool) transactions.
+	// Ordered by received timestamp.
+	GetAllUnconfirmedTransactions(ctx context.Context) ([]Transaction, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	// Retrieves a key scope by its ID.
 	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
@@ -29,6 +44,15 @@ type Querier interface {
 	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
+	// Gets the most recent CONFIRMED (mined) transaction with a given hash.
+	// Returns only confirmed transactions, ordered by highest block.
+	GetLatestConfirmedTransactionByHash(ctx context.Context, txHash []byte) (Transaction, error)
+	// Gets a transaction by hash with priority: unconfirmed first, then highest confirmed block.
+	GetTransactionByHash(ctx context.Context, txHash []byte) (GetTransactionByHashRow, error)
+	// Retrieves a confirmed transaction by its hash and block height.
+	GetTransactionByHashAndBlock(ctx context.Context, arg GetTransactionByHashAndBlockParams) (Transaction, error)
+	// Retrieves an unconfirmed transaction by its hash.
+	GetUnconfirmedTransactionByHash(ctx context.Context, txHash []byte) (Transaction, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
@@ -36,13 +60,32 @@ type Querier interface {
 	// Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
 	// watch-only scopes.
 	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
+	// Inserts a new transaction record.
+	// For confirmed transactions, block_height must be set.
+	// For unconfirmed transactions, block_height should be NULL.
+	// Returns the auto-generated ID.
+	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int32, error)
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
+	// Retrieves transactions within a block height range, with block metadata.
+	// Returns transactions ordered by block height and received timestamp.
+	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
+	// Checks if a transaction with the given hash and block exists.
+	TransactionExists(ctx context.Context, arg TransactionExistsParams) (bool, error)
+	// Moves all transactions at or after a given height back to unconfirmed.
+	// Used during blockchain reorganizations.
+	UnconfirmTransactionsFromHeight(ctx context.Context, blockHeight sql.NullInt32) error
+	// Checks if an unconfirmed transaction with the given hash exists.
+	UnconfirmedTransactionExists(ctx context.Context, txHash []byte) (bool, error)
+	// Updates the block height of a transaction (for confirming transactions).
+	UpdateTransactionBlock(ctx context.Context, arg UpdateTransactionBlockParams) error
+	// Updates the label of a transaction.
+	UpdateTransactionLabel(ctx context.Context, arg UpdateTransactionLabelParams) error
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }
