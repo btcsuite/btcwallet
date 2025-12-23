@@ -474,6 +474,9 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	deprecated := &walletDeprecated{
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
+		publicPassphrase:    pubPass,
+		db:                  db,
+		recoveryWindow:      recoveryWindow,
 		rescanAddJob:        make(chan *RescanJob),
 		rescanBatch:         make(chan *rescanBatch),
 		rescanNotifications: make(chan interface{}),
@@ -492,11 +495,8 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	w := &Wallet{
-		publicPassphrase: pubPass,
-		db:               db,
 		addrStore:        addrMgr,
 		txStore:          txMgr,
-		recoveryWindow:   recoveryWindow,
 		walletDeprecated: deprecated,
 	}
 
