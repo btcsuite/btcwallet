@@ -5,7 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -120,4 +125,268 @@ func TestSyncerRun(t *testing.T) {
 	// Assert: The run loop should exit without error.
 	err := s.run(ctx)
 	require.NoError(t, err)
+}
+
+// TestWaitUntilBackendSynced verifies polling logic.
+func TestWaitUntilBackendSynced(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock its chain to simulate a
+	// delayed synchronization.
+	mockChain := &mockChain{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
+
+	// Simulate the backend not being current on the first check, but
+	// becoming current on the second check.
+	mockChain.On("IsCurrent").Return(false).Once()
+	mockChain.On("IsCurrent").Return(true).Once()
+
+	// Act & Assert: Call waitUntilBackendSynced and verify it waits for
+	// the backend to sync before returning successfully.
+	err := s.waitUntilBackendSynced(t.Context())
+	require.NoError(t, err)
+	mockChain.AssertExpectations(t)
+}
+
+// TestCheckRollbackNoReorg verifies checkRollback when tips match.
+func TestCheckRollbackNoReorg(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and mock chain.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockChain := &mockChain{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, nil, nil,
+	)
+
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	mockAddrStore.On("SyncedTo").Return(tip)
+
+	// Mock retrieval of synced block hashes from the database for the
+	// last 10 blocks.
+	for i := int32(91); i <= 100; i++ {
+		hash := chainhash.Hash{byte(i)}
+		mockAddrStore.On(
+			"BlockHash", mock.Anything, i,
+		).Return(&hash, nil)
+	}
+
+	// Mock retrieval of matching block hashes from the remote chain.
+	remoteHashes := make([]chainhash.Hash, 10)
+	for i := range 10 {
+		remoteHashes[i] = chainhash.Hash{byte(91 + i)}
+	}
+
+	mockChain.On(
+		"GetBlockHashes", int64(91), int64(100),
+	).Return(remoteHashes, nil).Once()
+
+	// Act & Assert: Verify that checkRollback completes without error
+	// and no rollback is triggered when hashes match.
+	err := s.checkRollback(t.Context())
+	require.NoError(t, err)
+}
+
+// TestCheckRollbackDetected verifies checkRollback when reorg is detected.
+func TestCheckRollbackDetected(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and mocks to
+	// simulate a chain reorganization.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockChain := &mockChain{}
+	mockTxStore := &mockTxStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
+		mockPublisher,
+	)
+
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	mockAddrStore.On("SyncedTo").Return(tip)
+
+	// Mock retrieval of synced block hashes from the database for blocks
+	// 91 to 100.
+	for i := int32(91); i <= 100; i++ {
+		hash := chainhash.Hash{byte(i)}
+		mockAddrStore.On(
+			"BlockHash", mock.Anything, i,
+		).Return(&hash, nil)
+	}
+
+	// Mock retrieval of remote block hashes where a fork occurs at
+	// height 95.
+	remoteHashes := make([]chainhash.Hash, 10)
+	for i := range 10 {
+		h := 91 + i
+		if h > 95 {
+			remoteHashes[i] = chainhash.Hash{0xff} // Mismatch
+		} else {
+			remoteHashes[i] = chainhash.Hash{byte(h)} // Match
+		}
+	}
+
+	mockChain.On(
+		"GetBlockHashes", int64(91), int64(100),
+	).Return(remoteHashes, nil).Once()
+
+	// Mock header retrieval for the detected fork point at height 95.
+	forkHash := chainhash.Hash{byte(95)}
+	header := &wire.BlockHeader{Timestamp: time.Now()}
+	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
+
+	// Expect a rollback to the common ancestor at height 95 and a
+	// corresponding transaction store rollback.
+	mockAddrStore.On(
+		"SetSyncedTo", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+	mockTxStore.On("Rollback", mock.Anything, int32(96)).Return(nil).Once()
+
+	// Act & Assert: Verify that checkRollback correctly identifies the
+	// fork and performs the rollback.
+	err := s.checkRollback(t.Context())
+	require.NoError(t, err)
+}
+
+// TestInitChainSync verifies the initial synchronization sequence.
+func TestInitChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock its dependencies for the
+	// initial synchronization sequence.
+	mockChain := &mockChain{}
+	mockAddrStore := &mockAddrStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
+	)
+
+	// Mock backend synchronization check.
+	mockChain.On("IsCurrent").Return(true).Once()
+
+	// Mock block notification registration.
+	mockChain.On("NotifyBlocks").Return(nil).Once()
+
+	// Mock rollback check at the start of synchronization.
+	tip := waddrmgr.BlockStamp{Height: 0}
+	mockAddrStore.On("SyncedTo").Return(tip)
+
+	// Act & Assert: Verify that the initial chain synchronization
+	// sequence completes successfully.
+	err := s.initChainSync(t.Context())
+	require.NoError(t, err)
+}
+
+// TestScanBatchHeadersOnly verifies header-only scan logic.
+func TestScanBatchHeadersOnly(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock block and header retrieval.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
+
+	hashes := []chainhash.Hash{{0x01}, {0x02}}
+	mockChain.On(
+		"GetBlockHashes", int64(10), int64(11),
+	).Return(hashes, nil).Once()
+
+	headers := []*wire.BlockHeader{
+		{Timestamp: time.Unix(100, 0)},
+		{Timestamp: time.Unix(200, 0)},
+	}
+	mockChain.On("GetBlockHeaders", hashes).Return(headers, nil).Once()
+
+	// Act: Perform a header-only scan for blocks 10 and 11.
+	results, err := s.scanBatchHeadersOnly(t.Context(), 10, 11)
+
+	// Assert: Verify that the correct block results are returned with
+	// expected heights.
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	require.Equal(t, int32(10), results[0].meta.Height)
+	require.Equal(t, int32(11), results[1].meta.Height)
+}
+
+// TestSyncerLoadScanState verifies full scan state loading.
+func TestSyncerLoadScanState(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and set up complex
+	// mock expectations for loading wallet scan data.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{
+			DB:             db,
+			RecoveryWindow: 10,
+			ChainParams:    &chaincfg.MainNetParams,
+		},
+		mockAddrStore, mockTxStore, mockPublisher,
+	)
+
+	// Mock active scoped key managers.
+	scopedMgr := &mockAccountStore{}
+	mockAddrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
+
+	// Mock active accounts for the key manager scope.
+	scopedMgr.On("ActiveAccounts").Return([]uint32{0}).Once()
+	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
+
+	// Mock database operations to fetch scan data, including key managers,
+	// account properties, active addresses, and outputs to watch.
+	mockAddrStore.On(
+		"FetchScopedKeyManager", mock.Anything,
+	).Return(scopedMgr, nil).Times(3)
+
+	props := &waddrmgr.AccountProperties{
+		AccountNumber: 0,
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+	}
+	scopedMgr.On(
+		"AccountProperties", mock.Anything, uint32(0),
+	).Return(props, nil).Twice()
+
+	mockAddrStore.On(
+		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	mockTxStore.On(
+		"OutputsToWatch", mock.Anything,
+	).Return([]wtxmgr.Credit(nil), nil).Once()
+
+	// Mock address derivation for the lookahead window (10 addresses for
+	// each branch).
+	mockAddr := &mockAddress{}
+	mockAddr.On("EncodeAddress").Return("addr")
+	mockAddr.On("ScriptAddress").Return([]byte{0x00})
+	scopedMgr.On(
+		"DeriveAddr", mock.Anything, mock.Anything, mock.Anything,
+	).Return(
+		mockAddr, []byte{0x00}, nil,
+	).Maybe()
+
+	// Act: Load the full scan state from the database.
+	state, err := s.loadFullScanState(t.Context())
+
+	// Assert: Verify that the scan state is correctly loaded and not nil.
+	require.NoError(t, err)
+	require.NotNil(t, state)
 }
