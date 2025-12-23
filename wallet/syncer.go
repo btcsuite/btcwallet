@@ -896,7 +896,66 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 	}
 }
 
-// scanBatch fetches and processes a batch of blocks from the chain backend.
+// advanceChainSync checks if the wallet is behind the chain tip and processes
+// a batch of blocks if necessary. It returns (syncFinished, error) where
+// syncFinished is true if the wallet is caught up to the best known tip, and
+// false if a sync operation was performed (or attempted) indicating that the
+// caller should continue polling.
+func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
+	// Check the chain tip.
+	_, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		// An error getting best block height means we couldn't
+		// determine sync status. We are NOT finished, and an error
+		// occurred. Caller should retry.
+		return false, fmt.Errorf("unable to get best block height: %w",
+			err)
+	}
+
+	// Determine our current sync state.
+	syncedTo := s.addrStore.SyncedTo()
+
+	// If the wallet is caught up to the best known tip, log this and
+	// return.
+	if syncedTo.Height >= bestHeight {
+		s.state.Store(uint32(syncStateSynced))
+		log.Infof("Wallet is synced to chain tip: height=%d",
+			syncedTo.Height)
+
+		return true, nil
+	}
+
+	// Calculate the gap.
+	gap := bestHeight - syncedTo.Height
+
+	// If the gap is large (> 6 blocks), we treat it as a major event
+	// requiring Syncing state protection. Smaller gaps are handled
+	// silently to avoid disrupting user operations like CreateTx.
+	isLargeGap := gap > syncStateSwitchThreshold
+
+	if isLargeGap {
+		s.state.Store(uint32(syncStateSyncing))
+	}
+
+	// Wallet is behind, log the sync range and attempt to scan a batch.
+	log.Infof("Wallet is in syncing mode: from height %d to %d (gap=%d)",
+		syncedTo.Height+1, bestHeight, gap)
+
+	err = s.scanBatch(ctx, syncedTo, bestHeight)
+	if err != nil {
+		// Scan failed. Sync operation was attempted but not finished
+		// due to error.
+		return false, fmt.Errorf("failed to process batch: %w", err)
+	}
+
+	// Scan successful, but wallet might still be behind. Synchronization
+	// is NOT finished. Caller should continue looping to process the next
+	// batch.
+	return false, nil
+}
+
+// scanBatch fetches and processes a batch of blocks from the chain backend. It
+// handles fetching, CFilter matching, and DB updates.
 func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	bestHeight int32) error {
 
