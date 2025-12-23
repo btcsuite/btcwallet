@@ -429,6 +429,57 @@ func (s *syncer) loadFullScanState(
 	return scanState, nil
 }
 
+// scanBatchWithFullBlocks implements the fallback scanning by downloading and
+// checking every block in the batch.
+func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
+	scanState *RecoveryState, startHeight int32,
+	hashes []chainhash.Hash) ([]scanResult, error) {
+
+	results := make([]scanResult, 0, len(hashes))
+
+	// 1. Fetch ALL Blocks.
+	blocks, err := s.cfg.Chain.GetBlocks(hashes)
+	if err != nil {
+		return nil, fmt.Errorf("batch get blocks (fallback): %w", err)
+	}
+
+	// Iterate and Process Blocks. Now that all blocks in the batch have
+	// been fetched, process each block individually. This involves
+	// creating the necessary block metadata and then feeding the full
+	// block into the recovery state for filtering and horizon expansion.
+	for i := range hashes {
+		hash := hashes[i]
+		block := blocks[i]
+
+		//nolint:gosec // i is bounded by batch size (2000), so
+		// addition to startHeight won't overflow int32.
+		height := startHeight + int32(i)
+
+		meta := &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Hash: hash, Height: height},
+		}
+
+		// Process the block using the recovery state. This involves:
+		// 1. Filtering the block for relevant transactions.
+		// 2. Expanding the address lookahead horizons if new addresses
+		//    are found.
+		// 3. Re-filtering if horizons were expanded to ensure we catch
+		//    all transactions relevant to the newly derived addresses.
+		res, err := scanState.ProcessBlock(block)
+		if err != nil {
+			return nil, fmt.Errorf("process block %d (%s): %w",
+				height, hash, err)
+		}
+
+		results = append(results, scanResult{
+			meta:               meta,
+			BlockProcessResult: res,
+		})
+	}
+
+	return results, nil
+}
+
 // loadWalletScanData retrieves all necessary data from the database.
 func (s *syncer) loadWalletScanData(ctx context.Context) (
 	[]*waddrmgr.AccountProperties, []address.Address,
