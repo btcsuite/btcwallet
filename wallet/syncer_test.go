@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -964,4 +965,258 @@ func TestHandleScanReq(t *testing.T) {
 	// handled.
 	err = s.handleScanReq(t.Context(), req)
 	require.NoError(t, err)
+}
+
+// TestWaitForEvent verifies event loop idling and dispatch.
+func TestWaitForEvent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock its dependencies for testing
+	// the event loop.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+	mockAddrStore := &mockAddrStore{}
+
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	s := newSyncer(
+		Config{
+			Chain: mockChain,
+			DB:    db,
+		},
+		mockAddrStore, nil, mockPublisher,
+	)
+
+	// Mock chain notifications channel.
+	notificationChan := make(chan any, 1)
+	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
+
+	// Case 1: Test event handling when a chain notification arrives.
+	notificationChan <- chain.BlockConnected{}
+
+	// Mock sync progress update resulting from the chain notification.
+	mockAddrStore.On(
+		"SetSyncedTo", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+
+	// Act & Assert: Call waitForEvent and verify it correctly processes
+	// the arriving notification.
+	err := s.waitForEvent(t.Context())
+	require.NoError(t, err)
+
+	// Case 2: Test event handling when a scan request arrives.
+	s.scanReqChan <- &scanReq{typ: scanTypeRewind}
+
+	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Once()
+
+	// Act & Assert: Call waitForEvent and verify it correctly processes
+	// the arriving scan request.
+	err = s.waitForEvent(t.Context())
+	require.NoError(t, err)
+}
+
+// TestSyncerFullRun verifies the full run loop coordination.
+func TestSyncerFullRun(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer with a test database and set up
+	// extensive mocks to simulate a full run loop execution.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockChain := &mockChain{}
+	mockAddrStore := &mockAddrStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, nil,
+		mockPublisher,
+	)
+
+	// Mock initial chain sync sequence.
+	mockAddrStore.On("Birthday").Return(time.Now()).Once()
+	mockChain.On("IsCurrent").Return(true).Once()
+	mockAddrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
+	).Once()
+
+	// Mock rollback check dependencies.
+	mockAddrStore.On(
+		"BlockHash", mock.Anything, mock.Anything,
+	).Return(&chainhash.Hash{}, nil).Maybe()
+
+	// Mock remote hashes for rollback check (batch size 10).
+	remoteHashes := make([]chainhash.Hash, 10)
+	mockChain.On(
+		"GetBlockHashes", mock.Anything, mock.Anything,
+	).Return(remoteHashes, nil).Maybe()
+	mockChain.On("NotifyBlocks").Return(nil).Once()
+
+	// Mock advancement to the current best block.
+	mockChain.On(
+		"GetBestBlock",
+	).Return(&chainhash.Hash{}, int32(100), nil).Once()
+
+	// Mock synced state retrieval.
+	mockAddrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
+	).Once()
+
+	// Mock retrieval of unmined transactions from the store.
+	mockTxStore := &mockTxStore{}
+	s.txStore = mockTxStore
+	mockTxStore.On("UnminedTxs", mock.Anything).Return(
+		[]*wire.MsgTx(nil), nil,
+	).Once()
+
+	// Set up for the event waiting phase of the run loop.
+	ctx, cancel := context.WithCancel(t.Context())
+
+	// Use a goroutine to cancel the context after a delay to allow the
+	// syncer to enter its event loop.
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		cancel()
+	}()
+
+	notificationChan := make(chan any)
+	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
+
+	// Act & Assert: Execute the syncer's run loop and verify that it
+	// completes all initial sync steps and enters the idle loop.
+	err := s.run(ctx)
+	require.NoError(t, err)
+}
+
+var (
+	errDBMockSync = errors.New("db error")
+	errCFilter    = errors.New("not supported")
+)
+
+// TestProcessChainUpdate_Disconnect verifies rollback on block disconnect.
+func TestProcessChainUpdate_Disconnect(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock its dependencies for handling
+	// a block disconnect.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockChain := &mockChain{}
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
+		mockPublisher,
+	)
+
+	mockAddrStore.On("SyncedTo").Return(
+		waddrmgr.BlockStamp{Height: 100},
+	).Once()
+
+	mockAddrStore.On(
+		"BlockHash", mock.Anything, mock.Anything,
+	).Return(&chainhash.Hash{}, nil).Maybe()
+
+	remoteHashes := make([]chainhash.Hash, 10)
+	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
+		remoteHashes, nil,
+	).Once()
+
+	// Act & Assert: Process a BlockDisconnected notification and verify
+	// that it triggers a rollback check.
+	err := s.processChainUpdate(t.Context(), chain.BlockDisconnected{})
+	require.NoError(t, err)
+}
+
+// TestBroadcastUnminedTxns_Error verifies error handling.
+func TestBroadcastUnminedTxns_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock an error during unmined
+	// transactions retrieval.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockTxStore := &mockTxStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher)
+
+	mockTxStore.On("UnminedTxs", mock.Anything).Return(
+		([]*wire.MsgTx)(nil), errDBMockSync,
+	).Once()
+
+	// Act & Assert: Verify that broadcasting unmined transactions
+	// returns the expected database error.
+	err := s.broadcastUnminedTxns(t.Context())
+	require.Error(t, err)
+}
+
+// TestInitChainSync_BackendNotSynced verifies it waits/errors.
+func TestInitChainSync_BackendNotSynced(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock the backend as not being
+	// current to test initialization timeout.
+	mockChain := &mockChain{}
+	mockAddrStore := &mockAddrStore{}
+	mockPublisher := &mockTxPublisher{}
+
+	s := newSyncer(
+		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
+	)
+
+	mockAddrStore.On("Birthday").Return(time.Now()).Once()
+	mockChain.On("IsCurrent").Return(false)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	// Act & Assert: Verify that initialization fails due to timeout
+	// when the backend never becomes current.
+	err := s.initChainSync(ctx)
+	require.Error(t, err)
+}
+
+// TestDispatchScanStrategy_CFilterFail verifies fallback.
+func TestDispatchScanStrategy_CFilterFail(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize a syncer and mock a CFilter retrieval failure
+	// to test fallback to full block scanning.
+	mockChain := &mockChain{}
+	mockPublisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{Chain: mockChain, SyncMethod: SyncMethodAuto}, nil, nil,
+		mockPublisher,
+	)
+	mockAddrStore := &mockAddrStore{}
+	scanState := NewRecoveryState(
+		10, &chaincfg.MainNetParams, mockAddrStore,
+	)
+	hashes := []chainhash.Hash{{0x01}}
+
+	mockChain.On(
+		"GetCFilters", hashes, wire.GCSFilterRegular,
+	).Return(([]*gcs.Filter)(nil), errCFilter).Once()
+
+	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
+		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+	mockChain.On(
+		"GetBlocks", hashes,
+	).Return([]*wire.MsgBlock{msgBlock}, nil).Once()
+
+	// Act: Dispatch the scan strategy when CFilters are not supported.
+	results, err := s.dispatchScanStrategy(
+		t.Context(), scanState, 10, hashes,
+	)
+
+	// Assert: Verify that the scan fell back to full blocks successfully.
+	require.NoError(t, err)
+	require.Len(t, results, 1)
 }
