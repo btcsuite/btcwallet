@@ -25,6 +25,13 @@ var (
 	ErrNilDB = errors.New(
 		"wallet requires a non-nil database connection",
 	)
+
+	// ErrTxNotFound is returned when a transaction is not found in the
+	// database.
+	ErrTxNotFound = errors.New("transaction not found")
+
+	// ErrTxNil is returned when a nil transaction is provided.
+	ErrTxNil = errors.New("transaction is nil")
 )
 
 // WalletStore defines the methods for wallet-level operations.
