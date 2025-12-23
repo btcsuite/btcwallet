@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -991,6 +992,103 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 	}
 	// Process Batch (Update). We do this in a single DB transaction.
 	return s.DBPutSyncBatch(ctx, results)
+}
+
+// handleChainUpdate processes a notification immediately.
+// It returns an error if processing fails or if the wallet is shutting down.
+func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
+	// For a single update, we process it and commit immediately.
+	err := s.processChainUpdate(ctx, n)
+	if err != nil {
+		return fmt.Errorf("failed to process chain update: %w", err)
+	}
+
+	switch msg := n.(type) {
+	case *chain.RescanProgress:
+		log.Debugf("Rescanned through block %v (height %d)",
+			msg.Hash, msg.Height)
+
+	// Consume and log the legacy RescanFinished notification. We no longer
+	// perform state updates here as the new controller- driven sync loop
+	// manages wallet synchronization.
+	case *chain.RescanFinished:
+		log.Debugf("Received legacy RescanFinished notification for "+
+			"block %v (height %d). No wallet state updates "+
+			"performed.", msg.Hash, msg.Height)
+	}
+
+	return nil
+}
+
+// processChainUpdate writes a single chain update to the database.
+func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
+	switch n := update.(type) {
+	case chain.BlockConnected:
+		return s.DBPutSyncTip(ctx, wtxmgr.BlockMeta(n))
+
+	// A block was disconnected. We use checkRollback to safely verify our
+	// chain state against the backend and rewind if necessary. This
+	// handles both single block disconnects and deeper reorgs robustly.
+	case chain.BlockDisconnected:
+		return s.checkRollback(ctx)
+
+	// We only expect individual transaction notifications for unconfirmed
+	// transactions as they enter the mempool. Confirmed transactions are
+	// handled atomically via FilteredBlockConnected.
+	case chain.RelevantTx:
+		matches := s.prepareTxMatches([]*wtxmgr.TxRecord{n.TxRecord})
+		return s.DBPutTxns(ctx, matches, n.Block)
+
+	case chain.FilteredBlockConnected:
+		matches := s.prepareTxMatches(n.RelevantTxs)
+		return s.DBPutBlocks(ctx, matches, n.Block)
+	}
+
+	return nil
+}
+
+// prepareTxMatches extracts address entries from a batch of transactions and
+// groups them by transaction hash.
+func (s *syncer) prepareTxMatches(recs []*wtxmgr.TxRecord) TxEntries {
+	matches := make(TxEntries, 0, len(recs))
+	for _, rec := range recs {
+		entries := s.extractAddrEntries(rec.MsgTx.TxOut)
+		matches = append(matches, TxEntry{
+			Rec:     rec,
+			Entries: entries,
+		})
+	}
+
+	return matches
+}
+
+// extractAddrEntries collects all addresses from transaction outputs and
+// creates initial AddrEntry objects with output indices.
+func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
+	var entries []AddrEntry
+	for i, output := range txOuts {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, s.cfg.ChainParams,
+		)
+		if err != nil {
+			log.Warnf("Cannot extract non-std pkScript=%x",
+				output.PkScript)
+
+			continue
+		}
+
+		for _, addr := range addrs {
+			entries = append(entries, AddrEntry{
+				Address: addr,
+				Credit: wtxmgr.CreditEntry{
+					//nolint:gosec // bounded.
+					Index: uint32(i),
+				},
+			})
+		}
+	}
+
+	return entries
 }
 
 // loadWalletScanData retrieves all necessary data from the database.
