@@ -122,3 +122,192 @@ type Controller interface {
 	Rescan(ctx context.Context, startHeight uint32,
 		targets []waddrmgr.AccountScope) error
 }
+
+// mainLoop is the central event loop for the wallet, responsible for
+// coordinating and serializing all lifecycle and authentication requests. It
+// manages the transition between locked and unlocked states and handles the
+// automatic locking of the wallet after a specified duration.
+func (w *Wallet) mainLoop() {
+	defer w.wg.Done()
+
+	for {
+		select {
+		case req := <-w.requestChan:
+			// Process incoming serialized requests.
+			switch r := req.(type) {
+			// Perform the unlock.
+			case unlockReq:
+				w.handleUnlockReq(r)
+
+			// Perform an explicit lock and stop the timer.
+			case lockReq:
+				w.handleLockReq(r)
+
+			// Rotate wallet passphrases.
+			case changePassphraseReq:
+				w.handleChangePassphraseReq(r)
+
+			default:
+				log.Errorf("Wallet received unknown request "+
+					"type: %T", req)
+			}
+
+		// The auto-lock timer has expired. We trigger a lock with a
+		// dummy response channel to avoid nil checks in the handler.
+		case <-w.lockTimer.C:
+			log.Infof("Auto-lock timeout fired, locking wallet")
+			w.handleLockReq(newLockReq())
+
+		// The wallet is shutting down. We exit the main loop.
+		case <-w.lifetimeCtx.Done():
+			w.lockTimer.Stop()
+
+			return
+		}
+	}
+}
+
+// resultChan is a generic channel for returning errors to callers.
+type resultChan chan error
+
+// unlockReq requests the wallet to be unlocked.
+type unlockReq struct {
+	req  UnlockRequest
+	resp resultChan
+}
+
+// lockReq requests the wallet to be locked.
+type lockReq struct {
+	resp resultChan
+}
+
+// changePassphraseReq requests a change of the wallet's passphrases.
+type changePassphraseReq struct {
+	req  ChangePassphraseRequest
+	resp resultChan
+}
+
+// newUnlockReq creates a new unlock request with a buffered response channel.
+// We use this constructor to ensure that the response channel is always
+// correctly initialized and buffered, preventing the main loop from blocking
+// when reporting the result.
+func newUnlockReq(req UnlockRequest) unlockReq {
+	return unlockReq{
+		req:  req,
+		resp: make(resultChan, 1),
+	}
+}
+
+// newLockReq creates a new lock request with a buffered response channel.
+func newLockReq() lockReq {
+	return lockReq{
+		resp: make(resultChan, 1),
+	}
+}
+
+// newChangePassphraseReq creates a new change passphrase request with a
+// buffered response channel.
+func newChangePassphraseReq(req ChangePassphraseRequest) changePassphraseReq {
+	return changePassphraseReq{
+		req:  req,
+		resp: make(resultChan, 1),
+	}
+}
+
+// handleUnlockReq processes an incoming request to unlock the wallet. It
+// authenticates the provided passphrase against the database and, on success,
+// transitions the wallet to the unlocked state.
+func (w *Wallet) handleUnlockReq(req unlockReq) {
+	// First, validate that the wallet is in a state that allows unlocking.
+	err := w.state.canUnlock()
+	if err != nil {
+		req.resp <- err
+		return
+	}
+
+	// Attempt to unlock the underlying address manager.
+	err = w.DBUnlock(w.lifetimeCtx, req.req.Passphrase)
+	if err != nil {
+		req.resp <- err
+		return
+	}
+
+	// On success, update the atomic wallet state to reflect that we are
+	// now unlocked.
+	w.state.toUnlocked()
+
+	// Handle auto-lock timer. If a timeout is specified, we reset the
+	// timer to fire in the future. Otherwise, we stop the timer to disable
+	// auto-locking.
+	duration := req.req.Timeout
+	if duration > 0 {
+		w.lockTimer.Reset(duration)
+	} else if !w.lockTimer.Stop() {
+		// If the timer has already fired, we drain its channel to
+		// prevent a stale signal from being processed by the main
+		// loop, which would cause an immediate, unexpected lock.
+		select {
+		case <-w.lockTimer.C:
+		default:
+		}
+	}
+
+	// Always report the result back to the caller.
+	req.resp <- nil
+}
+
+// handleLockReq processes an incoming request to lock the wallet. It clears
+// any cached private key material from memory and transitions the wallet to
+// the locked state.
+func (w *Wallet) handleLockReq(req lockReq) {
+	// First, validate that the wallet is in a state that allows locking.
+	err := w.state.canLock()
+	if err != nil {
+		req.resp <- err
+		return
+	}
+
+	// Stop the auto-lock timer since the wallet is now explicitly locked.
+	if !w.lockTimer.Stop() {
+		// Drain the channel if the timer has already fired to ensure
+		// we don't process a stale lock signal in the next iteration.
+		select {
+		case <-w.lockTimer.C:
+		default:
+		}
+	}
+
+	// Signal the address manager to lock, clearing sensitive data.
+	err = w.addrStore.Lock()
+	if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+		log.Errorf("Could not lock wallet: %v", err)
+	}
+
+	// Even if an error occurred (e.g. already locked), we ensure the
+	// wallet's high-level state is synchronized to 'locked'.
+	if err == nil {
+		w.state.toLocked()
+	}
+
+	// Report the result back to the caller.
+	req.resp <- err
+}
+
+// handleChangePassphraseReq processes a request to rotate the wallet's
+// passphrases. It can change either the public passphrase, the private
+// passphrase, or both in a single atomic database update.
+func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
+	// First, validate that the wallet is in a state that allows changing
+	// the passphrase.
+	err := w.state.canChangePassphrase()
+	if err != nil {
+		req.resp <- err
+		return
+	}
+
+	// Delegate the cryptographic rotation to the database layer.
+	err = w.DBPutPassphrase(w.lifetimeCtx, req.req)
+
+	// Report the result back to the caller.
+	req.resp <- err
+}
