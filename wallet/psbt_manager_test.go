@@ -4630,3 +4630,68 @@ func TestCombinePsbt(t *testing.T) {
 		require.ErrorIs(t, err, ErrDifferentTransactions)
 	})
 }
+
+// TestDeduplicateUnknowns tests that deduplicateUnknowns correctly adds new
+// unknowns from src to dest while avoiding duplicates based on the key.
+func TestDeduplicateUnknowns(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create some sample unknowns.
+	unknown1 := &psbt.Unknown{Key: []byte{1}, Value: []byte{1}}
+	unknown2 := &psbt.Unknown{Key: []byte{2}, Value: []byte{2}}
+	unknown3 := &psbt.Unknown{Key: []byte{3}, Value: []byte{3}}
+
+	// Arrange: Create a duplicate of unknown1 (same key, different value to
+	// ensure we only check key).
+	unknown1Dup := &psbt.Unknown{Key: []byte{1}, Value: []byte{99}}
+
+	tests := []struct {
+		name     string
+		dest     []*psbt.Unknown
+		src      []*psbt.Unknown
+		expected []*psbt.Unknown
+	}{
+		{
+			name:     "no duplicates",
+			dest:     []*psbt.Unknown{unknown1},
+			src:      []*psbt.Unknown{unknown2, unknown3},
+			expected: []*psbt.Unknown{unknown1, unknown2, unknown3},
+		},
+		{
+			name:     "duplicates in src",
+			dest:     []*psbt.Unknown{unknown1},
+			src:      []*psbt.Unknown{unknown1Dup, unknown2},
+			expected: []*psbt.Unknown{unknown1, unknown2},
+		},
+		{
+			name:     "empty dest",
+			dest:     []*psbt.Unknown{},
+			src:      []*psbt.Unknown{unknown1, unknown2},
+			expected: []*psbt.Unknown{unknown1, unknown2},
+		},
+		{
+			name:     "empty src",
+			dest:     []*psbt.Unknown{unknown1},
+			src:      []*psbt.Unknown{},
+			expected: []*psbt.Unknown{unknown1},
+		},
+		{
+			name:     "all duplicates",
+			dest:     []*psbt.Unknown{unknown1, unknown2},
+			src:      []*psbt.Unknown{unknown1Dup, unknown2},
+			expected: []*psbt.Unknown{unknown1, unknown2},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act: Call deduplicateUnknowns.
+			got := deduplicateUnknowns(tc.dest, tc.src)
+
+			// Assert: Verify the result.
+			require.Equal(t, tc.expected, got)
+		})
+	}
+}
