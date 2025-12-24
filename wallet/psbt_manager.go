@@ -1716,6 +1716,11 @@ func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
 	// Iterate through ALL packets (including the first) and merge their
 	// contents into the combined packet.
 	for _, p := range psbts {
+		// Merge Global Unknowns.
+		combined.Unknowns = deduplicateUnknowns(
+			combined.Unknowns, p.Unknowns,
+		)
+
 		// Merge Inputs.
 		for j := range combined.Inputs {
 			err := mergePsbtInputs(
@@ -1787,7 +1792,7 @@ func validatePsbtMerge(psbts []*psbt.Packet) (*psbt.Packet, error) {
 		UnsignedTx: base.UnsignedTx.Copy(),
 		Inputs:     make([]psbt.PInput, nInputs),
 		Outputs:    make([]psbt.POutput, nOutputs),
-		Unknowns:   base.Unknowns,
+		Unknowns:   make([]*psbt.Unknown, 0),
 	}
 
 	return combined, nil
@@ -1844,6 +1849,9 @@ func mergePsbtInputs(dest, src *psbt.PInput) error {
 		return err
 	}
 
+	// Merge Unknowns.
+	dest.Unknowns = deduplicateUnknowns(dest.Unknowns, src.Unknowns)
+
 	return nil
 }
 
@@ -1873,6 +1881,9 @@ func mergePsbtOutputs(dest, src *psbt.POutput) error {
 	if err != nil {
 		return err
 	}
+
+	// Merge Unknowns.
+	dest.Unknowns = deduplicateUnknowns(dest.Unknowns, src.Unknowns)
 
 	return nil
 }
@@ -2286,4 +2297,22 @@ func PsbtPrevOutputFetcher(packet *psbt.Packet) (
 	}
 
 	return fetcher, nil
+}
+
+// deduplicateUnknowns adds new Unknowns from src to dest, avoiding duplicates
+// based on Key.
+//
+// TODO(yy): A more efficient approach would be to use a map to track the keys
+// of unknowns already in the dest slice, reducing the complexity to O(N+M).
+func deduplicateUnknowns(dest, src []*psbt.Unknown) []*psbt.Unknown {
+	for _, unknown := range src {
+		if !slices.ContainsFunc(dest, func(dU *psbt.Unknown) bool {
+			return bytes.Equal(dU.Key, unknown.Key)
+		}) {
+
+			dest = append(dest, unknown)
+		}
+	}
+
+	return dest
 }
