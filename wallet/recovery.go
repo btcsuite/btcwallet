@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -279,6 +281,25 @@ func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint,
 	rs.watchedOutPoints[*outPoint] = addr
 }
 
+// AddrEntry holds the derivation info for an address to support
+// reverse lookups during filtering.
+type AddrEntry struct {
+	// Address is the cached address for script generation.
+	Address address.Address
+
+	// Credit records the transaction credit metadata (index, change)
+	// when this address matches a transaction output.
+	Credit wtxmgr.CreditEntry
+
+	// IsLookahead indicates whether this address is part of the current
+	// lookahead window. If true, finding this address *in the block*
+	// triggers horizon expansion.
+	IsLookahead bool
+
+	// addrScope identifies the specific address derivation path.
+	addrScope waddrmgr.AddrScope
+}
+
 // ScopeRecoveryState is used to manage the recovery of addresses generated
 // under a particular BIP32 account. Each account tracks both an external and
 // internal branch recovery state, both of which use the same recovery window.
@@ -300,8 +321,8 @@ type ScopeRecoveryState struct {
 // TODO(yy): Deprecated, remove.
 func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
 	return &ScopeRecoveryState{
-		ExternalBranch: NewBranchRecoveryState(recoveryWindow),
-		InternalBranch: NewBranchRecoveryState(recoveryWindow),
+		ExternalBranch: NewBranchRecoveryState(recoveryWindow, nil),
+		InternalBranch: NewBranchRecoveryState(recoveryWindow, nil),
 	}
 }
 
@@ -335,15 +356,22 @@ type BranchRecoveryState struct {
 	// invalidChildren records the set of child indexes that derive to
 	// invalid keys.
 	invalidChildren map[uint32]struct{}
+
+	// manager is the scoped key manager used to derive addresses for this
+	// branch.
+	manager waddrmgr.AccountStore
 }
 
 // NewBranchRecoveryState creates a new BranchRecoveryState that can be used to
 // track either the external or internal branch of an account's derivation path.
-func NewBranchRecoveryState(recoveryWindow uint32) *BranchRecoveryState {
+func NewBranchRecoveryState(recoveryWindow uint32,
+	manager waddrmgr.AccountStore) *BranchRecoveryState {
+
 	return &BranchRecoveryState{
 		recoveryWindow:  recoveryWindow,
 		addresses:       make(map[uint32]address.Address),
 		invalidChildren: make(map[uint32]struct{}),
+		manager:         manager,
 	}
 }
 
@@ -437,4 +465,75 @@ func (brs *BranchRecoveryState) NumInvalidInHorizon() uint32 {
 	}
 
 	return nInvalid
+}
+
+// buildAddrFilters is a helper method that maintains the address lookahead
+// window for this branch. It performs two main tasks:
+//  1. Syncs the branch state to the provided `lastKnownIndex` (if non-zero),
+//     ensuring the state reflects what is known from disk or previous scans.
+//  2. Extends the lookahead window if necessary, deriving new addresses and
+//     creating filter entries for them.
+//
+// The returned entries are used to populate the batch-wide address filter.
+func (brs *BranchRecoveryState) buildAddrFilters(bs waddrmgr.BranchScope,
+	lastKnownIndex uint32) ([]AddrEntry, error) {
+
+	// 1. Sync State.
+	// If a last known index is provided (e.g., from DB during
+	// initialization), we update our state to reflect that we've found
+	// addresses up to this point.
+	if lastKnownIndex > 0 {
+		brs.ReportFound(lastKnownIndex - 1)
+	}
+
+	// 2. Compute Extension.
+	// Determine the current horizon and how many new addresses are needed
+	// to maintain the required lookahead window (recoveryWindow) beyond
+	// the last found address.
+	curHorizon, windowToDerive := brs.ExtendHorizon()
+	count, childIndex := uint32(0), curHorizon
+
+	var newEntries []AddrEntry
+
+	// 3. Derive & Cache.
+	// Iterate to derive the required number of new addresses.
+	for count < windowToDerive {
+		addr, _, err := brs.manager.DeriveAddr(
+			bs.Account, bs.Branch, childIndex,
+		)
+		if err != nil {
+			// Handle invalid children (rare in HD, but possible).
+			// We skip the invalid index, mark it, and continue to
+			// ensure we still generate the full window of *valid*
+			// addresses.
+			if errors.Is(err, hdkeychain.ErrInvalidChild) {
+				brs.MarkInvalidChild(childIndex)
+				childIndex++
+
+				continue
+			}
+
+			return nil, fmt.Errorf("derive addr: %w", err)
+		}
+
+		// Cache the valid address in the branch state for future
+		// lookups.
+		brs.AddAddr(childIndex, addr)
+
+		// Create a filter entry for the new address. This entry
+		// contains the metadata (Scope, Account, Branch, Index) needed
+		// to map a future hit back to this specific derivation path.
+		as := waddrmgr.AddrScope{BranchScope: bs, Index: childIndex}
+		entry := AddrEntry{
+			Address:     addr,
+			addrScope:   as,
+			IsLookahead: true,
+		}
+		newEntries = append(newEntries, entry)
+
+		childIndex++
+		count++
+	}
+
+	return newEntries, nil
 }
