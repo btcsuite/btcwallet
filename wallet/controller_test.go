@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -520,4 +521,67 @@ func TestControllerInfo(t *testing.T) {
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
+}
+
+// TestControllerResync verifies the Resync method.
+func TestControllerResync(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createTestWalletWithMocks(t)
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+	deps.syncer.On("syncState").Return(syncStateSynced)
+
+	// 1. Start height too high.
+	deps.chain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(100), nil,
+	).Once()
+
+	err := w.Resync(t.Context(), 101)
+	require.ErrorIs(t, err, ErrStartHeightTooHigh)
+
+	// 2. Success.
+	deps.chain.On(
+		"GetBestBlock",
+	).Return(&chainhash.Hash{}, int32(100), nil).Once()
+	deps.syncer.On("requestScan", mock.Anything, mock.MatchedBy(
+		func(req *scanReq) bool {
+			return req.typ == scanTypeRewind &&
+				req.startBlock.Height == 50
+		},
+	)).Return(nil).Once()
+
+	err = w.Resync(t.Context(), 50)
+	require.NoError(t, err)
+}
+
+// TestControllerRescan verifies the Rescan method.
+func TestControllerRescan(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createTestWalletWithMocks(t)
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+	deps.syncer.On("syncState").Return(syncStateSynced)
+
+	targets := []waddrmgr.AccountScope{{Account: 1}}
+
+	// 1. No targets.
+	err := w.Rescan(t.Context(), 50, nil)
+	require.ErrorIs(t, err, ErrNoScanTargets)
+
+	// 2. Success.
+	deps.chain.On(
+		"GetBestBlock",
+	).Return(&chainhash.Hash{}, int32(100), nil).Once()
+	deps.syncer.On("requestScan", mock.Anything, mock.MatchedBy(
+		func(req *scanReq) bool {
+			return req.typ == scanTypeTargeted &&
+				req.startBlock.Height == 50 &&
+				len(req.targets) == 1
+		},
+	)).Return(nil).Once()
+
+	err = w.Rescan(t.Context(), 50, targets)
+	require.NoError(t, err)
 }
