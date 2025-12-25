@@ -1,10 +1,10 @@
 package wallet_test
 
 import (
-	"runtime"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/stretchr/testify/require"
 )
 
 // Harness holds the BranchRecoveryState being tested, the recovery window being
@@ -238,9 +238,6 @@ func assertNumInvalid(t *testing.T, i int, have, want uint32) {
 }
 
 func assertHaveWant(t *testing.T, i int, msg string, have, want uint32) {
-	_, _, line, _ := runtime.Caller(2)
-	if want != have {
-		t.Fatalf("[line: %d, step: %d] %s: got %d, want %d",
-			line, i, msg, have, want)
-	}
+	t.Helper()
+	require.Equal(t, want, have, "[step: %d] %s", i, msg)
 }
