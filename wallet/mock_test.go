@@ -874,7 +874,7 @@ func (m *mockChain) GetBestBlock() (*chainhash.Hash, int32, error) {
 	args := m.Called()
 	hash, _ := args.Get(0).(*chainhash.Hash)
 
-	return hash, int32(args.Int(1)), args.Error(2)
+	return hash, args.Get(1).(int32), args.Error(2)
 }
 
 // GetBlock implements the chain.Interface interface.
@@ -903,27 +903,29 @@ func (m *mockChain) GetBlockHeader(
 	return header, args.Error(1)
 }
 
-func (m *mockChain) GetBlockHashes(int64, int64) ([]chainhash.Hash, error) {
-	args := m.Called()
+func (m *mockChain) GetBlockHashes(start, end int64) ([]chainhash.Hash, error) {
+	args := m.Called(start, end)
 	return args.Get(0).([]chainhash.Hash), args.Error(1)
 }
 
 func (m *mockChain) GetBlockHeaders(
-	[]chainhash.Hash) ([]*wire.BlockHeader, error) {
+	hashes []chainhash.Hash) ([]*wire.BlockHeader, error) {
 
-	args := m.Called()
+	args := m.Called(hashes)
 	return args.Get(0).([]*wire.BlockHeader), args.Error(1)
 }
 
-func (m *mockChain) GetCFilters([]chainhash.Hash, wire.FilterType) (
-	[]*gcs.Filter, error) {
+func (m *mockChain) GetCFilters(hashes []chainhash.Hash,
+	filterType wire.FilterType) ([]*gcs.Filter, error) {
 
-	args := m.Called()
+	args := m.Called(hashes, filterType)
 	return args.Get(0).([]*gcs.Filter), args.Error(1)
 }
 
-func (m *mockChain) GetBlocks([]chainhash.Hash) ([]*wire.MsgBlock, error) {
-	args := m.Called()
+func (m *mockChain) GetBlocks(
+	hashes []chainhash.Hash) ([]*wire.MsgBlock, error) {
+
+	args := m.Called(hashes)
 	return args.Get(0).([]*wire.MsgBlock), args.Error(1)
 }
 
