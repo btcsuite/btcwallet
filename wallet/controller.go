@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -348,6 +349,75 @@ func (w *Wallet) Info(_ context.Context) (*Info, error) {
 	}
 
 	return info, nil
+}
+
+// Resync rewinds the wallet's synchronization state to a specific block
+// height.
+//
+// This is part of the Controller interface.
+func (w *Wallet) Resync(ctx context.Context, startHeight uint32) error {
+	return w.submitRescanRequest(
+		ctx, scanTypeRewind, startHeight, nil,
+	)
+}
+
+// Rescan initiates a targeted rescan for specific accounts or addresses
+// starting from the given block height. This operation scans for
+// relevant transactions without rewinding the wallet's global
+// synchronization state.
+func (w *Wallet) Rescan(ctx context.Context, startHeight uint32,
+	targets []waddrmgr.AccountScope) error {
+
+	if len(targets) == 0 {
+		return ErrNoScanTargets
+	}
+
+	return w.submitRescanRequest(
+		ctx, scanTypeTargeted, startHeight, targets,
+	)
+}
+
+// submitRescanRequest validates the rescan request and submits it to the
+// syncer.
+func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
+	startHeight uint32, targets []waddrmgr.AccountScope) error {
+
+	// Ensure the wallet is running and synced.
+	err := w.state.validateSynced()
+	if err != nil {
+		return err
+	}
+
+	// BlockStamp.Height is int32, so we need to ensure the requested
+	// startHeight does not exceed math.MaxInt32.
+	if startHeight > math.MaxInt32 {
+		return fmt.Errorf("%w: %d", ErrStartHeightTooLarge, startHeight)
+	}
+
+	startHeightInt32 := int32(startHeight)
+
+	// Fetch the current best block to ensure we don't resync past the tip.
+	_, bestHeightInt32, err := w.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("unable to get chain tip: %w", err)
+	}
+
+	if startHeightInt32 > bestHeightInt32 {
+		return fmt.Errorf("%w: start height %d is greater than "+
+			"current chain tip %d", ErrStartHeightTooHigh,
+			startHeight, bestHeightInt32)
+	}
+
+	// Submit the rescan request to the syncer.
+	req := &scanReq{
+		typ: typ,
+		startBlock: waddrmgr.BlockStamp{
+			Height: startHeightInt32,
+		},
+		targets: targets,
+	}
+
+	return w.sync.requestScan(ctx, req)
 }
 
 // mainLoop is the central event loop for the wallet, responsible for
