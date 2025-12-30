@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -181,7 +182,7 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 
 // NewTestStore creates a PostgreSQL wallet store and returns it along with the
 // underlying database connection for tests that also need direct DB access.
-func NewTestStore(t *testing.T) (*db.PostgresWalletDB, *sql.DB) {
+func NewTestStore(t *testing.T) (*db.PostgresWalletDB, *sqlcpg.Queries) {
 	t.Helper()
 
 	dbConn := NewPostgresDB(t)
@@ -189,5 +190,7 @@ func NewTestStore(t *testing.T) (*db.PostgresWalletDB, *sql.DB) {
 	store, err := db.NewPostgresWalletDB(dbConn)
 	require.NoError(t, err, "failed to create wallet store")
 
-	return store, dbConn
+	queries := sqlcpg.New(dbConn)
+
+	return store, queries
 }
