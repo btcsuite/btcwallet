@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -40,7 +41,7 @@ func NewSQLiteDB(t *testing.T) *sql.DB {
 
 // NewTestStore creates the SQLite wallet store and returns it along with the
 // underlying database connection for tests that also need direct DB access.
-func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sql.DB) {
+func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sqlcsqlite.Queries) {
 	t.Helper()
 
 	dbConn := NewSQLiteDB(t)
@@ -48,5 +49,7 @@ func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sql.DB) {
 	store, err := db.NewSQLiteWalletDB(dbConn)
 	require.NoError(t, err, "failed to create wallet store")
 
-	return store, dbConn
+	queries := sqlcsqlite.New(dbConn)
+
+	return store, queries
 }
