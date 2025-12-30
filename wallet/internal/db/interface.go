@@ -22,9 +22,40 @@ var (
 
 	// ErrNilDB is returned when a nil database connection pointer is
 	// provided to the wallet.
-	ErrNilDB = errors.New(
-		"wallet requires a non-nil database connection",
+	ErrNilDB = errors.New("wallet requires a non-nil database connection")
+
+	// ErrAccountNotFound is returned when an account is not found in the
+	// database.
+	ErrAccountNotFound = errors.New("account not found")
+
+	// ErrKeyScopeNotFound is returned when a key scope is not found in the
+	// database.
+	ErrKeyScopeNotFound = errors.New("key scope not found")
+
+	// ErrUnknownKeyScope is returned when a key scope is not found in
+	// ScopeAddrMap.
+	ErrUnknownKeyScope = errors.New("unknown scope in ScopeAddrMap")
+
+	// ErrInvalidAccountQuery is returned when both or neither account filters
+	// are provided in GetAccount or RenameAccount.
+	ErrInvalidAccountQuery = errors.New(
+		"exactly one of Name or AccountNumber must be provided",
 	)
+
+	// ErrMissingAccountPublicKey is returned when an imported account is
+	// missing the encrypted public key.
+	ErrMissingAccountPublicKey = errors.New(
+		"imported account requires an encrypted public key",
+	)
+
+	// ErrMissingAccountName is returned when an account is being created
+	// without a name.
+	ErrMissingAccountName = errors.New("account name is required")
+
+	// ErrMaxAccountNumberReached indicates that no more accounts can be created
+	// within a key scope because the account number counter has reached its
+	// maximum representable value.
+	ErrMaxAccountNumberReached = errors.New("max account number reached")
 )
 
 // WalletStore defines the methods for wallet-level operations.
