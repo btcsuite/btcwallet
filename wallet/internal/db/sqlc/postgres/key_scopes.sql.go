@@ -20,6 +20,7 @@ INSERT INTO key_scopes (
 ) VALUES (
     $1, $2, $3, $4, $5, $6
 )
+ON CONFLICT (wallet_id, purpose, coin_type) DO NOTHING
 RETURNING id
 `
 

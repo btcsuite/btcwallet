@@ -24,6 +24,18 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.allocateAccountNumberStmt, err = db.PrepareContext(ctx, AllocateAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query AllocateAccountNumber: %w", err)
+	}
+	if q.createAccountSecretStmt, err = db.PrepareContext(ctx, CreateAccountSecret); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateAccountSecret: %w", err)
+	}
+	if q.createDerivedAccountStmt, err = db.PrepareContext(ctx, CreateDerivedAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAccount: %w", err)
+	}
+	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
+	}
 	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
 	}
@@ -38,6 +50,21 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.deleteKeyScopeSecretsStmt, err = db.PrepareContext(ctx, DeleteKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScopeSecrets: %w", err)
+	}
+	if q.getAccountByScopeAndNameStmt, err = db.PrepareContext(ctx, GetAccountByScopeAndName); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountByScopeAndName: %w", err)
+	}
+	if q.getAccountByScopeAndNumberStmt, err = db.PrepareContext(ctx, GetAccountByScopeAndNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountByScopeAndNumber: %w", err)
+	}
+	if q.getAccountByWalletScopeAndNameStmt, err = db.PrepareContext(ctx, GetAccountByWalletScopeAndName); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountByWalletScopeAndName: %w", err)
+	}
+	if q.getAccountByWalletScopeAndNumberStmt, err = db.PrepareContext(ctx, GetAccountByWalletScopeAndNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountByWalletScopeAndNumber: %w", err)
+	}
+	if q.getAccountPropsByIdStmt, err = db.PrepareContext(ctx, GetAccountPropsById); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountPropsById: %w", err)
 	}
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
@@ -75,6 +102,18 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertWalletSyncStateStmt, err = db.PrepareContext(ctx, InsertWalletSyncState); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSyncState: %w", err)
 	}
+	if q.listAccountsByScopeStmt, err = db.PrepareContext(ctx, ListAccountsByScope); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccountsByScope: %w", err)
+	}
+	if q.listAccountsByWalletStmt, err = db.PrepareContext(ctx, ListAccountsByWallet); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccountsByWallet: %w", err)
+	}
+	if q.listAccountsByWalletAndNameStmt, err = db.PrepareContext(ctx, ListAccountsByWalletAndName); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccountsByWalletAndName: %w", err)
+	}
+	if q.listAccountsByWalletScopeStmt, err = db.PrepareContext(ctx, ListAccountsByWalletScope); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccountsByWalletScope: %w", err)
+	}
 	if q.listAddressTypesStmt, err = db.PrepareContext(ctx, ListAddressTypes); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAddressTypes: %w", err)
 	}
@@ -83,6 +122,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
+	}
+	if q.updateAccountNameByWalletScopeAndNameStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndName); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndName: %w", err)
+	}
+	if q.updateAccountNameByWalletScopeAndNumberStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndNumber: %w", err)
 	}
 	if q.updateWalletSecretsStmt, err = db.PrepareContext(ctx, UpdateWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateWalletSecrets: %w", err)
@@ -95,6 +140,26 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.allocateAccountNumberStmt != nil {
+		if cerr := q.allocateAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing allocateAccountNumberStmt: %w", cerr)
+		}
+	}
+	if q.createAccountSecretStmt != nil {
+		if cerr := q.createAccountSecretStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createAccountSecretStmt: %w", cerr)
+		}
+	}
+	if q.createDerivedAccountStmt != nil {
+		if cerr := q.createDerivedAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAccountStmt: %w", cerr)
+		}
+	}
+	if q.createImportedAccountStmt != nil {
+		if cerr := q.createImportedAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createImportedAccountStmt: %w", cerr)
+		}
+	}
 	if q.createKeyScopeStmt != nil {
 		if cerr := q.createKeyScopeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createKeyScopeStmt: %w", cerr)
@@ -118,6 +183,31 @@ func (q *Queries) Close() error {
 	if q.deleteKeyScopeSecretsStmt != nil {
 		if cerr := q.deleteKeyScopeSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteKeyScopeSecretsStmt: %w", cerr)
+		}
+	}
+	if q.getAccountByScopeAndNameStmt != nil {
+		if cerr := q.getAccountByScopeAndNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountByScopeAndNameStmt: %w", cerr)
+		}
+	}
+	if q.getAccountByScopeAndNumberStmt != nil {
+		if cerr := q.getAccountByScopeAndNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountByScopeAndNumberStmt: %w", cerr)
+		}
+	}
+	if q.getAccountByWalletScopeAndNameStmt != nil {
+		if cerr := q.getAccountByWalletScopeAndNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountByWalletScopeAndNameStmt: %w", cerr)
+		}
+	}
+	if q.getAccountByWalletScopeAndNumberStmt != nil {
+		if cerr := q.getAccountByWalletScopeAndNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountByWalletScopeAndNumberStmt: %w", cerr)
+		}
+	}
+	if q.getAccountPropsByIdStmt != nil {
+		if cerr := q.getAccountPropsByIdStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountPropsByIdStmt: %w", cerr)
 		}
 	}
 	if q.getAddressTypeByIDStmt != nil {
@@ -180,6 +270,26 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertWalletSyncStateStmt: %w", cerr)
 		}
 	}
+	if q.listAccountsByScopeStmt != nil {
+		if cerr := q.listAccountsByScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountsByScopeStmt: %w", cerr)
+		}
+	}
+	if q.listAccountsByWalletStmt != nil {
+		if cerr := q.listAccountsByWalletStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountsByWalletStmt: %w", cerr)
+		}
+	}
+	if q.listAccountsByWalletAndNameStmt != nil {
+		if cerr := q.listAccountsByWalletAndNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountsByWalletAndNameStmt: %w", cerr)
+		}
+	}
+	if q.listAccountsByWalletScopeStmt != nil {
+		if cerr := q.listAccountsByWalletScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountsByWalletScopeStmt: %w", cerr)
+		}
+	}
 	if q.listAddressTypesStmt != nil {
 		if cerr := q.listAddressTypesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAddressTypesStmt: %w", cerr)
@@ -193,6 +303,16 @@ func (q *Queries) Close() error {
 	if q.listWalletsStmt != nil {
 		if cerr := q.listWalletsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
+		}
+	}
+	if q.updateAccountNameByWalletScopeAndNameStmt != nil {
+		if cerr := q.updateAccountNameByWalletScopeAndNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNameStmt: %w", cerr)
+		}
+	}
+	if q.updateAccountNameByWalletScopeAndNumberStmt != nil {
+		if cerr := q.updateAccountNameByWalletScopeAndNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNumberStmt: %w", cerr)
 		}
 	}
 	if q.updateWalletSecretsStmt != nil {
@@ -242,57 +362,87 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                              DBTX
-	tx                              *sql.Tx
-	createKeyScopeStmt              *sql.Stmt
-	createWalletStmt                *sql.Stmt
-	deleteBlockStmt                 *sql.Stmt
-	deleteKeyScopeStmt              *sql.Stmt
-	deleteKeyScopeSecretsStmt       *sql.Stmt
-	getAddressTypeByIDStmt          *sql.Stmt
-	getBlockByHeightStmt            *sql.Stmt
-	getKeyScopeByIDStmt             *sql.Stmt
-	getKeyScopeByWalletAndScopeStmt *sql.Stmt
-	getKeyScopeSecretsStmt          *sql.Stmt
-	getWalletByIDStmt               *sql.Stmt
-	getWalletByNameStmt             *sql.Stmt
-	getWalletSecretsStmt            *sql.Stmt
-	insertBlockStmt                 *sql.Stmt
-	insertKeyScopeSecretsStmt       *sql.Stmt
-	insertWalletSecretsStmt         *sql.Stmt
-	insertWalletSyncStateStmt       *sql.Stmt
-	listAddressTypesStmt            *sql.Stmt
-	listKeyScopesByWalletStmt       *sql.Stmt
-	listWalletsStmt                 *sql.Stmt
-	updateWalletSecretsStmt         *sql.Stmt
-	updateWalletSyncStateStmt       *sql.Stmt
+	db                                          DBTX
+	tx                                          *sql.Tx
+	allocateAccountNumberStmt                   *sql.Stmt
+	createAccountSecretStmt                     *sql.Stmt
+	createDerivedAccountStmt                    *sql.Stmt
+	createImportedAccountStmt                   *sql.Stmt
+	createKeyScopeStmt                          *sql.Stmt
+	createWalletStmt                            *sql.Stmt
+	deleteBlockStmt                             *sql.Stmt
+	deleteKeyScopeStmt                          *sql.Stmt
+	deleteKeyScopeSecretsStmt                   *sql.Stmt
+	getAccountByScopeAndNameStmt                *sql.Stmt
+	getAccountByScopeAndNumberStmt              *sql.Stmt
+	getAccountByWalletScopeAndNameStmt          *sql.Stmt
+	getAccountByWalletScopeAndNumberStmt        *sql.Stmt
+	getAccountPropsByIdStmt                     *sql.Stmt
+	getAddressTypeByIDStmt                      *sql.Stmt
+	getBlockByHeightStmt                        *sql.Stmt
+	getKeyScopeByIDStmt                         *sql.Stmt
+	getKeyScopeByWalletAndScopeStmt             *sql.Stmt
+	getKeyScopeSecretsStmt                      *sql.Stmt
+	getWalletByIDStmt                           *sql.Stmt
+	getWalletByNameStmt                         *sql.Stmt
+	getWalletSecretsStmt                        *sql.Stmt
+	insertBlockStmt                             *sql.Stmt
+	insertKeyScopeSecretsStmt                   *sql.Stmt
+	insertWalletSecretsStmt                     *sql.Stmt
+	insertWalletSyncStateStmt                   *sql.Stmt
+	listAccountsByScopeStmt                     *sql.Stmt
+	listAccountsByWalletStmt                    *sql.Stmt
+	listAccountsByWalletAndNameStmt             *sql.Stmt
+	listAccountsByWalletScopeStmt               *sql.Stmt
+	listAddressTypesStmt                        *sql.Stmt
+	listKeyScopesByWalletStmt                   *sql.Stmt
+	listWalletsStmt                             *sql.Stmt
+	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
+	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
+	updateWalletSecretsStmt                     *sql.Stmt
+	updateWalletSyncStateStmt                   *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                              tx,
-		tx:                              tx,
-		createKeyScopeStmt:              q.createKeyScopeStmt,
-		createWalletStmt:                q.createWalletStmt,
-		deleteBlockStmt:                 q.deleteBlockStmt,
-		deleteKeyScopeStmt:              q.deleteKeyScopeStmt,
-		deleteKeyScopeSecretsStmt:       q.deleteKeyScopeSecretsStmt,
-		getAddressTypeByIDStmt:          q.getAddressTypeByIDStmt,
-		getBlockByHeightStmt:            q.getBlockByHeightStmt,
-		getKeyScopeByIDStmt:             q.getKeyScopeByIDStmt,
-		getKeyScopeByWalletAndScopeStmt: q.getKeyScopeByWalletAndScopeStmt,
-		getKeyScopeSecretsStmt:          q.getKeyScopeSecretsStmt,
-		getWalletByIDStmt:               q.getWalletByIDStmt,
-		getWalletByNameStmt:             q.getWalletByNameStmt,
-		getWalletSecretsStmt:            q.getWalletSecretsStmt,
-		insertBlockStmt:                 q.insertBlockStmt,
-		insertKeyScopeSecretsStmt:       q.insertKeyScopeSecretsStmt,
-		insertWalletSecretsStmt:         q.insertWalletSecretsStmt,
-		insertWalletSyncStateStmt:       q.insertWalletSyncStateStmt,
-		listAddressTypesStmt:            q.listAddressTypesStmt,
-		listKeyScopesByWalletStmt:       q.listKeyScopesByWalletStmt,
-		listWalletsStmt:                 q.listWalletsStmt,
-		updateWalletSecretsStmt:         q.updateWalletSecretsStmt,
-		updateWalletSyncStateStmt:       q.updateWalletSyncStateStmt,
+		db:                                          tx,
+		tx:                                          tx,
+		allocateAccountNumberStmt:                   q.allocateAccountNumberStmt,
+		createAccountSecretStmt:                     q.createAccountSecretStmt,
+		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
+		createImportedAccountStmt:                   q.createImportedAccountStmt,
+		createKeyScopeStmt:                          q.createKeyScopeStmt,
+		createWalletStmt:                            q.createWalletStmt,
+		deleteBlockStmt:                             q.deleteBlockStmt,
+		deleteKeyScopeStmt:                          q.deleteKeyScopeStmt,
+		deleteKeyScopeSecretsStmt:                   q.deleteKeyScopeSecretsStmt,
+		getAccountByScopeAndNameStmt:                q.getAccountByScopeAndNameStmt,
+		getAccountByScopeAndNumberStmt:              q.getAccountByScopeAndNumberStmt,
+		getAccountByWalletScopeAndNameStmt:          q.getAccountByWalletScopeAndNameStmt,
+		getAccountByWalletScopeAndNumberStmt:        q.getAccountByWalletScopeAndNumberStmt,
+		getAccountPropsByIdStmt:                     q.getAccountPropsByIdStmt,
+		getAddressTypeByIDStmt:                      q.getAddressTypeByIDStmt,
+		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
+		getKeyScopeByIDStmt:                         q.getKeyScopeByIDStmt,
+		getKeyScopeByWalletAndScopeStmt:             q.getKeyScopeByWalletAndScopeStmt,
+		getKeyScopeSecretsStmt:                      q.getKeyScopeSecretsStmt,
+		getWalletByIDStmt:                           q.getWalletByIDStmt,
+		getWalletByNameStmt:                         q.getWalletByNameStmt,
+		getWalletSecretsStmt:                        q.getWalletSecretsStmt,
+		insertBlockStmt:                             q.insertBlockStmt,
+		insertKeyScopeSecretsStmt:                   q.insertKeyScopeSecretsStmt,
+		insertWalletSecretsStmt:                     q.insertWalletSecretsStmt,
+		insertWalletSyncStateStmt:                   q.insertWalletSyncStateStmt,
+		listAccountsByScopeStmt:                     q.listAccountsByScopeStmt,
+		listAccountsByWalletStmt:                    q.listAccountsByWalletStmt,
+		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,
+		listAccountsByWalletScopeStmt:               q.listAccountsByWalletScopeStmt,
+		listAddressTypesStmt:                        q.listAddressTypesStmt,
+		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
+		listWalletsStmt:                             q.listWalletsStmt,
+		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
+		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
+		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,
+		updateWalletSyncStateStmt:                   q.updateWalletSyncStateStmt,
 	}
 }
