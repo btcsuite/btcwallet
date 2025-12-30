@@ -17,14 +17,23 @@ CREATE TABLE key_scopes (
     -- Indicates the coin type for the key scope. This is typically 0 for BTC.
     coin_type BIGINT NOT NULL,
 
-    -- Encrypted key used to derive public keys for this scope.
-    encrypted_coin_pub_key BYTEA NOT NULL,
+    -- Encrypted key used to derive public keys for this scope in imported
+    -- accounts.
+    encrypted_coin_pub_key BYTEA,
 
     -- Reference to the address type used for internal/change addresses.
     internal_type_id SMALLINT NOT NULL,
 
     -- Reference to the address type used for external/receiving addresses.
     external_type_id SMALLINT NOT NULL,
+
+    -- Counter used to allocate sequential account numbers within this scope.
+    -- This avoids scanning the accounts table to compute MAX(account_number).
+    -- The value is updated atomically via UPDATE with RETURNING, which allows
+    -- concurrent account creation without additional locking logic.
+    -- The counter starts at minus one. Each new account consumes the current
+    -- value plus one, then stores the updated value for the next allocation.
+    last_account_number BIGINT NOT NULL DEFAULT -1,
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if key scopes still exist.
