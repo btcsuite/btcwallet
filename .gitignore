@@ -6,3 +6,4 @@ coverage.txt
 .vscode
 .DS_Store
 .aider*
+coverage.out
