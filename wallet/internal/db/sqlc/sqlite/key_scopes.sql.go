@@ -9,6 +9,30 @@ import (
 	"context"
 )
 
+const AllocateAccountNumber = `-- name: AllocateAccountNumber :one
+UPDATE key_scopes
+SET last_account_number = last_account_number + 1
+WHERE id = ?
+RETURNING id, last_account_number
+`
+
+type AllocateAccountNumberRow struct {
+	ID                int64
+	LastAccountNumber int64
+}
+
+// Atomically allocates the next account number for a key scope.
+// Returns the scope_id and the allocated account number.
+// SQLite limitation: Can't combine UPDATE...RETURNING with INSERT in a single
+// CTE (unlike Postgres). So, we call this first, then pass the returned number
+// to CreateAccount, within the same SQL transaction.
+func (q *Queries) AllocateAccountNumber(ctx context.Context, id int64) (AllocateAccountNumberRow, error) {
+	row := q.queryRow(ctx, q.allocateAccountNumberStmt, AllocateAccountNumber, id)
+	var i AllocateAccountNumberRow
+	err := row.Scan(&i.ID, &i.LastAccountNumber)
+	return i, err
+}
+
 const CreateKeyScope = `-- name: CreateKeyScope :one
 INSERT INTO key_scopes (
     wallet_id,
@@ -20,6 +44,7 @@ INSERT INTO key_scopes (
 ) VALUES (
     ?, ?, ?, ?, ?, ?
 )
+ON CONFLICT (wallet_id, purpose, coin_type) DO NOTHING
 RETURNING id
 `
 
