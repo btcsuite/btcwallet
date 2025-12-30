@@ -10,6 +10,7 @@ INSERT INTO key_scopes (
 ) VALUES (
     ?, ?, ?, ?, ?, ?
 )
+ON CONFLICT (wallet_id, purpose, coin_type) DO NOTHING
 RETURNING id;
 
 -- name: InsertKeyScopeSecrets :exec
@@ -47,6 +48,17 @@ SELECT
     external_type_id
 FROM key_scopes
 WHERE wallet_id = ? AND purpose = ? AND coin_type = ?;
+
+-- name: AllocateAccountNumber :one
+-- Atomically allocates the next account number for a key scope.
+-- Returns the scope_id and the allocated account number.
+-- SQLite limitation: Can't combine UPDATE...RETURNING with INSERT in a single
+-- CTE (unlike Postgres). So, we call this first, then pass the returned number
+-- to CreateAccount, within the same SQL transaction.
+UPDATE key_scopes
+SET last_account_number = last_account_number + 1
+WHERE id = ?
+RETURNING id, last_account_number;
 
 -- name: ListKeyScopesByWallet :many
 -- Lists all key scopes for a wallet, ordered by ID.
