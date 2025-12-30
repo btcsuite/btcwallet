@@ -8,7 +8,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 )
@@ -368,8 +367,9 @@ type ScopeAddrSchema struct {
 	InternalAddrType AddressType
 }
 
-// CreateAccountParams contains the parameters for creating a new account.
-type CreateAccountParams struct {
+// CreateDerivedAccountParams contains the parameters for creating a new derived
+// account.
+type CreateDerivedAccountParams struct {
 	// WalletID is the ID of the wallet to create the account in.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
@@ -383,9 +383,9 @@ type CreateAccountParams struct {
 	Name string
 }
 
-// ImportAccountParams contains the data required to import an account from an
-// extended key.
-type ImportAccountParams struct {
+// CreateImportedAccountParams contains the data required to store an imported
+// account from an external extended key.
+type CreateImportedAccountParams struct {
 	// WalletID is the ID of the wallet to import the account into.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
@@ -395,29 +395,22 @@ type ImportAccountParams struct {
 	// Name is the name of the account to import.
 	Name string
 
-	// AccountKey is the extended key for the account.
-	AccountKey *hdkeychain.ExtendedKey
-
-	// MasterKeyFingerprint is the fingerprint of the master key.
-	MasterKeyFingerprint uint32
-
 	// Scope is the key scope for the account. The address schema for the
-	// account will be determined by the default mapping for this scope.
+	// scope will be determined by the default mapping for this scope.
 	Scope KeyScope
-}
 
-// ImportAccountResult holds the results of an account import operation.
-type ImportAccountResult struct {
-	// AccountProperties contains the properties of the imported account.
-	AccountProperties *AccountProperties
+	// MasterFingerprint is the fingerprint of the master key.
+	MasterFingerprint uint32
 
-	// ExternalAddrs contains the derived external addresses if the import
-	// was a dry run.
-	ExternalAddrs []AddressInfo
+	// EncryptedPublicKey is the encrypted extended public key for the
+	// account. This should be encrypted by the caller before being passed
+	// to the database layer.
+	EncryptedPublicKey []byte
 
-	// InternalAddrs contains the derived internal addresses if the import
-	// was a dry run.
-	InternalAddrs []AddressInfo
+	// EncryptedPrivateKey is the encrypted extended private key for the
+	// account. This should be encrypted by the caller before being passed
+	// to the database layer. A nil or empty slice indicates watch-only.
+	EncryptedPrivateKey []byte
 }
 
 // AccountProperties contains properties associated with each account, such as
@@ -441,11 +434,11 @@ type AccountProperties struct {
 	// account.
 	ImportedKeyCount uint32
 
-	// AccountPubKey is the account's public key that can be used to
-	// derive any address relevant to said account.
-	//
-	// NOTE: This may be nil for imported accounts.
-	AccountPubKey *hdkeychain.ExtendedKey
+	// EncryptedPublicKey is the encrypted account public key. This is the
+	// encrypted form of the extended public key that can be used to derive
+	// addresses for the account. The caller must decrypt this using the
+	// appropriate crypto key to use it.
+	EncryptedPublicKey []byte
 
 	// MasterKeyFingerprint represents the fingerprint of the root key
 	// corresponding to the master public key (also known as the key with
@@ -520,7 +513,8 @@ type RenameAccountParams struct {
 	Scope KeyScope
 
 	// OldName is the current name of the account. This is used to identify
-	// the account if AccountNumber is not provided.
+	// the account if AccountNumber is not provided. An empty string means
+	// this field is not provided (use AccountNumber instead).
 	OldName string
 
 	// AccountNumber is the number of the account to rename. This is used
