@@ -181,13 +181,13 @@ func TestListWallets(t *testing.T) {
 func TestUpdateWallet_SyncedTo(t *testing.T) {
 	t.Parallel()
 
-	store, dbConn := NewTestStore(t)
+	store, queries := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("update-sync-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 
-	block := CreateBlockFixture(t, dbConn, 100)
+	block := CreateBlockFixture(t, queries, 100)
 
 	updateParams := db.UpdateWalletParams{
 		WalletID: created.ID,
@@ -215,7 +215,7 @@ func TestUpdateWallet_SyncedTo(t *testing.T) {
 func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	t.Parallel()
 
-	store, dbConn := NewTestStore(t)
+	store, queries := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("update-birthday-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -224,7 +224,7 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	// Initially, BirthdayBlock should be nil.
 	require.Nil(t, created.BirthdayBlock)
 
-	block := CreateBlockFixture(t, dbConn, 50)
+	block := CreateBlockFixture(t, queries, 50)
 
 	updateParams := db.UpdateWalletParams{
 		WalletID:      created.ID,
