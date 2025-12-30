@@ -21,9 +21,9 @@ type Querier interface {
 	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
 	// Retrieves a key scope by its ID.
-	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
+	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
-	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
@@ -38,7 +38,7 @@ type Querier interface {
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	// Lists all key scopes for a wallet, ordered by ID.
-	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
