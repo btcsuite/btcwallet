@@ -9,6 +9,17 @@ import (
 )
 
 type Querier interface {
+	// Inserts the encrypted private key material for an account.
+	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
+	// Creates a new derived account under the given scope, allocating a fresh
+	// sequential account number from key_scopes.last_account_number.
+	// The allocation is atomic: the UPDATE takes the row lock on the scope row,
+	// returns the allocated number, and updates the counter for the next call.
+	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
+	// Creates a new imported account under the given scope with NULL account
+	// number. Imported accounts don't follow BIP44 derivation, so they don't need
+	// a sequential account number.
+	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
@@ -17,6 +28,16 @@ type Querier interface {
 	DeleteKeyScope(ctx context.Context, id int64) (int64, error)
 	// Deletes the secrets for a key scope.
 	DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error)
+	// Returns a single account by scope id and account name.
+	GetAccountByScopeAndName(ctx context.Context, arg GetAccountByScopeAndNameParams) (GetAccountByScopeAndNameRow, error)
+	// Returns a single account by scope id and account number.
+	GetAccountByScopeAndNumber(ctx context.Context, arg GetAccountByScopeAndNumberParams) (GetAccountByScopeAndNumberRow, error)
+	// Returns a single account by wallet id, scope tuple, and account name.
+	GetAccountByWalletScopeAndName(ctx context.Context, arg GetAccountByWalletScopeAndNameParams) (GetAccountByWalletScopeAndNameRow, error)
+	// Returns a single account by wallet id, scope tuple, and account number.
+	GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error)
+	// Returns full account properties by account id.
+	GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
@@ -35,11 +56,27 @@ type Querier interface {
 	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
+	// Lists all accounts in a scope, ordered by account number. Imported accounts
+	// (with NULL account_number) appear last.
+	ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error)
+	// Lists all accounts for a wallet, ordered by account number. Imported
+	// accounts (with NULL account_number) appear last.
+	ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error)
+	// Lists all accounts for a wallet filtered by account name, ordered by account
+	// number. Imported accounts (with NULL account_number) appear last.
+	ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error)
+	// Lists all accounts for a wallet and scope tuple, ordered by account number.
+	// Imported accounts (with NULL account_number) appear last.
+	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
+	// Renames an account identified by wallet id, scope tuple, and current account name.
+	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
+	// Renames an account identified by wallet id, scope tuple, and account number.
+	UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error)
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }
