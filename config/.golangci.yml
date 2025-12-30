@@ -62,7 +62,12 @@ linters:
     funlen:
       # Checks the number of lines in a function.
       # If lower than 0, disable the check.
-      lines: 100
+      # Increased from 100 to 200 to allow more verbose parameters while still
+      # keeping low complexity. e.g.:
+      #   func (w *PostgresWalletDB) CreateDerivedAccount(ctx context.Context,
+      #	    params CreateDerivedAccountParams) (*AccountInfo, error) {
+      lines: 200
+
       # Checks the number of statements in a function.
       statements: 50
 
