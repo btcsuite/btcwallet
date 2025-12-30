@@ -64,21 +64,21 @@ type WalletStore interface {
 
 // AccountStore defines the database actions for managing accounts.
 type AccountStore interface {
-	// CreateAccount creates a new account with the given name and scope. It
-	// returns the properties of the newly created account or an error if
-	// the
-	// creation fails.
-	CreateAccount(ctx context.Context, params CreateAccountParams) (
-		*AccountInfo, error)
+	// CreateDerivedAccount creates a new derived account with the given name
+	// and scope.
+	//
+	// If the key scope does not exist, it will be automatically created with
+	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	CreateDerivedAccount(ctx context.Context,
+		params CreateDerivedAccountParams) (*AccountInfo, error)
 
-	// ImportAccount imports an account from an extended key. This method
-	// supports normal imports, imports with a specific scope, and dry-run
-	// imports. The behavior is controlled by the fields in the
-	// ImportAccountParams struct. It returns the properties of the imported
-	// account and derived addresses (for dry runs) or an error if the
-	// import fails. The returned addresses are of type AddressInfo.
-	ImportAccount(ctx context.Context, params ImportAccountParams) (
-		*ImportAccountResult, error)
+	// CreateImportedAccount stores an imported account identified by an
+	// extended public key.
+	//
+	// If the key scope does not exist, it will be automatically created with
+	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	CreateImportedAccount(ctx context.Context,
+		params CreateImportedAccountParams) (*AccountProperties, error)
 
 	// GetAccount retrieves information about a specific account,
 	// identified by its name or account number within a given key scope.
