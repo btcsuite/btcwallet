@@ -2,22 +2,22 @@ package db
 
 import (
 	"context"
-	"fmt"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
-func sqliteAddressTypeToInfo(row sqlcsqlite.AddressType) (AddressTypeInfo,
+// sqliteAddressTypeRowToInfo converts a SQLite address type row to an
+// AddressTypeInfo struct.
+func sqliteAddressTypeRowToInfo(row sqlcsqlite.AddressType) (AddressTypeInfo,
 	error) {
 
-	id, err := int64ToUint8(row.ID)
+	addrType, err := idToAddressType(row.ID)
 	if err != nil {
-		return AddressTypeInfo{}, fmt.Errorf("address type id %d: %w",
-			row.ID, err)
+		return AddressTypeInfo{}, err
 	}
 
 	return AddressTypeInfo{
-		Type:        AddressType(id),
+		Type:        addrType,
 		Description: row.Description,
 	}, nil
 }
@@ -27,8 +27,9 @@ func sqliteAddressTypeToInfo(row sqlcsqlite.AddressType) (AddressTypeInfo,
 func (w *SQLiteWalletDB) ListAddressTypes(ctx context.Context) (
 	[]AddressTypeInfo, error) {
 
-	return listAddressTypes(ctx, w.queries.ListAddressTypes,
-		sqliteAddressTypeToInfo)
+	return listAddressTypes(
+		ctx, w.queries.ListAddressTypes, sqliteAddressTypeRowToInfo,
+	)
 }
 
 // GetAddressType returns the AddressTypeInfo associated with the given address
@@ -36,6 +37,8 @@ func (w *SQLiteWalletDB) ListAddressTypes(ctx context.Context) (
 func (w *SQLiteWalletDB) GetAddressType(ctx context.Context,
 	id AddressType) (AddressTypeInfo, error) {
 
-	return getAddressTypeByID(ctx, w.queries.GetAddressTypeByID,
-		int64(id), id, sqliteAddressTypeToInfo)
+	return getAddressTypeByID(
+		ctx, w.queries.GetAddressTypeByID, int64(id), id,
+		sqliteAddressTypeRowToInfo,
+	)
 }
