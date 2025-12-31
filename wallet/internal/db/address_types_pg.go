@@ -2,20 +2,20 @@ package db
 
 import (
 	"context"
-	"fmt"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
 
-func pgAddressTypeToInfo(row sqlcpg.AddressType) (AddressTypeInfo, error) {
-	id, err := int16ToUint8(row.ID)
+// pgAddressTypeRowToInfo converts a PostgreSQL address type row to an
+// AddressTypeInfo struct.
+func pgAddressTypeRowToInfo(row sqlcpg.AddressType) (AddressTypeInfo, error) {
+	addrType, err := idToAddressType(row.ID)
 	if err != nil {
-		return AddressTypeInfo{}, fmt.Errorf("address type id %d: %w",
-			row.ID, err)
+		return AddressTypeInfo{}, err
 	}
 
 	return AddressTypeInfo{
-		Type:        AddressType(id),
+		Type:        addrType,
 		Description: row.Description,
 	}, nil
 }
@@ -25,8 +25,9 @@ func pgAddressTypeToInfo(row sqlcpg.AddressType) (AddressTypeInfo, error) {
 func (w *PostgresWalletDB) ListAddressTypes(ctx context.Context) (
 	[]AddressTypeInfo, error) {
 
-	return listAddressTypes(ctx, w.queries.ListAddressTypes,
-		pgAddressTypeToInfo)
+	return listAddressTypes(
+		ctx, w.queries.ListAddressTypes, pgAddressTypeRowToInfo,
+	)
 }
 
 // GetAddressType returns the AddressTypeInfo associated with the given address
@@ -34,6 +35,8 @@ func (w *PostgresWalletDB) ListAddressTypes(ctx context.Context) (
 func (w *PostgresWalletDB) GetAddressType(ctx context.Context,
 	id AddressType) (AddressTypeInfo, error) {
 
-	return getAddressTypeByID(ctx, w.queries.GetAddressTypeByID,
-		int16(id), id, pgAddressTypeToInfo)
+	return getAddressTypeByID(
+		ctx, w.queries.GetAddressTypeByID, int16(id), id,
+		pgAddressTypeRowToInfo,
+	)
 }
