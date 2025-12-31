@@ -149,6 +149,24 @@ var (
 	}
 )
 
+// AccountOrigin specifies the origin of an account. This is used to identify
+// the account origin type, such as derived from the wallet's HD seed or
+// imported from an external source.
+//
+// The enum values MUST match the IDs in the account_origins database table.
+// See migration 000005_accounts for the canonical descriptions.
+type AccountOrigin uint8
+
+const (
+	// DerivedAccount indicates the account was derived from a hierarchical
+	// deterministic key.
+	DerivedAccount AccountOrigin = iota
+
+	// ImportedAccount indicates the account was imported from an external
+	// source.
+	ImportedAccount
+)
+
 // Tapscript represents a Taproot script leaf, which includes the script itself
 // and its corresponding control block. This is used for spending Taproot
 // outputs.
@@ -322,11 +340,18 @@ type UpdateWalletSecretsParams struct {
 // AccountInfo contains all information about a single account, including its
 // properties and balances.
 type AccountInfo struct {
-	// AccountNumber is the unique identifier for the account.
+	// AccountNumber is the BIP44 account index used for derived accounts.
+	// Imported accounts do not follow BIP44 derivation and therefore do not
+	// have a meaningful account index. For those accounts, this field is
+	// set to 0 and must not be used when Origin is ImportedAccount.
 	AccountNumber uint32
 
 	// AccountName is the human-readable name of the account.
 	AccountName string
+
+	// Origin indicates whether the account was derived from the wallet's
+	// HD seed or imported from an external source.
+	Origin AccountOrigin
 
 	// ExternalKeyCount is the number of external keys that have been
 	// derived.
@@ -419,11 +444,18 @@ type CreateImportedAccountParams struct {
 // AccountProperties contains properties associated with each account, such as
 // the account name, number, and the nubmer of derived and imported keys.
 type AccountProperties struct {
-	// AccountNumber is the internal number used to reference the account.
+	// AccountNumber is the BIP44 account index used for derived accounts.
+	// Imported accounts do not follow BIP44 derivation and therefore do not
+	// have a meaningful account index. For those accounts, this field is
+	// set to 0 and must not be used when Origin is ImportedAccount.
 	AccountNumber uint32
 
 	// AccountName is the user-identifying name of the account.
 	AccountName string
+
+	// Origin indicates whether the account was derived from the wallet's
+	// HD seed or imported from an external source.
+	Origin AccountOrigin
 
 	// ExternalKeyCount is the number of internal keys that have been
 	// derived for the account.
