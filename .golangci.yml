@@ -94,6 +94,11 @@ linters:
       multi-func: true
       multi-if: true
 
+    wrapcheck:
+      ignore-sig-regexps:
+        # Allow returning .Err() from context.Context without wrapping it.
+        - context\.Context.*\.Err\(\)
+
     gomoddirectives:
       replace-local: true
       replace-allow-list:
