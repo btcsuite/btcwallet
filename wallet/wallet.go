@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
@@ -87,45 +88,107 @@ var (
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
-// Wallet is a structure containing all the components for a
-// complete wallet.  It contains the Armory-style key store
-// addresses and keys),
-// Wallet is a structure containing all the components for a complete wallet.
-// It manages the cryptographic keys, transaction history, and synchronization
-// with the blockchain.
-type Wallet struct {
-	// walletDeprecated embeds the legacy state and channels. Access to these
-	// should be phased out as refactoring progresses.
-	*walletDeprecated
+// SyncMethod determines the strategy used to synchronize the wallet with the
+// blockchain.
+type SyncMethod uint8
 
-	// publicPassphrase is the passphrase used to encrypt and decrypt public
-	// data in the address manager.
-	publicPassphrase []byte
+const (
+	// SyncMethodAuto defaults to CFilters if available (Neutrino/Bitcoind),
+	// falling back to Full Block scan if not.
+	//
+	// Use Case: Default for most users.
+	//
+	// Logic:
+	// 1. Checks if the number of watched items (Addresses + UTXOs) exceeds
+	//    a heuristic threshold (100,000). If so, switches to Full Block
+	//    scanning to avoid the CPU bottleneck of client-side filter
+	//    matching.
+	// 2. Attempts to fetch CFilters. If successful, uses CFilters.
+	// 3. If CFilters are unavailable, falls back to Full Block scanning.
+	SyncMethodAuto SyncMethod = iota
 
-	// db is the underlying key-value database where all wallet data is
-	// persisted.
-	db walletdb.DB
+	// SyncMethodCFilters forces the use of Compact Filters (BIP 157/158).
+	// The sync process will fail if the backend does not support filters.
+	//
+	// Use Case: Bandwidth-constrained environments (mobile) or when privacy
+	// is paramount (Neutrino P2P).
+	//
+	// Pros:
+	// - Minimal Bandwidth: Only downloads headers and filters (approx 4MB
+	//   per 200 blocks) plus relevant blocks. Ideal for sparse wallets.
+	//
+	// Cons:
+	// - CPU Intensive: Client-side matching is O(N*M) where N=Blocks,
+	//   M=Addresses. Can be slow for massive wallets (>100k addresses).
+	// - Slower if Match Rate is High: If the wallet has transactions in
+	//   nearly every block, it downloads filters AND blocks, resulting in
+	//   higher overhead than full block scanning.
+	SyncMethodCFilters
 
-	// addrStore is the address and key manager responsible for hierarchical
-	// deterministic (HD) derivation and storage of cryptographic keys.
-	addrStore waddrmgr.AddrStore
+	// SyncMethodFullBlocks forces the use of full block downloading and
+	// scanning, bypassing filters entirely.
+	//
+	// Use Case: High-bandwidth/Local environments (Bitcoind on localhost)
+	// or massive wallets (exchanges, heavy users).
+	//
+	// Pros:
+	// - Low CPU: Block parsing and map lookup is extremely fast compared
+	//   to filter matching. Scaling is O(1) or O(TxOutputs) for address
+	//   lookups, independent of watchlist size.
+	// - Faster for High Match Rates: Avoids the overhead of
+	//   fetching/matching filters when most blocks are going to be
+	//   downloaded anyway.
+	//
+	// Cons:
+	// - High Bandwidth: Downloads all block data (approx 200MB per 200
+	//   blocks). Slow on limited connections.
+	SyncMethodFullBlocks
+)
 
-	// txStore is the transaction manager responsible for storing and
-	// querying the wallet's transaction history and unspent outputs.
-	txStore wtxmgr.TxStore
+// Config holds the configuration options for creating a new
+// WalletController.
+type Config struct {
+	// DB is the underlying database for the wallet.
+	DB walletdb.DB
 
-	// recoveryWindow specifies the number of additional keys to derive
-	// beyond the last used one to look for previously used addresses
-	// during a rescan or recovery.
-	recoveryWindow uint32
+	// Chain is the interface to the blockchain (e.g. bitcoind,
+	// neutrino). If set, the wallet will automatically synchronize with
+	// the chain upon Start.
+	Chain chain.Interface
 
-	// NtfnServer handles the delivery of wallet-related events (e.g., new
-	// transactions, block connections) to connected clients.
-	NtfnServer *NotificationServer
+	// ChainParams defines the network parameters (e.g. mainnet, testnet).
+	ChainParams *chaincfg.Params
 
-	// wg is a wait group used to track and wait for all long-running
-	// background goroutines to finish during a graceful shutdown.
-	wg sync.WaitGroup
+	// RecoveryWindow specifies the address lookahead for recovery.
+	RecoveryWindow uint32
+
+	// WalletSyncRetryInterval is the interval at which the wallet should
+	// retry syncing to the chain if it encounters an error.
+	WalletSyncRetryInterval time.Duration
+
+	// SyncMethod specifies the synchronization strategy to use.
+	SyncMethod SyncMethod
+
+	// AutoLockDuration is the default duration after which the wallet will
+	// automatically lock itself if no specific duration is provided during
+	// unlock. If zero or negative, the wallet will default to a hardcoded
+	// safe duration (e.g. 10m) unless explicitly overridden by the unlock
+	// request.
+	AutoLockDuration time.Duration
+
+	// Name is the unique identifier for the wallet. It is used to track
+	// active wallet instances within the Manager.
+	Name string
+
+	// PubPassphrase is the public passphrase for the wallet.
+	PubPassphrase []byte
+
+	// MaxCFilterItems is the threshold of watched items (addresses +
+	// outpoints) above which the wallet will fallback to full block
+	// scanning when SyncMethodAuto is used. This avoids the CPU bottleneck
+	// of client-side filter matching for large watchlists. If 0, a default
+	// of 100,000 is used.
+	MaxCFilterItems int
 }
 
 // locateBirthdayBlock returns a block that meets the given birthday timestamp
@@ -212,6 +275,37 @@ func locateBirthdayBlock(chainClient chainConn,
 		birthdayBlock.Timestamp)
 
 	return birthdayBlock, nil
+}
+
+// Wallet is a structure containing all the components for a complete wallet.
+// It manages the cryptographic keys, transaction history, and synchronization
+// with the blockchain.
+//
+//nolint:unused // TODO(yy): remove it once implemented
+type Wallet struct {
+	// walletDeprecated embeds the legacy state and channels. Access to
+	// these should be phased out as refactoring progresses.
+	*walletDeprecated
+
+	// addrStore is the address and key manager responsible for hierarchical
+	// deterministic (HD) derivation and storage of cryptographic keys.
+	addrStore waddrmgr.AddrStore
+
+	// txStore is the transaction manager responsible for storing and
+	// querying the wallet's transaction history and unspent outputs.
+	txStore wtxmgr.TxStore
+
+	// NtfnServer handles the delivery of wallet-related events (e.g., new
+	// transactions, block connections) to connected clients.
+	NtfnServer *NotificationServer
+
+	// wg is a wait group used to track and wait for all long-running
+	// background goroutines to finish during a graceful shutdown.
+	wg sync.WaitGroup
+
+	// cfg holds the static configuration parameters provided when the
+	// wallet was created or loaded.
+	cfg Config
 }
 
 // hasMinConfs checks whether a transaction at height txHeight has met minconf
