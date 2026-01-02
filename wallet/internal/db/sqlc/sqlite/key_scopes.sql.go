@@ -276,3 +276,21 @@ func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]
 	}
 	return items, nil
 }
+
+const SetLastAccountNumber = `-- name: SetLastAccountNumber :exec
+UPDATE key_scopes
+SET last_account_number = ?
+WHERE id = ?
+`
+
+type SetLastAccountNumberParams struct {
+	LastAccountNumber int64
+	ID                int64
+}
+
+// Sets the last_account_number for a key scope. This is intended for testing
+// the account number overflow behavior without creating billions of accounts.
+func (q *Queries) SetLastAccountNumber(ctx context.Context, arg SetLastAccountNumberParams) error {
+	_, err := q.exec(ctx, q.setLastAccountNumberStmt, SetLastAccountNumber, arg.LastAccountNumber, arg.ID)
+	return err
+}

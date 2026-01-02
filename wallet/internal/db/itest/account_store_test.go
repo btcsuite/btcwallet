@@ -4,6 +4,8 @@ package itest
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -659,6 +661,43 @@ func TestRenameAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountMaxAccountNumber verifies that CreateDerivedAccount
+// returns ErrMaxAccountNumberReached when the account number counter exceeds
+// the maximum uint32 value.
+func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	store, queries := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-max-account")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "account-0")
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	SetLastAccountNumber(t, queries, scopeID, math.MaxUint32-1)
+
+	// This should succeed with account_number = MaxUint32.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "account-max",
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(math.MaxUint32), info.AccountNumber)
+
+	// This should fail; the next allocation would be MaxUint32 + 1, which
+	// overflows uint32.
+	_, err = store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "account-overflow",
+		},
+	)
+	require.ErrorIs(t, err, db.ErrMaxAccountNumberReached)
+}
+
+// newWallet creates a new wallet with the given name using the provided
+// store and returns its ID.
 func newWallet(t *testing.T, store db.WalletStore, name string) uint32 {
 	t.Helper()
 

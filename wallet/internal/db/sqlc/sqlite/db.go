@@ -123,6 +123,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
+	if q.setLastAccountNumberStmt, err = db.PrepareContext(ctx, SetLastAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query SetLastAccountNumber: %w", err)
+	}
 	if q.updateAccountNameByWalletScopeAndNameStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndName); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndName: %w", err)
 	}
@@ -305,6 +308,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
+	if q.setLastAccountNumberStmt != nil {
+		if cerr := q.setLastAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing setLastAccountNumberStmt: %w", cerr)
+		}
+	}
 	if q.updateAccountNameByWalletScopeAndNameStmt != nil {
 		if cerr := q.updateAccountNameByWalletScopeAndNameStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNameStmt: %w", cerr)
@@ -397,6 +405,7 @@ type Queries struct {
 	listAddressTypesStmt                        *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listWalletsStmt                             *sql.Stmt
+	setLastAccountNumberStmt                    *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
@@ -440,6 +449,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listWalletsStmt:                             q.listWalletsStmt,
+		setLastAccountNumberStmt:                    q.setLastAccountNumberStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,
