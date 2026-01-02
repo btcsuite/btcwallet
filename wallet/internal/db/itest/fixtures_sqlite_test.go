@@ -27,3 +27,35 @@ func CreateBlockFixture(t *testing.T, queries *sqlcsqlite.Queries,
 
 	return block
 }
+
+// SetLastAccountNumber sets the last_account_number for a key scope.
+// Used to test account number overflow without creating billions of accounts.
+func SetLastAccountNumber(t *testing.T, queries *sqlcsqlite.Queries,
+	scopeID int64, lastAccountNumber int64) {
+	t.Helper()
+
+	err := queries.SetLastAccountNumber(
+		t.Context(), sqlcsqlite.SetLastAccountNumberParams{
+			LastAccountNumber: lastAccountNumber,
+			ID:                scopeID,
+		},
+	)
+	require.NoError(t, err)
+}
+
+// GetKeyScopeID retrieves the scope ID for a given wallet and key scope.
+func GetKeyScopeID(t *testing.T, queries *sqlcsqlite.Queries,
+	walletID uint32, scope db.KeyScope) int64 {
+	t.Helper()
+
+	row, err := queries.GetKeyScopeByWalletAndScope(
+		t.Context(), sqlcsqlite.GetKeyScopeByWalletAndScopeParams{
+			WalletID: int64(walletID),
+			Purpose:  int64(scope.Purpose),
+			CoinType: int64(scope.Coin),
+		},
+	)
+	require.NoError(t, err)
+
+	return row.ID
+}
