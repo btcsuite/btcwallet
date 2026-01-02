@@ -91,3 +91,10 @@ WHERE scope_id = ?;
 -- Deletes a key scope by its ID.
 DELETE FROM key_scopes
 WHERE id = ?;
+
+-- name: SetLastAccountNumber :exec
+-- Sets the last_account_number for a key scope. This is intended for testing
+-- the account number overflow behavior without creating billions of accounts.
+UPDATE key_scopes
+SET last_account_number = ?
+WHERE id = ?;
