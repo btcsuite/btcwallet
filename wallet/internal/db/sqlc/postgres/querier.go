@@ -73,6 +73,9 @@ type Querier interface {
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
+	// Sets the last_account_number for a key scope. This is intended for testing
+	// the account number overflow behavior without creating billions of accounts.
+	SetLastAccountNumber(ctx context.Context, arg SetLastAccountNumberParams) error
 	// Renames an account identified by wallet id, scope tuple, and current account name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.
