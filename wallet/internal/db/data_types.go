@@ -443,7 +443,7 @@ type CreateImportedAccountParams struct {
 }
 
 // AccountProperties contains properties associated with each account, such as
-// the account name, number, and the nubmer of derived and imported keys.
+// the account name, number, and the number of derived and imported keys.
 type AccountProperties struct {
 	// AccountNumber is the BIP44 account index used for derived accounts.
 	// Imported accounts do not follow BIP44 derivation and therefore do not
