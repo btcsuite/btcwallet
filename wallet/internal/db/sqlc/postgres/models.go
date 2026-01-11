@@ -31,6 +31,23 @@ type AccountSecret struct {
 	EncryptedPrivateKey []byte
 }
 
+type Address struct {
+	ID            int64
+	AccountID     int64
+	ScriptPubKey  []byte
+	TypeID        int16
+	AddressBranch sql.NullInt64
+	AddressIndex  sql.NullInt64
+	PubKey        []byte
+	CreatedAt     time.Time
+}
+
+type AddressSecret struct {
+	AddressID        int64
+	EncryptedPrivKey []byte
+	EncryptedScript  []byte
+}
+
 type AddressType struct {
 	ID          int16
 	Description string
