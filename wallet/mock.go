@@ -92,7 +92,7 @@ func (m *mockChainClient) BackEnd() string {
 	return "mock"
 }
 
-// TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
+// TestMempoolAccept returns result of mempool acceptance tests indicating
 // if raw transaction(s) would be accepted by mempool.
 //
 // NOTE: This is part of the chain.Interface interface.
