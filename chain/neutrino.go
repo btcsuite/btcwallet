@@ -228,7 +228,7 @@ func (s *NeutrinoClient) SendRawTransaction(tx *wire.MsgTx, allowHighFees bool) 
 	return &hash, nil
 }
 
-// TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
+// TestMempoolAccept returns result of mempool acceptance tests indicating
 // if raw transaction(s) would be accepted by mempool.
 //
 // NOTE: This is part of the chain.Interface interface.
