@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -167,18 +166,6 @@ const (
 	// source.
 	ImportedAccount
 )
-
-// Tapscript represents a Taproot script leaf, which includes the script itself
-// and its corresponding control block. This is used for spending Taproot
-// outputs.
-type Tapscript struct {
-	// ControlBlock is the control block for the Taproot script, which is
-	// required to reveal the script path during spending.
-	ControlBlock []byte
-
-	// Script is the actual script code of the Taproot leaf.
-	Script []byte
-}
 
 // --------------------
 // WalletStore Types
@@ -571,36 +558,69 @@ type RenameAccountParams struct {
 // AddressInfo represents a wallet-managed address, including its properties and
 // derivation information.
 type AddressInfo struct {
-	// Address is the human-readable address string.
-	Address address.Address
+	// ID is the database unique identifier for the address.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	ID uint32
 
-	// Internal indicates whether the address is for internal (change) use.
-	Internal bool
+	// AccountID is the database unique identifier for the account this address
+	// belongs to.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	AccountID uint32
 
-	// Compressed indicates whether the address is compressed.
-	Compressed bool
-
-	// Used indicates whether the address has been used in a transaction.
-	Used bool
-
-	// IsWatchOnly indicates whether the wallet has the private key for
-	// this address.
-	IsWatchOnly bool
-
-	// AddrType is the type of the address (P2PKH, P2SH, etc.).
+	// AddrType is the type of address (P2PKH, P2WPKH, P2TR, etc.).
 	AddrType AddressType
 
-	// DerivationInfo contains the BIP-32 derivation path information for
-	// the address. This will be nil for imported addresses that are not
-	// part of an HD account.
-	DerivationInfo *DerivationInfo
+	// CreatedAt is when the address was created in the wallet database.
+	CreatedAt time.Time
 
-	// Script is the script associated with the address, if any.
-	Script []byte
+	// Origin indicates whether this is a derived HD address or an imported
+	// address. Reuses the AccountOrigin enum.
+	Origin AccountOrigin
+
+	// Branch is the BIP44 branch number (0=external, 1=internal/change).
+	// Zero value for imported addresses.
+	Branch uint32
+
+	// Index is the BIP44 index within the branch. Zero value for imported
+	// addresses.
+	Index uint32
+
+	// ScriptPubKey is the script pubkey (plaintext). Zero value for
+	// derived addresses.
+	ScriptPubKey []byte
+
+	// PubKey is the public key (plaintext). Zero value for derived
+	// addresses.
+	PubKey []byte
+
+	// IsWatchOnly indicates whether the wallet has the private key for this
+	// address. Convenience field.
+	IsWatchOnly bool
 }
 
-// NewAddressParams contains the parameters for creating a new address.
-type NewAddressParams struct {
+// AddressSecret contains sensitive encrypted material for an address.
+type AddressSecret struct {
+	// AddressID is the database unique identifier for the address.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	AddressID uint32
+
+	// EncryptedPrivKey is the encrypted private key.
+	EncryptedPrivKey []byte
+
+	// EncryptedScript is the encrypted redeem or witness script for
+	// P2SH/P2WSH addresses. For Taproot, this is the TLV-encoded Tapscript.
+	EncryptedScript []byte
+}
+
+// NewDerivedAddressParams contains the parameters for creating a new derived
+// address.
+type NewDerivedAddressParams struct {
 	// WalletID is the ID of the wallet to create the address in.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
@@ -618,45 +638,39 @@ type NewAddressParams struct {
 	Change bool
 }
 
-// ImportAddressParams encapsulates all the data needed to store a new, imported
-// address, script, or private key. All imported addresses are automatically
-// assigned to the wallet's logical "imported" account. The presence of a
-// private key determines whether the address will be spendable or watch-only.
-type ImportAddressParams struct {
-	// WalletID is the ID of the wallet to import the address into.
+// NewImportedAddressParams defines the input required to import a single
+// address into the wallet. All imported addresses are assigned to the
+// wallet imported account. The caller is responsible for encrypting any
+// sensitive material before populating this struct.
+type NewImportedAddressParams struct {
+	// WalletID identifies the wallet that will own this address.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// PrivateKey is the private key to import, in WIF format. If this is
-	// provided, the address will be spendable. If nil, the import will be
-	// watch-only.
-	PrivateKey *btcutil.WIF
+	// Scope is the key scope for the imported address.
+	Scope KeyScope
 
-	// PubKey is the public key to import for a watch-only address. This
-	// field is only used if PrivateKey is nil.
-	PubKey *btcec.PublicKey
+	// AddressType specifies the address format being imported, such as
+	// P2PKH, P2WPKH, or P2TR.
+	AddressType AddressType
 
-	// Tapscript is the Taproot script to import for a watch-only address.
-	// This field is only used if PrivateKey is nil.
-	Tapscript *Tapscript
+	// ScriptPubKey contains the script pubkey associated with the address
+	// (stored in plaintext).
+	ScriptPubKey []byte
 
-	// Script is the generic script to import for a watch-only address.
-	// This field is only used if PrivateKey is nil.
-	Script []byte
-}
+	// PubKey contains the public key corresponding to the private key for
+	// this address (stored in plaintext).
+	PubKey []byte
 
-// GetPrivateKeyParams contains the parameters for retrieving a private key.
-type GetPrivateKeyParams struct {
-	// WalletID is the ID of the wallet to query.
-	//
-	// NOTE: uint32 is used to ensure compatibility with standard SQL
-	// databases (signed 64-bit integers).
-	WalletID uint32
+	// EncryptedPrivateKey contains the encrypted private key for the address.
+	EncryptedPrivateKey []byte
 
-	// Address is the address for which to retrieve the private key.
-	Address address.Address
+	// EncryptedScript contains the encrypted, pre serialized script.
+	// For P2SH and P2WSH this is the redeem or witness script.
+	// For Taproot this is the TLV encoded Tapscript.
+	EncryptedScript []byte
 }
 
 // GetAddressQuery contains the parameters for querying an address.
@@ -667,8 +681,10 @@ type GetAddressQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Address is the address to query.
-	Address address.Address
+	// ScriptPubKey is the script pubkey. If provided, the query will be
+	// performed using this value. Only applicable to imported addresses,
+	// as derived addresses have NULL script pubkeys.
+	ScriptPubKey []byte
 }
 
 // ListAddressesQuery contains the parameters for listing addresses.
@@ -684,38 +700,6 @@ type ListAddressesQuery struct {
 
 	// Scope is the key scope of the account.
 	Scope KeyScope
-}
-
-// MarkAddressAsUsedParams contains the parameters for marking an address as
-// used.
-type MarkAddressAsUsedParams struct {
-	// WalletID is the ID of the wallet containing the address.
-	//
-	// NOTE: uint32 is used to ensure compatibility with standard SQL
-	// databases (signed 64-bit integers).
-	WalletID uint32
-
-	// Address is the address to mark as used.
-	Address address.Address
-}
-
-// DerivationInfo contains the BIP-32 derivation path information for a key.
-type DerivationInfo struct {
-	// KeyScope is the key scope of the derivation path.
-	KeyScope KeyScope
-
-	// MasterKeyFingerprint is the fingerprint of the master key.
-	MasterKeyFingerprint uint32
-
-	// Account is the account number of the derivation path.
-	Account uint32
-
-	// Branch is the branch number of the derivation path (0 for external,
-	// 1 for internal).
-	Branch uint32
-
-	// Index is the index of the key in the branch.
-	Index uint32
 }
 
 // --------------------
