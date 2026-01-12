@@ -246,7 +246,7 @@ func (c *BitcoindClient) MapRPCErr(rpcErr error) error {
 	return fmt.Errorf("%w: %v", ErrUndefined, rpcErr)
 }
 
-// TestMempoolAcceptCmd returns result of mempool acceptance tests indicating
+// TestMempoolAccept returns result of mempool acceptance tests indicating
 // if raw transaction(s) would be accepted by mempool.
 //
 // NOTE: This is part of the chain.Interface interface.
