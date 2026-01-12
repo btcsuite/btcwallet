@@ -90,7 +90,7 @@ func (w *SQLiteWalletDB) CreateDerivedAccount(ctx context.Context,
 		}
 
 		info = buildAccountInfo(
-			accNumber, params.Name, DerivedAccount, false,
+			accNumber, params.Name, DerivedAccount, 0, 0, 0, false,
 			row.CreatedAt, params.Scope,
 		)
 
@@ -223,6 +223,9 @@ func sqliteGetAccountProps(ctx context.Context, qtx *sqlcsqlite.Queries,
 		AccountNumber:      row.AccountNumber,
 		AccountName:        row.AccountName,
 		OriginID:           row.OriginID,
+		ExternalKeyCount:   row.ExternalKeyCount,
+		InternalKeyCount:   row.InternalKeyCount,
+		ImportedKeyCount:   row.ImportedKeyCount,
 		EncryptedPublicKey: row.EncryptedPublicKey,
 		MasterFingerprint:  row.MasterFingerprint,
 		IsWatchOnly:        row.IsWatchOnly,
@@ -260,14 +263,17 @@ func sqliteAccountRowToInfo[T sqliteAccountInfoRow](row T) (*AccountInfo,
 	base := sqlcsqlite.GetAccountByScopeAndNameRow(row)
 
 	return accountRowToInfo(accountInfoRow[int64]{
-		AccountNumber:  base.AccountNumber,
-		AccountName:    base.AccountName,
-		OriginID:       base.OriginID,
-		IsWatchOnly:    base.IsWatchOnly,
-		CreatedAt:      base.CreatedAt,
-		Purpose:        base.Purpose,
-		CoinType:       base.CoinType,
-		IDToOriginType: idToAccountOrigin[int64],
+		AccountNumber:    base.AccountNumber,
+		AccountName:      base.AccountName,
+		OriginID:         base.OriginID,
+		ExternalKeyCount: base.ExternalKeyCount,
+		InternalKeyCount: base.InternalKeyCount,
+		ImportedKeyCount: base.ImportedKeyCount,
+		IsWatchOnly:      base.IsWatchOnly,
+		CreatedAt:        base.CreatedAt,
+		Purpose:          base.Purpose,
+		CoinType:         base.CoinType,
+		IDToOriginType:   idToAccountOrigin[int64],
 	})
 }
 

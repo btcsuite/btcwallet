@@ -54,6 +54,9 @@ type accountPropsRow[AddrTypeId, AccOriginId any] struct {
 	AccountNumber      sql.NullInt64
 	AccountName        string
 	OriginID           AccOriginId
+	ExternalKeyCount   int64
+	InternalKeyCount   int64
+	ImportedKeyCount   int64
 	EncryptedPublicKey []byte
 	MasterFingerprint  sql.NullInt64
 	IsWatchOnly        bool
@@ -66,13 +69,52 @@ type accountPropsRow[AddrTypeId, AccOriginId any] struct {
 	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
 }
 
+// getKeyCounts converts external, internal, and imported key counts from
+// int64 to uint32 and handles errors.
+func getKeyCounts(external, internal, imported int64) (uint32, uint32,
+	uint32, error) {
+
+	externalKeyCount, err := int64ToUint32(external)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("external key count: %w", err)
+	}
+
+	internalKeyCount, err := int64ToUint32(internal)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("internal key count: %w", err)
+	}
+
+	importedKeyCount, err := int64ToUint32(imported)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("imported key count: %w", err)
+	}
+
+	return externalKeyCount, internalKeyCount, importedKeyCount, nil
+}
+
+// getAddrTypes extracts the internal and external address types from the row
+// and handles errors.
+func getAddrTypes[AddrTypeId, AccOriginId any](
+	row accountPropsRow[AddrTypeId, AccOriginId]) (AddressType, AddressType,
+	error) {
+
+	internalType, err := row.IDToAddrType(row.InternalTypeID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("internal type: %w", err)
+	}
+
+	externalType, err := row.IDToAddrType(row.ExternalTypeID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("external type: %w", err)
+	}
+
+	return internalType, externalType, nil
+}
+
 // accountPropsRowToProps converts a database row containing full account
 // properties into an AccountProperties struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
 // values.
-//
-// TODO(stingelin): Add address counting support after address management is
-// implemented.
 func accountPropsRowToProps[AddrTypeId, AccOriginId any](
 	row accountPropsRow[AddrTypeId, AccOriginId]) (*AccountProperties, error) {
 
@@ -101,14 +143,9 @@ func accountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
-	internalType, err := row.IDToAddrType(row.InternalTypeID)
+	internalType, externalType, err := getAddrTypes(row)
 	if err != nil {
-		return nil, fmt.Errorf("internal type: %w", err)
-	}
-
-	externalType, err := row.IDToAddrType(row.ExternalTypeID)
-	if err != nil {
-		return nil, fmt.Errorf("external type: %w", err)
+		return nil, err
 	}
 
 	var fingerprint uint32
@@ -119,13 +156,20 @@ func accountPropsRowToProps[AddrTypeId, AccOriginId any](
 		}
 	}
 
+	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
+		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &AccountProperties{
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
 		Origin:               origin,
-		ExternalKeyCount:     0,
-		InternalKeyCount:     0,
-		ImportedKeyCount:     0,
+		ExternalKeyCount:     externalKeyCount,
+		InternalKeyCount:     internalKeyCount,
+		ImportedKeyCount:     importedKeyCount,
 		EncryptedPublicKey:   row.EncryptedPublicKey,
 		MasterKeyFingerprint: fingerprint,
 		KeyScope: KeyScope{
@@ -186,23 +230,22 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 }
 
 // buildAccountInfo creates an AccountInfo with the provided values and zeroed
-// balances and key counts while we do not yet support address counting.
+// balances while we do not yet support balance tracking.
 //
-// TODO(stingelin): Add address counting support after address management is
-// implemented.
 // TODO(stingelin): Add balance tracking support after transaction management is
 // implemented.
 func buildAccountInfo(accountNum uint32, accountName string,
-	origin AccountOrigin, isWatchOnly bool, createdAt time.Time,
+	origin AccountOrigin, externalKeyCount, internalKeyCount,
+	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
 	scope KeyScope) *AccountInfo {
 
 	return &AccountInfo{
 		AccountNumber:      accountNum,
 		AccountName:        accountName,
 		Origin:             origin,
-		ExternalKeyCount:   0,
-		InternalKeyCount:   0,
-		ImportedKeyCount:   0,
+		ExternalKeyCount:   externalKeyCount,
+		InternalKeyCount:   internalKeyCount,
+		ImportedKeyCount:   importedKeyCount,
 		ConfirmedBalance:   0,
 		UnconfirmedBalance: 0,
 		IsWatchOnly:        isWatchOnly,
@@ -224,14 +267,17 @@ func idToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // accountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type accountInfoRow[AccOriginId any] struct {
-	AccountNumber  sql.NullInt64
-	AccountName    string
-	OriginID       AccOriginId
-	IsWatchOnly    bool
-	CreatedAt      time.Time
-	Purpose        int64
-	CoinType       int64
-	IDToOriginType func(AccOriginId) (AccountOrigin, error)
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         AccOriginId
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	IDToOriginType   func(AccOriginId) (AccountOrigin, error)
 }
 
 // accountRowToInfo converts raw database field values into an AccountInfo
@@ -264,12 +310,17 @@ func accountRowToInfo[AccOriginId any](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
+	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
+		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return buildAccountInfo(
-		accountNum, row.AccountName, origin, row.IsWatchOnly,
-		row.CreatedAt, KeyScope{
-			Purpose: purposeNum,
-			Coin:    coinTypeNum,
-		},
+		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
+		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
+		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
 	), nil
 }
 
