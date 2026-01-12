@@ -181,10 +181,15 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1 AND a.account_name = $2
+GROUP BY a.id, ks.id
 `
 
 type GetAccountByScopeAndNameParams struct {
@@ -194,13 +199,16 @@ type GetAccountByScopeAndNameParams struct {
 
 type GetAccountByScopeAndNameRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Returns a single account by scope id and account name.
@@ -216,6 +224,9 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.ImportedKeyCount,
 	)
 	return i, err
 }
@@ -229,10 +240,15 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1 AND a.account_number = $2
+GROUP BY a.id, ks.id
 `
 
 type GetAccountByScopeAndNumberParams struct {
@@ -242,13 +258,16 @@ type GetAccountByScopeAndNumberParams struct {
 
 type GetAccountByScopeAndNumberRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Returns a single account by scope id and account number.
@@ -264,6 +283,9 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.ImportedKeyCount,
 	)
 	return i, err
 }
@@ -277,14 +299,19 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_name = $4
+GROUP BY a.id, ks.id
 `
 
 type GetAccountByWalletScopeAndNameParams struct {
@@ -296,13 +323,16 @@ type GetAccountByWalletScopeAndNameParams struct {
 
 type GetAccountByWalletScopeAndNameRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Returns a single account by wallet id, scope tuple, and account name.
@@ -323,6 +353,9 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.ImportedKeyCount,
 	)
 	return i, err
 }
@@ -336,14 +369,19 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_number = $4
+GROUP BY a.id, ks.id
 `
 
 type GetAccountByWalletScopeAndNumberParams struct {
@@ -355,13 +393,16 @@ type GetAccountByWalletScopeAndNumberParams struct {
 
 type GetAccountByWalletScopeAndNumberRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Returns a single account by wallet id, scope tuple, and account number.
@@ -382,6 +423,9 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.ImportedKeyCount,
 	)
 	return i, err
 }
@@ -398,10 +442,15 @@ SELECT
     ks.purpose,
     ks.coin_type,
     ks.internal_type_id,
-    ks.external_type_id
+    ks.external_type_id,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.id = $1
+GROUP BY a.id, ks.id
 `
 
 type GetAccountPropsByIdRow struct {
@@ -416,6 +465,9 @@ type GetAccountPropsByIdRow struct {
 	CoinType           int64
 	InternalTypeID     int16
 	ExternalTypeID     int16
+	ExternalKeyCount   int64
+	InternalKeyCount   int64
+	ImportedKeyCount   int64
 }
 
 // Returns full account properties by account id.
@@ -434,6 +486,9 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.CoinType,
 		&i.InternalTypeID,
 		&i.ExternalTypeID,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.ImportedKeyCount,
 	)
 	return i, err
 }
@@ -479,22 +534,30 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1
+GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
 type ListAccountsByScopeRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Lists all accounts in a scope, ordered by account number. Imported accounts
@@ -517,6 +580,9 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.ExternalKeyCount,
+			&i.InternalKeyCount,
+			&i.ImportedKeyCount,
 		); err != nil {
 			return nil, err
 		}
@@ -540,22 +606,30 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = $1
+GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
 type ListAccountsByWalletRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Lists all accounts for a wallet, ordered by account number. Imported
@@ -578,6 +652,9 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.ExternalKeyCount,
+			&i.InternalKeyCount,
+			&i.ImportedKeyCount,
 		); err != nil {
 			return nil, err
 		}
@@ -601,10 +678,15 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = $1 AND a.account_name = $2
+GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
@@ -615,13 +697,16 @@ type ListAccountsByWalletAndNameParams struct {
 
 type ListAccountsByWalletAndNameRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Lists all accounts for a wallet filtered by account name, ordered by account
@@ -644,6 +729,9 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.ExternalKeyCount,
+			&i.InternalKeyCount,
+			&i.ImportedKeyCount,
 		); err != nil {
 			return nil, err
 		}
@@ -667,13 +755,18 @@ SELECT
     a.is_watch_only,
     a.created_at,
     ks.purpose,
-    ks.coin_type
+    ks.coin_type,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
+GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
@@ -685,13 +778,16 @@ type ListAccountsByWalletScopeParams struct {
 
 type ListAccountsByWalletScopeRow struct {
 	ID               int64
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	IsWatchOnly   bool
-	CreatedAt     time.Time
-	Purpose       int64
-	CoinType      int64
+	AccountNumber    sql.NullInt64
+	AccountName      string
+	OriginID         int16
+	IsWatchOnly      bool
+	CreatedAt        time.Time
+	Purpose          int64
+	CoinType         int64
+	ExternalKeyCount int64
+	InternalKeyCount int64
+	ImportedKeyCount int64
 }
 
 // Lists all accounts for a wallet and scope tuple, ordered by account number.
@@ -714,6 +810,9 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.ExternalKeyCount,
+			&i.InternalKeyCount,
+			&i.ImportedKeyCount,
 		); err != nil {
 			return nil, err
 		}
