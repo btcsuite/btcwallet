@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/btcsuite/btcd/address/v2"
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 )
 
@@ -131,44 +129,53 @@ type AccountStore interface {
 	RenameAccount(ctx context.Context, params RenameAccountParams) error
 }
 
+// AddressDerivationFunc is called by the database layer after allocating an
+// address index to derive the actual address data (script_pub_key). As the
+// database should not know about how to derive an address, we pass this as a
+// callback.
+type AddressDerivationFunc func(ctx context.Context, accountID uint32,
+	branch uint32, index uint32) (*DerivedAddressData, error)
+
+// DerivedAddressData contains the derived address information returned by
+// the AddressDerivationFunc callback.
+type DerivedAddressData struct {
+	// ScriptPubKey is the script public key for the derived address.
+	ScriptPubKey []byte
+}
+
 // AddressStore defines the database actions for managing addresses.
 type AddressStore interface {
-	// NewAddress creates a new address for a given account and key scope.
-	// It returns the newly created address or an error if the creation
-	// fails.
-	NewAddress(ctx context.Context, params NewAddressParams) (
-		address.Address, error)
+	// NewDerivedAddress creates a new HD-derived address for the specified
+	// account and key scope. The database layer allocates the address index
+	// atomically, then calls deriveFn to derive the actual address data.
+	// Returns the complete address metadata including the derived
+	// script_pub_key.
+	NewDerivedAddress(ctx context.Context, params NewDerivedAddressParams,
+		deriveFn AddressDerivationFunc) (*AddressInfo, error)
 
-	// ImportAddress imports a new address, script, or private key. If a
-	// private key is provided in the parameters, the address will be
-	// spendable. Otherwise, it will be imported as watch-only. It returns
-	// information about the imported address or an error if the import
-	// fails.
-	ImportAddress(ctx context.Context, params ImportAddressParams) (
-		*AddressInfo, error)
+	// NewImportedAddress imports a new address, script, or private key.
+	// If a private key is provided in the parameters, the address will
+	// be spendable. Otherwise, it will be imported as watch-only. It
+	// returns information about the imported address or an error if the
+	// import fails.
+	NewImportedAddress(ctx context.Context,
+		params NewImportedAddressParams) (*AddressInfo, error)
 
 	// GetAddress retrieves information about a specific address. It
 	// returns an AddressInfo struct containing the address's properties or
 	// an error if the address is not found.
-	GetAddress(ctx context.Context, query GetAddressQuery) (
-		*AddressInfo, error)
+	GetAddress(ctx context.Context, query GetAddressQuery) (*AddressInfo, error)
 
 	// ListAddresses returns a slice of AddressInfo for all addresses in a
 	// given account. It returns an empty slice if no addresses are found.
-	ListAddresses(ctx context.Context, query ListAddressesQuery) (
-		[]AddressInfo, error)
+	ListAddresses(ctx context.Context, query ListAddressesQuery) ([]AddressInfo,
+		error)
 
-	// MarkAddressAsUsed marks a given address as used. This is used to
-	// ensure that the address is not reused.
-	MarkAddressAsUsed(ctx context.Context,
-		params MarkAddressAsUsedParams) error
-
-	// GetPrivateKey retrieves the private key for a given address. This
-	// method is ONLY valid for addresses that were imported with a private
-	// key. It will return an error for derived HD addresses and watch-only
-	// imports.
-	GetPrivateKey(ctx context.Context, params GetPrivateKeyParams) (
-		*btcec.PrivateKey, error)
+	// GetAddressSecret retrieves the encrypted secret material for a given
+	// address. Returns the AddressSecret containing encrypted private key
+	// and scripts, or an error if the secret does not exist.
+	GetAddressSecret(ctx context.Context, addressID uint32) (*AddressSecret,
+		error)
 
 	// ListAddressTypes returns all supported address types along with their
 	// readable descriptions, wrapped in AddressTypeInfo values.
@@ -176,8 +183,7 @@ type AddressStore interface {
 
 	// GetAddressType returns the AddressTypeInfo associated with the given
 	// address type identifier. An error is returned if the type is unknown.
-	GetAddressType(ctx context.Context, id AddressType) (AddressTypeInfo,
-		error)
+	GetAddressType(ctx context.Context, id AddressType) (AddressTypeInfo, error)
 }
 
 // TxStore defines the database actions for managing transaction records.
