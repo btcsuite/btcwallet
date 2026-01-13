@@ -2499,7 +2499,6 @@ func TestAddTaprootSigToPInput(t *testing.T) {
 				LeafHashes:  [][]byte{leafHash},
 			},
 			// Assert: Expect TaprootScriptSpendSig to be appended.
-			//nolint:lll
 			expectedPInput: &psbt.PInput{
 				SighashType: txscript.SigHashDefault,
 				TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
