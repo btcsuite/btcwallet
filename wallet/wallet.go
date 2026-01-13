@@ -280,8 +280,6 @@ func locateBirthdayBlock(chainClient chainConn,
 // Wallet is a structure containing all the components for a complete wallet.
 // It manages the cryptographic keys, transaction history, and synchronization
 // with the blockchain.
-//
-//nolint:unused // TODO(yy): remove it once implemented
 type Wallet struct {
 	// walletDeprecated embeds the legacy state and channels. Access to
 	// these should be phased out as refactoring progresses.
