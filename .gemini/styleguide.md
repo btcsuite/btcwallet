@@ -1,4 +1,4 @@
-# LND Style Guide
+# Btcwallet Style Guide
 
 ## Code Documentation and Commenting
 
