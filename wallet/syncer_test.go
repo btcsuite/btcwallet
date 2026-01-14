@@ -62,8 +62,8 @@ func TestSyncerRequestScan(t *testing.T) {
 		},
 	}
 
-	// Act: Submit request.
-	err := s.requestScan(context.Background(), req)
+	// Act: Submit the rewind request to the syncer.
+	err := s.requestScan(t.Context(), req)
 
 	// Assert: Ensure the request is accepted without error and is
 	// correctly placed in the scan request channel.
@@ -91,9 +91,10 @@ func TestSyncerRequestScanBlocked(t *testing.T) {
 	// Fill the buffer (size 1).
 	s.scanReqChan <- &scanReq{}
 
-	// Act: Submit another request with a canceled context.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately.
+	// Act: Attempt to submit another request with a context that is
+	// already canceled.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
 
 	err := s.requestScan(ctx, &scanReq{})
 
@@ -124,8 +125,9 @@ func TestSyncerRun(t *testing.T) {
 	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	mockChain.On("NotifyBlocks").Return(nil).Maybe()
 
-	// Act: Run with canceled context to stop loop immediately.
-	ctx, cancel := context.WithCancel(context.Background())
+	// Act: Execute the syncer's run loop with a context that is canceled
+	// immediately to stop the loop.
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
 	// Assert: The run loop should exit without error.
