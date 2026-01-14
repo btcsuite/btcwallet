@@ -36,6 +36,14 @@ A deep dive into the core design philosophy, architectural patterns, and Go impl
 
 ---
 
+## 🗄️ SQLC Development Guide
+
+Guide for working with the SQLC code generation infrastructure, including how to write SQL queries and migrations for both PostgreSQL and SQLite backends.
+
+**[➡️ Read the SQLC Development Guide](./sqlc_development_guide.md)**
+
+---
+
 ## 📝 Architecture Decision Records (ADRs)
 
 Formal documentation of significant architectural decisions, their context, and consequences.
