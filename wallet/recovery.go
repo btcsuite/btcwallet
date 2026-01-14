@@ -53,7 +53,9 @@ func NewRecoveryManager(recoveryWindow, batchSize uint32,
 		recoveryWindow: recoveryWindow,
 		blockBatch:     make([]wtxmgr.BlockMeta, 0, batchSize),
 		chainParams:    chainParams,
-		state:          NewRecoveryState(recoveryWindow),
+		state: NewRecoveryState(
+			recoveryWindow, chainParams, nil,
+		),
 	}
 }
 
@@ -222,24 +224,57 @@ type RecoveryState struct {
 	// TODO(yy): Deprecated, remove.
 	scopes map[waddrmgr.KeyScope]*ScopeRecoveryState
 
+	// branchStates maintains the recovery state for every branch (scope +
+	// account + branch). This is the source of truth.
+	branchStates map[waddrmgr.BranchScope]*BranchRecoveryState
+
 	// watchedOutPoints contains the set of all outpoints known to the
 	// wallet. This is updated iteratively as new outpoints are found during
 	// a rescan.
 	//
 	// TODO(yy): Deprecated, remove.
 	watchedOutPoints map[wire.OutPoint]address.Address
+
+	// chainParams are the parameters that describe the chain we're trying
+	// to recover funds on. These are set at initialization and remain
+	// constant.
+	chainParams *chaincfg.Params
+
+	// addrMgr is the address manager used to derive new keys and manage
+	// account state.
+	addrMgr waddrmgr.AddrStore
+
+	// outpoints tracks unspent outpoints to detect spends. The value is
+	// the PkScript of the outpoint. This map is transient, initialized by
+	// InitScanState at the beginning of a batch scan and pruned by Prune()
+	// at the end to manage memory.
+	outpoints map[wire.OutPoint][]byte
+
+	// addrFilters maps encoded addresses to their derivation info for
+	// identifying incoming payments. This map is transient, initialized by
+	// InitScanState at the beginning of a batch scan and pruned by Prune()
+	// at the end to manage memory.
+	addrFilters map[string]AddrEntry
 }
 
 // NewRecoveryState creates a new RecoveryState using the provided
 // recoveryWindow. Each RecoveryState that is subsequently initialized for a
 // particular key scope will receive the same recoveryWindow.
-func NewRecoveryState(recoveryWindow uint32) *RecoveryState {
-	scopes := make(map[waddrmgr.KeyScope]*ScopeRecoveryState)
+func NewRecoveryState(recoveryWindow uint32,
+	chainParams *chaincfg.Params,
+	addrMgr waddrmgr.AddrStore) *RecoveryState {
 
 	return &RecoveryState{
-		recoveryWindow:   recoveryWindow,
-		scopes:           scopes,
+		recoveryWindow: recoveryWindow,
+		scopes: make(
+			map[waddrmgr.KeyScope]*ScopeRecoveryState,
+		),
+		branchStates: make(
+			map[waddrmgr.BranchScope]*BranchRecoveryState,
+		),
 		watchedOutPoints: make(map[wire.OutPoint]address.Address),
+		chainParams:      chainParams,
+		addrMgr:          addrMgr,
 	}
 }
 
@@ -279,6 +314,61 @@ func (rs *RecoveryState) AddWatchedOutPoint(outPoint *wire.OutPoint,
 	addr address.Address) {
 
 	rs.watchedOutPoints[*outPoint] = addr
+}
+
+// String returns a summary of the recovery state.
+func (rs *RecoveryState) String() string {
+	return fmt.Sprintf("RecoveryState(addrs=%d, outpoints=%d)",
+		len(rs.addrFilters), len(rs.outpoints))
+}
+
+// Empty returns true if there are no addresses or outpoints to watch.
+func (rs *RecoveryState) Empty() bool {
+	return len(rs.addrFilters) == 0 && len(rs.outpoints) == 0
+}
+
+// WatchListSize returns the total number of items (addresses + outpoints)
+// in the current watchlist.
+func (rs *RecoveryState) WatchListSize() int {
+	return len(rs.addrFilters) + len(rs.outpoints)
+}
+
+// GetBranchState returns the recovery state for the provided branch scope.
+// It acts as the source of truth for branch states by either retrieving an
+// existing in-memory BranchRecoveryState for the given `bs` (branch scope)
+// or creating a new one if it doesn't already exist.
+//
+// When a new state is created, it fetches the appropriate AccountStore (key
+// manager) from the Address Manager. This ensures that the BranchRecoveryState
+// is correctly linked to its derivation logic and maintains a consistent,
+// up-to-date view of the branch's lookahead horizon and derived addresses
+// throughout the recovery process. This centralization prevents redundant
+// state creation and ensures all recovery operations for a specific branch
+// operate on the same instance.
+func (rs *RecoveryState) GetBranchState(bs waddrmgr.BranchScope) (
+	*BranchRecoveryState, error) {
+
+	if s, ok := rs.branchStates[bs]; ok {
+		return s, nil
+	}
+
+	// We assume the scope is valid and active if we are requesting state
+	// for it.
+	var mgr waddrmgr.AccountStore
+	if rs.addrMgr != nil {
+		var err error
+
+		mgr, err = rs.addrMgr.FetchScopedKeyManager(bs.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch manager for "+
+				"scope %v: %w", bs.Scope, err)
+		}
+	}
+
+	s := NewBranchRecoveryState(rs.recoveryWindow, mgr)
+	rs.branchStates[bs] = s
+
+	return s, nil
 }
 
 // AddrEntry holds the derivation info for an address to support
@@ -337,6 +427,8 @@ func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
 //   - Reporting that an address has been found.
 //   - Retrieving all currently derived addresses for the branch.
 //   - Looking up a particular address by its child index.
+//
+// TODO(yy): Privatize this struct and all its methods.
 type BranchRecoveryState struct {
 	// recoveryWindow defines the key-derivation lookahead used when
 	// attempting to recover the set of addresses on this branch.
