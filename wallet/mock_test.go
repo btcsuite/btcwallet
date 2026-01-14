@@ -1286,3 +1286,38 @@ func (m *mockTxPublisher) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	args := m.Called(ctx, tx, label)
 	return args.Error(0)
 }
+
+// mockAddress is a mock implementation of the address.Address interface.
+// It embeds mock.Mock to allow for flexible stubbing of its methods,
+// enabling granular control over address behavior in tests.
+type mockAddress struct {
+	mock.Mock
+}
+
+// EncodeAddress mocks the EncodeAddress method.
+// It returns a predefined string based on mock expectations.
+func (m *mockAddress) EncodeAddress() string {
+	args := m.Called()
+	return args.String(0)
+}
+
+// ScriptAddress mocks the ScriptAddress method.
+// It returns a predefined byte slice based on mock expectations.
+func (m *mockAddress) ScriptAddress() []byte {
+	args := m.Called()
+	return args.Get(0).([]byte)
+}
+
+// IsForNet mocks the IsForNet method.
+// It returns a predefined boolean based on mock expectations.
+func (m *mockAddress) IsForNet(params *chaincfg.Params) bool {
+	args := m.Called(params)
+	return args.Bool(0)
+}
+
+// String mocks the String method.
+// It returns a predefined string based on mock expectations.
+func (m *mockAddress) String() string {
+	args := m.Called()
+	return args.String(0)
+}
