@@ -1,4 +1,3 @@
-//nolint:unused,revive // TODO(yy): remove it once implemented
 package wallet
 
 import (
@@ -470,7 +469,7 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 		return nil
 
 	case <-ctx.Done():
-		return fmt.Errorf("context done: %w", ctx.Err())
+		return ctx.Err()
 	}
 }
 
