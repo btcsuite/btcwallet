@@ -136,8 +136,15 @@ func (s *walletState) toStarting() error {
 
 // toStarted marks the wallet as fully started. This should be called only
 // after all resource initialization is complete.
-func (s *walletState) toStarted() {
-	s.lifecycle.Store(uint32(lifecycleStarted))
+func (s *walletState) toStarted() error {
+	if !s.lifecycle.CompareAndSwap(
+		uint32(lifecycleStarting), uint32(lifecycleStarted)) {
+
+		return fmt.Errorf("%w: cannot transition to started from %v",
+			ErrStateForbidden, lifecycle(s.lifecycle.Load()))
+	}
+
+	return nil
 }
 
 // toStopping transitions the wallet from Started to Stopping.
@@ -160,11 +167,40 @@ func (s *walletState) toStopping() error {
 }
 
 // toStopped marks the wallet as fully stopped.
-func (s *walletState) toStopped() {
-	s.lifecycle.Store(uint32(lifecycleStopped))
+func (s *walletState) toStopped() error {
+	// We allow transition from Stopping (normal shutdown) or Starting
+	// (failure during startup).
+	//
+	// We use a CAS loop here to handle potential races where the state
+	// might change between Load and CompareAndSwap.
+	//
+	// This loop is guaranteed to terminate because:
+	// 1. If CAS succeeds, we break.
+	// 2. If CAS fails, it means the state changed. We reload the new state.
+	// 3. If the new state is not Stopping or Starting (e.g. it became
+	//    Started or already Stopped), the validation check fails and we
+	//    return an error.
+	for {
+		current := s.lifecycle.Load()
+		lc := lifecycle(current)
+
+		if lc != lifecycleStopping && lc != lifecycleStarting {
+			return fmt.Errorf("%w: cannot transition to stopped "+
+				"from %v", ErrStateForbidden, lc)
+		}
+
+		if s.lifecycle.CompareAndSwap(
+			current, uint32(lifecycleStopped),
+		) {
+
+			break
+		}
+	}
 
 	// Force lock the wallet on shutdown for security.
 	s.unlocked.Store(false)
+
+	return nil
 }
 
 // toUnlocked marks the wallet as unlocked.
