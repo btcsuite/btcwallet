@@ -660,7 +660,7 @@ func TestFetchAccountBalances(t *testing.T) {
 		)
 		require.NoError(t, err)
 		_, err = w.NewAccount(
-			ctx, waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49",
+			t.Context(), waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49",
 		)
 		require.NoError(t, err)
 

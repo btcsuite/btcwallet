@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"context"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -38,7 +37,6 @@ const testTxLabel = "test-tx"
 func TestCheckMempoolAcceptance(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	tx := &wire.MsgTx{}
 
 	mempoolAcceptResultAllowed := []*btcjson.TestMempoolAcceptResult{
@@ -108,7 +106,7 @@ func TestCheckMempoolAcceptance(t *testing.T) {
 				).Return(errInsufficientFee)
 			}
 
-			err := w.CheckMempoolAcceptance(ctx, tc.tx)
+			err := w.CheckMempoolAcceptance(t.Context(), tc.tx)
 			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
@@ -568,7 +566,6 @@ func TestRemoveUnminedTx(t *testing.T) {
 func TestCheckMempool(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	tx := &wire.MsgTx{}
 
 	testCases := []struct {
@@ -636,7 +633,7 @@ func TestCheckMempool(t *testing.T) {
 				).Return(nil, tc.mempoolAcceptErr)
 			}
 
-			err := w.checkMempool(ctx, tx)
+			err := w.checkMempool(t.Context(), tx)
 			require.ErrorIs(t, err, tc.expectedErr)
 		})
 	}
@@ -687,6 +684,7 @@ func TestPublishTx(t *testing.T) {
 			w, m := testWalletWithMocks(t)
 
 			m.chain.On("NotifyReceived",
+				mock.Anything, mock.Anything,
 				mock.Anything).Return(tc.notifyErr)
 
 			// We only expect SendRawTransaction to be called if
@@ -707,7 +705,6 @@ func TestPublishTx(t *testing.T) {
 func TestBroadcastSuccess(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	label := testTxLabel
 	w, m := testWalletWithMocks(t)
 
@@ -756,7 +753,7 @@ func TestBroadcastSuccess(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, nil)
 
-	err = w.Broadcast(ctx, tx, label)
+	err = w.Broadcast(t.Context(), tx, label)
 	require.NoError(t, err)
 }
 
@@ -765,7 +762,6 @@ func TestBroadcastSuccess(t *testing.T) {
 func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	label := testTxLabel
 	w, m := testWalletWithMocks(t)
 
@@ -778,7 +774,7 @@ func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 	m.chain.On("TestMempoolAccept", mock.Anything, mock.Anything).
 		Return(nil, chain.ErrTxAlreadyInMempool)
 
-	err := w.Broadcast(ctx, tx, label)
+	err := w.Broadcast(t.Context(), tx, label)
 	require.NoError(t, err)
 }
 
@@ -787,7 +783,6 @@ func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	label := testTxLabel
 	w, m := testWalletWithMocks(t)
 
@@ -841,7 +836,7 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil).Once()
 
-	err = w.Broadcast(ctx, tx, label)
+	err = w.Broadcast(t.Context(), tx, label)
 	require.ErrorIs(t, err, errPublish)
 }
 
@@ -850,7 +845,6 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	label := testTxLabel
 	w, m := testWalletWithMocks(t)
 
@@ -908,7 +902,7 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(errRemove).Once()
 
-	err = w.Broadcast(ctx, tx, label)
+	err = w.Broadcast(t.Context(), tx, label)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), errPublish.Error())
 	require.Contains(t, err.Error(), errRemove.Error())
@@ -919,10 +913,9 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 func TestBroadcastNilTx(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
 	label := testTxLabel
 	w, _ := testWalletWithMocks(t)
 
-	err := w.Broadcast(ctx, nil, label)
+	err := w.Broadcast(t.Context(), nil, label)
 	require.ErrorIs(t, err, ErrTxCannotBeNil)
 }
