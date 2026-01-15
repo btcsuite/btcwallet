@@ -25,7 +25,8 @@ func TestStateSecureByDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	// Act: Transition to Started.
-	s.toStarted()
+	err = s.toStarted()
+	require.NoError(t, err)
 	require.True(t, s.isStarted())
 	require.True(t, s.isRunning())
 
@@ -38,7 +39,8 @@ func TestStateSecureByDefault(t *testing.T) {
 	require.False(t, s.isRunning())
 
 	// Act: Transition to Stopped.
-	s.toStopped()
+	err = s.toStopped()
+	require.NoError(t, err)
 	require.False(t, s.isRunning())
 
 	// Assert: Invalid transition (Stop when already Stopped).
@@ -54,22 +56,26 @@ func TestStateAuthentication(t *testing.T) {
 	s := newWalletState(syncer)
 
 	// Arrange: Start the wallet (must be started to be useful).
-	s.toStarted()
+	require.NoError(t, s.toStarting())
+	err := s.toStarted()
+	require.NoError(t, err)
 
 	// Assert: Default is Locked.
 	require.False(t, s.isUnlocked())
 
 	// Act: Unlock.
 	s.toUnlocked()
+	require.NoError(t, err)
 	require.True(t, s.isUnlocked())
 
 	// Act: Lock.
 	s.toLocked()
+	require.NoError(t, err)
 	require.False(t, s.isUnlocked())
 
 	// Act: Verify canSign checks.
 	// Case 1: Locked -> Error.
-	err := s.canSign()
+	err = s.canSign()
 	require.ErrorIs(t, err, ErrStateForbidden)
 	require.ErrorContains(t, err, "wallet locked")
 
@@ -80,7 +86,9 @@ func TestStateAuthentication(t *testing.T) {
 
 	// Case 3: Stopped -> Error (even if unlocked, though stopped forces
 	// lock).
-	s.toStopped()
+	require.NoError(t, s.toStopping())
+	err = s.toStopped()
+	require.NoError(t, err)
 	// Note: toStopped forces lock, so we must check that logic too.
 	require.False(t, s.isUnlocked())
 
@@ -98,7 +106,8 @@ func TestStateSynchronization(t *testing.T) {
 
 	syncer := &mockChainSyncer{}
 	s := newWalletState(syncer)
-	s.toStarted()
+	require.NoError(t, s.toStarting())
+	require.NoError(t, s.toStarted())
 
 	// Arrange: Mock syncer to return Synced.
 	syncer.On("syncState").Return(syncStateSynced)
@@ -150,8 +159,18 @@ func TestStateThreadSafety(t *testing.T) {
 			defer wg.Done()
 
 			<-start
+
+			// NOTE: We ignore errors here because we are
+			// purposefully hammering the state machine from
+			// multiple goroutines. Many of these transitions will
+			// fail (e.g., trying to start an already starting
+			// wallet), which is expected behavior. We are
+			// primarily verifying that no data races or panics
+			// occur.
+			//
 			// Try to start.
 			_ = s.toStarting()
+
 			// Try to stop.
 			_ = s.toStopping()
 		}()
@@ -178,7 +197,8 @@ func TestValidateSynced(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 
 	// Case 2: Started but not synced.
-	s.toStarted()
+	require.NoError(t, s.toStarting())
+	require.NoError(t, s.toStarted())
 	syncer.On("syncState").Return(syncStateSyncing)
 
 	err = s.validateSynced()
@@ -273,7 +293,8 @@ func TestStateStartStop(t *testing.T) {
 		require.False(t, state.unlocked.Load())
 
 		// Now mark as started.
-		state.toStarted()
+		err = state.toStarted()
+		require.NoError(t, err)
 		require.Equal(t, uint32(lifecycleStarted),
 			state.lifecycle.Load())
 	})
@@ -410,7 +431,8 @@ func TestStateAuxiliaryMethods(t *testing.T) {
 	require.ErrorIs(t, s.canChangePassphrase(), ErrStateForbidden)
 
 	// Case 2: Started -> All allowed.
-	s.toStarted()
+	require.NoError(t, s.toStarting())
+	require.NoError(t, s.toStarted())
 	require.NoError(t, s.canUnlock())
 	require.NoError(t, s.canLock())
 	require.NoError(t, s.canChangePassphrase())
