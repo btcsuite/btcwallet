@@ -110,6 +110,40 @@ func TestHandleLockReq(t *testing.T) {
 	require.False(t, w.state.isUnlocked())
 }
 
+// TestHandleLockReq_Idempotency verifies that if the wallet is already locked
+// (indicated by waddrmgr.ErrLocked), the lock request treats it as a success
+// and ensures the state is consistent.
+func TestHandleLockReq_Idempotency(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet and transition it to 'Started'.
+	w, deps := createTestWalletWithMocks(t)
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	// Transition the wallet to the 'Unlocked' state for testing.
+	w.state.toUnlocked()
+
+	req := newLockReq()
+
+	// Setup the expected call to the address manager's Lock method
+	// returning ErrLocked.
+	errLocked := waddrmgr.ManagerError{
+		ErrorCode:   waddrmgr.ErrLocked,
+		Description: "address manager is locked",
+	}
+	deps.addrStore.On("Lock").Return(errLocked).Once()
+
+	// Act: Dispatch the lock request to the handler.
+	w.handleLockReq(req)
+
+	// Assert: Verify that the response indicates success and the wallet
+	// state is 'Locked'.
+	resp := <-req.resp
+	require.NoError(t, resp)
+	require.False(t, w.state.isUnlocked())
+}
+
 // TestHandleLockReq_Errors verifies that handleLockReq correctly handles error
 // conditions, such as attempting to lock a stopped wallet.
 func TestHandleLockReq_Errors(t *testing.T) {
