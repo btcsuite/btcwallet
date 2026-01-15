@@ -15,8 +15,38 @@ import (
 )
 
 var (
-	errDBMock = errors.New("db error")
-	errMock   = errors.New("mock error")
+	errDBMock         = errors.New("db error")
+	errMock           = errors.New("mock error")
+	errChainMock      = errors.New("chain error")
+	errPutMock        = errors.New("put error")
+	errLockMock       = errors.New("lock fail")
+	errDBFail         = errors.New("db fail")
+	errDeriveFail     = errors.New("derive fail")
+	errLoadStateFail  = errors.New("load state fail")
+	errRollbackFail   = errors.New("rollback fail")
+	errFetchFail      = errors.New("fetch fail")
+	errCFilterFail    = errors.New("cfilter fail")
+	errActiveMgrsFail = errors.New("active managers fail")
+
+	errSetFail   = errors.New("set fail")
+	errOther     = errors.New("other error")
+	errBroadcast = errors.New("broadcast fail")
+	errScan      = errors.New("scan fail")
+	errBlocks    = errors.New("blocks fail")
+	errDBInsert  = errors.New("db insert fail")
+	errBestBlock = errors.New("best block fail")
+	errAddr      = errors.New("addr fail")
+	errInsert    = errors.New("insert fail")
+	errManager   = errors.New("manager fail")
+	errUtxo      = errors.New("utxo fail")
+	errGetBlocks = errors.New("get blocks fail")
+	errBlockHash = errors.New("block hash fail")
+	errSetSync   = errors.New("set sync fail")
+	errRemote    = errors.New("remote fail")
+	errNotify    = errors.New("notify fail")
+	errHashes    = errors.New("hashes fail")
+	errHeaders   = errors.New("headers fail")
+	errHeader    = errors.New("header fail")
 )
 
 // setupTestDB creates a temporary database for testing.
@@ -76,13 +106,15 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	mockSyncer := &mockChainSyncer{}
 	mockChain := &mockChain{}
 
+	ctx, cancel := context.WithCancel(t.Context())
+
 	w := &Wallet{
 		addrStore:   mockAddrStore,
 		txStore:     mockTxStore,
 		sync:        mockSyncer,
 		state:       newWalletState(mockSyncer),
-		lifetimeCtx: context.Background(),
-		cancel:      func() {},
+		lifetimeCtx: ctx,
+		cancel:      cancel,
 		requestChan: make(chan any, 1),
 		lockTimer:   time.NewTimer(time.Hour),
 		birthdayBlock: waddrmgr.BlockStamp{
