@@ -610,3 +610,440 @@ func TestDBGetScanData_Error(t *testing.T) {
 	require.Nil(t, addrs)
 	require.Nil(t, unspent)
 }
+
+// TestDBPutTargetedBatch_WithTxns verifies that DBPutTargetedBatch processes
+// relevant outputs.
+func TestDBPutTargetedBatch_WithTxns(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a syncer and mock dependencies for processing a
+	// targeted batch.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
+	require.NoError(t, err)
+
+	results := []scanResult{
+		{
+			meta: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 100},
+				Time:  time.Now(),
+			},
+			BlockProcessResult: &BlockProcessResult{
+				RelevantOutputs: TxEntries{
+					{Rec: rec, Entries: []AddrEntry{}},
+				},
+			},
+		},
+	}
+
+	mockTxStore.On("InsertConfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything).Return(nil).Once()
+
+	// Act: Execute the targeted batch update.
+	err = s.DBPutTargetedBatch(t.Context(), results)
+
+	// Assert: Verify success.
+	require.NoError(t, err)
+}
+
+// TestDBPutSyncTip_Error verifies error propagation in DBPutSyncTip.
+func TestDBPutSyncTip_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where SetSyncedTo fails during
+	// DBPutSyncTip.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	mockAddrStore.On("SetSyncedTo", mock.Anything,
+		mock.Anything).Return(errSetFail).Once()
+
+	// Act: Attempt to update the sync tip.
+	err := s.DBPutSyncTip(t.Context(), wtxmgr.BlockMeta{})
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errSetFail)
+}
+
+// TestDBPutTargetedBatch_Errors verifies error paths.
+func TestDBPutTargetedBatch_Errors(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where transaction insertion fails
+	// during a targeted batch update.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
+	require.NoError(t, err)
+
+	results := []scanResult{
+		{
+			meta: &wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{Height: 100},
+				Time:  time.Now(),
+			},
+			BlockProcessResult: &BlockProcessResult{
+				RelevantOutputs: TxEntries{
+					{Rec: rec, Entries: []AddrEntry{}},
+				},
+			},
+		},
+	}
+
+	mockTxStore.On("InsertConfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything).Return(errDBInsert).Once()
+
+	// Act: Execute the targeted batch update.
+	err = s.DBPutTargetedBatch(t.Context(), results)
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errDBInsert)
+}
+
+// TestDBPutTxns_Error verifies error propagation in DBPutTxns.
+func TestDBPutTxns_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where address lookup fails during
+	// transaction persistence.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	matches := TxEntries{
+		{
+			Rec:     &wtxmgr.TxRecord{},
+			Entries: []AddrEntry{{Address: addr}},
+		},
+	}
+
+	mockAddrStore.On("Address",
+		mock.Anything, mock.Anything).Return(nil, errAddr).Once()
+
+	// Act: Attempt to persist transactions.
+	err = s.DBPutTxns(t.Context(), matches, nil)
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errAddr)
+}
+
+// TestDBPutTxns_UnconfirmedError verifies error propagation for unconfirmed tx.
+func TestDBPutTxns_UnconfirmedError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where unconfirmed transaction
+	// insertion fails.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	matches := TxEntries{
+		{
+			Rec:     &wtxmgr.TxRecord{},
+			Entries: []AddrEntry{{Address: addr}},
+		},
+	}
+
+	maddr := &mockManagedAddress{}
+	maddr.On("Internal").Return(false).Maybe()
+	mockAddrStore.On("Address", mock.Anything, mock.Anything).Return(maddr,
+		nil).Once()
+
+	mgr := &mockAccountStore{}
+	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
+	mockAddrStore.On("AddrAccount", mock.Anything, mock.Anything).Return(
+		mgr,
+		uint32(0), nil).Once()
+	mockAddrStore.On("MarkUsed", mock.Anything,
+		mock.Anything).Return(nil).Once()
+	mockTxStore.On("InsertUnconfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything).Return(errInsert).Once()
+
+	// Act: Attempt to persist unconfirmed transactions.
+	err = s.DBPutTxns(t.Context(), matches, nil)
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errInsert)
+}
+
+// TestPutSyncTip_Error verifies error propagation.
+func TestPutSyncTip_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where sync tip update fails within
+	// a database transaction.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	// Act: Execute sync tip update within a database transaction.
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		mockAddrStore.On("SetSyncedTo", mock.Anything,
+			mock.Anything).Return(errSetFail).Once()
+
+		return s.putSyncTip(t.Context(), tx, wtxmgr.BlockMeta{})
+	})
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errSetFail)
+}
+
+// TestDBGetScanData_ManagerError verifies account not found is handled.
+func TestDBGetScanData_ManagerError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where key manager lookup fails
+	// during scan data retrieval.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	targets := []waddrmgr.AccountScope{
+		{Scope: waddrmgr.KeyScopeBIP0084, Account: 0},
+	}
+
+	mockAddrStore.On("FetchScopedKeyManager",
+		mock.Anything).Return(nil, errManager).Once()
+
+	// Act: Attempt to retrieve scan data.
+	horizons, addrs, unspent, err := s.DBGetScanData(t.Context(), targets)
+
+	// Assert: Verify failure.
+	require.Nil(t, horizons)
+	require.Nil(t, addrs)
+	require.Nil(t, unspent)
+	require.ErrorIs(t, err, errManager)
+}
+
+// TestDBGetScanData_UTXOError verifies UTXO loading failure.
+func TestDBGetScanData_UTXOError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where UTXO lookup fails during scan
+	// data retrieval.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
+		mock.AnythingOfType("func(address.Address) error"),
+	).Return(nil).Once()
+	mockTxStore.On("OutputsToWatch",
+		mock.Anything).Return(([]wtxmgr.Credit)(nil), errUtxo).Once()
+
+	// Act: Attempt to retrieve scan data.
+	horizons, addrs, unspent, err := s.DBGetScanData(t.Context(), nil)
+
+	// Assert: Verify failure.
+	require.Nil(t, horizons)
+	require.Nil(t, addrs)
+	require.Nil(t, unspent)
+	require.ErrorIs(t, err, errUtxo)
+}
+
+// TestPutAddrHorizons_Error verifies error propagation.
+func TestPutAddrHorizons_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where key manager lookup fails
+	// during horizon persistence.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	results := []scanResult{
+		{
+			BlockProcessResult: &BlockProcessResult{
+				FoundHorizons: map[waddrmgr.BranchScope]uint32{
+					{}: 1,
+				},
+			},
+		},
+	}
+
+	mockAddrStore.On("FetchScopedKeyManager",
+		mock.Anything).Return(nil, errManager).Once()
+
+	// Act: Attempt to persist address horizons.
+	err := s.putAddrHorizons(t.Context(), nil, results)
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errManager)
+}
+
+// TestDBGetScanData_AddressError verifies active address loading failure.
+func TestDBGetScanData_AddressError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where address iteration fails
+	// during scan data retrieval.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
+		mock.Anything).Return(errAddr).Once()
+
+	// Act: Attempt to retrieve scan data.
+	horizons, addrs, unspent, err := s.DBGetScanData(t.Context(), nil)
+
+	// Assert: Verify failure.
+	require.Nil(t, horizons)
+	require.Nil(t, addrs)
+	require.Nil(t, unspent)
+	require.ErrorIs(t, err, errAddr)
+}
+
+// TestDBPutTxns_InternalAddressAsChange verifies internal branch handling.
+func TestDBPutTxns_InternalAddressAsChange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations for a transaction match where the
+	// address is internal, requiring it to be marked as change.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	matches := TxEntries{
+		{
+			Rec:     &wtxmgr.TxRecord{},
+			Entries: []AddrEntry{{Address: addr}},
+		},
+	}
+
+	maddr := &mockManagedAddress{}
+	maddr.On("Internal").Return(true).Once()
+	mockAddrStore.On("Address",
+		mock.Anything, mock.Anything).Return(maddr, nil).Once()
+
+	mgr := &mockAccountStore{}
+	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
+	mockAddrStore.On("AddrAccount",
+		mock.Anything, mock.Anything).Return(mgr, uint32(0), nil).Once()
+
+	mockAddrStore.On("MarkUsed", mock.Anything,
+		mock.Anything).Return(nil).Once()
+
+	mockTxStore.On("InsertUnconfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything).Return(nil).Once()
+
+	// Act: Persist transactions and filter branch scopes.
+	err = s.DBPutTxns(t.Context(), matches, nil)
+
+	// Assert: Verify that the output was correctly identified as change.
+	require.NoError(t, err)
+	require.True(t, matches[0].Entries[0].Credit.Change)
+}
+
+// TestDBPutTxns_AddressNotFound verifies ignoring not-found addresses.
+func TestDBPutTxns_AddressNotFound(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where an address lookup returns a
+	// "not found" error, which should lead to the entry being filtered out.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &mockTxStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	matches := TxEntries{
+		{
+			Rec:     &wtxmgr.TxRecord{},
+			Entries: []AddrEntry{{Address: addr}},
+		},
+	}
+
+	mockAddrStore.On("Address",
+		mock.Anything, mock.Anything,
+	).Return(nil, waddrmgr.ManagerError{
+		ErrorCode: waddrmgr.ErrAddressNotFound}).Once()
+
+	mockTxStore.On("InsertUnconfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything).Return(nil).Once()
+
+	// Act: Persist transactions.
+	err = s.DBPutTxns(t.Context(), matches, nil)
+
+	// Assert: Verify that the unknown address entry was filtered.
+	require.NoError(t, err)
+	require.Empty(t, matches[0].Entries)
+}
+
+// TestDBPutRewind_Error verifies error propagation.
+func TestDBPutRewind_Error(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup mock expectations where SetSyncedTo fails during
+	// DBPutRewind.
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &mockAddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	mockAddrStore.On("SetSyncedTo",
+		mock.Anything, mock.Anything).Return(errSetSync).Once()
+
+	// Act: Perform DBPutRewind.
+	err := s.DBPutRewind(t.Context(), waddrmgr.BlockStamp{})
+
+	// Assert: Verify failure.
+	require.ErrorIs(t, err, errSetSync)
+}
