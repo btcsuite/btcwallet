@@ -570,18 +570,24 @@ func (w *Wallet) handleLockReq(req lockReq) {
 
 	// Signal the address manager to lock, clearing sensitive data.
 	err = w.addrStore.Lock()
-	if err != nil && !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+	if err != nil {
 		log.Errorf("Could not lock wallet: %v", err)
+
+		// If the wallet is already locked, we consider this a success
+		// (idempotency) and proceed to ensure our state is consistent.
+		if !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
+			req.resp <- err
+
+			return
+		}
 	}
 
 	// Even if an error occurred (e.g. already locked), we ensure the
 	// wallet's high-level state is synchronized to 'locked'.
-	if err == nil {
-		w.state.toLocked()
-	}
+	w.state.toLocked()
 
 	// Report the result back to the caller.
-	req.resp <- err
+	req.resp <- nil
 }
 
 // handleChangePassphraseReq processes a request to rotate the wallet's
