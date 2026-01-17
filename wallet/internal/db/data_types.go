@@ -350,6 +350,9 @@ type AccountInfo struct {
 	// IsWatchOnly indicates whether the account is in watch-only mode.
 	IsWatchOnly bool
 
+	// CreatedAt is the timestamp when the account was created in the database.
+	CreatedAt time.Time
+
 	// KeyScope is the key scope the account belongs to. This determines the
 	// derivation path and the default address schema.
 	KeyScope KeyScope
@@ -452,6 +455,9 @@ type AccountProperties struct {
 	// IsWatchOnly indicates whether the is set up as watch-only, i.e., it
 	// doesn't contain any private key information.
 	IsWatchOnly bool
+
+	// CreatedAt is the timestamp when the account was created in the database.
+	CreatedAt time.Time
 
 	// AddrSchema, if non-nil, specifies an address schema override for
 	// address generation only applicable to the account.
