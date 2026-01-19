@@ -11,11 +11,14 @@ import (
 type Querier interface {
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
-	// Creates a new derived account under the given scope, allocating a fresh
-	// sequential account number from key_scopes.last_account_number.
-	// The allocation is atomic: the UPDATE takes the row lock on the scope row,
-	// returns the allocated number, and updates the counter for the next call.
+	// Creates a new derived account under the given scope, computing the next
+	// account number atomically. The caller MUST call LockAccountScope first
+	// to acquire the advisory lock and prevent race conditions.
+	// See LockAccountScope comments for why this is a separate statement.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
+	// Test-only: Creates a derived account with a specific account number.
+	// Used for testing account number overflow without creating billions of accounts.
+	CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error)
 	// Creates a new imported account under the given scope with NULL account
 	// number. Imported accounts don't follow BIP44 derivation, so they don't need
 	// a sequential account number.
@@ -42,9 +45,9 @@ type Querier interface {
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	// Retrieves a key scope by its ID.
-	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
+	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
-	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
@@ -71,11 +74,32 @@ type Querier interface {
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	// Lists all key scopes for a wallet, ordered by ID.
-	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
-	// Sets the last_account_number for a key scope. This is intended for testing
-	// the account number overflow behavior without creating billions of accounts.
-	SetLastAccountNumber(ctx context.Context, arg SetLastAccountNumberParams) error
+	// Acquires a transaction-level advisory lock to serialize account creation within a scope.
+	// The lock is automatically released upon transaction commit or rollback.
+	// This MUST be called immediately before 'CreateDerivedAccount' within the same transaction.
+	//
+	// We explicitly use a two-statement pattern because single-statement CTE/Join
+	// approaches failed to prevent race conditions during concurrent account generation.
+	// The following "one-query" strategies were tested and proven unreliable:
+	//
+	// 1. CTE with CROSS/INNER JOIN: The PostgreSQL optimizer may evaluate the
+	//    MAX(account_number) subquery using a snapshot taken before the lock CTE
+	//    is fully processed, leading to duplicate account numbers.
+	//
+	// 2. CTE with OFFSET 0: Designed to force materialization, this still fails to
+	//    guarantee that the lock is held before the aggregate subquery begins its
+	//    read operation.
+	//
+	// 3. FOR UPDATE in Subqueries: Since FOR UPDATE targets existing rows, it fails
+	//    to "lock the gap" for new inserts or handle empty tables, allowing
+	//    concurrent processes to calculate identical MAX() values.
+	//
+	// Using two separate calls ensures the application pauses until
+	// LockAccountScope returns, guaranteeing that the subsequent SELECT MAX()
+	// operates inside a strictly serialized execution window for that scope.
+	LockAccountScope(ctx context.Context, dollar_1 int64) error
 	// Renames an account identified by wallet id, scope tuple, and current account name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.

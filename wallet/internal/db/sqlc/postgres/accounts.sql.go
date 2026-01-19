@@ -32,13 +32,6 @@ func (q *Queries) CreateAccountSecret(ctx context.Context, arg CreateAccountSecr
 }
 
 const CreateDerivedAccount = `-- name: CreateDerivedAccount :one
-WITH allocated_number AS (
-    UPDATE key_scopes
-    SET last_account_number = last_account_number + 1
-    WHERE key_scopes.id = $1
-    RETURNING key_scopes.id, last_account_number AS account_number
-)
-
 INSERT INTO accounts (
     scope_id,
     account_number,
@@ -48,20 +41,20 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-SELECT
-    allocated_number.id AS scope_id,
-    allocated_number.account_number,
-    $2 AS account_name,
-    $3 AS origin_id,
-    $4 AS encrypted_public_key,
-    $5 AS master_fingerprint,
-    $6 AS is_watch_only
-FROM allocated_number
-RETURNING accounts.id, accounts.account_number, accounts.created_at
+VALUES (
+    $1,
+    (
+        SELECT coalesce(max(account_number), -1) + 1
+        FROM accounts
+        WHERE scope_id = $1
+    ),
+    $2, $3, $4, $5, $6
+)
+RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
-	ID                 int64
+	ScopeID            int64
 	AccountName        string
 	OriginID           int16
 	EncryptedPublicKey []byte
@@ -75,13 +68,13 @@ type CreateDerivedAccountRow struct {
 	CreatedAt     time.Time
 }
 
-// Creates a new derived account under the given scope, allocating a fresh
-// sequential account number from key_scopes.last_account_number.
-// The allocation is atomic: the UPDATE takes the row lock on the scope row,
-// returns the allocated number, and updates the counter for the next call.
+// Creates a new derived account under the given scope, computing the next
+// account number atomically. The caller MUST call LockAccountScope first
+// to acquire the advisory lock and prevent race conditions.
+// See LockAccountScope comments for why this is a separate statement.
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
-		arg.ID,
+		arg.ScopeID,
 		arg.AccountName,
 		arg.OriginID,
 		arg.EncryptedPublicKey,
@@ -89,6 +82,47 @@ func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAcc
 		arg.IsWatchOnly,
 	)
 	var i CreateDerivedAccountRow
+	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)
+	return i, err
+}
+
+const CreateDerivedAccountWithNumber = `-- name: CreateDerivedAccountWithNumber :one
+INSERT INTO accounts (
+    scope_id,
+    account_number,
+    account_name,
+    origin_id,
+    is_watch_only
+)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, account_number, created_at
+`
+
+type CreateDerivedAccountWithNumberParams struct {
+	ScopeID       int64
+	AccountNumber sql.NullInt64
+	AccountName   string
+	OriginID      int16
+	IsWatchOnly   bool
+}
+
+type CreateDerivedAccountWithNumberRow struct {
+	ID            int64
+	AccountNumber sql.NullInt64
+	CreatedAt     time.Time
+}
+
+// Test-only: Creates a derived account with a specific account number.
+// Used for testing account number overflow without creating billions of accounts.
+func (q *Queries) CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error) {
+	row := q.queryRow(ctx, q.createDerivedAccountWithNumberStmt, CreateDerivedAccountWithNumber,
+		arg.ScopeID,
+		arg.AccountNumber,
+		arg.AccountName,
+		arg.OriginID,
+		arg.IsWatchOnly,
+	)
+	var i CreateDerivedAccountWithNumberRow
 	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)
 	return i, err
 }
@@ -636,6 +670,38 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 		return nil, err
 	}
 	return items, nil
+}
+
+const LockAccountScope = `-- name: LockAccountScope :exec
+SELECT pg_advisory_xact_lock(hashtextextended('account_scope', $1::BIGINT))
+`
+
+// Acquires a transaction-level advisory lock to serialize account creation within a scope.
+// The lock is automatically released upon transaction commit or rollback.
+// This MUST be called immediately before 'CreateDerivedAccount' within the same transaction.
+//
+// We explicitly use a two-statement pattern because single-statement CTE/Join
+// approaches failed to prevent race conditions during concurrent account generation.
+// The following "one-query" strategies were tested and proven unreliable:
+//
+//  1. CTE with CROSS/INNER JOIN: The PostgreSQL optimizer may evaluate the
+//     MAX(account_number) subquery using a snapshot taken before the lock CTE
+//     is fully processed, leading to duplicate account numbers.
+//
+//  2. CTE with OFFSET 0: Designed to force materialization, this still fails to
+//     guarantee that the lock is held before the aggregate subquery begins its
+//     read operation.
+//
+//  3. FOR UPDATE in Subqueries: Since FOR UPDATE targets existing rows, it fails
+//     to "lock the gap" for new inserts or handle empty tables, allowing
+//     concurrent processes to calculate identical MAX() values.
+//
+// Using two separate calls ensures the application pauses until
+// LockAccountScope returns, guaranteeing that the subsequent SELECT MAX()
+// operates inside a strictly serialized execution window for that scope.
+func (q *Queries) LockAccountScope(ctx context.Context, dollar_1 int64) error {
+	_, err := q.exec(ctx, q.lockAccountScopeStmt, LockAccountScope, dollar_1)
+	return err
 }
 
 const UpdateAccountNameByWalletScopeAndName = `-- name: UpdateAccountNameByWalletScopeAndName :execrows

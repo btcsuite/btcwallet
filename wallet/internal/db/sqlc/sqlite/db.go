@@ -24,14 +24,14 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
-	if q.allocateAccountNumberStmt, err = db.PrepareContext(ctx, AllocateAccountNumber); err != nil {
-		return nil, fmt.Errorf("error preparing query AllocateAccountNumber: %w", err)
-	}
 	if q.createAccountSecretStmt, err = db.PrepareContext(ctx, CreateAccountSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateAccountSecret: %w", err)
 	}
 	if q.createDerivedAccountStmt, err = db.PrepareContext(ctx, CreateDerivedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAccount: %w", err)
+	}
+	if q.createDerivedAccountWithNumberStmt, err = db.PrepareContext(ctx, CreateDerivedAccountWithNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAccountWithNumber: %w", err)
 	}
 	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
@@ -123,9 +123,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
-	if q.setLastAccountNumberStmt, err = db.PrepareContext(ctx, SetLastAccountNumber); err != nil {
-		return nil, fmt.Errorf("error preparing query SetLastAccountNumber: %w", err)
-	}
 	if q.updateAccountNameByWalletScopeAndNameStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndName); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndName: %w", err)
 	}
@@ -143,11 +140,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
-	if q.allocateAccountNumberStmt != nil {
-		if cerr := q.allocateAccountNumberStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing allocateAccountNumberStmt: %w", cerr)
-		}
-	}
 	if q.createAccountSecretStmt != nil {
 		if cerr := q.createAccountSecretStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createAccountSecretStmt: %w", cerr)
@@ -156,6 +148,11 @@ func (q *Queries) Close() error {
 	if q.createDerivedAccountStmt != nil {
 		if cerr := q.createDerivedAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createDerivedAccountStmt: %w", cerr)
+		}
+	}
+	if q.createDerivedAccountWithNumberStmt != nil {
+		if cerr := q.createDerivedAccountWithNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAccountWithNumberStmt: %w", cerr)
 		}
 	}
 	if q.createImportedAccountStmt != nil {
@@ -308,11 +305,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
-	if q.setLastAccountNumberStmt != nil {
-		if cerr := q.setLastAccountNumberStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing setLastAccountNumberStmt: %w", cerr)
-		}
-	}
 	if q.updateAccountNameByWalletScopeAndNameStmt != nil {
 		if cerr := q.updateAccountNameByWalletScopeAndNameStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNameStmt: %w", cerr)
@@ -372,9 +364,9 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 type Queries struct {
 	db                                          DBTX
 	tx                                          *sql.Tx
-	allocateAccountNumberStmt                   *sql.Stmt
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
+	createDerivedAccountWithNumberStmt          *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
 	createKeyScopeStmt                          *sql.Stmt
 	createWalletStmt                            *sql.Stmt
@@ -405,7 +397,6 @@ type Queries struct {
 	listAddressTypesStmt                        *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listWalletsStmt                             *sql.Stmt
-	setLastAccountNumberStmt                    *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
@@ -416,9 +407,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
 		db:                                          tx,
 		tx:                                          tx,
-		allocateAccountNumberStmt:                   q.allocateAccountNumberStmt,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
+		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
 		createKeyScopeStmt:                          q.createKeyScopeStmt,
 		createWalletStmt:                            q.createWalletStmt,
@@ -449,7 +440,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listWalletsStmt:                             q.listWalletsStmt,
-		setLastAccountNumberStmt:                    q.setLastAccountNumberStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,

@@ -1,15 +1,35 @@
--- name: CreateDerivedAccount :one
--- Creates a new derived account under the given scope, allocating a fresh
--- sequential account number from key_scopes.last_account_number.
--- The allocation is atomic: the UPDATE takes the row lock on the scope row,
--- returns the allocated number, and updates the counter for the next call.
-WITH allocated_number AS (
-    UPDATE key_scopes
-    SET last_account_number = last_account_number + 1
-    WHERE key_scopes.id = $1
-    RETURNING key_scopes.id, last_account_number AS account_number
-)
+-- name: LockAccountScope :exec
+-- Acquires a transaction-level advisory lock to serialize account creation within a scope.
+-- The lock is automatically released upon transaction commit or rollback.
+-- This MUST be called immediately before 'CreateDerivedAccount' within the same transaction.
+--
+-- We explicitly use a two-statement pattern because single-statement CTE/Join
+-- approaches failed to prevent race conditions during concurrent account generation.
+-- The following "one-query" strategies were tested and proven unreliable:
+--
+-- 1. CTE with CROSS/INNER JOIN: The PostgreSQL optimizer may evaluate the
+--    MAX(account_number) subquery using a snapshot taken before the lock CTE
+--    is fully processed, leading to duplicate account numbers.
+--
+-- 2. CTE with OFFSET 0: Designed to force materialization, this still fails to
+--    guarantee that the lock is held before the aggregate subquery begins its
+--    read operation.
+--
+-- 3. FOR UPDATE in Subqueries: Since FOR UPDATE targets existing rows, it fails
+--    to "lock the gap" for new inserts or handle empty tables, allowing
+--    concurrent processes to calculate identical MAX() values.
+--
+-- Using two separate calls ensures the application pauses until
+-- LockAccountScope returns, guaranteeing that the subsequent SELECT MAX()
+-- operates inside a strictly serialized execution window for that scope.
+SELECT pg_advisory_xact_lock(hashtextextended('account_scope', $1::BIGINT));
 
+
+-- name: CreateDerivedAccount :one
+-- Creates a new derived account under the given scope, computing the next
+-- account number atomically. The caller MUST call LockAccountScope first
+-- to acquire the advisory lock and prevent race conditions.
+-- See LockAccountScope comments for why this is a separate statement.
 INSERT INTO accounts (
     scope_id,
     account_number,
@@ -19,16 +39,16 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-SELECT
-    allocated_number.id AS scope_id,
-    allocated_number.account_number,
-    $2 AS account_name,
-    $3 AS origin_id,
-    $4 AS encrypted_public_key,
-    $5 AS master_fingerprint,
-    $6 AS is_watch_only
-FROM allocated_number
-RETURNING accounts.id, accounts.account_number, accounts.created_at;
+VALUES (
+    $1,
+    (
+        SELECT coalesce(max(account_number), -1) + 1
+        FROM accounts
+        WHERE scope_id = $1
+    ),
+    $2, $3, $4, $5, $6
+)
+RETURNING id, account_number, created_at;
 
 -- name: CreateImportedAccount :one
 -- Creates a new imported account under the given scope with NULL account
@@ -233,3 +253,16 @@ WHERE
             AND coin_type = sqlc.arg(coin_type)
     )
     AND account_name = sqlc.arg(old_name);
+
+-- name: CreateDerivedAccountWithNumber :one
+-- Test-only: Creates a derived account with a specific account number.
+-- Used for testing account number overflow without creating billions of accounts.
+INSERT INTO accounts (
+    scope_id,
+    account_number,
+    account_name,
+    origin_id,
+    is_watch_only
+)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, account_number, created_at;

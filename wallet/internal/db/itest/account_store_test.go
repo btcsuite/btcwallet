@@ -671,7 +671,7 @@ func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 	walletID := newWallet(t, store, "wallet-max-account")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "account-0")
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
-	SetLastAccountNumber(t, queries, scopeID, math.MaxUint32-1)
+	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1, "account-near-max")
 
 	// This should succeed with account_number = MaxUint32.
 	info, err := store.CreateDerivedAccount(
