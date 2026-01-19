@@ -899,72 +899,24 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// Taproot (SegWit v1) and legacy/SegWit v0 inputs, adapting the
 	// signing process accordingly.
 	for i := range packet.Inputs {
-		pInput := &packet.Inputs[i]
-
-		// First, we check if the current input should be skipped. This
-		// helper function identifies inputs that are already finalized
-		// or lack any derivation information (meaning we don't own the
-		// key or it's not intended for us to sign). Skipping these
-		// allows the wallet to focus on relevant inputs and gracefully
-		// handle multi-signer PSBTs.
-		if shouldSkipInput(pInput, i) {
-			continue
-		}
-
-		// Validate the derivation information to ensure we have an
-		// unambiguous signing path. Our policy enforces that an input
-		// should not contain conflicting Taproot and BIP32 derivation
-		// paths, nor multiple paths of the same type. This prevents
-		// misinterpretations and ensures deterministic signing.
-		isTaproot, err := validateDerivation(pInput, i)
+		signed, err := w.signPsbtInput(
+			ctx, packet, i, sigHashes, params.InputTweakers,
+		)
 		if err != nil {
-			return nil, err
-		}
-
-		// Based on the validated derivation information, we dispatch
-		// the signing task to the appropriate helper function. If the
-		// input is identified as Taproot, we use
-		// `signTaprootPsbtInput`; otherwise, we assume it's a legacy
-		// or SegWit v0 input and use `signBip32PsbtInput`.
-		if isTaproot {
-			err = w.signTaprootPsbtInput(
-				ctx, packet, i, sigHashes,
-				params.InputTweakers[i],
-			)
-		} else {
-			err = w.signBip32PsbtInput(
-				ctx, packet, i, sigHashes,
-				params.InputTweakers[i],
-			)
-		}
-
-		// If an error occurred during signing, we first check if it's
-		// an error that permits us to skip the current input (e.g., if
-		// the key is not found, implying it's another signer's input
-		// in a collaborative PSBT). If the error is *not* skippable,
-		// it indicates a critical issue, and we return it immediately.
-		// Otherwise, we continue to the next input.
-		if err != nil {
-			if shouldSkipSigningError(err, i) {
-				continue
-			}
-
 			return nil, fmt.Errorf("input %d: %w", i, err)
 		}
 
-		// If signing was successful (or the error was gracefully
-		// skipped), we record the index of this input as one that the
-		// wallet has contributed a signature to. This provides
-		// valuable feedback to the caller about the progress of the
-		// signing operation.
-		//
-		// We convert the index i (int) to uint32. This is safe because
-		// a Bitcoin transaction is strictly bounded by the block size
-		// limit (4MB). Even with the smallest possible input size, the
-		// maximum number of inputs is less than 100,000, which is far
-		// below MaxUint32 (~4.2 billion).
-		//nolint:gosec
-		signedInputs = append(signedInputs, uint32(i))
+		if signed {
+			// If signing was successful, we record the index of
+			// this input as one that the wallet has contributed a
+			// signature to.
+			//
+			// We convert the index i (int) to uint32. This is safe
+			// because a Bitcoin transaction is strictly bounded by
+			// the block size limit.
+			//nolint:gosec
+			signedInputs = append(signedInputs, uint32(i))
+		}
 	}
 
 	// Finally, return the result, which includes the list of inputs that
@@ -974,6 +926,67 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 		SignedInputs: signedInputs,
 		Packet:       packet,
 	}, nil
+}
+
+// signPsbtInput attempts to sign a single input of the PSBT. It returns true
+// if the input was successfully signed, false if it was skipped (e.g. already
+// signed or not owned), and an error if a fatal signing error occurred.
+func (w *Wallet) signPsbtInput(ctx context.Context, packet *psbt.Packet,
+	i int, sigHashes *txscript.TxSigHashes,
+	tweakers map[int]PrivKeyTweaker) (bool, error) {
+
+	pInput := &packet.Inputs[i]
+
+	// First, we check if the current input should be skipped. This
+	// helper function identifies inputs that are already finalized
+	// or lack any derivation information (meaning we don't own the
+	// key or it's not intended for us to sign). Skipping these
+	// allows the wallet to focus on relevant inputs and gracefully
+	// handle multi-signer PSBTs.
+	if shouldSkipInput(pInput, i) {
+		return false, nil
+	}
+
+	// Validate the derivation information to ensure we have an
+	// unambiguous signing path. Our policy enforces that an input
+	// should not contain conflicting Taproot and BIP32 derivation
+	// paths, nor multiple paths of the same type. This prevents
+	// misinterpretations and ensures deterministic signing.
+	isTaproot, err := validateDerivation(pInput, i)
+	if err != nil {
+		return false, err
+	}
+
+	// Based on the validated derivation information, we dispatch
+	// the signing task to the appropriate helper function. If the
+	// input is identified as Taproot, we use
+	// `signTaprootPsbtInput`; otherwise, we assume it's a legacy
+	// or SegWit v0 input and use `signBip32PsbtInput`.
+	if isTaproot {
+		err = w.signTaprootPsbtInput(
+			ctx, packet, i, sigHashes, tweakers[i],
+		)
+	} else {
+		err = w.signBip32PsbtInput(
+			ctx, packet, i, sigHashes, tweakers[i],
+		)
+	}
+
+	// If an error occurred during signing, we first check if it's
+	// an error that permits us to skip the current input (e.g., if
+	// the key is not found, implying it's another signer's input
+	// in a collaborative PSBT). If the error is *not* skippable,
+	// it indicates a critical issue, and we return it immediately.
+	// Otherwise, we continue to the next input.
+	if err != nil {
+		if shouldSkipSigningError(err, i) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
 }
 
 // parseBip32Path parses a raw derivation path (sequence of uint32s) and

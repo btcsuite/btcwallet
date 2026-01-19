@@ -187,73 +187,12 @@ func (w *Wallet) ListUnspent(_ context.Context,
 		// Iterate through each UTXO to apply filters and enrich it with
 		// address-specific details.
 		for _, output := range unspent {
-			confs := calcConf(output.Height, currentHeight)
-
-			log.Tracef("Checking utxo[%v]: current height=%v, "+
-				"confirm height=%v, conf=%v", output.OutPoint,
-				currentHeight, output.Height, confs)
-
-			// Apply the MinConfs and MaxConfs filters from the
-			// query.
-			if confs < query.MinConfs || confs > query.MaxConfs {
-				continue
-			}
-
-			// Extract the address from the UTXO's public key
-			// script.
-			// For multi-address scripts, the first address is used.
-			addr := extractAddrFromPKScript(
-				output.PkScript, w.cfg.ChainParams,
+			utxo := w.processUnspentOutput(
+				addrmgrNs, output, currentHeight, query,
 			)
-			if addr == nil {
-				continue
+			if utxo != nil {
+				utxos = append(utxos, utxo)
 			}
-
-			// Get all the required address-related details.
-			//
-			// NOTE: This lookup is the source of the N+1 query
-			// problem.
-			spendable, account, addrType := w.addrStore.
-				AddressDetails(addrmgrNs, addr)
-
-			log.Debugf("Found address: %s from account: %s",
-				addr.String(), account)
-
-			// Apply the Account filter from the query.
-			if query.Account != "" && account != query.Account {
-				continue
-			}
-
-			// A UTXO is also unspendable if it is an immature
-			// coinbase output.
-			if output.FromCoinBase {
-				maturity := w.cfg.ChainParams.CoinbaseMaturity
-				if confs < int32(maturity) {
-					spendable = false
-				}
-			}
-
-			// TODO(yy): This should be a column in the new utxo
-			// SQL table. Note that currently UnspentOutputs only
-			// returns unlocked outputs, so this field will always
-			// be false. This will be fixed in the upcoming
-			// sqlization PRs.
-			locked := output.Locked
-
-			// If all filters pass, construct the final Utxo struct
-			// with all the combined data.
-			utxo := &Utxo{
-				OutPoint:      output.OutPoint,
-				Amount:        output.Amount,
-				PkScript:      output.PkScript,
-				Confirmations: confs,
-				Spendable:     spendable,
-				Address:       addr,
-				Account:       account,
-				AddressType:   addrType,
-				Locked:        locked,
-			}
-			utxos = append(utxos, utxo)
 		}
 
 		return nil
@@ -267,6 +206,76 @@ func (w *Wallet) ListUnspent(_ context.Context,
 	})
 
 	return utxos, err
+}
+
+// processUnspentOutput processes a single unspent output, applying filters and
+// enriching it with address details. Returns nil if the output should be
+// skipped.
+func (w *Wallet) processUnspentOutput(addrmgrNs walletdb.ReadBucket,
+	output wtxmgr.Credit, currentHeight int32, query UtxoQuery) *Utxo {
+
+	confs := calcConf(output.Height, currentHeight)
+
+	log.Tracef("Checking utxo[%v]: current height=%v, "+
+		"confirm height=%v, conf=%v", output.OutPoint,
+		currentHeight, output.Height, confs)
+
+	// Apply the MinConfs and MaxConfs filters from the query.
+	if confs < query.MinConfs || confs > query.MaxConfs {
+		return nil
+	}
+
+	// Extract the address from the UTXO's public key script.
+	// For multi-address scripts, the first address is used.
+	addr := extractAddrFromPKScript(
+		output.PkScript, w.cfg.ChainParams,
+	)
+	if addr == nil {
+		return nil
+	}
+
+	// Get all the required address-related details.
+	//
+	// NOTE: This lookup is the source of the N+1 query problem.
+	spendable, account, addrType := w.addrStore.AddressDetails(
+		addrmgrNs, addr,
+	)
+
+	log.Debugf("Found address: %s from account: %s",
+		addr.String(), account)
+
+	// Apply the Account filter from the query.
+	if query.Account != "" && account != query.Account {
+		return nil
+	}
+
+	// A UTXO is also unspendable if it is an immature coinbase output.
+	if output.FromCoinBase {
+		maturity := w.cfg.ChainParams.CoinbaseMaturity
+		if confs < int32(maturity) {
+			spendable = false
+		}
+	}
+
+	// TODO(yy): This should be a column in the new utxo SQL table. Note
+	// that currently UnspentOutputs only returns unlocked outputs, so this
+	// field will always be false. This will be fixed in the upcoming
+	// sqlization PRs.
+	locked := output.Locked
+
+	// If all filters pass, construct the final Utxo struct with all the
+	// combined data.
+	return &Utxo{
+		OutPoint:      output.OutPoint,
+		Amount:        output.Amount,
+		PkScript:      output.PkScript,
+		Confirmations: confs,
+		Spendable:     spendable,
+		Address:       addr,
+		Account:       account,
+		AddressType:   addrType,
+		Locked:        locked,
+	}
 }
 
 // GetUtxo returns the output information for a given outpoint.
