@@ -362,9 +362,28 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		return nil, err
 	}
 
+	unusedAddr, err := w.findUnusedAddress(manager, accountName, change)
+	// We'll ignore the special error that we use to stop the iteration.
+	if err != nil && !errors.Is(err, errStopIteration) {
+		return nil, err
+	}
+
+	// If we found an unused address, we can return it now.
+	if unusedAddr != nil {
+		return unusedAddr, nil
+	}
+
+	// Otherwise, we'll generate a new one.
+	return w.NewAddress(ctx, accountName, addrType, change)
+}
+
+// findUnusedAddress scans for an unused address for the given account.
+func (w *Wallet) findUnusedAddress(manager waddrmgr.AccountStore,
+	accountName string, change bool) (address.Address, error) {
+
 	var unusedAddr address.Address
 
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// First, look up the account number for the passed account
@@ -401,18 +420,7 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		)
 	})
 
-	// We'll ignore the special error that we use to stop the iteration.
-	if err != nil && !errors.Is(err, errStopIteration) {
-		return nil, err
-	}
-
-	// If we found an unused address, we can return it now.
-	if unusedAddr != nil {
-		return unusedAddr, nil
-	}
-
-	// Otherwise, we'll generate a new one.
-	return w.NewAddress(ctx, accountName, addrType, change)
+	return unusedAddr, err
 }
 
 // AddressInfo returns detailed information regarding a wallet address.
