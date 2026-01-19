@@ -3,11 +3,12 @@ package wallet
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -25,11 +26,13 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
+	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -185,19 +188,63 @@ func (w *Wallet) RenameAccountDeprecated(scope waddrmgr.KeyScope,
 func (w *Wallet) ScriptForOutputDeprecated(output *wire.TxOut) (
 	waddrmgr.ManagedPubKeyAddress, []byte, []byte, error) {
 
-	script, err := w.ScriptForOutput(context.Background(), *output)
+	// First make sure we can sign for the input by making sure the script
+	// in the UTXO belongs to our wallet and we have the private key for it.
+	walletAddr, err := w.fetchOutputAddr(output.PkScript)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	addr := script.Addr
-	pubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+	pubKeyAddr, ok := walletAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("%w: addr %s",
-			ErrNotPubKeyAddress, addr.Address())
+		return nil, nil, nil, fmt.Errorf("address %s is not a "+
+			"p2wkh or np2wkh address", walletAddr.Address())
 	}
 
-	return pubKeyAddr, script.WitnessProgram, script.RedeemScript, nil
+	var (
+		witnessProgram []byte
+		sigScript      []byte
+	)
+
+	switch {
+	// If we're spending p2wkh output nested within a p2sh output, then
+	// we'll need to attach a sigScript in addition to witness data.
+	case walletAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
+		pubKey := pubKeyAddr.PubKey()
+		pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
+
+		// Next, we'll generate a valid sigScript that will allow us to
+		// spend the p2sh output. The sigScript will contain only a
+		// single push of the p2wkh witness program corresponding to
+		// the matching public key of this address.
+		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+			pubKeyHash, w.chainParams,
+		)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		bldr := txscript.NewScriptBuilder()
+		bldr.AddData(witnessProgram)
+		sigScript, err = bldr.Script()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+	// Otherwise, this is a regular p2wkh or p2tr output, so we include the
+	// witness program itself as the subscript to generate the proper
+	// sighash digest. As part of the new sighash digest algorithm, the
+	// p2wkh witness program will be expanded into a regular p2kh
+	// script.
+	default:
+		witnessProgram = output.PkScript
+	}
+
+	return pubKeyAddr, witnessProgram, sigScript, nil
 }
 
 // ComputeInputScript generates a complete InputScript for the passed
@@ -2709,6 +2756,17 @@ func (w *Wallet) UnlockOutpoint(op wire.OutPoint) {
 	defer w.lockedOutpointsMtx.Unlock()
 
 	delete(w.lockedOutpoints, op)
+}
+
+// LockedOutpoint returns whether an outpoint has been marked as locked and
+// should not be used as an input for created transactions.
+func (w *Wallet) LockedOutpoint(op wire.OutPoint) bool {
+	w.lockedOutpointsMtx.Lock()
+	defer w.lockedOutpointsMtx.Unlock()
+
+	_, locked := w.lockedOutpoints[op]
+
+	return locked
 }
 
 // ResetLockedOutpoints resets the set of locked outpoints so all may be used
@@ -6333,4 +6391,1032 @@ func (w *Wallet) RescanDeprecated(addrs []address.Address,
 	unspent []wtxmgr.Credit) error {
 
 	return w.rescanWithTarget(addrs, unspent, nil)
+}
+
+// RescanProgressMsg reports the current progress made by a rescan for a
+// set of wallet addresses.
+type RescanProgressMsg struct {
+	Addresses    []address.Address
+	Notification chain.RescanProgress
+}
+
+// RescanFinishedMsg reports the addresses that were rescanned when a
+// rescanfinished message was received rescanning a batch of addresses.
+type RescanFinishedMsg struct {
+	Addresses    []address.Address
+	Notification *chain.RescanFinished
+}
+
+// RescanJob is a job to be processed by the RescanManager.  The job includes
+// a set of wallet addresses, a starting height to begin the rescan, and
+// outpoints spendable by the addresses thought to be unspent.  After the
+// rescan completes, the error result of the rescan RPC is sent on the Err
+// channel.
+type RescanJob struct {
+	InitialSync bool
+	Addrs       []address.Address
+	OutPoints   map[wire.OutPoint]address.Address
+	BlockStamp  waddrmgr.BlockStamp
+	err         chan error
+}
+
+// rescanBatch is a collection of one or more RescanJobs that were merged
+// together before a rescan is performed.
+type rescanBatch struct {
+	initialSync bool
+	addrs       []address.Address
+	outpoints   map[wire.OutPoint]address.Address
+	bs          waddrmgr.BlockStamp
+	errChans    []chan error
+}
+
+// SubmitRescan submits a RescanJob to the RescanManager.  A channel is
+// returned with the final error of the rescan.  The channel is buffered
+// and does not need to be read to prevent a deadlock.
+func (w *Wallet) SubmitRescan(job *RescanJob) <-chan error {
+	errChan := make(chan error, 1)
+	job.err = errChan
+	select {
+	case w.rescanAddJob <- job:
+	case <-w.quitChan():
+		errChan <- ErrWalletShuttingDown
+	}
+	return errChan
+}
+
+// batch creates the rescanBatch for a single rescan job.
+func (job *RescanJob) batch() *rescanBatch {
+	return &rescanBatch{
+		initialSync: job.InitialSync,
+		addrs:       job.Addrs,
+		outpoints:   job.OutPoints,
+		bs:          job.BlockStamp,
+		errChans:    []chan error{job.err},
+	}
+}
+
+// merge merges the work from k into j, setting the starting height to
+// the minimum of the two jobs.  This method does not check for
+// duplicate addresses or outpoints.
+func (b *rescanBatch) merge(job *RescanJob) {
+	if job.InitialSync {
+		b.initialSync = true
+	}
+	b.addrs = append(b.addrs, job.Addrs...)
+
+	for op, addr := range job.OutPoints {
+		b.outpoints[op] = addr
+	}
+
+	if job.BlockStamp.Height < b.bs.Height {
+		b.bs = job.BlockStamp
+	}
+	b.errChans = append(b.errChans, job.err)
+}
+
+// done iterates through all error channels, duplicating sending the error
+// to inform callers that the rescan finished (or could not complete due
+// to an error).
+func (b *rescanBatch) done(err error) {
+	for _, c := range b.errChans {
+		c <- err
+	}
+}
+
+// rescanBatchHandler handles incoming rescan request, serializing rescan
+// submissions, and possibly batching many waiting requests together so they
+// can be handled by a single rescan after the current one completes.
+func (w *Wallet) rescanBatchHandler() {
+	defer w.wg.Done()
+
+	var curBatch, nextBatch *rescanBatch
+	quit := w.quitChan()
+
+	for {
+		select {
+		case job := <-w.rescanAddJob:
+			if curBatch == nil {
+				// Set current batch as this job and send
+				// request.
+				curBatch = job.batch()
+				select {
+				case w.rescanBatch <- curBatch:
+				case <-quit:
+					job.err <- ErrWalletShuttingDown
+					return
+				}
+			} else {
+				// Create next batch if it doesn't exist, or
+				// merge the job.
+				if nextBatch == nil {
+					nextBatch = job.batch()
+				} else {
+					nextBatch.merge(job)
+				}
+			}
+
+		case n := <-w.rescanNotifications:
+			switch n := n.(type) {
+			case *chain.RescanProgress:
+				if curBatch == nil {
+					log.Warnf("Received rescan progress " +
+						"notification but no rescan " +
+						"currently running")
+					continue
+				}
+				select {
+				case w.rescanProgress <- &RescanProgressMsg{
+					Addresses:    curBatch.addrs,
+					Notification: *n,
+				}:
+				case <-quit:
+					for _, errChan := range curBatch.errChans {
+						errChan <- ErrWalletShuttingDown
+					}
+					return
+				}
+
+			case *chain.RescanFinished:
+				if curBatch == nil {
+					log.Warnf("Received rescan finished " +
+						"notification but no rescan " +
+						"currently running")
+					continue
+				}
+				select {
+				case w.rescanFinished <- &RescanFinishedMsg{
+					Addresses:    curBatch.addrs,
+					Notification: n,
+				}:
+				case <-quit:
+					for _, errChan := range curBatch.errChans {
+						errChan <- ErrWalletShuttingDown
+					}
+					return
+				}
+
+				curBatch, nextBatch = nextBatch, nil
+
+				if curBatch != nil {
+					select {
+					case w.rescanBatch <- curBatch:
+					case <-quit:
+						for _, errChan := range curBatch.errChans {
+							errChan <- ErrWalletShuttingDown
+						}
+						return
+					}
+				}
+
+			default:
+				// Unexpected message
+				panic(n)
+			}
+
+		case <-quit:
+			return
+		}
+	}
+}
+
+// rescanProgressHandler handles notifications for partially and fully completed
+// rescans by marking each rescanned address as partially or fully synced.
+func (w *Wallet) rescanProgressHandler() {
+	quit := w.quitChan()
+out:
+	for {
+		// These can't be processed out of order since both chans are
+		// unbuffured and are sent from same context (the batch
+		// handler).
+		select {
+		case msg := <-w.rescanProgress:
+			n := msg.Notification
+			log.Infof("Rescanned through block %v (height %d)",
+				n.Hash, n.Height)
+
+		case msg := <-w.rescanFinished:
+			n := msg.Notification
+			addrs := msg.Addresses
+			noun := pickNoun(len(addrs), "address", "addresses")
+			log.Infof("Finished rescan for %d %s (synced to block "+
+				"%s, height %d)", len(addrs), noun, n.Hash,
+				n.Height)
+
+			go w.resendUnminedTxs()
+
+		case <-quit:
+			break out
+		}
+	}
+	w.wg.Done()
+}
+
+// rescanRPCHandler reads batch jobs sent by rescanBatchHandler and sends the
+// RPC requests to perform a rescan.  New jobs are not read until a rescan
+// finishes.
+func (w *Wallet) rescanRPCHandler() {
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("rescanRPCHandler called without an RPC client")
+		w.wg.Done()
+		return
+	}
+
+	quit := w.quitChan()
+
+out:
+	for {
+		select {
+		case batch := <-w.rescanBatch:
+			// Log the newly-started rescan.
+			numAddrs := len(batch.addrs)
+			numOps := len(batch.outpoints)
+
+			log.Infof("Started rescan from block %v (height %d) "+
+				"for %d addrs, %d outpoints", batch.bs.Hash,
+				batch.bs.Height, numAddrs, numOps)
+
+			err := chainClient.Rescan(
+				&batch.bs.Hash, batch.addrs, batch.outpoints,
+			)
+			if err != nil {
+				log.Errorf("Rescan for %d addrs, %d outpoints "+
+					"failed: %v", numAddrs, numOps, err)
+			}
+			batch.done(err)
+		case <-quit:
+			break out
+		}
+	}
+
+	w.wg.Done()
+}
+
+// rescanWithTarget performs a rescan starting at the optional startStamp. If
+// none is provided, the rescan will begin from the manager's sync tip.
+func (w *Wallet) rescanWithTarget(addrs []address.Address,
+	unspent []wtxmgr.Credit, startStamp *waddrmgr.BlockStamp) error {
+
+	outpoints := make(map[wire.OutPoint]address.Address, len(unspent))
+	for _, output := range unspent {
+		_, outputAddrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		outpoints[output.OutPoint] = outputAddrs[0]
+	}
+
+	// If a start block stamp was provided, we will use that as the initial
+	// starting point for the rescan.
+	if startStamp == nil {
+		startStamp = &waddrmgr.BlockStamp{}
+		*startStamp = w.addrStore.SyncedTo()
+	}
+
+	job := &RescanJob{
+		InitialSync: true,
+		Addrs:       addrs,
+		OutPoints:   outpoints,
+		BlockStamp:  *startStamp,
+	}
+
+	// Submit merged job and block until rescan completes.
+	select {
+	case err := <-w.SubmitRescan(job):
+		return err
+	case <-w.quitChan():
+		return ErrWalletShuttingDown
+	}
+}
+
+// ChainParams returns the network parameters for the blockchain the wallet
+// belongs to.
+func (w *Wallet) ChainParams() *chaincfg.Params {
+	return w.chainParams
+}
+
+// Database returns the underlying walletdb database. This method is provided
+// in order to allow applications wrapping btcwallet to store app-specific data
+// with the wallet's database.
+func (w *Wallet) Database() walletdb.DB {
+	return w.db
+}
+
+// Open loads an already-created wallet from the passed database and namespaces.
+func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
+	params *chaincfg.Params, recoveryWindow uint32) (*Wallet, error) {
+
+	return OpenWithRetry(
+		db, pubPass, cbs, params, recoveryWindow,
+		defaultSyncRetryInterval,
+	)
+}
+
+// OpenWithRetry loads an already-created wallet from the passed database and
+// namespaces and re-tries on errors during initial sync.
+func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
+	params *chaincfg.Params, recoveryWindow uint32,
+	syncRetryInterval time.Duration) (*Wallet, error) {
+
+	var (
+		addrMgr *waddrmgr.Manager
+		txMgr   *wtxmgr.Store
+	)
+
+	// Before attempting to open the wallet, we'll check if there are any
+	// database upgrades for us to proceed. We'll also create our references
+	// to the address and transaction managers, as they are backed by the
+	// database.
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		addrMgrBucket := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if addrMgrBucket == nil {
+			return errors.New("missing address manager namespace")
+		}
+		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txMgrBucket == nil {
+			return errors.New("missing transaction manager namespace")
+		}
+
+		addrMgrUpgrader := waddrmgr.NewMigrationManager(addrMgrBucket)
+		txMgrUpgrader := wtxmgr.NewMigrationManager(txMgrBucket)
+		err := migration.Upgrade(txMgrUpgrader, addrMgrUpgrader)
+		if err != nil {
+			return err
+		}
+
+		addrMgr, err = waddrmgr.Open(addrMgrBucket, pubPass, params)
+		if err != nil {
+			return err
+		}
+		txMgr, err = wtxmgr.Open(txMgrBucket, params)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Infof("Opened wallet") // TODO: log balance? last sync height?
+
+	deprecated := &walletDeprecated{
+		lockedOutpoints:     map[wire.OutPoint]struct{}{},
+		publicPassphrase:    pubPass,
+		db:                  db,
+		recoveryWindow:      recoveryWindow,
+		rescanAddJob:        make(chan *RescanJob),
+		rescanBatch:         make(chan *rescanBatch),
+		rescanNotifications: make(chan interface{}),
+		rescanProgress:      make(chan *RescanProgressMsg),
+		rescanFinished:      make(chan *RescanFinishedMsg),
+		createTxRequests:    make(chan createTxRequest),
+		unlockRequests:      make(chan unlockRequest),
+		lockRequests:        make(chan struct{}),
+		holdUnlockRequests:  make(chan chan heldUnlock),
+		lockState:           make(chan bool),
+		changePassphrase:    make(chan changePassphraseRequest),
+		changePassphrases:   make(chan changePassphrasesRequest),
+		chainParams:         params,
+		quit:                make(chan struct{}),
+		syncRetryInterval:   syncRetryInterval,
+	}
+
+	w := &Wallet{
+		addrStore:        addrMgr,
+		txStore:          txMgr,
+		walletDeprecated: deprecated,
+	}
+
+	w.NtfnServer = newNotificationServer(w)
+	txMgr.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
+		w.NtfnServer.notifyUnspentOutput(0, hash, index)
+	}
+
+	return w, nil
+}
+
+// RecoveryManager maintains the state required to recover previously used
+// addresses, and coordinates batched processing of the blocks to search.
+//
+// TODO(yy): Deprecated, remove.
+type RecoveryManager struct {
+	// recoveryWindow defines the key-derivation lookahead used when
+	// attempting to recover the set of used addresses.
+	recoveryWindow uint32
+
+	// started is true after the first block has been added to the batch.
+	started bool
+
+	// blockBatch contains a list of blocks that have not yet been searched
+	// for recovered addresses.
+	blockBatch []wtxmgr.BlockMeta
+
+	// state encapsulates and allocates the necessary recovery state for all
+	// key scopes and subsidiary derivation paths.
+	state *RecoveryState
+
+	// chainParams are the parameters that describe the chain we're trying
+	// to recover funds on.
+	chainParams *chaincfg.Params
+}
+
+// NewRecoveryManager initializes a new RecoveryManager with a derivation
+// look-ahead of `recoveryWindow` child indexes, and pre-allocates a backing
+// array for `batchSize` blocks to scan at once.
+//
+// TODO(yy): Deprecated, remove.
+func NewRecoveryManager(recoveryWindow, batchSize uint32,
+	chainParams *chaincfg.Params) *RecoveryManager {
+
+	return &RecoveryManager{
+		recoveryWindow: recoveryWindow,
+		blockBatch:     make([]wtxmgr.BlockMeta, 0, batchSize),
+		chainParams:    chainParams,
+		state: NewRecoveryState(
+			recoveryWindow, chainParams, nil,
+		),
+	}
+}
+
+// Resurrect restores all known addresses for the provided scopes that can be
+// found in the walletdb namespace, in addition to restoring all outpoints that
+// have been previously found. This method ensures that the recovery state's
+// horizons properly start from the last found address of a prior recovery
+// attempt.
+//
+// TODO(yy): Deprecated, remove.
+func (rm *RecoveryManager) Resurrect(ns walletdb.ReadBucket,
+	scopedMgrs map[waddrmgr.KeyScope]waddrmgr.AccountStore,
+	credits []wtxmgr.Credit) error {
+
+	// First, for each scope that we are recovering, rederive all of the
+	// addresses up to the last found address known to each branch.
+	for keyScope, scopedMgr := range scopedMgrs {
+		// Load the current account properties for this scope, using the
+		// the default account number.
+		// TODO(conner): rescan for all created accounts if we allow
+		// users to use non-default address
+		scopeState := rm.state.StateForScope(keyScope)
+		acctProperties, err := scopedMgr.AccountProperties(
+			ns, waddrmgr.DefaultAccountNum,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Fetch the external key count, which bounds the indexes we
+		// will need to rederive.
+		externalCount := acctProperties.ExternalKeyCount
+
+		// Walk through all indexes through the last external key,
+		// deriving each address and adding it to the external branch
+		// recovery state's set of addresses to look for.
+		for i := uint32(0); i < externalCount; i++ {
+			keyPath := externalKeyPath(i)
+			addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+			if err != nil && err != hdkeychain.ErrInvalidChild {
+				return err
+			} else if err == hdkeychain.ErrInvalidChild {
+				scopeState.ExternalBranch.MarkInvalidChild(i)
+				continue
+			}
+
+			scopeState.ExternalBranch.AddAddr(i, addr.Address())
+		}
+
+		// Fetch the internal key count, which bounds the indexes we
+		// will need to rederive.
+		internalCount := acctProperties.InternalKeyCount
+
+		// Walk through all indexes through the last internal key,
+		// deriving each address and adding it to the internal branch
+		// recovery state's set of addresses to look for.
+		for i := uint32(0); i < internalCount; i++ {
+			keyPath := internalKeyPath(i)
+			addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+			if err != nil && err != hdkeychain.ErrInvalidChild {
+				return err
+			} else if err == hdkeychain.ErrInvalidChild {
+				scopeState.InternalBranch.MarkInvalidChild(i)
+				continue
+			}
+
+			scopeState.InternalBranch.AddAddr(i, addr.Address())
+		}
+
+		// The key counts will point to the next key that can be
+		// derived, so we subtract one to point to last known key. If
+		// the key count is zero, then no addresses have been found.
+		if externalCount > 0 {
+			scopeState.ExternalBranch.ReportFound(externalCount - 1)
+		}
+		if internalCount > 0 {
+			scopeState.InternalBranch.ReportFound(internalCount - 1)
+		}
+	}
+
+	// In addition, we will re-add any outpoints that are known the wallet
+	// to our global set of watched outpoints, so that we can watch them for
+	// spends.
+	for _, credit := range credits {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			credit.PkScript, rm.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		rm.state.AddWatchedOutPoint(&credit.OutPoint, addrs[0])
+	}
+
+	return nil
+}
+
+// AddToBlockBatch appends the block information, consisting of hash and height,
+// to the batch of blocks to be searched.
+//
+// TODO(yy): Deprecated, remove.
+func (rm *RecoveryManager) AddToBlockBatch(hash *chainhash.Hash, height int32,
+	timestamp time.Time) {
+
+	if !rm.started {
+		log.Infof("Seed birthday surpassed, starting recovery "+
+			"of wallet from height=%d hash=%v with "+
+			"recovery-window=%d", height, *hash, rm.recoveryWindow)
+		rm.started = true
+	}
+
+	block := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   *hash,
+			Height: height,
+		},
+		Time: timestamp,
+	}
+	rm.blockBatch = append(rm.blockBatch, block)
+}
+
+// BlockBatch returns a buffer of blocks that have not yet been searched.
+//
+// TODO(yy): Deprecated, remove.
+func (rm *RecoveryManager) BlockBatch() []wtxmgr.BlockMeta {
+	return rm.blockBatch
+}
+
+// ResetBlockBatch resets the internal block buffer to conserve memory.
+//
+// TODO(yy): Deprecated, remove.
+func (rm *RecoveryManager) ResetBlockBatch() {
+	rm.blockBatch = rm.blockBatch[:0]
+}
+
+// State returns the current RecoveryState.
+//
+// TODO(yy): Deprecated, remove.
+func (rm *RecoveryManager) State() *RecoveryState {
+	return rm.state
+}
+
+// ScopeRecoveryState is used to manage the recovery of addresses generated
+// under a particular BIP32 account. Each account tracks both an external and
+// internal branch recovery state, both of which use the same recovery window.
+//
+// TODO(yy): Deprecated, remove.
+type ScopeRecoveryState struct {
+	// ExternalBranch is the recovery state of addresses generated for
+	// external use, i.e. receiving addresses.
+	ExternalBranch *BranchRecoveryState
+
+	// InternalBranch is the recovery state of addresses generated for
+	// internal use, i.e. change addresses.
+	InternalBranch *BranchRecoveryState
+}
+
+// NewScopeRecoveryState initializes an ScopeRecoveryState with the chosen
+// recovery window.
+//
+// TODO(yy): Deprecated, remove.
+func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
+	return &ScopeRecoveryState{
+		ExternalBranch: NewBranchRecoveryState(recoveryWindow, nil),
+		InternalBranch: NewBranchRecoveryState(recoveryWindow, nil),
+	}
+}
+
+const (
+	// WalletDBName specified the database filename for the wallet.
+	WalletDBName = "wallet.db"
+
+	// DefaultDBTimeout is the default timeout value when opening the wallet
+	// database.
+	DefaultDBTimeout = 60 * time.Second
+)
+
+var (
+	// ErrLoaded describes the error condition of attempting to load or
+	// create a wallet when the loader has already done so.
+	ErrLoaded = errors.New("wallet already loaded")
+
+	// ErrNotLoaded describes the error condition of attempting to close a
+	// loaded wallet when a wallet has not been loaded.
+	ErrNotLoaded = errors.New("wallet is not loaded")
+
+	// ErrExists describes the error condition of attempting to create a new
+	// wallet when one exists already.
+	ErrExists = errors.New("wallet already exists")
+)
+
+// loaderConfig contains the configuration options for the loader.
+type loaderConfig struct {
+	walletSyncRetryInterval time.Duration
+}
+
+// defaultLoaderConfig returns the default configuration options for the loader.
+func defaultLoaderConfig() *loaderConfig {
+	return &loaderConfig{
+		walletSyncRetryInterval: defaultSyncRetryInterval,
+	}
+}
+
+// LoaderOption is a configuration option for the loader.
+type LoaderOption func(*loaderConfig)
+
+// WithWalletSyncRetryInterval specifies the interval at which the wallet
+// should retry syncing to the chain if it encounters an error.
+func WithWalletSyncRetryInterval(interval time.Duration) LoaderOption {
+	return func(c *loaderConfig) {
+		c.walletSyncRetryInterval = interval
+	}
+}
+
+// Loader implements the creating of new and opening of existing wallets, while
+// providing a callback system for other subsystems to handle the loading of a
+// wallet.  This is primarily intended for use by the RPC servers, to enable
+// methods and services which require the wallet when the wallet is loaded by
+// another subsystem.
+//
+// Loader is safe for concurrent access.
+type Loader struct {
+	cfg            *loaderConfig
+	callbacks      []func(*Wallet)
+	chainParams    *chaincfg.Params
+	dbDirPath      string
+	noFreelistSync bool
+	timeout        time.Duration
+	recoveryWindow uint32
+	wallet         *Wallet
+	localDB        bool
+	walletExists   func() (bool, error)
+	walletCreated  func(db walletdb.ReadWriteTx) error
+	db             walletdb.DB
+	mu             sync.Mutex
+}
+
+// NewLoader constructs a Loader with an optional recovery window. If the
+// recovery window is non-zero, the wallet will attempt to recovery addresses
+// starting from the last SyncedTo height.
+func NewLoader(chainParams *chaincfg.Params, dbDirPath string,
+	noFreelistSync bool, timeout time.Duration, recoveryWindow uint32,
+	opts ...LoaderOption) *Loader {
+
+	cfg := defaultLoaderConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return &Loader{
+		cfg:            cfg,
+		chainParams:    chainParams,
+		dbDirPath:      dbDirPath,
+		noFreelistSync: noFreelistSync,
+		timeout:        timeout,
+		recoveryWindow: recoveryWindow,
+		localDB:        true,
+	}
+}
+
+// NewLoaderWithDB constructs a Loader with an externally provided DB. This way
+// users are free to use their own walletdb implementation (eg. leveldb, etcd)
+// to store the wallet. Given that the external DB may be shared an additional
+// function is also passed which will override Loader.WalletExists().
+func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
+	db walletdb.DB, walletExists func() (bool, error),
+	opts ...LoaderOption) (*Loader, error) {
+
+	if db == nil {
+		return nil, fmt.Errorf("no DB provided")
+	}
+
+	if walletExists == nil {
+		return nil, fmt.Errorf("unable to check if wallet exists")
+	}
+
+	cfg := defaultLoaderConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return &Loader{
+		cfg:            cfg,
+		chainParams:    chainParams,
+		recoveryWindow: recoveryWindow,
+		localDB:        false,
+		walletExists:   walletExists,
+		db:             db,
+	}, nil
+}
+
+// onLoaded executes each added callback and prevents loader from loading any
+// additional wallets.  Requires mutex to be locked.
+func (l *Loader) onLoaded(w *Wallet) {
+	for _, fn := range l.callbacks {
+		fn(w)
+	}
+
+	l.wallet = w
+	l.callbacks = nil // not needed anymore
+}
+
+// RunAfterLoad adds a function to be executed when the loader creates or opens
+// a wallet.  Functions are executed in a single goroutine in the order they are
+// added.
+func (l *Loader) RunAfterLoad(fn func(*Wallet)) {
+	l.mu.Lock()
+	if l.wallet != nil {
+		w := l.wallet
+		l.mu.Unlock()
+		fn(w)
+	} else {
+		l.callbacks = append(l.callbacks, fn)
+		l.mu.Unlock()
+	}
+}
+
+// OnWalletCreated adds a function that will be executed the wallet structure
+// is initialized in the wallet database. This is useful if users want to add
+// extra fields in the same transaction (eg. to flag wallet existence).
+func (l *Loader) OnWalletCreated(fn func(walletdb.ReadWriteTx) error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.walletCreated = fn
+}
+
+// CreateNewWallet creates a new wallet using the provided public and private
+// passphrases.  The seed is optional.  If non-nil, addresses are derived from
+// this seed.  If nil, a secure random seed is generated.
+func (l *Loader) CreateNewWallet(pubPassphrase, privPassphrase, seed []byte,
+	bday time.Time) (*Wallet, error) {
+
+	var (
+		rootKey *hdkeychain.ExtendedKey
+		err     error
+	)
+
+	// If a seed was specified, we check its length now. If no seed is
+	// passed, the wallet will create a new random one.
+	if seed != nil {
+		if len(seed) < hdkeychain.MinSeedBytes ||
+			len(seed) > hdkeychain.MaxSeedBytes {
+
+			return nil, hdkeychain.ErrInvalidSeedLen
+		}
+
+		// Derive the master extended key from the seed.
+		rootKey, err = hdkeychain.NewMaster(seed, l.chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive master " +
+				"extended key")
+		}
+	}
+
+	return l.createNewWallet(
+		pubPassphrase, privPassphrase, rootKey, bday, false,
+	)
+}
+
+// CreateNewWalletExtendedKey creates a new wallet from an extended master root
+// key using the provided public and private passphrases.  The root key is
+// optional.  If non-nil, addresses are derived from this root key.  If nil, a
+// secure random seed is generated and the root key is derived from that.
+func (l *Loader) CreateNewWalletExtendedKey(pubPassphrase, privPassphrase []byte,
+	rootKey *hdkeychain.ExtendedKey, bday time.Time) (*Wallet, error) {
+
+	return l.createNewWallet(
+		pubPassphrase, privPassphrase, rootKey, bday, false,
+	)
+}
+
+// CreateNewWatchingOnlyWallet creates a new wallet using the provided
+// public passphrase.  No seed or private passphrase may be provided
+// since the wallet is watching-only.
+func (l *Loader) CreateNewWatchingOnlyWallet(pubPassphrase []byte,
+	bday time.Time) (*Wallet, error) {
+
+	return l.createNewWallet(
+		pubPassphrase, nil, nil, bday, true,
+	)
+}
+
+func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
+	rootKey *hdkeychain.ExtendedKey, bday time.Time,
+	isWatchingOnly bool) (*Wallet, error) {
+
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.wallet != nil {
+		return nil, ErrLoaded
+	}
+
+	exists, err := l.WalletExists()
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrExists
+	}
+
+	if l.localDB {
+		dbPath := filepath.Join(l.dbDirPath, WalletDBName)
+
+		// Create the wallet database backed by bolt db.
+		err = os.MkdirAll(l.dbDirPath, 0700)
+		if err != nil {
+			return nil, err
+		}
+		l.db, err = walletdb.Create(
+			"bdb", dbPath, l.noFreelistSync, l.timeout, false,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Initialize the newly created database for the wallet before opening.
+	if isWatchingOnly {
+		err := CreateWatchingOnlyWithCallback(
+			l.db, pubPassphrase, l.chainParams, bday,
+			l.walletCreated,
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		err := CreateWithCallback(
+			l.db, pubPassphrase, privPassphrase, rootKey,
+			l.chainParams, bday, l.walletCreated,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Open the newly-created wallet.
+	w, err := OpenWithRetry(
+		l.db, pubPassphrase, nil, l.chainParams, l.recoveryWindow,
+		l.cfg.walletSyncRetryInterval,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	l.onLoaded(w)
+	return w, nil
+}
+
+var errNoConsole = errors.New("db upgrade requires console access for additional input")
+
+func noConsole() ([]byte, error) {
+	return nil, errNoConsole
+}
+
+// OpenExistingWallet opens the wallet from the loader's wallet database path
+// and the public passphrase.  If the loader is being called by a context where
+// standard input prompts may be used during wallet upgrades, setting
+// canConsolePrompt will enables these prompts.
+func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
+	canConsolePrompt bool) (*Wallet, error) {
+
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.wallet != nil {
+		return nil, ErrLoaded
+	}
+
+	if l.localDB {
+		var err error
+		// Ensure that the network directory exists.
+		if err = checkCreateDir(l.dbDirPath); err != nil {
+			return nil, err
+		}
+
+		// Open the database using the boltdb backend.
+		dbPath := filepath.Join(l.dbDirPath, WalletDBName)
+		l.db, err = walletdb.Open(
+			"bdb", dbPath, l.noFreelistSync, l.timeout, false,
+		)
+		if err != nil {
+			log.Errorf("Failed to open database: %v", err)
+			return nil, err
+		}
+	}
+
+	var cbs *waddrmgr.OpenCallbacks
+	if canConsolePrompt {
+		cbs = &waddrmgr.OpenCallbacks{
+			ObtainSeed:        prompt.ProvideSeed,
+			ObtainPrivatePass: prompt.ProvidePrivPassphrase,
+		}
+	} else {
+		cbs = &waddrmgr.OpenCallbacks{
+			ObtainSeed:        noConsole,
+			ObtainPrivatePass: noConsole,
+		}
+	}
+	w, err := OpenWithRetry(
+		l.db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow,
+		l.cfg.walletSyncRetryInterval,
+	)
+	if err != nil {
+		// If opening the wallet fails (e.g. because of wrong
+		// passphrase), we must close the backing database to
+		// allow future calls to walletdb.Open().
+		if l.localDB {
+			e := l.db.Close()
+			if e != nil {
+				log.Warnf("Error closing database: %v", e)
+			}
+		}
+
+		return nil, err
+	}
+
+	w.StartDeprecated()
+
+	l.onLoaded(w)
+	return w, nil
+}
+
+// WalletExists returns whether a file exists at the loader's database path.
+// This may return an error for unexpected I/O failures.
+func (l *Loader) WalletExists() (bool, error) {
+	if l.localDB {
+		dbPath := filepath.Join(l.dbDirPath, WalletDBName)
+		return fileExists(dbPath)
+	}
+
+	return l.walletExists()
+}
+
+// LoadedWallet returns the loaded wallet, if any, and a bool for whether the
+// wallet has been loaded or not.  If true, the wallet pointer should be safe to
+// dereference.
+func (l *Loader) LoadedWallet() (*Wallet, bool) {
+	l.mu.Lock()
+	w := l.wallet
+	l.mu.Unlock()
+	return w, w != nil
+}
+
+// UnloadWallet stops the loaded wallet, if any, and closes the wallet database.
+// This returns ErrNotLoaded if the wallet has not been loaded with
+// CreateNewWallet or LoadExistingWallet.  The Loader may be reused if this
+// function returns without error.
+func (l *Loader) UnloadWallet() error {
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.wallet == nil {
+		return ErrNotLoaded
+	}
+
+	l.wallet.StopDeprecated()
+	l.wallet.WaitForShutdown()
+	if l.localDB {
+		err := l.db.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	l.wallet = nil
+	l.db = nil
+	return nil
+}
+
+func fileExists(filePath string) (bool, error) {
+	_, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

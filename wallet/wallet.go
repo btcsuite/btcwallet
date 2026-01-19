@@ -21,12 +21,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -376,19 +374,6 @@ func calcConf(txHeight, curHeight int32) int32 {
 	}
 }
 
-// ChainParams returns the network parameters for the blockchain the wallet
-// belongs to.
-func (w *Wallet) ChainParams() *chaincfg.Params {
-	return w.chainParams
-}
-
-// Database returns the underlying walletdb database. This method is provided
-// in order to allow applications wrapping btcwallet to store app-specific data
-// with the wallet's database.
-func (w *Wallet) Database() walletdb.DB {
-	return w.db
-}
-
 // RemoveDescendants attempts to remove any transaction from the wallet's tx
 // store (that may be unconfirmed) that spends outputs created by the passed
 // transaction. This remove propagates recursively down the chain of descendent
@@ -542,99 +527,4 @@ func create(db walletdb.DB, pubPass, privPass []byte,
 
 		return nil
 	})
-}
-
-// Open loads an already-created wallet from the passed database and namespaces.
-func Open(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
-	params *chaincfg.Params, recoveryWindow uint32) (*Wallet, error) {
-
-	return OpenWithRetry(
-		db, pubPass, cbs, params, recoveryWindow,
-		defaultSyncRetryInterval,
-	)
-}
-
-// OpenWithRetry loads an already-created wallet from the passed database and
-// namespaces and re-tries on errors during initial sync.
-func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
-	params *chaincfg.Params, recoveryWindow uint32,
-	syncRetryInterval time.Duration) (*Wallet, error) {
-
-	var (
-		addrMgr *waddrmgr.Manager
-		txMgr   *wtxmgr.Store
-	)
-
-	// Before attempting to open the wallet, we'll check if there are any
-	// database upgrades for us to proceed. We'll also create our references
-	// to the address and transaction managers, as they are backed by the
-	// database.
-	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		addrMgrBucket := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		if addrMgrBucket == nil {
-			return errors.New("missing address manager namespace")
-		}
-		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		if txMgrBucket == nil {
-			return errors.New("missing transaction manager namespace")
-		}
-
-		addrMgrUpgrader := waddrmgr.NewMigrationManager(addrMgrBucket)
-		txMgrUpgrader := wtxmgr.NewMigrationManager(txMgrBucket)
-		err := migration.Upgrade(txMgrUpgrader, addrMgrUpgrader)
-		if err != nil {
-			return err
-		}
-
-		addrMgr, err = waddrmgr.Open(addrMgrBucket, pubPass, params)
-		if err != nil {
-			return err
-		}
-		txMgr, err = wtxmgr.Open(txMgrBucket, params)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	log.Infof("Opened wallet") // TODO: log balance? last sync height?
-
-	deprecated := &walletDeprecated{
-		lockedOutpoints:     map[wire.OutPoint]struct{}{},
-		publicPassphrase:    pubPass,
-		db:                  db,
-		recoveryWindow:      recoveryWindow,
-		rescanAddJob:        make(chan *RescanJob),
-		rescanBatch:         make(chan *rescanBatch),
-		rescanNotifications: make(chan interface{}),
-		rescanProgress:      make(chan *RescanProgressMsg),
-		rescanFinished:      make(chan *RescanFinishedMsg),
-		createTxRequests:    make(chan createTxRequest),
-		unlockRequests:      make(chan unlockRequest),
-		lockRequests:        make(chan struct{}),
-		holdUnlockRequests:  make(chan chan heldUnlock),
-		lockState:           make(chan bool),
-		changePassphrase:    make(chan changePassphraseRequest),
-		changePassphrases:   make(chan changePassphrasesRequest),
-		chainParams:         params,
-		quit:                make(chan struct{}),
-		syncRetryInterval:   syncRetryInterval,
-	}
-
-	w := &Wallet{
-		addrStore:        addrMgr,
-		txStore:          txMgr,
-		walletDeprecated: deprecated,
-	}
-
-	w.NtfnServer = newNotificationServer(w)
-	txMgr.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
-		w.NtfnServer.notifyUnspentOutput(0, hash, index)
-	}
-
-	return w, nil
 }
