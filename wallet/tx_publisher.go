@@ -64,11 +64,6 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	}
 
 	// TODO(yy): thread context through.
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
 	// The TestMempoolAccept rpc expects a slice of transactions.
 	txns := []*wire.MsgTx{tx}
 
@@ -77,7 +72,7 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	// or 10,000 sat/vb.
 	maxFeeRate := float64(0)
 
-	results, err := chainClient.TestMempoolAccept(txns, maxFeeRate)
+	results, err := w.cfg.Chain.TestMempoolAccept(txns, maxFeeRate)
 	if err != nil {
 		return err
 	}
@@ -100,7 +95,7 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	//nolint:err113
 	err = errors.New(result.RejectReason)
 
-	return chainClient.MapRPCErr(err)
+	return w.cfg.Chain.MapRPCErr(err)
 }
 
 // Broadcast broadcasts a tx to the network. It is the main implementation of
@@ -478,15 +473,10 @@ func (w *Wallet) filterOwnedAddresses(
 // transaction to the network. This includes getting a chain client,
 // registering for notifications, and sending the raw transaction.
 func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return err
-	}
-
 	// We'll also ask to be notified of the tx once it confirms on-chain.
 	// This is done outside of the database tx to prevent backend
 	// interaction within it.
-	err = chainClient.NotifyReceived(ourAddrs)
+	err := w.cfg.Chain.NotifyReceived(ourAddrs)
 	if err != nil {
 		return err
 	}
@@ -501,7 +491,7 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	//nolint:lll
 	allowHighFees := false
 
-	_, rpcErr := chainClient.SendRawTransaction(tx, allowHighFees)
+	_, rpcErr := w.cfg.Chain.SendRawTransaction(tx, allowHighFees)
 	if rpcErr == nil {
 		return nil
 	}

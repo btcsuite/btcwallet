@@ -460,20 +460,30 @@ func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
 	// used.
 	changeAccount := w.determineChangeSource(intent)
 
+	manager, err := w.addrStore.FetchScopedKeyManager(
+		changeAccount.KeyScope,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+			changeAccount.AccountName)
+	}
+
 	var (
 		changeSource *txauthor.ChangeSource
 		inputSource  txauthor.InputSource
 	)
 	// We perform the core logic of creating the input and change sources
 	// within a single database transaction to ensure atomicity.
-	err := walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(w.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
 		changeKeyScope := &changeAccount.KeyScope
 		accountName := changeAccount.AccountName
+
+		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
 
 		// Query the account's number using the account name.
 		//
 		// TODO(yy): Remove this query in upcoming SQL.
-		account, err := w.AccountNumber(*changeKeyScope, accountName)
+		account, err := manager.LookupAccount(addrmgrNs, accountName)
 		if err != nil {
 			return fmt.Errorf("%w: %s", ErrAccountNotFound,
 				accountName)
@@ -749,16 +759,9 @@ func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
 func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
 	source CoinSource, minconf uint32) ([]wtxmgr.Credit, error) {
 
-	// TODO(yy): remove this requireChainClient. The block stamp should be
+	// TODO(yy): remove this block stamp check. The block stamp should be
 	// passed in as a parameter.
-	chainClient, err := w.requireChainClient()
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the current block's height and hash. This is needed to determine
-	// the number of confirmations for UTXOs.
-	bs, err := chainClient.BlockStamp()
+	bs, err := w.cfg.Chain.BlockStamp()
 	if err != nil {
 		return nil, err
 	}
@@ -796,7 +799,15 @@ func (w *Wallet) getEligibleUTXOsFromAccount(dbtx walletdb.ReadTx,
 
 	keyScope := &source.KeyScope
 
-	account, err := w.AccountNumber(*keyScope, source.AccountName)
+	manager, err := w.addrStore.FetchScopedKeyManager(*keyScope)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+			source.AccountName)
+	}
+
+	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
+
+	account, err := manager.LookupAccount(addrmgrNs, source.AccountName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
 			source.AccountName)
