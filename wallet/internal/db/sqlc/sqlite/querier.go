@@ -9,26 +9,15 @@ import (
 )
 
 type Querier interface {
-	// Atomically allocates the next account number for a key scope.
-	// Returns the scope_id and the allocated account number.
-	// SQLite limitation: Can't combine UPDATE...RETURNING with INSERT in a single
-	// CTE (unlike Postgres). So, we call this first, then pass the returned number
-	// to CreateAccount, within the same SQL transaction.
-	AllocateAccountNumber(ctx context.Context, id int64) (AllocateAccountNumberRow, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
-	// Creates a new derived account under the given scope, using a caller-provided
-	// account number.
-	//
-	// NOTE: Unlike Postgres, SQLite can't combine an UPDATE...RETURNING allocation
-	// step with an INSERT in a single CTE.
-	//
-	// We instead:
-	//  1) call AllocateAccountNumber (key_scopes.sql)
-	//  2) call CreateDerivedAccount with the returned number
-	//
-	// Both statements run within the same SQL transaction.
+	// Creates a new derived account under the given scope, computing the next
+	// account number from existing accounts. SQLite's _txlock=immediate ensures
+	// only one writer at a time, preventing concurrent allocation conflicts.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
+	// Test-only: Creates a derived account with a specific account number.
+	// Used for testing account number overflow without creating billions of accounts.
+	CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error)
 	// Creates a new imported account under the given scope with NULL account
 	// number. Imported accounts don't follow BIP44 derivation, so they don't need
 	// a sequential account number.
@@ -55,9 +44,9 @@ type Querier interface {
 	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
 	// Retrieves a key scope by its ID.
-	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
+	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
-	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
@@ -84,11 +73,8 @@ type Querier interface {
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	// Lists all key scopes for a wallet, ordered by ID.
-	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
-	// Sets the last_account_number for a key scope. This is intended for testing
-	// the account number overflow behavior without creating billions of accounts.
-	SetLastAccountNumber(ctx context.Context, arg SetLastAccountNumberParams) error
 	// Renames an account identified by wallet id, scope tuple, and current account name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.

@@ -9,30 +9,6 @@ import (
 	"context"
 )
 
-const AllocateAccountNumber = `-- name: AllocateAccountNumber :one
-UPDATE key_scopes
-SET last_account_number = last_account_number + 1
-WHERE id = ?
-RETURNING id, last_account_number
-`
-
-type AllocateAccountNumberRow struct {
-	ID                int64
-	LastAccountNumber int64
-}
-
-// Atomically allocates the next account number for a key scope.
-// Returns the scope_id and the allocated account number.
-// SQLite limitation: Can't combine UPDATE...RETURNING with INSERT in a single
-// CTE (unlike Postgres). So, we call this first, then pass the returned number
-// to CreateAccount, within the same SQL transaction.
-func (q *Queries) AllocateAccountNumber(ctx context.Context, id int64) (AllocateAccountNumberRow, error) {
-	row := q.queryRow(ctx, q.allocateAccountNumberStmt, AllocateAccountNumber, id)
-	var i AllocateAccountNumberRow
-	err := row.Scan(&i.ID, &i.LastAccountNumber)
-	return i, err
-}
-
 const CreateKeyScope = `-- name: CreateKeyScope :one
 INSERT INTO key_scopes (
     wallet_id,
@@ -113,20 +89,10 @@ FROM key_scopes
 WHERE id = ?
 `
 
-type GetKeyScopeByIDRow struct {
-	ID                  int64
-	WalletID            int64
-	Purpose             int64
-	CoinType            int64
-	EncryptedCoinPubKey []byte
-	InternalTypeID      int64
-	ExternalTypeID      int64
-}
-
 // Retrieves a key scope by its ID.
-func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error) {
+func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error) {
 	row := q.queryRow(ctx, q.getKeyScopeByIDStmt, GetKeyScopeByID, id)
-	var i GetKeyScopeByIDRow
+	var i KeyScope
 	err := row.Scan(
 		&i.ID,
 		&i.WalletID,
@@ -158,20 +124,10 @@ type GetKeyScopeByWalletAndScopeParams struct {
 	CoinType int64
 }
 
-type GetKeyScopeByWalletAndScopeRow struct {
-	ID                  int64
-	WalletID            int64
-	Purpose             int64
-	CoinType            int64
-	EncryptedCoinPubKey []byte
-	InternalTypeID      int64
-	ExternalTypeID      int64
-}
-
 // Retrieves a key scope by wallet ID, purpose, and coin type.
-func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error) {
+func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error) {
 	row := q.queryRow(ctx, q.getKeyScopeByWalletAndScopeStmt, GetKeyScopeByWalletAndScope, arg.WalletID, arg.Purpose, arg.CoinType)
-	var i GetKeyScopeByWalletAndScopeRow
+	var i KeyScope
 	err := row.Scan(
 		&i.ID,
 		&i.WalletID,
@@ -235,26 +191,16 @@ WHERE wallet_id = ?
 ORDER BY id
 `
 
-type ListKeyScopesByWalletRow struct {
-	ID                  int64
-	WalletID            int64
-	Purpose             int64
-	CoinType            int64
-	EncryptedCoinPubKey []byte
-	InternalTypeID      int64
-	ExternalTypeID      int64
-}
-
 // Lists all key scopes for a wallet, ordered by ID.
-func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error) {
+func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error) {
 	rows, err := q.query(ctx, q.listKeyScopesByWalletStmt, ListKeyScopesByWallet, walletID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListKeyScopesByWalletRow
+	var items []KeyScope
 	for rows.Next() {
-		var i ListKeyScopesByWalletRow
+		var i KeyScope
 		if err := rows.Scan(
 			&i.ID,
 			&i.WalletID,
@@ -275,22 +221,4 @@ func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]
 		return nil, err
 	}
 	return items, nil
-}
-
-const SetLastAccountNumber = `-- name: SetLastAccountNumber :exec
-UPDATE key_scopes
-SET last_account_number = ?
-WHERE id = ?
-`
-
-type SetLastAccountNumberParams struct {
-	LastAccountNumber int64
-	ID                int64
-}
-
-// Sets the last_account_number for a key scope. This is intended for testing
-// the account number overflow behavior without creating billions of accounts.
-func (q *Queries) SetLastAccountNumber(ctx context.Context, arg SetLastAccountNumberParams) error {
-	_, err := q.exec(ctx, q.setLastAccountNumberStmt, SetLastAccountNumber, arg.LastAccountNumber, arg.ID)
-	return err
 }

@@ -1,15 +1,7 @@
 -- name: CreateDerivedAccount :one
--- Creates a new derived account under the given scope, using a caller-provided
--- account number.
---
--- NOTE: Unlike Postgres, SQLite can't combine an UPDATE...RETURNING allocation
--- step with an INSERT in a single CTE.
---
--- We instead:
---  1) call AllocateAccountNumber (key_scopes.sql)
---  2) call CreateDerivedAccount with the returned number
---
--- Both statements run within the same SQL transaction.
+-- Creates a new derived account under the given scope, computing the next
+-- account number from existing accounts. SQLite's _txlock=immediate ensures
+-- only one writer at a time, preventing concurrent allocation conflicts.
 INSERT INTO accounts (
     scope_id,
     account_number,
@@ -20,7 +12,12 @@ INSERT INTO accounts (
     is_watch_only
 )
 VALUES (
-    ?, ?, ?, ?, ?, ?, ?
+    ?1,
+    (
+        SELECT coalesce(max(account_number), -1) + 1 FROM accounts
+        WHERE scope_id = ?1
+    ),
+    ?2, ?3, ?4, ?5, ?6
 )
 RETURNING id, account_number, created_at;
 
@@ -227,3 +224,16 @@ WHERE
             AND coin_type = sqlc.arg(coin_type)
     )
     AND account_name = sqlc.arg(old_name);
+
+-- name: CreateDerivedAccountWithNumber :one
+-- Test-only: Creates a derived account with a specific account number.
+-- Used for testing account number overflow without creating billions of accounts.
+INSERT INTO accounts (
+    scope_id,
+    account_number,
+    account_name,
+    origin_id,
+    is_watch_only
+)
+VALUES (?, ?, ?, ?, ?)
+RETURNING id, account_number, created_at;

@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -28,16 +29,19 @@ func CreateBlockFixture(t *testing.T, queries *sqlcpg.Queries,
 	return block
 }
 
-// SetLastAccountNumber sets the last_account_number for a key scope.
+// CreateAccountWithNumber creates an account with a specific account number.
 // Used to test account number overflow without creating billions of accounts.
-func SetLastAccountNumber(t *testing.T, queries *sqlcpg.Queries,
-	scopeID int64, lastAccountNumber int64) {
+func CreateAccountWithNumber(t *testing.T, queries *sqlcpg.Queries,
+	scopeID int64, accountNumber uint32, name string) {
 	t.Helper()
 
-	err := queries.SetLastAccountNumber(
-		t.Context(), sqlcpg.SetLastAccountNumberParams{
-			LastAccountNumber: lastAccountNumber,
-			ID:                scopeID,
+	_, err := queries.CreateDerivedAccountWithNumber(
+		t.Context(), sqlcpg.CreateDerivedAccountWithNumberParams{
+			ScopeID:       scopeID,
+			AccountNumber: sql.NullInt64{Int64: int64(accountNumber), Valid: true},
+			AccountName:   name,
+			OriginID:      int16(db.DerivedAccount),
+			IsWatchOnly:   false,
 		},
 	)
 	require.NoError(t, err)
