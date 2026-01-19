@@ -30,6 +30,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createDerivedAccountStmt, err = db.PrepareContext(ctx, CreateDerivedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAccount: %w", err)
 	}
+	if q.createDerivedAccountWithNumberStmt, err = db.PrepareContext(ctx, CreateDerivedAccountWithNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAccountWithNumber: %w", err)
+	}
 	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
 	}
@@ -120,8 +123,8 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listWalletsStmt, err = db.PrepareContext(ctx, ListWallets); err != nil {
 		return nil, fmt.Errorf("error preparing query ListWallets: %w", err)
 	}
-	if q.setLastAccountNumberStmt, err = db.PrepareContext(ctx, SetLastAccountNumber); err != nil {
-		return nil, fmt.Errorf("error preparing query SetLastAccountNumber: %w", err)
+	if q.lockAccountScopeStmt, err = db.PrepareContext(ctx, LockAccountScope); err != nil {
+		return nil, fmt.Errorf("error preparing query LockAccountScope: %w", err)
 	}
 	if q.updateAccountNameByWalletScopeAndNameStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndName); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndName: %w", err)
@@ -148,6 +151,11 @@ func (q *Queries) Close() error {
 	if q.createDerivedAccountStmt != nil {
 		if cerr := q.createDerivedAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createDerivedAccountStmt: %w", cerr)
+		}
+	}
+	if q.createDerivedAccountWithNumberStmt != nil {
+		if cerr := q.createDerivedAccountWithNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAccountWithNumberStmt: %w", cerr)
 		}
 	}
 	if q.createImportedAccountStmt != nil {
@@ -300,9 +308,9 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listWalletsStmt: %w", cerr)
 		}
 	}
-	if q.setLastAccountNumberStmt != nil {
-		if cerr := q.setLastAccountNumberStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing setLastAccountNumberStmt: %w", cerr)
+	if q.lockAccountScopeStmt != nil {
+		if cerr := q.lockAccountScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing lockAccountScopeStmt: %w", cerr)
 		}
 	}
 	if q.updateAccountNameByWalletScopeAndNameStmt != nil {
@@ -366,6 +374,7 @@ type Queries struct {
 	tx                                          *sql.Tx
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
+	createDerivedAccountWithNumberStmt          *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
 	createKeyScopeStmt                          *sql.Stmt
 	createWalletStmt                            *sql.Stmt
@@ -396,7 +405,7 @@ type Queries struct {
 	listAddressTypesStmt                        *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listWalletsStmt                             *sql.Stmt
-	setLastAccountNumberStmt                    *sql.Stmt
+	lockAccountScopeStmt                        *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
@@ -409,6 +418,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		tx:                                          tx,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
+		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
 		createKeyScopeStmt:                          q.createKeyScopeStmt,
 		createWalletStmt:                            q.createWalletStmt,
@@ -439,7 +449,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listWalletsStmt:                             q.listWalletsStmt,
-		setLastAccountNumberStmt:                    q.setLastAccountNumberStmt,
+		lockAccountScopeStmt:                        q.lockAccountScopeStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,

@@ -50,7 +50,6 @@ type KeyScope struct {
 	EncryptedCoinPubKey []byte
 	InternalTypeID      int16
 	ExternalTypeID      int16
-	LastAccountNumber   int64
 }
 
 type KeyScopeSecret struct {

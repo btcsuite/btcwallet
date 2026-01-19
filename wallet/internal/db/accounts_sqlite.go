@@ -66,8 +66,13 @@ func (w *SQLiteWalletDB) CreateDerivedAccount(ctx context.Context,
 			return err
 		}
 
-		row, err := sqliteAllocateAndCreateAccount(
-			ctx, qtx, scopeID, params.Name,
+		row, err := qtx.CreateDerivedAccount(
+			ctx, sqlcsqlite.CreateDerivedAccountParams{
+				ScopeID:     scopeID,
+				AccountName: params.Name,
+				OriginID:    int64(DerivedAccount),
+				IsWatchOnly: false,
+			},
 		)
 		if err != nil {
 			return fmt.Errorf("create account: %w", err)
@@ -124,42 +129,8 @@ func sqliteEnsureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
 				),
 			}
 		},
-		func(row sqlcsqlite.GetKeyScopeByWalletAndScopeRow) int64 {
-			return row.ID
-		}, scope,
+		func(row sqlcsqlite.KeyScope) int64 { return row.ID }, scope,
 	)
-}
-
-// sqliteAllocateAndCreateAccount allocates a new sequential account number and
-// creates a derived account in a single atomic operation. SQLite requires a
-// two-step process because it lacks PostgreSQL's UPDATE ... RETURNING clause.
-func sqliteAllocateAndCreateAccount(ctx context.Context,
-	qtx *sqlcsqlite.Queries, scopeID int64,
-	accountName string) (sqlcsqlite.CreateDerivedAccountRow, error) {
-
-	allocated, err := qtx.AllocateAccountNumber(ctx, scopeID)
-	if err != nil {
-		return sqlcsqlite.CreateDerivedAccountRow{},
-			fmt.Errorf("allocate account number: %w", err)
-	}
-
-	row, err := qtx.CreateDerivedAccount(ctx,
-		sqlcsqlite.CreateDerivedAccountParams{
-			ScopeID: scopeID,
-			AccountNumber: sql.NullInt64{
-				Int64: allocated.LastAccountNumber,
-				Valid: true,
-			},
-			AccountName: accountName,
-			OriginID:    int64(DerivedAccount),
-			IsWatchOnly: false,
-		})
-	if err != nil {
-		return sqlcsqlite.CreateDerivedAccountRow{},
-			fmt.Errorf("create account: %w", err)
-	}
-
-	return row, nil
 }
 
 // CreateImportedAccount stores an imported account identified by an extended

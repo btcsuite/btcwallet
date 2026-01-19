@@ -27,14 +27,6 @@ CREATE TABLE key_scopes (
     -- Reference to the address type used for external/receiving addresses.
     external_type_id SMALLINT NOT NULL,
 
-    -- Counter used to allocate sequential account numbers within this scope.
-    -- This avoids scanning the accounts table to compute MAX(account_number).
-    -- The value is updated atomically via UPDATE with RETURNING, which allows
-    -- concurrent account creation without additional locking logic.
-    -- The counter starts at minus one. Each new account consumes the current
-    -- value plus one, then stores the updated value for the next allocation.
-    last_account_number BIGINT NOT NULL DEFAULT -1,
-
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if key scopes still exist.
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,

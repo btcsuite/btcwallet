@@ -66,9 +66,19 @@ func (w *PostgresWalletDB) CreateDerivedAccount(ctx context.Context,
 			return err
 		}
 
+		// Acquire an advisory lock for this scope to serialize account creation
+		// and prevent race conditions when computing MAX(account_number). This
+		// MUST be a separate statement that completes before
+		// qtx.CreateDerivedAccount runs. See the LockAccountScope comments for
+		// why single-statement approaches don't work.
+		err = qtx.LockAccountScope(ctx, scopeID)
+		if err != nil {
+			return fmt.Errorf("lock account scope: %w", err)
+		}
+
 		row, err := qtx.CreateDerivedAccount(
 			ctx, sqlcpg.CreateDerivedAccountParams{
-				ID:          scopeID,
+				ScopeID:     scopeID,
 				AccountName: params.Name,
 				OriginID:    int16(DerivedAccount),
 				IsWatchOnly: false,
@@ -226,7 +236,7 @@ func pgEnsureKeyScope(ctx context.Context, qtx *sqlcpg.Queries, walletID uint32,
 				),
 			}
 		},
-		func(row sqlcpg.GetKeyScopeByWalletAndScopeRow) int64 {
+		func(row sqlcpg.KeyScope) int64 {
 			return row.ID
 		}, scope,
 	)
