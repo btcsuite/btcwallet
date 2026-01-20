@@ -7,9 +7,17 @@ IT_TAGS ?=
 ifeq ($(db),postgres)
 IT_TAGS += test_db_postgres
 IT_DB_LABEL := PostgreSQL
+IT_DB_TYPE := postgres
 else
 IT_TAGS :=
 IT_DB_LABEL := SQLite
+IT_DB_TYPE := sqlite
+endif
+
+# Enable integration test coverage
+ifeq ($(cover),1)
+ITEST_DB_COVERPROFILE = coverage-itest-$(IT_DB_TYPE).txt
+ITEST_DB_COVERAGE = -coverprofile=$(ITEST_DB_COVERPROFILE) -coverpkg=$(PKG)/wallet/internal/db/... -covermode=atomic
 endif
 
 GOCC ?= go
@@ -91,5 +99,5 @@ endif
 
 UNIT_COVER := $(GOTEST) $(COVER_FLAGS) -tags="$(DEV_TAGS) $(LOG_TAGS)" $(TEST_FLAGS) $(COVER_PKG)
 
-ITEST_DB := $(GOTEST) -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
+ITEST_DB := $(GOTEST) $(ITEST_DB_COVERAGE) -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
 ITEST_DB_RACE := $(GOTEST) -race -tags="itest $(DEV_TAGS) $(LOG_TAGS) $(IT_TAGS)" $(TEST_FLAGS) $(PKG)/wallet/internal/db/itest
