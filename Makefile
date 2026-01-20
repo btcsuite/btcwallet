@@ -110,6 +110,10 @@ itest-db:
 	fi
 	@$(call print, "Running $(IT_DB_LABEL) integration tests.")
 	$(ITEST_DB)
+	@if [ -n "$(ITEST_DB_COVERPROFILE)" ]; then \
+		echo  "Filtering coverage report."; \
+		./scripts/filter_coverage.sh $(IT_DB_TYPE); \
+	fi
 
 #? itest-db-race: Run integration tests for wallet database with race detector
 itest-db-race:
