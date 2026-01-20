@@ -152,24 +152,26 @@ jobs:
         run: make ${{ matrix.unit_type }}
 
       - name: Send coverage
-        uses: shogo82148/actions-goveralls@v1
+        uses: coverallsapp/github-action@v2
         if: matrix.unit_type == 'unit-cover'
         continue-on-error: true
         with:
-          path-to-profile: coverage.txt
+          file: coverage.txt
+          flag-name: unit
+          format: golang
           parallel: true
 
   ########################
   # run integration tests (SQLite + Postgres)
   ########################
   itest-db:
-    name: integration tests (${{ matrix.db }}, ${{ matrix.target }})
+    name: integration tests (${{ matrix.db }}, ${{ matrix.race && 'race' || 'cover' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         db: [sqlite, postgres]
-        target: [itest-db, itest-db-race]
+        race: [false, true]
     steps:
       - name: git checkout
         uses: actions/checkout@v5
@@ -193,5 +195,35 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
-      - name: run ${{ matrix.db }} ${{ matrix.target }}
-        run: make ${{ matrix.target }} db=${{ matrix.db }} verbose=1
+      - name: run ${{ matrix.db }} itest-db (coverage)
+        if: ${{ !matrix.race }}
+        run: make itest-db db=${{ matrix.db }} cover=1 verbose=1
+
+      - name: run ${{ matrix.db }} itest-db-race
+        if: matrix.race
+        run: make itest-db-race db=${{ matrix.db }} verbose=1
+
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        if: ${{ !matrix.race }}
+        continue-on-error: true
+        with:
+          file: coverage-itest-${{ matrix.db }}.txt
+          flag-name: itest-db-${{ matrix.db }}
+          format: golang
+          parallel: true
+
+  ########################
+  # Complete parallel coverage uploads
+  ########################
+  finish:
+    name: Finish coverage upload
+    if: ${{ !cancelled() }}
+    needs: [unit-test, itest-db]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finish parallel Coveralls upload
+        uses: coverallsapp/github-action@v2
+        continue-on-error: true
+        with:
+          parallel-finished: true
