@@ -2,6 +2,8 @@ btcwallet
 vendor
 .idea
 coverage.txt
+coverage-itest-postgres.txt
+coverage-itest-sqlite.txt
 *.swp
 .vscode
 .DS_Store
