@@ -9,7 +9,7 @@
 - Unit tests must always use the `require` library. Either table driven unit 
   tests or tests using the `rapid` library are preferred. 
 - The line length MUST NOT exceed 80 characters, this is very important. 
-  You must count the Golang indentation (tabulator character) as 8 spaces when 
+  You must count the Golang indentation (tabulator character) as 4 spaces when 
   determining the line length. Use creative approaches or the wrapping rules 
   specified below to make sure the line length isn't exceeded.
 - Every function must be commented with its purpose and assumptions.
@@ -151,7 +151,7 @@ if amt < 546 {
 ### 80 character line length
 
 - Wrap columns at 80 characters.
-- Tabs are 8 spaces.
+- Tabs are 4 spaces.
 
 **WRONG**
 ```go
