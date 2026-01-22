@@ -16,6 +16,51 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDBCreateWallet verifies that the wallet database is correctly
+// initialized with the address and transaction manager buckets.
+func TestDBCreateWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet with a fresh database.
+	// Note: createTestWalletWithMocks creates the top-level buckets, but
+	// they are empty. DBCreateWallet will populate them.
+	w, _ := createTestWalletWithMocks(t)
+
+	params := CreateWalletParams{
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	// Act: Initialize the wallet database.
+	err := DBCreateWallet(w.cfg, params, nil)
+
+	// Assert: Verify initialization success.
+	require.NoError(t, err)
+
+	// Verify that the address manager and transaction manager can be
+	// opened, indicating successful initialization.
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		_, err := waddrmgr.Open(
+			addrmgrNs, params.PubPassphrase, w.cfg.ChainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, txmgrNs)
+
+		_, err = wtxmgr.Open(txmgrNs, w.cfg.ChainParams)
+
+		return err
+	})
+	require.NoError(t, err)
+}
+
 // TestDBBirthdayBlock verifies that the wallet can successfully persist and
 // retrieve its birthday block information.
 func TestDBBirthdayBlock(t *testing.T) {
