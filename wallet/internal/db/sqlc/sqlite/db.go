@@ -33,8 +33,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createDerivedAccountWithNumberStmt, err = db.PrepareContext(ctx, CreateDerivedAccountWithNumber); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAccountWithNumber: %w", err)
 	}
+	if q.createDerivedAddressStmt, err = db.PrepareContext(ctx, CreateDerivedAddress); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAddress: %w", err)
+	}
 	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
+	}
+	if q.createImportedAddressStmt, err = db.PrepareContext(ctx, CreateImportedAddress); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateImportedAddress: %w", err)
 	}
 	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
@@ -66,6 +72,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAccountPropsByIdStmt, err = db.PrepareContext(ctx, GetAccountPropsById); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccountPropsById: %w", err)
 	}
+	if q.getAddressByScriptPubKeyStmt, err = db.PrepareContext(ctx, GetAddressByScriptPubKey); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAddressByScriptPubKey: %w", err)
+	}
+	if q.getAddressSecretStmt, err = db.PrepareContext(ctx, GetAddressSecret); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAddressSecret: %w", err)
+	}
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
 	}
@@ -89,6 +101,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getWalletSecretsStmt, err = db.PrepareContext(ctx, GetWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query GetWalletSecrets: %w", err)
+	}
+	if q.insertAddressSecretStmt, err = db.PrepareContext(ctx, InsertAddressSecret); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertAddressSecret: %w", err)
 	}
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
@@ -116,6 +131,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listAddressTypesStmt, err = db.PrepareContext(ctx, ListAddressTypes); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAddressTypes: %w", err)
+	}
+	if q.listAddressesByAccountStmt, err = db.PrepareContext(ctx, ListAddressesByAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAddressesByAccount: %w", err)
 	}
 	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
@@ -155,9 +173,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createDerivedAccountWithNumberStmt: %w", cerr)
 		}
 	}
+	if q.createDerivedAddressStmt != nil {
+		if cerr := q.createDerivedAddressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAddressStmt: %w", cerr)
+		}
+	}
 	if q.createImportedAccountStmt != nil {
 		if cerr := q.createImportedAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createImportedAccountStmt: %w", cerr)
+		}
+	}
+	if q.createImportedAddressStmt != nil {
+		if cerr := q.createImportedAddressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createImportedAddressStmt: %w", cerr)
 		}
 	}
 	if q.createKeyScopeStmt != nil {
@@ -210,6 +238,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getAccountPropsByIdStmt: %w", cerr)
 		}
 	}
+	if q.getAddressByScriptPubKeyStmt != nil {
+		if cerr := q.getAddressByScriptPubKeyStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAddressByScriptPubKeyStmt: %w", cerr)
+		}
+	}
+	if q.getAddressSecretStmt != nil {
+		if cerr := q.getAddressSecretStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAddressSecretStmt: %w", cerr)
+		}
+	}
 	if q.getAddressTypeByIDStmt != nil {
 		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
@@ -248,6 +286,11 @@ func (q *Queries) Close() error {
 	if q.getWalletSecretsStmt != nil {
 		if cerr := q.getWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getWalletSecretsStmt: %w", cerr)
+		}
+	}
+	if q.insertAddressSecretStmt != nil {
+		if cerr := q.insertAddressSecretStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertAddressSecretStmt: %w", cerr)
 		}
 	}
 	if q.insertBlockStmt != nil {
@@ -293,6 +336,11 @@ func (q *Queries) Close() error {
 	if q.listAddressTypesStmt != nil {
 		if cerr := q.listAddressTypesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listAddressTypesStmt: %w", cerr)
+		}
+	}
+	if q.listAddressesByAccountStmt != nil {
+		if cerr := q.listAddressesByAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAddressesByAccountStmt: %w", cerr)
 		}
 	}
 	if q.listKeyScopesByWalletStmt != nil {
@@ -367,7 +415,9 @@ type Queries struct {
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
 	createDerivedAccountWithNumberStmt          *sql.Stmt
+	createDerivedAddressStmt                    *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
+	createImportedAddressStmt                   *sql.Stmt
 	createKeyScopeStmt                          *sql.Stmt
 	createWalletStmt                            *sql.Stmt
 	deleteBlockStmt                             *sql.Stmt
@@ -378,6 +428,8 @@ type Queries struct {
 	getAccountByWalletScopeAndNameStmt          *sql.Stmt
 	getAccountByWalletScopeAndNumberStmt        *sql.Stmt
 	getAccountPropsByIdStmt                     *sql.Stmt
+	getAddressByScriptPubKeyStmt                *sql.Stmt
+	getAddressSecretStmt                        *sql.Stmt
 	getAddressTypeByIDStmt                      *sql.Stmt
 	getBlockByHeightStmt                        *sql.Stmt
 	getKeyScopeByIDStmt                         *sql.Stmt
@@ -386,6 +438,7 @@ type Queries struct {
 	getWalletByIDStmt                           *sql.Stmt
 	getWalletByNameStmt                         *sql.Stmt
 	getWalletSecretsStmt                        *sql.Stmt
+	insertAddressSecretStmt                     *sql.Stmt
 	insertBlockStmt                             *sql.Stmt
 	insertKeyScopeSecretsStmt                   *sql.Stmt
 	insertWalletSecretsStmt                     *sql.Stmt
@@ -395,6 +448,7 @@ type Queries struct {
 	listAccountsByWalletAndNameStmt             *sql.Stmt
 	listAccountsByWalletScopeStmt               *sql.Stmt
 	listAddressTypesStmt                        *sql.Stmt
+	listAddressesByAccountStmt                  *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listWalletsStmt                             *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
@@ -410,7 +464,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
 		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
+		createDerivedAddressStmt:                    q.createDerivedAddressStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
+		createImportedAddressStmt:                   q.createImportedAddressStmt,
 		createKeyScopeStmt:                          q.createKeyScopeStmt,
 		createWalletStmt:                            q.createWalletStmt,
 		deleteBlockStmt:                             q.deleteBlockStmt,
@@ -421,6 +477,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAccountByWalletScopeAndNameStmt:          q.getAccountByWalletScopeAndNameStmt,
 		getAccountByWalletScopeAndNumberStmt:        q.getAccountByWalletScopeAndNumberStmt,
 		getAccountPropsByIdStmt:                     q.getAccountPropsByIdStmt,
+		getAddressByScriptPubKeyStmt:                q.getAddressByScriptPubKeyStmt,
+		getAddressSecretStmt:                        q.getAddressSecretStmt,
 		getAddressTypeByIDStmt:                      q.getAddressTypeByIDStmt,
 		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
 		getKeyScopeByIDStmt:                         q.getKeyScopeByIDStmt,
@@ -429,6 +487,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getWalletByIDStmt:                           q.getWalletByIDStmt,
 		getWalletByNameStmt:                         q.getWalletByNameStmt,
 		getWalletSecretsStmt:                        q.getWalletSecretsStmt,
+		insertAddressSecretStmt:                     q.insertAddressSecretStmt,
 		insertBlockStmt:                             q.insertBlockStmt,
 		insertKeyScopeSecretsStmt:                   q.insertKeyScopeSecretsStmt,
 		insertWalletSecretsStmt:                     q.insertWalletSecretsStmt,
@@ -438,6 +497,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,
 		listAccountsByWalletScopeStmt:               q.listAccountsByWalletScopeStmt,
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
+		listAddressesByAccountStmt:                  q.listAddressesByAccountStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listWalletsStmt:                             q.listWalletsStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
