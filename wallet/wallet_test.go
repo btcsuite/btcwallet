@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -35,6 +36,80 @@ var (
 		Time: time.Now(),
 	}
 )
+
+// TestConfigValidate ensures that the Config.validate method correctly
+// identifies missing required parameters.
+func TestConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	db, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
+
+	testCases := []struct {
+		name        string
+		config      Config
+		expectedErr string
+	}{
+		{
+			name: "valid config",
+			config: Config{
+				DB:          db,
+				Chain:       &mockChain{},
+				ChainParams: &chainParams,
+				Name:        "test-wallet",
+			},
+		},
+		{
+			name: "missing DB",
+			config: Config{
+				Chain:       &mockChain{},
+				ChainParams: &chainParams,
+				Name:        "test-wallet",
+			},
+			expectedErr: "DB",
+		},
+		{
+			name: "missing Chain",
+			config: Config{
+				DB:          db,
+				ChainParams: &chainParams,
+				Name:        "test-wallet",
+			},
+			expectedErr: "Chain",
+		},
+		{
+			name: "missing ChainParams",
+			config: Config{
+				DB:    db,
+				Chain: &mockChain{},
+				Name:  "test-wallet",
+			},
+			expectedErr: "ChainParams",
+		},
+		{
+			name: "missing Name",
+			config: Config{
+				DB:          db,
+				Chain:       &mockChain{},
+				ChainParams: &chainParams,
+			},
+			expectedErr: "Name",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tc.config.validate()
+			if tc.expectedErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.expectedErr)
+			}
+		})
+	}
+}
 
 // mockChainConn is a mock in-memory implementation of the chainConn interface
 // that will be used for the birthday block sanity check tests. The struct is

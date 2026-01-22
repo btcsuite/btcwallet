@@ -87,6 +87,10 @@ var (
 	// or not hardened).
 	ErrInvalidAccountKey = errors.New("invalid account key")
 
+	// ErrMissingParam is returned when a required parameter is missing from
+	// the configuration.
+	ErrMissingParam = errors.New("missing config parameter")
+
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
@@ -195,6 +199,27 @@ type Config struct {
 	MaxCFilterItems int
 }
 
+// validate checks the configuration for consistency and completeness.
+func (c *Config) validate() error {
+	if c.DB == nil {
+		return fmt.Errorf("%w: DB", ErrMissingParam)
+	}
+
+	if c.Chain == nil {
+		return fmt.Errorf("%w: Chain", ErrMissingParam)
+	}
+
+	if c.ChainParams == nil {
+		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
+	}
+
+	if c.Name == "" {
+		return fmt.Errorf("%w: Name", ErrMissingParam)
+	}
+
+	return nil
+}
+
 // locateBirthdayBlock returns a block that meets the given birthday timestamp
 // by a margin of +/-2 hours. This is safe to do as the timestamp is already 2
 // days in the past of the actual timestamp.
@@ -299,6 +324,8 @@ type Wallet struct {
 
 	// NtfnServer handles the delivery of wallet-related events (e.g., new
 	// transactions, block connections) to connected clients.
+	//
+	// TODO(yy): Deprecate.
 	NtfnServer *NotificationServer
 
 	// wg is a wait group used to track and wait for all long-running
