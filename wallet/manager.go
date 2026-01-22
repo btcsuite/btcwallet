@@ -1,7 +1,11 @@
 package wallet
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -81,4 +85,203 @@ type CreateWalletParams struct {
 
 	// PrivatePassphrase is the private passphrase for the wallet.
 	PrivatePassphrase []byte
+}
+
+// Manager is a high-level manager that handles the lifecycle of multiple
+// wallets. It acts as a factory for creating and loading wallets, and can
+// optionally track the active wallets.
+//
+// The Manager enables a one-to-many relationship, allowing a single application
+// to manage multiple distinct wallets (e.g., for different coins or different
+// accounts) simultaneously.
+type Manager struct {
+	sync.RWMutex
+
+	// wallets holds the active wallets keyed by their unique name.
+	wallets map[string]*Wallet
+}
+
+// NewManager creates a new Wallet Manager.
+func NewManager() *Manager {
+	return &Manager{
+		wallets: make(map[string]*Wallet),
+	}
+}
+
+// String returns a summary of the active wallets managed by the Manager.
+func (m *Manager) String() string {
+	m.RLock()
+	defer m.RUnlock()
+
+	names := make([]string, 0, len(m.wallets))
+	for name := range m.wallets {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return fmt.Sprintf("active_wallets=%v", names)
+}
+
+// Create creates a new wallet based on the provided configuration and
+// initialization parameters. It initializes the database structure and then
+// loads the wallet.
+func (m *Manager) Create(cfg Config,
+	params CreateWalletParams) (*Wallet, error) {
+
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	rootKey, err := m.deriveRootKey(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the wallet is NOT watch-only, we require a private root key to be able
+	// to sign transactions and derive child private keys.
+	if !params.WatchOnly && rootKey != nil && !rootKey.IsPrivate() {
+		return nil, fmt.Errorf("%w: private key required for "+
+			"non-watch-only wallet", ErrWalletParams)
+	}
+
+	// Create the underlying database structure.
+	err = DBCreateWallet(cfg, params, rootKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the newly created wallet.
+	w, err := m.Load(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return w, nil
+}
+
+// Load loads an existing wallet from the provided configuration. It opens the
+// database, initializes the wallet structure, and registers it with the manager
+// for tracking.
+func (m *Manager) Load(cfg Config) (*Wallet, error) {
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the wallet is already loaded.
+	m.RLock()
+	existingW, ok := m.wallets[cfg.Name]
+	m.RUnlock()
+
+	if ok {
+		return existingW, nil
+	}
+
+	addrMgr, txMgr, err := DBLoadWallet(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply the safe default for auto-lock duration if not specified.
+	if cfg.AutoLockDuration == 0 {
+		cfg.AutoLockDuration = defaultLockDuration
+	}
+
+	// Initialize the auto-lock timer in a stopped state. We perform a
+	// non-blocking drain on the channel to ensure it's empty and won't fire
+	// immediately.
+	lockTimer := time.NewTimer(0)
+	if !lockTimer.Stop() {
+		<-lockTimer.C
+	}
+
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
+
+	w := &Wallet{
+		cfg:         cfg,
+		addrStore:   addrMgr,
+		txStore:     txMgr,
+		requestChan: make(chan any),
+		lifetimeCtx: lifetimeCtx,
+		cancel:      cancel,
+		lockTimer:   lockTimer,
+	}
+
+	w.sync = newSyncer(cfg, w.addrStore, w.txStore, w)
+	w.state = newWalletState(w.sync)
+
+	// Register the wallet.
+	m.Lock()
+	m.wallets[cfg.Name] = w
+	m.Unlock()
+
+	return w, nil
+}
+
+// deriveRootKey resolves the master extended key based on the creation mode.
+func (m *Manager) deriveRootKey(cfg Config,
+	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
+
+	switch params.Mode {
+	case ModeGenSeed:
+		return m.genRootKey(cfg)
+
+	case ModeImportSeed:
+		return m.deriveFromSeed(cfg, params.Seed)
+
+	case ModeImportExtKey:
+		// Ensure an extended key was provided.
+		if params.RootKey == nil {
+			return nil, fmt.Errorf("%w: root key is required",
+				ErrWalletParams)
+		}
+
+		// Use the provided extended key (can be XPrv or XPub).
+		return params.RootKey, nil
+
+	case ModeShell:
+		// In shell mode, no root key is persisted. Accounts will be
+		// imported individually.
+		return nil, nil //nolint:nilnil
+
+	case ModeUnknown:
+		fallthrough
+
+	default:
+		return nil, fmt.Errorf("%w: unknown mode %v", ErrWalletParams,
+			params.Mode)
+	}
+}
+
+// genRootKey generates a fresh random seed and derives the master extended
+// private key from it.
+func (m *Manager) genRootKey(cfg Config) (*hdkeychain.ExtendedKey, error) {
+	// Generate a fresh random seed using the recommended length.
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate seed: %w", err)
+	}
+
+	return m.deriveFromSeed(cfg, seed)
+}
+
+// deriveFromSeed derives the master extended private key from the provided
+// seed.
+func (m *Manager) deriveFromSeed(cfg Config, seed []byte) (
+	*hdkeychain.ExtendedKey, error) {
+
+	// Ensure a seed was provided for restoration.
+	if len(seed) == 0 {
+		return nil, fmt.Errorf("%w: seed is required", ErrWalletParams)
+	}
+
+	// Derive the master extended private key from the provided seed.
+	key, err := hdkeychain.NewMaster(seed, cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive master key: %w", err)
+	}
+
+	return key, nil
 }

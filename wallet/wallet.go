@@ -52,6 +52,10 @@ const (
 	// birthday timestamp and our birthday block's timestamp when searching
 	// for a better birthday block candidate (if possible).
 	birthdayBlockDelta = 2 * time.Hour
+
+	// defaultLockDuration is the default duration for automatic wallet
+	// locking.
+	defaultLockDuration = 10 * time.Minute
 )
 
 var (
