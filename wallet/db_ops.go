@@ -9,12 +9,55 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// DBCreateWallet initializes the database structure for a new wallet.
+func DBCreateWallet(cfg Config, params CreateWalletParams,
+	rootKey *hdkeychain.ExtendedKey) error {
+
+	err := walletdb.Update(cfg.DB, func(tx walletdb.ReadWriteTx) error {
+		// Create the top-level bucket for the address manager.
+		addrMgrNs, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return fmt.Errorf("create addr mgr bucket: %w", err)
+		}
+
+		// Create the top-level bucket for the transaction manager.
+		txMgrNs, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return fmt.Errorf("create tx mgr bucket: %w", err)
+		}
+
+		// Initialize the address manager in the database. This sets up
+		// the master keys and the initial account structure.
+		err = waddrmgr.Create(
+			addrMgrNs, rootKey, params.PubPassphrase, params.PrivatePassphrase,
+			cfg.ChainParams, nil, params.Birthday,
+		)
+		if err != nil {
+			return fmt.Errorf("create addr mgr: %w", err)
+		}
+
+		// Initialize the transaction manager in the database.
+		err = wtxmgr.Create(txMgrNs)
+		if err != nil {
+			return fmt.Errorf("create tx mgr: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+
+	return nil
+}
 
 // DBGetBirthdayBlock retrieves the current birthday block from the database.
 //
