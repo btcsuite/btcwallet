@@ -27,6 +27,10 @@ var (
 	// database.
 	ErrAccountNotFound = errors.New("account not found")
 
+	// ErrAddressNotFound is returned when an address is not found in the
+	// database.
+	ErrAddressNotFound = errors.New("address not found")
+
 	// ErrKeyScopeNotFound is returned when a key scope is not found in the
 	// database.
 	ErrKeyScopeNotFound = errors.New("key scope not found")
@@ -40,6 +44,14 @@ var (
 	ErrInvalidAccountQuery = errors.New(
 		"exactly one of Name or AccountNumber must be provided",
 	)
+
+	// ErrInvalidAddressQuery is returned when GetAddressQuery has invalid
+	// field combinations.
+	ErrInvalidAddressQuery = errors.New("ScriptPubKey must be provided")
+
+	// ErrMissingScriptPubKey is returned when creating an imported
+	// address without the required script public key.
+	ErrMissingScriptPubKey = errors.New("script pubkey required")
 
 	// ErrMissingAccountPublicKey is returned when an imported account is
 	// missing the encrypted public key.
@@ -55,6 +67,11 @@ var (
 	// within a key scope because the account number counter has reached its
 	// maximum representable value.
 	ErrMaxAccountNumberReached = errors.New("max account number reached")
+
+	// ErrMaxAddressIndexReached indicates that no more addresses can be
+	// created within a branch because the address index counter has reached
+	// its maximum representable value.
+	ErrMaxAddressIndexReached = errors.New("max address index reached")
 )
 
 // WalletStore defines the methods for wallet-level operations.
