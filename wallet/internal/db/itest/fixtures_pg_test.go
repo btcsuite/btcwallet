@@ -47,6 +47,55 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlcpg.Queries,
 	require.NoError(t, err)
 }
 
+// CreateAddressWithIndex creates a derived address with a specific address
+// index. Used to test address index overflow without creating billions of
+// addresses.
+func CreateAddressWithIndex(t *testing.T, queries *sqlcpg.Queries,
+	accountID int64, branch uint32, index uint32) {
+	t.Helper()
+
+	_, err := queries.CreateDerivedAddress(
+		t.Context(), sqlcpg.CreateDerivedAddressParams{
+			AccountID:     accountID,
+			ScriptPubKey:  RandomBytes(20),
+			TypeID:        int16(db.WitnessPubKey),
+			AddressBranch: sql.NullInt64{Int64: int64(branch), Valid: true},
+			AddressIndex:  sql.NullInt64{Int64: int64(index), Valid: true},
+			PubKey:        nil,
+		},
+	)
+	require.NoError(t, err)
+}
+
+// UpdateAccountNextExternalIndex updates the account's external index counter.
+func UpdateAccountNextExternalIndex(t *testing.T, queries *sqlcpg.Queries,
+	accountID int64, nextIndex uint32) {
+	t.Helper()
+
+	err := queries.UpdateAccountNextExternalIndex(
+		t.Context(), sqlcpg.UpdateAccountNextExternalIndexParams{
+			ID:                accountID,
+			NextExternalIndex: int64(nextIndex),
+		},
+	)
+	require.NoError(t, err)
+}
+
+// UpdateAccountNextInternalIndex updates the account's internal index counter.
+func UpdateAccountNextInternalIndex(t *testing.T, queries *sqlcpg.Queries,
+	accountID int64, nextIndex uint32) {
+
+	t.Helper()
+
+	err := queries.UpdateAccountNextInternalIndex(
+		t.Context(), sqlcpg.UpdateAccountNextInternalIndexParams{
+			ID:                accountID,
+			NextInternalIndex: int64(nextIndex),
+		},
+	)
+	require.NoError(t, err)
+}
+
 // GetKeyScopeID retrieves the scope ID for a given wallet and key scope.
 func GetKeyScopeID(t *testing.T, queries *sqlcpg.Queries,
 	walletID uint32, scope db.KeyScope) int64 {
@@ -62,4 +111,43 @@ func GetKeyScopeID(t *testing.T, queries *sqlcpg.Queries,
 	require.NoError(t, err)
 
 	return row.ID
+}
+
+// GetAccountID retrieves the account ID for a given scope and account name.
+func GetAccountID(t *testing.T, queries *sqlcpg.Queries,
+	scopeID int64, accountName string) int64 {
+	t.Helper()
+
+	row, err := queries.GetAccountByScopeAndName(
+		t.Context(),
+		sqlcpg.GetAccountByScopeAndNameParams{
+			ScopeID:     scopeID,
+			AccountName: accountName,
+		},
+	)
+	require.NoError(t, err)
+
+	return row.ID
+}
+
+func getAddressID(t *testing.T, queries *sqlcpg.Queries, scriptPubKey []byte,
+	walletID uint32) int64 {
+	t.Helper()
+
+	addr, err := queries.GetAddressByScriptPubKey(
+		t.Context(), sqlcpg.GetAddressByScriptPubKeyParams{
+			ScriptPubKey: scriptPubKey,
+			WalletID:     int64(walletID),
+		},
+	)
+	require.NoError(t, err)
+
+	return addr.ID
+}
+
+func getAddressSecret(t *testing.T, queries *sqlcpg.Queries,
+	addressID int64) (sqlcpg.GetAddressSecretRow, error) {
+	t.Helper()
+
+	return queries.GetAddressSecret(t.Context(), addressID)
 }
