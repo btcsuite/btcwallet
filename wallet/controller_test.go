@@ -50,40 +50,45 @@ func TestHandleUnlockReq(t *testing.T) {
 func TestHandleUnlockReq_Errors(t *testing.T) {
 	t.Parallel()
 
-	// 1. ErrStateForbidden (Wallet Locked).
-	//
-	// Arrange: Create a test wallet. By default, it is in the 'Stopped'
-	// state.
-	w, deps := createTestWalletWithMocks(t)
+	t.Run("ErrStateForbidden", func(t *testing.T) {
+		t.Parallel()
 
-	pass := []byte("password")
-	req := newUnlockReq(UnlockRequest{Passphrase: pass})
+		// Arrange: Create a test wallet. By default, it is in the 'Stopped'
+		// state.
+		w, _ := createTestWalletWithMocks(t)
 
-	// Act: Attempt to unlock the wallet while it is stopped.
-	w.handleUnlockReq(req)
+		pass := []byte("password")
+		req := newUnlockReq(UnlockRequest{Passphrase: pass})
 
-	// Assert: Verify that the request fails with ErrStateForbidden.
-	err := <-req.resp
-	require.ErrorIs(t, err, ErrStateForbidden)
+		// Act: Attempt to unlock the wallet while it is stopped.
+		w.handleUnlockReq(req)
 
-	// 2. DBUnlock failure.
-	//
-	// Arrange: Transition the wallet to 'Started' so the state check
-	// passes, but setup the address manager to return an error.
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+		// Assert: Verify that the request fails with ErrStateForbidden.
+		err := <-req.resp
+		require.ErrorIs(t, err, ErrStateForbidden)
+	})
 
-	req = newUnlockReq(UnlockRequest{Passphrase: pass})
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(
-		errDBMock,
-	).Once()
+	t.Run("DBUnlock_Failure", func(t *testing.T) {
+		t.Parallel()
 
-	// Act: Attempt to unlock the wallet again.
-	w.handleUnlockReq(req)
+		// Arrange: Create a test wallet and transition to 'Started'.
+		w, deps := createTestWalletWithMocks(t)
+		require.NoError(t, w.state.toStarting())
+		require.NoError(t, w.state.toStarted())
 
-	// Assert: Verify that the database error is propagated.
-	err = <-req.resp
-	require.ErrorContains(t, err, "db error")
+		pass := []byte("password")
+		req := newUnlockReq(UnlockRequest{Passphrase: pass})
+		deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+			errDBMock,
+		).Once()
+
+		// Act: Attempt to unlock the wallet.
+		w.handleUnlockReq(req)
+
+		// Assert: Verify that the database error is propagated.
+		err := <-req.resp
+		require.ErrorContains(t, err, "db error")
+	})
 }
 
 // TestHandleLockReq verifies that the handleLockReq method correctly processes
