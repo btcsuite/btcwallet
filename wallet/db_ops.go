@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -14,7 +15,18 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+)
+
+var (
+	// ErrMissingAddressManager is returned when the address manager namespace
+	// is missing from the database.
+	ErrMissingAddressManager = errors.New("missing address manager namespace")
+
+	// ErrMissingTxManager is returned when the transaction manager namespace is
+	// missing from the database.
+	ErrMissingTxManager = errors.New("missing transaction manager namespace")
 )
 
 // DBCreateWallet initializes the database structure for a new wallet.
@@ -57,6 +69,58 @@ func DBCreateWallet(cfg Config, params CreateWalletParams,
 	}
 
 	return nil
+}
+
+// DBLoadWallet initializes the database and returns the address and transaction
+// managers.
+func DBLoadWallet(cfg Config) (*waddrmgr.Manager, *wtxmgr.Store, error) {
+	var (
+		addrMgr *waddrmgr.Manager
+		txMgr   *wtxmgr.Store
+	)
+
+	// Before attempting to open the wallet, we'll check if there are any
+	// database upgrades for us to proceed. We'll also create our references
+	// to the address and transaction managers, as they are backed by the
+	// database.
+	err := walletdb.Update(cfg.DB, func(tx walletdb.ReadWriteTx) error {
+		addrMgrBucket := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if addrMgrBucket == nil {
+			return ErrMissingAddressManager
+		}
+
+		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txMgrBucket == nil {
+			return ErrMissingTxManager
+		}
+
+		addrMgrUpgrader := waddrmgr.NewMigrationManager(addrMgrBucket)
+		txMgrUpgrader := wtxmgr.NewMigrationManager(txMgrBucket)
+
+		err := migration.Upgrade(txMgrUpgrader, addrMgrUpgrader)
+		if err != nil {
+			return fmt.Errorf("failed to upgrade database: %w", err)
+		}
+
+		addrMgr, err = waddrmgr.Open(
+			addrMgrBucket, cfg.PubPassphrase, cfg.ChainParams,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to open address manager: %w", err)
+		}
+
+		txMgr, err = wtxmgr.Open(txMgrBucket, cfg.ChainParams)
+		if err != nil {
+			return fmt.Errorf("failed to open transaction manager: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load wallet: %w", err)
+	}
+
+	return addrMgr, txMgr, nil
 }
 
 // DBGetBirthdayBlock retrieves the current birthday block from the database.

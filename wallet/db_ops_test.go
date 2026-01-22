@@ -61,6 +61,35 @@ func TestDBCreateWallet(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestDBLoadWallet verifies that the wallet database can be successfully loaded
+// and the address and transaction managers retrieved.
+func TestDBLoadWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a test wallet and initialize it.
+	w, _ := createTestWalletWithMocks(t)
+
+	pubPass := []byte("public")
+	w.cfg.PubPassphrase = pubPass
+
+	params := CreateWalletParams{
+		PubPassphrase:     pubPass,
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	err := DBCreateWallet(w.cfg, params, nil)
+	require.NoError(t, err)
+
+	// Act: Load the wallet database.
+	addrMgr, txMgr, err := DBLoadWallet(w.cfg)
+
+	// Assert: Verify that both managers were loaded successfully.
+	require.NoError(t, err)
+	require.NotNil(t, addrMgr)
+	require.NotNil(t, txMgr)
+}
+
 // TestDBBirthdayBlock verifies that the wallet can successfully persist and
 // retrieve its birthday block information.
 func TestDBBirthdayBlock(t *testing.T) {
