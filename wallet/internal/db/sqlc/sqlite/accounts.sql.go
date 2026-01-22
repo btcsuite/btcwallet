@@ -172,6 +172,7 @@ func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedA
 
 const GetAccountByScopeAndName = `-- name: GetAccountByScopeAndName :one
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -190,6 +191,7 @@ type GetAccountByScopeAndNameParams struct {
 }
 
 type GetAccountByScopeAndNameRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -204,6 +206,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 	row := q.queryRow(ctx, q.getAccountByScopeAndNameStmt, GetAccountByScopeAndName, arg.ScopeID, arg.AccountName)
 	var i GetAccountByScopeAndNameRow
 	err := row.Scan(
+		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.OriginID,
@@ -217,6 +220,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 
 const GetAccountByScopeAndNumber = `-- name: GetAccountByScopeAndNumber :one
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -235,6 +239,7 @@ type GetAccountByScopeAndNumberParams struct {
 }
 
 type GetAccountByScopeAndNumberRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -249,6 +254,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 	row := q.queryRow(ctx, q.getAccountByScopeAndNumberStmt, GetAccountByScopeAndNumber, arg.ScopeID, arg.AccountNumber)
 	var i GetAccountByScopeAndNumberRow
 	err := row.Scan(
+		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.OriginID,
@@ -262,6 +268,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 
 const GetAccountByWalletScopeAndName = `-- name: GetAccountByWalletScopeAndName :one
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -286,6 +293,7 @@ type GetAccountByWalletScopeAndNameParams struct {
 }
 
 type GetAccountByWalletScopeAndNameRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -305,6 +313,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 	)
 	var i GetAccountByWalletScopeAndNameRow
 	err := row.Scan(
+		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.OriginID,
@@ -318,6 +327,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 
 const GetAccountByWalletScopeAndNumber = `-- name: GetAccountByWalletScopeAndNumber :one
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -342,6 +352,7 @@ type GetAccountByWalletScopeAndNumberParams struct {
 }
 
 type GetAccountByWalletScopeAndNumberRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -361,6 +372,7 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 	)
 	var i GetAccountByWalletScopeAndNumberRow
 	err := row.Scan(
+		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.OriginID,
@@ -426,6 +438,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 
 const ListAccountsByScope = `-- name: ListAccountsByScope :many
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -440,6 +453,7 @@ ORDER BY a.account_number IS NULL, a.account_number
 `
 
 type ListAccountsByScopeRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -461,6 +475,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 	for rows.Next() {
 		var i ListAccountsByScopeRow
 		if err := rows.Scan(
+			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.OriginID,
@@ -484,6 +499,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 
 const ListAccountsByWallet = `-- name: ListAccountsByWallet :many
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -498,6 +514,7 @@ ORDER BY a.account_number IS NULL, a.account_number
 `
 
 type ListAccountsByWalletRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -519,6 +536,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 	for rows.Next() {
 		var i ListAccountsByWalletRow
 		if err := rows.Scan(
+			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.OriginID,
@@ -542,6 +560,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 
 const ListAccountsByWalletAndName = `-- name: ListAccountsByWalletAndName :many
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -561,6 +580,7 @@ type ListAccountsByWalletAndNameParams struct {
 }
 
 type ListAccountsByWalletAndNameRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -582,6 +602,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 	for rows.Next() {
 		var i ListAccountsByWalletAndNameRow
 		if err := rows.Scan(
+			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.OriginID,
@@ -605,6 +626,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 
 const ListAccountsByWalletScope = `-- name: ListAccountsByWalletScope :many
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -628,6 +650,7 @@ type ListAccountsByWalletScopeParams struct {
 }
 
 type ListAccountsByWalletScopeRow struct {
+	ID               int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int64
@@ -649,6 +672,7 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 	for rows.Next() {
 		var i ListAccountsByWalletScopeRow
 		if err := rows.Scan(
+			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.OriginID,

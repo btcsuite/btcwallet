@@ -49,6 +49,7 @@ INSERT INTO account_secrets (
 -- name: GetAccountByScopeAndName :one
 -- Returns a single account by scope id and account name.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -63,6 +64,7 @@ WHERE a.scope_id = ? AND a.account_name = ?;
 -- name: GetAccountByScopeAndNumber :one
 -- Returns a single account by scope id and account number.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -77,6 +79,7 @@ WHERE a.scope_id = ? AND a.account_number = ?;
 -- name: GetAccountByWalletScopeAndName :one
 -- Returns a single account by wallet id, scope tuple, and account name.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -95,6 +98,7 @@ WHERE
 -- name: GetAccountByWalletScopeAndNumber :one
 -- Returns a single account by wallet id, scope tuple, and account number.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -132,6 +136,7 @@ WHERE a.id = ?;
 -- Lists all accounts in a scope, ordered by account number. Imported accounts
 -- (with NULL account_number) appear last.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -148,6 +153,7 @@ ORDER BY a.account_number IS NULL, a.account_number;
 -- Lists all accounts for a wallet and scope tuple, ordered by account number.
 -- Imported accounts (with NULL account_number) appear last.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -167,6 +173,7 @@ ORDER BY a.account_number IS NULL, a.account_number;
 -- Lists all accounts for a wallet filtered by account name, ordered by account
 -- number. Imported accounts (with NULL account_number) appear last.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
@@ -183,6 +190,7 @@ ORDER BY a.account_number IS NULL, a.account_number;
 -- Lists all accounts for a wallet, ordered by account number. Imported
 -- accounts (with NULL account_number) appear last.
 SELECT
+    a.id,
     a.account_number,
     a.account_name,
     a.origin_id,
