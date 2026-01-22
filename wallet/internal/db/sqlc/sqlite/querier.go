@@ -18,10 +18,15 @@ type Querier interface {
 	// Test-only: Creates a derived account with a specific account number.
 	// Used for testing account number overflow without creating billions of accounts.
 	CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error)
+	// Creates a derived address with the given index and derived data.
+	// The index is allocated separately via GetAndIncrementNextAddressIndex.
+	CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error)
 	// Creates a new imported account under the given scope with NULL account
 	// number. Imported accounts don't follow BIP44 derivation, so they don't need
 	// a sequential account number.
 	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
+	// Creates an imported address (no derivation path, has script/pubkey).
+	CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error)
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
@@ -40,6 +45,13 @@ type Querier interface {
 	GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error)
 	// Returns full account properties by account id.
 	GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error)
+	// Retrieves an address by its script pubkey and account wallet.
+	GetAddressByScriptPubKey(ctx context.Context, arg GetAddressByScriptPubKeyParams) (GetAddressByScriptPubKeyRow, error)
+	// Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
+	// - Address exists with secret: returns full row
+	// - Address exists without secret (watch-only/derived): returns row with NULL secret fields
+	// - Address does not exist: returns no rows (sql.ErrNoRows)
+	GetAddressSecret(ctx context.Context, id int64) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
@@ -52,6 +64,9 @@ type Querier interface {
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
+	// Inserts address secret information (private key, script) for imported addresses.
+	// Not used for derived addresses (their keys are derived from account key).
+	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	// Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
 	// watch-only scopes.
@@ -72,6 +87,10 @@ type Querier interface {
 	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
+	// Lists all addresses for a given account identified by wallet_id, key scope
+	// (purpose/coin_type), and account name. Returns all address columns for
+	// filtering and processing by the application.
+	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
 	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
