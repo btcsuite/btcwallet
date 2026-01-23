@@ -151,6 +151,11 @@ type TxDetail struct {
 func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
 	*TxDetail, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	txDetails, err := w.fetchTxDetails(&txHash)
 	if err != nil {
 		return nil, err
@@ -183,6 +188,11 @@ func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
 func (w *Wallet) ListTxns(_ context.Context, startHeight,
 	endHeight int32) ([]*TxDetail, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	bestBlock := w.SyncedTo()
 	currentHeight := bestBlock.Height
 
@@ -191,7 +201,7 @@ func (w *Wallet) ListTxns(_ context.Context, startHeight,
 	// time we hold the database lock.
 	var records []wtxmgr.TxDetails
 
-	err := walletdb.View(w.cfg.DB, func(dbtx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 		err := w.txStore.RangeTransactions(

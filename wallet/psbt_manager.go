@@ -371,6 +371,11 @@ type PsbtManager interface {
 func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	skipUnknown bool) (*psbt.Packet, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	// We'll iterate through all the inputs of the PSBT and decorate them
 	// if they are owned by the wallet. The `skipUnknown` parameter
 	// determines whether an error is returned if an input is not owned
@@ -558,8 +563,13 @@ func findCredit(txDetail *wtxmgr.TxDetails, outputIndex uint32) bool {
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	*psbt.Packet, int32, error) {
 
+	err := w.state.validateSynced()
+	if err != nil {
+		return nil, 0, err
+	}
+
 	// Validate the funding intent before proceeding.
-	err := w.validateFundIntent(intent)
+	err = w.validateFundIntent(intent)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -838,6 +848,11 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	*SignPsbtResult, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
 	if params == nil {
 		return nil, ErrNilArguments
 	}
@@ -855,7 +870,7 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// has at least a WitnessUtxo or NonWitnessUtxo, which is crucial for
 	// signature generation. If this check fails, it indicates a malformed
 	// or incomplete PSBT that cannot be signed.
-	err := psbt.InputsReadyToSign(packet)
+	err = psbt.InputsReadyToSign(packet)
 	if err != nil {
 		return nil, fmt.Errorf("psbt inputs not ready: %w", err)
 	}
@@ -1561,8 +1576,13 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 //     constructs the final witnesses and strips the PSBT metadata, leaving a
 //     ready-to-broadcast transaction.
 func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
+	err := w.state.canSign()
+	if err != nil {
+		return err
+	}
+
 	// Check that the PSBT is structurally ready to be signed/finalized.
-	err := psbt.InputsReadyToSign(packet)
+	err = psbt.InputsReadyToSign(packet)
 	if err != nil {
 		return fmt.Errorf("psbt inputs not ready: %w", err)
 	}
@@ -1703,6 +1723,11 @@ func addScriptToPInput(pInput *psbt.PInput,
 //     includes deduplicating signatures and aggregating scripts/derivations.
 func (w *Wallet) CombinePsbt(_ context.Context, psbts ...*psbt.Packet) (
 	*psbt.Packet, error) {
+
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. Validation Pass: Ensure compatibility of all packets and prepare
 	//    a fresh result packet.
