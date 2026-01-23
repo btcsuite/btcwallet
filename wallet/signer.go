@@ -461,6 +461,11 @@ var _ SpendDetails = (*TaprootSpendDetails)(nil)
 func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
 	*btcec.PublicKey, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
 	if err != nil {
 		return nil, err
@@ -541,6 +546,11 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return [32]byte{}, err
+	}
+
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
 	if err != nil {
 		return [32]byte{}, err
@@ -592,7 +602,12 @@ func validateSignDigestIntent(intent *SignDigestIntent) error {
 func (w *Wallet) SignDigest(_ context.Context, path BIP32Path,
 	intent *SignDigestIntent) (Signature, error) {
 
-	err := validateSignDigestIntent(intent)
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateSignDigestIntent(intent)
 	if err != nil {
 		return nil, err
 	}
@@ -667,6 +682,11 @@ func signDigestECDSA(privKey *btcec.PrivateKey,
 // spend a UTXO.
 func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	params *UnlockingScriptParams) (*UnlockingScript, error) {
+
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
 
 	// First, we'll fetch the managed address that corresponds to the
 	// output being spent. This will be used to look up the private key
@@ -775,6 +795,11 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
 	RawSignature, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
 	// Get the managed address for the specified derivation path. This will
 	// be used to retrieve the private key.
 	managedAddr, err := w.fetchManagedPubKeyAddress(params.Path)
@@ -815,6 +840,11 @@ func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
 func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
 	*btcec.PrivateKey, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
 	if err != nil {
 		return nil, err
@@ -834,6 +864,11 @@ func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
 func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
 	*btcec.PrivateKey, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
 	return w.PrivKeyForAddress(a)
 }
 
@@ -842,9 +877,14 @@ func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
 func (w *Wallet) PrivKeyForAddress(a address.Address) (
 	*btcec.PrivateKey, error) {
 
+	err := w.state.canSign()
+	if err != nil {
+		return nil, err
+	}
+
 	var privKey *btcec.PrivateKey
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		addr, err := w.addrStore.Address(addrmgrNs, a)
@@ -864,7 +904,6 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to view database: %w", err)
 	}

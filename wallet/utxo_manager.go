@@ -161,6 +161,11 @@ type UtxoManager interface {
 func (w *Wallet) ListUnspent(_ context.Context,
 	query UtxoQuery) ([]*Utxo, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	log.Debugf("ListUnspent using query: %v", query)
 
 	syncBlock := w.addrStore.SyncedTo()
@@ -168,7 +173,7 @@ func (w *Wallet) ListUnspent(_ context.Context,
 
 	var utxos []*Utxo
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -307,6 +312,11 @@ func (w *Wallet) ListUnspent(_ context.Context,
 func (w *Wallet) GetUtxo(_ context.Context,
 	prevOut wire.OutPoint) (*Utxo, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	// Calculate the current confirmation status based on the wallet's
 	// synced block height.
 	syncBlock := w.addrStore.SyncedTo()
@@ -314,7 +324,7 @@ func (w *Wallet) GetUtxo(_ context.Context,
 
 	var utxo *Utxo
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -408,10 +418,12 @@ func (w *Wallet) GetUtxo(_ context.Context,
 func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
-	var (
-		expiration time.Time
-		err        error
-	)
+	err := w.state.validateStarted()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var expiration time.Time
 
 	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
@@ -464,6 +476,11 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 func (w *Wallet) ReleaseOutput(_ context.Context, id wtxmgr.LockID,
 	op wire.OutPoint) error {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
 	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(txmgrNs, id, op)
@@ -505,10 +522,12 @@ func (w *Wallet) ReleaseOutput(_ context.Context, id wtxmgr.LockID,
 func (w *Wallet) ListLeasedOutputs(
 	_ context.Context) ([]*wtxmgr.LockedOutput, error) {
 
-	var (
-		leasedOutputs []*wtxmgr.LockedOutput
-		err           error
-	)
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	var leasedOutputs []*wtxmgr.LockedOutput
 
 	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
