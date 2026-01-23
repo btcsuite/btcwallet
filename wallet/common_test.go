@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -47,6 +48,12 @@ var (
 	errHashes    = errors.New("hashes fail")
 	errHeaders   = errors.New("headers fail")
 	errHeader    = errors.New("header fail")
+)
+
+var (
+	// chainParams are the chain parameters used throughout the wallet
+	// tests.
+	chainParams = chaincfg.RegressionNetParams
 )
 
 // setupTestDB creates a temporary database for testing.
@@ -230,4 +237,10 @@ func createUnlockedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	w.state.toUnlocked()
 
 	return w, deps
+}
+
+func init() {
+	// Use fast scrypt options for tests to avoid CPU exhaustion and
+	// timeouts, especially when running with -race.
+	waddrmgr.DefaultScryptOptions = waddrmgr.FastScryptOptions
 }
