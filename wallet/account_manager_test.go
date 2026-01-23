@@ -5,6 +5,8 @@
 package wallet
 
 import (
+	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -18,6 +20,57 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func hardenedKey(key uint32) uint32 {
+	return key + hdkeychain.HardenedKeyStart
+}
+
+func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
+	scope waddrmgr.KeyScope, paths ...uint32) *hdkeychain.ExtendedKey {
+
+	t.Helper()
+
+	path := []uint32{hardenedKey(scope.Purpose), hardenedKey(scope.Coin)}
+	path = append(path, paths...)
+
+	var (
+		currentKey = root
+		err        error
+	)
+	for _, pathPart := range path {
+		currentKey, err = currentKey.Derive(pathPart)
+		require.NoError(t, err)
+	}
+
+	// The Neuter() method checks the version and doesn't know any
+	// non-standard methods. We need to convert them to standard, neuter,
+	// then convert them back with the target extended public key version.
+	pubVersionBytes := make([]byte, 4)
+	copy(pubVersionBytes, chainParams.HDPublicKeyID[:])
+
+	switch {
+	case strings.HasPrefix(root.String(), "uprv"):
+		binary.BigEndian.PutUint32(pubVersionBytes, uint32(
+			waddrmgr.HDVersionTestNetBIP0049,
+		))
+
+	case strings.HasPrefix(root.String(), "vprv"):
+		binary.BigEndian.PutUint32(pubVersionBytes, uint32(
+			waddrmgr.HDVersionTestNetBIP0084,
+		))
+	}
+
+	currentKey, err = currentKey.CloneWithVersion(
+		chainParams.HDPrivateKeyID[:],
+	)
+	require.NoError(t, err)
+	currentKey, err = currentKey.Neuter()
+	require.NoError(t, err)
+	currentKey, err = currentKey.CloneWithVersion(pubVersionBytes)
+	require.NoError(t, err)
+
+	return currentKey
+}
 
 const (
 	// testAccountName is a constant for the account name used in the tests.
