@@ -23,7 +23,7 @@ func TestListUnspent(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Define account names.
 	account1 := defaultAccountName
@@ -44,11 +44,8 @@ func TestListUnspent(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to be 100.
-	currentHeight := int32(100)
-	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
-		Height: currentHeight,
-	})
+	// Set the current block height to match the default mock (1).
+	currentHeight := int32(1)
 
 	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
 		false, account1, waddrmgr.WitnessPubKey,
@@ -199,7 +196,7 @@ func TestGetUtxo(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Define account names.
 	account1 := "default"
@@ -212,11 +209,8 @@ func TestGetUtxo(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to be 100.
-	currentHeight := int32(100)
-	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
-		Height: currentHeight,
-	})
+	// Set the current block height to match the default mock (1).
+	currentHeight := int32(1)
 
 	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
 		false, account1, waddrmgr.WitnessPubKey,
@@ -269,13 +263,7 @@ func TestGetUtxo_Err(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
-
-	// Set the current block height to be 100.
-	currentHeight := int32(100)
-	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
-		Height: currentHeight,
-	})
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Test the case where the UTXO is not found.
 	utxoNotFound := wire.OutPoint{
@@ -295,7 +283,7 @@ func TestLeaseOutput(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Create a UTXO.
 	utxo := wire.OutPoint{
@@ -323,7 +311,7 @@ func TestReleaseOutput(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Create a UTXO.
 	utxo := wire.OutPoint{
@@ -347,7 +335,7 @@ func TestListLeasedOutputs(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Create a leased output.
 	leasedOutput := &wtxmgr.LockedOutput{
