@@ -956,7 +956,7 @@ func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
 		}
 
 		// Locked unspent outputs are skipped.
-		if w.LockedOutpoint(output.OutPoint) {
+		if output.Locked {
 			continue
 		}
 

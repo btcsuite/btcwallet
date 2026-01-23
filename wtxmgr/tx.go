@@ -187,6 +187,9 @@ type Credit struct {
 	PkScript     []byte
 	Received     time.Time
 	FromCoinBase bool
+
+	// Locked indicates whether the output is locked by the wallet.
+	Locked bool
 }
 
 // LockID represents a unique context-specific ID assigned to an output lock.
@@ -932,12 +935,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -969,6 +973,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
@@ -1018,12 +1023,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -1061,6 +1067,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
