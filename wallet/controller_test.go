@@ -1646,3 +1646,130 @@ func TestControllerLock_StateError(t *testing.T) {
 	// Assert: Verify error.
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
+
+// TestWaitForBackoff_StableRun verifies that the backoff is reset to the
+// initial value if the syncer has been running for a stable amount of time.
+func TestWaitForBackoff_StableRun(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a wallet with a canceled context to avoid waiting.
+	w := &Wallet{
+		lifetimeCtx: context.Background(),
+	}
+
+	// Mock a start time that exceeds the stable run time.
+	startTime := time.Now().Add(-stableRunTime - time.Minute)
+	currentBackoff := maxBackoff
+
+	// Mock the timer function to fire immediately.
+	timerFn := func(d time.Duration) <-chan time.Time {
+		// Verify that the backoff was reset to initial before waiting.
+		require.Equal(t, initialBackoff, d)
+
+		c := make(chan time.Time, 1)
+		c <- time.Now()
+
+		return c
+	}
+
+	// Act: Wait for backoff.
+	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+
+	// Assert: Verify that the operation continued and backoff doubled.
+	require.True(t, ok)
+	require.Equal(t, initialBackoff*2, nextBackoff)
+}
+
+// TestWaitForBackoff_UnstableRun verifies that the backoff duration doubles
+// when the syncer fails quickly (unstable run).
+func TestWaitForBackoff_UnstableRun(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a wallet.
+	w := &Wallet{
+		lifetimeCtx: context.Background(),
+	}
+
+	// Mock a start time that is recent (unstable).
+	startTime := time.Now()
+	currentBackoff := time.Second
+
+	// Mock the timer function.
+	timerFn := func(d time.Duration) <-chan time.Time {
+		// Verify that the backoff was NOT reset.
+		require.Equal(t, currentBackoff, d)
+
+		c := make(chan time.Time, 1)
+		c <- time.Now()
+
+		return c
+	}
+
+	// Act: Wait for backoff.
+	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+
+	// Assert: Verify that the operation continued and backoff doubled.
+	require.True(t, ok)
+	require.Equal(t, currentBackoff*2, nextBackoff)
+}
+
+// TestWaitForBackoff_MaxBackoffCap verifies that the backoff duration is
+// capped at maxBackoff.
+func TestWaitForBackoff_MaxBackoffCap(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a wallet.
+	w := &Wallet{
+		lifetimeCtx: context.Background(),
+	}
+
+	startTime := time.Now()
+	// Current backoff is already high enough that doubling it would exceed
+	// maxBackoff.
+	currentBackoff := maxBackoff
+
+	timerFn := func(d time.Duration) <-chan time.Time {
+		require.Equal(t, currentBackoff, d)
+
+		c := make(chan time.Time, 1)
+		c <- time.Now()
+
+		return c
+	}
+
+	// Act: Wait for backoff.
+	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+
+	// Assert: Verify that the backoff is capped.
+	require.True(t, ok)
+	require.Equal(t, maxBackoff, nextBackoff)
+}
+
+// TestWaitForBackoff_Shutdown verifies that waitForBackoff returns early if
+// the wallet is shutting down.
+func TestWaitForBackoff_Shutdown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a wallet with a canceled context.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	w := &Wallet{
+		lifetimeCtx: ctx,
+	}
+
+	startTime := time.Now()
+	currentBackoff := time.Second
+
+	// Mock a timer that never fires, ensuring we select on the context.
+	timerFn := func(d time.Duration) <-chan time.Time {
+		return make(chan time.Time)
+	}
+
+	// Act: Wait for backoff.
+	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
+
+	// Assert: Verify that the operation was aborted.
+	require.False(t, ok)
+	require.Equal(t, time.Duration(0), nextBackoff)
+}
