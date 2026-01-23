@@ -2117,6 +2117,11 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	mockChain := &mockChain{}
 	mockAddrStore := &mockAddrStore{}
 	mockTxStore := &mockTxStore{}
+
+	defer mockChain.AssertExpectations(t)
+	defer mockAddrStore.AssertExpectations(t)
+	defer mockTxStore.AssertExpectations(t)
+
 	s := newSyncer(Config{
 		DB:              db,
 		Chain:           mockChain,
@@ -2131,27 +2136,28 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	}
 
 	mockTxStore.On("OutputsToWatch", mock.Anything).Return(
-		[]wtxmgr.Credit(nil), nil).Maybe()
+		[]wtxmgr.Credit{{PkScript: []byte{0x01}}}, nil).Once()
 
 	mgr := &mockAccountStore{}
 	mockAddrStore.On("FetchScopedKeyManager", mock.Anything).Return(mgr,
-		nil).Times(6)
+		nil).Times(3)
+	mgr.On("AccountProperties", mock.Anything, mock.Anything).Return(
+		&waddrmgr.AccountProperties{}, nil).Once()
 	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
 		mock.AnythingOfType("func(address.Address) error")).Return(
-		nil).Times(2)
+		nil).Once()
 	// SyncedTo is not called in the targeted scan path.
 	mockAddrStore.On("SyncedTo").Return(
 		waddrmgr.BlockStamp{Height: 100}).Maybe()
 
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
-	mockChain.On("GetBlockHashes", int64(99), int64(100)).Return(
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
 		[]chainhash.Hash{}, nil).Once()
+	mockChain.On("GetCFilters", []chainhash.Hash{},
+		wire.GCSFilterRegular).Return([]*gcs.Filter{}, nil).Once()
 	mockChain.On("GetBlockHeaders", []chainhash.Hash{}).Return(
 		[]*wire.BlockHeader{}, nil).Once()
-
-	req.targets = nil
-	req.startBlock.Height = 99
 
 	// Act: Perform the scan.
 	err := s.scanWithTargets(t.Context(), req)
