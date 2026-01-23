@@ -113,6 +113,11 @@ var _ AccountManager = (*Wallet)(nil)
 func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 	name string) (*waddrmgr.AccountProperties, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
@@ -180,13 +185,18 @@ type AccountsResult struct {
 // UTXOs and A is the number of accounts in the wallet. A potential future
 // improvement is to make the balance calculation optional.
 func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	// Get all active key scope managers to iterate through all available
 	// scopes.
 	scopes := w.addrStore.ActiveScopedKeyManagers()
 
 	var accounts []AccountResult
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// First, build a map of balances for all accounts that own at
@@ -249,6 +259,11 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 func (w *Wallet) ListAccountsByScope(_ context.Context,
 	scope waddrmgr.KeyScope) (*AccountsResult, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	// First, we'll fetch the scoped key manager for the given scope. This
 	// manager will be used to list the accounts.
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
@@ -305,11 +320,16 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 func (w *Wallet) ListAccountsByName(_ context.Context,
 	name string) (*AccountsResult, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	scopes := w.addrStore.ActiveScopedKeyManagers()
 
 	var accounts []AccountResult
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		// First, calculate the balances for any accounts that match the
 		// given name. This is efficient as it iterates over the UTXO
 		// set, not accounts.
@@ -385,6 +405,11 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 	name string) (*AccountResult, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
@@ -446,6 +471,11 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 	oldName, newName string) error {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
 	manager, err := w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return err
@@ -485,9 +515,14 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 func (w *Wallet) Balance(_ context.Context, conf uint32,
 	scope waddrmgr.KeyScope, name string) (btcutil.Amount, error) {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return 0, err
+	}
+
 	var balance btcutil.Amount
 
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -571,10 +606,12 @@ func (w *Wallet) ImportAccount(_ context.Context,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
 	dryRun bool) (*waddrmgr.AccountProperties, error) {
 
-	var (
-		props *waddrmgr.AccountProperties
-		err   error
-	)
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	var props *waddrmgr.AccountProperties
 
 	if dryRun {
 		props, _, _, err = w.ImportAccountDryRun(
