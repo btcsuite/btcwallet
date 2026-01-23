@@ -1253,8 +1253,12 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	log.Infof("Starting targeted rescan from height %d to %d for %d "+
 		"accounts", startHeight, bestHeight, len(req.targets))
 
-	// Loop until caught up.
-	for startHeight < bestHeight {
+	// Loop until caught up. We use an inclusive condition (<=) because
+	// startHeight represents the first block of the missing range and
+	// bestHeight is the last block (the chain tip). If we used a strict
+	// inequality (<), the tip would be skipped when the wallet is only one
+	// block behind.
+	for startHeight <= bestHeight {
 		// Cap end height.
 		endHeight := min(
 			startHeight+int32(recoveryBatchSize)-1, bestHeight,
