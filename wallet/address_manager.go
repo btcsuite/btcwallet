@@ -277,22 +277,11 @@ func (w *Wallet) keyScopeFromAddrType(
 
 // newAddress returns the next external chained address for a wallet. It
 // wraps the database transaction and the call to the scoped key manager's
-// NewAddress method. A mutex is used to protect the in-memory state of the
-// address manager from concurrent access during address creation.
+// NewAddress method. The underlying address manager handles its own
+// synchronization to ensure that in-memory state remains consistent with the
+// database, preventing race conditions during address creation.
 func (w *Wallet) newAddress(manager waddrmgr.AccountStore,
 	accountName string, change bool) (address.Address, error) {
-
-	// The address manager uses OnCommit on the walletdb tx to update the
-	// in-memory state of the account state. But because the commit happens
-	// _after_ the account manager internal lock has been released, there
-	// is a chance for the address index to be accessed concurrently, even
-	// though the closure in OnCommit re-acquires the lock. To avoid this
-	// issue, we surround the whole address creation process with a lock.
-	//
-	// TODO(yy): remove the lock - we should separate the db action and
-	// memory cache.
-	w.newAddrMtx.Lock()
-	defer w.newAddrMtx.Unlock()
 
 	var (
 		addr address.Address
