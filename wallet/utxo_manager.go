@@ -168,7 +168,7 @@ func (w *Wallet) ListUnspent(_ context.Context,
 
 	var utxos []*Utxo
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -198,7 +198,7 @@ func (w *Wallet) ListUnspent(_ context.Context,
 			// script.
 			// For multi-address scripts, the first address is used.
 			addr := extractAddrFromPKScript(
-				output.PkScript, w.chainParams,
+				output.PkScript, w.cfg.ChainParams,
 			)
 			if addr == nil {
 				continue
@@ -222,7 +222,7 @@ func (w *Wallet) ListUnspent(_ context.Context,
 			// A UTXO is also unspendable if it is an immature
 			// coinbase output.
 			if output.FromCoinBase {
-				maturity := w.chainParams.CoinbaseMaturity
+				maturity := w.cfg.ChainParams.CoinbaseMaturity
 				if confs < int32(maturity) {
 					spendable = false
 				}
@@ -314,7 +314,7 @@ func (w *Wallet) GetUtxo(_ context.Context,
 
 	var utxo *Utxo
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -334,7 +334,7 @@ func (w *Wallet) GetUtxo(_ context.Context,
 
 		// Extract the address from the UTXO's public key script.
 		// For multi-address scripts, the first address is used.
-		addr := extractAddrFromPKScript(output.PkScript, w.chainParams)
+		addr := extractAddrFromPKScript(output.PkScript, w.cfg.ChainParams)
 		if addr == nil {
 			return wtxmgr.ErrUtxoNotFound
 		}
@@ -413,7 +413,7 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 		err        error
 	)
 
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		expiration, err = w.txStore.LockOutput(
@@ -464,7 +464,7 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 func (w *Wallet) ReleaseOutput(_ context.Context, id wtxmgr.LockID,
 	op wire.OutPoint) error {
 
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		return w.txStore.UnlockOutput(txmgrNs, id, op)
 	})
@@ -510,7 +510,7 @@ func (w *Wallet) ListLeasedOutputs(
 		err           error
 	)
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 		leasedOutputs, err = w.txStore.ListLockedOutputs(txmgrNs)
 

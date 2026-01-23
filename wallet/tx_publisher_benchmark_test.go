@@ -120,7 +120,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 					numTxOutputs: txIOGrowth[i],
 				},
 			)
-			bw.chainClient = chainBackend
+			bw.cfg.Chain = chainBackend
 
 			var (
 				beforeResult map[chainhash.Hash]*wire.MsgTx
@@ -336,7 +336,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 					numTxOutputs: txIOGrowth[i],
 				},
 			)
-			bw.chainClient = chainBackend
+			bw.cfg.Chain = chainBackend
 
 			var (
 				beforeResult map[chainhash.Hash]*wire.MsgTx
