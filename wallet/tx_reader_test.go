@@ -13,7 +13,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -60,8 +59,8 @@ func TestBuildTxDetail(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// Arrange: Create a test wallet with mocks.
-			w, _ := testWalletWithMocks(t)
-			currentHeight := int32(100)
+			w, _ := createStartedWalletWithMocks(t)
+			currentHeight := int32(1)
 
 			// Act: Build the TxDetail.
 			result := w.buildTxDetail(tc.details, currentHeight)
@@ -100,12 +99,9 @@ func TestGetTxSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// Arrange: Create a test wallet with mocks.
-			w, mocks := testWalletWithMocks(t)
-			mocks.addrStore.On("SyncedTo").Return(
-				waddrmgr.BlockStamp{
-					Height: 100,
-				},
-			)
+			w, mocks := createStartedWalletWithMocks(t)
+			// SyncedTo is mocked in createStartedWalletWithMocks (height 1).
+
 			mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
 				Return(tc.mockDetails, nil).Once()
 
@@ -126,7 +122,7 @@ func TestGetTxNotFound(t *testing.T) {
 
 	// Arrange: Create a test wallet with mocks and mock the TxDetails call
 	// to return nil, simulating a non-existing tx.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 	mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
 		Return(nil, nil).Once()
 
@@ -142,12 +138,10 @@ func TestListTxnsSuccess(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a test wallet with mocks and a mock tx record.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 	_, expectedTxDetail := createMinedTxDetail(t)
 
-	mocks.addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
-		Height: 100,
-	})
+	// SyncedTo is mocked in createStartedWalletWithMocks (height 1).
 
 	// Set up the mock for the tx store. We use .Run to execute the
 	// callback function that's passed in as an argument to the mock.
@@ -297,11 +291,12 @@ func createMinedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 	t.Helper()
 
 	minedDetails, minedTxDetail := createUnminedTxDetail(t)
-	minedDetails.Block.Height = 100
+	// Set height to 1 to match the default SyncedTo mock (height 1).
+	minedDetails.Block.Height = 1
 	minedDetails.Block.Time = time.Unix(1616161617, 0)
 	minedTxDetail.Confirmations = 1
 	minedTxDetail.Block = &BlockDetails{
-		Height:    100,
+		Height:    1,
 		Timestamp: minedDetails.Block.Time.Unix(),
 	}
 

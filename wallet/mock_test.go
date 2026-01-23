@@ -1491,3 +1491,37 @@ func (m *mockAddress) String() string {
 	args := m.Called()
 	return args.String(0)
 }
+
+// mockManagedTaprootScriptAddress is a mock implementation of the
+// waddrmgr.ManagedTaprootScriptAddress interface.
+type mockManagedTaprootScriptAddress struct {
+	mockManagedAddress
+}
+
+// A compile-time assertion to ensure that mockManagedTaprootScriptAddress
+// implements the waddrmgr.ManagedTaprootScriptAddress interface.
+var _ waddrmgr.ManagedTaprootScriptAddress = (*mockManagedTaprootScriptAddress)(
+	nil,
+)
+
+// Script implements the waddrmgr.ManagedScriptAddress interface.
+func (m *mockManagedTaprootScriptAddress) Script() ([]byte, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]byte), args.Error(1)
+}
+
+// TaprootScript implements the waddrmgr.ManagedTaprootScriptAddress interface.
+func (m *mockManagedTaprootScriptAddress) TaprootScript() (
+	*waddrmgr.Tapscript, error) {
+
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*waddrmgr.Tapscript), args.Error(1)
+}
