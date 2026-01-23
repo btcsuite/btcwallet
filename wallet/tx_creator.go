@@ -941,7 +941,7 @@ func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
 		}
 
 		if output.FromCoinBase {
-			target := w.chainParams.CoinbaseMaturity
+			target := w.cfg.ChainParams.CoinbaseMaturity
 			if !hasMinConfs(
 				uint32(target), output.Height, bs.Height,
 			) {
@@ -961,7 +961,8 @@ func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
 		// TODO: Handle multisig outputs by determining if enough of the
 		// addresses are controlled.
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, w.chainParams)
+			output.PkScript, w.cfg.ChainParams,
+		)
 		if err != nil || len(addrs) != 1 {
 			continue
 		}

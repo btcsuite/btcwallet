@@ -326,7 +326,7 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 func (w *Wallet) recordTxAndCredits(txRec *wtxmgr.TxRecord, label string,
 	creditsToWrite []creditInfo) error {
 
-	return walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+	return walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
 		addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 
@@ -385,7 +385,7 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 	txOutAddrs := make(map[uint32][]address.Address)
 	for i, output := range tx.TxOut {
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, w.chainParams,
+			output.PkScript, w.cfg.ChainParams,
 		)
 		// Ignore non-standard scripts.
 		if err != nil {
@@ -429,7 +429,7 @@ func (w *Wallet) filterOwnedAddresses(
 		}
 	}
 
-	err := walletdb.View(w.db, func(dbTx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(dbTx walletdb.ReadTx) error {
 		addrmgrNs := dbTx.ReadBucket(waddrmgrNamespaceKey)
 
 		for addr, indices := range uniqueAddrs {
@@ -518,7 +518,7 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
 	txHash := tx.TxHash()
 
-	dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+	dbErr := walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
 		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())

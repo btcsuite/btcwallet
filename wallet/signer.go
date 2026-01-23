@@ -504,7 +504,7 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 	// database transaction.
 	var addr waddrmgr.ManagedAddress
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// Derive the managed address from the derivation path.
@@ -844,7 +844,7 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 
 	var privKey *btcec.PrivateKey
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		addr, err := w.addrStore.Address(addrmgrNs, a)

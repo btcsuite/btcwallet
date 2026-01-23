@@ -283,7 +283,7 @@ func assertLabelTxAPIsEquivalent(b *testing.B, w *Wallet, hash chainhash.Hash,
 
 	var actualLabel string
 
-	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(dbtx walletdb.ReadTx) error {
 		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
 
 		var err error
