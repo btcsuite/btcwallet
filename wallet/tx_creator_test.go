@@ -342,7 +342,7 @@ func (u *unsupportedCoinSource) isCoinSource() {}
 func TestDetermineChangeSource(t *testing.T) {
 	t.Parallel()
 
-	w, _ := testWalletWithMocks(t)
+	w, _ := createStartedWalletWithMocks(t)
 
 	// Define a set of accounts to be reused across test cases.
 	explicitChangeSource := &ScopedAccount{
@@ -431,7 +431,7 @@ func (m *mockReadTx) ReadBucket(key []byte) walletdb.ReadBucket {
 func TestGetEligibleUTXOsFromList(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Define a block stamp for the current chain height.
 	currentHeight := int32(100)
@@ -575,7 +575,7 @@ func TestGetEligibleUTXOsFromAccount(t *testing.T) {
 	keyScope := waddrmgr.KeyScopeBIP0086
 	minconf := uint32(1)
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 	accountStore := &mockAccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager", keyScope).
 		Return(accountStore, nil)
@@ -618,14 +618,14 @@ func TestGetEligibleUTXOs(t *testing.T) {
 	testCases := []struct {
 		name        string
 		source      CoinSource
-		setupMocks  func(m *mockers, source CoinSource)
+		setupMocks  func(m *mockWalletDeps, source CoinSource)
 		expectedErr error
 	}{
 		{
 			name:   "scoped account",
 			source: scopedAccount,
 			setupMocks: func(
-				m *mockers, source CoinSource,
+				m *mockWalletDeps, source CoinSource,
 			) {
 
 				m.chain.On("BlockStamp").Return(
@@ -653,7 +653,7 @@ func TestGetEligibleUTXOs(t *testing.T) {
 			source: &CoinSourceUTXOs{
 				UTXOs: []wire.OutPoint{utxo},
 			},
-			setupMocks: func(m *mockers, source CoinSource) {
+			setupMocks: func(m *mockWalletDeps, source CoinSource) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				)
@@ -664,7 +664,7 @@ func TestGetEligibleUTXOs(t *testing.T) {
 		{
 			name:   "nil source",
 			source: nil,
-			setupMocks: func(m *mockers, source CoinSource) {
+			setupMocks: func(m *mockWalletDeps, source CoinSource) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				)
@@ -676,7 +676,7 @@ func TestGetEligibleUTXOs(t *testing.T) {
 		{
 			name:   "unsupported source",
 			source: &unsupportedCoinSource{},
-			setupMocks: func(m *mockers, source CoinSource) {
+			setupMocks: func(m *mockWalletDeps, source CoinSource) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				)
@@ -689,7 +689,7 @@ func TestGetEligibleUTXOs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, mocks := testWalletWithMocks(t)
+			w, mocks := createStartedWalletWithMocks(t)
 			tc.setupMocks(mocks, tc.source)
 
 			_, err := w.getEligibleUTXOs(
@@ -709,7 +709,7 @@ func TestGetEligibleUTXOs(t *testing.T) {
 func TestCreateManualInputSource(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 	dbtx := &mockReadTx{}
 
 	utxo1 := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
@@ -803,7 +803,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 	testCases := []struct {
 		name        string
 		policy      *InputsPolicy
-		setupMocks  func(m *mockers)
+		setupMocks  func(m *mockWalletDeps)
 		expectedErr error
 	}{
 		{
@@ -813,7 +813,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				Source:   nil,
 				MinConfs: 1,
 			},
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				).Once()
@@ -828,7 +828,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				Source:   nil,
 				MinConfs: 1,
 			},
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				).Once()
@@ -842,7 +842,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				Source:   nil,
 				MinConfs: 1,
 			},
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				).Once()
@@ -859,7 +859,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 				Source:   nil,
 				MinConfs: 1,
 			},
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				).Once()
@@ -874,7 +874,7 @@ func TestCreatePolicyInputSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, mocks := testWalletWithMocks(t)
+			w, mocks := createStartedWalletWithMocks(t)
 			tc.setupMocks(mocks)
 
 			source, err := w.createPolicyInputSource(
@@ -922,13 +922,13 @@ func TestCreateInputSource(t *testing.T) {
 	testCases := []struct {
 		name        string
 		intent      *TxIntent
-		setupMocks  func(m *mockers)
+		setupMocks  func(m *mockWalletDeps)
 		expectedErr error
 	}{
 		{
 			name:   "manual inputs",
 			intent: intentManual,
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.txStore.On("GetUtxo", mock.Anything, utxo).
 					Return(credit, nil).Once()
 			},
@@ -936,7 +936,7 @@ func TestCreateInputSource(t *testing.T) {
 		{
 			name:   "policy inputs",
 			intent: intentPolicy,
-			setupMocks: func(m *mockers) {
+			setupMocks: func(m *mockWalletDeps) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				).Once()
@@ -948,7 +948,7 @@ func TestCreateInputSource(t *testing.T) {
 		{
 			name:        "unsupported inputs",
 			intent:      intentUnsupported,
-			setupMocks:  func(m *mockers) {},
+			setupMocks:  func(m *mockWalletDeps) {},
 			expectedErr: ErrUnsupportedTxInputs,
 		},
 	}
@@ -957,7 +957,7 @@ func TestCreateInputSource(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, mocks := testWalletWithMocks(t)
+			w, mocks := createStartedWalletWithMocks(t)
 			tc.setupMocks(mocks)
 
 			source, err := w.createInputSource(dbtx, tc.intent)
@@ -979,7 +979,8 @@ func TestCreateTransactionSuccessManualInputs(t *testing.T) {
 	t.Parallel()
 
 	// Arrange.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -1072,7 +1073,8 @@ func TestCreateTransactionSuccessNilChangeSourceManualInputs(t *testing.T) {
 	t.Parallel()
 
 	// Arrange.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -1164,7 +1166,8 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 	t.Parallel()
 
 	// Arrange.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -1267,7 +1270,7 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 		mock.Anything, testAddr,
 	).Return(mockAddr, nil)
 	mocks.addrStore.On("AddrAccount",
-		mock.Anything, testAddr,
+		mock.Anything, mock.Anything,
 	).Return(accountStore, uint32(1), nil)
 	accountStore.On("Scope").Return(waddrmgr.KeyScopeBIP0086)
 
@@ -1289,7 +1292,8 @@ func TestCreateTransactionInvalidIntent(t *testing.T) {
 	t.Parallel()
 
 	// Arrange.
-	w, _ := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	intent := &TxIntent{
 		Outputs: []wire.TxOut{}, // No outputs
@@ -1309,7 +1313,8 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 	t.Parallel()
 
 	// Arrange.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)

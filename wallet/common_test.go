@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,10 +86,14 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
-	addrStore *mockAddrStore
-	txStore   *mockTxStore
-	syncer    *mockChainSyncer
-	chain     *mockChain
+	addrStore      *mockAddrStore
+	txStore        *mockTxStore
+	syncer         *mockChainSyncer
+	chain          *mockChain
+	addr           *mockManagedAddress
+	accountManager *mockAccountStore
+	pubKeyAddr     *mockManagedPubKeyAddr
+	taprootAddr    *mockManagedTaprootScriptAddress
 }
 
 // createTestWalletWithMocks creates a Wallet instance with mocked
@@ -105,6 +109,10 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	mockTxStore := &mockTxStore{}
 	mockSyncer := &mockChainSyncer{}
 	mockChain := &mockChain{}
+	mockAddr := &mockManagedAddress{}
+	mockAccountManager := &mockAccountStore{}
+	mockPubKeyAddr := &mockManagedPubKeyAddr{}
+	mockTaprootAddr := &mockManagedTaprootScriptAddress{}
 
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -120,11 +128,10 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		birthdayBlock: waddrmgr.BlockStamp{
 			Height: 100,
 		},
-
 		cfg: Config{
 			DB:          db,
 			Chain:       mockChain,
-			ChainParams: &chaincfg.MainNetParams,
+			ChainParams: &chainParams,
 		},
 	}
 
@@ -132,10 +139,14 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	w.lockTimer.Stop()
 
 	deps := &mockWalletDeps{
-		addrStore: mockAddrStore,
-		txStore:   mockTxStore,
-		syncer:    mockSyncer,
-		chain:     mockChain,
+		addrStore:      mockAddrStore,
+		txStore:        mockTxStore,
+		syncer:         mockSyncer,
+		chain:          mockChain,
+		addr:           mockAddr,
+		accountManager: mockAccountManager,
+		pubKeyAddr:     mockPubKeyAddr,
+		taprootAddr:    mockTaprootAddr,
 	}
 
 	t.Cleanup(func() {
@@ -143,7 +154,80 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		mockTxStore.AssertExpectations(t)
 		mockSyncer.AssertExpectations(t)
 		mockChain.AssertExpectations(t)
+		mockAddr.AssertExpectations(t)
+		mockAccountManager.AssertExpectations(t)
+		mockPubKeyAddr.AssertExpectations(t)
+		mockTaprootAddr.AssertExpectations(t)
 	})
+
+	return w, deps
+}
+
+// createStartedWalletWithMocks creates a fully started and unlocked Wallet
+// instance with mocked dependencies.
+func createStartedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
+	t.Helper()
+
+	w, deps := createTestWalletWithMocks(t)
+
+	// Mock the birthday block to be present.
+	deps.addrStore.On("BirthdayBlock", mock.Anything).
+		Return(waddrmgr.BlockStamp{}, true, nil).
+		Once()
+
+	// Allow SyncedTo to be called any number of times (background sync).
+	deps.addrStore.On("SyncedTo").
+		Return(waddrmgr.BlockStamp{Height: 1}).
+		Maybe()
+
+	// Mock account loading.
+	deps.addrStore.On("ActiveScopedKeyManagers").
+		Return([]waddrmgr.AccountStore{deps.accountManager}).
+		Once()
+
+	deps.accountManager.On("LastAccount", mock.Anything).
+		Return(uint32(0), nil).
+		Once()
+
+	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
+		Return(&waddrmgr.AccountProperties{
+			AccountNumber: 0,
+			AccountName:   "default",
+		}, nil).
+		Once()
+
+	// Mock expired lock deletion.
+	deps.txStore.On("DeleteExpiredLockedOutputs", mock.Anything).
+		Return(nil).
+		Once()
+
+	// Mock the syncer run.
+	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	// Start the wallet.
+	require.NoError(t, w.Start(t.Context()))
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
+		defer cancel()
+
+		require.NoError(t, w.Stop(ctx))
+	})
+
+	return w, deps
+}
+
+// createUnlockedWalletWithMocks creates a fully started and unlocked Wallet
+// instance with mocked dependencies.
+func createUnlockedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
+	t.Helper()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	// Transition to Unlocked.
+	w.state.toUnlocked()
 
 	return w, deps
 }

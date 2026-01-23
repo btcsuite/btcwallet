@@ -16,7 +16,7 @@ import (
 func TestLabelTxSuccess(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Arrange: Mock the TxDetails call to simulate a known transaction.
 	// We return a non-nil TxDetails to pass the check.
@@ -43,7 +43,7 @@ func TestLabelTxSuccess(t *testing.T) {
 func TestLabelTxNotFound(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Arrange: Mock the TxDetails call to return nil, simulating a tx
 	// that is not known to the wallet.

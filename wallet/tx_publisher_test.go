@@ -87,7 +87,7 @@ func TestCheckMempoolAcceptance(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			w, m := testWalletWithMocks(t)
+			w, m := createStartedWalletWithMocks(t)
 
 			if tc.tx != nil {
 				m.chain.On("TestMempoolAccept",
@@ -220,7 +220,7 @@ func TestExtractTxAddrs(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
-	w, _ := testWalletWithMocks(t)
+	w, _ := createStartedWalletWithMocks(t)
 
 	// Create the test transaction.
 	testData := createTestTx(t, w)
@@ -255,7 +255,7 @@ func TestFilterOwnedAddresses(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Create two addresses, one owned and one not.
 	ownedPrivKey, err := btcec.NewPrivateKey()
@@ -357,7 +357,8 @@ func TestRecordTxAndCredits(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			w, mocks := testWalletWithMocks(t)
+
+			w, mocks := createStartedWalletWithMocks(t)
 			txid := tx.TxHash()
 
 			label := ""
@@ -436,7 +437,8 @@ func TestAddTxToWallet(t *testing.T) {
 
 	t.Run("tx with owned outputs", func(t *testing.T) {
 		t.Parallel()
-		w, m := testWalletWithMocks(t)
+
+		w, m := createStartedWalletWithMocks(t)
 
 		// This test case simulates the scenario where the
 		// transaction has outputs owned by the wallet. We expect
@@ -499,7 +501,8 @@ func TestAddTxToWallet(t *testing.T) {
 
 	t.Run("tx with no owned outputs", func(t *testing.T) {
 		t.Parallel()
-		w, m := testWalletWithMocks(t)
+
+		w, m := createStartedWalletWithMocks(t)
 
 		// This test case simulates the scenario where the
 		// transaction has no outputs owned by the wallet. We
@@ -544,7 +547,7 @@ func mustPayToAddrScript(addr address.Address) []byte {
 func TestRemoveUnminedTx(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createStartedWalletWithMocks(t)
 
 	// Create a sample transaction with one input and one output.
 	tx := &wire.MsgTx{
@@ -620,7 +623,7 @@ func TestCheckMempool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			w, m := testWalletWithMocks(t)
+			w, m := createStartedWalletWithMocks(t)
 
 			// Setup the mock for TestMempoolAccept.
 			if tc.mempoolAcceptErr == nil {
@@ -683,7 +686,7 @@ func TestPublishTx(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			w, m := testWalletWithMocks(t)
+			w, m := createStartedWalletWithMocks(t)
 
 			m.chain.On("NotifyReceived",
 				mock.Anything, mock.Anything,
@@ -708,7 +711,7 @@ func TestBroadcastSuccess(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
-	w, m := testWalletWithMocks(t)
+	w, m := createStartedWalletWithMocks(t)
 
 	// Create a transaction with an owned output.
 	ownedPrivKey, err := btcec.NewPrivateKey()
@@ -765,7 +768,7 @@ func TestBroadcastAlreadyBroadcasted(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
-	w, m := testWalletWithMocks(t)
+	w, m := createStartedWalletWithMocks(t)
 
 	tx := &wire.MsgTx{
 		TxIn:  []*wire.TxIn{{}},
@@ -786,7 +789,7 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
-	w, m := testWalletWithMocks(t)
+	w, m := createStartedWalletWithMocks(t)
 
 	// Create a transaction with an owned output.
 	ownedPrivKey, err := btcec.NewPrivateKey()
@@ -848,7 +851,7 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
-	w, m := testWalletWithMocks(t)
+	w, m := createStartedWalletWithMocks(t)
 
 	// Create a transaction with an owned output.
 	ownedPrivKey, err := btcec.NewPrivateKey()
@@ -916,7 +919,7 @@ func TestBroadcastNilTx(t *testing.T) {
 	t.Parallel()
 
 	label := testTxLabel
-	w, _ := testWalletWithMocks(t)
+	w, _ := createStartedWalletWithMocks(t)
 
 	err := w.Broadcast(t.Context(), nil, label)
 	require.ErrorIs(t, err, ErrTxCannotBeNil)
