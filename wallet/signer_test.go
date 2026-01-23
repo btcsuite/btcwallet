@@ -139,7 +139,7 @@ func TestDerivePubKeySuccess(t *testing.T) {
 
 	// Arrange: Set up the wallet with mocks, a test key, and a
 	// derivation path.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
@@ -178,7 +178,7 @@ func TestDerivePubKeyFetchManagerFails(t *testing.T) {
 
 	// Arrange: Set up the wallet and a test path. Configure the mock
 	// addrStore to return an error when fetching the key manager.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
@@ -199,7 +199,7 @@ func TestDerivePubKeyDeriveFails(t *testing.T) {
 
 	// Arrange: Set up the wallet, mocks, and a test path. Configure the
 	// mock account manager to return an error on derivation.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{
 		KeyScope: waddrmgr.KeyScopeBIP0084,
 		DerivationPath: waddrmgr.DerivationPath{
@@ -229,7 +229,7 @@ func TestDerivePubKeyNotPubKeyAddr(t *testing.T) {
 
 	// Arrange: Set up the wallet and mocks. Configure the mock derivation
 	// to return a managed address that is NOT a ManagedPubKeyAddress.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	// We need a valid address for the error message.
@@ -258,7 +258,7 @@ func TestECDHSuccess(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and test keys.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Use a hardcoded private key for deterministic test results.
 	privKey, _ := deterministicPrivKey(t)
@@ -314,7 +314,7 @@ func TestECDHFails(t *testing.T) {
 
 	// Arrange: Set up the wallet and configure the mock addrStore to return
 	// an error.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	remoteKey, err := btcec.NewPrivateKey()
@@ -484,7 +484,7 @@ func TestSignDigest(t *testing.T) {
 			// deterministic private key for the specified
 			// derivation path. This allows us to test the signing
 			// logic in isolation.
-			w, mocks := testWalletWithMocks(t)
+			w, mocks := createUnlockedWalletWithMocks(t)
 
 			// Configure the full mock chain to return the test
 			// private key.
@@ -524,7 +524,7 @@ func TestSignDigest(t *testing.T) {
 func TestSignDigestFail(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	digest := make([]byte, 32)
@@ -637,7 +637,7 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 
 	// Arrange: Set up the wallet, keys, and a dummy transaction that will
 	// be used to spend the P2PKH output.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2PKH address and the corresponding previous output script.
@@ -711,7 +711,7 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 
 	// Arrange: Set up the wallet, keys, and a dummy transaction that will
 	// be used to spend the P2WKH output.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2WKH address and the corresponding previous output script.
@@ -780,7 +780,7 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, keys, and a dummy transaction.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a NP2WKH address. This is a P2WKH output nested within a
@@ -859,7 +859,7 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, keys, and a dummy transaction.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2TR address for a key-path spend. This involves computing
@@ -950,7 +950,7 @@ func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
 	// Arrange: Set up the wallet and mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock the address store to return an error.
 	mocks.addrStore.On("Address", mock.Anything, addr).
@@ -992,7 +992,7 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
 	// Arrange: Set up the wallet and mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
@@ -1038,7 +1038,7 @@ func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
 	// Arrange: Set up the wallet and mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
@@ -1088,7 +1088,7 @@ func TestComputeUnlockingScriptFail_UnsupportedAddr(t *testing.T) {
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
 	// Arrange: Set up the wallet and mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
@@ -1120,7 +1120,7 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, keys, and transaction.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 
 	privKey, pubKey := deterministicPrivKey(t)
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
@@ -1178,7 +1178,7 @@ func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and a deterministic private key.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2PKH address from the public key.
@@ -1256,7 +1256,7 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 
 	// Arrange: Set up the wallet with mocks and a deterministic private
 	// key for testing.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
 
@@ -1325,7 +1325,7 @@ func TestComputeRawSigSegwitV0(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and a deterministic private key.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2WKH address from the public key.
@@ -1405,7 +1405,7 @@ func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and a deterministic private key.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, internalKey := deterministicPrivKey(t)
 
 	// Create a P2TR address from the public key.
@@ -1480,7 +1480,7 @@ func TestComputeRawSigTaprootScriptPath(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and a deterministic private key.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, internalKey := deterministicPrivKey(t)
 
 	// Create a script to spend.
@@ -1586,7 +1586,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// the raw signature computation, the error is correctly propagated.
 	t.Run("Fetch Address Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return((*mockAccountStore)(nil),
 				errManagerNotFound).Once()
@@ -1609,7 +1609,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// correctly propagated.
 	t.Run("PrivKey Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 
@@ -1638,7 +1638,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// that error.
 	t.Run("Tweak Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 
@@ -1672,7 +1672,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// correctly propagates that error.
 	t.Run("Sign Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 
@@ -1707,7 +1707,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// invalid configurations.
 	t.Run("Invalid Taproot Path", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 
 		path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
@@ -1737,7 +1737,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// error is correctly propagated.
 	t.Run("Segwit Sign Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 		mocks.accountManager.On("DeriveFromKeyPath",
@@ -1767,7 +1767,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// propagated.
 	t.Run("Taproot KeyPath Sign Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 		mocks.accountManager.On("DeriveFromKeyPath",
@@ -1795,7 +1795,7 @@ func TestComputeRawSigFail(t *testing.T) {
 	// propagated.
 	t.Run("Taproot ScriptPath Sign Fail", func(t *testing.T) {
 		t.Parallel()
-		w, mocks := testWalletWithMocks(t)
+		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
 			Return(mocks.accountManager, nil).Once()
 		mocks.accountManager.On("DeriveFromKeyPath",
@@ -1828,7 +1828,7 @@ func TestDerivePrivKeySuccess(t *testing.T) {
 
 	// Arrange: Set up the wallet with mocks, a test key, and a
 	// derivation path.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
@@ -1866,7 +1866,7 @@ func TestDerivePrivKeyFails(t *testing.T) {
 
 	// Arrange: Set up the wallet and a test path. Configure the mock
 	// addrStore to return an error when fetching the key manager.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
@@ -1885,7 +1885,7 @@ func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet, mocks, and a deterministic private key.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	privKey, pubKey := deterministicPrivKey(t)
 
 	// Create a P2PKH address from the public key.
@@ -1918,7 +1918,7 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Set up the wallet and mocks.
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
@@ -1949,7 +1949,7 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 func TestDerivePrivKeyFail(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	// Test Case 1: Fetching key manager fails.
@@ -1983,7 +1983,7 @@ func TestDerivePrivKeyFail(t *testing.T) {
 func TestECDHFail(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := testWalletWithMocks(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 	privKey, _ := btcec.NewPrivateKey()
 
@@ -2012,4 +2012,23 @@ func TestECDHFail(t *testing.T) {
 
 	_, err = w.ECDH(t.Context(), path, privKey.PubKey())
 	require.ErrorContains(t, err, "cannot get private key")
+}
+
+// TestSignDigestLocked tests that SignDigest fails when the wallet is locked.
+func TestSignDigestLocked(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a locked wallet.
+	w, _ := createStartedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	intent := &SignDigestIntent{
+		Digest:  make([]byte, 32),
+		SigType: SigTypeECDSA,
+	}
+
+	// Act: Call SignDigest.
+	_, err := w.SignDigest(t.Context(), path, intent)
+
+	// Assert: Check for forbidden/locked error.
+	require.ErrorIs(t, err, ErrStateForbidden)
 }
