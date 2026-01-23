@@ -23,6 +23,9 @@ type CreditRecord struct {
 	Index  uint32
 	Spent  bool
 	Change bool
+
+	// Locked indicates whether the output is locked by the wallet.
+	Locked bool
 }
 
 // DebitRecord contains metadata regarding a transaction debit for a known
@@ -78,6 +81,12 @@ func (s *Store) minedTxDetails(ns walletdb.ReadBucket, txHash *chainhash.Hash, r
 			spent := existsRawUnminedInput(ns, k) != nil
 			credIter.elem.Spent = spent
 		}
+
+		// Check if locked.
+		op := wire.OutPoint{Hash: *txHash, Index: credIter.elem.Index}
+		_, _, locked := isLockedOutput(ns, op, s.clock.Now())
+		credIter.elem.Locked = locked
+
 		details.Credits = append(details.Credits, credIter.elem)
 	}
 	if credIter.err != nil {
@@ -126,6 +135,12 @@ func (s *Store) unminedTxDetails(ns walletdb.ReadBucket, txHash *chainhash.Hash,
 
 		// Set the Spent field since this is not done by the iterator.
 		it.elem.Spent = existsRawUnminedInput(ns, it.ck) != nil
+
+		// Check if locked.
+		op := wire.OutPoint{Hash: *txHash, Index: it.elem.Index}
+		_, _, locked := isLockedOutput(ns, op, s.clock.Now())
+		it.elem.Locked = locked
+
 		details.Credits = append(details.Credits, it.elem)
 	}
 	if it.err != nil {
@@ -489,6 +504,8 @@ func (s *Store) getMinedUtxo(ns walletdb.ReadBucket, outpoint wire.OutPoint,
 		return nil, err
 	}
 
+	_, _, locked := isLockedOutput(ns, outpoint, s.clock.Now())
+
 	credit := &Credit{
 		OutPoint: outpoint,
 		BlockMeta: BlockMeta{
@@ -499,6 +516,7 @@ func (s *Store) getMinedUtxo(ns walletdb.ReadBucket, outpoint wire.OutPoint,
 		PkScript:     txOut.PkScript,
 		Received:     rec.Received,
 		FromCoinBase: blockchain.IsCoinBaseTx(&rec.MsgTx),
+		Locked:       locked,
 	}
 	return credit, nil
 }
@@ -531,6 +549,8 @@ func (s *Store) getUnminedUtxo(ns walletdb.ReadBucket,
 	}
 	txOut := rec.MsgTx.TxOut[outpoint.Index]
 
+	_, _, locked := isLockedOutput(ns, outpoint, s.clock.Now())
+
 	credit := &Credit{
 		OutPoint: outpoint,
 		BlockMeta: BlockMeta{
@@ -540,6 +560,7 @@ func (s *Store) getUnminedUtxo(ns walletdb.ReadBucket,
 		PkScript:     txOut.PkScript,
 		Received:     rec.Received,
 		FromCoinBase: false, // Unmined can't be coinbase.
+		Locked:       locked,
 	}
 	return credit, nil
 }
