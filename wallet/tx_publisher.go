@@ -54,6 +54,11 @@ var _ TxPublisher = (*Wallet)(nil)
 func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	tx *wire.MsgTx) error {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
 	if tx == nil {
 		return ErrTxCannotBeNil
 	}
@@ -103,12 +108,17 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
+	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
 	if tx == nil {
 		return ErrTxCannotBeNil
 	}
 
 	// We'll start by checking if the tx is acceptable to the mempool.
-	err := w.checkMempool(ctx, tx)
+	err = w.checkMempool(ctx, tx)
 	if errors.Is(err, errAlreadyBroadcasted) {
 		return nil
 	}

@@ -337,6 +337,11 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 //
 // This is part of the Controller interface.
 func (w *Wallet) Info(_ context.Context) (*Info, error) {
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
 	info := &Info{
 		BirthdayBlock:    w.birthdayBlock,
 		Backend:          w.cfg.Chain.BackEnd(),
