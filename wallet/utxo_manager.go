@@ -234,8 +234,11 @@ func (w *Wallet) ListUnspent(_ context.Context,
 			}
 
 			// TODO(yy): This should be a column in the new utxo
-			// SQL table.
-			locked := w.LockedOutpoint(output.OutPoint)
+			// SQL table. Note that currently UnspentOutputs only
+			// returns unlocked outputs, so this field will always
+			// be false. This will be fixed in the upcoming
+			// sqlization PRs.
+			locked := output.Locked
 
 			// If all filters pass, construct the final Utxo struct
 			// with all the combined data.
@@ -344,7 +347,9 @@ func (w *Wallet) GetUtxo(_ context.Context,
 
 		// Extract the address from the UTXO's public key script.
 		// For multi-address scripts, the first address is used.
-		addr := extractAddrFromPKScript(output.PkScript, w.cfg.ChainParams)
+		addr := extractAddrFromPKScript(
+			output.PkScript, w.cfg.ChainParams,
+		)
 		if addr == nil {
 			return wtxmgr.ErrUtxoNotFound
 		}
@@ -352,11 +357,9 @@ func (w *Wallet) GetUtxo(_ context.Context,
 		// In a single lookup, get all the required
 		// address-related details: spendability, account name,
 		// and address type. This avoids the N+1 query problem.
-		spendable, account, addrType := w.addrStore.
-			AddressDetails(addrmgrNs, addr)
-
-		// TODO(yy): This should be a column in the new utxo SQL table.
-		locked := w.LockedOutpoint(output.OutPoint)
+		spendable, account, addrType := w.addrStore.AddressDetails(
+			addrmgrNs, addr,
+		)
 
 		// If all filters pass, construct the final Utxo struct
 		// with all the combined data.
@@ -369,7 +372,7 @@ func (w *Wallet) GetUtxo(_ context.Context,
 			Address:       addr,
 			Account:       account,
 			AddressType:   addrType,
-			Locked:        locked,
+			Locked:        output.Locked,
 		}
 
 		return nil

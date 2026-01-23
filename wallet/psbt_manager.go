@@ -518,14 +518,15 @@ func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
 
 	// With the transaction details retrieved, we'll make an additional
 	// check to ensure we actually have control of this output.
-	if !findCredit(txDetail, txIn.PreviousOutPoint.Index) {
+	cred := findCredit(txDetail, txIn.PreviousOutPoint.Index)
+	if cred == nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
 			txIn.PreviousOutPoint)
 	}
 
 	// Now that we've confirmed we know about the UTXO, we'll check if it
 	// is locked.
-	if w.LockedOutpoint(txIn.PreviousOutPoint) {
+	if cred.Locked {
 		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked,
 			txIn.PreviousOutPoint)
 	}
@@ -541,14 +542,16 @@ func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
 
 // findCredit determines whether a transaction's details contain a credit for a
 // specific output index.
-func findCredit(txDetail *wtxmgr.TxDetails, outputIndex uint32) bool {
-	for _, cred := range txDetail.Credits {
-		if cred.Index == outputIndex {
-			return true
+func findCredit(txDetail *wtxmgr.TxDetails,
+	outputIndex uint32) *wtxmgr.CreditRecord {
+
+	for i := range txDetail.Credits {
+		if txDetail.Credits[i].Index == outputIndex {
+			return &txDetail.Credits[i]
 		}
 	}
 
-	return false
+	return nil
 }
 
 // FundPsbt performs coin selection and funds the PSBT.
