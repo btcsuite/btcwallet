@@ -418,7 +418,7 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	// We'll start by extracting the address from the UTXO's pkScript.
 	// This will be used to look up the managed address from the
 	// database.
-	addr := extractAddrFromPKScript(utxo.PkScript, w.chainParams)
+	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
 	if addr == nil {
 		return fmt.Errorf("%w: from pkscript %x",
 			ErrUnableToExtractAddress, utxo.PkScript)
@@ -459,7 +459,7 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	default:
 		// We'll need to build the redeem script for the input.
 		_, redeemScript, err := buildScriptsForManagedAddress(
-			pubKeyAddr, utxo.PkScript, w.chainParams,
+			pubKeyAddr, utxo.PkScript, w.cfg.ChainParams,
 		)
 		if err != nil {
 			return err
@@ -999,10 +999,10 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	index := path[4]
 
 	// Verify that the coin type matches the wallet's chain parameters.
-	if coinType != w.chainParams.HDCoinType {
+	if coinType != w.cfg.ChainParams.HDCoinType {
 		return BIP32Path{}, fmt.Errorf("%w: expected coin type %d, "+
 			"got %d", ErrInvalidBip32Path,
-			w.chainParams.HDCoinType, coinType)
+			w.cfg.ChainParams.HDCoinType, coinType)
 	}
 
 	scope := waddrmgr.KeyScope{

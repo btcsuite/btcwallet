@@ -143,7 +143,8 @@ func createTestTx(t *testing.T, w *Wallet) *testTxData {
 
 	pubKey1 := privKey1.PubKey()
 	addr1, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKey1.SerializeCompressed()), w.chainParams,
+		address.Hash160(pubKey1.SerializeCompressed()),
+		w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 
@@ -169,7 +170,7 @@ func createTestTx(t *testing.T, w *Wallet) *testTxData {
 	// Output 1: P2SH
 	script2 := []byte{txscript.OP_1}
 	addr2, err := address.NewAddressScriptHash(
-		script2, w.chainParams,
+		script2, w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 	pkScript2, err := txscript.PayToAddrScript(addr2)
@@ -197,7 +198,7 @@ func createTestTx(t *testing.T, w *Wallet) *testTxData {
 
 	scriptHash := sha256.Sum256(multiSigScript)
 	addr3, err := address.NewAddressWitnessScriptHash(
-		scriptHash[:], w.chainParams,
+		scriptHash[:], w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 	pkScript4, err := txscript.PayToAddrScript(addr3)
@@ -260,14 +261,15 @@ func TestFilterOwnedAddresses(t *testing.T) {
 	ownedPrivKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	ownedAddr, err := address.NewAddressPubKey(
-		ownedPrivKey.PubKey().SerializeCompressed(), w.chainParams,
+		ownedPrivKey.PubKey().SerializeCompressed(), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 
 	unownedPrivKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	unownedAddr, err := address.NewAddressPubKey(
-		unownedPrivKey.PubKey().SerializeCompressed(), w.chainParams,
+		unownedPrivKey.PubKey().SerializeCompressed(),
+		w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 

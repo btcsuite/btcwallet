@@ -27,7 +27,7 @@ var _ TxWriter = (*Wallet)(nil)
 func (w *Wallet) LabelTx(_ context.Context,
 	hash chainhash.Hash, label string) error {
 
-	err := walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
 		txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		// Check that the transaction is known to the wallet.

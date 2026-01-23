@@ -198,7 +198,7 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// We need to create a realistic transaction that has at least one
 	// input.
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		// Create a new transaction and set the output to the address
@@ -396,7 +396,7 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	pubKey := privKey.PubKey()
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()),
-		w.chainParams,
+		w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 
@@ -435,7 +435,7 @@ func TestListAddresses(t *testing.T) {
 
 	// We need to create a realistic transaction that has at least one
 	// input.
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
 		// Create a new transaction and set the output to the address
@@ -501,7 +501,8 @@ func TestImportPublicKey(t *testing.T) {
 
 	// Check that the address is now managed by the wallet.
 	addr, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKey.SerializeCompressed()), w.chainParams,
+		address.Hash160(pubKey.SerializeCompressed()),
+		w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 	managed, err := w.HaveAddress(addr)
@@ -547,7 +548,7 @@ func TestImportTaprootScript(t *testing.T) {
 	addr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(txscript.ComputeTaprootOutputKey(
 			pubKey, rootHash[:],
-		)), w.chainParams,
+		)), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 	managed, err := w.HaveAddress(addr)
