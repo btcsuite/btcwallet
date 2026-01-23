@@ -208,7 +208,7 @@ func TestDisconnectCoinbaseSpends(t *testing.T) {
 		require.Equal(t, coinbase.Received, cbDetail.Received)
 		require.Equal(t, []wtxmgr.CreditRecord{
 			{Amount: 1000, Index: 0, Spent: true},
-			{Amount: 1000, Index: 1},
+			{Amount: 1000, Index: 1, Locked: true},
 			{Amount: 1000, Index: 2},
 		}, cbDetail.Credits)
 
