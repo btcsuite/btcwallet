@@ -500,8 +500,7 @@ func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
 		// `AccountStore` that accepts an active database transaction
 		// and returns an unused address. This will allow the address
 		// derivation to occur within the same atomic transaction as
-		// the rest of the tx creation logic. Once fixed, we can remove
-		// the above `w.newAddrMtx` lock.
+		// the rest of the tx creation logic.
 		_, changeSource, err = w.addrMgrWithChangeSource(
 			dbtx, changeKeyScope, account,
 		)
@@ -555,17 +554,6 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	if err != nil {
 		return nil, err
 	}
-
-	// The addrMgrWithChangeSource function of the wallet creates a new
-	// change address. The address manager uses OnCommit on the walletdb tx
-	// to update the in-memory state of the account state. But because the
-	// commit happens _after_ the account manager internal lock has been
-	// released, there is a chance for the address index to be accessed
-	// concurrently, even though the closure in OnCommit re-acquires the
-	// lock. To avoid this issue, we surround the whole address creation
-	// process with a lock.
-	w.newAddrMtx.Lock()
-	defer w.newAddrMtx.Unlock()
 
 	inputSource, changeSource, err := w.prepareTxAuthSources(intent)
 	if err != nil {
