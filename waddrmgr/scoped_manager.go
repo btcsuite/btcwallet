@@ -1118,8 +1118,10 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	account uint32, numAddresses uint32, internal bool) ([]ManagedAddress,
 	error) {
 
-	// The next address can only be generated for accounts that have
-	// already been created.
+	// The next address can only be generated for accounts that have already
+	// been created. We load the account info to retrieve the decrypted keys and
+	// other cached metadata. This ensures we don't perform expensive crypto
+	// operations for every address generation.
 	acctInfo, err := s.loadAccountInfo(ns, account)
 	if err != nil {
 		return nil, err
@@ -1128,23 +1130,36 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	// Choose the account key to used based on whether the address manager
 	// is locked.
 	acctKey := acctInfo.acctKeyPub
-	watchOnly := s.rootManager.WatchOnly() || len(acctInfo.acctKeyEncrypted) == 0
+	watchOnly := s.rootManager.WatchOnly() ||
+		len(acctInfo.acctKeyEncrypted) == 0
+
 	if !s.rootManager.IsLocked() && !watchOnly {
 		acctKey = acctInfo.acctKeyPriv
-	}
-
-	// Choose the branch key and index depending on whether or not this is
-	// an internal address.
-	branchNum, nextIndex := ExternalBranch, acctInfo.nextExternalIndex
-	if internal {
-		branchNum = InternalBranch
-		nextIndex = acctInfo.nextInternalIndex
 	}
 
 	// Choose the appropriate type of address to derive since it's possible
 	// for a watch-only account to have a different schema from the
 	// manager's.
 	addrType := s.accountAddrType(acctInfo, internal)
+
+	// We also fetch the raw account row directly from the database to
+	// ensure we have the most up-to-date address indices, bypassing any
+	// potentially stale cached state. This is critical for preventing
+	// race conditions during concurrent address generation.
+	//
+	// NOTE: We must do this *after* loadAccountInfo to ensure the account
+	// exists and is cached, but we override the indices with the DB values.
+	nextIndex, err := s.getNextIndex(ns, account, internal)
+	if err != nil {
+		return nil, err
+	}
+
+	// Choose the branch key and index depending on whether or not this is
+	// an internal address.
+	branchNum := ExternalBranch
+	if internal {
+		branchNum = InternalBranch
+	}
 
 	// Ensure the requested number of addresses doesn't exceed the maximum
 	// allowed for this account.
@@ -1317,13 +1332,22 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		}
 
 		// Set the last address and next address for tracking.
+		//
+		// NOTE: We only update the cache if the new index is strictly greater
+		// than the current cached index. This protects against a race condition
+		// where a slower transaction commits *after* a faster one, which could
+		// otherwise cause the cache to regress.
 		ma := addressInfo[len(addressInfo)-1].managedAddr
 		if internal {
-			acctInfo.nextInternalIndex = nextIndex
-			acctInfo.lastInternalAddr = ma
+			if nextIndex > acctInfo.nextInternalIndex {
+				acctInfo.nextInternalIndex = nextIndex
+				acctInfo.lastInternalAddr = ma
+			}
 		} else {
-			acctInfo.nextExternalIndex = nextIndex
-			acctInfo.lastExternalAddr = ma
+			if nextIndex > acctInfo.nextExternalIndex {
+				acctInfo.nextExternalIndex = nextIndex
+				acctInfo.lastExternalAddr = ma
+			}
 		}
 	}
 	ns.Tx().OnCommit(onCommit)
@@ -1356,18 +1380,29 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		acctKey = acctInfo.acctKeyPriv
 	}
 
-	// Choose the branch key and index depending on whether or not this is
-	// an internal address.
-	branchNum, nextIndex := ExternalBranch, acctInfo.nextExternalIndex
-	if internal {
-		branchNum = InternalBranch
-		nextIndex = acctInfo.nextInternalIndex
-	}
-
 	// Choose the appropriate type of address to derive since it's possible
 	// for a watch-only account to have a different schema from the
 	// manager's.
 	addrType := s.accountAddrType(acctInfo, internal)
+
+	// We also fetch the raw account row directly from the database to
+	// ensure we have the most up-to-date address indices, bypassing any
+	// potentially stale cached state. This is critical for preventing
+	// race conditions during concurrent address generation.
+	//
+	// NOTE: We must do this *after* loadAccountInfo to ensure the account
+	// exists and is cached, but we override the indices with the DB values.
+	nextIndex, err := s.getNextIndex(ns, account, internal)
+	if err != nil {
+		return err
+	}
+
+	// Choose the branch key and index depending on whether or not this is
+	// an internal address.
+	branchNum := ExternalBranch
+	if internal {
+		branchNum = InternalBranch
+	}
 
 	// If the last index requested is already lower than the next index, we
 	// can return early.
@@ -1507,13 +1542,22 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Set the last address and next address for tracking.
+	//
+	// NOTE: We only update the cache if the new index is strictly greater
+	// than the current cached index. This protects against a race condition
+	// where a slower transaction commits *after* a faster one, which could
+	// otherwise cause the cache to regress.
 	ma := addressInfo[len(addressInfo)-1].managedAddr
 	if internal {
-		acctInfo.nextInternalIndex = nextIndex
-		acctInfo.lastInternalAddr = ma
+		if nextIndex > acctInfo.nextInternalIndex {
+			acctInfo.nextInternalIndex = nextIndex
+			acctInfo.lastInternalAddr = ma
+		}
 	} else {
-		acctInfo.nextExternalIndex = nextIndex
-		acctInfo.lastExternalAddr = ma
+		if nextIndex > acctInfo.nextExternalIndex {
+			acctInfo.nextExternalIndex = nextIndex
+			acctInfo.lastExternalAddr = ma
+		}
 	}
 
 	return nil
@@ -2820,6 +2864,40 @@ func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
 	addr := addrs[0].Address()
 
 	return addr, nil
+}
+
+// getNextIndex fetches the current next address index for the specified branch
+// (internal/external) of an account directly from the database. This bypasses
+// the in-memory cache to ensure the most up-to-date state is used, avoiding
+// potential race conditions.
+func (s *ScopedKeyManager) getNextIndex(ns walletdb.ReadBucket,
+	account uint32, internal bool) (uint32, error) {
+
+	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
+	if err != nil {
+		return 0, maybeConvertDbError(err)
+	}
+
+	var nextInternal, nextExternal uint32
+	switch row := rowInterface.(type) {
+	case *dbDefaultAccountRow:
+		nextInternal = row.nextInternalIndex
+		nextExternal = row.nextExternalIndex
+
+	case *dbWatchOnlyAccountRow:
+		nextInternal = row.nextInternalIndex
+		nextExternal = row.nextExternalIndex
+
+	default:
+		str := fmt.Sprintf("unsupported account type %T", row)
+		return 0, managerError(ErrDatabase, str, nil)
+	}
+
+	if internal {
+		return nextInternal, nil
+	}
+
+	return nextExternal, nil
 }
 
 // deriveAddr performs the actual derivation logic for a single address using
