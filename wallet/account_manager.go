@@ -126,7 +126,7 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 
 	var props *waddrmgr.AccountProperties
 
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// Create a new account under the current key scope.
@@ -186,7 +186,7 @@ func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
 
 	var accounts []AccountResult
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// First, build a map of balances for all accounts that own at
@@ -258,7 +258,7 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 
 	var accounts []AccountResult
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// Calculate the balances for all accounts, but only for the
@@ -309,7 +309,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 
 	var accounts []AccountResult
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		// First, calculate the balances for any accounts that match the
 		// given name. This is efficient as it iterates over the UTXO
 		// set, not accounts.
@@ -392,7 +392,7 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 
 	var account *AccountResult
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		// Look up the account number for the given name and scope. This
@@ -458,7 +458,7 @@ func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return err
 	}
 
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// Look up the account number for the given name. This is
@@ -487,7 +487,7 @@ func (w *Wallet) Balance(_ context.Context, conf uint32,
 
 	var balance btcutil.Amount
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 
@@ -539,7 +539,9 @@ func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
 	utxo wtxmgr.Credit) btcutil.Amount {
 
 	// Extract the address from the UTXO's public key script.
-	addr := extractAddrFromPKScript(utxo.PkScript, w.chainParams)
+	addr := extractAddrFromPKScript(
+		utxo.PkScript, w.cfg.ChainParams,
+	)
 	if addr == nil {
 		return 0
 	}
@@ -714,7 +716,9 @@ func (w *Wallet) fetchAccountBalances(tx walletdb.ReadTx,
 	// Iterate through all UTXOs, mapping them back to their owning account
 	// to aggregate the total balance for each.
 	for _, utxo := range utxos {
-		addr := extractAddrFromPKScript(utxo.PkScript, w.chainParams)
+		addr := extractAddrFromPKScript(
+			utxo.PkScript, w.cfg.ChainParams,
+		)
 		if addr == nil {
 			// This can happen for non-standard script types.
 			continue

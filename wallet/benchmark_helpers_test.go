@@ -340,7 +340,7 @@ func setSyncedToHeight(tb testing.TB, w *Wallet, height int32,
 
 	tb.Helper()
 
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
@@ -360,7 +360,7 @@ func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 
 	var allAddresses []waddrmgr.ManagedAddress
 
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		// Distribute accounts across the specified key scopes.
 		accountsPerScope := numAccounts / len(scopes)
 		remainder := numAccounts % len(scopes)
@@ -461,7 +461,7 @@ func createTestWalletTxs(tb testing.TB, w *Wallet,
 		highestBlockMeta wtxmgr.BlockMeta
 	)
 
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		msgTx := TstTx.MsgTx()
@@ -765,7 +765,7 @@ func getTestAddress(tb testing.TB, w *Wallet, numAccounts int) address.Address {
 func markAddressAsUsed(b *testing.B, w *Wallet, addr address.Address) {
 	b.Helper()
 
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		manager, err := w.addrStore.FetchScopedKeyManager(
@@ -1052,7 +1052,7 @@ func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
 	}
 
 	// Additional lookup 1: Extract address from pkScript.
-	addr := extractAddrFromPKScript(txOut.PkScript, w.chainParams)
+	addr := extractAddrFromPKScript(txOut.PkScript, w.cfg.ChainParams)
 	if addr == nil {
 		return nil, ErrNotMine
 	}
@@ -1065,7 +1065,7 @@ func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
 		addrType  waddrmgr.AddressType
 	)
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		spendable, account, addrType = w.addrStore.AddressDetails(
 			addrmgrNs, addr,
