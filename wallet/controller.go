@@ -11,6 +11,21 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
+const (
+	// initialBackoff is the initial delay between synchronization retry
+	// attempts.
+	initialBackoff = 1 * time.Second
+
+	// maxBackoff is the maximum delay allowed between synchronization retry
+	// attempts.
+	maxBackoff = 5 * time.Minute
+
+	// stableRunTime is the minimum amount of time the syncer must run
+	// without error to be considered "stable", at which point the retry
+	// backoff is reset to initialBackoff.
+	stableRunTime = 10 * time.Minute
+)
+
 var (
 	// ErrWalletNotStopped is returned when an attempt is made to start the
 	// wallet when it is not in the stopped state.
@@ -171,11 +186,7 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	go func() {
 		defer w.wg.Done()
 
-		// TODO(yy): build a retry loop.
-		err := w.sync.run(w.lifetimeCtx)
-		if err != nil {
-			log.Errorf("Chain sync loop exited with error: %v", err)
-		}
+		w.runSyncLoop()
 	}()
 
 	// 5. Mark the wallet as fully started.
@@ -185,6 +196,78 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	}
 
 	return nil
+}
+
+// runSyncLoop executes the main chain synchronization loop with automatic
+// retries and exponential backoff. It ensures the wallet attempts to stay
+// synced even if the backend connection is flaky.
+func (w *Wallet) runSyncLoop() {
+	backoff := initialBackoff
+
+	for {
+		startTime := time.Now()
+
+		// Block until the syncer exits.
+		err := w.sync.run(w.lifetimeCtx)
+
+		// If the wallet is shutting down, we can exit immediately.
+		if w.lifetimeCtx.Err() != nil {
+			log.Info("Chain sync loop exiting due to wallet shutdown")
+
+			return
+		}
+
+		// If the syncer exited cleanly (nil error), it generally means it was
+		// requested to stop, so we shouldn't restart.
+		if err == nil {
+			log.Info("Chain sync loop exited normally")
+			return
+		}
+
+		log.Errorf("Chain sync loop exited with error: %v", err)
+
+		var shouldContinue bool
+
+		backoff, shouldContinue = w.waitForBackoff(
+			startTime, backoff, time.After,
+		)
+		if !shouldContinue {
+			return
+		}
+	}
+}
+
+// waitForBackoff handles the delay between synchronization retry attempts. It
+// resets the backoff if the previous run was stable, waits for the calculated
+// delay, and then returns the updated backoff duration for the next attempt.
+// It returns false if the wallet is shutting down.
+func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
+	timerFn func(time.Duration) <-chan time.Time) (time.Duration, bool) {
+
+	// If the syncer ran for a significant amount of time, we consider it a
+	// "stable" run and reset the backoff.
+	if time.Since(startTime) > stableRunTime {
+		backoff = initialBackoff
+	}
+
+	log.Infof("Restarting sync loop in %v...", backoff)
+
+	// Wait for the backoff period or a shutdown signal.
+	select {
+	case <-timerFn(backoff):
+		// Increase backoff for the next attempt, capping it.
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		return backoff, true
+
+	case <-w.lifetimeCtx.Done():
+		log.Debug("Backoff interrupted by wallet shutdown")
+
+		return 0, false
+	}
 }
 
 // performRuntimeSetup executes the synchronous initialization tasks required
