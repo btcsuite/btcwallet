@@ -27,7 +27,6 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
-	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -5746,78 +5745,6 @@ func keyScopeFromPubKey(pubKey *hdkeychain.ExtendedKey,
 	}
 }
 
-// isPubKeyForNet determines if the given public key is for the current network
-// the wallet is operating under.
-func (w *Wallet) isPubKeyForNet(pubKey *hdkeychain.ExtendedKey) bool {
-	version := waddrmgr.HDVersion(binary.BigEndian.Uint32(pubKey.Version()))
-	switch w.chainParams.Net {
-	case wire.MainNet:
-		return version == waddrmgr.HDVersionMainNetBIP0044 ||
-			version == waddrmgr.HDVersionMainNetBIP0049 ||
-			version == waddrmgr.HDVersionMainNetBIP0084
-
-	case wire.TestNet, wire.TestNet3, wire.TestNet4,
-		netparams.SigNetWire(w.chainParams):
-
-		return version == waddrmgr.HDVersionTestNetBIP0044 ||
-			version == waddrmgr.HDVersionTestNetBIP0049 ||
-			version == waddrmgr.HDVersionTestNetBIP0084
-
-	// For simnet, we'll also allow the mainnet versions since simnet
-	// doesn't have defined versions for some of our key scopes, and the
-	// mainnet versions are usually used as the default regardless of the
-	// network/key scope.
-	case wire.SimNet:
-		return version == waddrmgr.HDVersionSimNetBIP0044 ||
-			version == waddrmgr.HDVersionMainNetBIP0049 ||
-			version == waddrmgr.HDVersionMainNetBIP0084
-
-	default:
-		return false
-	}
-}
-
-// validateExtendedPubKey ensures a sane derived public key is provided.
-func (w *Wallet) validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
-	isAccountKey bool) error {
-
-	// Private keys are not allowed.
-	if pubKey.IsPrivate() {
-		return errors.New("private keys cannot be imported")
-	}
-
-	// The public key must have a version corresponding to the current
-	// chain.
-	if !w.isPubKeyForNet(pubKey) {
-		return fmt.Errorf("expected extended public key for current "+
-			"network %v", w.chainParams.Name)
-	}
-
-	// Verify the extended public key's depth and child index based on
-	// whether it's an account key or not.
-	if isAccountKey {
-		if pubKey.Depth() != accountPubKeyDepth {
-			return errors.New("invalid account key, must be of the " +
-				"form m/purpose'/coin_type'/account'")
-		}
-		if pubKey.ChildIndex() < hdkeychain.HardenedKeyStart {
-			return errors.New("invalid account key, must be hardened")
-		}
-	} else {
-		if pubKey.Depth() != pubKeyDepth {
-			return errors.New("invalid account key, must be of the " +
-				"form m/purpose'/coin_type'/account'/change/" +
-				"address_index")
-		}
-		if pubKey.ChildIndex() >= hdkeychain.HardenedKeyStart {
-			return errors.New("invalid pulic key, must not be " +
-				"hardened")
-		}
-	}
-
-	return nil
-}
-
 // ImportAccountDeprecated imports an account backed by an account extended
 // public key.
 // The master key fingerprint denotes the fingerprint of the root key
@@ -5886,7 +5813,7 @@ func (w *Wallet) importAccount(ns walletdb.ReadWriteBucket, name string,
 	addrType *waddrmgr.AddressType) (*waddrmgr.AccountProperties, error) {
 
 	// Ensure we have a valid account public key.
-	if err := w.validateExtendedPubKey(accountPubKey, true); err != nil {
+	if err := validateExtendedPubKey(accountPubKey, true, w.chainParams); err != nil {
 		return nil, err
 	}
 
