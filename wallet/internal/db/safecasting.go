@@ -21,10 +21,8 @@ var (
 // if the value is out of range.
 func int64ToUint32(v int64) (uint32, error) {
 	if v < 0 || v > math.MaxUint32 {
-		return 0, fmt.Errorf(
-			"could not cast %d to uint32: %w",
-			v, ErrCastingOverflow,
-		)
+		return 0, fmt.Errorf("could not cast %d to uint32: %w", v,
+			ErrCastingOverflow)
 	}
 
 	return uint32(v), nil
@@ -34,10 +32,8 @@ func int64ToUint32(v int64) (uint32, error) {
 // if the value is out of range.
 func int64ToInt32(v int64) (int32, error) {
 	if v < math.MinInt32 || v > math.MaxInt32 {
-		return 0, fmt.Errorf(
-			"could not cast %d to int32: %w",
-			v, ErrCastingOverflow,
-		)
+		return 0, fmt.Errorf("could not cast %d to int32: %w", v,
+			ErrCastingOverflow)
 	}
 
 	return int32(v), nil
@@ -80,10 +76,8 @@ func int16ToUint8(v int16) (uint8, error) {
 // if the value is out of range.
 func uint32ToInt32(v uint32) (int32, error) {
 	if v > math.MaxInt32 {
-		return 0, fmt.Errorf(
-			"could not cast %d to int32: %w",
-			v, ErrCastingOverflow,
-		)
+		return 0, fmt.Errorf("could not cast %d to int32: %w", v,
+			ErrCastingOverflow)
 	}
 
 	return int32(v), nil
@@ -104,17 +98,13 @@ func uint32ToNullInt32(v uint32) (sql.NullInt32, error) {
 // an error if the value is out of range or invalid.
 func nullInt32ToUint32(n sql.NullInt32) (uint32, error) {
 	if !n.Valid {
-		return 0, fmt.Errorf(
-			"could not cast invalid NullInt32 to uint32: %w",
-			ErrInvalidNullInt,
-		)
+		return 0, fmt.Errorf("could not cast invalid NullInt32 to uint32: %w",
+			ErrInvalidNullInt)
 	}
 
 	if n.Int32 < 0 {
-		return 0, fmt.Errorf(
-			"could not cast %d to uint32: %w",
-			n.Int32, ErrCastingOverflow,
-		)
+		return 0, fmt.Errorf("could not cast %d to uint32: %w", n.Int32,
+			ErrCastingOverflow)
 	}
 
 	return uint32(n.Int32), nil
