@@ -11,6 +11,9 @@ package wallet
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -18,6 +21,8 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -597,10 +602,18 @@ func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
 	return 0
 }
 
-// ImportAccount imports an account from an extended public or private key.
+// ImportAccount imports an account from an extended public or private key. The
+// key scope is derived from the version bytes of the extended key. The account
+// name must be unique within the derived scope. If dryRun is true, the import
+// is validated but not persisted.
 //
-// The time complexity of this method is dominated by the database lookup
-// to ensure the account name is unique within the scope.
+// The time complexity of this method is dominated by the database lookup to
+// ensure the account name is unique within the scope.
+//
+// TODO(yy): we will move the db operation to a dedicated method, so we can
+// ignore cyclop for now.
+//
+//nolint:cyclop
 func (w *Wallet) ImportAccount(_ context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
@@ -611,19 +624,189 @@ func (w *Wallet) ImportAccount(_ context.Context,
 		return nil, err
 	}
 
-	var props *waddrmgr.AccountProperties
-
-	if dryRun {
-		props, _, _, err = w.ImportAccountDryRun(
-			name, accountKey, masterKeyFingerprint, &addrType, 0,
-		)
-	} else {
-		props, err = w.ImportAccountDeprecated(
-			name, accountKey, masterKeyFingerprint, &addrType,
-		)
+	// Ensure we have a valid account public key. We require an account-level
+	// key (depth 3) to properly manage the derivation path.
+	err = validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
+	if err != nil {
+		return nil, err
 	}
 
-	return props, err
+	// Determine what key scope the account public key should belong to and
+	// whether it should use a custom address schema. This is inferred from
+	// the key's HD version bytes.
+	keyScope, addrSchema, err := keyScopeFromPubKey(accountKey, &addrType)
+	if err != nil {
+		return nil, err
+	}
+
+	var props *waddrmgr.AccountProperties
+
+	// We'll perform the import within a database update transaction to ensure
+	// atomicity. If dryRun is enabled, we'll return a special error at the end
+	// to trigger a rollback.
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// Check if a manager for this key scope already exists. If not, we'll
+		// create a new one using the inferred schema.
+		scopedMgr, err := w.addrStore.FetchScopedKeyManager(keyScope)
+		if err != nil {
+			scopedMgr, err = w.addrStore.NewScopedKeyManager(
+				ns, keyScope, *addrSchema,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		// Create the new watching-only account using the provided key. Since we
+		// only have the public key, the wallet won't be able to sign for this
+		// account unless the private key is also provided later.
+		account, err := scopedMgr.NewAccountWatchingOnly(
+			ns, name, accountKey, masterKeyFingerprint, addrSchema,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Retrieve the properties for the newly created account.
+		props, err = scopedMgr.AccountProperties(ns, account)
+		if !dryRun {
+			return err
+		}
+
+		// If this is a dry-run, we'll generate a few addresses to simulate the
+		// import process and then roll back.
+		props, err = importAccountDryRun(ns, props, scopedMgr)
+		if err != nil {
+			return err
+		}
+
+		// Make sure we always roll back the dry-run transaction by returning an
+		// error here.
+		return walletdb.ErrDryRunRollBack
+	})
+
+	// If this was a dry-run, we ignore the rollback error.
+	if err != nil && !dryRun && !errors.Is(err, walletdb.ErrDryRunRollBack) {
+		return nil, err
+	}
+
+	return props, nil
+}
+
+// importAccountDryRun simulates an account import by generating a single
+// address for both the internal and external derivation branches. This ensures
+// that the provided account key is valid and can be used to derive addresses.
+// The changes made during this simulation are rolled back by the caller.
+func importAccountDryRun(ns walletdb.ReadWriteBucket,
+	props *waddrmgr.AccountProperties, scopedMgr waddrmgr.AccountStore) (
+	*waddrmgr.AccountProperties, error) {
+
+	// The importAccount method above will cache the imported account within the
+	// scoped manager. Since this is a dry-run attempt, we'll want to invalidate
+	// the cache for it.
+	defer scopedMgr.InvalidateAccountCache(props.AccountNumber)
+
+	_, err := scopedMgr.NextExternalAddresses(ns, props.AccountNumber, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = scopedMgr.NextInternalAddresses(ns, props.AccountNumber, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Refresh the account's properties after generating the addresses.
+	props, err = scopedMgr.AccountProperties(ns, props.AccountNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	return props, nil
+}
+
+// validateExtendedPubKey ensures a sane derived public key is provided.
+func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
+	isAccountKey bool, chainParams *chaincfg.Params) error {
+
+	// Private keys are not allowed.
+	if pubKey.IsPrivate() {
+		return fmt.Errorf("%w: private keys cannot be imported",
+			ErrInvalidAccountKey)
+	}
+
+	// The public key must have a version corresponding to the current
+	// chain.
+	if !isPubKeyForNet(pubKey, chainParams) {
+		return fmt.Errorf("%w: expected extended public key for current "+
+			"network %v", ErrInvalidAccountKey, chainParams.Name)
+	}
+
+	// Verify the extended public key's depth and child index based on
+	// whether it's an account key or not.
+	if isAccountKey {
+		if pubKey.Depth() != accountPubKeyDepth {
+			return fmt.Errorf("%w: must be of the form "+
+				"m/purpose'/coin_type'/account'", ErrInvalidAccountKey)
+		}
+
+		if pubKey.ChildIndex() < hdkeychain.HardenedKeyStart {
+			return fmt.Errorf("%w: must be hardened", ErrInvalidAccountKey)
+		}
+
+		return nil
+	}
+
+	if pubKey.Depth() != pubKeyDepth {
+		return fmt.Errorf("%w: must be of the form "+
+			"m/purpose'/coin_type'/account'/change/address_index",
+			ErrInvalidAccountKey)
+	}
+
+	if pubKey.ChildIndex() >= hdkeychain.HardenedKeyStart {
+		return fmt.Errorf("%w: must not be hardened", ErrInvalidAccountKey)
+	}
+
+	return nil
+}
+
+// isPubKeyForNet determines if the given public key is for the current network
+// the wallet is operating under.
+//
+// Ignore exhaustive linter as the `wire.SigNet` is covered by `SigNetWire`.
+//
+//nolint:exhaustive,cyclop
+func isPubKeyForNet(pubKey *hdkeychain.ExtendedKey,
+	chainParams *chaincfg.Params) bool {
+
+	version := waddrmgr.HDVersion(binary.BigEndian.Uint32(pubKey.Version()))
+	switch chainParams.Net {
+	case wire.MainNet:
+		return version == waddrmgr.HDVersionMainNetBIP0044 ||
+			version == waddrmgr.HDVersionMainNetBIP0049 ||
+			version == waddrmgr.HDVersionMainNetBIP0084
+
+	case wire.TestNet, wire.TestNet3, wire.TestNet4,
+		netparams.SigNetWire(chainParams):
+
+		return version == waddrmgr.HDVersionTestNetBIP0044 ||
+			version == waddrmgr.HDVersionTestNetBIP0049 ||
+			version == waddrmgr.HDVersionTestNetBIP0084
+
+	// For simnet, we'll also allow the mainnet versions since simnet
+	// doesn't have defined versions for some of our key scopes, and the
+	// mainnet versions are usually used as the default regardless of the
+	// network/key scope.
+	case wire.SimNet:
+		return version == waddrmgr.HDVersionSimNetBIP0044 ||
+			version == waddrmgr.HDVersionMainNetBIP0049 ||
+			version == waddrmgr.HDVersionMainNetBIP0084
+
+	default:
+		return false
+	}
 }
 
 // extractAddrFromPKScript extracts an address from a public key script. If the

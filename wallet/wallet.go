@@ -82,6 +82,11 @@ var (
 	ErrNoAssocPrivateKey = errors.New("address does not have an " +
 		"associated private key")
 
+	// ErrInvalidAccountKey is returned when the provided extended public key
+	// does not meet the requirements for an account key (e.g., wrong depth
+	// or not hardened).
+	ErrInvalidAccountKey = errors.New("invalid account key")
+
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
