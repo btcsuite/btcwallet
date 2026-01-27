@@ -56,6 +56,12 @@ const (
 	// defaultLockDuration is the default duration for automatic wallet
 	// locking.
 	defaultLockDuration = 10 * time.Minute
+
+	// MinRecoveryWindow is the minimum allowed value for the RecoveryWindow
+	// configuration parameter. This value ensures that a sufficient number
+	// of addresses are scanned during wallet recovery to avoid missing
+	// funds due to gaps in the address chain.
+	MinRecoveryWindow = 20
 )
 
 var (
@@ -94,6 +100,9 @@ var (
 	// ErrMissingParam is returned when a required parameter is missing from
 	// the configuration.
 	ErrMissingParam = errors.New("missing config parameter")
+
+	// ErrInvalidParam is returned when a parameter is invalid.
+	ErrInvalidParam = errors.New("invalid config parameter")
 
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
@@ -219,6 +228,11 @@ func (c *Config) validate() error {
 
 	if c.Name == "" {
 		return fmt.Errorf("%w: Name", ErrMissingParam)
+	}
+
+	if c.RecoveryWindow < MinRecoveryWindow {
+		return fmt.Errorf("%w: RecoveryWindow must be at least %d",
+			ErrInvalidParam, MinRecoveryWindow)
 	}
 
 	return nil
