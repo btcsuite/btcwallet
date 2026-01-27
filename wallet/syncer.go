@@ -273,6 +273,11 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 // waitUntilBackendSynced blocks until the chain backend considers itself
 // "current".
 func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
+	// Check immediately if the backend is already synced.
+	if s.cfg.Chain.IsCurrent() {
+		return nil
+	}
+
 	// We'll poll every second to determine if our chain considers itself
 	// "current".
 	t := time.NewTicker(time.Second)
