@@ -7,3 +7,6 @@ coverage.txt
 .DS_Store
 .aider*
 coverage.out
+*.prof
+*.test
+*cpu.out
