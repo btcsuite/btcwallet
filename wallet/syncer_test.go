@@ -116,11 +116,9 @@ func TestSyncerRun(t *testing.T) {
 		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
 	)
 
-	// Mock expectations for the initial chain sync sequence.
-	// Use Maybe() because the run loop might exit immediately due to
 	// context cancellation.
 	mockAddrStore.On("Birthday").Return(time.Now()).Maybe()
-	mockChain.On("IsCurrent").Return(true).Maybe()
+	mockChain.On("IsCurrent").Return(false).Maybe()
 	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	mockChain.On("NotifyBlocks").Return(nil).Maybe()
 
