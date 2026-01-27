@@ -297,6 +297,41 @@ func setupBenchmarkWallet(tb testing.TB,
 	w := testWallet(setupT)
 	require.False(tb, setupT.Failed(), "testWallet setup failed")
 
+	// Backfill Config and State for benchmarks comparing new APIs.
+	// Legacy testWallet does not populate these.
+	if w.cfg.DB == nil {
+		w.cfg = Config{
+			DB:          w.db,
+			ChainParams: w.chainParams,
+			Chain:       w.chainClient,
+		}
+	}
+
+	if w.sync == nil {
+		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w)
+	}
+
+	// Initialize controller channels and timer.
+	if w.requestChan == nil {
+		w.requestChan = make(chan any)
+	}
+
+	if w.lockTimer == nil {
+		w.lockTimer = time.NewTimer(0)
+		if !w.lockTimer.Stop() {
+			<-w.lockTimer.C
+		}
+	}
+
+	// Force state to Started to satisfy validateStarted() in new APIs.
+	err := w.state.toStarting()
+	if err == nil {
+		err = w.state.toStarted()
+		require.NoError(tb, err)
+	}
+	// Transition to Unlocked so signing operations are permitted.
+	w.state.toUnlocked()
+
 	addresses := createTestAccounts(
 		tb, w, cfg.scopes, cfg.numAccounts, cfg.numAddresses,
 	)
