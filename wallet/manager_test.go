@@ -101,11 +101,12 @@ func TestManagerCreateSuccess(t *testing.T) {
 
 			m := NewManager()
 			cfg := Config{
-				DB:            db,
-				Chain:         &mockChain{},
-				ChainParams:   &chainParams,
-				Name:          "test-wallet",
-				PubPassphrase: []byte("public"),
+				DB:             db,
+				Chain:          &mockChain{},
+				ChainParams:    &chainParams,
+				Name:           "test-wallet",
+				PubPassphrase:  []byte("public"),
+				RecoveryWindow: MinRecoveryWindow,
 			}
 
 			// Attempt to create the wallet with the specified parameters.
@@ -216,10 +217,11 @@ func TestManagerCreateError(t *testing.T) {
 
 			m := NewManager()
 			cfg := Config{
-				DB:          db,
-				Chain:       &mockChain{},
-				ChainParams: &chainParams,
-				Name:        "test-wallet",
+				DB:             db,
+				Chain:          &mockChain{},
+				ChainParams:    &chainParams,
+				Name:           "test-wallet",
+				RecoveryWindow: MinRecoveryWindow,
 			}
 
 			// Attempt to create the wallet. We expect this to fail due to
@@ -351,11 +353,12 @@ func TestManagerLoadSuccess(t *testing.T) {
 
 	m := NewManager()
 	cfg := Config{
-		DB:            db,
-		Chain:         &mockChain{},
-		ChainParams:   &chainParams,
-		Name:          "test-wallet",
-		PubPassphrase: []byte("public"),
+		DB:             db,
+		Chain:          &mockChain{},
+		ChainParams:    &chainParams,
+		Name:           "test-wallet",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
@@ -395,11 +398,12 @@ func TestManagerLoad_ExistingWallet(t *testing.T) {
 
 	m := NewManager()
 	cfg := Config{
-		DB:            db,
-		Chain:         &mockChain{},
-		ChainParams:   &chainParams,
-		Name:          "test-wallet",
-		PubPassphrase: []byte("public"),
+		DB:             db,
+		Chain:          &mockChain{},
+		ChainParams:    &chainParams,
+		Name:           "test-wallet",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
