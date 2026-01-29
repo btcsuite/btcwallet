@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,8 +25,18 @@ func TestManagerCreateSuccess(t *testing.T) {
 	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
 	require.NoError(t, err)
 
-	// Arrange: Define test cases for different creation modes.
+	// Create an account XPub for ModeShell testing.
+	// Derive account key: m/44'/0'/0'
+	acctKey, err := rootKey.Derive(hdkeychain.HardenedKeyStart + 44)
+	require.NoError(t, err)
+	acctKey, err = acctKey.Derive(hdkeychain.HardenedKeyStart + 0)
+	require.NoError(t, err)
+	acctKey, err = acctKey.Derive(hdkeychain.HardenedKeyStart + 0)
+	require.NoError(t, err)
+	acctXPub, err := acctKey.Neuter()
+	require.NoError(t, err)
 
+	// Arrange: Define test cases for different creation modes.
 	tests := []struct {
 		name   string
 		params CreateWalletParams
@@ -57,6 +69,22 @@ func TestManagerCreateSuccess(t *testing.T) {
 				PubPassphrase:     []byte("public"),
 				PrivatePassphrase: []byte("private"),
 				Birthday:          time.Now(),
+			},
+		},
+		{
+			name: "ModeShell",
+			params: CreateWalletParams{
+				Mode: ModeShell,
+				InitialAccounts: []WatchOnlyAccount{{
+					Scope:                waddrmgr.KeyScopeBIP0049Plus,
+					XPub:                 acctXPub,
+					MasterKeyFingerprint: 0,
+					Name:                 "test-shell-account",
+					AddrType:             waddrmgr.NestedWitnessPubKey,
+				}},
+				WatchOnly:     true,
+				PubPassphrase: []byte("public"),
+				Birthday:      time.Now(),
 			},
 		},
 	}
@@ -95,7 +123,30 @@ func TestManagerCreateSuccess(t *testing.T) {
 			loadedW, ok := m.wallets["test-wallet"]
 			m.RUnlock()
 			require.True(t, ok)
-			require.Equal(t, w, loadedW)
+			require.Same(t, w, loadedW)
+
+			// If ModeShell, verify account was imported.
+			if tc.params.Mode == ModeShell {
+				// We can't use w.GetAccount here because the wallet is not
+				// started. We'll verify directly against the address manager.
+				err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+					ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+					scopeMgr, err := w.addrStore.FetchScopedKeyManager(
+						tc.params.InitialAccounts[0].Scope,
+					)
+					if err != nil {
+						return err
+					}
+
+					_, err = scopeMgr.LookupAccount(
+						ns, tc.params.InitialAccounts[0].Name,
+					)
+
+					return err
+				})
+				require.NoError(t, err)
+			}
 		})
 	}
 }
