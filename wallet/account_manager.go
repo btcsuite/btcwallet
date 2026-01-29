@@ -609,12 +609,7 @@ func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
 //
 // The time complexity of this method is dominated by the database lookup to
 // ensure the account name is unique within the scope.
-//
-// TODO(yy): we will move the db operation to a dedicated method, so we can
-// ignore cyclop for now.
-//
-//nolint:cyclop
-func (w *Wallet) ImportAccount(_ context.Context,
+func (w *Wallet) ImportAccount(ctx context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
 	dryRun bool) (*waddrmgr.AccountProperties, error) {
@@ -624,9 +619,26 @@ func (w *Wallet) ImportAccount(_ context.Context,
 		return nil, err
 	}
 
+	return w.importAccountInternal(
+		ctx, name, accountKey, masterKeyFingerprint, addrType, dryRun,
+	)
+}
+
+// importAccountInternal is the internal implementation of ImportAccount,
+// allowing callers (like Manager.Create) to bypass the started check.
+//
+// TODO(yy): we will move the db operation to a dedicated method, so we can
+// ignore cyclop for now.
+//
+//nolint:cyclop
+func (w *Wallet) importAccountInternal(_ context.Context,
+	name string, accountKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
+	dryRun bool) (*waddrmgr.AccountProperties, error) {
+
 	// Ensure we have a valid account public key. We require an account-level
 	// key (depth 3) to properly manage the derivation path.
-	err = validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
+	err := validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
 	if err != nil {
 		return nil, err
 	}
