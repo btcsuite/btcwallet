@@ -47,11 +47,17 @@ type WatchOnlyAccount struct {
 	// Scope is the key scope of the account.
 	Scope waddrmgr.KeyScope
 
-	// Account is the account number.
-	Account uint32
-
 	// XPub is the extended public key for the account.
 	XPub *hdkeychain.ExtendedKey
+
+	// MasterKeyFingerprint is the fingerprint of the master key.
+	MasterKeyFingerprint uint32
+
+	// Name is the name of the account.
+	Name string
+
+	// AddrType is the address type of the account.
+	AddrType waddrmgr.AddressType
 }
 
 // CreateWalletParams holds the parameters required to initialize a new wallet.
@@ -158,7 +164,36 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
+	// If we are in shell mode and have initial accounts, we import them now.
+	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
+		err = w.importInitialAccounts(
+			context.Background(), params.InitialAccounts,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return w, nil
+}
+
+// importInitialAccounts imports a list of watch-only accounts into the wallet.
+// This is typically used during wallet initialization in shell mode.
+func (w *Wallet) importInitialAccounts(ctx context.Context,
+	accounts []WatchOnlyAccount) error {
+
+	for _, account := range accounts {
+		_, err := w.importAccountInternal(
+			ctx, account.Name, account.XPub, account.MasterKeyFingerprint,
+			account.AddrType, false,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to import account %s: %w", account.Name,
+				err)
+		}
+	}
+
+	return nil
 }
 
 // Load loads an existing wallet from the provided configuration. It opens the
