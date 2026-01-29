@@ -233,6 +233,96 @@ func TestManagerCreateError(t *testing.T) {
 	}
 }
 
+// TestCreateWalletParams_Validate verifies that the validate method enforces
+// the correct constraints for each creation mode.
+func TestCreateWalletParams_Validate(t *testing.T) {
+	t.Parallel()
+
+	// Pre-calculate cryptographic material to construct specific test
+	// scenarios.
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		params      CreateWalletParams
+		expectedErr string
+	}{
+		{
+			name: "ModeGenSeed with Seed",
+			params: CreateWalletParams{
+				Mode: ModeGenSeed,
+				Seed: seed,
+			},
+			expectedErr: "seed should not be set for ModeGenSeed",
+		},
+		{
+			name: "ModeGenSeed with RootKey",
+			params: CreateWalletParams{
+				Mode:    ModeGenSeed,
+				RootKey: rootKey,
+			},
+			expectedErr: "root key should not be set for ModeGenSeed",
+		},
+		{
+			name: "ModeImportSeed with RootKey",
+			params: CreateWalletParams{
+				Mode:    ModeImportSeed,
+				Seed:    seed,
+				RootKey: rootKey,
+			},
+			expectedErr: "root key should not be set for ModeImportSeed",
+		},
+		{
+			name: "ModeImportExtKey with Seed",
+			params: CreateWalletParams{
+				Mode:    ModeImportExtKey,
+				RootKey: rootKey,
+				Seed:    seed,
+			},
+			expectedErr: "seed should not be set for ModeImportExtKey",
+		},
+		{
+			name: "ModeShell with Seed",
+			params: CreateWalletParams{
+				Mode: ModeShell,
+				Seed: seed,
+			},
+			expectedErr: "seed should not be set for ModeShell",
+		},
+		{
+			name: "Unknown Mode",
+			params: CreateWalletParams{
+				Mode: ModeUnknown,
+			},
+			expectedErr: "unknown mode",
+		},
+		{
+			name: "InitialAccounts with ModeGenSeed",
+			params: CreateWalletParams{
+				Mode: ModeGenSeed,
+				InitialAccounts: []WatchOnlyAccount{{
+					Name: "test",
+				}},
+			},
+			expectedErr: "initial accounts should only " +
+				"be set for ModeShell",
+		}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tc.params.validate()
+			require.Error(t, err)
+			require.ErrorContains(t, err, tc.expectedErr)
+		})
+	}
+}
+
 // TestManagerCreate_InvalidConfig verifies that the Create method performs
 // configuration validation before proceeding with any operations.
 func TestManagerCreate_InvalidConfig(t *testing.T) {
