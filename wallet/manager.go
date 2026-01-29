@@ -93,6 +93,75 @@ type CreateWalletParams struct {
 	PrivatePassphrase []byte
 }
 
+// validate ensures that the parameters are consistent with the chosen creation
+// mode.
+//
+// We skip cyclop because this method performs exhaustive validation of
+// mutually exclusive fields across all creation modes.
+//
+//nolint:cyclop
+func (p *CreateWalletParams) validate() error {
+	if p.Mode == ModeUnknown {
+		return fmt.Errorf("%w: unknown mode", ErrWalletParams)
+	}
+
+	// InitialAccounts should only be set for ModeShell.
+	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
+		return fmt.Errorf("%w: initial accounts should only be set "+
+			"for ModeShell", ErrWalletParams)
+	}
+
+	if p.Mode == ModeGenSeed {
+		if len(p.Seed) != 0 {
+			return fmt.Errorf("%w: seed should not be set for "+
+				"ModeGenSeed", ErrWalletParams)
+		}
+
+		if p.RootKey != nil {
+			return fmt.Errorf("%w: root key should not be set for "+
+				"ModeGenSeed", ErrWalletParams)
+		}
+	}
+
+	if p.Mode == ModeImportSeed {
+		if len(p.Seed) == 0 {
+			return fmt.Errorf("%w: seed is required for "+
+				"ModeImportSeed", ErrWalletParams)
+		}
+
+		if p.RootKey != nil {
+			return fmt.Errorf("%w: root key should not be set for "+
+				"ModeImportSeed", ErrWalletParams)
+		}
+	}
+
+	if p.Mode == ModeImportExtKey {
+		if p.RootKey == nil {
+			return fmt.Errorf("%w: root key is required for "+
+				"ModeImportExtKey", ErrWalletParams)
+		}
+
+		if len(p.Seed) != 0 {
+			return fmt.Errorf("%w: seed should not be set for "+
+				"ModeImportExtKey", ErrWalletParams)
+		}
+	}
+
+	if p.Mode == ModeShell {
+		if len(p.Seed) != 0 {
+			return fmt.Errorf("%w: seed should not be set for "+
+				"ModeShell", ErrWalletParams)
+		}
+
+		if p.RootKey != nil {
+			return fmt.Errorf("%w: root key should not be set for "+
+				"ModeShell", ErrWalletParams)
+		}
+	}
+
+	return nil
+}
+
 // Manager is a high-level manager that handles the lifecycle of multiple
 // wallets. It acts as a factory for creating and loading wallets, and can
 // optionally track the active wallets.
@@ -132,10 +201,15 @@ func (m *Manager) String() string {
 // Create creates a new wallet based on the provided configuration and
 // initialization parameters. It initializes the database structure and then
 // loads the wallet.
-func (m *Manager) Create(cfg Config,
-	params CreateWalletParams) (*Wallet, error) {
+func (m *Manager) Create(cfg Config, params CreateWalletParams) (
+	*Wallet, error) {
 
 	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.validate()
 	if err != nil {
 		return nil, err
 	}
