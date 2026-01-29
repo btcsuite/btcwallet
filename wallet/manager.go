@@ -201,29 +201,12 @@ func (m *Manager) String() string {
 // Create creates a new wallet based on the provided configuration and
 // initialization parameters. It initializes the database structure and then
 // loads the wallet.
-func (m *Manager) Create(cfg Config, params CreateWalletParams) (
-	*Wallet, error) {
+func (m *Manager) Create(cfg Config,
+	params CreateWalletParams) (*Wallet, error) {
 
-	err := cfg.validate()
+	rootKey, err := m.prepareWalletCreation(cfg, params)
 	if err != nil {
 		return nil, err
-	}
-
-	err = params.validate()
-	if err != nil {
-		return nil, err
-	}
-
-	rootKey, err := m.deriveRootKey(cfg, params)
-	if err != nil {
-		return nil, err
-	}
-
-	// If the wallet is NOT watch-only, we require a private root key to be able
-	// to sign transactions and derive child private keys.
-	if !params.WatchOnly && rootKey != nil && !rootKey.IsPrivate() {
-		return nil, fmt.Errorf("%w: private key required for "+
-			"non-watch-only wallet", ErrWalletParams)
 	}
 
 	// Create the underlying database structure.
@@ -327,6 +310,36 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	m.Unlock()
 
 	return w, nil
+}
+
+// prepareWalletCreation validates the configuration and parameters, and derives
+// the root key for wallet creation.
+func (m *Manager) prepareWalletCreation(cfg Config,
+	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
+
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	rootKey, err := m.deriveRootKey(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the wallet is NOT watch-only, we require a private root key to be able
+	// to sign transactions and derive child private keys.
+	if !params.WatchOnly && rootKey != nil && !rootKey.IsPrivate() {
+		return nil, fmt.Errorf("%w: private key required for "+
+			"non-watch-only wallet", ErrWalletParams)
+	}
+
+	return rootKey, nil
 }
 
 // deriveRootKey resolves the master extended key based on the creation mode.
