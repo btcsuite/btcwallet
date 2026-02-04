@@ -30,10 +30,22 @@ ifneq ($(workers),)
 LINT_WORKERS = --concurrency=$(workers)
 endif
 
+# Detect if we're in a git worktree. Use git rev-parse --git-common-dir to get
+# the path to the main git directory for the linter's diff processor to work
+# correctly with the new-from-rev setting.
+GIT_COMMON_DIR := $(shell \
+  common_dir="$$(git rev-parse --git-common-dir 2>/dev/null)"; \
+  if [ "$$common_dir" != ".git" ] && [ -n "$$common_dir" ]; then \
+    echo "$$common_dir"; \
+  fi)
+GIT_VOLUME := $(if $(GIT_COMMON_DIR),-v "$(GIT_COMMON_DIR):$(GIT_COMMON_DIR):ro",)
+
 DOCKER_TOOLS = docker run \
   --rm \
   -v $(shell bash -c "mkdir -p /tmp/go-build-cache; echo /tmp/go-build-cache"):/root/.cache/go-build \
-  -v $$(pwd):/build btcwallet-tools
+  -v $$(pwd):/build \
+  $(GIT_VOLUME) \
+  btcwallet-tools
 
 SQLFLUFF = docker run \
 	--rm \
