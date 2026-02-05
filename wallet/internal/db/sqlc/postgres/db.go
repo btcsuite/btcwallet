@@ -81,6 +81,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
 	}
+	if q.getAndIncrementNextExternalIndexStmt, err = db.PrepareContext(ctx, GetAndIncrementNextExternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAndIncrementNextExternalIndex: %w", err)
+	}
+	if q.getAndIncrementNextInternalIndexStmt, err = db.PrepareContext(ctx, GetAndIncrementNextInternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAndIncrementNextInternalIndex: %w", err)
+	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
 	}
@@ -149,6 +155,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateAccountNameByWalletScopeAndNumberStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndNumber); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndNumber: %w", err)
+	}
+	if q.updateAccountNextExternalIndexStmt, err = db.PrepareContext(ctx, UpdateAccountNextExternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateAccountNextExternalIndex: %w", err)
+	}
+	if q.updateAccountNextInternalIndexStmt, err = db.PrepareContext(ctx, UpdateAccountNextInternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateAccountNextInternalIndex: %w", err)
 	}
 	if q.updateWalletSecretsStmt, err = db.PrepareContext(ctx, UpdateWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateWalletSecrets: %w", err)
@@ -254,6 +266,16 @@ func (q *Queries) Close() error {
 	if q.getAddressTypeByIDStmt != nil {
 		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
+		}
+	}
+	if q.getAndIncrementNextExternalIndexStmt != nil {
+		if cerr := q.getAndIncrementNextExternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAndIncrementNextExternalIndexStmt: %w", cerr)
+		}
+	}
+	if q.getAndIncrementNextInternalIndexStmt != nil {
+		if cerr := q.getAndIncrementNextInternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAndIncrementNextInternalIndexStmt: %w", cerr)
 		}
 	}
 	if q.getBlockByHeightStmt != nil {
@@ -371,6 +393,16 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNumberStmt: %w", cerr)
 		}
 	}
+	if q.updateAccountNextExternalIndexStmt != nil {
+		if cerr := q.updateAccountNextExternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateAccountNextExternalIndexStmt: %w", cerr)
+		}
+	}
+	if q.updateAccountNextInternalIndexStmt != nil {
+		if cerr := q.updateAccountNextInternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateAccountNextInternalIndexStmt: %w", cerr)
+		}
+	}
 	if q.updateWalletSecretsStmt != nil {
 		if cerr := q.updateWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateWalletSecretsStmt: %w", cerr)
@@ -439,6 +471,8 @@ type Queries struct {
 	getAddressByScriptPubKeyStmt                *sql.Stmt
 	getAddressSecretStmt                        *sql.Stmt
 	getAddressTypeByIDStmt                      *sql.Stmt
+	getAndIncrementNextExternalIndexStmt        *sql.Stmt
+	getAndIncrementNextInternalIndexStmt        *sql.Stmt
 	getBlockByHeightStmt                        *sql.Stmt
 	getKeyScopeByIDStmt                         *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt             *sql.Stmt
@@ -462,6 +496,8 @@ type Queries struct {
 	lockAccountScopeStmt                        *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
+	updateAccountNextExternalIndexStmt          *sql.Stmt
+	updateAccountNextInternalIndexStmt          *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
 	updateWalletSyncStateStmt                   *sql.Stmt
 }
@@ -489,6 +525,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAddressByScriptPubKeyStmt:                q.getAddressByScriptPubKeyStmt,
 		getAddressSecretStmt:                        q.getAddressSecretStmt,
 		getAddressTypeByIDStmt:                      q.getAddressTypeByIDStmt,
+		getAndIncrementNextExternalIndexStmt:        q.getAndIncrementNextExternalIndexStmt,
+		getAndIncrementNextInternalIndexStmt:        q.getAndIncrementNextInternalIndexStmt,
 		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
 		getKeyScopeByIDStmt:                         q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:             q.getKeyScopeByWalletAndScopeStmt,
@@ -512,6 +550,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		lockAccountScopeStmt:                        q.lockAccountScopeStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
+		updateAccountNextExternalIndexStmt:          q.updateAccountNextExternalIndexStmt,
+		updateAccountNextInternalIndexStmt:          q.updateAccountNextInternalIndexStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,
 		updateWalletSyncStateStmt:                   q.updateWalletSyncStateStmt,
 	}

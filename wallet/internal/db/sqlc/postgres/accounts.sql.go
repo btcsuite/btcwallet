@@ -438,6 +438,38 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 	return i, err
 }
 
+const GetAndIncrementNextExternalIndex = `-- name: GetAndIncrementNextExternalIndex :one
+UPDATE accounts
+SET next_external_index = next_external_index + 1
+WHERE id = $1
+RETURNING (next_external_index - 1)::BIGINT AS address_index
+`
+
+// Atomically gets the next external address index and increments the counter.
+// Returns the current index value (before incrementing) for the address derivation.
+func (q *Queries) GetAndIncrementNextExternalIndex(ctx context.Context, id int64) (int64, error) {
+	row := q.queryRow(ctx, q.getAndIncrementNextExternalIndexStmt, GetAndIncrementNextExternalIndex, id)
+	var address_index int64
+	err := row.Scan(&address_index)
+	return address_index, err
+}
+
+const GetAndIncrementNextInternalIndex = `-- name: GetAndIncrementNextInternalIndex :one
+UPDATE accounts
+SET next_internal_index = next_internal_index + 1
+WHERE id = $1
+RETURNING (next_internal_index - 1)::BIGINT AS address_index
+`
+
+// Atomically gets the next internal/change address index and increments the counter.
+// Returns the current index value (before incrementing) for the address derivation.
+func (q *Queries) GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error) {
+	row := q.queryRow(ctx, q.getAndIncrementNextInternalIndexStmt, GetAndIncrementNextInternalIndex, id)
+	var address_index int64
+	err := row.Scan(&address_index)
+	return address_index, err
+}
+
 const ListAccountsByScope = `-- name: ListAccountsByScope :many
 SELECT
     a.id,
@@ -802,4 +834,40 @@ func (q *Queries) UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, a
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const UpdateAccountNextExternalIndex = `-- name: UpdateAccountNextExternalIndex :exec
+UPDATE accounts
+SET next_external_index = $2
+WHERE id = $1
+`
+
+type UpdateAccountNextExternalIndexParams struct {
+	ID                int64
+	NextExternalIndex int64
+}
+
+// Updates the next_external_index counter for an account. Used in tests
+// to set up specific index scenarios.
+func (q *Queries) UpdateAccountNextExternalIndex(ctx context.Context, arg UpdateAccountNextExternalIndexParams) error {
+	_, err := q.exec(ctx, q.updateAccountNextExternalIndexStmt, UpdateAccountNextExternalIndex, arg.ID, arg.NextExternalIndex)
+	return err
+}
+
+const UpdateAccountNextInternalIndex = `-- name: UpdateAccountNextInternalIndex :exec
+UPDATE accounts
+SET next_internal_index = $2
+WHERE id = $1
+`
+
+type UpdateAccountNextInternalIndexParams struct {
+	ID                int64
+	NextInternalIndex int64
+}
+
+// Updates the next_internal_index counter for an account. Used in tests
+// to set up specific index scenarios.
+func (q *Queries) UpdateAccountNextInternalIndex(ctx context.Context, arg UpdateAccountNextInternalIndexParams) error {
+	_, err := q.exec(ctx, q.updateAccountNextInternalIndexStmt, UpdateAccountNextInternalIndex, arg.ID, arg.NextInternalIndex)
+	return err
 }
