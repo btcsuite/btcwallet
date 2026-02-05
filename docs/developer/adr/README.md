@@ -7,3 +7,4 @@ ADRs serve as a historical log of important design choices, providing context fo
 ## Existing ADRs
 
 *   [ADR 0001: Multi-Wallet Architecture](./0001-multi-wallet-architecture.md)
+*   [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md)
