@@ -19,6 +19,8 @@ type Account struct {
 	MasterFingerprint  sql.NullInt64
 	EncryptedPublicKey []byte
 	CreatedAt          time.Time
+	NextExternalIndex  int64
+	NextInternalIndex  int64
 }
 
 type AccountOrigin struct {

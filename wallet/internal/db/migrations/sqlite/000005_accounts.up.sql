@@ -64,6 +64,12 @@ CREATE TABLE accounts (
     -- Timestamp when the account was created. Automatically set by the database.
     created_at DATETIME NOT NULL DEFAULT current_timestamp,
 
+    -- Next index to use for external addresses (branch 0)
+    next_external_index INTEGER NOT NULL DEFAULT 0,
+
+    -- Next index to use for internal/change addresses (branch 1)
+    next_internal_index INTEGER NOT NULL DEFAULT 0,
+
     -- Foreign key constraints to key scope. Using ON DELETE RESTRICT to ensure
     -- that the key scope cannot be deleted if accounts still exist.
     FOREIGN KEY (scope_id) REFERENCES key_scopes (id) ON DELETE RESTRICT,
