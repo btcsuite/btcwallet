@@ -245,3 +245,33 @@ INSERT INTO accounts (
 )
 VALUES (?, ?, ?, ?, ?)
 RETURNING id, account_number, created_at;
+
+-- name: GetAndIncrementNextExternalIndex :one
+-- Atomically gets the next external address index and increments the counter.
+-- Returns the current index value (before incrementing) for the address derivation.
+UPDATE accounts
+SET next_external_index = next_external_index + 1
+WHERE id = ?
+RETURNING next_external_index - 1 AS address_index;
+
+-- name: GetAndIncrementNextInternalIndex :one
+-- Atomically gets the next internal/change address index and increments the counter.
+-- Returns the current index value (before incrementing) for the address derivation.
+UPDATE accounts
+SET next_internal_index = next_internal_index + 1
+WHERE id = ?
+RETURNING next_internal_index - 1 AS address_index;
+
+-- name: UpdateAccountNextExternalIndex :exec
+-- Updates the next_external_index counter for an account. Used in tests
+-- to set up specific index scenarios.
+UPDATE accounts
+SET next_external_index = ?2
+WHERE id = ?1;
+
+-- name: UpdateAccountNextInternalIndex :exec
+-- Updates the next_internal_index counter for an account. Used in tests
+-- to set up specific index scenarios.
+UPDATE accounts
+SET next_internal_index = ?2
+WHERE id = ?1;

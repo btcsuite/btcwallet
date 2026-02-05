@@ -55,6 +55,12 @@ type Querier interface {
 	GetAddressSecret(ctx context.Context, id int64) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
+	// Atomically gets the next external address index and increments the counter.
+	// Returns the current index value (before incrementing) for the address derivation.
+	GetAndIncrementNextExternalIndex(ctx context.Context, id int64) (int64, error)
+	// Atomically gets the next internal/change address index and increments the counter.
+	// Returns the current index value (before incrementing) for the address derivation.
+	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	// Retrieves a key scope by its ID.
 	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
@@ -123,6 +129,12 @@ type Querier interface {
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.
 	UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error)
+	// Updates the next_external_index counter for an account. Used in tests
+	// to set up specific index scenarios.
+	UpdateAccountNextExternalIndex(ctx context.Context, arg UpdateAccountNextExternalIndexParams) error
+	// Updates the next_internal_index counter for an account. Used in tests
+	// to set up specific index scenarios.
+	UpdateAccountNextInternalIndex(ctx context.Context, arg UpdateAccountNextInternalIndexParams) error
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }
