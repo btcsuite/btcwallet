@@ -202,13 +202,13 @@ tidy-module-check: tidy-module
 #? sql-parse: Ensures SQL files are syntactically valid
 sql-parse:
 	@$(call print, "Validating SQL files (postgres migrations).")
-	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS) --format none
 	@$(call print, "Validating SQL files (postgres queries).")
-	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES) --format none
 	@$(call print, "Validating SQL files (sqlite migrations).")
-	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS) --format none
 	@$(call print, "Validating SQL files (sqlite queries).")
-	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES) --format none
 
 #? sqlc: Generate Go code from SQL queries and migrations
 sqlc: sql-parse docker-tools
