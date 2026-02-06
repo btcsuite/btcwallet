@@ -1,11 +1,7 @@
 package bwtest
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
@@ -14,16 +10,6 @@ import (
 )
 
 const (
-	// MinerLogFilename is the default log filename for the miner node.
-	MinerLogFilename = "output_btcd_miner.log"
-
-	// MinerLogDir is the default log dir for the miner node.
-	//
-	// Note: When running the integration tests with `go test ./itest`, the
-	// working directory is `itest`, so logs are written under
-	// `itest/test-logs`.
-	MinerLogDir = "test-logs"
-
 	// minerSetupOutputs is the number of outputs to generate during miner
 	// setup.
 	minerSetupOutputs = 50
@@ -39,13 +25,6 @@ const (
 	// minerWindowMultiplier is the multiplier for the miner confirmation
 	// window to ensure we mine enough blocks for activation.
 	minerWindowMultiplier = 2
-
-	// minerLogDirPerm is the file mode used when creating the miner log dir.
-	minerLogDirPerm = 0o750
-
-	// maxMinerLogDirAttempts is the maximum number of attempts to create a
-	// unique log directory.
-	maxMinerLogDirAttempts = 1000
 )
 
 var (
@@ -62,19 +41,17 @@ type minerHarness struct {
 
 	// logPath is the directory path of the miner's logs.
 	logPath string
-
-	// logFilename is the saved log filename of the miner node.
-	logFilename string
 }
 
 // newMiner creates a new minerHarness instance.
-func newMiner(t *testing.T) *minerHarness {
+func newMiner(t *testing.T, logDir string) *minerHarness {
 	t.Helper()
 
 	btcdBinary, err := GetBtcdBinary()
 	require.NoError(t, err, "unable to find btcd binary")
 
-	logDir := createMinerLogDir(t)
+	err = ensureLogDir(logDir)
+	require.NoError(t, err, "unable to create miner log dir")
 
 	args := []string{
 		"--rejectnonstd",          // Reject non-standard txs in tests.
@@ -95,54 +72,12 @@ func newMiner(t *testing.T) *minerHarness {
 	require.NoError(t, err, "unable to create rpctest harness")
 
 	m := &minerHarness{
-		T:           t,
-		Harness:     harness,
-		logPath:     logDir,
-		logFilename: MinerLogFilename,
+		T:       t,
+		Harness: harness,
+		logPath: logDir,
 	}
 
 	return m
-}
-
-// createMinerLogDir creates a per-run log directory for the miner.
-//
-// The directory is named using the format log-YYYYMMDD-HHMMSS. If the
-// directory already exists, a numeric suffix is appended.
-func createMinerLogDir(t *testing.T) string {
-	t.Helper()
-
-	// Ensure the log root exists.
-	err := os.MkdirAll(MinerLogDir, minerLogDirPerm)
-	require.NoError(t, err, "unable to create miner log root")
-
-	base := "log-" + time.Now().Format("20060102-150405")
-
-	for i := range maxMinerLogDirAttempts {
-		dir := base
-		if i > 0 {
-			dir = fmt.Sprintf("%s-%d", base, i)
-		}
-
-		fullPath := filepath.Join(MinerLogDir, dir)
-
-		err := os.Mkdir(fullPath, minerLogDirPerm)
-		if err == nil {
-			return fullPath
-		}
-
-		if os.IsExist(err) {
-			continue
-		}
-
-		require.NoError(t, err, "unable to create miner log dir")
-	}
-
-	t.Fatalf(
-		"unable to create miner log dir: too many collisions (%d)",
-		maxMinerLogDirAttempts,
-	)
-
-	return ""
 }
 
 // SetUp starts the miner node and generates initial blocks to activate SegWit.
@@ -196,7 +131,4 @@ func (m *minerHarness) SetUpNoChain() {
 // Stop shuts down the miner.
 func (m *minerHarness) Stop() {
 	require.NoError(m, m.TearDown(), "tear down miner failed")
-
-	// Always keep logs for debugging, even for passing tests.
-	m.Logf("Miner logs available at: %s", m.logPath)
 }
