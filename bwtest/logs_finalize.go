@@ -57,9 +57,86 @@ func (h *HarnessTest) finalizeLogs() {
 			h.Logf("failed to flatten btcd backend logs: %v", err)
 		}
 
+	case backendBitcoind:
+		err = flattenBitcoindLogs(h.T, chainLogDir, chainDst)
+		if err != nil {
+			h.Logf("failed to flatten bitcoind backend logs: %v", err)
+		}
+
 	default:
 		// No backend logs to flatten.
 	}
+}
+
+// flattenBitcoindLogs concatenates bitcoind logs under srcDir into dstFile.
+func flattenBitcoindLogs(t *testing.T, srcDir, dstFile string) error {
+	t.Helper()
+
+	// Capture process stdout/stderr first, as fatal startup errors might not be
+	// present in debug.log.
+	prelude := []string{
+		filepath.Join(srcDir, "bitcoind.stderr.log"),
+		filepath.Join(srcDir, "bitcoind.stdout.log"),
+	}
+
+	pattern := filepath.Join(srcDir, "*", "debug.log*")
+
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("glob bitcoind logs: %w", err)
+	}
+
+	files := make([]string, 0, len(prelude)+len(matches))
+	files = append(files, prelude...)
+	files = append(files, matches...)
+
+	files = filterRegularFiles(files)
+	if len(files) == 0 {
+		return nil
+	}
+
+	// bitcoind rotates debug.log.1, debug.log.2 etc but we don't try too hard
+	// ordering here.
+	sort.Strings(files)
+
+	// #nosec G304 -- dstFile is created by the test harness.
+	f, err := os.OpenFile(dstFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+		logFilePerm)
+	if err != nil {
+		return fmt.Errorf("open dst log: %w", err)
+	}
+
+	defer func() {
+		_ = f.Close()
+	}()
+
+	for i, p := range files {
+		// Keep a blank line between concatenated source files to make the
+		// merged output easier to scan when debugging CI failures.
+		if i > 0 {
+			_, _ = f.WriteString("\n")
+		}
+
+		base := filepath.Base(p)
+		_, _ = f.WriteString("--- " + base + " ---\n")
+
+		// #nosec G304 -- p is discovered under the harness-controlled log dir.
+		src, err := os.Open(p)
+		if err != nil {
+			return fmt.Errorf("open src log: %w", err)
+		}
+
+		_, cpErr := io.Copy(f, src)
+		_ = src.Close()
+
+		if cpErr != nil {
+			return fmt.Errorf("copy src log: %w", cpErr)
+		}
+	}
+
+	_ = os.RemoveAll(srcDir)
+
+	return nil
 }
 
 // flattenBtcdLogs concatenates btcd logs under srcDir into dstFile.

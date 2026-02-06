@@ -54,7 +54,10 @@ func NewBackend(t *testing.T, backendType, logDir string) ChainBackend {
 	case backendBtcd:
 		return NewBtcdBackend(t, logDir)
 
-	case backendBitcoind, backendNeutrino:
+	case backendBitcoind:
+		return NewBitcoindBackend(t, logDir)
+
+	case backendNeutrino:
 		t.Fatalf("chain backend %q is not implemented yet", backendType)
 		return nil
 
@@ -73,7 +76,10 @@ func validateBackendType(t *testing.T, backendType string) {
 	case backendBtcd:
 		return
 
-	case backendBitcoind, backendNeutrino:
+	case backendBitcoind:
+		return
+
+	case backendNeutrino:
 		t.Fatalf("chain backend %q is not implemented yet", backendType)
 		return
 
