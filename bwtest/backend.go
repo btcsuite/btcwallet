@@ -58,32 +58,12 @@ func NewBackend(t *testing.T, backendType, logDir string) ChainBackend {
 		return NewBitcoindBackend(t, logDir)
 
 	case backendNeutrino:
-		t.Fatalf("chain backend %q is not implemented yet", backendType)
-		return nil
+		// Neutrino is an in-process backend and does not require a backend log
+		// directory.
+		return NewNeutrinoBackend(t, logDir)
 
 	default:
 		t.Fatalf("unknown chain backend %q", backendType)
 		return nil
-	}
-}
-
-// validateBackendType validates the chain backend identifier provided by test
-// flags before backend construction starts.
-func validateBackendType(t *testing.T, backendType string) {
-	t.Helper()
-
-	switch backendType {
-	case backendBtcd:
-		return
-
-	case backendBitcoind:
-		return
-
-	case backendNeutrino:
-		t.Fatalf("chain backend %q is not implemented yet", backendType)
-		return
-
-	default:
-		t.Fatalf("unknown chain backend %q", backendType)
 	}
 }
