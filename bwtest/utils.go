@@ -2,6 +2,7 @@ package bwtest
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 )
@@ -36,4 +37,14 @@ func GetBitcoindBinary() (string, error) {
 	}
 
 	return path, nil
+}
+
+// ensureLogDir creates the log directory if it doesn't exist.
+func ensureLogDir(dir string) error {
+	err := os.MkdirAll(dir, logDirPerm)
+	if err != nil {
+		return fmt.Errorf("mkdir log dir: %w", err)
+	}
+
+	return nil
 }
