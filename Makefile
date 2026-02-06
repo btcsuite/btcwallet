@@ -137,7 +137,7 @@ itest-db-race:
 	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(ITEST_DB_RACE)
 
 #? itest: Run integration tests
-#? itest (vars): chain=btcd|bitcoind|neutrino db=kvdb|sqlite|postgres
+#? itest (vars): chain=btcd|bitcoind|neutrino backend=btcd|bitcoind|neutrino db=kvdb|sqlite|postgres
 #? itest (vars): icase=<regex> (filter itest cases)
 #? itest (vars): timeout=<duration> verbose=1 nocache=1
 #? itest (ex): make itest icase=manager
@@ -146,10 +146,10 @@ itest:
 	@$(call print, "Running integration tests.")
 	@$(GOTEST) -v ./itest \
 		-tags="itest $(DEV_TAGS) nolog" \
-		$(if $(icase),-test.run="TestBtcWallet/.*/$(icase)",) \
+		$(if $(icase),-test.run="TestBtcWallet$$|$(icase)",) \
 		$(filter-out -test.run=%,$(TEST_FLAGS)) \
 		-args \
-		-chain="$(if $(chain),$(chain),btcd)" \
+		-chain="$(if $(backend),$(backend),$(if $(chain),$(chain),btcd))" \
 		-db="$(if $(db),$(db),kvdb)"
 
 # =========
