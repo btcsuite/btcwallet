@@ -12,3 +12,9 @@ coverage.out
 *.prof
 *.test
 *cpu.out
+
+# Integration test logs.
+itest/test-logs/
+
+# Backwards compatibility for older log dir.
+itest/.minerlogs/
