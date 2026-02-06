@@ -23,6 +23,9 @@ import (
 )
 
 var (
+	// Limit concurrent database creation to avoid exhausting connections.
+	pgDBSemaphore = make(chan struct{}, 4)
+
 	// Shared container instance, reused across tests for performance.
 	// This is safe to use concurrently because we only share the container
 	// and not the database inside it. Each test gets its own database.
@@ -134,6 +137,13 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := t.Context()
 
+	// Acquire a semaphore slot to limit concurrent database creation and
+	// parallel test execution that depends on it.
+	pgDBSemaphore <- struct{}{}
+	defer func() {
+		<-pgDBSemaphore
+	}()
+
 	container, err := GetPostgresContainer(ctx)
 	require.NoError(t, err, "failed to get postgres container")
 
@@ -145,12 +155,6 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	require.NoError(t, err, "failed to open admin connection")
 	require.NotNil(t, adminDB, "admin connection is nil")
 
-	// Close the connection to avoid leaking an idle connection during tests.
-	// The container is reused across all tests, so we explicitly clean this up.
-	t.Cleanup(func() {
-		_ = adminDB.Close()
-	})
-
 	// Create a database name based on the test name.
 	dbName := sanitizedPgDBName(t)
 
@@ -158,6 +162,10 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	createDBStmt := fmt.Sprintf("CREATE DATABASE %s", dbName)
 	_, err = adminDB.ExecContext(ctx, createDBStmt)
 	require.NoError(t, err, "failed to create test database")
+
+	// Close the connection to avoid leaking an idle connection during tests.
+	// The container is reused across all tests, so we explicitly clean this up.
+	_ = adminDB.Close()
 
 	// Build the connection string for the test database.
 	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
