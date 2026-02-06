@@ -319,10 +319,11 @@ func (h *HarnessTest) MineBlockWithTx(tx *wire.MsgTx) *wire.MsgBlock {
 func (h *HarnessTest) SpawnTempMiner() *HarnessTest {
 	h.Helper()
 
-	tempMiner := newMiner(h.T)
+	minerLogDir := createUniqueLogSubDir(h.T, h.logDir, "miner-temp")
+	tempMiner := newMiner(h.T, minerLogDir)
 	tempMiner.SetUpNoChain()
 
-	th := &HarnessTest{T: h.T, miner: tempMiner}
+	th := &HarnessTest{T: h.T, logDir: h.logDir, miner: tempMiner}
 	h.Cleanup(tempMiner.Stop)
 
 	// Connect the miners and wait for the temp miner to sync.
