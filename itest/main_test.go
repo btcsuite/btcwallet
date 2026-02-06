@@ -5,11 +5,14 @@ package itest
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/chain/port"
 )
 
 var (
@@ -31,13 +34,33 @@ var (
 		"db", "kvdb",
 		"database backend to use (kvdb, sqlite, postgres)",
 	)
+
+	// shuffleSeedFlag is the source of randomness used to shuffle the test
+	// cases. If not specified, the test cases won't be shuffled.
+	shuffleSeedFlag = flag.Uint64(
+		"shuffleseed", 0,
+		"if set, shuffles the test cases using this as the source of "+
+			"randomness",
+	)
 )
+
+func init() {
+	// Use system-unique ports for rpctest harnesses so multiple local test runs
+	// don't collide.
+	rpctest.ListenAddressGenerator = func() (string, string) {
+		p2p := fmt.Sprintf(rpctest.ListenerFormat, port.NextAvailablePort())
+		rpc := fmt.Sprintf(rpctest.ListenerFormat, port.NextAvailablePort())
+		return p2p, rpc
+	}
+}
 
 // TestBtcWallet runs the btcwallet integration test suite.
 func TestBtcWallet(t *testing.T) {
 	if len(allTestCases) == 0 {
 		t.Skip("no integration test cases registered")
 	}
+
+	maybeShuffleTestCases()
 
 	harness := bwtest.SetupHarness(t, *chainBackend, *dbBackend)
 
@@ -61,6 +84,20 @@ func TestBtcWallet(t *testing.T) {
 			break
 		}
 	}
+}
+
+// maybeShuffleTestCases shuffles the test cases if the flag `shuffleseed` is
+// set and not 0.
+func maybeShuffleTestCases() {
+	// Exit if set to 0.
+	if *shuffleSeedFlag == 0 {
+		return
+	}
+
+	r := rand.New(rand.NewSource(int64(*shuffleSeedFlag)))
+	r.Shuffle(len(allTestCases), func(i, j int) {
+		allTestCases[i], allTestCases[j] = allTestCases[j], allTestCases[i]
+	})
 }
 
 // validateTestCaseName enforces a consistent naming convention for integration
