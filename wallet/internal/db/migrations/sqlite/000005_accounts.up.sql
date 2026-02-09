@@ -102,8 +102,9 @@ ON accounts (scope_id, account_name);
 
 -- Account Secrets table to hold encrypted account-level secrets.
 CREATE TABLE account_secrets (
-    -- Reference to the account these keys belong to.
-    account_id INTEGER NOT NULL,
+    -- Reference to the account these keys belong to. Also serves as the
+    -- primary key, enforcing one-to-one relationship.
+    account_id INTEGER PRIMARY KEY,
 
     -- Encrypted private key for the account. Watch-only accounts may have
     -- no row in this table.
@@ -113,7 +114,3 @@ CREATE TABLE account_secrets (
     -- that the account cannot be deleted if secrets still exist.
     FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT
 );
-
--- Unique index to ensure one-to-one relationship between account and its secrets.
-CREATE UNIQUE INDEX uidx_account_secrets_account
-ON account_secrets (account_id);
