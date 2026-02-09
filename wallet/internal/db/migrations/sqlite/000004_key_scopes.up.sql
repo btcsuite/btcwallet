@@ -46,9 +46,9 @@ ON key_scopes (wallet_id, purpose, coin_type);
 -- Watch-only scopes may have no corresponding row in this table or have NULL
 -- encrypted_coin_priv_key.
 CREATE TABLE key_scope_secrets (
-    -- Reference to the key scope these keys belong to. Acts as the primary key
-    -- via the unique index below, enforcing one-to-one relationship.
-    scope_id INTEGER NOT NULL,
+    -- Reference to the key scope these keys belong to. Also serves as the
+    -- primary key, enforcing one-to-one relationship.
+    scope_id INTEGER PRIMARY KEY,
 
     -- Encrypted key used to derive private keys for this scope.
     -- NULL for watch-only key scopes.
@@ -58,8 +58,3 @@ CREATE TABLE key_scope_secrets (
     -- that the key scope cannot be deleted if secrets still exist.
     FOREIGN KEY (scope_id) REFERENCES key_scopes (id) ON DELETE RESTRICT
 );
-
--- Enforces one-to-one relationship: each key scope has at most one secrets record.
--- Also serves as the effective primary key for this table.
-CREATE UNIQUE INDEX uidx_key_scope_secrets_scope
-ON key_scope_secrets (scope_id);

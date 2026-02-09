@@ -77,8 +77,9 @@ CREATE INDEX idx_addresses_script_pub_key ON addresses (script_pub_key);
 -- from an address. This table has a one-to-one relationship with addresses.
 -- Watch-only addresses may have no row in this table.
 CREATE TABLE address_secrets (
-    -- Reference to the address these secrets belong to.
-    address_id BIGINT NOT NULL,
+    -- Reference to the address these secrets belong to. Also serves as the
+    -- primary key, enforcing one-to-one relationship.
+    address_id BIGINT PRIMARY KEY,
 
     -- Encrypted private key for imported addresses. NULL for HD-derived
     -- addresses since their private keys are derived from the account key.
@@ -92,8 +93,3 @@ CREATE TABLE address_secrets (
     -- that the address cannot be deleted if secrets still exist.
     FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT
 );
-
--- Unique index to ensure one-to-one relationship between address and its
--- secrets.
-CREATE UNIQUE INDEX uidx_address_secrets_address
-ON address_secrets (address_id);
