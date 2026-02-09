@@ -56,18 +56,13 @@ WHERE
     address_branch IS NOT NULL
     AND address_index IS NOT NULL;
 
--- Unique partial index to prevent duplicate script_pub_key within the same
--- account. Only enforced when script_pub_key is non-NULL (imported addresses).
--- Derived addresses are excluded from this constraint.
+-- Unique index to prevent duplicate script_pub_key within the same account.
 CREATE UNIQUE INDEX uidx_addresses_account_script_pub_key
-ON addresses (account_id, script_pub_key)
-WHERE script_pub_key IS NOT NULL;
+ON addresses (account_id, script_pub_key);
 
 -- Index on script_pub_key for efficient lookups by script pubkey.
--- Used by GetAddressByScriptPubKey which joins through accounts to key_scopes.
-CREATE INDEX idx_addresses_script_pub_key
-ON addresses (script_pub_key)
-WHERE script_pub_key IS NOT NULL;
+-- Used by GetAddressByScriptPubKey.
+CREATE INDEX idx_addresses_script_pub_key ON addresses (script_pub_key);
 
 -- Address Secrets table stores sensitive encrypted material needed to spend
 -- from an address. This table has a one-to-one relationship with addresses.

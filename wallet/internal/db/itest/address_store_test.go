@@ -680,7 +680,7 @@ func TestNewDerivedAddress(t *testing.T) {
 			require.NotZero(t, info.CreatedAt)
 			require.Equal(t, tc.expectedBranch, info.Branch)
 			require.GreaterOrEqual(t, info.Index, uint32(0))
-			require.Nil(t, info.ScriptPubKey)
+			require.NotNil(t, info.ScriptPubKey)
 			require.Nil(t, info.PubKey)
 			require.False(t, info.IsWatchOnly)
 		})
