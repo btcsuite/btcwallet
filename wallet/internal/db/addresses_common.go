@@ -461,14 +461,15 @@ func createDerivedAddress[T any](ctx context.Context,
 	}
 
 	return &AddressInfo{
-		ID:          id,
-		AccountID:   convertedAcctID,
-		AddrType:    addrType,
-		CreatedAt:   rowCreatedAt(row),
-		Origin:      DerivedAccount,
-		Branch:      branch,
-		Index:       index,
-		IsWatchOnly: false,
+		ID:           id,
+		AccountID:    convertedAcctID,
+		AddrType:     addrType,
+		CreatedAt:    rowCreatedAt(row),
+		Origin:       DerivedAccount,
+		Branch:       branch,
+		Index:        index,
+		ScriptPubKey: scriptPubKey,
+		IsWatchOnly:  false,
 	}, nil
 }
 
