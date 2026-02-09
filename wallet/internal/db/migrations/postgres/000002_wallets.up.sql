@@ -38,9 +38,9 @@ CREATE UNIQUE INDEX uidx_wallets_name ON wallets (wallet_name);
 -- Watch-only wallets may have no corresponding row in this table or have all
 -- private key fields with no data.
 CREATE TABLE wallet_secrets (
-    -- Reference to the wallet these secrets belong to. Acts as the primary key
-    -- via the unique index below, enforcing one-to-one relationship.
-    wallet_id BIGINT NOT NULL,
+    -- Reference to the wallet these secrets belong to. Also serves as the
+    -- primary key, enforcing one-to-one relationship.
+    wallet_id BIGINT PRIMARY KEY,
 
     -- Params to derive the private master key. NULL for watch-only wallets.
     master_priv_params BYTEA,
@@ -61,17 +61,13 @@ CREATE TABLE wallet_secrets (
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT
 );
 
--- Enforces one-to-one relationship: each wallet has at most one secrets record.
--- Also serves as the effective primary key for this table.
-CREATE UNIQUE INDEX uidx_wallet_secrets_wallet ON wallet_secrets (wallet_id);
-
 -- Wallet Sync States table to store the synchronization state of each wallet.
 -- This is kept separate from the wallets table to avoid write amplification on
 -- frequently updated sync data. Each wallet has exactly one sync state record.
 CREATE TABLE wallet_sync_states (
-    -- Reference to the wallet this sync state belongs to. Acts as the primary key
-    -- via the unique index below, enforcing one-to-one relationship.
-    wallet_id BIGINT NOT NULL,
+    -- Reference to the wallet this sync state belongs to. Also serves as the
+    -- primary key, enforcing one-to-one relationship.
+    wallet_id BIGINT PRIMARY KEY,
 
     -- Current sync status of the wallet (references blocks table). NULL for wallets
     -- that haven't synced any blocks yet.
@@ -102,8 +98,3 @@ CREATE TABLE wallet_sync_states (
     FOREIGN KEY (birthday_height) REFERENCES blocks (block_height)
     ON DELETE RESTRICT
 );
-
--- Enforces one-to-one relationship: each wallet has exactly one sync state record.
--- Also serves as the effective primary key for this table.
-CREATE UNIQUE INDEX uidx_wallet_sync_states_wallet
-ON wallet_sync_states (wallet_id);
