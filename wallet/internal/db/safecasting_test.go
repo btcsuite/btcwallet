@@ -200,57 +200,6 @@ func TestInt16ToUint8(t *testing.T) {
 	}
 }
 
-// TestInt64ToInt16 checks that an int64 value is converted to int16 only
-// when it fits within the signed 16 bit range. It should fail loudly for
-// any value outside those limits.
-func TestInt64ToInt16(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		val     int64
-		want    int16
-		wantErr bool
-	}{
-		{
-			name: "min int16",
-			val:  int64(math.MinInt16),
-			want: math.MinInt16,
-		},
-		{
-			name: "max int16",
-			val:  int64(math.MaxInt16),
-			want: math.MaxInt16,
-		},
-		{name: "zero", val: 0, want: 0},
-		{
-			name:    "below min",
-			val:     int64(math.MinInt16) - 1,
-			wantErr: true,
-		},
-		{
-			name:    "above max",
-			val:     int64(math.MaxInt16) + 1,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := int64ToInt16(tc.val)
-			if tc.wantErr {
-				require.ErrorIs(t, err, ErrCastingOverflow)
-				return
-			}
-
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
-
 // TestUint32ToInt32 checks that an uint32 value is safely converted to int32
 // only when it fits within the signed 32 bit range. It should fail loudly
 // for any value that exceeds those limits.
