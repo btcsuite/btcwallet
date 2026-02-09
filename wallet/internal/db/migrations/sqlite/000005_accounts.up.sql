@@ -70,6 +70,12 @@ CREATE TABLE accounts (
     -- Next index to use for internal/change addresses (branch 1)
     next_internal_index INTEGER NOT NULL DEFAULT 0,
 
+    -- External derivation index must be non-negative.
+    CHECK (next_external_index >= 0),
+
+    -- Internal derivation index must be non-negative.
+    CHECK (next_internal_index >= 0),
+
     -- Foreign key constraints to key scope. Using ON DELETE RESTRICT to ensure
     -- that the key scope cannot be deleted if accounts still exist.
     FOREIGN KEY (scope_id) REFERENCES key_scopes (id) ON DELETE RESTRICT,
