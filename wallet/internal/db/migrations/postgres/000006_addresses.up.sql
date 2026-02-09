@@ -38,6 +38,16 @@ CREATE TABLE addresses (
     -- Timestamp when the address was created. Automatically set by the database.
     created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
 
+    -- Branch and index are set together for HD-derived addresses and both
+    -- NULL for imported addresses.
+    CHECK ((address_branch IS NULL) = (address_index IS NULL)),
+
+    -- Branch must be a BIP44 branch number when set.
+    CHECK (address_branch IS NULL OR address_branch IN (0, 1)),
+
+    -- Address index must be non-negative when set.
+    CHECK (address_index IS NULL OR address_index >= 0),
+
     -- Foreign key constraint to accounts. Using ON DELETE RESTRICT to ensure
     -- that the account cannot be deleted if addresses still exist.
     FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT,
