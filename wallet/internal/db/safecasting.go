@@ -39,17 +39,6 @@ func int64ToInt32(v int64) (int32, error) {
 	return int32(v), nil
 }
 
-// int64ToInt16 safely casts an int64 to an int16, returning an error
-// if the value is out of range.
-func int64ToInt16(v int64) (int16, error) {
-	if v < math.MinInt16 || v > math.MaxInt16 {
-		return 0, fmt.Errorf("could not cast %d to int16: %w", v,
-			ErrCastingOverflow)
-	}
-
-	return int16(v), nil
-}
-
 // int64ToUint8 safely casts an int64 to an uint8, returning an error
 // if the value is out of range.
 func int64ToUint8(v int64) (uint8, error) {
