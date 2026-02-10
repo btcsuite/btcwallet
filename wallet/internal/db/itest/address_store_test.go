@@ -1049,7 +1049,7 @@ func TestNewDerivedAddressBranchCounters(t *testing.T) {
 func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store, queries, dbConn := NewTestStoreWithDB(t)
 	walletID := newWallet(t, store, "wallet-max-index")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
 
@@ -1060,7 +1060,7 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	CreateAddressWithIndex(t, queries, accountID, 0, math.MaxUint32-1)
 
 	// Set the counter to MaxUint32 so the next allocation gives us MaxUint32
-	UpdateAccountNextExternalIndex(t, queries, accountID, math.MaxUint32)
+	UpdateAccountNextExternalIndex(t, dbConn, accountID, math.MaxUint32)
 
 	// This should succeed with address index = MaxUint32.
 	info := newDerivedAddress(
@@ -1087,7 +1087,7 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store, queries, dbConn := NewTestStoreWithDB(t)
 	walletID := newWallet(t, store, "wallet-max-index-internal")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
 
@@ -1099,7 +1099,7 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 
 	// Set the internal counter to MaxUint32 so the next allocation gives us
 	// MaxUint32.
-	UpdateAccountNextInternalIndex(t, queries, accountID, math.MaxUint32)
+	UpdateAccountNextInternalIndex(t, dbConn, accountID, math.MaxUint32)
 
 	// This should succeed with address index = MaxUint32.
 	info := newDerivedAddress(

@@ -335,17 +335,3 @@ UPDATE accounts
 SET next_internal_index = next_internal_index + 1
 WHERE id = $1
 RETURNING (next_internal_index - 1)::BIGINT AS address_index;
-
--- name: UpdateAccountNextExternalIndex :exec
--- Updates the next_external_index counter for an account. Used in tests
--- to set up specific index scenarios.
-UPDATE accounts
-SET next_external_index = $2
-WHERE id = $1;
-
--- name: UpdateAccountNextInternalIndex :exec
--- Updates the next_internal_index counter for an account. Used in tests
--- to set up specific index scenarios.
-UPDATE accounts
-SET next_internal_index = $2
-WHERE id = $1;
