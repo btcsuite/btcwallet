@@ -92,4 +92,5 @@ INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
     ks.wallet_id = ? AND ks.purpose = ? AND ks.coin_type = ?
-    AND acc.account_name = ?;
+    AND acc.account_name = ?
+ORDER BY a.id;

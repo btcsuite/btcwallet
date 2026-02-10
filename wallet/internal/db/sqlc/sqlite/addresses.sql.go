@@ -222,6 +222,7 @@ LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
     ks.wallet_id = ? AND ks.purpose = ? AND ks.coin_type = ?
     AND acc.account_name = ?
+ORDER BY a.id
 `
 
 type ListAddressesByAccountParams struct {
