@@ -59,12 +59,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
-WHERE a.scope_id = ? AND a.account_name = ?
-GROUP BY a.id, ks.id;
+WHERE a.scope_id = ? AND a.account_name = ?;
 
 -- name: GetAccountByScopeAndNumber :one
 -- Returns a single account by scope id and account number.
@@ -79,12 +77,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
-WHERE a.scope_id = ? AND a.account_number = ?
-GROUP BY a.id, ks.id;
+WHERE a.scope_id = ? AND a.account_number = ?;
 
 -- name: GetAccountByWalletScopeAndName :one
 -- Returns a single account by wallet id, scope tuple, and account name.
@@ -99,16 +95,14 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
     AND ks.coin_type = ?
-    AND a.account_name = ?
-GROUP BY a.id, ks.id;
+    AND a.account_name = ?;
 
 -- name: GetAccountByWalletScopeAndNumber :one
 -- Returns a single account by wallet id, scope tuple, and account number.
@@ -123,16 +117,14 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
     AND ks.coin_type = ?
-    AND a.account_number = ?
-GROUP BY a.id, ks.id;
+    AND a.account_number = ?;
 
 -- name: GetAccountPropsById :one
 -- Returns full account properties by account id.
@@ -150,12 +142,10 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
-WHERE a.id = ?
-GROUP BY a.id, ks.id;
+WHERE a.id = ?;
 
 -- name: ListAccountsByScope :many
 -- Lists all accounts in a scope, ordered by account number. Imported accounts
@@ -171,12 +161,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = ?
-GROUP BY a.id, ks.id
 ORDER BY a.account_number IS NULL, a.account_number;
 
 -- name: ListAccountsByWalletScope :many
@@ -193,15 +181,13 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
     AND ks.coin_type = ?
-GROUP BY a.id, ks.id
 ORDER BY a.account_number IS NULL, a.account_number;
 
 -- name: ListAccountsByWalletAndName :many
@@ -218,12 +204,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = ? AND a.account_name = ?
-GROUP BY a.id, ks.id
 ORDER BY a.account_number IS NULL, a.account_number;
 
 -- name: ListAccountsByWallet :many
@@ -240,12 +224,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(CASE WHEN addr.address_branch IS NULL AND addr.id IS NOT NULL THEN 1 END) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = ?
-GROUP BY a.id, ks.id
 ORDER BY a.account_number IS NULL, a.account_number;
 
 -- name: UpdateAccountNameByWalletScopeAndNumber :execrows

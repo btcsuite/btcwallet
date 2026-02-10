@@ -334,6 +334,135 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 	}
 }
 
+// TestImportedAddressCounterInsertDelete verifies that imported address inserts
+// increment the per-account counter and deletes decrement it.
+func TestImportedAddressCounterInsertDelete(t *testing.T) {
+	t.Parallel()
+
+	store, _, dbConn := NewTestStoreWithDB(t)
+	walletID := newWallet(t, store, "wallet-imported-counter")
+	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+
+	const importedAddrCount = 5
+	addressIDs := make([]uint32, 0, importedAddrCount)
+
+	account := getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, "imported",
+	)
+	require.Zero(t, account.ImportedKeyCount)
+
+	for i := 0; i < importedAddrCount; i++ {
+		info, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     walletID,
+				Scope:        db.KeyScopeBIP0084,
+				AddressType:  db.WitnessPubKey,
+				ScriptPubKey: RandomBytes(32),
+				PubKey:       RandomBytes(33),
+			},
+		)
+		require.NoError(t, err)
+
+		addressIDs = append(addressIDs, info.ID)
+	}
+
+	account = getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, "imported",
+	)
+	require.Equal(t, uint32(importedAddrCount), account.ImportedKeyCount)
+
+	for _, addressID := range addressIDs {
+		MustDeleteAddress(t, dbConn, addressID)
+	}
+
+	account = getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, "imported",
+	)
+	require.Zero(t, account.ImportedKeyCount)
+}
+
+// TestImportedAddressCounterConcurrentInsert verifies that concurrent imported
+// address inserts correctly update the per-account imported key counter.
+func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
+	t.Parallel()
+
+	store, _, dbConn := NewTestStoreWithDB(t)
+	walletID := newWallet(t, store, "wallet-imported-counter-concurrent")
+	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+
+	const workers = 20
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	type insertResult struct {
+		id  uint32
+		err error
+	}
+
+	insertResultChan := make(chan insertResult, workers)
+	var wg sync.WaitGroup
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			info, err := store.NewImportedAddress(
+				ctx, db.NewImportedAddressParams{
+					WalletID:     walletID,
+					Scope:        db.KeyScopeBIP0084,
+					AddressType:  db.WitnessPubKey,
+					ScriptPubKey: RandomBytes(32),
+					PubKey:       RandomBytes(33),
+				},
+			)
+			if err != nil {
+				insertResultChan <- insertResult{err: err}
+				return
+			}
+
+			insertResultChan <- insertResult{id: info.ID}
+		}()
+	}
+
+	wg.Wait()
+	close(insertResultChan)
+
+	addressIDs := make([]uint32, 0, workers)
+	for result := range insertResultChan {
+		require.NoError(t, result.err)
+		addressIDs = append(addressIDs, result.id)
+	}
+
+	require.Len(t, addressIDs, workers)
+
+	account := getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, "imported",
+	)
+	require.Equal(t, uint32(workers), account.ImportedKeyCount)
+
+	deleteErrChan := make(chan error, workers)
+	for _, addressID := range addressIDs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deleteErrChan <- deleteAddress(ctx, dbConn, addressID)
+		}()
+	}
+
+	wg.Wait()
+	close(deleteErrChan)
+
+	for err := range deleteErrChan {
+		require.NoError(t, err)
+	}
+
+	account = getAccountByName(
+		t, store, walletID, db.KeyScopeBIP0084, "imported",
+	)
+	require.Zero(t, account.ImportedKeyCount)
+}
+
 // TestNewImportedAddressDuplicate verifies that importing an address with
 // a duplicate ScriptPubKey fails with a constraint error.
 func TestNewImportedAddressDuplicate(t *testing.T) {
