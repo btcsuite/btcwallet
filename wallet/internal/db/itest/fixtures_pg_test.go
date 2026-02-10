@@ -3,7 +3,9 @@
 package itest
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -148,4 +150,35 @@ func getAddressSecret(t *testing.T, queries *sqlcpg.Queries,
 	t.Helper()
 
 	return queries.GetAddressSecret(t.Context(), addressID)
+}
+
+// MustDeleteAddress deletes an address by ID for test scenarios.
+func MustDeleteAddress(t *testing.T, dbConn *sql.DB, addressID uint32) {
+	t.Helper()
+
+	err := deleteAddress(t.Context(), dbConn, addressID)
+	require.NoError(t, err)
+}
+
+// deleteAddress removes a single address row by ID and validates row count.
+func deleteAddress(ctx context.Context, dbConn *sql.DB,
+	addressID uint32) error {
+
+	result, err := dbConn.ExecContext(
+		ctx, "DELETE FROM addresses WHERE id = $1", int64(addressID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("expected 1 deleted row, got %d", rows)
+	}
+
+	return nil
 }
