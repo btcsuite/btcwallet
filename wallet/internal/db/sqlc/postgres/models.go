@@ -21,6 +21,7 @@ type Account struct {
 	CreatedAt          time.Time
 	NextExternalIndex  int64
 	NextInternalIndex  int64
+	ImportedKeyCount   int64
 }
 
 type AccountOrigin struct {
