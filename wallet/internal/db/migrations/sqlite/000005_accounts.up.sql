@@ -70,11 +70,17 @@ CREATE TABLE accounts (
     -- Next index to use for internal/change addresses (branch 1)
     next_internal_index INTEGER NOT NULL DEFAULT 0,
 
+    -- Number of imported addresses in this account.
+    imported_key_count INTEGER NOT NULL DEFAULT 0,
+
     -- External derivation index must be non-negative.
     CHECK (next_external_index >= 0),
 
     -- Internal derivation index must be non-negative.
     CHECK (next_internal_index >= 0),
+
+    -- Imported address counter must be non-negative.
+    CHECK (imported_key_count >= 0),
 
     -- Foreign key constraints to key scope. Using ON DELETE RESTRICT to ensure
     -- that the key scope cannot be deleted if accounts still exist.

@@ -184,12 +184,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1 AND a.account_name = $2
-GROUP BY a.id, ks.id
 `
 
 type GetAccountByScopeAndNameParams struct {
@@ -243,12 +241,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1 AND a.account_number = $2
-GROUP BY a.id, ks.id
 `
 
 type GetAccountByScopeAndNumberParams struct {
@@ -302,16 +298,14 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_name = $4
-GROUP BY a.id, ks.id
 `
 
 type GetAccountByWalletScopeAndNameParams struct {
@@ -372,16 +366,14 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_number = $4
-GROUP BY a.id, ks.id
 `
 
 type GetAccountByWalletScopeAndNumberParams struct {
@@ -445,12 +437,10 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.id = $1
-GROUP BY a.id, ks.id
 `
 
 type GetAccountPropsByIdRow struct {
@@ -537,12 +527,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE a.scope_id = $1
-GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
@@ -609,12 +597,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = $1
-GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
@@ -681,12 +667,10 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE ks.wallet_id = $1 AND a.account_name = $2
-GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
@@ -758,15 +742,13 @@ SELECT
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    count(*) FILTER (WHERE addr.address_branch IS NULL AND addr.id IS NOT NULL) AS imported_key_count
+    a.imported_key_count
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
-LEFT JOIN addresses AS addr ON a.id = addr.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
-GROUP BY a.id, ks.id
 ORDER BY a.account_number NULLS LAST
 `
 
