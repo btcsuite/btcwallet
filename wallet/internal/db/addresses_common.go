@@ -158,6 +158,42 @@ type addressInfoRow[TypeID, OriginIDType any] struct {
 	IDToOrigin func(OriginIDType) (AccountOrigin, error)
 }
 
+// addressSecretRow captures fields shared by address secret row types across
+// backends.
+type addressSecretRow struct {
+	// AddressID is the database unique identifier for the address.
+	AddressID int64
+
+	// EncryptedPrivKey is the encrypted private key for imported addresses.
+	EncryptedPrivKey []byte
+
+	// EncryptedScript is the encrypted script for script-based addresses.
+	EncryptedScript []byte
+}
+
+// addressSecretRowToSecret converts raw secret row fields into an AddressSecret
+// with validation and ID conversion.
+func addressSecretRowToSecret(row addressSecretRow) (*AddressSecret, error) {
+	hasKey := len(row.EncryptedPrivKey) > 0
+	hasScript := len(row.EncryptedScript) > 0
+
+	if !hasKey && !hasScript {
+		return nil, fmt.Errorf("address %d: %w", row.AddressID,
+			ErrSecretNotFound)
+	}
+
+	addrID, err := int64ToUint32(row.AddressID)
+	if err != nil {
+		return nil, fmt.Errorf("address ID: %w", err)
+	}
+
+	return &AddressSecret{
+		AddressID:        addrID,
+		EncryptedPrivKey: row.EncryptedPrivKey,
+		EncryptedScript:  row.EncryptedScript,
+	}, nil
+}
+
 // convertAddressIDs converts database IDs to their respective uint32 values
 // with error handling.
 func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
