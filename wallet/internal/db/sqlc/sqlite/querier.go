@@ -19,7 +19,8 @@ type Querier interface {
 	// Used for testing account number overflow without creating billions of accounts.
 	CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error)
 	// Creates a derived address with the given index and derived data.
-	// The index is allocated separately via GetAndIncrementNextAddressIndex.
+	// The index is allocated separately via GetAndIncrementNextExternalIndex
+	// or GetAndIncrementNextInternalIndex.
 	CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error)
 	// Creates a new imported account under the given scope with NULL account
 	// number. Imported accounts don't follow BIP44 derivation, so they don't need

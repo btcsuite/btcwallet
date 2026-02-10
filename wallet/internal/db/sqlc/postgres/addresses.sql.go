@@ -38,7 +38,8 @@ type CreateDerivedAddressRow struct {
 }
 
 // Creates a derived address with the given index and derived data.
-// The index is allocated separately via GetAndIncrementNextAddressIndex.
+// The index is allocated separately via GetAndIncrementNextExternalIndex
+// or GetAndIncrementNextInternalIndex.
 func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAddressStmt, CreateDerivedAddress,
 		arg.AccountID,
