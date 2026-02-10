@@ -270,9 +270,24 @@ func convertAddressMetadata[TypeID, OriginIDType any](
 	return addrType, origin, nil
 }
 
-// convertAddressPath converts BIP44 branch and index values with error
-// handling.
-func convertAddressPath(branch, index sql.NullInt64) (uint32, uint32, error) {
+// convertAddressPath converts BIP44 branch/index values into uint32 fields.
+// Imported addresses must have both branch/index unset and return zero values.
+// Derived addresses must have both fields set and convertible to uint32.
+func convertAddressPath(origin AccountOrigin, branch,
+	index sql.NullInt64) (uint32, uint32, error) {
+
+	if origin == ImportedAccount {
+		if branch.Valid || index.Valid {
+			return 0, 0, errInvalidDerivationPath
+		}
+
+		return 0, 0, nil
+	}
+
+	if !branch.Valid || !index.Valid {
+		return 0, 0, errInvalidDerivationPath
+	}
+
 	addrBranch, err := int64ToUint32(branch.Int64)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address branch: %w", err)
@@ -301,16 +316,8 @@ func addressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
-	if origin == DerivedAccount {
-		if !row.AddressIndex.Valid ||
-			!row.AddressBranch.Valid {
-
-			return nil, errInvalidDerivationPath
-		}
-	}
-
 	addrBranch, addrIndex, err := convertAddressPath(
-		row.AddressBranch, row.AddressIndex,
+		origin, row.AddressBranch, row.AddressIndex,
 	)
 	if err != nil {
 		return nil, err
