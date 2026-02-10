@@ -237,6 +237,43 @@ func TestUint32ToInt32(t *testing.T) {
 	}
 }
 
+// TestUint32ToInt16 checks that an uint32 value is safely converted to int16
+// only when it fits within the signed 16 bit range. It should fail loudly
+// for any value that exceeds those limits.
+func TestUint32ToInt16(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		val     uint32
+		want    int16
+		wantErr bool
+	}{
+		{name: "zero", val: 0, want: 0},
+		{name: "max int16", val: math.MaxInt16, want: math.MaxInt16},
+		{
+			name:    "overflow",
+			val:     uint32(math.MaxInt16) + 1,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := uint32ToInt16(tc.val)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrCastingOverflow)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 // TestUint32ToNullInt32 checks that we respect the signed 32 bit limits
 // before converting an uint32 value into sql.NullInt32. It should fail
 // loudly when the value is out of range or when valid is false.

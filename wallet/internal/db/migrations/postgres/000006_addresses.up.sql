@@ -22,9 +22,11 @@ CREATE TABLE addresses (
     -- how the address is encoded and how funds can be spent.
     type_id SMALLINT NOT NULL,
 
-    -- Branch number in BIP44 derivation path (typically 0 for external, 1 for
-    -- internal/change). NULL for imported addresses.
-    address_branch BIGINT,
+    -- Branch number in BIP44 derivation path. We currently use only 0
+    -- (external) and 1 (internal/change), so SMALLINT is sufficient. This can
+    -- be widened to BIGINT later with ALTER COLUMN if branch semantics expand.
+    -- NULL for imported addresses.
+    address_branch SMALLINT,
 
     -- Index number in BIP44 derivation path (sequential counter within each
     -- branch). NULL for imported addresses.

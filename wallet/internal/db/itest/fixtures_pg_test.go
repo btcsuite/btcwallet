@@ -53,7 +53,7 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlcpg.Queries,
 // index. Used to test address index overflow without creating billions of
 // addresses.
 func CreateAddressWithIndex(t *testing.T, queries *sqlcpg.Queries,
-	accountID int64, branch uint32, index uint32) {
+	accountID int64, branch int16, index uint32) {
 	t.Helper()
 
 	_, err := queries.CreateDerivedAddress(
@@ -61,7 +61,7 @@ func CreateAddressWithIndex(t *testing.T, queries *sqlcpg.Queries,
 			AccountID:     accountID,
 			ScriptPubKey:  RandomBytes(20),
 			TypeID:        int16(db.WitnessPubKey),
-			AddressBranch: sql.NullInt64{Int64: int64(branch), Valid: true},
+			AddressBranch: sql.NullInt16{Int16: branch, Valid: true},
 			AddressIndex:  sql.NullInt64{Int64: int64(index), Valid: true},
 			PubKey:        nil,
 		},

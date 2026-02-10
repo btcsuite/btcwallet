@@ -39,7 +39,7 @@ type Address struct {
 	AccountID     int64
 	ScriptPubKey  []byte
 	TypeID        int16
-	AddressBranch sql.NullInt64
+	AddressBranch sql.NullInt16
 	AddressIndex  sql.NullInt64
 	PubKey        []byte
 	CreatedAt     time.Time
