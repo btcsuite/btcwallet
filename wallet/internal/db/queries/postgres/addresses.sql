@@ -44,7 +44,8 @@ WHERE a.id = $1;
 
 -- name: CreateDerivedAddress :one
 -- Creates a derived address with the given index and derived data.
--- The index is allocated separately via GetAndIncrementNextAddressIndex.
+-- The index is allocated separately via GetAndIncrementNextExternalIndex
+-- or GetAndIncrementNextInternalIndex.
 INSERT INTO addresses (
     account_id,
     script_pub_key,
