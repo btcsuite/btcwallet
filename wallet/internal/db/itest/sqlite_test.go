@@ -50,9 +50,11 @@ func NewSQLiteDB(t *testing.T) *sql.DB {
 	return dbConn
 }
 
-// NewTestStore creates the SQLite wallet store and returns it along with the
-// underlying database connection for tests that also need direct DB access.
-func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sqlcsqlite.Queries) {
+// NewTestStoreWithDB creates a SQLite wallet store and also returns the raw
+// sql.DB for fixture-level direct SQL setup.
+func NewTestStoreWithDB(t *testing.T) (*db.SQLiteWalletDB, *sqlcsqlite.Queries,
+	*sql.DB) {
+
 	t.Helper()
 
 	dbConn := NewSQLiteDB(t)
@@ -61,6 +63,15 @@ func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sqlcsqlite.Queries) {
 	require.NoError(t, err, "failed to create wallet store")
 
 	queries := sqlcsqlite.New(dbConn)
+
+	return store, queries, dbConn
+}
+
+// NewTestStore creates the SQLite wallet store and returns it with queries.
+func NewTestStore(t *testing.T) (*db.SQLiteWalletDB, *sqlcsqlite.Queries) {
+	t.Helper()
+
+	store, queries, _ := NewTestStoreWithDB(t)
 
 	return store, queries
 }
