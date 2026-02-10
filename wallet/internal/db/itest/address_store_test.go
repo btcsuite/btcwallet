@@ -1078,7 +1078,7 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 			Change:      false,
 		}, mockDeriveFunc(),
 	)
-	require.Error(t, err)
+	require.ErrorIs(t, err, db.ErrMaxAddressIndexReached)
 }
 
 // TestNewDerivedAddressMaxIndexInternal verifies that internal addresses can be
