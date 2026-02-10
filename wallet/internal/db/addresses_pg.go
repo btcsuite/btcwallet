@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -240,30 +239,16 @@ func importedAddressRowCreatedAtPg(
 	return row.CreatedAt
 }
 
-// pgAddressSecretRowToSecret converts a sqlc GetAddressSecretRow row to the
-// db.AddressSecret type used by the wallet, handling null value conversions.
-// Returns ErrSecretNotFound if the address exists but has no secret.
-func pgAddressSecretRowToSecret(row sqlcpg.GetAddressSecretRow) (*AddressSecret,
-	error) {
+// pgAddressSecretRowToSecret converts a PostgreSQL address secret row to an
+// AddressSecret struct.
+func pgAddressSecretRowToSecret(
+	row sqlcpg.GetAddressSecretRow) (*AddressSecret, error) {
 
-	hasKey := len(row.EncryptedPrivKey) > 0
-	hasScript := len(row.EncryptedScript) > 0
-
-	if !hasKey && !hasScript {
-		return nil, fmt.Errorf("address %d: %w", row.AddressID,
-			ErrSecretNotFound)
-	}
-
-	addrID, err := int64ToUint32(row.AddressID)
-	if err != nil {
-		return nil, fmt.Errorf("address ID: %w", err)
-	}
-
-	return &AddressSecret{
-		AddressID:        addrID,
+	return addressSecretRowToSecret(addressSecretRow{
+		AddressID:        row.AddressID,
 		EncryptedPrivKey: row.EncryptedPrivKey,
 		EncryptedScript:  row.EncryptedScript,
-	}, nil
+	})
 }
 
 // pgAddressInfoRow is a type constraint that unifies all PostgreSQL address
