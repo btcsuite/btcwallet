@@ -27,7 +27,7 @@ type CreateDerivedAddressParams struct {
 	AccountID     int64
 	ScriptPubKey  []byte
 	TypeID        int16
-	AddressBranch sql.NullInt64
+	AddressBranch sql.NullInt16
 	AddressIndex  sql.NullInt64
 	PubKey        []byte
 }
@@ -122,7 +122,7 @@ type GetAddressByScriptPubKeyRow struct {
 	ID            int64
 	AccountID     int64
 	TypeID        int16
-	AddressBranch sql.NullInt64
+	AddressBranch sql.NullInt16
 	AddressIndex  sql.NullInt64
 	ScriptPubKey  []byte
 	PubKey        []byte
@@ -236,7 +236,7 @@ type ListAddressesByAccountRow struct {
 	ID            int64
 	AccountID     int64
 	TypeID        int16
-	AddressBranch sql.NullInt64
+	AddressBranch sql.NullInt16
 	AddressIndex  sql.NullInt64
 	ScriptPubKey  []byte
 	PubKey        []byte

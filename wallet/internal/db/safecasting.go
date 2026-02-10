@@ -72,6 +72,17 @@ func uint32ToInt32(v uint32) (int32, error) {
 	return int32(v), nil
 }
 
+// uint32ToInt16 safely casts an uint32 to an int16, returning an error
+// if the value is out of range.
+func uint32ToInt16(v uint32) (int16, error) {
+	if v > math.MaxInt16 {
+		return 0, fmt.Errorf("could not cast %d to int16: %w", v,
+			ErrCastingOverflow)
+	}
+
+	return int16(v), nil
+}
+
 // uint32ToNullInt32 safely casts an uint32 to a sql.NullInt32, returning
 // an error if the value is out of range.
 func uint32ToNullInt32(v uint32) (sql.NullInt32, error) {

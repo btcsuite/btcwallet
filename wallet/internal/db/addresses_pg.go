@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -151,13 +152,20 @@ func newDerivedAddressCreateAddrPg(qtx *sqlcpg.Queries) func(context.Context,
 		branch uint32, index uint32,
 		scriptPubKey []byte) (sqlcpg.CreateDerivedAddressRow, error) {
 
+		branchNum, err := uint32ToInt16(branch)
+		if err != nil {
+			return sqlcpg.CreateDerivedAddressRow{}, fmt.Errorf(
+				"address branch: %w", err,
+			)
+		}
+
 		return qtx.CreateDerivedAddress(
 			ctx, sqlcpg.CreateDerivedAddressParams{
 				AccountID:    accountID,
 				ScriptPubKey: scriptPubKey,
 				TypeID:       int16(addrType),
-				AddressBranch: sql.NullInt64{
-					Int64: int64(branch),
+				AddressBranch: sql.NullInt16{
+					Int16: branchNum,
 					Valid: true,
 				},
 				AddressIndex: sql.NullInt64{
@@ -274,12 +282,15 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*AddressInfo, error) {
 		HasPrivateKey: base.HasPrivateKey,
 		HasScript:     base.HasScript,
 		CreatedAt:     base.CreatedAt,
-		AddressBranch: base.AddressBranch,
-		AddressIndex:  base.AddressIndex,
-		ScriptPubKey:  base.ScriptPubKey,
-		PubKey:        base.PubKey,
-		IDToAddrType:  idToAddressType[int16],
-		IDToOrigin:    idToOrigin[int16],
+		AddressBranch: sql.NullInt64{
+			Int64: int64(base.AddressBranch.Int16),
+			Valid: base.AddressBranch.Valid,
+		},
+		AddressIndex: base.AddressIndex,
+		ScriptPubKey: base.ScriptPubKey,
+		PubKey:       base.PubKey,
+		IDToAddrType: idToAddressType[int16],
+		IDToOrigin:   idToOrigin[int16],
 	})
 	if err != nil {
 		return nil, err
