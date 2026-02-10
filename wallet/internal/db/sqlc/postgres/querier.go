@@ -129,12 +129,6 @@ type Querier interface {
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.
 	UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error)
-	// Updates the next_external_index counter for an account. Used in tests
-	// to set up specific index scenarios.
-	UpdateAccountNextExternalIndex(ctx context.Context, arg UpdateAccountNextExternalIndexParams) error
-	// Updates the next_internal_index counter for an account. Used in tests
-	// to set up specific index scenarios.
-	UpdateAccountNextInternalIndex(ctx context.Context, arg UpdateAccountNextInternalIndexParams) error
 	UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error)
 	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }

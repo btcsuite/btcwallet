@@ -153,12 +153,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateAccountNameByWalletScopeAndNumberStmt, err = db.PrepareContext(ctx, UpdateAccountNameByWalletScopeAndNumber); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateAccountNameByWalletScopeAndNumber: %w", err)
 	}
-	if q.updateAccountNextExternalIndexStmt, err = db.PrepareContext(ctx, UpdateAccountNextExternalIndex); err != nil {
-		return nil, fmt.Errorf("error preparing query UpdateAccountNextExternalIndex: %w", err)
-	}
-	if q.updateAccountNextInternalIndexStmt, err = db.PrepareContext(ctx, UpdateAccountNextInternalIndex); err != nil {
-		return nil, fmt.Errorf("error preparing query UpdateAccountNextInternalIndex: %w", err)
-	}
 	if q.updateWalletSecretsStmt, err = db.PrepareContext(ctx, UpdateWalletSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateWalletSecrets: %w", err)
 	}
@@ -385,16 +379,6 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateAccountNameByWalletScopeAndNumberStmt: %w", cerr)
 		}
 	}
-	if q.updateAccountNextExternalIndexStmt != nil {
-		if cerr := q.updateAccountNextExternalIndexStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing updateAccountNextExternalIndexStmt: %w", cerr)
-		}
-	}
-	if q.updateAccountNextInternalIndexStmt != nil {
-		if cerr := q.updateAccountNextInternalIndexStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing updateAccountNextInternalIndexStmt: %w", cerr)
-		}
-	}
 	if q.updateWalletSecretsStmt != nil {
 		if cerr := q.updateWalletSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateWalletSecretsStmt: %w", cerr)
@@ -487,8 +471,6 @@ type Queries struct {
 	listWalletsStmt                             *sql.Stmt
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
-	updateAccountNextExternalIndexStmt          *sql.Stmt
-	updateAccountNextInternalIndexStmt          *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
 	updateWalletSyncStateStmt                   *sql.Stmt
 }
@@ -540,8 +522,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listWalletsStmt:                             q.listWalletsStmt,
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
-		updateAccountNextExternalIndexStmt:          q.updateAccountNextExternalIndexStmt,
-		updateAccountNextInternalIndexStmt:          q.updateAccountNextInternalIndexStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,
 		updateWalletSyncStateStmt:                   q.updateWalletSyncStateStmt,
 	}

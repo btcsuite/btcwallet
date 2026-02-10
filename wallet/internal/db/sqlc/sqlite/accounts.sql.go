@@ -900,39 +900,3 @@ func (q *Queries) UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, a
 	}
 	return result.RowsAffected()
 }
-
-const UpdateAccountNextExternalIndex = `-- name: UpdateAccountNextExternalIndex :exec
-UPDATE accounts
-SET next_external_index = ?2
-WHERE id = ?1
-`
-
-type UpdateAccountNextExternalIndexParams struct {
-	ID                int64
-	NextExternalIndex int64
-}
-
-// Updates the next_external_index counter for an account. Used in tests
-// to set up specific index scenarios.
-func (q *Queries) UpdateAccountNextExternalIndex(ctx context.Context, arg UpdateAccountNextExternalIndexParams) error {
-	_, err := q.exec(ctx, q.updateAccountNextExternalIndexStmt, UpdateAccountNextExternalIndex, arg.ID, arg.NextExternalIndex)
-	return err
-}
-
-const UpdateAccountNextInternalIndex = `-- name: UpdateAccountNextInternalIndex :exec
-UPDATE accounts
-SET next_internal_index = ?2
-WHERE id = ?1
-`
-
-type UpdateAccountNextInternalIndexParams struct {
-	ID                int64
-	NextInternalIndex int64
-}
-
-// Updates the next_internal_index counter for an account. Used in tests
-// to set up specific index scenarios.
-func (q *Queries) UpdateAccountNextInternalIndex(ctx context.Context, arg UpdateAccountNextInternalIndexParams) error {
-	_, err := q.exec(ctx, q.updateAccountNextInternalIndexStmt, UpdateAccountNextInternalIndex, arg.ID, arg.NextInternalIndex)
-	return err
-}

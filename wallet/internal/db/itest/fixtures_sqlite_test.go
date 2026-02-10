@@ -68,30 +68,28 @@ func CreateAddressWithIndex(t *testing.T, queries *sqlcsqlite.Queries,
 }
 
 // UpdateAccountNextExternalIndex updates the account's external index counter.
-func UpdateAccountNextExternalIndex(t *testing.T, queries *sqlcsqlite.Queries,
+func UpdateAccountNextExternalIndex(t *testing.T, dbConn *sql.DB,
 	accountID int64, nextIndex uint32) {
 	t.Helper()
 
-	err := queries.UpdateAccountNextExternalIndex(
-		t.Context(), sqlcsqlite.UpdateAccountNextExternalIndexParams{
-			ID:                accountID,
-			NextExternalIndex: int64(nextIndex),
-		},
+	_, err := dbConn.ExecContext(
+		t.Context(),
+		"UPDATE accounts SET next_external_index = ? WHERE id = ?",
+		int64(nextIndex), accountID,
 	)
 	require.NoError(t, err)
 }
 
 // UpdateAccountNextInternalIndex updates the account's internal index counter.
-func UpdateAccountNextInternalIndex(t *testing.T, queries *sqlcsqlite.Queries,
+func UpdateAccountNextInternalIndex(t *testing.T, dbConn *sql.DB,
 	accountID int64, nextIndex uint32) {
 
 	t.Helper()
 
-	err := queries.UpdateAccountNextInternalIndex(
-		t.Context(), sqlcsqlite.UpdateAccountNextInternalIndexParams{
-			ID:                accountID,
-			NextInternalIndex: int64(nextIndex),
-		},
+	_, err := dbConn.ExecContext(
+		t.Context(),
+		"UPDATE accounts SET next_internal_index = ? WHERE id = ?",
+		int64(nextIndex), accountID,
 	)
 	require.NoError(t, err)
 }
