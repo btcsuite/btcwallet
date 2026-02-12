@@ -11,14 +11,14 @@ import (
 
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
-func (w *PostgresWalletDB) GetAddress(ctx context.Context,
+func (s *PostgresStore) GetAddress(ctx context.Context,
 	query GetAddressQuery) (*AddressInfo, error) {
 
 	getByScript := func(ctx context.Context, q GetAddressQuery) (*AddressInfo,
 		error) {
 
 		return getAddress(
-			ctx, w.queries.GetAddressByScriptPubKey,
+			ctx, s.queries.GetAddressByScriptPubKey,
 			sqlcpg.GetAddressByScriptPubKeyParams{
 				ScriptPubKey: q.ScriptPubKey,
 				WalletID:     int64(q.WalletID),
@@ -31,11 +31,11 @@ func (w *PostgresWalletDB) GetAddress(ctx context.Context,
 
 // ListAddresses returns a slice of AddressInfo for all addresses in a given
 // account.
-func (w *PostgresWalletDB) ListAddresses(ctx context.Context,
+func (s *PostgresStore) ListAddresses(ctx context.Context,
 	query ListAddressesQuery) ([]AddressInfo, error) {
 
 	return listAddresses(
-		ctx, w.queries.ListAddressesByAccount,
+		ctx, s.queries.ListAddressesByAccount,
 		sqlcpg.ListAddressesByAccountParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
@@ -46,17 +46,17 @@ func (w *PostgresWalletDB) ListAddresses(ctx context.Context,
 }
 
 // GetAddressSecret retrieves the encrypted secret information for an address.
-func (w *PostgresWalletDB) GetAddressSecret(ctx context.Context,
+func (s *PostgresStore) GetAddressSecret(ctx context.Context,
 	addressID uint32) (*AddressSecret, error) {
 
 	return getAddressSecret(
-		ctx, w.queries.GetAddressSecret, addressID, pgAddressSecretRowToSecret,
+		ctx, s.queries.GetAddressSecret, addressID, pgAddressSecretRowToSecret,
 	)
 }
 
 // NewDerivedAddress creates a new address for a given account and key
 // scope.
-func (w *PostgresWalletDB) NewDerivedAddress(ctx context.Context,
+func (s *PostgresStore) NewDerivedAddress(ctx context.Context,
 	params NewDerivedAddressParams,
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
 
@@ -65,7 +65,7 @@ func (w *PostgresWalletDB) NewDerivedAddress(ctx context.Context,
 		sqlcpg.GetAccountByWalletScopeAndNameRow,
 		accountLookupKey,
 		sqlcpg.CreateDerivedAddressRow]{
-		getAccount:    pgGetAccountFromKey(w.queries),
+		getAccount:    pgGetAccountFromKey(s.queries),
 		accountParams: accountKeyFromParams,
 		getAccountID:  newDerivedAddressGetAccountIDPg,
 		getExtIndex:   newDerivedAddressGetExtIndexPg,
@@ -75,11 +75,11 @@ func (w *PostgresWalletDB) NewDerivedAddress(ctx context.Context,
 		rowCreatedAt:  newDerivedAddressRowCreatedAtPg,
 	}
 
-	return newDerivedAddressWithTx(ctx, params, w.ExecuteTx, adapters, deriveFn)
+	return newDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
 }
 
 // NewImportedAddress imports a new address, script, or private key.
-func (w *PostgresWalletDB) NewImportedAddress(ctx context.Context,
+func (s *PostgresStore) NewImportedAddress(ctx context.Context,
 	params NewImportedAddressParams) (*AddressInfo, error) {
 
 	adapters := importedAddressAdapters[
@@ -89,7 +89,7 @@ func (w *PostgresWalletDB) NewImportedAddress(ctx context.Context,
 		sqlcpg.CreateImportedAddressParams,
 		sqlcpg.CreateImportedAddressRow,
 		sqlcpg.InsertAddressSecretParams]{
-		getAccount:    pgGetAccountFromKey(w.queries),
+		getAccount:    pgGetAccountFromKey(s.queries),
 		accountParams: accountKeyFromImportedParams,
 		getAccountID:  newImportedAddressGetAccountIDPg,
 		createAddr:    pgCreateImportedAddress,
@@ -100,7 +100,7 @@ func (w *PostgresWalletDB) NewImportedAddress(ctx context.Context,
 		rowCreatedAt:  importedAddressRowCreatedAtPg,
 	}
 
-	return newImportedAddressWithTx(ctx, params, w.ExecuteTx, adapters)
+	return newImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
 }
 
 // pgGetAccountFromKey returns a helper to look up accounts by key.

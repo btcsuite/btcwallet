@@ -8,25 +8,25 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
-// Ensure SQLiteWalletDB satisfies the AccountStore interface.
-var _ AccountStore = (*SQLiteWalletDB)(nil)
+// Ensure SqliteStore satisfies the AccountStore interface.
+var _ AccountStore = (*SqliteStore)(nil)
 
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
-func (w *SQLiteWalletDB) GetAccount(ctx context.Context,
+func (s *SqliteStore) GetAccount(ctx context.Context,
 	query GetAccountQuery) (*AccountInfo, error) {
 
-	getQueries := sqliteAccountGetQueries{q: w.queries}
+	getQueries := sqliteAccountGetQueries{q: s.queries}
 
 	return getAccountByQuery(ctx, query, getQueries.byNumber, getQueries.byName)
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
 // filtered by name or key scope.
-func (w *SQLiteWalletDB) ListAccounts(ctx context.Context,
+func (s *SqliteStore) ListAccounts(ctx context.Context,
 	query ListAccountsQuery) ([]AccountInfo, error) {
 
-	listQueries := sqliteAccountListQueries{q: w.queries}
+	listQueries := sqliteAccountListQueries{q: s.queries}
 
 	return listAccountsByQuery(
 		ctx, query, listQueries.byScope, listQueries.byName, listQueries.all,
@@ -35,10 +35,10 @@ func (w *SQLiteWalletDB) ListAccounts(ctx context.Context,
 
 // RenameAccount changes the name of an account. The account can be identified
 // by its old name or its account number.
-func (w *SQLiteWalletDB) RenameAccount(ctx context.Context,
+func (s *SqliteStore) RenameAccount(ctx context.Context,
 	params RenameAccountParams) error {
 
-	renameQueries := sqliteAccountRenameQueries{q: w.queries}
+	renameQueries := sqliteAccountRenameQueries{q: s.queries}
 
 	return renameAccountByQuery(
 		ctx, params, renameQueries.byNumber, renameQueries.byName,
@@ -48,7 +48,7 @@ func (w *SQLiteWalletDB) RenameAccount(ctx context.Context,
 // CreateDerivedAccount creates a new derived account with the given name and
 // scope. If the key scope does not exist, it is created with NULL encrypted
 // keys using the address schema provided by the caller.
-func (w *SQLiteWalletDB) CreateDerivedAccount(ctx context.Context,
+func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 	params CreateDerivedAccountParams) (*AccountInfo, error) {
 
 	paramsErr := params.validate()
@@ -58,7 +58,7 @@ func (w *SQLiteWalletDB) CreateDerivedAccount(ctx context.Context,
 
 	var info *AccountInfo
 
-	err := w.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		scopeID, err := sqliteEnsureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -137,12 +137,12 @@ func sqliteEnsureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
 // public key. If the key scope does not exist, it is created with NULL
 // encrypted keys using the address schema provided by the caller. Imported
 // accounts have NULL account_number since they don't follow BIP44 derivation.
-func (w *SQLiteWalletDB) CreateImportedAccount(ctx context.Context,
+func (s *SqliteStore) CreateImportedAccount(ctx context.Context,
 	params CreateImportedAccountParams) (*AccountProperties, error) {
 
 	var props *AccountProperties
 
-	err := w.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		var err error
 
 		props, err = createImportedAccount(

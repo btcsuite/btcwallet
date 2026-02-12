@@ -7,19 +7,19 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
-// SQLiteWalletDB is the SQLite implementation of the WalletStore interface.
-type SQLiteWalletDB struct {
+// SqliteStore is the SQLite implementation of the WalletStore interface.
+type SqliteStore struct {
 	db      *sql.DB
 	queries *sqlcsqlite.Queries
 }
 
-// NewSQLiteWalletDB creates a new SQLite-based WalletStore.
-func NewSQLiteWalletDB(db *sql.DB) (*SQLiteWalletDB, error) {
+// NewSqliteStore creates a new SQLite-based WalletStore.
+func NewSqliteStore(db *sql.DB) (*SqliteStore, error) {
 	if db == nil {
 		return nil, ErrNilDB
 	}
 
-	return &SQLiteWalletDB{
+	return &SqliteStore{
 		db:      db,
 		queries: sqlcsqlite.New(db),
 	}, nil
@@ -29,7 +29,7 @@ func NewSQLiteWalletDB(db *sql.DB) (*SQLiteWalletDB, error) {
 // receives a transactional query executor and should perform all database
 // operations using it. The transaction will be automatically committed on
 // success or rolled back on error.
-func (w *SQLiteWalletDB) ExecuteTx(ctx context.Context,
+func (w *SqliteStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcsqlite.Queries) error) error {
 
 	return execInTx(ctx, w.db, func(tx *sql.Tx) error {
