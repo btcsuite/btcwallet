@@ -9,18 +9,18 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
-// Ensure SQLiteWalletDB satisfies the WalletStore interface.
-var _ WalletStore = (*SQLiteWalletDB)(nil)
+// Ensure SqliteStore satisfies the WalletStore interface.
+var _ WalletStore = (*SqliteStore)(nil)
 
 // CreateWallet creates a new wallet in the database with the provided
 // parameters. It returns the created wallet info or an error if the
 // creation fails.
-func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
+func (s *SqliteStore) CreateWallet(ctx context.Context,
 	params CreateWalletParams) (*WalletInfo, error) {
 
 	var info *WalletInfo
 
-	err := w.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		walletParams := sqlcsqlite.CreateWalletParams{
 			WalletName:              params.Name,
 			IsImported:              params.IsImported,
@@ -111,10 +111,10 @@ func (w *SQLiteWalletDB) CreateWallet(ctx context.Context,
 // GetWallet retrieves information about a wallet given its name. It
 // returns a WalletInfo struct containing the wallet's properties or an
 // error if the wallet is not found.
-func (w *SQLiteWalletDB) GetWallet(ctx context.Context,
+func (s *SqliteStore) GetWallet(ctx context.Context,
 	name string) (*WalletInfo, error) {
 
-	row, err := w.queries.GetWalletByName(ctx, name)
+	row, err := s.queries.GetWalletByName(ctx, name)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("wallet %q: %w", name,
@@ -143,10 +143,10 @@ func (w *SQLiteWalletDB) GetWallet(ctx context.Context,
 // ListWallets returns a slice of WalletInfo for all wallets stored in
 // the database. It returns an empty slice if no wallets are found, or
 // an error if the retrieval fails.
-func (w *SQLiteWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
+func (s *SqliteStore) ListWallets(ctx context.Context) ([]WalletInfo,
 	error) {
 
-	rows, err := w.queries.ListWallets(ctx)
+	rows, err := s.queries.ListWallets(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list wallets: %w", err)
 	}
@@ -181,10 +181,10 @@ func (w *SQLiteWalletDB) ListWallets(ctx context.Context) ([]WalletInfo,
 // birthday, birthday block, or sync state. The specific fields to
 // update are provided in the UpdateWalletParams struct. It returns an
 // error if the update fails.
-func (w *SQLiteWalletDB) UpdateWallet(ctx context.Context,
+func (s *SqliteStore) UpdateWallet(ctx context.Context,
 	params UpdateWalletParams) error {
 
-	return w.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
 			err := ensureBlockExistsSqlite(
@@ -226,10 +226,10 @@ func (w *SQLiteWalletDB) UpdateWallet(ctx context.Context,
 // Deterministic (HD) seed of the wallet. This seed is sensitive
 // information and is returned in its encrypted form. It returns the
 // encrypted seed as a byte slice or an error if the retrieval fails.
-func (w *SQLiteWalletDB) GetEncryptedHDSeed(ctx context.Context,
+func (s *SqliteStore) GetEncryptedHDSeed(ctx context.Context,
 	walletID uint32) ([]byte, error) {
 
-	secrets, err := w.queries.GetWalletSecrets(ctx, int64(walletID))
+	secrets, err := s.queries.GetWalletSecrets(ctx, int64(walletID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("secrets for wallet %d: %w",
@@ -249,7 +249,7 @@ func (w *SQLiteWalletDB) GetEncryptedHDSeed(ctx context.Context,
 }
 
 // UpdateWalletSecrets updates the secrets for the wallet.
-func (w *SQLiteWalletDB) UpdateWalletSecrets(ctx context.Context,
+func (s *SqliteStore) UpdateWalletSecrets(ctx context.Context,
 	params UpdateWalletSecretsParams) error {
 
 	secretsParams := sqlcsqlite.UpdateWalletSecretsParams{
@@ -260,7 +260,7 @@ func (w *SQLiteWalletDB) UpdateWalletSecrets(ctx context.Context,
 		WalletID:                 int64(params.WalletID),
 	}
 
-	rowsAffected, err := w.queries.UpdateWalletSecrets(ctx, secretsParams)
+	rowsAffected, err := s.queries.UpdateWalletSecrets(ctx, secretsParams)
 	if err != nil {
 		return fmt.Errorf("update wallet secrets: %w", err)
 	}

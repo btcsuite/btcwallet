@@ -190,14 +190,14 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 
 // NewTestStoreWithDB creates a PostgreSQL wallet store and also returns the
 // raw sql.DB for fixture-level direct SQL setup.
-func NewTestStoreWithDB(t *testing.T) (*db.PostgresWalletDB, *sqlcpg.Queries,
+func NewTestStoreWithDB(t *testing.T) (*db.PostgresStore, *sqlcpg.Queries,
 	*sql.DB) {
 
 	t.Helper()
 
 	dbConn := NewPostgresDB(t)
 
-	store, err := db.NewPostgresWalletDB(dbConn)
+	store, err := db.NewPostgresStore(dbConn)
 	require.NoError(t, err, "failed to create wallet store")
 
 	queries := sqlcpg.New(dbConn)
@@ -206,7 +206,7 @@ func NewTestStoreWithDB(t *testing.T) (*db.PostgresWalletDB, *sqlcpg.Queries,
 }
 
 // NewTestStore creates a PostgreSQL wallet store and returns it with queries.
-func NewTestStore(t *testing.T) (*db.PostgresWalletDB, *sqlcpg.Queries) {
+func NewTestStore(t *testing.T) (*db.PostgresStore, *sqlcpg.Queries) {
 	t.Helper()
 
 	store, queries, _ := NewTestStoreWithDB(t)

@@ -10,14 +10,14 @@ import (
 
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
-func (w *SQLiteWalletDB) GetAddress(ctx context.Context,
+func (s *SqliteStore) GetAddress(ctx context.Context,
 	query GetAddressQuery) (*AddressInfo, error) {
 
 	getByScript := func(ctx context.Context, q GetAddressQuery) (*AddressInfo,
 		error) {
 
 		return getAddress(
-			ctx, w.queries.GetAddressByScriptPubKey,
+			ctx, s.queries.GetAddressByScriptPubKey,
 			sqlcsqlite.GetAddressByScriptPubKeyParams{
 				WalletID:     int64(q.WalletID),
 				ScriptPubKey: q.ScriptPubKey,
@@ -30,11 +30,11 @@ func (w *SQLiteWalletDB) GetAddress(ctx context.Context,
 
 // ListAddresses returns a slice of AddressInfo for all addresses in a given
 // account.
-func (w *SQLiteWalletDB) ListAddresses(ctx context.Context,
+func (s *SqliteStore) ListAddresses(ctx context.Context,
 	query ListAddressesQuery) ([]AddressInfo, error) {
 
 	return listAddresses(
-		ctx, w.queries.ListAddressesByAccount,
+		ctx, s.queries.ListAddressesByAccount,
 		sqlcsqlite.ListAddressesByAccountParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
@@ -45,18 +45,18 @@ func (w *SQLiteWalletDB) ListAddresses(ctx context.Context,
 }
 
 // GetAddressSecret retrieves the encrypted secret information for an address.
-func (w *SQLiteWalletDB) GetAddressSecret(ctx context.Context,
+func (s *SqliteStore) GetAddressSecret(ctx context.Context,
 	addressID uint32) (*AddressSecret, error) {
 
 	return getAddressSecret(
-		ctx, w.queries.GetAddressSecret, addressID,
+		ctx, s.queries.GetAddressSecret, addressID,
 		sqliteAddressSecretRowToSecret,
 	)
 }
 
 // NewDerivedAddress creates a new address for a given account and key
 // scope.
-func (w *SQLiteWalletDB) NewDerivedAddress(ctx context.Context,
+func (s *SqliteStore) NewDerivedAddress(ctx context.Context,
 	params NewDerivedAddressParams,
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
 
@@ -65,7 +65,7 @@ func (w *SQLiteWalletDB) NewDerivedAddress(ctx context.Context,
 		sqlcsqlite.GetAccountByWalletScopeAndNameRow,
 		accountLookupKey,
 		sqlcsqlite.CreateDerivedAddressRow]{
-		getAccount:    sqliteGetAccountFromKey(w.queries),
+		getAccount:    sqliteGetAccountFromKey(s.queries),
 		accountParams: accountKeyFromParams,
 		getAccountID:  newDerivedAddressGetAccountIDSQLite,
 		getExtIndex:   newDerivedAddressGetExtIndexSQLite,
@@ -75,11 +75,11 @@ func (w *SQLiteWalletDB) NewDerivedAddress(ctx context.Context,
 		rowCreatedAt:  newDerivedAddressRowCreatedAtSQLite,
 	}
 
-	return newDerivedAddressWithTx(ctx, params, w.ExecuteTx, adapters, deriveFn)
+	return newDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
 }
 
 // NewImportedAddress imports a new address, script, or private key.
-func (w *SQLiteWalletDB) NewImportedAddress(ctx context.Context,
+func (s *SqliteStore) NewImportedAddress(ctx context.Context,
 	params NewImportedAddressParams) (*AddressInfo, error) {
 
 	adapters := importedAddressAdapters[
@@ -89,7 +89,7 @@ func (w *SQLiteWalletDB) NewImportedAddress(ctx context.Context,
 		sqlcsqlite.CreateImportedAddressParams,
 		sqlcsqlite.CreateImportedAddressRow,
 		sqlcsqlite.InsertAddressSecretParams]{
-		getAccount:    sqliteGetAccountFromKey(w.queries),
+		getAccount:    sqliteGetAccountFromKey(s.queries),
 		accountParams: accountKeyFromImportedParams,
 		getAccountID:  newImportedAddressGetAccountIDSQLite,
 		createAddr:    sqliteCreateImportedAddress,
@@ -100,7 +100,7 @@ func (w *SQLiteWalletDB) NewImportedAddress(ctx context.Context,
 		rowCreatedAt:  importedAddressRowCreatedAtSQLite,
 	}
 
-	return newImportedAddressWithTx(ctx, params, w.ExecuteTx, adapters)
+	return newImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
 }
 
 // sqliteGetAccountFromKey returns a helper to look up accounts by key.
