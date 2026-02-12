@@ -58,3 +58,10 @@ func testBar(t *bwtest.HarnessTest) {
 
 Manager-focused tests should continue to create wallets through the manager API
 directly.
+
+## Fast Scrypt
+
+`bwtest` sets `waddrmgr.DefaultScryptOptions` to `waddrmgr.FastScryptOptions` via
+an `init()` function. Any package that imports `bwtest` (including `itest`)
+automatically benefits from faster key derivation, avoiding CPU exhaustion and
+timeouts — especially when running with `-race`.
