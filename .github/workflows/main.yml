@@ -134,17 +134,6 @@ jobs:
       - name: Clean up runner space
         uses: ./.github/actions/cleanup-space
 
-      - name: go cache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/work/go
-          key: btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-
-            btcwallet-${{ runner.os }}-go-
-
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
         with:
@@ -167,7 +156,7 @@ jobs:
   # run integration tests (SQLite + Postgres)
   ########################
   itest-db:
-    name: integration tests (${{ matrix.db }}, ${{ matrix.race && 'race' || 'cover' }})
+    name: ${{ matrix.db }} itest (${{ matrix.race && 'race' || 'cover' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -180,17 +169,6 @@ jobs:
 
       - name: Clean up runner space
         uses: ./.github/actions/cleanup-space
-
-      - name: go cache
-        uses: actions/cache@v4
-        with:
-          path: /home/runner/work/go
-          key: btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-${{ hashFiles('**/go.sum') }}
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ github.job }}-
-            btcwallet-${{ runner.os }}-go-${{ env.GO_VERSION }}-
-            btcwallet-${{ runner.os }}-go-
 
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v5
