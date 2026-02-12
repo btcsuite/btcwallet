@@ -8,25 +8,25 @@ import (
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
 
-// Ensure PostgresWalletDB satisfies the AccountStore interface.
-var _ AccountStore = (*PostgresWalletDB)(nil)
+// Ensure PostgresStore satisfies the AccountStore interface.
+var _ AccountStore = (*PostgresStore)(nil)
 
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
-func (w *PostgresWalletDB) GetAccount(ctx context.Context,
+func (s *PostgresStore) GetAccount(ctx context.Context,
 	query GetAccountQuery) (*AccountInfo, error) {
 
-	getQueries := pgAccountGetQueries{q: w.queries}
+	getQueries := pgAccountGetQueries{q: s.queries}
 
 	return getAccountByQuery(ctx, query, getQueries.byNumber, getQueries.byName)
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
 // filtered by name or key scope.
-func (w *PostgresWalletDB) ListAccounts(ctx context.Context,
+func (s *PostgresStore) ListAccounts(ctx context.Context,
 	query ListAccountsQuery) ([]AccountInfo, error) {
 
-	listQueries := pgAccountListQueries{q: w.queries}
+	listQueries := pgAccountListQueries{q: s.queries}
 
 	return listAccountsByQuery(
 		ctx, query, listQueries.byScope, listQueries.byName, listQueries.all,
@@ -35,10 +35,10 @@ func (w *PostgresWalletDB) ListAccounts(ctx context.Context,
 
 // RenameAccount changes the name of an account. The account can be identified
 // by its old name or its account number.
-func (w *PostgresWalletDB) RenameAccount(ctx context.Context,
+func (s *PostgresStore) RenameAccount(ctx context.Context,
 	params RenameAccountParams) error {
 
-	renameQueries := pgAccountRenameQueries{q: w.queries}
+	renameQueries := pgAccountRenameQueries{q: s.queries}
 
 	return renameAccountByQuery(
 		ctx, params, renameQueries.byNumber, renameQueries.byName,
@@ -48,7 +48,7 @@ func (w *PostgresWalletDB) RenameAccount(ctx context.Context,
 // CreateDerivedAccount creates a new derived account with the given name and
 // scope. If the key scope does not exist, it is created with NULL encrypted
 // keys using the address schema provided by the caller.
-func (w *PostgresWalletDB) CreateDerivedAccount(ctx context.Context,
+func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
 	params CreateDerivedAccountParams) (*AccountInfo, error) {
 
 	paramsErr := params.validate()
@@ -58,7 +58,7 @@ func (w *PostgresWalletDB) CreateDerivedAccount(ctx context.Context,
 
 	var info *AccountInfo
 
-	err := w.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		scopeID, err := pgEnsureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -117,12 +117,12 @@ func (w *PostgresWalletDB) CreateDerivedAccount(ctx context.Context,
 // public key. If the key scope does not exist, it is created with NULL
 // encrypted keys using the address schema provided by the caller. Imported
 // accounts have NULL account_number since they don't follow BIP44 derivation.
-func (w *PostgresWalletDB) CreateImportedAccount(ctx context.Context,
+func (s *PostgresStore) CreateImportedAccount(ctx context.Context,
 	params CreateImportedAccountParams) (*AccountProperties, error) {
 
 	var props *AccountProperties
 
-	err := w.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		var err error
 
 		props, err = createImportedAccount(
