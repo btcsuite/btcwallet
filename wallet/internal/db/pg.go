@@ -7,20 +7,20 @@ import (
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
 
-// PostgresWalletDB is the PostgreSQL implementation of the
+// PostgresStore is the PostgreSQL implementation of the
 // WalletStore interface.
-type PostgresWalletDB struct {
+type PostgresStore struct {
 	db      *sql.DB
 	queries *sqlcpg.Queries
 }
 
-// NewPostgresWalletDB creates a new PostgreSQL-based WalletStore.
-func NewPostgresWalletDB(db *sql.DB) (*PostgresWalletDB, error) {
+// NewPostgresStore creates a new PostgreSQL-based WalletStore.
+func NewPostgresStore(db *sql.DB) (*PostgresStore, error) {
 	if db == nil {
 		return nil, ErrNilDB
 	}
 
-	return &PostgresWalletDB{
+	return &PostgresStore{
 		db:      db,
 		queries: sqlcpg.New(db),
 	}, nil
@@ -30,7 +30,7 @@ func NewPostgresWalletDB(db *sql.DB) (*PostgresWalletDB, error) {
 // receives a transactional query executor and should perform all database
 // operations using it. The transaction will be automatically committed on
 // success or rolled back on error.
-func (w *PostgresWalletDB) ExecuteTx(ctx context.Context,
+func (w *PostgresStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcpg.Queries) error) error {
 
 	return execInTx(ctx, w.db, func(tx *sql.Tx) error {

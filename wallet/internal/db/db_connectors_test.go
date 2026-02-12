@@ -42,16 +42,16 @@ func newMockedTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// TestNewPostgresWalletDB checks that the PostgresWalletDB constructor
+// TestNewPostgresStore checks that the PostgresStore constructor
 // properly guards against nil *sql.DB inputs and wires up the queries
 // correctly.
-func TestNewPostgresWalletDB(t *testing.T) {
+func TestNewPostgresStore(t *testing.T) {
 	t.Parallel()
 
 	t.Run("nil db", func(t *testing.T) {
 		t.Parallel()
 
-		db, err := NewPostgresWalletDB(nil)
+		db, err := NewPostgresStore(nil)
 		require.ErrorIs(t, err, ErrNilDB)
 		require.Nil(t, db)
 	})
@@ -61,7 +61,7 @@ func TestNewPostgresWalletDB(t *testing.T) {
 
 		sqlDB := newMockedTestDB(t)
 
-		db, err := NewPostgresWalletDB(sqlDB)
+		db, err := NewPostgresStore(sqlDB)
 		require.NoError(t, err)
 		require.NotNil(t, db)
 		require.Equal(t, sqlDB, db.db)
@@ -69,16 +69,16 @@ func TestNewPostgresWalletDB(t *testing.T) {
 	})
 }
 
-// TestNewSQLiteWalletDB checks that the SQLiteWalletDB constructor
+// TestNewSqliteStore checks that the SqliteStore constructor
 // properly guards against nil *sql.DB inputs and wires up the queries
 // correctly.
-func TestNewSQLiteWalletDB(t *testing.T) {
+func TestNewSqliteStore(t *testing.T) {
 	t.Parallel()
 
 	t.Run("nil db", func(t *testing.T) {
 		t.Parallel()
 
-		db, err := NewSQLiteWalletDB(nil)
+		db, err := NewSqliteStore(nil)
 		require.ErrorIs(t, err, ErrNilDB)
 		require.Nil(t, db)
 	})
@@ -88,7 +88,7 @@ func TestNewSQLiteWalletDB(t *testing.T) {
 
 		sqlDB := newMockedTestDB(t)
 
-		db, err := NewSQLiteWalletDB(sqlDB)
+		db, err := NewSqliteStore(sqlDB)
 		require.NoError(t, err)
 		require.NotNil(t, db)
 		require.Equal(t, sqlDB, db.db)
