@@ -1,116 +1,113 @@
 package db
 
 import (
-	"database/sql"
-	"database/sql/driver"
-	"sync"
+	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-const testDriverName = "wallet-test-driver"
+func TestNewPostgresStoreValidateConfig(t *testing.T) {
+	t.Parallel()
 
-var (
-	registerDriverOnce sync.Once
-	testDriver         *mockDriver
-)
+	tests := []struct {
+		name    string
+		cfg     PostgresConfig
+		wantErr error
+	}{
+		{
+			name: "empty DSN",
+			cfg: PostgresConfig{
+				Dsn: "",
+			},
+			wantErr: ErrEmptyDSN,
+		},
+		{
+			name: "negative max connections",
+			cfg: PostgresConfig{
+				Dsn:            "postgres://test",
+				MaxConnections: -1,
+			},
+			wantErr: ErrNegativeMaxConns,
+		},
+	}
 
-// newMockedTestDB returns a *sql.DB backed by a mock driver. It avoids any
-// network or disk usage, so it works well for constructor tests that only
-// need a non nil database handle. It should be used only in very simple
-// scenarios, since it does not implement real behavior and cannot confirm
-// that the issued queries works as expected.
-func newMockedTestDB(t *testing.T) *sql.DB {
-	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	registerDriverOnce.Do(func() {
-		testDriver = &mockDriver{}
-		testDriver.On("Open", mock.Anything).Return(mockConn{}, nil)
+			store, err := NewPostgresStore(t.Context(), tc.cfg)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, store)
+		})
+	}
+}
 
-		sql.Register(testDriverName, testDriver)
-	})
+func TestNewPostgresStoreConnectionFailure(t *testing.T) {
+	t.Parallel()
 
-	db, err := sql.Open(testDriverName, "")
+	// Valid config, but hits a connection failure.
+	cfg := PostgresConfig{
+		Dsn: "postgres://localhost:1/testdb",
+	}
+
+	store, err := NewPostgresStore(t.Context(), cfg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "ping database")
+	require.NotErrorIs(t, err, ErrEmptyDSN)
+	require.NotErrorIs(t, err, ErrNegativeMaxConns)
+
+	// We are asserting nil here because it's not an integration test, so we
+	// are not able to create a postgres database and connect to it.
+	require.Nil(t, store)
+}
+
+func TestNewSqliteStoreValidateConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     SqliteConfig
+		wantErr error
+	}{
+		{
+			name: "empty DB path",
+			cfg: SqliteConfig{
+				DBPath: "",
+			},
+			wantErr: ErrEmptyDBPath,
+		},
+		{
+			name: "negative max connections",
+			cfg: SqliteConfig{
+				DBPath:         "/tmp/test.db",
+				MaxConnections: -1,
+			},
+			wantErr: ErrNegativeMaxConns,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := NewSqliteStore(t.Context(), tc.cfg)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, store)
+		})
+	}
+}
+
+func TestNewSqliteStoreSuccess(t *testing.T) {
+	t.Parallel()
+
+	cfg := SqliteConfig{
+		DBPath: filepath.Join(t.TempDir(), "wallet.db"),
+	}
+
+	store, err := NewSqliteStore(t.Context(), cfg)
 	require.NoError(t, err)
+	require.NotNil(t, store)
 
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
-
-	return db
-}
-
-// TestNewPostgresStore checks that the PostgresStore constructor
-// properly guards against nil *sql.DB inputs and wires up the queries
-// correctly.
-func TestNewPostgresStore(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil db", func(t *testing.T) {
-		t.Parallel()
-
-		db, err := NewPostgresStore(nil)
-		require.ErrorIs(t, err, ErrNilDB)
-		require.Nil(t, db)
-	})
-
-	t.Run("valid db", func(t *testing.T) {
-		t.Parallel()
-
-		sqlDB := newMockedTestDB(t)
-
-		db, err := NewPostgresStore(sqlDB)
-		require.NoError(t, err)
-		require.NotNil(t, db)
-		require.Equal(t, sqlDB, db.db)
-		require.NotNil(t, db.queries)
-	})
-}
-
-// TestNewSqliteStore checks that the SqliteStore constructor
-// properly guards against nil *sql.DB inputs and wires up the queries
-// correctly.
-func TestNewSqliteStore(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil db", func(t *testing.T) {
-		t.Parallel()
-
-		db, err := NewSqliteStore(nil)
-		require.ErrorIs(t, err, ErrNilDB)
-		require.Nil(t, db)
-	})
-
-	t.Run("valid db", func(t *testing.T) {
-		t.Parallel()
-
-		sqlDB := newMockedTestDB(t)
-
-		db, err := NewSqliteStore(sqlDB)
-		require.NoError(t, err)
-		require.NotNil(t, db)
-		require.Equal(t, sqlDB, db.db)
-		require.NotNil(t, db.queries)
-	})
-}
-
-// mockDriver implements a bare-bones SQL driver so tests can obtain a *sql.DB
-// without depending on an external database.
-type mockDriver struct {
-	mock.Mock
-}
-
-func (m *mockDriver) Open(name string) (driver.Conn, error) {
-	args := m.Called(name)
-	conn, _ := args.Get(0).(driver.Conn)
-
-	return conn, args.Error(1)
-}
-
-// mockConn is a mock implementation of a database connection. It does not
-// implement any real behavior. Used to be returned by the mockDriver.
-type mockConn struct {
-	mock.Mock
+	require.NoError(t, store.Close())
 }
