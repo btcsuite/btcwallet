@@ -133,7 +133,7 @@ func sanitizedPgDBName(t *testing.T) string {
 
 // NewPostgresDB creates a new PostgreSQL database connection with migrations
 // applied. Each test gets its own database for isolation.
-func NewPostgresDB(t *testing.T) *sql.DB {
+func NewPostgresDB(t *testing.T) *db.PostgresStore {
 	t.Helper()
 	ctx := t.Context()
 
@@ -170,22 +170,19 @@ func NewPostgresDB(t *testing.T) *sql.DB {
 	// Build the connection string for the test database.
 	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
 
-	// TODO(gustavostingelin): replace with the real PostgreSQL database
-	// connection constructor when available.
-	dbConn, err := sql.Open("pgx", testConnStr)
-	require.NoError(t, err, "failed to open test database connection")
-	require.NotNil(t, dbConn, "test database connection is nil")
+	cfg := db.PostgresConfig{
+		Dsn:            testConnStr,
+		MaxConnections: 0,
+	}
 
-	// Close the connection to avoid leaking an idle connection during tests.
-	// The container is reused across all tests, so we explicitly clean this up.
+	store, err := db.NewPostgresStore(t.Context(), cfg)
+	require.NoError(t, err, "failed to create postgres store")
+
 	t.Cleanup(func() {
-		_ = dbConn.Close()
+		_ = store.Close()
 	})
 
-	err = db.ApplyPostgresMigrations(dbConn)
-	require.NoError(t, err, "failed to apply migrations")
-
-	return dbConn
+	return store
 }
 
 // NewTestStoreWithDB creates a PostgreSQL wallet store and also returns the
@@ -195,11 +192,8 @@ func NewTestStoreWithDB(t *testing.T) (*db.PostgresStore, *sqlcpg.Queries,
 
 	t.Helper()
 
-	dbConn := NewPostgresDB(t)
-
-	store, err := db.NewPostgresStore(dbConn)
-	require.NoError(t, err, "failed to create wallet store")
-
+	store := NewPostgresDB(t)
+	dbConn := store.DB()
 	queries := sqlcpg.New(dbConn)
 
 	return store, queries, dbConn
