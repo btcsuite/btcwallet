@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -131,9 +129,9 @@ func sanitizedPgDBName(t *testing.T) string {
 	return dbName
 }
 
-// NewPostgresDB creates a new PostgreSQL database connection with migrations
+// NewTestStore creates a new PostgreSQL database connection with migrations
 // applied. Each test gets its own database for isolation.
-func NewPostgresDB(t *testing.T) *db.PostgresStore {
+func NewTestStore(t *testing.T) *db.PostgresStore {
 	t.Helper()
 	ctx := t.Context()
 
@@ -183,27 +181,4 @@ func NewPostgresDB(t *testing.T) *db.PostgresStore {
 	})
 
 	return store
-}
-
-// NewTestStoreWithDB creates a PostgreSQL wallet store and also returns the
-// raw sql.DB for fixture-level direct SQL setup.
-func NewTestStoreWithDB(t *testing.T) (*db.PostgresStore, *sqlcpg.Queries,
-	*sql.DB) {
-
-	t.Helper()
-
-	store := NewPostgresDB(t)
-	dbConn := store.DB()
-	queries := sqlcpg.New(dbConn)
-
-	return store, queries, dbConn
-}
-
-// NewTestStore creates a PostgreSQL wallet store and returns it with queries.
-func NewTestStore(t *testing.T) (*db.PostgresStore, *sqlcpg.Queries) {
-	t.Helper()
-
-	store, queries, _ := NewTestStoreWithDB(t)
-
-	return store, queries
 }
