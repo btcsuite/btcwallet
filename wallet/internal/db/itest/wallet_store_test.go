@@ -15,7 +15,7 @@ import (
 func TestCreateWallet(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	params := CreateWalletParamsFixture("test-wallet")
 	info, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
@@ -37,7 +37,7 @@ func TestCreateWallet(t *testing.T) {
 func TestCreateWallet_WithBirthday(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("birthday-wallet")
 	birthday := time.Now().UTC().Add(-30 * 24 * time.Hour)
@@ -56,7 +56,7 @@ func TestCreateWallet_WithBirthday(t *testing.T) {
 func TestCreateWallet_DuplicateName(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	params := CreateWalletParamsFixture("duplicate-wallet")
 
 	_, err := store.CreateWallet(t.Context(), params)
@@ -100,7 +100,7 @@ func TestCreateWallet_Variants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, _ := NewTestStore(t)
+			store := NewTestStore(t)
 			params := tc.params(tc.name)
 
 			info, err := store.CreateWallet(t.Context(), params)
@@ -116,7 +116,7 @@ func TestCreateWallet_Variants(t *testing.T) {
 func TestGetWallet(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("get-test-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -138,7 +138,7 @@ func TestGetWallet(t *testing.T) {
 func TestGetWallet_NotFound(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	_, err := store.GetWallet(t.Context(), "non-existent-wallet")
 	require.Error(t, err)
@@ -149,7 +149,7 @@ func TestGetWallet_NotFound(t *testing.T) {
 func TestListWallets(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	// Initially empty.
 	wallets, err := store.ListWallets(t.Context())
@@ -181,7 +181,8 @@ func TestListWallets(t *testing.T) {
 func TestUpdateWallet_SyncedTo(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
 
 	params := CreateWalletParamsFixture("update-sync-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -215,7 +216,8 @@ func TestUpdateWallet_SyncedTo(t *testing.T) {
 func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
 
 	params := CreateWalletParamsFixture("update-birthday-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -255,7 +257,7 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 func TestUpdateWallet_Birthday(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("birthday-timestamp-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -288,7 +290,7 @@ func TestUpdateWallet_Birthday(t *testing.T) {
 func TestUpdateWallet_NotFound(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	updateParams := db.UpdateWalletParams{
 		WalletID: 99999, // Non-existent ID.
@@ -303,7 +305,7 @@ func TestUpdateWallet_NotFound(t *testing.T) {
 func TestGetEncryptedHDSeed(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("seed-wallet")
 	expectedSeed := params.EncryptedMasterPrivKey
@@ -321,7 +323,7 @@ func TestGetEncryptedHDSeed(t *testing.T) {
 func TestGetEncryptedHDSeed_WatchOnly(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWatchOnlyWalletParams("watch-only-seed")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -337,7 +339,7 @@ func TestGetEncryptedHDSeed_WatchOnly(t *testing.T) {
 func TestUpdateWalletSecrets(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("secrets-wallet")
 	created, err := store.CreateWallet(t.Context(), params)
@@ -364,7 +366,7 @@ func TestUpdateWalletSecrets(t *testing.T) {
 func TestUpdateWallet_AutoBlockInsertion(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	params := CreateWalletParamsFixture("auto-block-wallet")
 	created, err := store.CreateWallet(t.Context(), params)

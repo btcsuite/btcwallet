@@ -21,7 +21,7 @@ import (
 // across all standard key scopes between multiple wallets.
 func TestCreateAccounts(t *testing.T) {
 	t.Parallel()
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	// Create 3 wallets to ensure wallet_id scoping works.
 	for i := range 3 {
@@ -51,7 +51,7 @@ func TestCreateAccounts(t *testing.T) {
 func TestCreateDerivedAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-create-derived-account-errors")
 
@@ -96,7 +96,7 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 func TestCreateDerivedAccountDuplicateName(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "duplicate-name-wallet")
 
@@ -120,7 +120,7 @@ func TestCreateDerivedAccountDuplicateName(t *testing.T) {
 func TestCreateDerivedAccountSameNameDifferentScopes(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "multi-scope-wallet")
 
@@ -151,7 +151,7 @@ func TestCreateDerivedAccountSameNameDifferentScopes(t *testing.T) {
 func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "sequential-wallet")
 
@@ -177,7 +177,7 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "concurrent-wallet")
 
@@ -222,7 +222,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 func TestCreateImportedAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-create-imported-account-errors")
 
@@ -279,7 +279,7 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 func TestCreateImportedAccountDuplicateName(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "imported-duplicate-name-wallet")
 
@@ -306,7 +306,7 @@ func TestCreateImportedAccountDuplicateName(t *testing.T) {
 func TestGetAccount(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-get-account")
 
@@ -345,7 +345,7 @@ func TestGetAccount(t *testing.T) {
 func TestGetAccountNotFound(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-get-account-not-found")
 
@@ -380,7 +380,7 @@ func TestListAccounts(t *testing.T) {
 	// Ensure that has at least 3 accounts to be tested.
 	require.GreaterOrEqual(t, len(AllAccountCases), 3)
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-list-accounts")
 
@@ -454,7 +454,7 @@ func TestListAccounts(t *testing.T) {
 func TestListAccountsOrdering(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-list-ordering")
 
@@ -493,7 +493,7 @@ func TestListAccountsOrdering(t *testing.T) {
 func TestAccountCreatedAtTimestamp(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-created-at")
 
@@ -534,7 +534,7 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 func TestRenameAccount(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-rename-account")
 
@@ -595,7 +595,7 @@ func TestRenameAccount(t *testing.T) {
 func TestRenameAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	walletID := newWallet(t, store, "wallet-rename-account-errors")
 
@@ -667,11 +667,10 @@ func TestRenameAccountErrors(t *testing.T) {
 func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-max-account")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "account-0")
-	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
-	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1, "account-near-max")
+	setupMaxAccountNumberTest(t, store, walletID)
 
 	// This should succeed with account_number = MaxUint32.
 	info, err := store.CreateDerivedAccount(

@@ -88,7 +88,8 @@ func getAccountByName(t *testing.T, store db.AccountStore, walletID uint32,
 func TestNewImportedAddress(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
 	walletID := newWallet(t, store, "wallet-imported-addresses")
 
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
@@ -231,7 +232,8 @@ func TestNewImportedAddress(t *testing.T) {
 func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 	t.Parallel()
 
-	store, queries := NewTestStore(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
 	walletID := newWallet(t, store, "wallet-encrypted-script")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0049Plus, "imported")
@@ -339,7 +341,8 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 func TestImportedAddressCounterInsertDelete(t *testing.T) {
 	t.Parallel()
 
-	store, _, dbConn := NewTestStoreWithDB(t)
+	store := NewTestStore(t)
+	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-imported-counter")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
@@ -386,7 +389,8 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	t.Parallel()
 
-	store, _, dbConn := NewTestStoreWithDB(t)
+	store := NewTestStore(t)
+	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-imported-counter-concurrent")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
@@ -468,7 +472,7 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 func TestNewImportedAddressDuplicate(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-duplicate-import")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
@@ -501,7 +505,7 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 func TestGetAddressSecret(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-secrets")
 	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
 
@@ -568,7 +572,7 @@ func TestGetAddressSecret(t *testing.T) {
 func TestGetAddress(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-get-address")
 
 	tests := []struct {
@@ -654,7 +658,7 @@ func TestGetAddress(t *testing.T) {
 func TestListAddresses(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-list-addresses")
 
 	tests := []struct {
@@ -772,7 +776,7 @@ func TestListAddresses(t *testing.T) {
 func TestNewDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-derived")
 
 	// Create account in BIP44 scope.
@@ -824,7 +828,7 @@ func TestNewDerivedAddress(t *testing.T) {
 func TestNewImportedAddress_NonExistentImportedAccount(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "test-wallet")
 
 	// Attempt to import address when "imported" account doesn't exist.
@@ -851,7 +855,7 @@ func TestNewImportedAddress_NonExistentImportedAccount(t *testing.T) {
 func TestGetAddressSecret_DerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "test-wallet")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "test-account")
 
@@ -879,7 +883,7 @@ func TestGetAddressSecret_DerivedAddress(t *testing.T) {
 func TestNewDerivedAddressSequentialIndexes(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-sequential-indexes")
 
 	// Create derived account for the test.
@@ -901,7 +905,7 @@ func TestNewDerivedAddressSequentialIndexes(t *testing.T) {
 func TestListAddressesOrdering(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-list-ordering")
 
 	createDerivedAccount(
@@ -962,7 +966,7 @@ func TestListAddressesOrdering(t *testing.T) {
 func TestNewDerivedAddressErrors(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-new-derived-address-errors")
 
 	tests := []struct {
@@ -1021,7 +1025,7 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 func TestNewDerivedAddressConcurrent(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "concurrent-wallet")
 
 	accountName := "concurrent-account"
@@ -1075,7 +1079,7 @@ func TestNewDerivedAddressConcurrent(t *testing.T) {
 func TestNewDerivedAddressBranchIsolation(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-branch-isolation")
 
 	// Create derived account for the test.
@@ -1119,7 +1123,7 @@ func TestNewDerivedAddressBranchIsolation(t *testing.T) {
 func TestNewDerivedAddressAccountKeyCounts(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-account-key-counts")
 
 	accountName := "counted-account"
@@ -1145,7 +1149,7 @@ func TestNewDerivedAddressAccountKeyCounts(t *testing.T) {
 func TestNewDerivedAddressBranchCounters(t *testing.T) {
 	t.Parallel()
 
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-branch-counters")
 
 	accountName := "branch-counter-account"
@@ -1178,7 +1182,9 @@ func TestNewDerivedAddressBranchCounters(t *testing.T) {
 func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	t.Parallel()
 
-	store, queries, dbConn := NewTestStoreWithDB(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-max-index")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
 
@@ -1216,7 +1222,9 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	t.Parallel()
 
-	store, queries, dbConn := NewTestStoreWithDB(t)
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-max-index-internal")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "max-acct")
 

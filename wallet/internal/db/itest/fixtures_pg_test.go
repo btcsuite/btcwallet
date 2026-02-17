@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -181,4 +182,18 @@ func deleteAddress(ctx context.Context, dbConn *sql.DB,
 	}
 
 	return nil
+}
+
+func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
+	walletID uint32) {
+
+	t.Helper()
+
+	require.IsType(t, &db.PostgresStore{}, store)
+
+	pgStore := store.(*db.PostgresStore)
+	queries := pgStore.Queries()
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,
+		"account-near-max")
 }
