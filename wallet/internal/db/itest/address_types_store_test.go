@@ -12,7 +12,7 @@ import (
 
 func TestListAddressTypes(t *testing.T) {
 	t.Parallel()
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	types, err := store.ListAddressTypes(t.Context())
 	require.NoError(t, err)
@@ -33,7 +33,7 @@ func TestListAddressTypes(t *testing.T) {
 
 func TestGetAddressType(t *testing.T) {
 	t.Parallel()
-	store, _ := NewTestStore(t)
+	store := NewTestStore(t)
 
 	tests := []struct {
 		id         db.AddressType
