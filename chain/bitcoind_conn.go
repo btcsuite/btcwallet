@@ -157,9 +157,30 @@ func NewBitcoindConn(cfg *BitcoindConfig) (*BitcoindConn, error) {
 	}
 
 	// Verify that the node is running on the expected network.
-	net, err := getCurrentNet(client)
-	if err != nil {
-		return nil, err
+	var net wire.BitcoinNet
+
+	btcInWarmup := false
+	for {
+		net, err = getCurrentNet(client)
+		if err == nil {
+			// No error means bitcoind is responsive and we can proceed.
+			break
+		}
+		if rpcErr, ok := err.(*btcjson.RPCError); ok &&
+			rpcErr.Code == btcjson.ErrRPCInWarmup {
+			// Error code -28 indicates the bitcoind rpc is warming up.
+			// We will wait and recheck periodically until rpc is ready.
+			if !btcInWarmup {
+				btcInWarmup = true
+				log.Info("Waiting for bitcoind RPC to finish warming up...")
+			}
+			time.Sleep(time.Second * 1)
+		} else {
+			return nil, err
+		}
+	}
+	if btcInWarmup {
+		log.Info("Bitcoind finished warming up and RPC is ready")
 	}
 	if net != cfg.ChainParams.Net {
 		return nil, fmt.Errorf("expected network %v, got %v",
