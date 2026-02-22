@@ -345,6 +345,7 @@ type Manager struct {
 	externalAddrSchemas map[AddressType][]KeyScope
 	internalAddrSchemas map[AddressType][]KeyScope
 
+	syncStateMtx sync.RWMutex
 	syncState    syncState
 	watchingOnly atomic.Bool
 	birthday     time.Time
@@ -426,42 +427,25 @@ func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
 //
 // TODO(yy): Rename this to wipe memory for priv keys.
 func (m *Manager) lock() {
-	for _, manager := range m.scopedManagers {
-		// Clear all of the account private keys.
-		for _, acctInfo := range manager.acctInfo {
-			if acctInfo.acctKeyPriv != nil {
-				acctInfo.acctKeyPriv.Zero()
-			}
-			acctInfo.acctKeyPriv = nil
-		}
+	// Mark locked first so callers checking IsLocked() see the locked
+	// state before we begin zeroing keys.
+	m.locked.Store(true)
+
+	// Zero private key material in each scoped manager under s.mtx.
+	for _, sm := range m.scopedManagers {
+		sm.Lock()
 	}
 
-	// Remove clear text private keys and scripts from all address entries.
-	for _, manager := range m.scopedManagers {
-		for _, ma := range manager.addrs {
-			switch addr := ma.(type) {
-			case *managedAddress:
-				addr.lock()
-			case *scriptAddress:
-				addr.lock()
-			}
-		}
-	}
-
-	// Remove clear text private master and crypto keys from memory.
+	// Zero manager-level crypto keys.
 	m.cryptoKeyScript.Zero()
 	m.cryptoKeyPriv.Zero()
 	m.masterKeyPriv.Zero()
-
-	// Zero the hashed passphrase.
 	zero.Bytea64(&m.hashedPrivPassphrase)
 
 	// NOTE: m.cryptoKeyPub is intentionally not cleared here as the address
 	// manager needs to be able to continue to read and decrypt public data
 	// which uses a separate derived key from the database even when it is
 	// locked.
-
-	m.locked.Store(true)
 }
 
 // Close cleanly shuts down the manager.  It makes a best try effort to remove
@@ -878,6 +862,42 @@ func (m *Manager) ChainParams() *chaincfg.Params {
 	return m.chainParams
 }
 
+// CryptoKeyPub returns the public crypto key used to encrypt/decrypt public
+// extended keys and addresses.
+func (m *Manager) CryptoKeyPub() EncryptorDecryptor {
+	return m.cryptoKeyPub
+}
+
+// CryptoKeyPriv returns the private crypto key used to encrypt/decrypt private
+// key material. The underlying key is zeroed when the manager is locked.
+func (m *Manager) CryptoKeyPriv() EncryptorDecryptor {
+	return m.cryptoKeyPriv
+}
+
+// CryptoKeyScript returns the script crypto key used to encrypt/decrypt script
+// data. The underlying key is zeroed when the manager is locked.
+func (m *Manager) CryptoKeyScript() EncryptorDecryptor {
+	return m.cryptoKeyScript
+}
+
+// SetStartBlock updates the start block if the given block is earlier than the
+// current start block. It persists the change to the database and updates
+// the in-memory state atomically.
+func (m *Manager) SetStartBlock(ns walletdb.ReadWriteBucket,
+	bs *BlockStamp) error {
+
+	m.syncStateMtx.Lock()
+	defer m.syncStateMtx.Unlock()
+
+	if bs.Height < m.syncState.startBlock.Height {
+		if err := putStartBlock(ns, bs); err != nil {
+			return err
+		}
+		m.syncState.startBlock = *bs
+	}
+	return nil
+}
+
 // ChangePassphrase changes either the public or private passphrase to the
 // provided value depending on the private flag.  In order to change the
 // private password, the address manager must not be watching-only.  The new
@@ -1076,32 +1096,9 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 		m.lock()
 	}
 
-	// This section clears and removes the encrypted private key material
-	// that is ordinarily used to unlock the manager.  Since the the manager
-	// is being converted to watching-only, the encrypted private key
-	// material is no longer needed.
-
-	// Clear and remove all of the encrypted acount private keys.
+	// Clear encrypted private key material from each scoped manager.
 	for _, manager := range m.scopedManagers {
-		for _, acctInfo := range manager.acctInfo {
-			zero.Bytes(acctInfo.acctKeyEncrypted)
-			acctInfo.acctKeyEncrypted = nil
-		}
-	}
-
-	// Clear and remove encrypted private keys and encrypted scripts from
-	// all address entries.
-	for _, manager := range m.scopedManagers {
-		for _, ma := range manager.addrs {
-			switch addr := ma.(type) {
-			case *managedAddress:
-				zero.Bytes(addr.privKeyEncrypted)
-				addr.privKeyEncrypted = nil
-			case *scriptAddress:
-				zero.Bytes(addr.scriptEncrypted)
-				addr.scriptEncrypted = nil
-			}
-		}
+		manager.ConvertToWatchingOnly()
 	}
 
 	// Clear and remove encrypted private and script crypto keys.
@@ -1210,64 +1207,9 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// Use the crypto private key to decrypt all of the account private
 	// extended keys.
 	for _, manager := range m.scopedManagers {
-		for account, acctInfo := range manager.acctInfo {
-			decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
-			if err != nil {
-				m.lock()
-				str := fmt.Sprintf("failed to decrypt account %d "+
-					"private key", account)
-				return managerError(ErrCrypto, str, err)
-			}
-
-			acctKeyPriv, err := hdkeychain.NewKeyFromString(string(decrypted))
-			zero.Bytes(decrypted)
-			if err != nil {
-				m.lock()
-				str := fmt.Sprintf("failed to regenerate account %d "+
-					"extended key", account)
-				return managerError(ErrKeyChain, str, err)
-			}
-			acctInfo.acctKeyPriv = acctKeyPriv
-		}
-
-		// We'll also derive any private keys that are pending due to
-		// them being created while the address manager was locked.
-		for _, info := range manager.deriveOnUnlock {
-			addressKey, _, _, err := manager.deriveKeyFromPath(
-				ns, info.managedAddr.InternalAccount(),
-				info.branch, info.index, true,
-			)
-			if err != nil {
-				m.lock()
-				return err
-			}
-
-			// It's ok to ignore the error here since it can only
-			// fail if the extended key is not private, however it
-			// was just derived as a private key.
-			privKey, _ := addressKey.ECPrivKey()
-			addressKey.Zero()
-
-			privKeyBytes := privKey.Serialize()
-			privKeyEncrypted, err := m.cryptoKeyPriv.Encrypt(privKeyBytes)
-			privKey.Zero()
-			if err != nil {
-				m.lock()
-				str := fmt.Sprintf("failed to encrypt private key for "+
-					"address %s", info.managedAddr.Address())
-				return managerError(ErrCrypto, str, err)
-			}
-
-			switch a := info.managedAddr.(type) {
-			case *managedAddress:
-				a.privKeyEncrypted = privKeyEncrypted
-				a.privKeyCT = privKeyBytes
-			case *scriptAddress:
-			}
-
-			// Avoid re-deriving this key on subsequent unlocks.
-			manager.deriveOnUnlock[0] = nil
-			manager.deriveOnUnlock = manager.deriveOnUnlock[1:]
+		if err := manager.Unlock(m.cryptoKeyPriv, ns); err != nil {
+			m.lock()
+			return err
 		}
 	}
 
