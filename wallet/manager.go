@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 )
 
 var (
@@ -294,6 +295,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	w := &Wallet{
 		cfg:         cfg,
 		addrStore:   addrMgr,
+		store:       kvdb.NewStore(cfg.DB, txMgr),
 		txStore:     txMgr,
 		requestChan: make(chan any),
 		lifetimeCtx: lifetimeCtx,

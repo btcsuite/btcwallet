@@ -310,6 +310,8 @@ func setupBenchmarkWallet(tb testing.TB,
 		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w)
 	}
 
+	require.NotNil(tb, w.store)
+
 	// Initialize controller channels and timer.
 	if w.requestChan == nil {
 		w.requestChan = make(chan any)

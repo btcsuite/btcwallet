@@ -2,9 +2,8 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-// This file contains a mock implementation of the wtxmgr.TxStore interface.
-// It is used in various tests to isolate wallet logic from the underlying
-// database.
+// This file contains mock implementations of wallet dependencies used in
+// tests to isolate wallet logic from underlying storage backends.
 
 package wallet
 
@@ -22,6 +21,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightninglabs/neutrino"
@@ -29,6 +29,88 @@ import (
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/mock"
 )
+
+// mockStore is a mock implementation of the db.Store interface.
+//
+// It is used to unit test wallet UTXO manager public methods without
+// exercising a real database backend.
+type mockStore struct {
+	mock.Mock
+}
+
+// A compile-time assertion to ensure that mockStore implements the db.Store
+// interface.
+var _ db.Store = (*mockStore)(nil)
+
+// GetUtxo implements the db.UTXOStore interface.
+func (m *mockStore) GetUtxo(ctx context.Context,
+	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.UtxoInfo), args.Error(1)
+}
+
+// ListUTXOs implements the db.UTXOStore interface.
+func (m *mockStore) ListUTXOs(ctx context.Context,
+	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.UtxoInfo), args.Error(1)
+}
+
+// LeaseOutput implements the db.UTXOStore interface.
+func (m *mockStore) LeaseOutput(ctx context.Context,
+	params db.LeaseOutputParams) (*db.LeasedOutput, error) {
+
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.LeasedOutput), args.Error(1)
+}
+
+// ReleaseOutput implements the db.UTXOStore interface.
+func (m *mockStore) ReleaseOutput(ctx context.Context,
+	params db.ReleaseOutputParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
+// ListLeasedOutputs implements the db.UTXOStore interface.
+func (m *mockStore) ListLeasedOutputs(ctx context.Context,
+	walletID uint32) ([]db.LeasedOutput, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.LeasedOutput), args.Error(1)
+}
+
+// Balance implements the db.UTXOStore interface.
+func (m *mockStore) Balance(ctx context.Context,
+	params db.BalanceParams) (btcutil.Amount, error) {
+
+	args := m.Called(ctx, params)
+
+	amount, ok := args.Get(0).(btcutil.Amount)
+	if !ok {
+		return 0, args.Error(1)
+	}
+
+	return amount, args.Error(1)
+}
 
 // mockTxStore is a mock implementation of the wtxmgr.TxStore interface.
 type mockTxStore struct {

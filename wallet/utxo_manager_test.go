@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -319,10 +320,12 @@ func TestReleaseOutput(t *testing.T) {
 		Index: 0,
 	}
 
-	// Mock the UnlockOutput method to return nil.
-	mocks.txStore.On("UnlockOutput",
-		mock.Anything, mock.Anything, utxo,
-	).Return(nil)
+	// Mock the UTXOStore ReleaseOutput method to return nil.
+	mocks.store.On("ReleaseOutput", mock.Anything, db.ReleaseOutputParams{
+		WalletID: 0,
+		ID:       [32]byte{1},
+		OutPoint: utxo,
+	}).Return(nil)
 
 	// Now, try to release the output.
 	leaseID := wtxmgr.LockID{1}

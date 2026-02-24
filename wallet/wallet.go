@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -339,6 +340,11 @@ type Wallet struct {
 	// txStore is the transaction manager responsible for storing and
 	// querying the wallet's transaction history and unspent outputs.
 	txStore wtxmgr.TxStore
+
+	// store provides access to database operations used by wallet managers.
+	//
+	// TODO(yy): Migrate UTXO-related callers behind db.UTXOStore.
+	store db.Store
 
 	// NtfnServer handles the delivery of wallet-related events (e.g., new
 	// transactions, block connections) to connected clients.

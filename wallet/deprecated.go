@@ -27,6 +27,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -6714,6 +6715,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	w := &Wallet{
 		addrStore:        addrMgr,
+		store:            kvdb.NewStore(db, txMgr),
 		txStore:          txMgr,
 		walletDeprecated: deprecated,
 	}
