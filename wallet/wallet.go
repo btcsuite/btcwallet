@@ -1035,6 +1035,214 @@ func internalKeyPath(index uint32) waddrmgr.DerivationPath {
 	}
 }
 
+// accountExternalKeyPath returns the relative external derivation path
+// /account/0/index for the given account.
+func accountExternalKeyPath(account, index uint32) waddrmgr.DerivationPath {
+	return waddrmgr.DerivationPath{
+		InternalAccount: account,
+		Account:         account,
+		Branch:          waddrmgr.ExternalBranch,
+		Index:           index,
+	}
+}
+
+// accountInternalKeyPath returns the relative internal derivation path
+// /account/1/index for the given account.
+func accountInternalKeyPath(account, index uint32) waddrmgr.DerivationPath {
+	return waddrmgr.DerivationPath{
+		InternalAccount: account,
+		Account:         account,
+		Branch:          waddrmgr.InternalBranch,
+		Index:           index,
+	}
+}
+
+// expandScopeHorizonsForAccount is like expandScopeHorizons but derives
+// addresses from the specified account rather than the default account.
+func expandScopeHorizonsForAccount(ns walletdb.ReadBucket,
+	scopedMgr *waddrmgr.ScopedKeyManager,
+	scopeState *ScopeRecoveryState, account uint32) error {
+
+	exHorizon, exWindow := scopeState.ExternalBranch.ExtendHorizon()
+	count, childIndex := uint32(0), exHorizon
+	for count < exWindow {
+		keyPath := accountExternalKeyPath(account, childIndex)
+		addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+		switch {
+		case err == hdkeychain.ErrInvalidChild:
+			scopeState.ExternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+		case err != nil:
+			return err
+		}
+		scopeState.ExternalBranch.AddAddr(childIndex, addr.Address())
+		childIndex++
+		count++
+	}
+
+	inHorizon, inWindow := scopeState.InternalBranch.ExtendHorizon()
+	count, childIndex = 0, inHorizon
+	for count < inWindow {
+		keyPath := accountInternalKeyPath(account, childIndex)
+		addr, err := scopedMgr.DeriveFromKeyPath(ns, keyPath)
+		switch {
+		case err == hdkeychain.ErrInvalidChild:
+			scopeState.InternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+		case err != nil:
+			return err
+		}
+		scopeState.InternalBranch.AddAddr(childIndex, addr.Address())
+		childIndex++
+		count++
+	}
+
+	return nil
+}
+
+// extendFoundAddressesForAccount is like extendFoundAddresses but extends
+// addresses for the specified account rather than the default account.
+func extendFoundAddressesForAccount(ns walletdb.ReadWriteBucket,
+	filterResp *chain.FilterBlocksResponse,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	recoveryState *RecoveryState, account uint32) error {
+
+	for scope, indexes := range filterResp.FoundExternalAddrs {
+		scopeState := recoveryState.StateForScope(scope)
+		for index := range indexes {
+			scopeState.ExternalBranch.ReportFound(index)
+		}
+
+		scopedMgr := scopedMgrs[scope]
+		exNextUnfound := scopeState.ExternalBranch.NextUnfound()
+		exLastFound := exNextUnfound
+		if exLastFound > 0 {
+			exLastFound--
+		}
+		err := scopedMgr.ExtendExternalAddresses(
+			ns, account, exLastFound,
+		)
+		if err != nil {
+			return err
+		}
+		for index := range indexes {
+			addr := scopeState.ExternalBranch.GetAddr(index)
+			err := scopedMgr.MarkUsed(ns, addr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	for scope, indexes := range filterResp.FoundInternalAddrs {
+		scopeState := recoveryState.StateForScope(scope)
+		for index := range indexes {
+			scopeState.InternalBranch.ReportFound(index)
+		}
+
+		scopedMgr := scopedMgrs[scope]
+		inNextUnfound := scopeState.InternalBranch.NextUnfound()
+		inLastFound := inNextUnfound
+		if inLastFound > 0 {
+			inLastFound--
+		}
+		err := scopedMgr.ExtendInternalAddresses(
+			ns, account, inLastFound,
+		)
+		if err != nil {
+			return err
+		}
+		for index := range indexes {
+			addr := scopeState.InternalBranch.GetAddr(index)
+			err := scopedMgr.MarkUsed(ns, addr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// recoverScopedAddressesForAccount is like recoverScopedAddresses but recovers
+// addresses for a specific imported account.
+func (w *Wallet) recoverScopedAddressesForAccount(
+	chainClient chain.Interface,
+	tx walletdb.ReadWriteTx,
+	ns walletdb.ReadWriteBucket,
+	batch []wtxmgr.BlockMeta,
+	recoveryState *RecoveryState,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	account uint32) error {
+
+	if len(batch) == 0 {
+		return nil
+	}
+
+	log.Infof("Scanning %d blocks for imported account addresses",
+		len(batch))
+
+expandHorizons:
+	for scope, scopedMgr := range scopedMgrs {
+		scopeState := recoveryState.StateForScope(scope)
+		err := expandScopeHorizonsForAccount(
+			ns, scopedMgr, scopeState, account,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	filterReq := newFilterBlocksRequest(batch, scopedMgrs, recoveryState)
+
+	filterResp, err := chainClient.FilterBlocks(filterReq)
+	if err != nil {
+		return err
+	}
+
+	if filterResp == nil {
+		return nil
+	}
+
+	block := batch[filterResp.BatchIndex]
+	logFilterBlocksResp(block, filterResp)
+
+	err = extendFoundAddressesForAccount(
+		ns, filterResp, scopedMgrs, recoveryState, account,
+	)
+	if err != nil {
+		return err
+	}
+
+	for outPoint, addr := range filterResp.FoundOutPoints {
+		outPoint := outPoint
+		recoveryState.AddWatchedOutPoint(&outPoint, addr)
+	}
+
+	for _, txn := range filterResp.RelevantTxns {
+		txRecord, err := wtxmgr.NewTxRecordFromMsgTx(
+			txn, filterResp.BlockMeta.Time,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = w.addRelevantTx(tx, txRecord, &filterResp.BlockMeta)
+		if err != nil {
+			return err
+		}
+	}
+
+	batch = batch[filterResp.BatchIndex+1:]
+	if len(batch) > 0 {
+		goto expandHorizons
+	}
+
+	return nil
+}
+
 // newFilterBlocksRequest constructs FilterBlocksRequests using our current
 // block range, scoped managers, and recovery state.
 func newFilterBlocksRequest(batch []wtxmgr.BlockMeta,

@@ -224,6 +224,258 @@ func (w *Wallet) ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKe
 	return accountProps, err
 }
 
+// ImportAccountWithRescan imports an account backed by an account extended
+// public key and initiates a background recovery scan to discover historical
+// transactions for addresses derived from the account.
+//
+// The birthdayHeight specifies the block height from which to begin scanning.
+// The recoveryWindow specifies the gap limit for BIP44-style address discovery.
+//
+// The method returns immediately after importing the account. The recovery scan
+// runs in a background goroutine.
+func (w *Wallet) ImportAccountWithRescan(name string,
+	accountPubKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
+	birthdayHeight int32, recoveryWindow uint32) (
+	*waddrmgr.AccountProperties, error) {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate birthdayHeight against the chain's best height.
+	_, bestHeight, err := chainClient.GetBestBlock()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get best block: %v", err)
+	}
+	if birthdayHeight > bestHeight {
+		return nil, fmt.Errorf("birthday height %d exceeds best "+
+			"block height %d", birthdayHeight, bestHeight)
+	}
+
+	// Resolve birthdayHeight into a full BlockStamp.
+	birthdayHash, err := chainClient.GetBlockHash(int64(birthdayHeight))
+	if err != nil {
+		return nil, fmt.Errorf("unable to get block hash for "+
+			"height %d: %v", birthdayHeight, err)
+	}
+	birthdayHeader, err := chainClient.GetBlockHeader(birthdayHash)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get block header for "+
+			"hash %v: %v", birthdayHash, err)
+	}
+	birthdayStamp := &waddrmgr.BlockStamp{
+		Hash:      *birthdayHash,
+		Height:    birthdayHeight,
+		Timestamp: birthdayHeader.Timestamp,
+	}
+
+	// Import the account and update birthday if needed.
+	var accountProps *waddrmgr.AccountProperties
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		var err error
+		accountProps, err = w.importAccount(
+			addrmgrNs, name, accountPubKey,
+			masterKeyFingerprint, addrType,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Update the wallet's birthday if the imported account's
+		// birthday is earlier, following ImportPrivateKey's pattern.
+		birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+		if err != nil {
+			return err
+		}
+		if birthdayStamp.Height >= birthdayBlock.Height {
+			return nil
+		}
+
+		err = w.Manager.SetBirthday(
+			addrmgrNs, birthdayStamp.Timestamp,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Mark as unverified to prompt a sanity check at next
+		// restart.
+		return w.Manager.SetBirthdayBlock(
+			addrmgrNs, *birthdayStamp, false,
+		)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Infof("Imported account %q, starting background recovery "+
+		"from height %d with recovery_window=%d",
+		name, birthdayHeight, recoveryWindow)
+
+	// Launch the background recovery goroutine.
+	go w.recoverImportedAccount(
+		accountProps.KeyScope, accountProps.AccountNumber,
+		birthdayStamp, recoveryWindow,
+	)
+
+	return accountProps, nil
+}
+
+// recoverImportedAccount scans the blockchain from the given birthday block to
+// discover historical transactions for addresses derived from an imported
+// account. This method is designed to run in a background goroutine on an
+// already-synced wallet.
+//
+// After scanning completes, a RescanJob is submitted to catch any blocks mined
+// during the scan and to register discovered addresses and outpoints for
+// ongoing monitoring.
+func (w *Wallet) recoverImportedAccount(scope waddrmgr.KeyScope,
+	account uint32, birthdayStamp *waddrmgr.BlockStamp,
+	recoveryWindow uint32) {
+
+	chainClient, err := w.requireChainClient()
+	if err != nil {
+		log.Errorf("Imported account recovery failed: no chain "+
+			"client: %v", err)
+		return
+	}
+
+	recoveryMgr := NewRecoveryManager(
+		recoveryWindow, recoveryBatchSize, w.chainParams,
+	)
+
+	// Snapshot the best height so we know when to stop.
+	_, bestHeight, err := chainClient.GetBestBlock()
+	if err != nil {
+		log.Errorf("Imported account recovery failed: unable to "+
+			"get best block: %v", err)
+		return
+	}
+
+	// Build a scoped managers map with only the relevant scope.
+	scopedMgr, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		log.Errorf("Imported account recovery failed: unable to "+
+			"fetch scoped key manager: %v", err)
+		return
+	}
+	scopedMgrs := map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager{
+		scope: scopedMgr,
+	}
+
+	// Scan blocks from birthdayHeight to bestHeight in batches.
+	var blocks []*waddrmgr.BlockStamp
+	for height := birthdayStamp.Height; height <= bestHeight; height++ {
+		if w.ShuttingDown() {
+			log.Warn("Imported account recovery aborted: " +
+				"wallet shutting down")
+			return
+		}
+
+		hash, err := chainClient.GetBlockHash(int64(height))
+		if err != nil {
+			log.Errorf("Imported account recovery failed at "+
+				"height %d: %v", height, err)
+			return
+		}
+		header, err := chainClient.GetBlockHeader(hash)
+		if err != nil {
+			log.Errorf("Imported account recovery failed "+
+				"getting header at height %d: %v",
+				height, err)
+			return
+		}
+		blocks = append(blocks, &waddrmgr.BlockStamp{
+			Hash:      *hash,
+			Height:    height,
+			Timestamp: header.Timestamp,
+		})
+
+		recoveryMgr.AddToBlockBatch(hash, height, header.Timestamp)
+
+		// Process in batches of recoveryBatchSize or on the last
+		// block.
+		recoveryBatch := recoveryMgr.BlockBatch()
+		if len(recoveryBatch) == recoveryBatchSize || height == bestHeight {
+			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				return w.recoverScopedAddressesForAccount(
+					chainClient, tx, ns,
+					recoveryBatch, recoveryMgr.State(),
+					scopedMgrs, account,
+				)
+			})
+			if err != nil {
+				log.Errorf("Imported account recovery "+
+					"failed during batch scan: %v", err)
+				return
+			}
+
+			if len(recoveryBatch) > 0 {
+				log.Infof("Recovered imported account "+
+					"addresses from blocks %d-%d",
+					recoveryBatch[0].Height,
+					recoveryBatch[len(recoveryBatch)-1].Height)
+			}
+
+			blocks = blocks[:0]
+			recoveryMgr.ResetBlockBatch()
+		}
+	}
+
+	// Collect all discovered addresses and outpoints from recovery state.
+	var allAddrs []btcutil.Address
+	scopeState := recoveryMgr.State().StateForScope(scope)
+	for _, addr := range scopeState.ExternalBranch.Addrs() {
+		allAddrs = append(allAddrs, addr)
+	}
+	for _, addr := range scopeState.InternalBranch.Addrs() {
+		allAddrs = append(allAddrs, addr)
+	}
+
+	watchedOutPoints := recoveryMgr.State().WatchedOutPoints()
+	outpoints := make(map[wire.OutPoint]btcutil.Address, len(watchedOutPoints))
+	for op, addr := range watchedOutPoints {
+		outpoints[op] = addr
+	}
+
+	// Get the block hash for our snapshot height to use as the rescan
+	// start point.
+	bestHash, err := chainClient.GetBlockHash(int64(bestHeight))
+	if err != nil {
+		log.Errorf("Imported account recovery: unable to get block "+
+			"hash for height %d: %v", bestHeight, err)
+		return
+	}
+	bestHeader, err := chainClient.GetBlockHeader(bestHash)
+	if err != nil {
+		log.Errorf("Imported account recovery: unable to get block "+
+			"header for hash %v: %v", bestHash, err)
+		return
+	}
+
+	// Submit a rescan from the snapshot height to catch any blocks mined
+	// during recovery and to register addresses/outpoints for ongoing
+	// monitoring.
+	job := &RescanJob{
+		Addrs:     allAddrs,
+		OutPoints: outpoints,
+		BlockStamp: waddrmgr.BlockStamp{
+			Hash:      *bestHash,
+			Height:    bestHeight,
+			Timestamp: bestHeader.Timestamp,
+		},
+	}
+	_ = w.SubmitRescan(job)
+
+	log.Infof("Imported account recovery complete: discovered %d "+
+		"addresses and %d outpoints, submitted follow-up rescan "+
+		"from height %d", len(allAddrs), len(outpoints), bestHeight)
+}
+
 // ImportAccountWithScope imports an account backed by an account extended
 // public key for a specific key scope which is known in advance.
 // The master key fingerprint denotes the fingerprint of the root key
