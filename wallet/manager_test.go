@@ -124,6 +124,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			// without error.
 			require.NoError(t, err)
 			require.NotNil(t, w)
+			require.Zero(t, w.ID())
 
 			// Verify internal state: Ensure the manager is tracking the
 			// newly created wallet in its internal map, keyed by the
@@ -394,6 +395,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 	m2.RUnlock()
 	require.True(t, ok)
 	require.Same(t, w, loadedW)
+	require.Zero(t, w.ID())
 }
 
 // TestManagerLoad_ExistingWallet verifies that if Load is called for a wallet
