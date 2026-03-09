@@ -464,9 +464,7 @@ func (w *Wallet) ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 	}
 
 	params := db.ReleaseOutputParams{
-		// TODO(yy): When multi-wallet support lands, plumb wallet ID into db
-		// calls instead of hard-coding 0.
-		WalletID: 0,
+		WalletID: w.id,
 		ID:       [32]byte(id),
 		OutPoint: op,
 	}
