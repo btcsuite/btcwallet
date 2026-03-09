@@ -360,7 +360,10 @@ type Wallet struct {
 	// wallet was created or loaded.
 	cfg Config
 
-	// id is the persistent database identifier assigned to this wallet.
+	// id is the runtime wallet identifier used by wallet-scoped DB calls.
+	//
+	// NOTE: Until the wallet store is wired into the manager load path, this
+	// field may remain the legacy zero-value for single-wallet setups.
 	id uint32
 
 	// sync is the dedicated synchronization component that manages the
@@ -402,7 +405,7 @@ type Wallet struct {
 	birthdayBlock waddrmgr.BlockStamp
 }
 
-// ID returns the persistent database identifier for the wallet.
+// ID returns the runtime wallet identifier for the wallet.
 func (w *Wallet) ID() uint32 {
 	return w.id
 }

@@ -180,7 +180,18 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 func createStartedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Helper()
 
+	return createStartedWalletWithID(t, 0)
+}
+
+// createStartedWalletWithID creates a fully started Wallet instance whose
+// runtime wallet ID is set before startup.
+func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
+	*mockWalletDeps) {
+
+	t.Helper()
+
 	w, deps := createTestWalletWithMocks(t)
+	w.id = walletID
 
 	// Mock the birthday block to be present.
 	deps.addrStore.On("BirthdayBlock", mock.Anything).

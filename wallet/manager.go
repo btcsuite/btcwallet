@@ -277,9 +277,9 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
-	// TODO(yy): Once the Store implementation is finalized, load the wallet
-	// ID from store.GetWallet instead of using the legacy single-wallet
-	// default.
+	// TODO(yy): Once Wallet.store includes wallet metadata accessors such as
+	// WalletStore.GetWallet, load the runtime wallet ID from that store
+	// instead of using the legacy single-wallet default.
 	walletID := uint32(0)
 
 	// Apply the safe default for auto-lock duration if not specified.
