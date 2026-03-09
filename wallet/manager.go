@@ -277,6 +277,11 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
+	// TODO(yy): Once the Store implementation is finalized, load the wallet
+	// ID from store.GetWallet instead of using the legacy single-wallet
+	// default.
+	walletID := uint32(0)
+
 	// Apply the safe default for auto-lock duration if not specified.
 	if cfg.AutoLockDuration == 0 {
 		cfg.AutoLockDuration = defaultLockDuration
@@ -294,6 +299,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 
 	w := &Wallet{
 		cfg:         cfg,
+		id:          walletID,
 		addrStore:   addrMgr,
 		store:       kvdb.NewStore(cfg.DB, txMgr),
 		txStore:     txMgr,
