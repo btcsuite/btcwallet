@@ -312,7 +312,7 @@ func TestReleaseOutput(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedWalletWithID(t, 7)
 
 	// Create a UTXO.
 	utxo := wire.OutPoint{
@@ -322,7 +322,7 @@ func TestReleaseOutput(t *testing.T) {
 
 	// Mock the UTXOStore ReleaseOutput method to return nil.
 	mocks.store.On("ReleaseOutput", mock.Anything, db.ReleaseOutputParams{
-		WalletID: 0,
+		WalletID: 7,
 		ID:       [32]byte{1},
 		OutPoint: utxo,
 	}).Return(nil)
