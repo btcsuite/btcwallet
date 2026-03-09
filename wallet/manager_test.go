@@ -10,6 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestWalletID(t *testing.T) {
+	t.Parallel()
+
+	w := &Wallet{id: 42}
+
+	require.Equal(t, uint32(42), w.ID())
+}
+
 // TestManagerCreateSuccess verifies that a wallet can be successfully created
 // in various modes. It checks that the Manager correctly initializes the
 // wallet structure and registers it for tracking.
@@ -465,6 +473,7 @@ func TestManagerLoadError(t *testing.T) {
 		require.Error(t, err)
 		require.Nil(t, w)
 	})
+
 }
 
 // TestManagerString verifies that the String representation of the Manager
