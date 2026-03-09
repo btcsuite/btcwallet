@@ -360,6 +360,9 @@ type Wallet struct {
 	// wallet was created or loaded.
 	cfg Config
 
+	// id is the persistent database identifier assigned to this wallet.
+	id uint32
+
 	// sync is the dedicated synchronization component that manages the
 	// chain loop, scanning, and reorganization handling.
 	sync chainSyncer
@@ -399,35 +402,9 @@ type Wallet struct {
 	birthdayBlock waddrmgr.BlockStamp
 }
 
-// hasMinConfs checks whether a transaction at height txHeight has met minconf
-// confirmations for a blockchain at height curHeight.
-func hasMinConfs(minconf uint32, txHeight, curHeight int32) bool {
-	confs := calcConf(txHeight, curHeight)
-	if confs < 0 {
-		return false
-	}
-
-	return uint32(confs) >= minconf
-}
-
-// calcConf returns the number of confirmations for a transaction given its
-// containing block height and the current best block height. Unconfirmed
-// transactions have a height of -1 and are considered to have 0 confirmations.
-func calcConf(txHeight, curHeight int32) int32 {
-	switch {
-	// Unconfirmed transactions have 0 confirmations.
-	case txHeight == -1:
-		return 0
-
-	// A transaction in a block after the current best block is considered
-	// unconfirmed. This can happen during a chain reorg.
-	case txHeight > curHeight:
-		return 0
-
-	// Confirmed transactions have at least one confirmation.
-	default:
-		return curHeight - txHeight + 1
-	}
+// ID returns the persistent database identifier for the wallet.
+func (w *Wallet) ID() uint32 {
+	return w.id
 }
 
 // RemoveDescendants attempts to remove any transaction from the wallet's tx
@@ -583,4 +560,35 @@ func create(db walletdb.DB, pubPass, privPass []byte,
 
 		return nil
 	})
+}
+
+// hasMinConfs checks whether a transaction at height txHeight has met minconf
+// confirmations for a blockchain at height curHeight.
+func hasMinConfs(minconf uint32, txHeight, curHeight int32) bool {
+	confs := calcConf(txHeight, curHeight)
+	if confs < 0 {
+		return false
+	}
+
+	return uint32(confs) >= minconf
+}
+
+// calcConf returns the number of confirmations for a transaction given its
+// containing block height and the current best block height. Unconfirmed
+// transactions have a height of -1 and are considered to have 0 confirmations.
+func calcConf(txHeight, curHeight int32) int32 {
+	switch {
+	// Unconfirmed transactions have 0 confirmations.
+	case txHeight == -1:
+		return 0
+
+	// A transaction in a block after the current best block is considered
+	// unconfirmed. This can happen during a chain reorg.
+	case txHeight > curHeight:
+		return 0
+
+	// Confirmed transactions have at least one confirmation.
+	default:
+		return curHeight - txHeight + 1
+	}
 }
