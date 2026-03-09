@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestWalletID verifies that Wallet.ID returns the cached runtime ID.
 func TestWalletID(t *testing.T) {
 	t.Parallel()
 
@@ -475,7 +476,6 @@ func TestManagerLoadError(t *testing.T) {
 		require.Error(t, err)
 		require.Nil(t, w)
 	})
-
 }
 
 // TestManagerString verifies that the String representation of the Manager
