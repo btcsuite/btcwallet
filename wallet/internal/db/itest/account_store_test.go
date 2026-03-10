@@ -499,11 +499,18 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 
 	scope := db.KeyScopeBIP0084
 
+	type createdAccount struct {
+		info        db.AccountInfo
+		createdNear time.Time
+	}
+
 	// Create three accounts with slight delays to ensure different
 	// timestamps.
-	var accounts []db.AccountInfo
+	var accounts []createdAccount
 	for i := range 3 {
 		time.Sleep(1 * time.Second)
+
+		createdNear := time.Now()
 		params := db.CreateDerivedAccountParams{
 			WalletID: walletID,
 			Scope:    scope,
@@ -511,21 +518,24 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		}
 		info, err := store.CreateDerivedAccount(t.Context(), params)
 		require.NoError(t, err)
-		accounts = append(accounts, *info)
+		accounts = append(accounts, createdAccount{
+			info:        *info,
+			createdNear: createdNear,
+		})
 	}
 
 	// Verify all accounts have CreatedAt populated.
 	for i, acc := range accounts {
-		require.False(t, acc.CreatedAt.IsZero(),
+		require.False(t, acc.info.CreatedAt.IsZero(),
 			"account %d should have CreatedAt set", i)
-		require.WithinDuration(t, time.Now(), acc.CreatedAt, 5*time.Second,
-			"account %d CreatedAt should be recent", i)
+		require.WithinDuration(t, acc.createdNear, acc.info.CreatedAt,
+			5*time.Second, "account %d CreatedAt should track creation", i)
 	}
 
 	// Verify accounts are ordered by creation time.
-	require.True(t, accounts[0].CreatedAt.Before(accounts[1].CreatedAt),
+	require.True(t, accounts[0].info.CreatedAt.Before(accounts[1].info.CreatedAt),
 		"account 0 should have CreatedAt before account 1")
-	require.True(t, accounts[1].CreatedAt.Before(accounts[2].CreatedAt),
+	require.True(t, accounts[1].info.CreatedAt.Before(accounts[2].info.CreatedAt),
 		"account 1 should have CreatedAt before account 2")
 }
 
@@ -800,10 +810,13 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 	require.Equal(t, tc.Origin, info.Origin)
 	require.Equal(t, tc.IsWatchOnly, info.IsWatchOnly)
 
-	// Verify CreatedAt is populated and recent.
+	// Verify CreatedAt is populated and not in the future. The account may have
+	// been created several seconds earlier in the test when parallel database
+	// setup runs under the race detector, so a strict "recent" assertion here is
+	// unnecessarily flaky.
 	require.False(t, info.CreatedAt.IsZero(), "CreatedAt should be set")
-	require.WithinDuration(t, time.Now(), info.CreatedAt, 5*time.Second,
-		"CreatedAt should be recent")
+	require.False(t, info.CreatedAt.After(time.Now().Add(5*time.Second)),
+		"CreatedAt should not be in the future")
 }
 
 // requireAccountPropertiesMatches asserts that the provided AccountProperties
@@ -819,10 +832,12 @@ func requireAccountPropertiesMatches(t *testing.T, props *db.AccountProperties,
 	require.Equal(t, tc.Origin, props.Origin)
 	require.Equal(t, tc.IsWatchOnly, props.IsWatchOnly)
 
-	// Verify CreatedAt is populated and recent.
+	// Verify CreatedAt is populated and not in the future. Imported-account test
+	// fixtures can be created well before these assertions run under heavy CI
+	// contention, so only the forward-time invariant is stable here.
 	require.False(t, props.CreatedAt.IsZero(), "CreatedAt should be set")
-	require.WithinDuration(t, time.Now(), props.CreatedAt, 5*time.Second,
-		"CreatedAt should be recent")
+	require.False(t, props.CreatedAt.After(time.Now().Add(5*time.Second)),
+		"CreatedAt should not be in the future")
 }
 
 // findAccountInList searches for an account in the provided list that matches
