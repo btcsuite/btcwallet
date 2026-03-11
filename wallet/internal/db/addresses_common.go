@@ -359,36 +359,14 @@ func getAddress[T any, Args any](ctx context.Context,
 	return nil, ErrAddressNotFound
 }
 
-// listAddresses is a generic helper that retrieves addresses using the provided
-// lister function and converts the results to AddressInfo structs.
-func listAddresses[T any, Args any](ctx context.Context,
-	lister func(context.Context, Args) ([]T, error), args Args,
-	toInfo func(T) (*AddressInfo, error)) ([]AddressInfo, error) {
+// nextListAddressesQuery returns a query with its pagination cursor advanced to
+// the provided value.
+func nextListAddressesQuery(q ListAddressesQuery,
+	cursor uint32) ListAddressesQuery {
 
-	rows, err := lister(ctx, args)
-	if err != nil {
-		return nil, fmt.Errorf("list addresses: %w", err)
-	}
+	q.Page = q.Page.WithAfter(cursor)
 
-	return addressInfosFromRows(rows, toInfo)
-}
-
-// addressInfosFromRows converts a slice of row types to AddressInfo structs
-// using the provided converter function.
-func addressInfosFromRows[T any](rows []T,
-	toInfo func(T) (*AddressInfo, error)) ([]AddressInfo, error) {
-
-	infos := make([]AddressInfo, len(rows))
-	for i, row := range rows {
-		info, err := toInfo(row)
-		if err != nil {
-			return nil, err
-		}
-
-		infos[i] = *info
-	}
-
-	return infos, nil
+	return q
 }
 
 // derivedAddressAdapters groups the functions needed to create a

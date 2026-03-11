@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"iter"
 	"time"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
 
@@ -31,19 +33,31 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 	return getAddressByQuery(ctx, query, getByScript)
 }
 
-// ListAddresses returns a slice of AddressInfo for all addresses in a given
-// account.
+// ListAddresses returns a page of addresses matching the given query.
 func (s *PostgresStore) ListAddresses(ctx context.Context,
-	query ListAddressesQuery) ([]AddressInfo, error) {
+	query ListAddressesQuery) (page.Result[AddressInfo, uint32], error) {
 
-	return listAddresses(
-		ctx, s.queries.ListAddressesByAccount,
-		sqlcpg.ListAddressesByAccountParams{
-			WalletID:    int64(query.WalletID),
-			Purpose:     int64(query.Scope.Purpose),
-			CoinType:    int64(query.Scope.Coin),
-			AccountName: query.AccountName,
-		}, pgAddressRowToInfo,
+	items, err := pgListAddressesByAccount(ctx, s.queries, query)
+	if err != nil {
+		return page.Result[AddressInfo, uint32]{}, err
+	}
+
+	result := page.BuildResult(
+		query.Page, items,
+		func(item AddressInfo) uint32 {
+			return item.ID
+		},
+	)
+
+	return result, nil
+}
+
+// IterAddresses returns an iterator over paginated address results.
+func (s *PostgresStore) IterAddresses(ctx context.Context,
+	query ListAddressesQuery) iter.Seq2[AddressInfo, error] {
+
+	return page.Iter(
+		ctx, query, s.ListAddresses, nextListAddressesQuery,
 	)
 }
 
@@ -299,4 +313,54 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*AddressInfo, error) {
 	}
 
 	return info, nil
+}
+
+// pgListAddressesByAccount lists addresses filtered by wallet ID, key scope,
+// and account name, with pagination support.
+func pgListAddressesByAccount(ctx context.Context, q *sqlcpg.Queries,
+	query ListAddressesQuery) ([]AddressInfo, error) {
+
+	rows, err := q.ListAddressesByAccount(
+		ctx, pgBuildAddressPageParams(query),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list addresses by account: %w", err)
+	}
+
+	items := make([]AddressInfo, len(rows))
+	for i, row := range rows {
+		item, err := pgAddressRowToInfo(row)
+		if err != nil {
+			return nil,
+				fmt.Errorf("list addresses by account: map address row: %w",
+					err)
+		}
+
+		items[i] = *item
+	}
+
+	return items, nil
+}
+
+// pgBuildAddressPageParams translates a ListAddresses query to
+// ListAddressesByAccount parameters, handling pagination cursors.
+func pgBuildAddressPageParams(
+	q ListAddressesQuery) sqlcpg.ListAddressesByAccountParams {
+
+	params := sqlcpg.ListAddressesByAccountParams{
+		WalletID:    int64(q.WalletID),
+		Purpose:     int64(q.Scope.Purpose),
+		CoinType:    int64(q.Scope.Coin),
+		AccountName: q.AccountName,
+		PageLimit:   int64(q.Page.QueryLimit()),
+	}
+
+	if cursor, ok := q.Page.After(); ok {
+		params.CursorID = sql.NullInt64{
+			Int64: int64(cursor),
+			Valid: true,
+		}
+	}
+
+	return params
 }
