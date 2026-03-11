@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 )
 
 const (
@@ -711,6 +712,9 @@ type ListAddressesQuery struct {
 
 	// Scope is the key scope of the account.
 	Scope KeyScope
+
+	// Page holds the pagination parameters for this query.
+	Page page.Request[uint32]
 }
 
 // --------------------
