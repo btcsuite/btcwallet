@@ -240,6 +240,12 @@ type Block struct {
 	Timestamp time.Time
 }
 
+// ListWalletsQuery contains the parameters for listing wallets.
+type ListWalletsQuery struct {
+	// Page holds the pagination parameters for this query.
+	Page page.Request[uint32]
+}
+
 // CreateWalletParams contains the parameters required to create a new wallet.
 type CreateWalletParams struct {
 	// Name is the name of the new wallet.
