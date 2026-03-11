@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"iter"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
@@ -140,41 +142,46 @@ func (s *SqliteStore) GetWallet(ctx context.Context,
 	})
 }
 
-// ListWallets returns a slice of WalletInfo for all wallets stored in
-// the database. It returns an empty slice if no wallets are found, or
-// an error if the retrieval fails.
-func (s *SqliteStore) ListWallets(ctx context.Context) ([]WalletInfo,
-	error) {
+// ListWallets returns a page of wallets matching the given query.
+func (s *SqliteStore) ListWallets(ctx context.Context,
+	query ListWalletsQuery) (page.Result[WalletInfo, uint32], error) {
 
-	rows, err := s.queries.ListWallets(ctx)
+	rows, err := s.queries.ListWallets(
+		ctx, sqliteListWalletsParams(query.Page),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("list wallets: %w", err)
+		return page.Result[WalletInfo, uint32]{},
+			fmt.Errorf("list wallets page: %w", err)
 	}
 
-	wallets := make([]WalletInfo, len(rows))
+	items := make([]WalletInfo, len(rows))
 	for i, row := range rows {
-		info, err := buildSqliteWalletInfo(sqliteWalletRowParams{
-			id:                     row.ID,
-			name:                   row.WalletName,
-			isImported:             row.IsImported,
-			managerVersion:         row.ManagerVersion,
-			isWatchOnly:            row.IsWatchOnly,
-			syncedHeight:           row.SyncedHeight,
-			syncedBlockHash:        row.SyncedBlockHash,
-			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-			birthdayHeight:         row.BirthdayHeight,
-			birthdayTimestamp:      row.BirthdayTimestamp,
-			birthdayBlockHash:      row.BirthdayBlockHash,
-			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-		})
-		if err != nil {
-			return nil, err
+		item, errMap := sqliteListWalletRowToInfo(row)
+		if errMap != nil {
+			return page.Result[WalletInfo, uint32]{},
+				fmt.Errorf("list wallets page: map row: %w", errMap)
 		}
 
-		wallets[i] = *info
+		items[i] = *item
 	}
 
-	return wallets, nil
+	result := page.BuildResult(
+		query.Page, items,
+		func(item WalletInfo) uint32 {
+			return item.ID
+		},
+	)
+
+	return result, nil
+}
+
+// IterWallets returns an iterator over paginated wallet results.
+func (s *SqliteStore) IterWallets(ctx context.Context,
+	query ListWalletsQuery) iter.Seq2[WalletInfo, error] {
+
+	return page.Iter(
+		ctx, query, s.ListWallets, nextListWalletsQuery,
+	)
 }
 
 // UpdateWallet updates various properties of a wallet, such as its
@@ -288,6 +295,43 @@ type sqliteWalletRowParams struct {
 	birthdayTimestamp      sql.NullTime
 	birthdayBlockHash      []byte
 	birthdayBlockTimestamp sql.NullInt64
+}
+
+// sqliteListWalletRowToInfo converts a ListWallets result row to a WalletInfo
+// struct for pagination.
+func sqliteListWalletRowToInfo(
+	row sqlcsqlite.ListWalletsRow) (*WalletInfo, error) {
+
+	return buildSqliteWalletInfo(sqliteWalletRowParams{
+		id:                     row.ID,
+		name:                   row.WalletName,
+		isImported:             row.IsImported,
+		managerVersion:         row.ManagerVersion,
+		isWatchOnly:            row.IsWatchOnly,
+		syncedHeight:           row.SyncedHeight,
+		syncedBlockHash:        row.SyncedBlockHash,
+		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
+		birthdayHeight:         row.BirthdayHeight,
+		birthdayTimestamp:      row.BirthdayTimestamp,
+		birthdayBlockHash:      row.BirthdayBlockHash,
+		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+	})
+}
+
+// sqliteListWalletsParams translates a page request to ListWallets query
+// parameters, handling optional cursor setup for pagination.
+func sqliteListWalletsParams(
+	req page.Request[uint32]) sqlcsqlite.ListWalletsParams {
+
+	params := sqlcsqlite.ListWalletsParams{
+		PageLimit: int64(req.QueryLimit()),
+	}
+
+	if cursor, ok := req.After(); ok {
+		params.CursorID = int64(cursor)
+	}
+
+	return params
 }
 
 // buildSqliteWalletInfo constructs a WalletInfo from the given wallet

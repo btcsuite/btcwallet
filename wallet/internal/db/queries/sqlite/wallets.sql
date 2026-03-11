@@ -62,6 +62,9 @@ LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
 WHERE w.wallet_name = ?;
 
 -- name: ListWallets :many
+-- Lists wallets using cursor-based pagination. If cursor_id is NULL, starts
+-- from the beginning; otherwise returns wallets with id > cursor_id. Returns up
+-- to page_limit rows.
 SELECT
     w.id,
     w.wallet_name,
@@ -80,7 +83,12 @@ FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
 LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
 LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
-ORDER BY w.id;
+WHERE (
+    sqlc.narg('cursor_id') IS NULL
+    OR w.id > sqlc.narg('cursor_id')
+)
+ORDER BY w.id
+LIMIT sqlc.arg('page_limit');
 
 -- name: GetWalletByID :one
 SELECT
