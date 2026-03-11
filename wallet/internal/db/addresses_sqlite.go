@@ -8,6 +8,8 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
+var _ AddressStore = (*SqliteStore)(nil)
+
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
 func (s *SqliteStore) GetAddress(ctx context.Context,
