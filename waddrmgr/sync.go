@@ -49,8 +49,8 @@ func newSyncState(startBlock, syncedTo *BlockStamp) *syncState {
 // marked as unsynced back to the oldest known point any of the addresses have
 // appeared in the block chain.
 func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
-	m.mtx.Lock()
-	defer m.mtx.Unlock()
+	m.syncStateMtx.Lock()
+	defer m.syncStateMtx.Unlock()
 
 	// Use the stored start blockstamp and reset recent hashes and height
 	// when the provided blockstamp is nil.
@@ -74,8 +74,8 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 // can use this information for intelligently initiating rescans to sync back to
 // the best chain from the last known good block.
 func (m *Manager) SyncedTo() BlockStamp {
-	m.mtx.RLock()
-	defer m.mtx.RUnlock()
+	m.syncStateMtx.RLock()
+	defer m.syncStateMtx.RUnlock()
 
 	return m.syncState.syncedTo
 }

@@ -401,7 +401,7 @@ func (a *managedAddress) PrivKey() (*btcec.PrivateKey, error) {
 	// Decrypt the key as needed.  Also, make sure it's a copy since the
 	// private key stored in memory can be cleared at any time.  Otherwise
 	// the returned private key could be invalidated from under the caller.
-	privKeyCopy, err := a.unlock(a.manager.rootManager.cryptoKeyPriv)
+	privKeyCopy, err := a.unlock(a.manager.rootManager.CryptoKeyPriv())
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +421,14 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 		return nil, err
 	}
 
-	return btcutil.NewWIF(pk, a.manager.rootManager.chainParams, a.compressed)
+	wif, err := btcutil.NewWIF(
+		pk, a.manager.rootManager.ChainParams(), a.compressed,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create WIF: %w", err)
+	}
+
+	return wif, nil
 }
 
 // DerivationInfo contains the information required to derive the key that
@@ -559,7 +566,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 		// First, we'll generate a normal p2wkh address from the pubkey hash.
 		witAddr, err := btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
+			pubKeyHash, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -577,7 +584,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		// witnessProgram as the sigScript, then present the proper
 		// <sig, pubkey> pair as the witness.
 		address, err = btcutil.NewAddressScriptHash(
-			witnessProgram, m.rootManager.chainParams,
+			witnessProgram, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -585,7 +592,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	case PubKeyHash:
 		address, err = btcutil.NewAddressPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
+			pubKeyHash, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -593,7 +600,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	case WitnessPubKey:
 		address, err = btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
+			pubKeyHash, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -602,7 +609,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	case TaprootPubKey:
 		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
 		address, err = btcutil.NewAddressTaproot(
-			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
+			schnorr.SerializePubKey(tapKey), m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -635,7 +642,10 @@ func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 	// NOTE: The privKeyBytes here are set into the managed address which
 	// are cleared when locked, so they aren't cleared here.
 	privKeyBytes := privKey.Serialize()
-	privKeyEncrypted, err := s.rootManager.cryptoKeyPriv.Encrypt(privKeyBytes)
+
+	privKeyEncrypted, err := s.rootManager.CryptoKeyPriv().Encrypt(
+		privKeyBytes,
+	)
 	if err != nil {
 		str := "failed to encrypt private key"
 		return nil, managerError(ErrCrypto, str, err)
@@ -894,7 +904,7 @@ func (a *scriptAddress) Script() ([]byte, error) {
 	// Decrypt the script as needed.  Also, make sure it's a copy since the
 	// script stored in memory can be cleared at any time.  Otherwise,
 	// the returned script could be invalidated from under the caller.
-	return a.unlock(a.manager.rootManager.cryptoKeyScript)
+	return a.unlock(a.manager.rootManager.CryptoKeyScript())
 }
 
 // Enforce scriptAddress satisfies the ManagedScriptAddress interface.
@@ -905,7 +915,7 @@ func newScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
 	scriptEncrypted []byte) (*scriptAddress, error) {
 
 	address, err := btcutil.NewAddressScriptHashFromHash(
-		scriptHash, m.rootManager.chainParams,
+		scriptHash, m.rootManager.ChainParams(),
 	)
 	if err != nil {
 		return nil, err
@@ -989,9 +999,9 @@ func (a *witnessScriptAddress) Script() ([]byte, error) {
 		return nil, managerError(ErrLocked, errLocked, nil)
 	}
 
-	cryptoKey := a.manager.rootManager.cryptoKeyScript
+	cryptoKey := a.manager.rootManager.CryptoKeyScript()
 	if !a.isSecretScript {
-		cryptoKey = a.manager.rootManager.cryptoKeyPub
+		cryptoKey = a.manager.rootManager.CryptoKeyPub()
 	}
 
 	// Decrypt the script as needed. Also, make sure it's a copy since the
@@ -1012,7 +1022,7 @@ func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 	switch witnessVersion {
 	case witnessVersionV0:
 		address, err := btcutil.NewAddressWitnessScriptHash(
-			scriptIdent, m.rootManager.chainParams,
+			scriptIdent, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err
@@ -1031,7 +1041,7 @@ func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 
 	case witnessVersionV1:
 		address, err := btcutil.NewAddressTaproot(
-			scriptIdent, m.rootManager.chainParams,
+			scriptIdent, m.rootManager.ChainParams(),
 		)
 		if err != nil {
 			return nil, err

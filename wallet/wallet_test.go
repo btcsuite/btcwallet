@@ -661,3 +661,37 @@ func TestEndRecovery(t *testing.T) {
 		t.Fatal("wrong error")
 	}
 }
+
+// TestWalletLockerAddressRace verifies there is no data race between the
+// walletLocker goroutine locking the wallet and concurrent address derivation
+// via NewAddress.
+func TestWalletLockerAddressRace(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	require.NoError(t, w.Unlock([]byte("world"), nil))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		for range 20 {
+			_, _ = w.NewAddress(0, waddrmgr.KeyScopeBIP0086)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		for range 20 {
+			w.Lock()
+			_ = w.Unlock([]byte("world"), nil)
+		}
+	}()
+
+	wg.Wait()
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -3293,4 +3294,59 @@ func TestManagedAddressValidation(t *testing.T) {
 		}
 	}
 
+}
+
+// TestLockUnlockRace verifies there is no data race between Manager.Lock()
+// and concurrent ScopedKeyManager.NextExternalAddresses calls.
+func TestLockUnlockRace(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	defer teardown()
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0086)
+	require.NoError(t, err)
+
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		for range iterations {
+			_ = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				_, err := scopedMgr.NextExternalAddresses(
+					ns, 0, 1,
+				)
+
+				return err
+			})
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		for range iterations {
+			_ = mgr.Lock()
+
+			_ = walletdb.View(db, func(tx walletdb.ReadTx) error {
+				ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+				return mgr.Unlock(ns, privPassphrase)
+			})
+		}
+	}()
+
+	wg.Wait()
 }
