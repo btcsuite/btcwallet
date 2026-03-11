@@ -31,6 +31,7 @@ func NewSqliteStore(ctx context.Context, cfg SqliteConfig) (*SqliteStore,
 	dsn += "&_pragma=journal_mode=WAL"
 	dsn += "&_txlock=immediate"
 	dsn += "&_pragma=busy_timeout=5000"
+	dsn += "&_time_format=sqlite"
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
