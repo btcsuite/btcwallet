@@ -142,10 +142,15 @@ type WalletStore interface {
 	// error if the wallet is not found.
 	GetWallet(ctx context.Context, name string) (*WalletInfo, error)
 
-	// ListWallets returns a slice of WalletInfo for all wallets stored in
-	// the database. It returns an empty slice if no wallets are found, or
-	// an error if the retrieval fails.
-	ListWallets(ctx context.Context) ([]WalletInfo, error)
+	// ListWallets returns one page of wallets for the given query, including a
+	// next-cursor for the following page.
+	ListWallets(ctx context.Context, query ListWalletsQuery) (
+		page.Result[WalletInfo, uint32], error)
+
+	// IterWallets returns an iterator that fetches pages transparently and
+	// yields wallets one by one until exhaustion or error.
+	IterWallets(ctx context.Context,
+		query ListWalletsQuery) iter.Seq2[WalletInfo, error]
 
 	// UpdateWallet updates various properties of a wallet, such as its
 	// birthday, birthday block, or sync state. The specific fields to

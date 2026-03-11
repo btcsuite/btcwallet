@@ -271,8 +271,18 @@ FROM wallets AS w
 LEFT JOIN wallet_sync_states AS s ON w.id = s.wallet_id
 LEFT JOIN blocks AS b_synced ON s.synced_height = b_synced.block_height
 LEFT JOIN blocks AS b_birthday ON s.birthday_height = b_birthday.block_height
+WHERE (
+    $1::BIGINT IS NULL
+    OR w.id > $1::BIGINT
+)
 ORDER BY w.id
+LIMIT $2::BIGINT
 `
+
+type ListWalletsParams struct {
+	CursorID  sql.NullInt64
+	PageLimit int64
+}
 
 type ListWalletsRow struct {
 	ID                     int64
@@ -290,8 +300,11 @@ type ListWalletsRow struct {
 	BirthdayBlockTimestamp sql.NullInt64
 }
 
-func (q *Queries) ListWallets(ctx context.Context) ([]ListWalletsRow, error) {
-	rows, err := q.query(ctx, q.listWalletsStmt, ListWallets)
+// Lists wallets using cursor-based pagination. If cursor_id is NULL, starts
+// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
+// to page_limit rows.
+func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error) {
+	rows, err := q.query(ctx, q.listWalletsStmt, ListWallets, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
