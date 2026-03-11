@@ -220,9 +220,20 @@ INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
-    ks.wallet_id = ? AND ks.purpose = ? AND ks.coin_type = ?
-    AND acc.account_name = ?
+    ks.wallet_id = ?1
+    AND ks.purpose = ?2
+    AND ks.coin_type = ?3
+    AND acc.account_name = ?4
+    -- sqlc.arg()/sqlc.narg() calls are bind parameters, not column
+    -- references; the RF02 suppression below silences a false-positive
+    -- from sqlfluff, which cannot distinguish sqlc pseudo-functions
+    -- from column names in a multi-table JOIN context.
+    AND (
+        ?5 IS NULL -- noqa: RF02
+        OR a.id > ?5 -- noqa: RF02
+    )
 ORDER BY a.id
+LIMIT ?6
 `
 
 type ListAddressesByAccountParams struct {
@@ -230,6 +241,8 @@ type ListAddressesByAccountParams struct {
 	Purpose     int64
 	CoinType    int64
 	AccountName string
+	CursorID    interface{}
+	PageLimit   int64
 }
 
 type ListAddressesByAccountRow struct {
@@ -246,15 +259,18 @@ type ListAddressesByAccountRow struct {
 	HasScript     bool
 }
 
-// Lists all addresses for a given account identified by wallet_id, key scope
-// (purpose/coin_type), and account name. Returns all address columns for
-// filtering and processing by the application.
+// Lists addresses for an account identified by wallet_id, key scope
+// (purpose/coin_type), and account name, ordered by address ID.
+// When cursor_id is provided, only rows strictly after that address ID are
+// returned. Returns up to page_limit rows.
 func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error) {
 	rows, err := q.query(ctx, q.listAddressesByAccountStmt, ListAddressesByAccount,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
 		arg.AccountName,
+		arg.CursorID,
+		arg.PageLimit,
 	)
 	if err != nil {
 		return nil, err

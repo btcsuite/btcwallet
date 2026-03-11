@@ -3,8 +3,11 @@ package db
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"iter"
 	"time"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
@@ -30,19 +33,31 @@ func (s *SqliteStore) GetAddress(ctx context.Context,
 	return getAddressByQuery(ctx, query, getByScript)
 }
 
-// ListAddresses returns a slice of AddressInfo for all addresses in a given
-// account.
+// ListAddresses returns a page of addresses matching the given query.
 func (s *SqliteStore) ListAddresses(ctx context.Context,
-	query ListAddressesQuery) ([]AddressInfo, error) {
+	query ListAddressesQuery) (page.Result[AddressInfo, uint32], error) {
 
-	return listAddresses(
-		ctx, s.queries.ListAddressesByAccount,
-		sqlcsqlite.ListAddressesByAccountParams{
-			WalletID:    int64(query.WalletID),
-			Purpose:     int64(query.Scope.Purpose),
-			CoinType:    int64(query.Scope.Coin),
-			AccountName: query.AccountName,
-		}, sqliteAddressRowToInfo,
+	items, err := sqliteListAddressesByAccount(ctx, s.queries, query)
+	if err != nil {
+		return page.Result[AddressInfo, uint32]{}, err
+	}
+
+	result := page.BuildResult(
+		query.Page, items,
+		func(item AddressInfo) uint32 {
+			return item.ID
+		},
+	)
+
+	return result, nil
+}
+
+// IterAddresses returns an iterator over paginated address results.
+func (s *SqliteStore) IterAddresses(ctx context.Context,
+	query ListAddressesQuery) iter.Seq2[AddressInfo, error] {
+
+	return page.Iter(
+		ctx, query, s.ListAddresses, nextListAddressesQuery,
 	)
 }
 
@@ -292,4 +307,51 @@ func sqliteAddressRowToInfo[T sqliteAddressInfoRow](row T) (*AddressInfo,
 	}
 
 	return info, nil
+}
+
+// sqliteListAddressesByAccount lists addresses filtered by wallet ID, key
+// scope, and account name, with pagination support.
+func sqliteListAddressesByAccount(ctx context.Context, q *sqlcsqlite.Queries,
+	query ListAddressesQuery) ([]AddressInfo, error) {
+
+	rows, err := q.ListAddressesByAccount(
+		ctx, sqliteBuildAddressPageParams(query),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list addresses by account: %w", err)
+	}
+
+	items := make([]AddressInfo, len(rows))
+	for i, row := range rows {
+		item, err := sqliteAddressRowToInfo(row)
+		if err != nil {
+			return nil,
+				fmt.Errorf("list addresses by account: map address row: %w",
+					err)
+		}
+
+		items[i] = *item
+	}
+
+	return items, nil
+}
+
+// sqliteBuildAddressPageParams translates a ListAddresses query to
+// ListAddressesByAccount parameters, handling pagination cursors.
+func sqliteBuildAddressPageParams(
+	q ListAddressesQuery) sqlcsqlite.ListAddressesByAccountParams {
+
+	params := sqlcsqlite.ListAddressesByAccountParams{
+		WalletID:    int64(q.WalletID),
+		Purpose:     int64(q.Scope.Purpose),
+		CoinType:    int64(q.Scope.Coin),
+		AccountName: q.AccountName,
+		PageLimit:   int64(q.Page.QueryLimit()),
+	}
+
+	if cursor, ok := q.Page.After(); ok {
+		params.CursorID = int64(cursor)
+	}
+
+	return params
 }

@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"errors"
+	"iter"
+
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 )
 
 var (
@@ -235,10 +238,15 @@ type AddressStore interface {
 	// an error if the address is not found.
 	GetAddress(ctx context.Context, query GetAddressQuery) (*AddressInfo, error)
 
-	// ListAddresses returns a slice of AddressInfo for all addresses in a
-	// given account. It returns an empty slice if no addresses are found.
-	ListAddresses(ctx context.Context, query ListAddressesQuery) ([]AddressInfo,
-		error)
+	// ListAddresses returns one page of addresses for the given query,
+	// including a next-cursor for the following page.
+	ListAddresses(ctx context.Context, query ListAddressesQuery) (
+		page.Result[AddressInfo, uint32], error)
+
+	// IterAddresses returns an iterator that fetches pages transparently and
+	// yields addresses one by one until exhaustion or error.
+	IterAddresses(ctx context.Context,
+		query ListAddressesQuery) iter.Seq2[AddressInfo, error]
 
 	// GetAddressSecret retrieves the encrypted secret material for a given
 	// address. Returns the AddressSecret containing encrypted private key
