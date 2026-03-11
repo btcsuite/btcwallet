@@ -337,28 +337,6 @@ func (s *ScopedKeyManager) zeroSensitivePublicData() {
 	}
 }
 
-// zeroPrivKeys zeroes all private key material: account private keys and
-// clear-text private keys in managed addresses.
-//
-// This function MUST be called with s.mtx held for writes.
-func (s *ScopedKeyManager) zeroPrivKeys() {
-	for _, acctInfo := range s.acctInfo {
-		if acctInfo.acctKeyPriv != nil {
-			acctInfo.acctKeyPriv.Zero()
-		}
-		acctInfo.acctKeyPriv = nil
-	}
-
-	for _, ma := range s.addrs {
-		switch addr := ma.(type) {
-		case *managedAddress:
-			addr.lock()
-		case *scriptAddress:
-			addr.lock()
-		}
-	}
-}
-
 // Lock removes all private key material from memory. It is the thread-safe
 // counterpart to the private key restoration done by Unlock.
 func (s *ScopedKeyManager) Lock() {
@@ -384,18 +362,23 @@ func (s *ScopedKeyManager) Unlock(cryptoKeyPriv EncryptorDecryptor,
 		if err != nil {
 			str := fmt.Sprintf("failed to decrypt account %d "+
 				"private key", account)
+
 			return managerError(ErrCrypto, str, err)
 		}
 
 		acctKeyPriv, err := hdkeychain.NewKeyFromString(
 			string(decrypted),
 		)
+
 		zero.Bytes(decrypted)
+
 		if err != nil {
 			str := fmt.Sprintf("failed to regenerate account "+
 				"%d extended key", account)
+
 			return managerError(ErrKeyChain, str, err)
 		}
+
 		acctInfo.acctKeyPriv = acctKeyPriv
 	}
 
@@ -412,12 +395,17 @@ func (s *ScopedKeyManager) Unlock(cryptoKeyPriv EncryptorDecryptor,
 		addressKey.Zero()
 
 		privKeyBytes := privKey.Serialize()
-		privKeyEncrypted, err := cryptoKeyPriv.Encrypt(privKeyBytes)
+		privKeyEncrypted, err := cryptoKeyPriv.Encrypt(
+			privKeyBytes,
+		)
+
 		privKey.Zero()
+
 		if err != nil {
 			str := fmt.Sprintf("failed to encrypt private "+
 				"key for address %s",
 				info.managedAddr.Address())
+
 			return managerError(ErrCrypto, str, err)
 		}
 
@@ -1212,6 +1200,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 					nextIndex)
 				return nil, managerError(ErrKeyChain, str, err)
 			}
+
 			key.SetNet(s.rootManager.ChainParams())
 
 			nextIndex++
@@ -1442,6 +1431,7 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 					nextIndex)
 				return managerError(ErrKeyChain, str, err)
 			}
+
 			key.SetNet(s.rootManager.ChainParams())
 
 			nextIndex++
@@ -1499,10 +1489,13 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 				return maybeConvertDbError(err)
 			}
 		case *scriptAddress:
-			encryptedHash, err := s.rootManager.CryptoKeyPub().Encrypt(a.AddrHash())
+			encryptedHash, err := s.rootManager.CryptoKeyPub().Encrypt(
+				a.AddrHash(),
+			)
 			if err != nil {
 				str := fmt.Sprintf("failed to encrypt script hash %x",
 					a.AddrHash())
+
 				return managerError(ErrCrypto, str, err)
 			}
 
@@ -1798,7 +1791,9 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 	}
 
 	// Decrypt the cointype key.
-	serializedKeyPriv, err := s.rootManager.CryptoKeyPriv().Decrypt(coinTypePrivEnc)
+	serializedKeyPriv, err := s.rootManager.CryptoKeyPriv().Decrypt(
+		coinTypePrivEnc,
+	)
 	if err != nil {
 		str := "failed to decrypt cointype serialized private key"
 		return managerError(ErrLocked, str, err)
@@ -1831,6 +1826,7 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 		str := "failed to  encrypt public key for account"
 		return managerError(ErrCrypto, str, err)
 	}
+
 	acctPrivEnc, err := s.rootManager.CryptoKeyPriv().Encrypt(
 		[]byte(acctKeyPriv.String()),
 	)
@@ -2067,8 +2063,13 @@ func (s *ScopedKeyManager) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	if !s.rootManager.WatchOnly() {
 		privKeyBytes := wif.PrivKey.Serialize()
 		var err error
-		encryptedPrivKey, err = s.rootManager.CryptoKeyPriv().Encrypt(privKeyBytes)
+
+		encryptedPrivKey, err = s.rootManager.CryptoKeyPriv().Encrypt(
+			privKeyBytes,
+		)
+
 		zero.Bytes(privKeyBytes)
+
 		if err != nil {
 			str := fmt.Sprintf("failed to encrypt private key for %x",
 				wif.PrivKey.PubKey().SerializeCompressed())
@@ -2183,7 +2184,8 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 
 	// Update the start block if the imported address is earlier.
 	if bs != nil {
-		if err := s.rootManager.SetStartBlock(ns, bs); err != nil {
+		err = s.rootManager.SetStartBlock(ns, bs)
+		if err != nil {
 			return err
 		}
 	}
@@ -2418,8 +2420,9 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 	s.addrs[addrKey(scriptIdent)] = managedAddr
 
 	// Update the start block if the imported address is earlier.
-	if err := s.rootManager.SetStartBlock(ns, bs); err != nil {
-		return nil, err
+	err = s.rootManager.SetStartBlock(ns, bs)
+	if err != nil {
+		return nil, fmt.Errorf("set start block: %w", err)
 	}
 
 	return managedAddr, nil
@@ -2663,4 +2666,27 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	delete(s.acctInfo, account)
+}
+
+// zeroPrivKeys zeroes all private key material: account private keys
+// and clear-text private keys in managed addresses.
+//
+// This function MUST be called with s.mtx held for writes.
+func (s *ScopedKeyManager) zeroPrivKeys() {
+	for _, acctInfo := range s.acctInfo {
+		if acctInfo.acctKeyPriv != nil {
+			acctInfo.acctKeyPriv.Zero()
+		}
+
+		acctInfo.acctKeyPriv = nil
+	}
+
+	for _, ma := range s.addrs {
+		switch addr := ma.(type) {
+		case *managedAddress:
+			addr.lock()
+		case *scriptAddress:
+			addr.lock()
+		}
+	}
 }

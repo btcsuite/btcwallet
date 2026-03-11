@@ -678,14 +678,16 @@ func TestWalletLockerAddressRace(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 20; i++ {
+
+		for range 20 {
 			_, _ = w.NewAddress(0, waddrmgr.KeyScopeBIP0086)
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 20; i++ {
+
+		for range 20 {
 			w.Lock()
 			_ = w.Unlock([]byte("world"), nil)
 		}

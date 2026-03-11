@@ -421,7 +421,14 @@ func (a *managedAddress) ExportPrivKey() (*btcutil.WIF, error) {
 		return nil, err
 	}
 
-	return btcutil.NewWIF(pk, a.manager.rootManager.ChainParams(), a.compressed)
+	wif, err := btcutil.NewWIF(
+		pk, a.manager.rootManager.ChainParams(), a.compressed,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create WIF: %w", err)
+	}
+
+	return wif, nil
 }
 
 // DerivationInfo contains the information required to derive the key that
@@ -635,7 +642,10 @@ func newManagedAddress(s *ScopedKeyManager, derivationPath DerivationPath,
 	// NOTE: The privKeyBytes here are set into the managed address which
 	// are cleared when locked, so they aren't cleared here.
 	privKeyBytes := privKey.Serialize()
-	privKeyEncrypted, err := s.rootManager.CryptoKeyPriv().Encrypt(privKeyBytes)
+
+	privKeyEncrypted, err := s.rootManager.CryptoKeyPriv().Encrypt(
+		privKeyBytes,
+	)
 	if err != nil {
 		str := "failed to encrypt private key"
 		return nil, managerError(ErrCrypto, str, err)

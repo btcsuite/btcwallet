@@ -862,27 +862,29 @@ func (m *Manager) ChainParams() *chaincfg.Params {
 	return m.chainParams
 }
 
-// CryptoKeyPub returns the public crypto key used to encrypt/decrypt public
-// extended keys and addresses.
-func (m *Manager) CryptoKeyPub() EncryptorDecryptor {
+// CryptoKeyPub returns the public crypto key used to encrypt/decrypt
+// public extended keys and addresses.
+func (m *Manager) CryptoKeyPub() EncryptorDecryptor { //nolint:ireturn
 	return m.cryptoKeyPub
 }
 
-// CryptoKeyPriv returns the private crypto key used to encrypt/decrypt private
-// key material. The underlying key is zeroed when the manager is locked.
-func (m *Manager) CryptoKeyPriv() EncryptorDecryptor {
+// CryptoKeyPriv returns the private crypto key used to
+// encrypt/decrypt private key material. The underlying key is zeroed
+// when the manager is locked.
+func (m *Manager) CryptoKeyPriv() EncryptorDecryptor { //nolint:ireturn
 	return m.cryptoKeyPriv
 }
 
-// CryptoKeyScript returns the script crypto key used to encrypt/decrypt script
-// data. The underlying key is zeroed when the manager is locked.
-func (m *Manager) CryptoKeyScript() EncryptorDecryptor {
+// CryptoKeyScript returns the script crypto key used to
+// encrypt/decrypt script data. The underlying key is zeroed when the
+// manager is locked.
+func (m *Manager) CryptoKeyScript() EncryptorDecryptor { //nolint:ireturn
 	return m.cryptoKeyScript
 }
 
-// SetStartBlock updates the start block if the given block is earlier than the
-// current start block. It persists the change to the database and updates
-// the in-memory state atomically.
+// SetStartBlock updates the start block if the given block is earlier
+// than the current start block. It persists the change to the database
+// and updates the in-memory state atomically.
 func (m *Manager) SetStartBlock(ns walletdb.ReadWriteBucket,
 	bs *BlockStamp) error {
 
@@ -890,11 +892,14 @@ func (m *Manager) SetStartBlock(ns walletdb.ReadWriteBucket,
 	defer m.syncStateMtx.Unlock()
 
 	if bs.Height < m.syncState.startBlock.Height {
-		if err := putStartBlock(ns, bs); err != nil {
+		err := putStartBlock(ns, bs)
+		if err != nil {
 			return err
 		}
+
 		m.syncState.startBlock = *bs
 	}
+
 	return nil
 }
 
@@ -1207,8 +1212,10 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// Use the crypto private key to decrypt all of the account private
 	// extended keys.
 	for _, manager := range m.scopedManagers {
-		if err := manager.Unlock(m.cryptoKeyPriv, ns); err != nil {
+		err := manager.Unlock(m.cryptoKeyPriv, ns)
+		if err != nil {
 			m.lock()
+
 			return err
 		}
 	}
