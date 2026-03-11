@@ -457,7 +457,10 @@ type Querier interface {
 	// - Treats min/max confirmations as optional filters so callers can
 	//   distinguish "not set" from an explicit zero-conf request.
 	ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error)
-	ListWallets(ctx context.Context) ([]ListWalletsRow, error)
+	// Lists wallets using cursor-based pagination. If cursor_id is NULL, starts
+	// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
+	// to page_limit rows.
+	ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error)
 	// Acquires a transaction-level advisory lock to serialize account creation within a scope.
 	// The lock is automatically released upon transaction commit or rollback.
 	// This MUST be called immediately before 'CreateDerivedAccount' within the same transaction.
