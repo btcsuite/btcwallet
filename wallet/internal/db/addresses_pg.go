@@ -9,6 +9,8 @@ import (
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
 
+var _ AddressStore = (*PostgresStore)(nil)
+
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
 func (s *PostgresStore) GetAddress(ctx context.Context,
