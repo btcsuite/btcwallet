@@ -71,9 +71,10 @@ INSERT INTO addresses (
 RETURNING id, created_at;
 
 -- name: ListAddressesByAccount :many
--- Lists all addresses for a given account identified by wallet_id, key scope
--- (purpose/coin_type), and account name. Returns all address columns for
--- filtering and processing by the application.
+-- Lists addresses for an account identified by wallet_id, key scope
+-- (purpose/coin_type), and account name, ordered by address ID.
+-- When cursor_id is provided, only rows strictly after that address ID are
+-- returned. Returns up to page_limit rows.
 SELECT
     a.id,
     a.account_id,
@@ -91,6 +92,17 @@ INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
-    ks.wallet_id = ? AND ks.purpose = ? AND ks.coin_type = ?
-    AND acc.account_name = ?
-ORDER BY a.id;
+    ks.wallet_id = sqlc.arg('wallet_id')
+    AND ks.purpose = sqlc.arg('purpose')
+    AND ks.coin_type = sqlc.arg('coin_type')
+    AND acc.account_name = sqlc.arg('account_name')
+    -- sqlc.arg()/sqlc.narg() calls are bind parameters, not column
+    -- references; the RF02 suppression below silences a false-positive
+    -- from sqlfluff, which cannot distinguish sqlc pseudo-functions
+    -- from column names in a multi-table JOIN context.
+    AND (
+        sqlc.narg('cursor_id') IS NULL -- noqa: RF02
+        OR a.id > sqlc.narg('cursor_id') -- noqa: RF02
+    )
+ORDER BY a.id
+LIMIT sqlc.arg('page_limit');
