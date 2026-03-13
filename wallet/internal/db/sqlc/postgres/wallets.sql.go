@@ -231,7 +231,7 @@ INSERT INTO wallet_sync_states (
     birthday_timestamp,
     updated_at
 ) VALUES (
-    $1, $2, $3, $4, current_timestamp
+    $1, $2, $3, $4, current_timestamp AT TIME ZONE 'UTC'
 )
 `
 
@@ -371,8 +371,8 @@ SET
     -- If birthday_timestamp param is NOT NULL, use it. Otherwise, keep existing value.
     birthday_timestamp = coalesce($4, birthday_timestamp),
 
-    -- Always update timestamp to current database time.
-    updated_at = current_timestamp
+    -- Always update timestamp to current database time in UTC.
+    updated_at = current_timestamp AT TIME ZONE 'UTC'
 WHERE
     wallet_id = $1
 `
