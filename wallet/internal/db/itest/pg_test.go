@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -96,13 +97,26 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer, err
 	pgContainerOnce.Do(func() {
 		cfg := DefaultPostgresConfig()
 
-		pgContainer, pgContainerErr = postgres.RunContainer(ctx,
-			testcontainers.WithImage(cfg.Image),
+		// PostgreSQL 18 can begin listening on the TCP port before it is
+		// ready to handle client queries, so wait for a successful SQL round
+		// trip instead of only waiting for the port to open.
+		waitForSQL := wait.ForSQL(
+			"5432/tcp", "pgx", func(host string, port nat.Port) string {
+				return fmt.Sprintf(
+					"postgres://%s:%s@%s:%s/%s?sslmode=disable",
+					cfg.Username, cfg.Password, host, port.Port(),
+					cfg.Database,
+				)
+			},
+		).WithStartupTimeout(pgInitTimeout)
+
+		pgContainer, pgContainerErr = postgres.Run(ctx,
+			cfg.Image,
 			postgres.WithDatabase(cfg.Database),
 			postgres.WithUsername(cfg.Username),
 			postgres.WithPassword(cfg.Password),
 			testcontainers.WithWaitStrategyAndDeadline(
-				pgInitTimeout, wait.ForListeningPort("5432/tcp"),
+				pgInitTimeout, waitForSQL,
 			),
 		)
 	})
