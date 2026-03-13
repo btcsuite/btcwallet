@@ -185,9 +185,10 @@ func (w *Wallet) checkMempool(ctx context.Context,
 
 		log.Infof("Tx %v already broadcasted", tx.TxHash())
 
-		// TODO(yy): Add a new method UpdateTxLabel to allow updating
-		// the label of a tx. With this change, the label passed in
-		// will be ignored if the tx is already known.
+		// TODO(yy): Update the Store layer with the caller-supplied
+		// label when the transaction is already known. With this
+		// change, the label passed in will be ignored if the tx is
+		// already known.
 		return errAlreadyBroadcasted
 
 	// If the backend does not support the mempool acceptance test, we'll

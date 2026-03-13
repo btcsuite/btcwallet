@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -100,7 +99,7 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 
 // Balance is not yet implemented for kvdb.
 func (s *Store) Balance(ctx context.Context,
-	_ db.BalanceParams) (btcutil.Amount, error) {
+	_ db.BalanceParams) (db.BalanceResult, error) {
 
-	return 0, notImplemented(ctx, "Balance")
+	return db.BalanceResult{}, notImplemented(ctx, "Balance")
 }

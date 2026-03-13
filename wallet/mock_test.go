@@ -101,16 +101,16 @@ func (m *mockStore) ListLeasedOutputs(ctx context.Context,
 
 // Balance implements the db.UTXOStore interface.
 func (m *mockStore) Balance(ctx context.Context,
-	params db.BalanceParams) (btcutil.Amount, error) {
+	params db.BalanceParams) (db.BalanceResult, error) {
 
 	args := m.Called(ctx, params)
 
-	amount, ok := args.Get(0).(btcutil.Amount)
+	result, ok := args.Get(0).(db.BalanceResult)
 	if !ok {
-		return 0, args.Error(1)
+		return db.BalanceResult{}, args.Error(1)
 	}
 
-	return amount, args.Error(1)
+	return result, args.Error(1)
 }
 
 // mockTxStore is a mock implementation of the wtxmgr.TxStore interface.
