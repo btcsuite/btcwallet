@@ -3,8 +3,6 @@ package db
 import (
 	"context"
 	"errors"
-
-	"github.com/btcsuite/btcd/btcutil/v2"
 )
 
 var (
@@ -72,6 +70,19 @@ var (
 	// created within a branch because the address index counter has reached
 	// its maximum representable value.
 	ErrMaxAddressIndexReached = errors.New("max address index reached")
+
+	// ErrTxNotFound is returned when a transaction is not found in the
+	// database.
+	ErrTxNotFound = errors.New("transaction not found")
+
+	// ErrUtxoNotFound is returned when a UTXO is not found in the database.
+	ErrUtxoNotFound = errors.New("utxo not found")
+
+	// ErrTxInputConflict is returned when CreateTx references a wallet-owned
+	// input that is already spent by another live wallet transaction.
+	ErrTxInputConflict = errors.New(
+		"transaction input conflicts with live wallet spend",
+	)
 )
 
 // Store defines the set of database operations used by the wallet.
@@ -227,18 +238,36 @@ type AddressStore interface {
 
 // TxStore defines the database actions for managing transaction records.
 type TxStore interface {
-	// CreateTx atomically records a transaction and its associated credits
-	// in the database. This is a single atomic operation that also handles
-	// the corresponding UTXO state changes: it will delete any UTXOs spent
-	// by the new transaction's inputs and create new UTXOs for any of its
-	// outputs that are spendable by the wallet. This ensures that the
-	// transaction record and the UTXO set are always consistent.
+	// CreateTx atomically records a transaction row and its associated credits
+	// in the database. This Store-layer API persists already-constructed
+	// wallet history; it does not build or publish transactions on the
+	// caller's behalf.
+	//
+	// The same write also updates the corresponding UTXO state: it marks any
+	// wallet-owned outputs referenced by the new transaction's inputs as spent
+	// and creates new UTXOs for any outputs that are spendable by the wallet.
+	// This keeps the transaction record and UTXO set consistent.
+	//
+	// CreateTx is also responsible for recording transaction metadata
+	// required by higher-level wallet policy:
+	//   - the received timestamp (stored in UTC),
+	//   - the optional block assignment (confirmed vs unconfirmed),
+	//   - the caller-selected initial transaction status.
+	//
+	// The create path does not infer whether an unmined transaction should
+	// start in TxStatusPending or TxStatusPublished; callers must provide that
+	// choice explicitly in CreateTxParams.
 	CreateTx(ctx context.Context, params CreateTxParams) error
 
-	// UpdateTx updates an existing transaction record in the database. It
-	// takes a context and UpdateTxParams, returning an error if the
+	// UpdateTxLabel updates an existing transaction record in the database. It
+	// takes a context and UpdateTxLabelParams, returning an error if the
 	// transaction cannot be found or updated.
-	UpdateTx(ctx context.Context, params UpdateTxParams) error
+	//
+	// UpdateTxLabel is intentionally narrow: it only updates the user-visible
+	// label. Block assignment, rollback, and status transitions belong to
+	// dedicated internal queries used by wallet synchronization and
+	// replacement handling.
+	UpdateTxLabel(ctx context.Context, params UpdateTxLabelParams) error
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
@@ -254,9 +283,15 @@ type TxStore interface {
 	// returning a slice of TxInfo or an error if the retrieval fails.
 	ListTxns(ctx context.Context, query ListTxnsQuery) ([]TxInfo, error)
 
-	// DeleteTx removes an unmined transaction from the store. It takes a
-	// context and DeleteTxParams, returning an error if the transaction is
-	// not found or the deletion fails.
+	// DeleteTx removes a live unconfirmed transaction from the store. It
+	// takes a context and DeleteTxParams, returning an error if the
+	// transaction is not found or the deletion fails.
+	//
+	// DeleteTx is intentionally narrower than a generic
+	// "delete any transaction" API. Orphaned, replaced, and failed rows remain
+	// part of the wallet's historical view for audit, reorg, and replacement
+	// handling and therefore must not be erased through the ordinary
+	// unconfirmed-deletion path.
 	DeleteTx(ctx context.Context, params DeleteTxParams) error
 
 	// RollbackToBlock removes all blocks at and after a given height,
@@ -267,6 +302,10 @@ type TxStore interface {
 	// inconsistent state if an error occurred mid-process. The current
 	// approach guarantees that the rollback is either fully completed or
 	// not at all.
+	//
+	// NOTE: This method has no wallet ID parameter and is therefore a
+	// DB-wide operation affecting all wallets that share the same `blocks`
+	// table.
 	//
 	// TODO(yy): explore performance improvement for this method.
 	RollbackToBlock(ctx context.Context, height uint32) error
@@ -279,36 +318,53 @@ type UTXOStore interface {
 	// GetUtxo retrieves a single unspent transaction output (UTXO) by its
 	// outpoint. It returns a UtxoInfo struct containing the UTXO's details
 	// or an error if the UTXO is not found or has been spent.
+	//
+	// GetUtxo treats outputs created by both live unconfirmed states
+	// (TxStatusPending and TxStatusPublished) as present in the wallet's
+	// UTXO set.
 	GetUtxo(ctx context.Context, query GetUtxoQuery) (*UtxoInfo, error)
 
 	// ListUTXOs returns a slice of all unspent transaction outputs (UTXOs)
 	// that match the provided query parameters. This can be used to list
 	// all UTXOs or filter them by account or confirmation status.
+	//
+	// ListUTXOs includes outputs from live unconfirmed parent transactions.
+	// Spendability policy such as coinbase maturity, lease state, or whether
+	// a caller wants to exclude TxStatusPending parents belongs in higher-level
+	// selection logic.
 	ListUTXOs(ctx context.Context, query ListUtxosQuery) ([]UtxoInfo, error)
 
 	// LeaseOutput locks a specific UTXO for a given duration, preventing
 	// it from being used in coin selection. This is useful for reserving
 	// UTXOs for a specific purpose, such as a pending transaction. The
 	// method returns the full lease information, including its expiration
-	// time.
+	// time. If another active lease already exists with a different lock ID,
+	// the call returns ErrOutputAlreadyLeased.
 	LeaseOutput(ctx context.Context, params LeaseOutputParams) (
 		*LeasedOutput, error)
 
 	// ReleaseOutput unlocks a previously leased UTXO, making it available
-	// for coin selection again. The lock ID must match the one used to
-	// lease the output.
+	// for coin selection again. Unlocking an already-unlocked or expired lease
+	// is a no-op. If another active lease still exists for the output, the lock
+	// ID must match the one that holds it or the call returns
+	// ErrOutputUnlockNotAllowed.
 	ReleaseOutput(ctx context.Context, params ReleaseOutputParams) error
 
-	// ListLeasedOutputs returns a slice of all currently leased UTXOs.
-	// This can be used to inspect which outputs are currently locked and
-	// when their leases expire.
+	// ListLeasedOutputs returns a slice of all currently leased live UTXOs.
+	// This can be used to inspect which still-unspent outputs are currently
+	// locked and when their leases expire.
 	ListLeasedOutputs(ctx context.Context, walletID uint32) (
 		[]LeasedOutput, error)
 
-	// Balance returns the total spendable balance of the wallet,
-	// calculated from the UTXO set. The minConfirms parameter specifies
-	// the minimum number of confirmations a UTXO must have to be included
-	// in the balance calculation.
+	// Balance returns a wallet-scoped balance view for the current unspent UTXO
+	// set after applying any optional caller-supplied filters.
+	//
+	// The zero-value BalanceParams request the wallet's live factual balance.
+	// Callers may narrow that view by account, confirmation range, lease
+	// or coinbase maturity when they need a workflow-specific balance policy
+	// from the public store interface. The returned BalanceResult always uses
+	// the same filtered base set for both Total and Locked so callers can
+	// reason about lease state without issuing a second balance query.
 	Balance(ctx context.Context, params BalanceParams) (
-		btcutil.Amount, error)
+		BalanceResult, error)
 }
