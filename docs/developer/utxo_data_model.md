@@ -124,15 +124,20 @@ We distinguish between a transaction's **Validity** (Status) and its **Confirmat
 
 **2. Validity (Source of Truth: `Status`)**
 
-| Status | Meaning | Affects Balance? |
+| Status Code | Meaning | Affects Balance? |
 | :--- | :--- | :--- |
-| `pending` | Created locally, not yet broadcast. | **No** (Locked) |
-| `published` | Active in mempool or blockchain. | **Yes** (If valid) |
-| `replaced` | Replaced by a higher-fee transaction (RBF). | **No** |
-| `failed` | Invalidated by a conflicting transaction (Double-Spend). | **No** |
-| `orphaned` | Coinbase tx that was reorged out (Invalid). | **No** |
+| `0` (`pending`) | Created locally, not yet broadcast. | **Yes** (Factual) |
+| `1` (`published`) | Active in mempool or blockchain. | **Yes** (If valid) |
+| `2` (`replaced`) | Replaced by a higher-fee transaction (RBF). | **No** |
+| `3` (`failed`) | Invalidated by a conflicting transaction (Double-Spend). | **No** |
+| `4` (`orphaned`) | Coinbase tx that was reorged out (Invalid). | **No** |
 
-*Additional invariant: Coinbase transactions cannot exist in the mempool. A coinbase transaction is either confirmed (`BlockHeight IS NOT NULL` and `Status='published'`) or orphaned (`Status='orphaned'` and `BlockHeight IS NULL`).*
+*Additional invariant: Coinbase transactions cannot exist in the mempool. A coinbase transaction is either confirmed (`BlockHeight IS NOT NULL` and `Status = 1`, `published`) or orphaned (`Status = 4`, `orphaned`, and `BlockHeight IS NULL`).*
+
+Factual-balance note: the SQL Store layer treats both `pending` and
+`published` parent transactions as part of the current live UTXO set. More
+conservative spendability policy (for example, excluding `pending` parents) is
+applied by higher-level callers on top of that factual base.
 
 *Note: There is no "Abandoned" state. A broadcast transaction cannot be safely abandoned; it can only be invalidated by double-spending its inputs.*
 
@@ -178,12 +183,12 @@ A UTXO does not store its own status field. Its status is calculated dynamically
 
 | UTXO State | Parent Tx Status | `BlockHeight` | `SpentBy` Pointer | Meaning |
 | :--- | :--- | :--- | :--- | :--- |
-| **Confirmed** | `published` | `NOT NULL` | `NULL` | Available, mature funds. |
-| **Unconfirmed** | `published` | `NULL` | `NULL` | Incoming funds, risk of RBF. |
-| **Immature** | `published` (Coinbase) | `NOT NULL` | `NULL` | Mined coins, must wait 100 blocks. |
-| **Spent** | `published` | `NOT NULL` | `NOT NULL` | History. We used this money. |
-| **Dead (Permanent)** | `failed` / `replaced` | *Any* | *Any* | Permanently invalid output from a failed attempt. |
-| **Dead (Recoverable)** | `orphaned` (coinbase) | `NULL` | *Any* | Orphaned coinbase output. Can become `Immature` if parent is reconfirmed. |
+| **Confirmed** | `1` (`published`) | `NOT NULL` | `NULL` | Available, mature funds. |
+| **Unconfirmed** | `1` (`published`) | `NULL` | `NULL` | Incoming funds, risk of RBF. |
+| **Immature** | `1` (`published`) coinbase | `NOT NULL` | `NULL` | Mined coins, must wait 100 blocks. |
+| **Spent** | `1` (`published`) | `NOT NULL` | `NOT NULL` | History. We used this money. |
+| **Dead (Permanent)** | `3` / `2` (`failed` / `replaced`) | *Any* | *Any* | Permanently invalid output from a failed attempt. |
+| **Dead (Recoverable)** | `4` (`orphaned`) coinbase | `NULL` | *Any* | Orphaned coinbase output. Can become `Immature` if parent is reconfirmed. |
 
 ---
 
@@ -213,7 +218,7 @@ When the blockchain reorganizes (disconnects blocks):
 
 Implementation note: The SQL `blocks` table models the current best chain. During a disconnect, the best-chain association is removed (for example by deleting the `blocks` row at that height and inserting the new one). The coinbase status update MUST be atomic with clearing `BlockHeight` to avoid an invalid "unconfirmed coinbase" state.
 
-Coinbase reconfirmation note: If an orphaned coinbase transaction re-enters the best chain, restoring it requires updating `BlockHeight` and `Status='published'` atomically (one SQL statement within a transaction) to satisfy coinbase invariants.
+Coinbase reconfirmation note: If an orphaned coinbase transaction re-enters the best chain, restoring it requires updating `BlockHeight` and `Status = 1` (`published`) atomically (one SQL statement within a transaction) to satisfy coinbase invariants.
 
 Reconfirmation semantics:
 *   The transaction keeps the same `tx_hash` and is associated with a new `block_height`.
@@ -237,7 +242,7 @@ graph TD
 When the wallet detects a replacement transaction (Tx B) for an existing unconfirmed transaction (Tx A):
 1.  **Detection:** Tx B spends the same inputs as Tx A.
 2.  **Update:** The input UTXOs are updated to point to Tx B (`SpentBy = TxB`).
-3.  **Archive:** Tx A is marked as `status = 'replaced'`. It remains in the DB for history but is ignored by balance queries.
+3.  **Archive:** Tx A is marked as `status = 2` (`replaced`). It remains in the DB for history but is ignored by balance queries.
 
 ### 5.3 Upstream Double-Spend (Invalidation)
 
@@ -260,7 +265,7 @@ When a transaction (Tx C) becomes invalid because *its input* was spent by a con
 2.  **Conflict:** We have Tx C (unconfirmed) which also spends UTXO X.
 3.  **Resolution:**
     *   Update UTXO X: `SpentBy = TxD`.
-    *   Mark Tx C: `Status = 'failed'`.
+    *   Mark Tx C: `Status = 3` (`failed`).
     *   **Cascade:** Any UTXOs created by Tx C are now effectively "Dead" (because their parent is `failed`).
     *   Any transactions spending those dead UTXOs must also be marked `failed` (recursive invalidation).
 
@@ -278,21 +283,32 @@ This can be implemented with an application-side loop (portable across databases
 ### 5.4 Coin Selection
 Coin selection queries focus purely on the UTXO set:
 1.  Filter by `SpentBy IS NULL`.
-2.  Join Parent Transaction to ensure `Status IN ('published', 'pending')`.
-    *   *Note:* Including `pending` allows chaining unbroadcast transactions (Zero-Latency Chaining), but creates a strict dependency: the parent must be broadcast before the child.
-    *   This is an advanced feature and should be opt-in for conservative policies.
-    *   If confirmation is required (e.g., for safety), add `AND BlockHeight IS NOT NULL`.
+2.  Join the parent transaction and choose a caller-specific live-status
+    filter.
+    *   Conservative callers can require `Status = 1` (`published`).
+    *   Zero-latency chaining can opt into `Status IN (0, 1)` (`pending`,
+        `published`), but this creates a strict dependency: the parent must be
+        broadcast before the child.
+    *   If confirmation is required (e.g., for safety), add
+        `AND BlockHeight IS NOT NULL`.
 3.  Filter out active `Leases`.
 
-Important: The `spendable_utxos` view described in ADR 0006 does not exclude leases (because it depends on the database's current time function and requires a `NOT EXISTS` against `utxo_leases`). Coin selection must explicitly filter `utxo_leases` where `expires_at > CURRENT_TIMESTAMP`.
+Important: There is no dedicated `spendable_utxos` view in the current branch.
+Coin selection should build directly on factual UTXO queries and then apply its
+own policy filters for pending parents, active leases, and immature coinbase
+outputs. Active leases should be excluded using the caller's UTC `now` value,
+not an implicit database-local timestamp.
 
 Transaction reconstruction note: This model optimizes the high-frequency UTXO read path. Reconstructing a full transaction view (inputs/outputs for UI/history) is inherently more join-heavy and should be treated as a lower-frequency, separately optimized read path.
 
 ### 5.5 Multi-Wallet Concurrency & Consistency
-When multiple wallets share a single database, all `wtxmgr` rows are scoped by `wallet_id` (see ADR 0006). This avoids conflicts and makes correctness properties explicit.
+When multiple wallets share a single database, the transaction graph remains
+wallet-scoped through `transactions.wallet_id`, and other rows either carry
+`wallet_id` directly or derive wallet ownership through that transaction graph.
+This avoids conflicts and makes correctness properties explicit.
 
 *   **Consistency model:** The system assumes ACID semantics from the database. Reorg handling, status transitions, and lease acquisition must be performed as explicit SQL transactions.
 *   **Concurrency primitive:** UTXO leases are the wallet-level lock. Coin selection must exclude leased UTXOs, and lease acquisition should be treated as part of the same atomic unit as input selection.
-*   **Coinbase maturity:** Coinbase UTXOs require 100 confirmations. This rule should be enforced in a single, well-defined place (query helper/view + height parameter) to avoid accidental selection of immature funds.
+*   **Coinbase maturity:** Coinbase UTXOs require 100 confirmations. This rule should be enforced in a single, well-defined caller-side policy path to avoid accidental selection of immature funds.
 
-Suggested enforcement: a parameterized query helper or SQL function that takes `current_height` and filters out coinbase UTXOs where `current_height - block_height < 100`.
+Suggested enforcement: a parameterized caller-side query helper or composition layer that takes `current_height` and filters out coinbase UTXOs where `current_height - block_height < 100`.
