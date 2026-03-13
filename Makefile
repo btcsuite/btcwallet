@@ -286,6 +286,20 @@ sql-lint-check:
 	@$(call print, "Linting SQL files (sqlite queries).")
 	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
 
+#? sql: Lint, verify, format, and regenerate SQL code for local development
+# First try auto-fixes. If that still fails, rerun lint in check mode so the
+# remaining unfixable violations are printed before aborting the workflow.
+# On success, verify the final SQL is clean before formatting and regeneration.
+sql:
+	@if ! $(MAKE) --no-print-directory --silent sql-lint; then \
+		$(MAKE) --no-print-directory --silent sql-lint-check; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory --silent sql-lint-check
+	@$(MAKE) --no-print-directory --silent sql-format
+	@$(MAKE) --no-print-directory --silent sqlc
+
+
 .PHONY: all \
 	default \
 	build \
@@ -303,6 +317,7 @@ sql-lint-check:
 	tidy-module \
 	tidy-module-check \
 	sql-parse \
+	sql \
 	sqlc \
 	sqlc-check \
 	sql-format \
