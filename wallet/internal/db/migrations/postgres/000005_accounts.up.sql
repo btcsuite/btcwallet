@@ -61,8 +61,9 @@ CREATE TABLE accounts (
     -- Encrypted public key for the account.
     encrypted_public_key BYTEA,
 
-    -- Timestamp when the account was created. Automatically set by the database.
-    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    -- Timestamp when the account was created. Automatically set by the database
+    -- in UTC.
+    created_at TIMESTAMP NOT NULL DEFAULT (current_timestamp AT TIME ZONE 'UTC'),
 
     -- Next index to use for external addresses (branch 0)
     next_external_index BIGINT NOT NULL DEFAULT 0,

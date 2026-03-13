@@ -37,8 +37,9 @@ CREATE TABLE addresses (
     -- account key.
     pub_key BYTEA,
 
-    -- Timestamp when the address was created. Automatically set by the database.
-    created_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+    -- Timestamp when the address was created. Automatically set by the database
+    -- in UTC.
+    created_at TIMESTAMP NOT NULL DEFAULT (current_timestamp AT TIME ZONE 'UTC'),
 
     -- Branch and index are set together for HD-derived addresses and both
     -- NULL for imported addresses.
