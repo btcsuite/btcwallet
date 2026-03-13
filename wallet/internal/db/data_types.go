@@ -4,12 +4,26 @@
 package db
 
 import (
+	"math"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+)
+
+const (
+	// UnminedHeight is a sentinel value used in UtxoInfo.Height to indicate
+	// that the UTXO is unconfirmed.
+	//
+	// Database rows represent an unconfirmed creating transaction by setting
+	// `transactions.block_height` to NULL. The store layer maps that NULL to
+	// this sentinel value so callers can continue to treat UtxoInfo.Height
+	// as a non-nullable `uint32`.
+	//
+	// NOTE: This value must never overlap with a real block height.
+	UnminedHeight uint32 = math.MaxUint32
 )
 
 // ============================================================================
@@ -703,6 +717,75 @@ type ListAddressesQuery struct {
 // TxStore Types
 // --------------------
 
+// TxStatus represents the wallet-relative validity state of a transaction.
+//
+// The value is stored in the `transactions.status` column as a compact numeric
+// code so hot-path predicates and indexes do not pay the storage/index cost of
+// repeated status strings.
+//
+// The enum values MUST match the numeric codes enforced by migration
+// `000007_transactions` in both Postgres and SQLite.
+type TxStatus uint8
+
+const (
+	// TxStatusPending indicates a locally-created transaction that has not yet
+	// been broadcast.
+	//
+	// Callers use this state when they need the store to retain a locally
+	// authored transaction before network publication.
+	TxStatusPending TxStatus = iota
+
+	// TxStatusPublished indicates a transaction that is still considered
+	// valid by the wallet and is either unconfirmed in the mempool or
+	// confirmed in the current best chain.
+	//
+	// The two cases share one validity status because Block already tells the
+	// caller whether the transaction is mined. Keeping both under
+	// TxStatusPublished avoids contradictory combinations such as
+	// "confirmed but not published" and keeps this field focused on whether the
+	// wallet still treats the transaction as live.
+	TxStatusPublished
+
+	// TxStatusReplaced indicates a transaction that was invalidated by a
+	// competing transaction spending the same inputs via RBF.
+	TxStatusReplaced
+
+	// TxStatusFailed indicates a transaction that was invalidated by a
+	// competing transaction spending the same inputs (double-spend).
+	TxStatusFailed
+
+	// TxStatusOrphaned indicates a coinbase transaction that was reorged out of
+	// the best chain.
+	//
+	// This state is reserved for coinbase transactions. Non-coinbase rows must
+	// use a different terminal state such as TxStatusFailed or
+	// TxStatusReplaced.
+	TxStatusOrphaned
+)
+
+// String returns the human-readable name of one transaction status code.
+func (s TxStatus) String() string {
+	switch s {
+	case TxStatusPending:
+		return "pending"
+
+	case TxStatusPublished:
+		return "published"
+
+	case TxStatusReplaced:
+		return "replaced"
+
+	case TxStatusFailed:
+		return "failed"
+
+	case TxStatusOrphaned:
+		return "orphaned"
+
+	default:
+		return "unknown"
+	}
+}
+
 // TxInfo represents the details of a transaction relevant to the wallet.
 type TxInfo struct {
 	// Hash is the transaction hash.
@@ -719,6 +802,11 @@ type TxInfo struct {
 	// and non-nil for mined (confirmed) transactions.
 	Block *Block
 
+	// Status is the wallet-relative validity state of the transaction.
+	//
+	// For confirmed transactions, Status is always TxStatusPublished.
+	Status TxStatus
+
 	// Label is a user-defined label for the transaction.
 	Label string
 }
@@ -733,6 +821,40 @@ type CreateTxParams struct {
 
 	// Tx is the transaction to record.
 	Tx *wire.MsgTx
+
+	// Received is the timestamp when the wallet learned about the transaction.
+	//
+	// Callers supply this explicitly so import/recovery paths can preserve the
+	// wallet-observed time instead of defaulting to insertion time.
+	//
+	// This timestamp is stored in the database as UTC.
+	Received time.Time
+
+	// Block optionally records the transaction as already confirmed in the
+	// provided block. When nil, the transaction is treated as unmined.
+	//
+	// The Store layer records factual transaction state. A non-nil Block means
+	// the caller is inserting a row already anchored to a specific block in
+	// wallet history; it does not ask the Store layer to infer publishing or
+	// confirmation policy on the caller's behalf.
+	//
+	// NOTE: Coinbase transactions cannot exist in the mempool. Callers MUST
+	// provide a non-nil Block when recording coinbase transactions.
+	Block *Block
+
+	// Status is the initial wallet-relative validity state for the
+	// transaction.
+	//
+	// This Store-layer API inserts an already-constructed transaction row. It
+	// does not build, sign, publish, or infer higher-level wallet policy.
+	// Callers must therefore set Status explicitly instead of asking the Store
+	// to guess how an app-layer workflow intends to use the row.
+	//
+	// Unmined inserts choose between TxStatusPending and TxStatusPublished.
+	// Confirmed inserts (Block non-nil) must use TxStatusPublished to satisfy
+	// the transaction-state invariants. TxStatusOrphaned is reserved for
+	// coinbase rows and must not be used for ordinary transactions.
+	Status TxStatus
 
 	// Label is an optional label for the transaction.
 	Label string
@@ -753,12 +875,28 @@ type CreditData struct {
 	Index uint32
 
 	// Address is the address that received the credit.
+	//
+	// NOTE: This field is for display only. The database layer should match the
+	// credit to an address row by the output's script_pub_key
+	// (`params.Tx.TxOut[Index].PkScript`), which is the canonical key
+	// used by the address schema. This is especially important for
+	// imported or script-based addresses, where wallet ownership is
+	// defined by the stored script material rather than by one canonical
+	// encoded address string.
+	//
+	// Examples:
+	// - A standard P2WPKH credit usually has one obvious bech32 address for UI
+	//   display, but the wallet still keys ownership off the exact witness
+	//   program bytes recorded in script_pub_key.
+	// - An imported script address (`waddrmgr.Script`,
+	//   `waddrmgr.WitnessScript`, or `waddrmgr.TaprootScript`) is owned because
+	//   the wallet imported the script material; the encoded address, if
+	//   any, is only a presentation form of that script.
 	Address address.Address
 }
 
-// UpdateTxParams contains the parameters for updating a transaction record.
-// Fields are pointers to allow for partial updates.
-type UpdateTxParams struct {
+// UpdateTxLabelParams contains the parameters for updating a transaction label.
+type UpdateTxLabelParams struct {
 	// WalletID is the ID of the wallet containing the transaction.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
@@ -768,11 +906,10 @@ type UpdateTxParams struct {
 	// Txid is the hash of the transaction to update.
 	Txid chainhash.Hash
 
-	// Block is the new block metadata for the transaction.
-	Block *Block
-
 	// Label is the new label for the transaction.
-	Label *string
+	//
+	// The empty string is a valid value and clears any prior label.
+	Label string
 }
 
 // GetTxQuery contains the parameters for querying a transaction. While a
@@ -849,6 +986,8 @@ type UtxoInfo struct {
 	FromCoinBase bool
 
 	// Height is the block height of the UTXO.
+	//
+	// Unconfirmed UTXOs use the sentinel value UnminedHeight.
 	Height uint32
 }
 
@@ -872,17 +1011,16 @@ type ListUtxosQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Account is an optional filter to list UTXOs only for a specific
-	// account.
+	// Account is an optional BIP44 account-number filter.
 	Account *uint32
 
-	// MinConfs is the minimum number of confirmations for a UTXO to be
-	// included.
-	MinConfs int32
+	// MinConfs optionally requires each returned UTXO to have at least this
+	// many confirmations.
+	MinConfs *int32
 
-	// MaxConfs is the maximum number of confirmations for a UTXO to be
-	// included.
-	MaxConfs int32
+	// MaxConfs optionally requires each returned UTXO to have at most this
+	// many confirmations.
+	MaxConfs *int32
 }
 
 // LeaseOutputParams contains the parameters for leasing a UTXO.
@@ -930,6 +1068,16 @@ type LeasedOutput struct {
 	Expiration time.Time
 }
 
+// BalanceResult represents one wallet-scoped balance view after applying the
+// requested filters.
+type BalanceResult struct {
+	// Total is the sum of every matching live UTXO, including leased outputs.
+	Total btcutil.Amount
+
+	// Locked is the subset of Total currently covered by active output leases.
+	Locked btcutil.Amount
+}
+
 // BalanceParams contains the parameters for the Balance method.
 type BalanceParams struct {
 	// WalletID is the ID of the wallet to query.
@@ -938,9 +1086,21 @@ type BalanceParams struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// MinConfirms is the minimum number of confirmations a UTXO must have
-	// to be included in the balance calculation.
-	MinConfirms int32
+	// Account optionally restricts the balance to one BIP44 account number.
+	Account *uint32
+
+	// MinConfs optionally requires each counted output to have at least
+	// this many confirmations.
+	MinConfs *int32
+
+	// MaxConfs optionally requires each counted output to have at most
+	// this many confirmations.
+	MaxConfs *int32
+
+	// CoinbaseMaturity optionally requires coinbase outputs to have at
+	// least this many confirmations before they count toward the returned
+	// balance result. Non-coinbase outputs ignore this filter.
+	CoinbaseMaturity *int32
 }
 
 // LockID represents a unique context-specific ID assigned to an output lock.
