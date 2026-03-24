@@ -39,7 +39,10 @@ SET
 WHERE
 utxo_leases.wallet_id = excluded.wallet_id
 AND (
-    utxo_leases.expires_at <= sqlc.arg('now_utc')
+    -- ?6 is the generated bind slot for now_utc; sqlc leaves a literal
+    -- sqlc.arg('now_utc') here, so this predicate must stay aligned with
+    -- the arg ordering above.
+    utxo_leases.expires_at <= ?6
     OR utxo_leases.lock_id = excluded.lock_id
 )
 RETURNING expires_at
