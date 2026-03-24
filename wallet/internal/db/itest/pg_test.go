@@ -5,9 +5,12 @@ package itest
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"os"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +25,6 @@ import (
 )
 
 var (
-	// Limit concurrent database creation to avoid exhausting connections.
-	pgDBSemaphore = make(chan struct{}, 4)
-
 	// Shared container instance, reused across tests for performance.
 	// This is safe to use concurrently because we only share the container
 	// and not the database inside it. Each test gets its own database.
@@ -45,6 +45,23 @@ var (
 	pgTerminateTimeout = 1 * time.Minute
 )
 
+// testParallelism returns the effective test parallelism level. It reads the
+// -test.parallel flag when set, falling back to GOMAXPROCS (the default used by
+// the Go test runner).
+func testParallelism() int {
+	f := flag.Lookup("test.parallel")
+	if f == nil {
+		return runtime.GOMAXPROCS(0)
+	}
+
+	n, err := strconv.Atoi(f.Value.String())
+	if err != nil || n <= 0 {
+		return runtime.GOMAXPROCS(0)
+	}
+
+	return n
+}
+
 // TestMain ensures the shared postgres container is terminated after the
 // integration test suite completes to avoid leaking docker resources.
 func TestMain(m *testing.M) {
@@ -52,10 +69,16 @@ func TestMain(m *testing.M) {
 
 	// Terminate the container after the test suite completes.
 	if pgContainer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), pgTerminateTimeout)
+		ctx, cancel := context.WithTimeout(
+			context.Background(), pgTerminateTimeout,
+		)
 		defer cancel()
 
-		err := pgContainer.Terminate(ctx)
+		// As the tests already completed, we can stop the container
+		// immediately.
+		err := pgContainer.Terminate(
+			ctx, testcontainers.StopTimeout(0),
+		)
 		if err != nil {
 			fmt.Printf("failed to terminate postgres container: %v\n", err)
 		}
@@ -91,9 +114,8 @@ func DefaultPostgresConfig() PostgresConfig {
 
 // GetPostgresContainer returns the shared PostgreSQL container instance.
 // The container is created once and reused across all tests for performance.
-//
-// Note: postgres:18-alpine defaults max_connections to 100.
-func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer, error) {
+func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
+	error) {
 	pgContainerOnce.Do(func() {
 		cfg := DefaultPostgresConfig()
 
@@ -115,6 +137,12 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer, err
 			postgres.WithDatabase(cfg.Database),
 			postgres.WithUsername(cfg.Username),
 			postgres.WithPassword(cfg.Password),
+			testcontainers.WithCmd(
+				"-c", fmt.Sprintf(
+					"max_connections=%d",
+					testParallelism()*db.DefaultMaxConnections,
+				),
+			),
 			testcontainers.WithWaitStrategyAndDeadline(
 				pgInitTimeout, waitForSQL,
 			),
@@ -144,17 +172,18 @@ func sanitizedPgDBName(t *testing.T) string {
 }
 
 // NewTestStore creates a new PostgreSQL database connection with migrations
-// applied. Each test gets its own database for isolation.
+// applied. Each parallel subtest must call NewTestStore itself rather than
+// sharing a store created by the parent test. When a parent test creates the
+// store and its subtests call t.Parallel(), the parent finishes and releases
+// its parallel slot while the subtests are still running. A new parent test
+// fills that slot and opens another store, but the original subtests still
+// hold their connections. This leads to more open connections than the parallel
+// limit allows, exhausting the PostgreSQL connection pool. Avoid this by
+// creating NewTestStore inside each parallel subtest so its lifecycle is tied
+// to the subtest's parallel slot.
 func NewTestStore(t *testing.T) *db.PostgresStore {
 	t.Helper()
 	ctx := t.Context()
-
-	// Acquire a semaphore slot to limit concurrent database creation and
-	// parallel test execution that depends on it.
-	pgDBSemaphore <- struct{}{}
-	defer func() {
-		<-pgDBSemaphore
-	}()
 
 	container, err := GetPostgresContainer(ctx)
 	require.NoError(t, err, "failed to get postgres container")
