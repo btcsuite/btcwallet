@@ -70,6 +70,8 @@ func SetupHarness(t *testing.T, chainBackendType, dbType string) *HarnessTest {
 	minerLogDir := createOrEnsureLogSubDir(t, logDir, "miner")
 	miner := newMiner(t, minerLogDir)
 	miner.SetUp()
+	require.NoError(t, waitForTCPListener(miner.P2PAddress(),
+		defaultTestTimeout), "miner p2p listener not ready")
 
 	// 2. Start Chain Backend.
 	backendLogDir := ""
