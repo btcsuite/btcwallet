@@ -572,20 +572,21 @@ func TestGetAddressSecret(t *testing.T) {
 func TestGetAddress(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-get-address")
-
 	tests := []struct {
 		name      string
-		setupFunc func(t *testing.T) db.GetAddressQuery
-		wantErr   error
-		validate  func(t *testing.T, addr *db.AddressInfo)
+		setupFunc func(t *testing.T, addrStore db.AddressStore,
+			accountStore db.AccountStore, walletID uint32) db.GetAddressQuery
+		wantErr  error
+		validate func(t *testing.T, addr *db.AddressInfo)
 	}{
 		{
 			name: "get by encrypted script pubkey",
-			setupFunc: func(t *testing.T) db.GetAddressQuery {
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.GetAddressQuery {
+
 				createImportedAccount(
-					t, store, walletID, db.KeyScopeBIP0084, "imported",
+					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
 				)
 
 				script := RandomBytes(32)
@@ -596,7 +597,7 @@ func TestGetAddress(t *testing.T) {
 					PubKey:       RandomBytes(33),
 					ScriptPubKey: script,
 				}
-				_, err := store.NewImportedAddress(t.Context(), params)
+				_, err := addrStore.NewImportedAddress(t.Context(), params)
 				require.NoError(t, err)
 
 				return db.GetAddressQuery{
@@ -611,7 +612,9 @@ func TestGetAddress(t *testing.T) {
 		},
 		{
 			name: "address not found by script",
-			setupFunc: func(t *testing.T) db.GetAddressQuery {
+			setupFunc: func(_ *testing.T, _ db.AddressStore,
+				_ db.AccountStore, walletID uint32) db.GetAddressQuery {
+
 				return db.GetAddressQuery{
 					WalletID:     walletID,
 					ScriptPubKey: RandomBytes(32),
@@ -621,7 +624,9 @@ func TestGetAddress(t *testing.T) {
 		},
 		{
 			name: "invalid query - empty script pubkey",
-			setupFunc: func(t *testing.T) db.GetAddressQuery {
+			setupFunc: func(_ *testing.T, _ db.AddressStore,
+				_ db.AccountStore, walletID uint32) db.GetAddressQuery {
+
 				return db.GetAddressQuery{
 					WalletID:     walletID,
 					ScriptPubKey: nil,
@@ -634,7 +639,11 @@ func TestGetAddress(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			query := tc.setupFunc(t)
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+
+			query := tc.setupFunc(t, store, store, walletID)
 			addr, err := store.GetAddress(t.Context(), query)
 
 			if tc.wantErr != nil {
@@ -658,25 +667,28 @@ func TestGetAddress(t *testing.T) {
 func TestListAddresses(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-list-addresses")
-
 	tests := []struct {
 		name      string
-		setupFunc func(t *testing.T) db.ListAddressesQuery
+		setupFunc func(t *testing.T, addrStore db.AddressStore,
+			accountStore db.AccountStore, walletID uint32) db.ListAddressesQuery
 		wantCount int
 		wantErr   error
 		validate  func(t *testing.T, addrs []db.AddressInfo)
 	}{
 		{
 			name: "list multiple addresses for account",
-			setupFunc: func(t *testing.T) db.ListAddressesQuery {
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
 				createDerivedAccount(
-					t, store, walletID, db.KeyScopeBIP0044, "test-account",
+					t, accountStore, walletID, db.KeyScopeBIP0044,
+					"test-account",
 				)
 
 				createDerivedAddresses(
-					t, store, walletID, db.KeyScopeBIP0044, "test-account",
+					t, addrStore, walletID, db.KeyScopeBIP0044,
+					"test-account",
 					false, 5,
 				)
 
@@ -698,9 +710,13 @@ func TestListAddresses(t *testing.T) {
 		},
 		{
 			name: "list addresses - empty result",
-			setupFunc: func(t *testing.T) db.ListAddressesQuery {
+			setupFunc: func(t *testing.T, _ db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
 				createDerivedAccount(
-					t, store, walletID, db.KeyScopeBIP0084, "empty-account",
+					t, accountStore, walletID, db.KeyScopeBIP0084,
+					"empty-account",
 				)
 
 				return db.ListAddressesQuery{
@@ -713,22 +729,29 @@ func TestListAddresses(t *testing.T) {
 		},
 		{
 			name: "list addresses filters by scope correctly",
-			setupFunc: func(t *testing.T) db.ListAddressesQuery {
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.ListAddressesQuery {
+
 				// Create accounts in different scopes.
 				createDerivedAccount(
-					t, store, walletID, db.KeyScopeBIP0044, "bip44-multi",
+					t, accountStore, walletID, db.KeyScopeBIP0044,
+					"bip44-multi",
 				)
 				createDerivedAccount(
-					t, store, walletID, db.KeyScopeBIP0049Plus, "bip49-multi",
+					t, accountStore, walletID, db.KeyScopeBIP0049Plus,
+					"bip49-multi",
 				)
 
 				createDerivedAddresses(
-					t, store, walletID, db.KeyScopeBIP0044, "bip44-multi",
+					t, addrStore, walletID, db.KeyScopeBIP0044,
+					"bip44-multi",
 					false, 3,
 				)
 
 				createDerivedAddresses(
-					t, store, walletID, db.KeyScopeBIP0049Plus, "bip49-multi",
+					t, addrStore, walletID, db.KeyScopeBIP0049Plus,
+					"bip49-multi",
 					false, 2,
 				)
 
@@ -752,7 +775,11 @@ func TestListAddresses(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			query := tc.setupFunc(t)
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+
+			query := tc.setupFunc(t, store, store, walletID)
 			addrs, err := store.ListAddresses(t.Context(), query)
 
 			if tc.wantErr != nil {
@@ -966,9 +993,6 @@ func TestListAddressesOrdering(t *testing.T) {
 func TestNewDerivedAddressErrors(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-new-derived-address-errors")
-
 	tests := []struct {
 		name    string
 		params  db.NewDerivedAddressParams
@@ -977,7 +1001,6 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 		{
 			name: "non-existent account",
 			params: db.NewDerivedAddressParams{
-				WalletID:    walletID,
 				Scope:       db.KeyScopeBIP0084,
 				AccountName: "non-existent",
 				Change:      false,
@@ -987,7 +1010,6 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 		{
 			name: "empty account name",
 			params: db.NewDerivedAddressParams{
-				WalletID:    walletID,
 				Scope:       db.KeyScopeBIP0044,
 				AccountName: "",
 				Change:      false,
@@ -997,7 +1019,6 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 		{
 			name: "unknown key scope returns account not found",
 			params: db.NewDerivedAddressParams{
-				WalletID: walletID,
 				Scope: db.KeyScope{
 					Purpose: 999,
 					Coin:    999,
@@ -1013,7 +1034,13 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			info, err := store.NewDerivedAddress(t.Context(), tc.params, mockDeriveFunc())
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+			tc.params.WalletID = walletID
+
+			info, err := store.NewDerivedAddress(
+				t.Context(), tc.params, mockDeriveFunc(),
+			)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, info)
 		})

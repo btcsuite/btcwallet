@@ -51,10 +51,6 @@ func TestCreateAccounts(t *testing.T) {
 func TestCreateDerivedAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-
-	walletID := newWallet(t, store, "wallet-create-derived-account-errors")
-
 	tests := []struct {
 		name    string
 		params  db.CreateDerivedAccountParams
@@ -63,18 +59,16 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 		{
 			name: "missing name",
 			params: db.CreateDerivedAccountParams{
-				WalletID: walletID,
-				Scope:    db.KeyScopeBIP0084,
-				Name:     "",
+				Scope: db.KeyScopeBIP0084,
+				Name:  "",
 			},
 			wantErr: db.ErrMissingAccountName,
 		},
 		{
 			name: "unknown scope",
 			params: db.CreateDerivedAccountParams{
-				WalletID: walletID,
-				Scope:    db.KeyScope{Purpose: 999, Coin: 999},
-				Name:     "unknown-scope-account",
+				Scope: db.KeyScope{Purpose: 999, Coin: 999},
+				Name:  "unknown-scope-account",
 			},
 			wantErr: db.ErrUnknownKeyScope,
 		},
@@ -83,6 +77,10 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+			tc.params.WalletID = walletID
 
 			info, err := store.CreateDerivedAccount(t.Context(), tc.params)
 			require.ErrorIs(t, err, tc.wantErr)
@@ -222,10 +220,6 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 func TestCreateImportedAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-
-	walletID := newWallet(t, store, "wallet-create-imported-account-errors")
-
 	tests := []struct {
 		name    string
 		params  db.CreateImportedAccountParams
@@ -234,7 +228,6 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 		{
 			name: "missing name",
 			params: db.CreateImportedAccountParams{
-				WalletID:           walletID,
 				Name:               "",
 				Scope:              db.KeyScopeBIP0084,
 				EncryptedPublicKey: RandomBytes(32),
@@ -244,7 +237,6 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 		{
 			name: "missing public key",
 			params: db.CreateImportedAccountParams{
-				WalletID:           walletID,
 				Name:               "missing-pubkey",
 				Scope:              db.KeyScopeBIP0084,
 				EncryptedPublicKey: nil,
@@ -254,7 +246,6 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 		{
 			name: "unknown scope",
 			params: db.CreateImportedAccountParams{
-				WalletID:           walletID,
 				Name:               "unknown-scope",
 				Scope:              db.KeyScope{Purpose: 999, Coin: 999},
 				EncryptedPublicKey: RandomBytes(32),
@@ -266,6 +257,10 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, tc.name+"-wallet")
+			tc.params.WalletID = walletID
 
 			props, err := store.CreateImportedAccount(t.Context(), tc.params)
 			require.ErrorIs(t, err, tc.wantErr)
@@ -345,16 +340,14 @@ func TestGetAccount(t *testing.T) {
 func TestGetAccountNotFound(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-
-	walletID := newWallet(t, store, "wallet-get-account-not-found")
-
-	createAllAccounts(t, store, walletID)
-
 	scope := db.KeyScopeBIP0084
 
 	t.Run("by name", func(t *testing.T) {
 		t.Parallel()
+
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-get-account-not-found-name")
+		createAllAccounts(t, store, walletID)
 
 		query := getAccountQueryByName(walletID, scope, "non-existent")
 		info, err := store.GetAccount(t.Context(), query)
@@ -364,6 +357,10 @@ func TestGetAccountNotFound(t *testing.T) {
 
 	t.Run("by number", func(t *testing.T) {
 		t.Parallel()
+
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-get-account-not-found-number")
+		createAllAccounts(t, store, walletID)
 
 		query := getAccountQueryByNumber(walletID, scope, 99999)
 		info, err := store.GetAccount(t.Context(), query)
@@ -380,14 +377,12 @@ func TestListAccounts(t *testing.T) {
 	// Ensure that has at least 3 accounts to be tested.
 	require.GreaterOrEqual(t, len(AllAccountCases), 3)
 
-	store := NewTestStore(t)
-
-	walletID := newWallet(t, store, "wallet-list-accounts")
-
-	createAllAccounts(t, store, walletID)
-
 	t.Run("all accounts", func(t *testing.T) {
 		t.Parallel()
+
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-list-accounts-all")
+		createAllAccounts(t, store, walletID)
 
 		query := db.ListAccountsQuery{WalletID: walletID}
 		accounts, err := store.ListAccounts(t.Context(), query)
@@ -401,6 +396,10 @@ func TestListAccounts(t *testing.T) {
 
 	t.Run("filter by scope", func(t *testing.T) {
 		t.Parallel()
+
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-list-accounts-scope")
+		createAllAccounts(t, store, walletID)
 
 		scope := db.KeyScopeBIP0084
 		query := db.ListAccountsQuery{
@@ -422,6 +421,10 @@ func TestListAccounts(t *testing.T) {
 	t.Run("filter by name", func(t *testing.T) {
 		t.Parallel()
 
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-list-accounts-name")
+		createAllAccounts(t, store, walletID)
+
 		// Ensure that has at least 3 derived accounts to be tested.
 		require.GreaterOrEqual(t, len(DerivedAccountCases), 3)
 
@@ -439,6 +442,8 @@ func TestListAccounts(t *testing.T) {
 
 	t.Run("empty result", func(t *testing.T) {
 		t.Parallel()
+
+		store := NewTestStore(t)
 
 		// Create a new wallet with no accounts.
 		emptyWalletID := newWallet(t, store, "wallet-list-empty")
@@ -605,15 +610,6 @@ func TestRenameAccount(t *testing.T) {
 func TestRenameAccountErrors(t *testing.T) {
 	t.Parallel()
 
-	store := NewTestStore(t)
-
-	walletID := newWallet(t, store, "wallet-rename-account-errors")
-
-	createAllAccounts(t, store, walletID)
-
-	nonExistentName := "nonexistent"
-	nonExistentNum := uint32(99999)
-
 	tests := []struct {
 		name    string
 		params  db.RenameAccountParams
@@ -622,40 +618,35 @@ func TestRenameAccountErrors(t *testing.T) {
 		{
 			name: "not found",
 			params: db.RenameAccountParams{
-				WalletID: walletID,
-				Scope:    db.KeyScopeBIP0084,
-				OldName:  nonExistentName,
-				NewName:  "new-name",
+				Scope:   db.KeyScopeBIP0084,
+				OldName: "nonexistent",
+				NewName: "new-name",
 			},
 			wantErr: db.ErrAccountNotFound,
 		},
 		{
 			name: "invalid - both set",
 			params: db.RenameAccountParams{
-				WalletID:      walletID,
-				Scope:         db.KeyScopeBIP0084,
-				OldName:       nonExistentName,
-				AccountNumber: &nonExistentNum,
-				NewName:       "new-name",
+				Scope:   db.KeyScopeBIP0084,
+				OldName: "nonexistent",
+				NewName: "new-name",
 			},
 			wantErr: db.ErrInvalidAccountQuery,
 		},
 		{
 			name: "invalid - neither set",
 			params: db.RenameAccountParams{
-				WalletID: walletID,
-				Scope:    db.KeyScopeBIP0084,
-				NewName:  "new-name",
+				Scope:   db.KeyScopeBIP0084,
+				NewName: "new-name",
 			},
 			wantErr: db.ErrInvalidAccountQuery,
 		},
 		{
 			name: "invalid - empty new name",
 			params: db.RenameAccountParams{
-				WalletID: walletID,
-				Scope:    db.KeyScopeBIP0084,
-				OldName:  nonExistentName,
-				NewName:  "",
+				Scope:   db.KeyScopeBIP0084,
+				OldName: "nonexistent",
+				NewName: "",
 			},
 			wantErr: db.ErrMissingAccountName,
 		},
@@ -664,6 +655,16 @@ func TestRenameAccountErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "wallet-rename-account-errors")
+			createAllAccounts(t, store, walletID)
+			tc.params.WalletID = walletID
+
+			if tc.name == "invalid - both set" {
+				num := uint32(99999)
+				tc.params.AccountNumber = &num
+			}
 
 			err := store.RenameAccount(t.Context(), tc.params)
 			require.ErrorIs(t, err, tc.wantErr)
