@@ -33,7 +33,6 @@ func TestListAddressTypes(t *testing.T) {
 
 func TestGetAddressType(t *testing.T) {
 	t.Parallel()
-	store := NewTestStore(t)
 
 	tests := []struct {
 		id         db.AddressType
@@ -118,6 +117,8 @@ func TestGetAddressType(t *testing.T) {
 
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
+
+			store := NewTestStore(t)
 
 			got, err := store.GetAddressType(t.Context(), tc.id)
 
