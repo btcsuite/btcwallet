@@ -100,8 +100,8 @@ func TestCreateWallet_Variants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store := NewTestStore(t)
 			params := tc.params(tc.name)
+			store := NewTestStore(t)
 
 			info, err := store.CreateWallet(t.Context(), params)
 			require.NoError(t, err)
