@@ -347,6 +347,45 @@ func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendBy
 	return spent_by_tx_id, err
 }
 
+const HasInvalidWalletUtxoByOutpoint = `-- name: HasInvalidWalletUtxoByOutpoint :one
+SELECT exists(
+    SELECT 1
+    FROM utxos AS u
+    INNER JOIN transactions AS t
+        ON u.tx_id = t.id
+    WHERE
+        t.wallet_id = $1
+        AND t.tx_hash = $2
+        AND u.output_index = $3
+        AND t.tx_status NOT IN (0, 1)
+) AS has_invalid
+`
+
+type HasInvalidWalletUtxoByOutpointParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int32
+}
+
+// Reports whether an outpoint belongs to a wallet-owned UTXO whose parent
+// transaction is already invalid.
+//
+// How:
+//   - Resolves the parent transaction row from `(wallet_id, tx_hash)` and checks
+//     for any status outside `pending`/`published`.
+//   - Exists so CreateTx can reject children of wallet-owned outputs whose
+//     parent transaction is already invalid.
+//
+// Performance:
+//   - Targets one wallet-scoped outpoint through the parent tx lookup plus the
+//     unique `(tx_id, output_index)` key.
+func (q *Queries) HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error) {
+	row := q.queryRow(ctx, q.hasInvalidWalletUtxoByOutpointStmt, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var has_invalid bool
+	err := row.Scan(&has_invalid)
+	return has_invalid, err
+}
+
 const InsertUtxo = `-- name: InsertUtxo :one
 INSERT INTO utxos (
     tx_id,
