@@ -27,6 +27,16 @@ var (
 	// ErrDuplicateInputOutPoint is returned when CreateTx receives the same
 	// previous outpoint more than once.
 	ErrDuplicateInputOutPoint = errors.New("duplicate input outpoint")
+
+	// ErrDeleteRequiresUnmined indicates that DeleteTx only accepts unmined
+	// transactions.
+	ErrDeleteRequiresUnmined = errors.New(
+		"delete requires an unmined transaction",
+	)
+
+	// ErrDeleteRequiresLeaf indicates that DeleteTx only accepts unmined
+	// transactions with no child spenders.
+	ErrDeleteRequiresLeaf = errors.New("delete requires a leaf transaction")
 )
 
 // serializeMsgTx serializes a wire.MsgTx so it can be stored in the
@@ -459,4 +469,181 @@ func updateTxWithOps(ctx context.Context, params UpdateTxParams,
 	}
 
 	return nil
+}
+
+// deleteTxOps is the minimal backend adapter the shared DeleteTx workflow
+// needs.
+//
+// The shared delete sequence is:
+//   - load and validate the target unmined row
+//   - reject deletes that would orphan direct child spenders
+//   - restore any wallet-owned parents the tx had marked spent
+//   - delete wallet-owned outputs created by the tx itself
+//   - delete the transaction row last
+//
+// DeleteTx is the ordinary leaf-cleanup path, not the invalidation path. The
+// shared helper therefore proves the leaf invariant first and only then unwinds
+// the wallet-owned state that points at the target row.
+type deleteTxOps interface {
+	// loadDeleteTarget returns the row ID of the unmined transaction
+	// DeleteTx is allowed to remove.
+	loadDeleteTarget(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (int64, error)
+
+	// ensureLeaf rejects DeleteTx when the target still has direct
+	// unmined child spenders.
+	ensureLeaf(ctx context.Context, walletID uint32, txHash chainhash.Hash,
+		txID int64) error
+
+	// clearSpentUtxos restores any wallet-owned parent outputs the
+	// transaction had marked spent.
+	clearSpentUtxos(ctx context.Context, walletID uint32, txID int64) error
+
+	// deleteCreatedUtxos removes any wallet-owned outputs created by the
+	// transaction being deleted.
+	deleteCreatedUtxos(ctx context.Context, walletID uint32, txID int64) error
+
+	// deleteUnminedTransaction removes the target row after its dependent
+	// wallet state has been cleaned up.
+	deleteUnminedTransaction(ctx context.Context, walletID uint32,
+		txHash chainhash.Hash) (int64, error)
+}
+
+// deleteTxWithOps runs the shared DeleteTx sequence inside a backend-specific
+// SQL transaction.
+//
+// The helper restores wallet-owned parent state before deleting created wallet
+// outputs and only removes the transaction row last, so a failed delete cannot
+// leave partial wallet bookkeeping behind.
+func deleteTxWithOps(ctx context.Context, params DeleteTxParams,
+	ops deleteTxOps) error {
+
+	txID, err := ops.loadDeleteTarget(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("load delete tx target: %w", err)
+	}
+
+	err = ops.ensureLeaf(ctx, params.WalletID, params.Txid, txID)
+	if err != nil {
+		return fmt.Errorf("check delete tx leaf: %w", err)
+	}
+
+	err = ops.clearSpentUtxos(ctx, params.WalletID, txID)
+	if err != nil {
+		return fmt.Errorf("clear spent utxos: %w", err)
+	}
+
+	err = ops.deleteCreatedUtxos(ctx, params.WalletID, txID)
+	if err != nil {
+		return fmt.Errorf("delete created utxos: %w", err)
+	}
+
+	rows, err := ops.deleteUnminedTransaction(ctx, params.WalletID, params.Txid)
+	if err != nil {
+		return fmt.Errorf("delete unmined tx: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("tx %s: %w", params.Txid, ErrTxNotFound)
+	}
+
+	return nil
+}
+
+// unminedTxRecord is the decoded view of one unmined transaction row used by
+// shared descendant checks.
+type unminedTxRecord struct {
+	id   int64
+	hash chainhash.Hash
+	tx   *wire.MsgTx
+}
+
+// extractUnminedTxFn projects one backend-specific unmined transaction row into
+// the shared `(id, tx_hash, raw_tx)` shape used by the invalidation walk.
+type extractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
+
+// newUnminedTxRecord decodes one normalized unmined transaction row into the
+// shared dependency-walk shape.
+func newUnminedTxRecord(id int64, hash []byte,
+	rawTx []byte) (unminedTxRecord, error) {
+
+	txHash, err := chainhash.NewHash(hash)
+	if err != nil {
+		return unminedTxRecord{}, fmt.Errorf("tx hash: %w", err)
+	}
+
+	tx, err := deserializeMsgTx(rawTx)
+	if err != nil {
+		return unminedTxRecord{}, err
+	}
+
+	return unminedTxRecord{id: id, hash: *txHash, tx: tx}, nil
+}
+
+// buildUnminedTxRecords decodes backend-specific unmined transaction rows into
+// the shared dependency-walk shape.
+func buildUnminedTxRecords[T any](rows []T,
+	extract extractUnminedTxFn[T]) ([]unminedTxRecord, error) {
+
+	records := make([]unminedTxRecord, 0, len(rows))
+	for _, row := range rows {
+		id, hash, rawTx := extract(row)
+
+		record, err := newUnminedTxRecord(id, hash, rawTx)
+		if err != nil {
+			return nil, fmt.Errorf("decode unmined tx %d: %w", id, err)
+		}
+
+		records = append(records, record)
+	}
+
+	return records, nil
+}
+
+// collectDirectChildTxIDs returns the IDs of unmined transactions that directly
+// spend any output created by the provided parent hash.
+func collectDirectChildTxIDs(parentHash chainhash.Hash,
+	candidates []unminedTxRecord) []int64 {
+
+	parentHashes := map[chainhash.Hash]struct{}{
+		parentHash: {},
+	}
+
+	childIDs := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		if txSpendsAnyParent(candidate.tx, parentHashes) {
+			childIDs = append(childIDs, candidate.id)
+		}
+	}
+
+	return childIDs
+}
+
+// txSpendsAnyParent reports whether the transaction spends any hash in the
+// provided parent set.
+func txSpendsAnyParent(tx *wire.MsgTx,
+	parentHashes map[chainhash.Hash]struct{}) bool {
+
+	for _, txIn := range tx.TxIn {
+		if _, ok := parentHashes[txIn.PreviousOutPoint.Hash]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isUnminedStatus reports whether a status still represents an unmined
+// transaction that DeleteTx may erase.
+func isUnminedStatus(status TxStatus) bool {
+	switch status {
+	case TxStatusPending, TxStatusPublished:
+		return true
+
+	case TxStatusReplaced, TxStatusFailed, TxStatusOrphaned:
+		return false
+
+	default:
+		return false
+	}
 }
