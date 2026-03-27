@@ -1613,6 +1613,64 @@ func TestListLeasedOutputsExcludesReleasedLease(t *testing.T) {
 	require.Empty(t, leases)
 }
 
+// TestBalanceReturnsTotalAndLocked verifies that Balance returns the filtered
+// total UTXO value together with the locked subset covered by active leases.
+func TestBalanceReturnsTotalAndLocked(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-balance")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	txOne := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 24000, PkScript: addr.ScriptPubKey}},
+	)
+	txTwo := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 26000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txOne,
+		Received: time.Unix(1710002300, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txTwo,
+		Received: time.Unix(1710002310, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	leaseID := RandomHash()
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		ID:       leaseID,
+		OutPoint: wire.OutPoint{Hash: txOne.TxHash(), Index: 0},
+		Duration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	balance, err := store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(50000), balance.Total)
+	require.Equal(t, btcutil.Amount(24000), balance.Locked)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
