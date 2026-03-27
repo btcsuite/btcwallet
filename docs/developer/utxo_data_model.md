@@ -2,6 +2,8 @@
 
 This document defines the core data model, state machines, and design philosophy of the `btcwallet` transaction subsystem. It serves as the definitive reference for understanding how the wallet manages money, history, and state.
 
+For the exact write-path rules that apply transaction ingress, invalidation, and rollback to the stored graph, see [Transaction Invalidation Flows](./tx_invalidation_flows.md).
+
 ## 1. Design Philosophy
 
 The `btcwallet` architecture is built upon a specific worldview: **The wallet is a UTXO Manager.**
