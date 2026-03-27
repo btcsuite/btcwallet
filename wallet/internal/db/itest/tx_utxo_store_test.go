@@ -301,6 +301,78 @@ func TestCreateTxRejectsDuplicateTx(t *testing.T) {
 	require.True(t, ok)
 }
 
+// TestGetTxReturnsStoredPendingTx verifies that GetTx rebuilds the public
+// transaction view for one stored unmined row.
+//
+// Scenario:
+//   - One pending wallet transaction has already been inserted.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row.
+//
+// Action:
+//   - Retrieve the transaction through GetTx.
+//
+// Assertions:
+//   - GetTx returns the stored hash, status, label, and nil block metadata.
+func TestGetTxReturnsStoredPendingTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-get-tx")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000600, 0),
+		Status:   db.TxStatusPending,
+		Label:    "pending-note",
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, tx.TxHash(), info.Hash)
+	require.Equal(t, db.TxStatusPending, info.Status)
+	require.Equal(t, "pending-note", info.Label)
+	require.Nil(t, info.Block)
+}
+
+// TestGetTxNotFound verifies that GetTx returns ErrTxNotFound when the wallet
+// has no matching transaction row.
+//
+// Scenario:
+//   - One wallet has no stored transaction for the requested hash.
+//
+// Setup:
+//   - Create one wallet and choose one random transaction hash.
+//
+// Action:
+//   - Query the missing hash through GetTx.
+//
+// Assertions:
+//   - GetTx returns ErrTxNotFound.
+func TestGetTxNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-get-tx-missing")
+
+	_, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     RandomHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
