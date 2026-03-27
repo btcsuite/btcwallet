@@ -1,7 +1,7 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -23,6 +23,10 @@ var (
 	// ErrOutputUnlockNotAllowed reports that a UTXO release request used a lock
 	// ID different from the active lease.
 	ErrOutputUnlockNotAllowed = errors.New("output unlock not allowed")
+
+	// errLeaseOutputNoRow indicates that the backend lease write found no
+	// leasable current UTXO row for the requested outpoint.
+	errLeaseOutputNoRow = errors.New("lease output no row")
 )
 
 // buildOutPoint converts database tx-hash and output-index fields into a
@@ -86,42 +90,71 @@ func buildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
 	}, nil
 }
 
-// optionalUint32Int64 converts an optional uint32 filter into the nullable any
-// form used by sqlite sqlc queries.
-func optionalUint32Int64(value *uint32) any {
-	if value == nil {
-		return nil
-	}
+// leaseOutputOps is the backend adapter the shared LeaseOutput workflow uses.
+//
+// The shared lease algorithm is intentionally ordered:
+//   - validate the public lease request up front
+//   - attempt the atomic lease write or renewal next
+//   - if the write reports no row, distinguish a missing UTXO from an active
+//     conflicting lease
+//   - return the public leased-output view only after the write succeeds
+//
+// The adapter methods map directly to those stages so the shared helper keeps
+// the policy and sequencing while each backend keeps only query details.
+type leaseOutputOps interface {
+	// acquire attempts to write or renew the lease and returns the stored
+	// expiration timestamp when the write succeeds.
+	acquire(ctx context.Context, params LeaseOutputParams, nowUTC time.Time,
+		expiresAt time.Time) (time.Time, error)
 
-	return int64(*value)
+	// hasUtxo reports whether the requested outpoint still exists as a current
+	// wallet-owned UTXO.
+	hasUtxo(ctx context.Context, params LeaseOutputParams) (bool, error)
 }
 
-// optionalInt32 converts an optional int32 filter into the nullable any form
-// used by sqlite sqlc queries.
-func optionalInt32(value *int32) any {
-	if value == nil {
-		return nil
+// leaseOutputWithOps runs the backend-independent LeaseOutput workflow once the
+// caller has opened a backend-specific SQL transaction.
+//
+// The helper owns the lease sequencing so every backend answers the same two
+// questions in the same order: did the lease write succeed, and if not, was the
+// target output missing or merely already leased by a different lock?
+func leaseOutputWithOps(ctx context.Context, params LeaseOutputParams,
+	ops leaseOutputOps) (*LeasedOutput, error) {
+
+	if params.Duration <= 0 {
+		return nil, fmt.Errorf("%w: lease duration must be positive",
+			ErrInvalidParam)
 	}
 
-	return *value
-}
+	nowUTC := time.Now().UTC()
+	expiresAt := nowUTC.Add(params.Duration)
 
-// nullableUint32Int64 converts an optional uint32 filter into the typed null
-// form used by postgres sqlc queries.
-func nullableUint32Int64(value *uint32) sql.NullInt64 {
-	if value == nil {
-		return sql.NullInt64{}
+	expiration, err := ops.acquire(ctx, params, nowUTC, expiresAt)
+	if err == nil {
+		return &LeasedOutput{
+			OutPoint:   params.OutPoint,
+			LockID:     LockID(params.ID),
+			Expiration: expiration.UTC(),
+		}, nil
 	}
 
-	return sql.NullInt64{Int64: int64(*value), Valid: true}
-}
-
-// nullableInt32 converts an optional int32 filter into the typed null form
-// used by postgres sqlc queries.
-func nullableInt32(value *int32) sql.NullInt32 {
-	if value == nil {
-		return sql.NullInt32{}
+	if !errors.Is(err, errLeaseOutputNoRow) {
+		return nil, fmt.Errorf("acquire utxo lease: %w", err)
 	}
 
-	return sql.NullInt32{Int32: *value, Valid: true}
+	// A no-row acquire means the write path found no leasable row.
+	// Distinguish a missing UTXO from an already-active lease before
+	// returning a public error.
+	exists, err := ops.hasUtxo(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("lookup utxo before lease conflict: %w", err)
+	}
+
+	if !exists {
+		return nil, fmt.Errorf("utxo %s: %w", params.OutPoint,
+			ErrUtxoNotFound)
+	}
+
+	return nil, fmt.Errorf("utxo %s: %w", params.OutPoint,
+		ErrOutputAlreadyLeased)
 }
