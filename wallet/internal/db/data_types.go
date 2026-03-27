@@ -743,7 +743,7 @@ const (
 	// caller whether the transaction is mined. Keeping both under
 	// TxStatusPublished avoids contradictory combinations such as
 	// "confirmed but not published" and keeps this field focused on whether the
-	// wallet still treats the transaction as live.
+	// wallet still treats the transaction as valid.
 	TxStatusPublished
 
 	// TxStatusReplaced indicates a transaction that was invalidated by a
@@ -945,9 +945,16 @@ type ListTxnsQuery struct {
 	// EndHeight is the ending block height for the query.
 	EndHeight uint32
 
-	// UnminedOnly, if true, will return only unmined (unconfirmed)
-	// transactions. If this is set, StartHeight and EndHeight will be
-	// ignored.
+	// UnminedOnly, if true, switches ListTxns onto the dedicated no-confirming-
+	// block read path.
+	//
+	// This path returns the active unmined set together with retained invalid
+	// history rows that also no longer have a confirming block, such as
+	// orphaned or failed transactions after rollback.
+	//
+	// This is not equivalent to using zero confirmations. The confirmed
+	// height-range query cannot express "only rows with no block", so
+	// StartHeight and EndHeight are ignored when this flag is set.
 	UnminedOnly bool
 }
 
@@ -1071,7 +1078,7 @@ type LeasedOutput struct {
 // BalanceResult represents one wallet-scoped balance view after applying the
 // requested filters.
 type BalanceResult struct {
-	// Total is the sum of every matching live UTXO, including leased outputs.
+	// Total is the sum of every matching UTXO, including leased outputs.
 	Total btcutil.Amount
 
 	// Locked is the subset of Total currently covered by active output leases.
