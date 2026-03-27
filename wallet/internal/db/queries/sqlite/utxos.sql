@@ -39,7 +39,7 @@ RETURNING id;
 -- - Joins transactions on `id` so callers can address a UTXO by
 --   network outpoint (`tx_hash`, `output_index`) instead of the internal row ID.
 -- - Restricts the result to unspent outputs whose parent transaction is still
---   in a live state (`pending` or `published`).
+--   `pending` or `published`.
 -- - Rejoins addresses -> accounts -> key_scopes so helper lookups do not return
 --   rows whose credited address does not actually belong to the wallet.
 -- - Exists separately from GetUtxoByOutpoint because mutation helpers often
@@ -72,8 +72,8 @@ WHERE
 --   the credited address belongs to the requested wallet.
 -- - Returns leased and unleased outputs alike because leasing affects coin
 --   selection, not whether the UTXO exists.
--- - Treats outputs from both live unconfirmed parent states (`pending` and
---   `published`) as part of the wallet's current UTXO set.
+-- - Treats outputs from unmined `pending` and `published` parent transactions
+--   as part of the wallet's current UTXO set.
 -- Performance:
 -- - The wallet-scoped tx hash lookup and unique outpoint constraint keep the
 --   join fanout to at most one candidate output.
@@ -109,8 +109,8 @@ WHERE
 --   ownership checks happen in the same read.
 -- - Returns leased outputs too because the API models leases separately from
 --   UTXO existence.
--- - Includes outputs whose parent transaction is still in a live unconfirmed
---   state (`pending` or `published`).
+-- - Includes outputs whose parent transaction is still in `pending` or
+--   `published` status.
 -- - Intentionally does not enforce coinbase maturity because this query models
 --   wallet-owned UTXO existence rather than a strictly spendable subset.
 -- Performance:
@@ -182,7 +182,8 @@ ORDER BY u.amount, t.tx_hash, u.output_index;
 -- - Returns both the total matching value and the locked subset covered by
 --   active leases after the same filters are applied.
 -- Performance:
--- - Executes as one aggregate over wallet-scoped live outputs.
+-- - Executes as one aggregate over wallet-scoped outputs whose parent
+--   transaction is still `pending` or `published`.
 -- - Uses a filtered aggregate over active leases rather than issuing a second
 --   query for the locked subset.
 -- - Uses the address/account/scope joins to keep ownership validation and
@@ -289,7 +290,7 @@ ORDER BY u.spent_by_tx_id;
 -- - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
 --   considers outputs whose parent status is `pending` or `published`.
 -- - Returns the nullable `spent_by_tx_id` column so callers can distinguish
---   between an external/dead parent and a wallet-owned conflict.
+--   between an external/unknown parent and a wallet-owned conflict.
 -- Performance:
 -- - Targets one wallet-scoped outpoint through the unique `(tx_id,
 --   output_index)` key after the parent hash lookup.

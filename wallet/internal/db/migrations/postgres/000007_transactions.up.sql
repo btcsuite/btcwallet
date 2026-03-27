@@ -83,7 +83,7 @@ CREATE TABLE transactions (
 
     -- A transaction attached to a block is treated as confirmed wallet history.
     -- For confirmed rows, the only valid status is `published`; every other
-    -- status represents either blockless local state or disconnected history.
+    -- status represents either unmined local state or disconnected history.
     CONSTRAINT check_confirmed_published CHECK (
         block_height IS NULL OR tx_status = 1
     ),
@@ -103,19 +103,19 @@ CREATE TABLE transactions (
     )
 );
 
--- Optimization for live unconfirmed transaction lookups.
+-- Optimization for unmined pending/published transaction lookups.
 CREATE INDEX idx_transactions_unconfirmed
 ON transactions (wallet_id, block_height)
 WHERE block_height IS NULL AND tx_status IN (0, 1);
 
--- Optimization for wallet-scoped joins into the live transaction set.
+-- Optimization for wallet-scoped joins into pending/published transactions.
 CREATE INDEX idx_transactions_live_by_wallet
 ON transactions (wallet_id, id)
 WHERE tx_status IN (0, 1);
 
--- Optimization for wallet-scoped blockless history reads ordered by newest
+-- Optimization for wallet-scoped unmined history reads ordered by newest
 -- receive time first.
-CREATE INDEX idx_transactions_blockless_history
+CREATE INDEX idx_transactions_unmined_history
 ON transactions (wallet_id, received_time DESC, id DESC)
 WHERE block_height IS NULL;
 
