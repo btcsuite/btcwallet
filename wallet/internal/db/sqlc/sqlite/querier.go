@@ -18,7 +18,7 @@ type Querier interface {
 	// - Resolves the outpoint to a current UTXO row and writes the lease in the
 	//   same statement.
 	// - Rechecks that the outpoint is still unspent and its parent transaction is
-	//   still in a live state (`pending` or `published`) at write time.
+	//   still in `pending` or `published` status at write time.
 	// - Uses one `INSERT .. ON CONFLICT DO UPDATE` statement so creation, renewal,
 	//   and expired-lease takeover all happen atomically.
 	// Lease semantics:
@@ -48,7 +48,8 @@ type Querier interface {
 	// - Returns both the total matching value and the locked subset covered by
 	//   active leases after the same filters are applied.
 	// Performance:
-	// - Executes as one aggregate over wallet-scoped live outputs.
+	// - Executes as one aggregate over wallet-scoped outputs whose parent
+	//   transaction is still `pending` or `published`.
 	// - Uses a filtered aggregate over active leases rather than issuing a second
 	//   query for the locked subset.
 	// - Uses the address/account/scope joins to keep ownership validation and
@@ -122,7 +123,7 @@ type Querier interface {
 	//
 	// How:
 	// - Deletes only rows whose `block_height` is still NULL and whose status is
-	//   still in a live unconfirmed state (`pending` or `published`).
+	//   still unmined `pending` or `published`.
 	// - Preserves orphaned/replaced/failed history; those rows must remain visible
 	//   for audit/reorg handling instead of being treated as ordinary mempool data.
 	// - The caller must delete or restore dependent UTXO rows first.
@@ -205,8 +206,8 @@ type Querier interface {
 	//   the credited address belongs to the requested wallet.
 	// - Returns leased and unleased outputs alike because leasing affects coin
 	//   selection, not whether the UTXO exists.
-	// - Treats outputs from both live unconfirmed parent states (`pending` and
-	//   `published`) as part of the wallet's current UTXO set.
+	// - Treats outputs from unmined `pending` and `published` parent transactions
+	//   as part of the wallet's current UTXO set.
 	// Performance:
 	// - The wallet-scoped tx hash lookup and unique outpoint constraint keep the
 	//   join fanout to at most one candidate output.
@@ -217,7 +218,7 @@ type Querier interface {
 	// - Joins transactions on `id` so callers can address a UTXO by
 	//   network outpoint (`tx_hash`, `output_index`) instead of the internal row ID.
 	// - Restricts the result to unspent outputs whose parent transaction is still
-	//   in a live state (`pending` or `published`).
+	//   `pending` or `published`.
 	// - Rejoins addresses -> accounts -> key_scopes so helper lookups do not return
 	//   rows whose credited address does not actually belong to the wallet.
 	// - Exists separately from GetUtxoByOutpoint because mutation helpers often
@@ -233,7 +234,7 @@ type Querier interface {
 	// - Resolves the parent transaction row from `(wallet_id, tx_hash)` and only
 	//   considers outputs whose parent status is `pending` or `published`.
 	// - Returns the nullable `spent_by_tx_id` column so callers can distinguish
-	//   between an external/dead parent and a wallet-owned conflict.
+	//   between an external/unknown parent and a wallet-owned conflict.
 	// Performance:
 	// - Targets one wallet-scoped outpoint through the unique `(tx_id,
 	//   output_index)` key after the parent hash lookup.
@@ -314,7 +315,7 @@ type Querier interface {
 	//   can be returned as network outpoints.
 	// - Filters out expired rows using the caller-supplied UTC timestamp.
 	// - Restricts the result to outputs that are still unspent and whose parent
-	//   transaction is still in a live state (`pending` or `published`).
+	//   transaction is still in `pending` or `published` status.
 	// Performance:
 	// - Restricts first by wallet and expiration, then joins only the surviving
 	//   lease rows back to utxos/transactions.
@@ -373,7 +374,7 @@ type Querier interface {
 	// How:
 	// - Reads only confirmed coinbase rows at or above the rollback boundary.
 	// - Returns wallet scope alongside each tx hash so callers can treat these
-	//   coinbase transactions as rollback roots when invalidating now-dead
+	//   coinbase transactions as rollback roots when invalidating now-invalid
 	//   descendants inside the same rollback transaction.
 	// - This is a rollback-specific helper, not a generic "coinbase txs from one
 	//   block" listing query.
@@ -401,17 +402,18 @@ type Querier interface {
 	// - The `(wallet_id, block_height)` index bounds the scan before the single-row
 	//   block join.
 	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
-	// Lists all unconfirmed transactions for a wallet.
+	// Lists the wallet transactions that still belong to the active unmined set.
 	//
 	// How:
-	// - Reads from transactions only and filters on blockless rows that are still
-	//   in a live unconfirmed state (`pending` or `published`).
-	// - Excludes orphaned/replaced/failed history so rollback-produced coinbase
-	//   rows do not reappear as mempool transactions.
+	// - Reads from transactions only and filters on unmined rows that are still
+	//   in unmined `pending` or `published` status.
+	// - Excludes orphaned/replaced/failed history so delete and rollback logic do
+	//   not treat retained invalid rows as active mempool spends.
 	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
-	//   so the unmined row shape stays aligned with the confirmed query below.
+	//   so sqlc preserves the nullable block columns while the row shape stays
+	//   aligned with other transaction queries.
 	// Performance:
-	// - Matches the dedicated blockless-history index while the more selective
+	// - Matches the dedicated unmined-history index while the more selective
 	//   live-only partial index stays available for conflict paths.
 	ListUnminedTransactions(ctx context.Context, walletID int64) ([]ListUnminedTransactionsRow, error)
 	// Lists unspent UTXOs that match the provided filters.
@@ -424,8 +426,8 @@ type Querier interface {
 	//   ownership checks happen in the same read.
 	// - Returns leased outputs too because the API models leases separately from
 	//   UTXO existence.
-	// - Includes outputs whose parent transaction is still in a live unconfirmed
-	//   state (`pending` or `published`).
+	// - Includes outputs whose parent transaction is still in `pending` or
+	//   `published` status.
 	// - Intentionally does not enforce coinbase maturity because this query models
 	//   wallet-owned UTXO existence rather than a strictly spendable subset.
 	// Performance:
