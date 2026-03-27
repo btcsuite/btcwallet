@@ -222,6 +222,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listTransactionsByHeightRangeStmt, err = db.PrepareContext(ctx, ListTransactionsByHeightRange); err != nil {
 		return nil, fmt.Errorf("error preparing query ListTransactionsByHeightRange: %w", err)
 	}
+	if q.listTransactionsWithoutBlockStmt, err = db.PrepareContext(ctx, ListTransactionsWithoutBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query ListTransactionsWithoutBlock: %w", err)
+	}
 	if q.listUnminedTransactionsStmt, err = db.PrepareContext(ctx, ListUnminedTransactions); err != nil {
 		return nil, fmt.Errorf("error preparing query ListUnminedTransactions: %w", err)
 	}
@@ -596,6 +599,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listTransactionsByHeightRangeStmt: %w", cerr)
 		}
 	}
+	if q.listTransactionsWithoutBlockStmt != nil {
+		if cerr := q.listTransactionsWithoutBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listTransactionsWithoutBlockStmt: %w", cerr)
+		}
+	}
 	if q.listUnminedTransactionsStmt != nil {
 		if cerr := q.listUnminedTransactionsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listUnminedTransactionsStmt: %w", cerr)
@@ -766,6 +774,7 @@ type Queries struct {
 	listRollbackCoinbaseRootsStmt               *sql.Stmt
 	listSpendingTxIDsByParentTxIDStmt           *sql.Stmt
 	listTransactionsByHeightRangeStmt           *sql.Stmt
+	listTransactionsWithoutBlockStmt            *sql.Stmt
 	listUnminedTransactionsStmt                 *sql.Stmt
 	listUtxosStmt                               *sql.Stmt
 	listWalletsStmt                             *sql.Stmt
@@ -851,6 +860,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listRollbackCoinbaseRootsStmt:               q.listRollbackCoinbaseRootsStmt,
 		listSpendingTxIDsByParentTxIDStmt:           q.listSpendingTxIDsByParentTxIDStmt,
 		listTransactionsByHeightRangeStmt:           q.listTransactionsByHeightRangeStmt,
+		listTransactionsWithoutBlockStmt:            q.listTransactionsWithoutBlockStmt,
 		listUnminedTransactionsStmt:                 q.listUnminedTransactionsStmt,
 		listUtxosStmt:                               q.listUtxosStmt,
 		listWalletsStmt:                             q.listWalletsStmt,
