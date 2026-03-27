@@ -462,3 +462,102 @@ func testCreateTxRequest(t *testing.T) createTxRequest {
 
 	return req
 }
+
+// TestUpdateTxWithOpsLabelAndState verifies that the shared UpdateTx workflow
+// can apply both a label patch and a state patch in one atomic sequence.
+func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one request with both a label patch and a state patch.
+	label := "note"
+	params := UpdateTxParams{
+		WalletID: 5,
+		Txid:     chainhash.Hash{1},
+		Label:    &label,
+		State: &UpdateTxState{
+			Status: TxStatusPublished,
+		},
+	}
+	ops := &stubUpdateTxOps{isCoinbase: false}
+
+	// Act: Run updateTxWithOps against a stub backend adapter.
+	err := updateTxWithOps(context.Background(), params, ops)
+	require.NoError(t, err)
+
+	// Assert: The shared flow loads, prepares, and applies both patches.
+	require.Equal(t,
+		[]string{"load", "prepare-state", "label", "state"},
+		ops.calls,
+	)
+	require.Equal(t, label, ops.updatedLabel)
+	require.Equal(t, TxStatusPublished, ops.updatedState.Status)
+}
+
+// TestUpdateTxWithOpsEmptyPatch verifies that the shared UpdateTx helper
+// rejects requests that do not ask to mutate any field.
+func TestUpdateTxWithOpsEmptyPatch(t *testing.T) {
+	t.Parallel()
+
+	params := UpdateTxParams{
+		WalletID: 5,
+		Txid:     chainhash.Hash{1},
+	}
+	ops := &stubUpdateTxOps{isCoinbase: false}
+
+	err := updateTxWithOps(context.Background(), params, ops)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.Equal(t, []string{"load"}, ops.calls)
+}
+
+// stubUpdateTxOps records how the shared UpdateTx helper drives one backend
+// adapter while letting tests control the loaded metadata.
+type stubUpdateTxOps struct {
+	isCoinbase   bool
+	calls        []string
+	updatedLabel string
+	updatedState UpdateTxState
+}
+
+var _ updateTxOps = (*stubUpdateTxOps)(nil)
+
+// loadIsCoinbase records that the shared flow loaded the existing transaction
+// row metadata.
+func (s *stubUpdateTxOps) loadIsCoinbase(_ context.Context, _ uint32,
+	_ chainhash.Hash) (bool, error) {
+
+	s.calls = append(s.calls, "load")
+
+	return s.isCoinbase, nil
+}
+
+// prepareState records that the shared flow validated and prepared one state
+// patch before applying it.
+func (s *stubUpdateTxOps) prepareState(_ context.Context,
+	_ UpdateTxState) error {
+
+	s.calls = append(s.calls, "prepare-state")
+
+	return nil
+}
+
+// updateLabel records the label value the shared flow asked the backend to
+// write.
+func (s *stubUpdateTxOps) updateLabel(_ context.Context, _ uint32,
+	_ chainhash.Hash, label string) error {
+
+	s.calls = append(s.calls, "label")
+	s.updatedLabel = label
+
+	return nil
+}
+
+// updateState records the state patch the shared flow asked the backend to
+// write.
+func (s *stubUpdateTxOps) updateState(_ context.Context, _ uint32,
+	_ chainhash.Hash, state UpdateTxState) error {
+
+	s.calls = append(s.calls, "state")
+	s.updatedState = state
+
+	return nil
+}
