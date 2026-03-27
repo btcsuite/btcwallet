@@ -104,6 +104,36 @@ func (o pgRollbackToBlockOps) deleteBlocksAtOrAboveHeight(
 	return nil
 }
 
+// markTxRootsOrphaned rewrites each disconnected coinbase root to the
+// orphaned state once its confirming block has been deleted.
+func (o pgRollbackToBlockOps) markTxRootsOrphaned(ctx context.Context,
+	walletID uint32, rootHashes []chainhash.Hash) error {
+
+	for _, txHash := range rootHashes {
+		// Rollback already removed the confirming block rows.
+		// The remaining coinbase row must therefore clear its
+		// block reference and become orphaned in the same
+		// row-local state patch.
+		rows, err := o.qtx.UpdateTransactionStateByHash(
+			ctx, sqlcpg.UpdateTransactionStateByHashParams{
+				BlockHeight: sql.NullInt32{},
+				Status:      int16(TxStatusOrphaned),
+				WalletID:    int64(walletID),
+				TxHash:      txHash[:],
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("update rollback coinbase state query: %w", err)
+		}
+
+		if rows == 0 {
+			return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		}
+	}
+
+	return nil
+}
+
 // listUnminedTxRecords loads and decodes every unmined transaction row for the
 // wallet so the shared helper can inspect raw inputs for descendant edges.
 func (o pgRollbackToBlockOps) listUnminedTxRecords(

@@ -362,7 +362,10 @@ func checkReuseCreateTx(req createTxRequest,
 	// Coinbase rows only reuse the orphaned state. That path restores the same
 	// coinbase hash after rollback disconnected its previous confirming block.
 	if existing.isCoinbase {
-		return false
+		// Both sides must still be coinbase history, and the existing
+		// row must be the rollback-created orphan that is waiting for a
+		// confirming block again.
+		return req.isCoinbase && existing.status == TxStatusOrphaned
 	}
 
 	// Non-coinbase rows only reuse the current unmined states.
@@ -856,6 +859,11 @@ type rollbackToBlockOps interface {
 	// rollback boundary after sync-state references have been rewound.
 	deleteBlocksAtOrAboveHeight(ctx context.Context, height uint32) error
 
+	// markTxRootsOrphaned rewrites the disconnected coinbase roots to the
+	// orphaned state after their confirming blocks are deleted.
+	markTxRootsOrphaned(ctx context.Context, walletID uint32,
+		rootHashes []chainhash.Hash) error
+
 	// listUnminedTxRecords loads the wallet's current unmined transaction
 	// rows in the normalized shape the descendant walk expects.
 	listUnminedTxRecords(ctx context.Context,
@@ -1017,6 +1025,23 @@ func invalidateRollbackDescendants(ctx context.Context,
 	return nil
 }
 
+// markTxRootsOrphaned rewrites every disconnected coinbase root to the
+// orphaned state before descendant invalidation completes.
+func markTxRootsOrphaned(ctx context.Context,
+	rootHashesByWallet map[uint32][]chainhash.Hash,
+	ops rollbackToBlockOps) error {
+
+	for walletID, rootHashes := range rootHashesByWallet {
+		err := ops.markTxRootsOrphaned(ctx, walletID, rootHashes)
+		if err != nil {
+			return fmt.Errorf("mark rollback coinbase roots orphaned for "+
+				"wallet %d: %w", walletID, err)
+		}
+	}
+
+	return nil
+}
+
 // rollbackToBlockWithOps runs the shared RollbackToBlock sequence inside one
 // backend-specific SQL transaction.
 //
@@ -1039,6 +1064,11 @@ func rollbackToBlockWithOps(ctx context.Context, height uint32,
 	err = ops.deleteBlocksAtOrAboveHeight(ctx, height)
 	if err != nil {
 		return fmt.Errorf("delete blocks at or above height: %w", err)
+	}
+
+	err = markTxRootsOrphaned(ctx, rootHashesByWallet, ops)
+	if err != nil {
+		return err
 	}
 
 	err = invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)

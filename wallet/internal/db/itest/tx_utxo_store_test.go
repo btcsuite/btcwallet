@@ -1280,6 +1280,7 @@ func TestDeleteTxRemovesParentWithFailedChild(t *testing.T) {
 //   - Roll back the block that confirmed the coinbase root.
 //
 // Assertions:
+//   - The disconnected coinbase root becomes orphaned.
 //   - Both unmined descendants become failed.
 //   - The spend edges from the coinbase root and child are cleared.
 func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
@@ -1338,6 +1339,14 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 	err = store.RollbackToBlock(t.Context(), block.Height)
 	require.NoError(t, err)
 
+	coinbaseInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     coinbaseTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusOrphaned, coinbaseInfo.Status)
+	require.Nil(t, coinbaseInfo.Block)
+
 	childInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
 		WalletID: walletID,
 		Txid:     childTx.TxHash(),
@@ -1356,6 +1365,84 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 
 	require.Empty(t, childSpendingTxIDs(t, store, walletID, coinbaseTx.TxHash()))
 	require.Empty(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()))
+}
+
+// TestCreateTxReconfirmsOrphanedCoinbase verifies that CreateTx can restore an
+// orphaned coinbase row to confirmed history when the same coinbase hash later
+// re-enters the best chain.
+//
+// Scenario:
+//   - One wallet already stores one orphaned coinbase transaction after
+//     rollback.
+//
+// Setup:
+//   - Create and confirm one wallet-owned coinbase transaction.
+//   - Roll back the confirming block so the coinbase becomes orphaned.
+//   - Create one new confirming block for the same tx hash.
+//
+// Action:
+//   - Call CreateTx again with the same coinbase transaction and new block.
+//
+// Assertions:
+//   - The existing row becomes confirmed and published again.
+//   - The wallet-owned coinbase output returns to the current UTXO set.
+func TestCreateTxReconfirmsOrphanedCoinbase(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-reconfirm-orphaned-coinbase")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	queries := store.Queries()
+	block := CreateBlockFixture(t, queries, 310)
+	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       coinbaseTx,
+		Received: time.Unix(1710001540, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.RollbackToBlock(t.Context(), block.Height)
+	require.NoError(t, err)
+
+	orphanInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     coinbaseTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusOrphaned, orphanInfo.Status)
+	require.Nil(t, orphanInfo.Block)
+
+	newBlock := CreateBlockFixture(t, queries, 311)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       coinbaseTx,
+		Received: time.Unix(1710001550, 0),
+		Block:    &newBlock,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     coinbaseTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+	require.NotNil(t, info.Block)
+	require.Equal(t, newBlock.Height, info.Block.Height)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: coinbaseTx.TxHash(), Index: 0,
+	}))
 }
 
 // TestGetUtxoReturnsCurrentWalletOutput verifies that GetUtxo returns a stored
