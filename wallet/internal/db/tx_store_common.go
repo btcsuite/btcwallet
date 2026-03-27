@@ -562,6 +562,50 @@ type unminedTxRecord struct {
 // the shared `(id, tx_hash, raw_tx)` shape used by the invalidation walk.
 type extractUnminedTxFn[Row any] func(Row) (int64, []byte, []byte)
 
+// rollbackToBlockOps adapts one SQL backend to the full RollbackToBlock
+// sequence, including sync-state rewinds, block deletion, and descendant
+// invalidation.
+//
+// The shared rollback algorithm is intentionally ordered:
+//   - collect rollback root hashes before block rows are removed
+//   - rewind sync-state heights that still point at the removed blocks
+//   - delete the shared block rows at or above the rollback height
+//   - mark the disconnected coinbase roots orphaned once their confirming
+//     blocks have been removed
+//   - walk the disconnected roots and invalidate dependent descendants
+//
+// The adapter methods map directly to those stages so the shared helper can own
+// the rollback sequencing while the backends keep only query details.
+type rollbackToBlockOps interface {
+	// listRollbackRootHashes returns the coinbase roots disconnected by the
+	// rollback, grouped by wallet for the later descendant walk.
+	listRollbackRootHashes(ctx context.Context,
+		height uint32) (map[uint32]map[chainhash.Hash]struct{}, error)
+
+	// rewindWalletSyncStateHeights clamps wallet sync-state references
+	// below the rollback boundary before block rows are removed.
+	rewindWalletSyncStateHeights(ctx context.Context, height uint32) error
+
+	// deleteBlocksAtOrAboveHeight removes the shared block rows at or above the
+	// rollback boundary after sync-state references have been rewound.
+	deleteBlocksAtOrAboveHeight(ctx context.Context, height uint32) error
+
+	// listUnminedTxRecords loads the wallet's current unmined transaction
+	// rows in the normalized shape the descendant walk expects.
+	listUnminedTxRecords(ctx context.Context,
+		walletID int64) ([]unminedTxRecord, error)
+
+	// clearDescendantSpends removes any wallet-owned spend edges claimed by one
+	// invalid descendant before its status is rewritten.
+	clearDescendantSpends(ctx context.Context, walletID int64,
+		descendantID int64) error
+
+	// markDescendantsFailed batch-marks the discovered descendants as
+	// failed once every dependent spend edge has been cleared.
+	markDescendantsFailed(ctx context.Context, walletID int64,
+		descendantIDs []int64) error
+}
+
 // newUnminedTxRecord decodes one normalized unmined transaction row into the
 // shared dependency-walk shape.
 func newUnminedTxRecord(id int64, hash []byte,
@@ -617,6 +661,116 @@ func collectDirectChildTxIDs(parentHash chainhash.Hash,
 	}
 
 	return childIDs
+}
+
+// collectDescendantTxIDs returns every unmined transaction that depends on any
+// of the provided root hashes, including indirect descendants discovered
+// through newly invalidated child hashes.
+func collectDescendantTxIDs(rootHashes map[chainhash.Hash]struct{},
+	candidates []unminedTxRecord) []int64 {
+
+	invalidHashes := make(map[chainhash.Hash]struct{}, len(rootHashes))
+	for hash := range rootHashes {
+		invalidHashes[hash] = struct{}{}
+	}
+
+	invalidIDs := make(map[int64]struct{}, len(candidates))
+	for changed := true; changed; {
+		changed = false
+
+		for _, candidate := range candidates {
+			if _, ok := invalidIDs[candidate.id]; ok {
+				continue
+			}
+
+			if !txSpendsAnyParent(candidate.tx, invalidHashes) {
+				continue
+			}
+
+			invalidIDs[candidate.id] = struct{}{}
+			invalidHashes[candidate.hash] = struct{}{}
+			changed = true
+		}
+	}
+
+	descendantIDs := make([]int64, 0, len(invalidIDs))
+	for _, candidate := range candidates {
+		if _, ok := invalidIDs[candidate.id]; ok {
+			descendantIDs = append(descendantIDs, candidate.id)
+		}
+	}
+
+	return descendantIDs
+}
+
+// invalidateRollbackDescendants clears spend edges and marks failed every
+// unmined descendant discovered from the provided wallet-scoped rollback roots.
+func invalidateRollbackDescendants(ctx context.Context,
+	rootHashesByWallet map[uint32]map[chainhash.Hash]struct{},
+	ops rollbackToBlockOps) error {
+
+	for walletID, rootHashes := range rootHashesByWallet {
+		walletID64 := int64(walletID)
+
+		candidates, err := ops.listUnminedTxRecords(ctx, walletID64)
+		if err != nil {
+			return fmt.Errorf("list unmined rollback descendants for "+
+				"wallet %d: %w", walletID, err)
+		}
+
+		descendantIDs := collectDescendantTxIDs(rootHashes, candidates)
+		if len(descendantIDs) == 0 {
+			continue
+		}
+
+		for _, descendantID := range descendantIDs {
+			err = ops.clearDescendantSpends(ctx, walletID64, descendantID)
+			if err != nil {
+				return fmt.Errorf("clear rollback descendant spends for "+
+					"wallet %d: %w", walletID, err)
+			}
+		}
+
+		err = ops.markDescendantsFailed(ctx, walletID64, descendantIDs)
+		if err != nil {
+			return fmt.Errorf("mark rollback descendants failed for "+
+				"wallet %d: %w", walletID, err)
+		}
+	}
+
+	return nil
+}
+
+// rollbackToBlockWithOps runs the shared RollbackToBlock sequence inside one
+// backend-specific SQL transaction.
+//
+// The helper rewinds sync-state heights before deleting blocks, then clears and
+// fails any now-invalid unmined descendants rooted in disconnected coinbase
+// history so rollback cannot leave dangling references behind.
+func rollbackToBlockWithOps(ctx context.Context, height uint32,
+	ops rollbackToBlockOps) error {
+
+	rootHashesByWallet, err := ops.listRollbackRootHashes(ctx, height)
+	if err != nil {
+		return fmt.Errorf("list rollback coinbase roots: %w", err)
+	}
+
+	err = ops.rewindWalletSyncStateHeights(ctx, height)
+	if err != nil {
+		return fmt.Errorf("rewind wallet sync state heights: %w", err)
+	}
+
+	err = ops.deleteBlocksAtOrAboveHeight(ctx, height)
+	if err != nil {
+		return fmt.Errorf("delete blocks at or above height: %w", err)
+	}
+
+	err = invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // txSpendsAnyParent reports whether the transaction spends any hash in the
