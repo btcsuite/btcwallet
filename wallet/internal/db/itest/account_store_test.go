@@ -610,6 +610,9 @@ func TestRenameAccount(t *testing.T) {
 func TestRenameAccountErrors(t *testing.T) {
 	t.Parallel()
 
+	accountNumber := uint32(99999)
+	accountPointer := &accountNumber
+
 	tests := []struct {
 		name    string
 		params  db.RenameAccountParams
@@ -627,9 +630,10 @@ func TestRenameAccountErrors(t *testing.T) {
 		{
 			name: "invalid - both set",
 			params: db.RenameAccountParams{
-				Scope:   db.KeyScopeBIP0084,
-				OldName: "nonexistent",
-				NewName: "new-name",
+				Scope:         db.KeyScopeBIP0084,
+				OldName:       "nonexistent",
+				AccountNumber: accountPointer,
+				NewName:       "new-name",
 			},
 			wantErr: db.ErrInvalidAccountQuery,
 		},
@@ -660,11 +664,6 @@ func TestRenameAccountErrors(t *testing.T) {
 			walletID := newWallet(t, store, "wallet-rename-account-errors")
 			createAllAccounts(t, store, walletID)
 			tc.params.WalletID = walletID
-
-			if tc.name == "invalid - both set" {
-				num := uint32(99999)
-				tc.params.AccountNumber = &num
-			}
 
 			err := store.RenameAccount(t.Context(), tc.params)
 			require.ErrorIs(t, err, tc.wantErr)
