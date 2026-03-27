@@ -270,6 +270,96 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 	require.Equal(t, []string{"acquire", "has-utxo"}, ops.calls)
 }
 
+// TestReleaseOutputWithOps verifies that the shared ReleaseOutput helper
+// returns nil when the backend delete removes the matching lease row.
+func TestReleaseOutputWithOps(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one valid release request and one successful stub adapter.
+	params := ReleaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       [32]byte{9},
+	}
+	ops := &stubReleaseOutputOps{
+		lookupUtxoIDResult: 11,
+		releaseRows:        1,
+	}
+
+	// Act: Run the shared ReleaseOutput flow.
+	err := releaseOutputWithOps(context.Background(), params, ops)
+
+	// Assert: The helper stops after the successful delete path.
+	require.NoError(t, err)
+	require.Equal(t, []string{"lookup-utxo", "release"}, ops.calls)
+}
+
+// TestReleaseOutputWithOpsMissingUtxo verifies that the shared ReleaseOutput
+// helper maps a missing current outpoint to ErrUtxoNotFound.
+func TestReleaseOutputWithOpsMissingUtxo(t *testing.T) {
+	t.Parallel()
+
+	params := ReleaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       [32]byte{9},
+	}
+	ops := &stubReleaseOutputOps{
+		lookupUtxoIDErr: errReleaseOutputUtxoNotFound,
+	}
+
+	err := releaseOutputWithOps(context.Background(), params, ops)
+	require.ErrorIs(t, err, ErrUtxoNotFound)
+	require.Equal(t, []string{"lookup-utxo"}, ops.calls)
+}
+
+// TestReleaseOutputWithOpsWrongLock verifies that the shared ReleaseOutput
+// helper maps a different active lock to ErrOutputUnlockNotAllowed.
+func TestReleaseOutputWithOpsWrongLock(t *testing.T) {
+	t.Parallel()
+
+	params := ReleaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       [32]byte{9},
+	}
+	ops := &stubReleaseOutputOps{
+		lookupUtxoIDResult: 11,
+		activeLockIDResult: []byte{1, 2, 3},
+	}
+
+	err := releaseOutputWithOps(context.Background(), params, ops)
+	require.ErrorIs(t, err, ErrOutputUnlockNotAllowed)
+	require.Equal(t,
+		[]string{"lookup-utxo", "release", "active-lock"},
+		ops.calls,
+	)
+}
+
+// TestReleaseOutputWithOpsMissingActiveLease verifies that the shared
+// ReleaseOutput helper treats an already-expired or already-cleared lease as a
+// no-op.
+func TestReleaseOutputWithOpsMissingActiveLease(t *testing.T) {
+	t.Parallel()
+
+	params := ReleaseOutputParams{
+		WalletID: 5,
+		OutPoint: testLeaseOutPoint(),
+		ID:       [32]byte{9},
+	}
+	ops := &stubReleaseOutputOps{
+		lookupUtxoIDResult: 11,
+		activeLockIDErr:    errReleaseOutputNoActiveLease,
+	}
+
+	err := releaseOutputWithOps(context.Background(), params, ops)
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"lookup-utxo", "release", "active-lock"},
+		ops.calls,
+	)
+}
+
 // stubLeaseOutputOps records how the shared LeaseOutput helper drives one
 // backend adapter while letting each test control the returned results.
 type stubLeaseOutputOps struct {
@@ -300,6 +390,51 @@ func (s *stubLeaseOutputOps) hasUtxo(_ context.Context,
 	s.calls = append(s.calls, "has-utxo")
 
 	return s.hasUtxoResult, nil
+}
+
+// stubReleaseOutputOps records how the shared ReleaseOutput helper drives one
+// backend adapter while letting each test control the returned results.
+type stubReleaseOutputOps struct {
+	lookupUtxoIDResult int64
+	lookupUtxoIDErr    error
+	releaseRows        int64
+	releaseErr         error
+	activeLockIDResult []byte
+	activeLockIDErr    error
+
+	calls []string
+}
+
+var _ releaseOutputOps = (*stubReleaseOutputOps)(nil)
+
+// lookupUtxoID records the shared outpoint lookup and returns the test-
+// controlled result.
+func (s *stubReleaseOutputOps) lookupUtxoID(_ context.Context,
+	_ ReleaseOutputParams) (int64, error) {
+
+	s.calls = append(s.calls, "lookup-utxo")
+
+	return s.lookupUtxoIDResult, s.lookupUtxoIDErr
+}
+
+// release records the shared delete attempt and returns the test-controlled row
+// count.
+func (s *stubReleaseOutputOps) release(_ context.Context, _ uint32,
+	_ int64, _ [32]byte) (int64, error) {
+
+	s.calls = append(s.calls, "release")
+
+	return s.releaseRows, s.releaseErr
+}
+
+// activeLockID records the fallback active-lock lookup and returns the test-
+// controlled result.
+func (s *stubReleaseOutputOps) activeLockID(_ context.Context, _ uint32,
+	_ int64, _ time.Time) ([]byte, error) {
+
+	s.calls = append(s.calls, "active-lock")
+
+	return s.activeLockIDResult, s.activeLockIDErr
 }
 
 // testLeaseOutPoint builds one stable outpoint fixture for shared UTXO lease
