@@ -143,25 +143,26 @@ WHERE
     wallet_id = sqlc.arg('wallet_id')
     AND tx_hash = sqlc.arg('tx_hash');
 
--- name: ConfirmUnminedTransactionByHash :execrows
--- Attaches a confirming block to one existing live unmined transaction row.
+-- name: UpdateTransactionStateByHash :execrows
+-- Updates the stored block assignment and wallet-relative status for one
+-- transaction row.
 --
 -- How:
--- - Updates only rows that are still blockless and live (`pending` or
---   `published`).
--- - Leaves user-visible metadata such as labels untouched so confirmation can
---   reuse the original transaction row instead of reinserting it.
+-- - Leaves immutable transaction facts such as `raw_tx`, credits, and spent
+--   inputs untouched.
+-- - Leaves the user-visible label untouched so callers can patch label and
+--   state independently or together inside one SQL transaction.
+-- - Expects callers to validate any required block reference and state
+--   invariants before issuing the update.
 -- Performance:
 -- - Updates at most one row through the wallet-scoped unique tx-hash lookup.
 UPDATE transactions
 SET
-    block_height = sqlc.arg('block_height')::INTEGER,
-    tx_status = 1
+    block_height = sqlc.narg('block_height')::INTEGER,
+    tx_status = sqlc.arg('status')
 WHERE
     wallet_id = sqlc.arg('wallet_id')
-    AND tx_hash = sqlc.arg('tx_hash')
-    AND block_height IS NULL
-    AND tx_status IN (0, 1);
+    AND tx_hash = sqlc.arg('tx_hash');
 
 -- name: UpdateTransactionStatusByIDs :execrows
 -- Updates the wallet-relative status for a set of transaction row IDs.

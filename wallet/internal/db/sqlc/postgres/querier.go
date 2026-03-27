@@ -64,16 +64,6 @@ type Querier interface {
 	// - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
 	//   ownership through the creating transaction.
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
-	// Attaches a confirming block to one existing live unmined transaction row.
-	//
-	// How:
-	// - Updates only rows that are still blockless and live (`pending` or
-	//   `published`).
-	// - Leaves user-visible metadata such as labels untouched so confirmation can
-	//   reuse the original transaction row instead of reinserting it.
-	// Performance:
-	// - Updates at most one row through the wallet-scoped unique tx-hash lookup.
-	ConfirmUnminedTransactionByHash(ctx context.Context, arg ConfirmUnminedTransactionByHashParams) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
 	// Creates a new derived account under the given scope, computing the next
@@ -268,13 +258,15 @@ type Querier interface {
 	//
 	// How:
 	// - Writes only the transactions table.
-	// - Expects the caller to have already resolved wallet scope and any optional
-	//   block reference.
+	// - Expects the caller to have already resolved wallet scope.
+	// - Inserts one row with no confirming block by storing `NULL` in
+	//   `block_height`. Later block assignment belongs to the state-update query
+	//   below.
 	// - Expects the caller to supply the initial status explicitly so unmined rows
 	//   do not have to guess between `pending` and `published`.
 	// Performance:
 	// - Single-row insert. The cost is dominated by the wallet/hash uniqueness
-	//   checks and any optional block foreign-key validation.
+	//   checks.
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
 	// Records a replacement edge between two wallet-scoped transactions.
 	//
@@ -528,6 +520,19 @@ type Querier interface {
 	// Performance:
 	// - Updates at most one row through the wallet-scoped unique tx-hash lookup.
 	UpdateTransactionLabelByHash(ctx context.Context, arg UpdateTransactionLabelByHashParams) (int64, error)
+	// Updates the stored block assignment and wallet-relative status for one
+	// transaction row.
+	//
+	// How:
+	// - Leaves immutable transaction facts such as `raw_tx`, credits, and spent
+	//   inputs untouched.
+	// - Leaves the user-visible label untouched so callers can patch label and
+	//   state independently or together inside one SQL transaction.
+	// - Expects callers to validate any required block reference and state
+	//   invariants before issuing the update.
+	// Performance:
+	// - Updates at most one row through the wallet-scoped unique tx-hash lookup.
+	UpdateTransactionStateByHash(ctx context.Context, arg UpdateTransactionStateByHashParams) (int64, error)
 	// Updates the wallet-relative status for a set of transaction row IDs.
 	//
 	// How:
