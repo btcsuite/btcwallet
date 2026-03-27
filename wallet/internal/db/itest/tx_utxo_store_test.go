@@ -1317,6 +1317,109 @@ func TestListUTXOsFiltersByAccount(t *testing.T) {
 	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
 }
 
+// TestLeaseOutputLocksCurrentUtxo verifies that LeaseOutput returns the active
+// lease metadata for a current wallet-owned output.
+func TestLeaseOutputLocksCurrentUtxo(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-lease-output")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 18000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710001700, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	lease, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		ID:       db.LockID{1},
+		Duration: 30 * time.Minute,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, tx.TxHash(), lease.OutPoint.Hash)
+	require.Equal(t, uint32(0), lease.OutPoint.Index)
+	require.Equal(t, db.LockID{1}, lease.LockID)
+	require.True(t, lease.Expiration.After(time.Now().UTC()))
+}
+
+// TestLeaseOutputRejectsAlreadyLeasedUtxo verifies that LeaseOutput reports
+// ErrOutputAlreadyLeased when another active lock already owns the same output.
+func TestLeaseOutputRejectsAlreadyLeasedUtxo(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-lease-output-conflict")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 19000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710001710, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		ID:       db.LockID{1},
+		Duration: 30 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		ID:       db.LockID{2},
+		Duration: 30 * time.Minute,
+	})
+	require.ErrorIs(t, err, db.ErrOutputAlreadyLeased)
+}
+
+// TestLeaseOutputRejectsNonPositiveDuration verifies that LeaseOutput rejects a
+// non-positive duration before it attempts any lease write.
+func TestLeaseOutputRejectsNonPositiveDuration(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-lease-output-duration")
+
+	_, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		OutPoint: randomOutPoint(),
+		ID:       db.LockID{3},
+		Duration: 0,
+	})
+
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
