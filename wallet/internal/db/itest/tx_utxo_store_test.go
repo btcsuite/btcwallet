@@ -1212,6 +1212,111 @@ func TestGetUtxoNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }
 
+// TestListUTXOsReturnsCurrentWalletOutputs verifies that ListUTXOs returns the
+// current wallet-owned outputs created by pending transactions.
+func TestListUTXOsReturnsCurrentWalletOutputs(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-utxos")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	txOne := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 15000, PkScript: addr.ScriptPubKey}},
+	)
+	txTwo := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 12000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txOne,
+		Received: time.Unix(1710001500, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txTwo,
+		Received: time.Unix(1710001510, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+	require.Equal(t, txTwo.TxHash(), utxos[0].OutPoint.Hash)
+	require.Equal(t, txOne.TxHash(), utxos[1].OutPoint.Hash)
+}
+
+// TestListUTXOsFiltersByAccount verifies that ListUTXOs applies the optional
+// account filter without affecting the underlying wallet ownership checks.
+func TestListUTXOsFiltersByAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-utxos-account")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "savings")
+
+	defaultAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	savingsAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "savings", false,
+	)
+
+	txDefault := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 16000, PkScript: defaultAddr.ScriptPubKey}},
+	)
+	txSavings := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 17000, PkScript: savingsAddr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txDefault,
+		Received: time.Unix(1710001600, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txSavings,
+		Received: time.Unix(1710001610, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	account := uint32(1)
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+		Account:  &account,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
