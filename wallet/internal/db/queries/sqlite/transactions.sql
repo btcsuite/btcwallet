@@ -66,6 +66,37 @@ FROM transactions AS t
 LEFT JOIN blocks AS b ON t.block_height = b.block_height
 WHERE t.wallet_id = ? AND t.tx_hash = ?;
 
+-- name: ListTransactionsWithoutBlock :many
+-- Lists every wallet transaction row that currently has no confirming block.
+--
+-- How:
+-- - Reads from transactions only and filters on rows with no confirming block.
+-- - Includes the active unmined set (`pending` and `published`) together with
+--   retained invalid history such as `failed`, `replaced`, or `orphaned`
+--   rows.
+-- - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+--   so sqlc preserves the nullable block columns while the row shape stays
+--   aligned with the confirmed query below.
+-- Performance:
+-- - Matches the dedicated no-confirming-block history index.
+SELECT
+    t.id,
+    t.tx_hash,
+    t.raw_tx,
+    t.received_time,
+    t.block_height,
+    b.header_hash AS block_hash,
+    b.block_timestamp,
+    t.is_coinbase,
+    t.tx_status,
+    t.tx_label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON 1 = 0
+WHERE
+    t.wallet_id = ?
+    AND t.block_height IS NULL
+ORDER BY t.received_time DESC, t.id DESC;
+
 -- name: ListUnminedTransactions :many
 -- Lists the wallet transactions that still belong to the active unmined set.
 --
