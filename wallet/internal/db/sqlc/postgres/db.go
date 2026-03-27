@@ -33,9 +33,6 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.clearUtxosSpentByTxIDStmt, err = db.PrepareContext(ctx, ClearUtxosSpentByTxID); err != nil {
 		return nil, fmt.Errorf("error preparing query ClearUtxosSpentByTxID: %w", err)
 	}
-	if q.confirmUnminedTransactionByHashStmt, err = db.PrepareContext(ctx, ConfirmUnminedTransactionByHash); err != nil {
-		return nil, fmt.Errorf("error preparing query ConfirmUnminedTransactionByHash: %w", err)
-	}
 	if q.createAccountSecretStmt, err = db.PrepareContext(ctx, CreateAccountSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateAccountSecret: %w", err)
 	}
@@ -255,6 +252,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.updateTransactionLabelByHashStmt, err = db.PrepareContext(ctx, UpdateTransactionLabelByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateTransactionLabelByHash: %w", err)
 	}
+	if q.updateTransactionStateByHashStmt, err = db.PrepareContext(ctx, UpdateTransactionStateByHash); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateTransactionStateByHash: %w", err)
+	}
 	if q.updateTransactionStatusByIDsStmt, err = db.PrepareContext(ctx, UpdateTransactionStatusByIDs); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateTransactionStatusByIDs: %w", err)
 	}
@@ -282,11 +282,6 @@ func (q *Queries) Close() error {
 	if q.clearUtxosSpentByTxIDStmt != nil {
 		if cerr := q.clearUtxosSpentByTxIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing clearUtxosSpentByTxIDStmt: %w", cerr)
-		}
-	}
-	if q.confirmUnminedTransactionByHashStmt != nil {
-		if cerr := q.confirmUnminedTransactionByHashStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing confirmUnminedTransactionByHashStmt: %w", cerr)
 		}
 	}
 	if q.createAccountSecretStmt != nil {
@@ -654,6 +649,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateTransactionLabelByHashStmt: %w", cerr)
 		}
 	}
+	if q.updateTransactionStateByHashStmt != nil {
+		if cerr := q.updateTransactionStateByHashStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateTransactionStateByHashStmt: %w", cerr)
+		}
+	}
 	if q.updateTransactionStatusByIDsStmt != nil {
 		if cerr := q.updateTransactionStatusByIDsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateTransactionStatusByIDsStmt: %w", cerr)
@@ -711,7 +711,6 @@ type Queries struct {
 	acquireUtxoLeaseStmt                        *sql.Stmt
 	balanceStmt                                 *sql.Stmt
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
-	confirmUnminedTransactionByHashStmt         *sql.Stmt
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
 	createDerivedAccountWithNumberStmt          *sql.Stmt
@@ -785,6 +784,7 @@ type Queries struct {
 	updateAccountNameByWalletScopeAndNameStmt   *sql.Stmt
 	updateAccountNameByWalletScopeAndNumberStmt *sql.Stmt
 	updateTransactionLabelByHashStmt            *sql.Stmt
+	updateTransactionStateByHashStmt            *sql.Stmt
 	updateTransactionStatusByIDsStmt            *sql.Stmt
 	updateWalletSecretsStmt                     *sql.Stmt
 	updateWalletSyncStateStmt                   *sql.Stmt
@@ -797,7 +797,6 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		acquireUtxoLeaseStmt:                        q.acquireUtxoLeaseStmt,
 		balanceStmt:                                 q.balanceStmt,
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,
-		confirmUnminedTransactionByHashStmt:         q.confirmUnminedTransactionByHashStmt,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
 		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
@@ -871,6 +870,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		updateAccountNameByWalletScopeAndNameStmt:   q.updateAccountNameByWalletScopeAndNameStmt,
 		updateAccountNameByWalletScopeAndNumberStmt: q.updateAccountNameByWalletScopeAndNumberStmt,
 		updateTransactionLabelByHashStmt:            q.updateTransactionLabelByHashStmt,
+		updateTransactionStateByHashStmt:            q.updateTransactionStateByHashStmt,
 		updateTransactionStatusByIDsStmt:            q.updateTransactionStatusByIDsStmt,
 		updateWalletSecretsStmt:                     q.updateWalletSecretsStmt,
 		updateWalletSyncStateStmt:                   q.updateWalletSyncStateStmt,

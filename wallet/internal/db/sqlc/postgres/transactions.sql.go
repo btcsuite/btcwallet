@@ -13,42 +13,6 @@ import (
 	"github.com/lib/pq"
 )
 
-const ConfirmUnminedTransactionByHash = `-- name: ConfirmUnminedTransactionByHash :execrows
-UPDATE transactions
-SET
-    block_height = $1::INTEGER,
-    tx_status = 1
-WHERE
-    wallet_id = $2
-    AND tx_hash = $3
-    AND block_height IS NULL
-    AND tx_status IN (0, 1)
-`
-
-type ConfirmUnminedTransactionByHashParams struct {
-	BlockHeight int32
-	WalletID    int64
-	TxHash      []byte
-}
-
-// Attaches a confirming block to one existing live unmined transaction row.
-//
-// How:
-//   - Updates only rows that are still blockless and live (`pending` or
-//     `published`).
-//   - Leaves user-visible metadata such as labels untouched so confirmation can
-//     reuse the original transaction row instead of reinserting it.
-//
-// Performance:
-// - Updates at most one row through the wallet-scoped unique tx-hash lookup.
-func (q *Queries) ConfirmUnminedTransactionByHash(ctx context.Context, arg ConfirmUnminedTransactionByHashParams) (int64, error) {
-	result, err := q.exec(ctx, q.confirmUnminedTransactionByHashStmt, ConfirmUnminedTransactionByHash, arg.BlockHeight, arg.WalletID, arg.TxHash)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 const DeleteBlocksAtOrAboveHeight = `-- name: DeleteBlocksAtOrAboveHeight :execrows
 DELETE FROM blocks
 WHERE block_height >= $1
@@ -243,14 +207,16 @@ type InsertTransactionParams struct {
 //
 // How:
 //   - Writes only the transactions table.
-//   - Expects the caller to have already resolved wallet scope and any optional
-//     block reference.
+//   - Expects the caller to have already resolved wallet scope.
+//   - Inserts one row with no confirming block by storing `NULL` in
+//     `block_height`. Later block assignment belongs to the state-update query
+//     below.
 //   - Expects the caller to supply the initial status explicitly so unmined rows
 //     do not have to guess between `pending` and `published`.
 //
 // Performance:
 //   - Single-row insert. The cost is dominated by the wallet/hash uniqueness
-//     checks and any optional block foreign-key validation.
+//     checks.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error) {
 	row := q.queryRow(ctx, q.insertTransactionStmt, InsertTransaction,
 		arg.WalletID,
@@ -567,6 +533,49 @@ type UpdateTransactionLabelByHashParams struct {
 // - Updates at most one row through the wallet-scoped unique tx-hash lookup.
 func (q *Queries) UpdateTransactionLabelByHash(ctx context.Context, arg UpdateTransactionLabelByHashParams) (int64, error) {
 	result, err := q.exec(ctx, q.updateTransactionLabelByHashStmt, UpdateTransactionLabelByHash, arg.Label, arg.WalletID, arg.TxHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const UpdateTransactionStateByHash = `-- name: UpdateTransactionStateByHash :execrows
+UPDATE transactions
+SET
+    block_height = $1::INTEGER,
+    tx_status = $2
+WHERE
+    wallet_id = $3
+    AND tx_hash = $4
+`
+
+type UpdateTransactionStateByHashParams struct {
+	BlockHeight sql.NullInt32
+	Status      int16
+	WalletID    int64
+	TxHash      []byte
+}
+
+// Updates the stored block assignment and wallet-relative status for one
+// transaction row.
+//
+// How:
+//   - Leaves immutable transaction facts such as `raw_tx`, credits, and spent
+//     inputs untouched.
+//   - Leaves the user-visible label untouched so callers can patch label and
+//     state independently or together inside one SQL transaction.
+//   - Expects callers to validate any required block reference and state
+//     invariants before issuing the update.
+//
+// Performance:
+// - Updates at most one row through the wallet-scoped unique tx-hash lookup.
+func (q *Queries) UpdateTransactionStateByHash(ctx context.Context, arg UpdateTransactionStateByHashParams) (int64, error) {
+	result, err := q.exec(ctx, q.updateTransactionStateByHashStmt, UpdateTransactionStateByHash,
+		arg.BlockHeight,
+		arg.Status,
+		arg.WalletID,
+		arg.TxHash,
+	)
 	if err != nil {
 		return 0, err
 	}
