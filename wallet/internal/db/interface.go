@@ -283,8 +283,8 @@ type TxStore interface {
 	// returning a slice of TxInfo or an error if the retrieval fails.
 	ListTxns(ctx context.Context, query ListTxnsQuery) ([]TxInfo, error)
 
-	// DeleteTx removes a live unconfirmed transaction from the store. It
-	// takes a context and DeleteTxParams, returning an error if the
+	// DeleteTx removes an unmined pending or published transaction from the
+	// store. It takes a context and DeleteTxParams, returning an error if the
 	// transaction is not found or the deletion fails.
 	//
 	// DeleteTx is intentionally narrower than a generic
@@ -319,16 +319,16 @@ type UTXOStore interface {
 	// outpoint. It returns a UtxoInfo struct containing the UTXO's details
 	// or an error if the UTXO is not found or has been spent.
 	//
-	// GetUtxo treats outputs created by both live unconfirmed states
-	// (TxStatusPending and TxStatusPublished) as present in the wallet's
-	// UTXO set.
+	// GetUtxo treats outputs created by unmined `pending` and `published`
+	// transactions as present in the wallet's UTXO set.
 	GetUtxo(ctx context.Context, query GetUtxoQuery) (*UtxoInfo, error)
 
 	// ListUTXOs returns a slice of all unspent transaction outputs (UTXOs)
 	// that match the provided query parameters. This can be used to list
 	// all UTXOs or filter them by account or confirmation status.
 	//
-	// ListUTXOs includes outputs from live unconfirmed parent transactions.
+	// ListUTXOs includes outputs from unmined `pending` and `published`
+	// parent transactions.
 	// Spendability policy such as coinbase maturity, lease state, or whether
 	// a caller wants to exclude TxStatusPending parents belongs in higher-level
 	// selection logic.
@@ -350,7 +350,8 @@ type UTXOStore interface {
 	// ErrOutputUnlockNotAllowed.
 	ReleaseOutput(ctx context.Context, params ReleaseOutputParams) error
 
-	// ListLeasedOutputs returns a slice of all currently leased live UTXOs.
+	// ListLeasedOutputs returns a slice of all currently leased UTXOs whose
+	// parent transaction is still `pending` or `published`.
 	// This can be used to inspect which still-unspent outputs are currently
 	// locked and when their leases expire.
 	ListLeasedOutputs(ctx context.Context, walletID uint32) (
@@ -359,7 +360,8 @@ type UTXOStore interface {
 	// Balance returns a wallet-scoped balance view for the current unspent UTXO
 	// set after applying any optional caller-supplied filters.
 	//
-	// The zero-value BalanceParams request the wallet's live factual balance.
+	// The zero-value BalanceParams request the wallet's current factual
+	// balance.
 	// Callers may narrow that view by account, confirmation range, lease
 	// or coinbase maturity when they need a workflow-specific balance policy
 	// from the public store interface. The returned BalanceResult always uses
