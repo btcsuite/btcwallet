@@ -373,6 +373,307 @@ func TestGetTxNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 }
 
+// TestUpdateTxRequiresExistingConfirmedBlock verifies that UpdateTx rejects a
+// state patch whose referenced block height is missing from the shared blocks
+// table.
+//
+// Scenario:
+//   - One stored pending transaction is later patched with a missing block.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row.
+//   - Build one block reference without inserting that block row.
+//
+// Action:
+//   - Apply the confirmation patch through UpdateTx.
+//
+// Assertions:
+//   - UpdateTx returns ErrBlockNotFound.
+//   - The transaction remains unconfirmed.
+func TestUpdateTxRequiresExistingConfirmedBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-confirmed-tx-missing-block")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+	block := db.Block{
+		Hash:      RandomHash(),
+		Height:    240,
+		Timestamp: time.Unix(1710000560, 0),
+	}
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000570, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &block,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.ErrorIs(t, err, db.ErrBlockNotFound)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, info.Block)
+}
+
+// TestUpdateTxRejectsMismatchedConfirmedBlock verifies that UpdateTx rejects a
+// state patch when the supplied block metadata does not match the stored block
+// row for that height.
+//
+// Scenario:
+//   - One stored pending transaction is later patched with mismatched block
+//     metadata for an existing height.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row.
+//   - Insert the real block row for the target height.
+//   - Build a second block reference with the same height but different hash.
+//
+// Action:
+//   - Apply the mismatched confirmation patch through UpdateTx.
+//
+// Assertions:
+//   - UpdateTx returns ErrBlockMismatch.
+//   - The existing transaction row remains unconfirmed and pending.
+func TestUpdateTxRejectsMismatchedConfirmedBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-tx-block-mismatch")
+	queries := store.Queries()
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000550, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	block := CreateBlockFixture(t, queries, 240)
+	mismatchBlock := block
+	mismatchBlock.Hash = RandomHash()
+
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &mismatchBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.ErrorIs(t, err, db.ErrBlockMismatch)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, info.Block)
+	require.Equal(t, db.TxStatusPending, info.Status)
+}
+
+// TestUpdateTxUpdatesStoredLabel verifies that UpdateTx can patch the stored
+// user-visible label without mutating chain-state metadata.
+//
+// Scenario:
+//   - One pending wallet transaction already exists with an old label.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row with a label.
+//
+// Action:
+//   - Patch only the label through UpdateTx.
+//
+// Assertions:
+//   - The stored label changes.
+//   - The transaction stays pending and unconfirmed.
+func TestUpdateTxUpdatesStoredLabel(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-tx-label")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: []byte{0x51}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000700, 0),
+		Status:   db.TxStatusPending,
+		Label:    "old-label",
+	})
+	require.NoError(t, err)
+
+	label := "new-label"
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+		Label:    &label,
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "new-label", info.Label)
+	require.Equal(t, db.TxStatusPending, info.Status)
+}
+
+// TestUpdateTxConfirmsStoredPendingTx verifies that UpdateTx can attach a
+// confirming block to an already-stored unmined row.
+//
+// Scenario:
+//   - One pending wallet transaction is later observed in a block.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row.
+//   - Insert one matching block row.
+//
+// Action:
+//   - Apply a published state patch with that block through UpdateTx.
+//
+// Assertions:
+//   - The transaction now carries the block metadata.
+//   - The status becomes published.
+func TestUpdateTxConfirmsStoredPendingTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-tx-confirm")
+	queries := store.Queries()
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 6000, PkScript: []byte{0x51}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000710, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	block := CreateBlockFixture(t, queries, 220)
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &block,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, info.Block)
+	require.Equal(t, block.Height, info.Block.Height)
+	require.Equal(t, block.Hash, info.Block.Hash)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+}
+
+// TestUpdateTxNotFound verifies that UpdateTx returns ErrTxNotFound when the
+// wallet has no matching transaction row.
+//
+// Scenario:
+//   - One wallet has no stored transaction for the requested hash.
+//
+// Setup:
+//   - Create one wallet and one label patch.
+//
+// Action:
+//   - Apply the patch to a random missing tx hash.
+//
+// Assertions:
+//   - UpdateTx returns ErrTxNotFound.
+func TestUpdateTxNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-label-missing")
+
+	label := "new-label"
+	err := store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     RandomHash(),
+		Label:    &label,
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
+
+// TestUpdateTxRejectsEmptyPatch verifies that UpdateTx rejects a request that
+// does not ask to mutate any transaction field.
+//
+// Scenario:
+//   - One wallet transaction exists, but the caller provides no label or state
+//     mutation.
+//
+// Setup:
+//   - Create one wallet and insert one pending transaction row.
+//
+// Action:
+//   - Call UpdateTx with an empty patch.
+//
+// Assertions:
+//   - UpdateTx returns ErrInvalidParam.
+func TestUpdateTxRejectsEmptyPatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-empty-patch")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 6000, PkScript: []byte{0x51}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000720, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
