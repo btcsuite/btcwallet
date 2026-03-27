@@ -674,6 +674,191 @@ func TestUpdateTxRejectsEmptyPatch(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrInvalidParam)
 }
 
+// TestListTxnsReturnsRowsWithoutBlock verifies that the no-confirming-block
+// query path excludes confirmed rows while still surfacing retained invalid
+// history that no longer has block metadata.
+//
+// Scenario:
+//   - One wallet has confirmed history, active unmined history, and retained
+//     invalid history without blocks.
+//
+// Setup:
+//   - Insert one confirmed transaction, one pending transaction, and one failed
+//     transaction whose block is nil.
+//
+// Action:
+//   - Query ListTxns with UnminedOnly set.
+//
+// Assertions:
+//   - Only unmined rows are returned.
+//   - Both the active pending row and the failed history row are present.
+func TestListTxnsReturnsRowsWithoutBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-txns-without-block")
+	queries := store.Queries()
+
+	confirmedBlock := CreateBlockFixture(t, queries, 200)
+	confirmedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: []byte{0x51}}},
+	)
+	unminedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 8000, PkScript: []byte{0x52}}},
+	)
+	failedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 8100, PkScript: []byte{0x53}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedTx,
+		Received: time.Unix(1710000800, 0),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     confirmedTx.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &confirmedBlock,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       unminedTx,
+		Received: time.Unix(1710000810, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       failedTx,
+		Received: time.Unix(1710000815, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+	setTxStatus(t, store, walletID, failedTx.TxHash(), db.TxStatusFailed)
+
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletID,
+		UnminedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, infos, 2)
+
+	statusesByHash := make(map[chainhash.Hash]db.TxStatus, len(infos))
+	for _, info := range infos {
+		require.Nil(t, info.Block)
+		statusesByHash[info.Hash] = info.Status
+	}
+
+	require.Equal(t, db.TxStatusPending, statusesByHash[unminedTx.TxHash()])
+	require.Equal(t, db.TxStatusFailed, statusesByHash[failedTx.TxHash()])
+}
+
+// TestListTxnsReturnsConfirmedTxsByHeightRange verifies that the
+// confirmed-range query path excludes unmined rows and respects the height
+// bounds.
+//
+// Scenario:
+//   - One wallet has confirmed transactions at multiple heights plus one
+//     unmined row.
+//
+// Setup:
+//   - Insert two confirmed transactions at different heights and one pending
+//     transaction without a block.
+//
+// Action:
+//   - Query ListTxns for one exact confirmed height range.
+//
+// Assertions:
+//   - Only the matching confirmed transaction is returned.
+//   - The unmined row is excluded.
+func TestListTxnsReturnsConfirmedTxsByHeightRange(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-txns-confirmed")
+	queries := store.Queries()
+
+	blockOne := CreateBlockFixture(t, queries, 210)
+	blockTwo := CreateBlockFixture(t, queries, 211)
+
+	txOne := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: []byte{0x51}}},
+	)
+	txTwo := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 10000, PkScript: []byte{0x52}}},
+	)
+	unminedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 11000, PkScript: []byte{0x53}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txOne,
+		Received: time.Unix(1710000900, 0),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     txOne.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &blockOne,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txTwo,
+		Received: time.Unix(1710000910, 0),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: walletID,
+		Txid:     txTwo.TxHash(),
+		State: &db.UpdateTxState{
+			Block:  &blockTwo,
+			Status: db.TxStatusPublished,
+		},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       unminedTx,
+		Received: time.Unix(1710000920, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletID,
+		StartHeight: 211,
+		EndHeight:   211,
+	})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, txTwo.TxHash(), infos[0].Hash)
+	require.NotNil(t, infos[0].Block)
+	require.Equal(t, uint32(211), infos[0].Block.Height)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
