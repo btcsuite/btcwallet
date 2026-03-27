@@ -255,15 +255,13 @@ type Querier interface {
 	//
 	// How:
 	// - Writes only the transactions table.
-	// - Expects the caller to have already resolved wallet scope.
-	// - Inserts one row with no confirming block by storing `NULL` in
-	//   `block_height`. Later block assignment belongs to the state-update query
-	//   below.
+	// - Expects the caller to have already resolved wallet scope and any optional
+	//   block reference.
 	// - Expects the caller to supply the initial status explicitly so unmined rows
 	//   do not have to guess between `pending` and `published`.
 	// Performance:
 	// - Single-row insert. The cost is dominated by the wallet/hash uniqueness
-	//   checks.
+	//   checks and any optional block foreign-key validation.
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
 	// Records a replacement edge between two wallet-scoped transactions.
 	//
@@ -406,6 +404,19 @@ type Querier interface {
 	// - The `(wallet_id, block_height)` index bounds the scan before the single-row
 	//   block join.
 	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
+	// Lists every wallet transaction row that currently has no confirming block.
+	//
+	// How:
+	// - Reads from transactions only and filters on rows with no confirming block.
+	// - Includes the active unmined set (`pending` and `published`) together with
+	//   retained invalid history such as `failed`, `replaced`, or `orphaned`
+	//   rows.
+	// - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
+	//   so sqlc preserves the nullable block columns while the row shape stays
+	//   aligned with the confirmed query below.
+	// Performance:
+	// - Matches the dedicated no-confirming-block history index.
+	ListTransactionsWithoutBlock(ctx context.Context, walletID int64) ([]ListTransactionsWithoutBlockRow, error)
 	// Lists the wallet transactions that still belong to the active unmined set.
 	//
 	// How:

@@ -207,16 +207,14 @@ type InsertTransactionParams struct {
 //
 // How:
 //   - Writes only the transactions table.
-//   - Expects the caller to have already resolved wallet scope.
-//   - Inserts one row with no confirming block by storing `NULL` in
-//     `block_height`. Later block assignment belongs to the state-update query
-//     below.
+//   - Expects the caller to have already resolved wallet scope and any optional
+//     block reference.
 //   - Expects the caller to supply the initial status explicitly so unmined rows
 //     do not have to guess between `pending` and `published`.
 //
 // Performance:
 //   - Single-row insert. The cost is dominated by the wallet/hash uniqueness
-//     checks.
+//     checks and any optional block foreign-key validation.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error) {
 	row := q.queryRow(ctx, q.insertTransactionStmt, InsertTransaction,
 		arg.WalletID,
@@ -345,6 +343,85 @@ func (q *Queries) ListTransactionsByHeightRange(ctx context.Context, arg ListTra
 	var items []ListTransactionsByHeightRangeRow
 	for rows.Next() {
 		var i ListTransactionsByHeightRangeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TxHash,
+			&i.RawTx,
+			&i.ReceivedTime,
+			&i.BlockHeight,
+			&i.BlockHash,
+			&i.BlockTimestamp,
+			&i.IsCoinbase,
+			&i.TxStatus,
+			&i.TxLabel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListTransactionsWithoutBlock = `-- name: ListTransactionsWithoutBlock :many
+SELECT
+    t.id,
+    t.tx_hash,
+    t.raw_tx,
+    t.received_time,
+    t.block_height,
+    NULL::BYTEA AS block_hash,
+    NULL::BIGINT AS block_timestamp,
+    t.is_coinbase,
+    t.tx_status,
+    t.tx_label
+FROM transactions AS t
+WHERE
+    t.wallet_id = $1
+    AND t.block_height IS NULL
+ORDER BY t.received_time DESC, t.id DESC
+`
+
+type ListTransactionsWithoutBlockRow struct {
+	ID             int64
+	TxHash         []byte
+	RawTx          []byte
+	ReceivedTime   time.Time
+	BlockHeight    sql.NullInt32
+	BlockHash      []byte
+	BlockTimestamp sql.NullInt64
+	IsCoinbase     bool
+	TxStatus       int16
+	TxLabel        string
+}
+
+// Lists every wallet transaction row that currently has no confirming block.
+//
+// How:
+//   - Reads from transactions only and filters on rows with no confirming block.
+//   - Includes the active unmined set (`pending` and `published`) together with
+//     retained invalid history such as `failed`, `replaced`, or `orphaned`
+//     rows.
+//   - Returns typed NULL block metadata explicitly because unmined rows have no
+//     block. `NULL::BYTEA AS block_hash` and `NULL::BIGINT AS block_timestamp`
+//     keep the row shape aligned with the confirmed query below.
+//
+// Performance:
+// - Matches the dedicated no-confirming-block history index.
+func (q *Queries) ListTransactionsWithoutBlock(ctx context.Context, walletID int64) ([]ListTransactionsWithoutBlockRow, error) {
+	rows, err := q.query(ctx, q.listTransactionsWithoutBlockStmt, ListTransactionsWithoutBlock, walletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTransactionsWithoutBlockRow
+	for rows.Next() {
+		var i ListTransactionsWithoutBlockRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.TxHash,
