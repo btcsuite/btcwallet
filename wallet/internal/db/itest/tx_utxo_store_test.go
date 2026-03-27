@@ -1520,6 +1520,99 @@ func TestReleaseOutputRejectsWrongLockID(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrOutputUnlockNotAllowed)
 }
 
+// TestListLeasedOutputsReturnsActiveLeases verifies that ListLeasedOutputs
+// returns the currently active wallet lease set.
+func TestListLeasedOutputsReturnsActiveLeases(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-leases")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 22000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710002100, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	leaseID := RandomHash()
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		ID:       leaseID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		Duration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), walletID)
+
+	require.NoError(t, err)
+	require.Len(t, leases, 1)
+	require.Equal(t, tx.TxHash(), leases[0].OutPoint.Hash)
+	require.Equal(t, db.LockID(leaseID), leases[0].LockID)
+}
+
+// TestListLeasedOutputsExcludesReleasedLease verifies that ListLeasedOutputs
+// reflects a successful release immediately.
+func TestListLeasedOutputsExcludesReleasedLease(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-leases-after-release")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 23000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710002200, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	leaseID := RandomHash()
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		ID:       leaseID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+		Duration: time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
+		WalletID: walletID,
+		ID:       leaseID,
+		OutPoint: wire.OutPoint{Hash: tx.TxHash(), Index: 0},
+	})
+	require.NoError(t, err)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), walletID)
+
+	require.NoError(t, err)
+	require.Empty(t, leases)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
