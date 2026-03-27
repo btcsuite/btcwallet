@@ -859,6 +859,139 @@ func TestListTxnsReturnsConfirmedTxsByHeightRange(t *testing.T) {
 	require.Equal(t, uint32(211), infos[0].Block.Height)
 }
 
+// TestDeleteTxRemovesLeafUnminedTx verifies that DeleteTx removes a leaf
+// unmined row and restores any parent spend markers it introduced.
+//
+// Scenario:
+//   - One unmined child transaction is the only spender of one wallet-owned
+//     parent output.
+//
+// Setup:
+//   - Create one wallet-owned parent credit and one unmined child spender.
+//
+// Action:
+//   - Delete the child through DeleteTx.
+//
+// Assertions:
+//   - The child row is removed.
+//   - The parent output becomes spendable again.
+//   - No child spend edges remain.
+func TestDeleteTxRemovesLeafUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-leaf")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710001000, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x51}}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710001010, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.DeleteTx(t.Context(), db.DeleteTxParams{
+		WalletID: walletID,
+		Txid:     childTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Empty(t, childSpendingTxIDs(t, store, walletID, parentTx.TxHash()))
+	_, ok := txIDByHash(t, store, walletID, childTx.TxHash())
+	require.False(t, ok)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: parentTx.TxHash(), Index: 0,
+	}))
+}
+
+// TestDeleteTxRejectsNonLeafTx verifies that DeleteTx refuses to erase an
+// unmined transaction that still has direct child spenders.
+//
+// Scenario:
+//   - One parent transaction still has one direct unmined child spender.
+//
+// Setup:
+//   - Create one wallet-owned parent credit and one child that spends it.
+//
+// Action:
+//   - Attempt to delete the parent through DeleteTx.
+//
+// Assertions:
+//   - DeleteTx returns ErrDeleteRequiresLeaf.
+//   - Both parent and child rows remain stored.
+func TestDeleteTxRejectsNonLeafTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-non-leaf")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710001100, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710001110, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.DeleteTx(t.Context(), db.DeleteTxParams{
+		WalletID: walletID,
+		Txid:     parentTx.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrDeleteRequiresLeaf)
+	_, ok := txIDByHash(t, store, walletID, parentTx.TxHash())
+	require.True(t, ok)
+	_, ok = txIDByHash(t, store, walletID, childTx.TxHash())
+	require.True(t, ok)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
