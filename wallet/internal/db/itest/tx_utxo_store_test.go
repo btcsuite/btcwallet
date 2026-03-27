@@ -992,6 +992,170 @@ func TestDeleteTxRejectsNonLeafTx(t *testing.T) {
 	require.True(t, ok)
 }
 
+// TestDeleteTxRemovesParentWithFailedChild verifies that DeleteTx only treats
+// still-active unmined children as leaf blockers.
+//
+// Scenario:
+//   - One parent transaction still has one direct child row, but that child has
+//     already been marked failed.
+//
+// Setup:
+//   - Create one wallet-owned parent credit and one child that spends it.
+//   - Mark the child failed to simulate an already-invalid branch.
+//
+// Action:
+//   - Delete the parent through DeleteTx.
+//
+// Assertions:
+//   - DeleteTx succeeds because the failed child is no longer part of the
+//     active unmined graph.
+//   - The parent row is removed.
+func TestDeleteTxRemovesParentWithFailedChild(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-parent-failed-child")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710001115, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710001120, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+	setTxStatus(t, store, walletID, childTx.TxHash(), db.TxStatusFailed)
+
+	err = store.DeleteTx(t.Context(), db.DeleteTxParams{
+		WalletID: walletID,
+		Txid:     parentTx.TxHash(),
+	})
+	require.NoError(t, err)
+
+	_, ok := txIDByHash(t, store, walletID, parentTx.TxHash())
+	require.False(t, ok)
+}
+
+// TestRollbackToBlockFailsCoinbaseDescendants verifies that RollbackToBlock
+// marks every unmined descendant of a disconnected coinbase root as failed and
+// clears the recorded spend edges they had claimed.
+//
+// Scenario:
+//   - One confirmed coinbase credit has one unmined child spender and one
+//     unmined grandchild spender beneath it.
+//
+// Setup:
+//   - Create one wallet-owned coinbase output and confirm it in one block.
+//   - Insert one child transaction that spends that output and creates one new
+//     wallet-owned credit.
+//   - Insert one grandchild that spends the child's wallet-owned output.
+//
+// Action:
+//   - Roll back the block that confirmed the coinbase root.
+//
+// Assertions:
+//   - Both unmined descendants become failed.
+//   - The spend edges from the coinbase root and child are cleared.
+func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-rollback-coinbase-descendants")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+	queries := store.Queries()
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	coinbaseTx := newCoinbaseTx(addr.ScriptPubKey)
+
+	block := CreateBlockFixture(t, queries, 300)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       coinbaseTx,
+		Received: time.Unix(1710001200, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: coinbaseTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710001210, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	grandchildTx := newRegularTx(
+		[]wire.OutPoint{{Hash: childTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 3000, PkScript: []byte{0x51}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       grandchildTx,
+		Received: time.Unix(1710001220, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, childSpendingTxIDs(t, store, walletID, coinbaseTx.TxHash()),
+		1)
+	require.Len(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()), 1)
+
+	err = store.RollbackToBlock(t.Context(), block.Height)
+	require.NoError(t, err)
+
+	childInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     childTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, childInfo.Status)
+	require.Nil(t, childInfo.Block)
+
+	grandchildInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     grandchildTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusFailed, grandchildInfo.Status)
+	require.Nil(t, grandchildInfo.Block)
+
+	require.Empty(t, childSpendingTxIDs(t, store, walletID, coinbaseTx.TxHash()))
+	require.Empty(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()))
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
