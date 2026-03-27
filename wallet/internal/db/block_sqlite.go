@@ -1,8 +1,10 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -40,4 +42,34 @@ func ensureBlockExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	}
 
 	return nil
+}
+
+// requireBlockMatchesSqlite loads the shared block row for the provided height
+// and verifies that its stored metadata matches the supplied block reference.
+func requireBlockMatchesSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+	block *Block) (int64, error) {
+
+	height := int64(block.Height)
+
+	storedBlock, err := qtx.GetBlockByHeight(ctx, height)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("block %d: %w", block.Height,
+				ErrBlockNotFound)
+		}
+
+		return 0, fmt.Errorf("get block by height: %w", err)
+	}
+
+	if !bytes.Equal(storedBlock.HeaderHash, block.Hash[:]) {
+		return 0, fmt.Errorf("block %d header hash: %w", block.Height,
+			ErrBlockMismatch)
+	}
+
+	if storedBlock.BlockTimestamp != block.Timestamp.Unix() {
+		return 0, fmt.Errorf("block %d timestamp: %w", block.Height,
+			ErrBlockMismatch)
+	}
+
+	return height, nil
 }
