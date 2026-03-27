@@ -67,17 +67,18 @@ LEFT JOIN blocks AS b ON t.block_height = b.block_height
 WHERE t.wallet_id = ? AND t.tx_hash = ?;
 
 -- name: ListUnminedTransactions :many
--- Lists all unconfirmed transactions for a wallet.
+-- Lists the wallet transactions that still belong to the active unmined set.
 --
 -- How:
--- - Reads from transactions only and filters on blockless rows that are still
---   in a live unconfirmed state (`pending` or `published`).
--- - Excludes orphaned/replaced/failed history so rollback-produced coinbase
---   rows do not reappear as mempool transactions.
+-- - Reads from transactions only and filters on unmined rows that are still
+--   in unmined `pending` or `published` status.
+-- - Excludes orphaned/replaced/failed history so delete and rollback logic do
+--   not treat retained invalid rows as active mempool spends.
 -- - Projects typed NULL block metadata through `LEFT JOIN blocks AS b ON 1 = 0`
---   so the unmined row shape stays aligned with the confirmed query below.
+--   so sqlc preserves the nullable block columns while the row shape stays
+--   aligned with other transaction queries.
 -- Performance:
--- - Matches the dedicated blockless-history index while the more selective
+-- - Matches the dedicated unmined-history index while the more selective
 --   live-only partial index stays available for conflict paths.
 SELECT
     t.id,
@@ -183,7 +184,7 @@ WHERE
 --
 -- How:
 -- - Deletes only rows whose `block_height` is still NULL and whose status is
---   still in a live unconfirmed state (`pending` or `published`).
+--   still unmined `pending` or `published`.
 -- - Preserves orphaned/replaced/failed history; those rows must remain visible
 --   for audit/reorg handling instead of being treated as ordinary mempool data.
 -- - The caller must delete or restore dependent UTXO rows first.
@@ -203,7 +204,7 @@ WHERE
 -- How:
 -- - Reads only confirmed coinbase rows at or above the rollback boundary.
 -- - Returns wallet scope alongside each tx hash so callers can treat these
---   coinbase transactions as rollback roots when invalidating now-dead
+--   coinbase transactions as rollback roots when invalidating now-invalid
 --   descendants inside the same rollback transaction.
 -- - This is a rollback-specific helper, not a generic "coinbase txs from one
 --   block" listing query.
