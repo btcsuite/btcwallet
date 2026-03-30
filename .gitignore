@@ -8,6 +8,7 @@ coverage-itest-sqlite.txt
 .vscode
 .DS_Store
 .aider*
+/.worktrees/
 coverage.out
 *.prof
 *.test
