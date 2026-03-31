@@ -328,12 +328,14 @@ func TestListLeasedOutputs(t *testing.T) {
 		Expiration: time.Now().Add(time.Hour),
 	}
 
-	// Mock the ListLockedOutputs method to return the leased output.
-	mocks.txStore.On("ListLockedOutputs", mock.Anything).Return(
-		[]*wtxmgr.LockedOutput{leasedOutput}, nil,
+	mocks.store.On("ListLeasedOutputs", mock.Anything, w.id).Return(
+		[]db.LeasedOutput{{
+			OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+			LockID:     db.LockID{1},
+			Expiration: leasedOutput.Expiration,
+		}}, nil,
 	)
 
-	// Now, try to list the leased outputs.
 	leasedOutputs, err := w.ListLeasedOutputs(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []*LeasedOutput{{
