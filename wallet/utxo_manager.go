@@ -348,7 +348,7 @@ func utxoConfirmations(height uint32, currentHeight int32) (int32, error) {
 // improved to perform this check.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
-func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
+func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
 	err := w.state.validateStarted()
@@ -356,19 +356,25 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 		return time.Time{}, err
 	}
 
-	var expiration time.Time
-
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		expiration, err = w.txStore.LockOutput(
-			txmgrNs, id, op, duration,
-		)
-
-		return err
+	lease, err := w.store.LeaseOutput(ctx, db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID(id),
+		OutPoint: op,
+		Duration: duration,
 	})
+	if err != nil {
+		switch {
+		case errors.Is(err, db.ErrUtxoNotFound):
+			return time.Time{}, wtxmgr.ErrUnknownOutput
 
-	return expiration, err
+		case errors.Is(err, db.ErrOutputAlreadyLeased):
+			return time.Time{}, wtxmgr.ErrOutputAlreadyLocked
+		}
+
+		return time.Time{}, fmt.Errorf("lease output: %w", err)
+	}
+
+	return lease.Expiration, nil
 }
 
 // ReleaseOutput unlocks a previously leased output, making it available for
