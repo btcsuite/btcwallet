@@ -23,14 +23,6 @@ import (
 func TestListUnspent(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
-	w, mocks := createStartedWalletWithMocks(t)
-
-	// Define account names.
-	account1 := defaultAccountName
-	account2 := "test"
-
-	// Create the addresses that our mocks will return.
 	privKeyDefault, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	addrDefault, err := btcutil.NewAddressPubKey(
@@ -45,70 +37,34 @@ func TestListUnspent(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to match the default mock (1).
-	currentHeight := int32(1)
-
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
-		false, account1, waddrmgr.WitnessPubKey,
-	)
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrTest).Return(
-		false, account2, waddrmgr.NestedWitnessPubKey,
-	)
-
-	// Now that the mocks are set up, we can create the pkScripts.
 	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
 	require.NoError(t, err)
 	pkScriptTest, err := txscript.PayToAddrScript(addrTest)
 	require.NoError(t, err)
 
-	const (
-		minConf = 2
-		maxConf = 6
-	)
-
-	// Create two UTXOs, one for each address.
-	utxo1 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{1},
-			Index: 0,
-		},
+	utxoDefault := db.UtxoInfo{
+		OutPoint: wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 		Amount:   100000,
 		PkScript: pkScriptDefault,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - minConf + 1,
-			},
-		},
+		Height:   1,
 	}
-	utxo2 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{2},
-			Index: 0,
-		},
+	utxoTest := db.UtxoInfo{
+		OutPoint: wire.OutPoint{Hash: [32]byte{2}, Index: 0},
 		Amount:   200000,
 		PkScript: pkScriptTest,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - maxConf + 1,
-			},
-		},
+		Height:   0,
 	}
-
-	// Mock the UnspentOutputs method to return the two UTXOs.
-	mocks.txStore.On("UnspentOutputs", mock.Anything).Return(
-		[]wtxmgr.Credit{utxo1, utxo2}, nil,
-	)
 
 	testCases := []struct {
 		name          string
 		query         UtxoQuery
-		expectedCount int
+		storeRows     []db.UtxoInfo
 		expectedAddrs map[string]bool
 	}{
 		{
-			name:          "no filter",
-			query:         UtxoQuery{MinConfs: 0, MaxConfs: 999999},
-			expectedCount: 2,
+			name:      "no filter",
+			query:     UtxoQuery{MinConfs: 0, MaxConfs: 999999},
+			storeRows: []db.UtxoInfo{utxoDefault, utxoTest},
 			expectedAddrs: map[string]bool{
 				addrDefault.String(): true,
 				addrTest.String():    true,
@@ -117,11 +73,11 @@ func TestListUnspent(t *testing.T) {
 		{
 			name: "filter by default account",
 			query: UtxoQuery{
-				Account:  account1,
+				Account:  defaultAccountName,
 				MinConfs: 0,
 				MaxConfs: 999999,
 			},
-			expectedCount: 1,
+			storeRows: []db.UtxoInfo{utxoDefault, utxoTest},
 			expectedAddrs: map[string]bool{
 				addrDefault.String(): true,
 			},
@@ -129,33 +85,27 @@ func TestListUnspent(t *testing.T) {
 		{
 			name: "filter by test account",
 			query: UtxoQuery{
-				Account:  account2,
+				Account:  "test",
 				MinConfs: 0,
 				MaxConfs: 999999,
 			},
-			expectedCount: 1,
+			storeRows: []db.UtxoInfo{utxoDefault, utxoTest},
 			expectedAddrs: map[string]bool{
 				addrTest.String(): true,
 			},
 		},
 		{
-			name: "filter by min confs",
-			query: UtxoQuery{
-				MinConfs: minConf + 1,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
+			name:      "filter by min confs",
+			query:     UtxoQuery{MinConfs: 2, MaxConfs: 999999},
+			storeRows: []db.UtxoInfo{utxoTest},
 			expectedAddrs: map[string]bool{
 				addrTest.String(): true,
 			},
 		},
 		{
-			name: "filter by max confs",
-			query: UtxoQuery{
-				MinConfs: 0,
-				MaxConfs: maxConf - 1,
-			},
-			expectedCount: 1,
+			name:      "filter by max confs",
+			query:     UtxoQuery{MinConfs: 0, MaxConfs: 1},
+			storeRows: []db.UtxoInfo{utxoDefault},
 			expectedAddrs: map[string]bool{
 				addrDefault.String(): true,
 			},
@@ -165,15 +115,57 @@ func TestListUnspent(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+
+			minConfs := tc.query.MinConfs
+			maxConfs := tc.query.MaxConfs
+
+			mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+				WalletID: w.id,
+				MinConfs: &minConfs,
+				MaxConfs: &maxConfs,
+				Account:  nil,
+			}).Return(tc.storeRows, nil).Once()
+			mocks.store.On("ListLeasedOutputs", mock.Anything, w.id).Return(
+				[]db.LeasedOutput{}, nil,
+			).Once()
+
+			for i := range tc.storeRows {
+				row := tc.storeRows[i]
+
+				switch {
+				case string(row.PkScript) == string(pkScriptDefault):
+					mocks.store.On(
+						"GetAddress", mock.Anything,
+						db.GetAddressQuery{
+							WalletID:     w.id,
+							ScriptPubKey: pkScriptDefault,
+						},
+					).Return(&db.AddressInfo{
+						AccountName: defaultAccountName,
+						AddrType:    db.WitnessPubKey,
+						IsWatchOnly: true,
+					}, nil).Once()
+
+				case string(row.PkScript) == string(pkScriptTest):
+					mocks.store.On(
+						"GetAddress", mock.Anything,
+						db.GetAddressQuery{
+							WalletID:     w.id,
+							ScriptPubKey: pkScriptTest,
+						},
+					).Return(&db.AddressInfo{
+						AccountName: "test",
+						AddrType:    db.NestedWitnessPubKey,
+						IsWatchOnly: true,
+					}, nil).Once()
+				}
+			}
+
 			utxos, err := w.ListUnspent(t.Context(), tc.query)
 			require.NoError(t, err)
-			require.Len(t, utxos, tc.expectedCount)
 
-			// Check that the correct addresses are returned. We do
-			// this by creating a map of the returned addresses and
-			// comparing it to the expected map. This ensures that
-			// all expected addresses are present and there are no
-			// duplicates.
 			returnedAddrs := make(map[string]bool)
 			for _, utxo := range utxos {
 				returnedAddrs[utxo.Address.String()] = true
@@ -181,8 +173,6 @@ func TestListUnspent(t *testing.T) {
 
 			require.Equal(t, tc.expectedAddrs, returnedAddrs)
 
-			// Check that the UTXOs are sorted by amount in
-			// ascending order.
 			for i := range len(utxos) - 1 {
 				require.LessOrEqual(
 					t, utxos[i].Amount, utxos[i+1].Amount,
