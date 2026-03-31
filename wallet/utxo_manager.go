@@ -60,6 +60,18 @@ type Utxo struct {
 	Locked bool
 }
 
+// LeasedOutput describes one currently leased wallet output.
+type LeasedOutput struct {
+	// OutPoint is the leased transaction output identifier.
+	OutPoint wire.OutPoint
+
+	// LockID is the lease owner identifier.
+	LockID wtxmgr.LockID
+
+	// Expiration is when the current lease expires.
+	Expiration time.Time
+}
+
 // UtxoQuery holds the set of options for a ListUnspent query.
 type UtxoQuery struct {
 	// Account specifies the account to query UTXOs for. If empty,
@@ -95,7 +107,7 @@ type UtxoManager interface {
 		op wire.OutPoint) error
 
 	// ListLeasedOutputs returns a list of all currently leased outputs.
-	ListLeasedOutputs(ctx context.Context) ([]*wtxmgr.LockedOutput, error)
+	ListLeasedOutputs(ctx context.Context) ([]*LeasedOutput, error)
 }
 
 // ListUnspent returns the wallet-owned UTXOs that match the provided query.
@@ -424,14 +436,9 @@ func (w *Wallet) ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 //   - The complexity is O(L), where L is the number of leased outputs, as it
 //     involves a full scan of the leased outputs bucket.
 //
-// TODO(yy): The current `wtxmgr.ListLeasedOutputs` implementation returns a
-// struct from the `wtxmgr` package. This is a leaky abstraction. The method
-// should return a struct defined in the `wallet` package to maintain a clean
-// separation of concerns.
-//
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) ListLeasedOutputs(
-	_ context.Context) ([]*wtxmgr.LockedOutput, error) {
+	_ context.Context) ([]*LeasedOutput, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -446,6 +453,18 @@ func (w *Wallet) ListLeasedOutputs(
 
 		return err
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return leasedOutputs, err
+	outputs := make([]*LeasedOutput, len(leasedOutputs))
+	for i := range leasedOutputs {
+		outputs[i] = &LeasedOutput{
+			OutPoint:   leasedOutputs[i].Outpoint,
+			LockID:     leasedOutputs[i].LockID,
+			Expiration: leasedOutputs[i].Expiration,
+		}
+	}
+
+	return outputs, nil
 }
