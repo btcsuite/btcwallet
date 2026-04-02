@@ -81,12 +81,13 @@ type config struct {
 	ProxyPass        string                  `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 
 	// SPV client options
-	UseSPV       bool          `long:"usespv" description:"Enables the experimental use of SPV rather than RPC for chain synchronization"`
-	AddPeers     []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
-	ConnectPeers []string      `long:"connect" description:"Connect only to the specified peers at startup"`
-	MaxPeers     int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
-	BanDuration  time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
-	BanThreshold uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers."`
+	UseSPV         bool          `long:"usespv" description:"Enables the experimental use of SPV rather than RPC for chain synchronization"`
+	UseActorRescan bool          `long:"useactorrescan" description:"Use the experimental actor/FSM-based SPV rescan implementation. Requires usespv"`
+	AddPeers       []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
+	ConnectPeers   []string      `long:"connect" description:"Connect only to the specified peers at startup"`
+	MaxPeers       int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
+	BanDuration    time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
+	BanThreshold   uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers."`
 
 	// RPC server options
 	//
@@ -555,6 +556,14 @@ func loadConfig() (*config, []string, error) {
 		"localhost": {},
 		"127.0.0.1": {},
 		"::1":       {},
+	}
+
+	if cfg.UseActorRescan && !cfg.UseSPV {
+		err := fmt.Errorf("%s: the --useactorrescan option requires --usespv",
+			funcName)
+		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(os.Stderr, usageMessage)
+		return nil, nil, err
 	}
 
 	if cfg.UseSPV {

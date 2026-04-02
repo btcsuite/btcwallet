@@ -184,7 +184,10 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 				log.Errorf("Couldn't create Neutrino ChainService: %s", err)
 				continue
 			}
-			chainClient = chain.NewNeutrinoClient(activeNet.Params, chainService)
+			chainClient = chain.NewNeutrinoClient(
+				activeNet.Params, chainService,
+				cfg.UseActorRescan,
+			)
 
 			err = chainClient.Start(context.Background())
 			if err != nil {
