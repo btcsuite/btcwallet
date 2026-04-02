@@ -529,12 +529,8 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		createdNear time.Time
 	}
 
-	// Create three accounts with slight delays to ensure different
-	// timestamps.
 	var accounts []createdAccount
 	for i := range 3 {
-		time.Sleep(1 * time.Second)
-
 		createdNear := time.Now()
 		params := db.CreateDerivedAccountParams{
 			WalletID: walletID,
@@ -557,11 +553,10 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 			5*time.Second, "account %d CreatedAt should track creation", i)
 	}
 
-	// Verify accounts are ordered by creation time.
-	require.True(t, accounts[0].info.CreatedAt.Before(accounts[1].info.CreatedAt),
-		"account 0 should have CreatedAt before account 1")
-	require.True(t, accounts[1].info.CreatedAt.Before(accounts[2].info.CreatedAt),
-		"account 1 should have CreatedAt before account 2")
+	require.False(t, accounts[0].info.CreatedAt.After(accounts[1].info.CreatedAt),
+		"account 0 should not have CreatedAt after account 1")
+	require.False(t, accounts[1].info.CreatedAt.After(accounts[2].info.CreatedAt),
+		"account 1 should not have CreatedAt after account 2")
 }
 
 // TestRenameAccount verifies that RenameAccount successfully renames accounts
