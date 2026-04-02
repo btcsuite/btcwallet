@@ -4,6 +4,9 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs"
@@ -13,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/banman"
+	"github.com/lightninglabs/neutrino/blockntfns"
 	"github.com/lightninglabs/neutrino/headerfs"
 	"github.com/stretchr/testify/mock"
 )
@@ -31,7 +35,7 @@ var (
 
 // newMockNeutrinoClient constructs a neutrino client with a mock chain
 // service implementation and mock rescanner interface implementation.
-func newMockNeutrinoClient() *NeutrinoClient {
+func newMockNeutrinoClient(useActorRescan bool) *NeutrinoClient {
 	// newRescanFunc returns a mockRescanner
 	newRescanFunc := func(ro ...neutrino.RescanOption) rescanner {
 		return &mockRescanner{
@@ -39,10 +43,19 @@ func newMockNeutrinoClient() *NeutrinoClient {
 		}
 	}
 
-	return &NeutrinoClient{
+	client := &NeutrinoClient{
 		CS:        &mockChainService{},
 		newRescan: newRescanFunc,
 	}
+
+	if useActorRescan {
+		client.UseActorRescan = true
+		client.newActorChainSource = func() neutrino.ChainSource {
+			return newMockActorChainSource(uint32(testBestBlock.Height))
+		}
+	}
+
+	return client
 }
 
 // mockRescanner is a mock implementation of a rescanner interface for use in
@@ -158,6 +171,127 @@ func (m *mockChainService) Stop() error {
 func (m *mockChainService) PeerByAddr(string) *neutrino.ServerPeer {
 	panic(errNotImplemented)
 }
+
+type mockActorChainSource struct {
+	heights map[chainhash.Hash]uint32
+	headers map[uint32]*wire.BlockHeader
+	best    headerfs.BlockStamp
+	params  chaincfg.Params
+}
+
+func newMockActorChainSource(bestHeight uint32) *mockActorChainSource {
+	headers := make(map[uint32]*wire.BlockHeader, bestHeight+1)
+	heights := make(map[chainhash.Hash]uint32, bestHeight+1)
+
+	var prevHash chainhash.Hash
+	for height := uint32(0); height <= bestHeight; height++ {
+		header := wire.BlockHeader{}
+		if height != 0 {
+			header = wire.BlockHeader{
+				Version:    int32(height + 1),
+				PrevBlock:  prevHash,
+				Timestamp:  time.Unix(int64(height), 0),
+				Bits:       uint32(height + 1),
+				Nonce:      height,
+				MerkleRoot: chainhash.Hash{byte(height + 1)},
+			}
+		}
+
+		hash := header.BlockHash()
+		headerCopy := header
+		headers[height] = &headerCopy
+		heights[hash] = height
+		prevHash = hash
+	}
+
+	bestHeader := headers[bestHeight]
+
+	return &mockActorChainSource{
+		heights: heights,
+		headers: headers,
+		best: headerfs.BlockStamp{
+			Hash:      bestHeader.BlockHash(),
+			Height:    int32(bestHeight),
+			Timestamp: bestHeader.Timestamp,
+		},
+		params: chaincfg.MainNetParams,
+	}
+}
+
+func (m *mockActorChainSource) ChainParams() chaincfg.Params {
+	return m.params
+}
+
+func (m *mockActorChainSource) BestBlock() (*headerfs.BlockStamp, error) {
+	best := m.best
+	return &best, nil
+}
+
+func (m *mockActorChainSource) GetBlockHeaderByHeight(
+	height uint32) (*wire.BlockHeader, error) {
+
+	header, ok := m.headers[height]
+	if !ok {
+		return nil, fmt.Errorf("unknown height %d", height)
+	}
+
+	headerCopy := *header
+	return &headerCopy, nil
+}
+
+func (m *mockActorChainSource) GetBlockHeader(
+	hash *chainhash.Hash) (*wire.BlockHeader, uint32, error) {
+
+	height, ok := m.heights[*hash]
+	if !ok {
+		return nil, 0, fmt.Errorf("unknown hash %v", hash)
+	}
+
+	header := m.headers[height]
+	headerCopy := *header
+	return &headerCopy, height, nil
+}
+
+func (m *mockActorChainSource) GetBlock(chainhash.Hash,
+	...neutrino.QueryOption) (*btcutil.Block, error) {
+
+	return nil, errNotImplemented
+}
+
+func (m *mockActorChainSource) GetFilterHeaderByHeight(
+	uint32) (*chainhash.Hash, error) {
+
+	zero := chainhash.Hash{}
+	return &zero, nil
+}
+
+func (m *mockActorChainSource) GetCFilter(chainhash.Hash,
+	wire.FilterType, ...neutrino.QueryOption) (*gcs.Filter, error) {
+
+	return nil, nil
+}
+
+func (m *mockActorChainSource) Subscribe(
+	uint32) (*blockntfns.Subscription, error) {
+
+	ntfns := make(chan blockntfns.BlockNtfn)
+	var once sync.Once
+
+	return &blockntfns.Subscription{
+		Notifications: ntfns,
+		Cancel: func() {
+			once.Do(func() {
+				close(ntfns)
+			})
+		},
+	}, nil
+}
+
+func (m *mockActorChainSource) IsCurrent() bool {
+	return true
+}
+
+var _ neutrino.ChainSource = (*mockActorChainSource)(nil)
 
 // mockRPCClient mocks the rpcClient interface.
 type mockRPCClient struct {
