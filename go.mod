@@ -58,3 +58,5 @@ require (
 // If you change this please run `make lint` to see where else it needs to be
 // updated as well.
 go 1.24.6
+
+replace github.com/lightninglabs/neutrino => /Users/roasbeef/gocode/src/github.com/lightninglabs/neutrino-neutrino-rescan
