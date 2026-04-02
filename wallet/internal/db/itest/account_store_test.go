@@ -182,7 +182,13 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	const workers = 20
-	results := make([]uint32, workers)
+
+	type createResult struct {
+		number uint32
+		err    error
+	}
+
+	resultCh := make(chan createResult, workers)
 	var wg sync.WaitGroup
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -192,6 +198,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+
 			info, err := store.CreateDerivedAccount(
 				ctx, db.CreateDerivedAccountParams{
 					WalletID: walletID,
@@ -199,12 +206,25 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 					Name:     "acct-concurrent-" + strconv.Itoa(i),
 				},
 			)
-			require.NoError(t, err)
-			results[i] = info.AccountNumber
+			if err != nil {
+				resultCh <- createResult{err: err}
+				return
+			}
+
+			resultCh <- createResult{number: info.AccountNumber}
 		}(i)
 	}
 
 	wg.Wait()
+	close(resultCh)
+
+	results := make([]uint32, 0, workers)
+	for result := range resultCh {
+		require.NoError(t, result.err)
+		results = append(results, result.number)
+	}
+
+	require.Len(t, results, workers)
 
 	// Verify all numbers are unique and sequential.
 	sort.Slice(results, func(i, j int) bool {
