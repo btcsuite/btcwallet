@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	rescanv2 "github.com/lightninglabs/neutrino/rescan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,46 +18,90 @@ import (
 // maxDur is the max duration a test has to execute successfully.
 var maxDur = 5 * time.Second
 
+type rescanMode struct {
+	name           string
+	useActorRescan bool
+}
+
+var rescanModes = []rescanMode{
+	{name: "legacy"},
+	{name: "actor", useActorRescan: true},
+}
+
+func TestNewNeutrinoClientUseActorRescanFlag(t *testing.T) {
+	client := NewNeutrinoClient(
+		&chaincfg.MainNetParams, nil, true,
+	)
+	require.True(t, client.UseActorRescan)
+
+	client = NewNeutrinoClient(
+		&chaincfg.MainNetParams, nil, false,
+	)
+	require.False(t, client.UseActorRescan)
+}
+
+func testRescanAddr(t *testing.T, label string) btcutil.Address {
+	t.Helper()
+
+	hash := chainhash.HashB([]byte(label))
+	addr, err := btcutil.NewAddressPubKeyHash(
+		hash[:20], &chaincfg.MainNetParams,
+	)
+	require.NoError(t, err)
+
+	return addr
+}
+
+func testRescanStartHash(t *testing.T, nc *NeutrinoClient) chainhash.Hash {
+	t.Helper()
+
+	if nc.UseActorRescan {
+		chainSource, err := nc.newRescanChainSource()
+		require.NoError(t, err)
+
+		header, err := chainSource.GetBlockHeaderByHeight(0)
+		require.NoError(t, err)
+
+		return header.BlockHash()
+	}
+
+	return new(wire.BlockHeader).BlockHash()
+}
+
 // TestNeutrinoClientSequentialStartStop ensures that the client
 // can sequentially Start and Stop without errors or races.
 func TestNeutrinoClientSequentialStartStop(t *testing.T) {
-	var (
-		nc           = newMockNeutrinoClient()
-		wantRestarts = 50
-	)
+	for _, mode := range rescanModes {
+		t.Run(mode.name, func(t *testing.T) {
+			var (
+				nc           = newMockNeutrinoClient(mode.useActorRescan)
+				wantRestarts = 50
+			)
 
-	// callStartStop starts the neutrino client, requires no error on
-	// startup, immediately stops the client and waits for shutdown.
-	// The returned channel is closed once shutdown is complete.
-	callStartStop := func() <-chan struct{} {
-		done := make(chan struct{})
+			callStartStop := func() <-chan struct{} {
+				done := make(chan struct{})
 
-		go func() {
-			defer close(done)
+				go func() {
+					defer close(done)
 
-			err := nc.Start(t.Context())
-			require.NoError(t, err)
-			nc.Stop()
-			nc.WaitForShutdown()
-		}()
+					err := nc.Start(t.Context())
+					require.NoError(t, err)
+					nc.Stop()
+					nc.WaitForShutdown()
+				}()
 
-		return done
-	}
+				return done
+			}
 
-	// For each wanted restart, execute callStartStop and wait until the
-	// call is done before continuing to the next execution.  Waiting for
-	// a read from done forces all executions of callStartStop to be done
-	// sequentially.
-	//
-	// The test fails if all of the wanted restarts cannot be completed
-	// sequentially before the timeout is reached.
-	timeout := time.After(maxDur)
-	for i := 0; i < wantRestarts; i++ {
-		select {
-		case <-timeout:
-			t.Fatal("timed out")
-		case <-callStartStop():
-		}
+			timeout := time.After(maxDur)
+			for i := 0; i < wantRestarts; i++ {
+				select {
+				case <-timeout:
+					t.Fatal("timed out")
+				case <-callStartStop():
+				}
+			}
+		})
 	}
 }
 
@@ -62,41 +109,71 @@ func TestNeutrinoClientSequentialStartStop(t *testing.T) {
 // the client into the scanning state and that subsequent calls while scanning
 // will call Update on the client's Rescanner.
 func TestNeutrinoClientNotifyReceived(t *testing.T) {
-	var (
-		nc                      = newMockNeutrinoClient()
-		wantNotifyReceivedCalls = 50
-		wantUpdateCalls         = wantNotifyReceivedCalls - 1
-	)
+	for _, mode := range rescanModes {
+		t.Run(mode.name, func(t *testing.T) {
+			var (
+				nc                      = newMockNeutrinoClient(mode.useActorRescan)
+				wantNotifyReceivedCalls = 50
+				wantUpdateCalls         = wantNotifyReceivedCalls - 1
+				addrs                   = []btcutil.Address{
+					testRescanAddr(t, mode.name),
+				}
+			)
 
-	// executeCalls calls NotifyReceived() synchronously n times without
-	// blocking the test and requires no error after each call.
-	executeCalls := func(n int) <-chan struct{} {
-		done := make(chan struct{})
+			err := nc.Start(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				nc.Stop()
+				nc.WaitForShutdown()
+			})
 
-		go func() {
-			defer close(done)
+			executeCalls := func(n int) <-chan error {
+				done := make(chan error, 1)
 
-			var addrs []btcutil.Address
-			for i := 0; i < n; i++ {
-				err := nc.NotifyReceived(addrs)
+				go func() {
+					defer close(done)
+
+					for i := 0; i < n; i++ {
+						err := nc.NotifyReceived(addrs)
+						if err != nil {
+							done <- err
+							return
+						}
+					}
+
+					done <- nil
+				}()
+
+				return done
+			}
+
+			timeout := time.After(maxDur)
+			select {
+			case <-timeout:
+				t.Fatal("timed out")
+			case err := <-executeCalls(wantNotifyReceivedCalls):
 				require.NoError(t, err)
 			}
-		}()
 
-		return done
-	}
+			if !mode.useActorRescan {
+				mockRescan := nc.rescan.(*mockRescanner)
+				gotUpdateCalls := mockRescan.updateArgs.Len()
+				require.Equal(t, wantUpdateCalls, gotUpdateCalls)
+				return
+			}
 
-	// Wait for all calls to complete or test to time out.
-	timeout := time.After(maxDur)
-	select {
-	case <-timeout:
-		t.Fatal("timed out")
-	case <-executeCalls(wantNotifyReceivedCalls):
-		// Require that the expected number of calls to Update were made
-		// once done sending all NotifyReceived calls.
-		mockRescan := nc.rescan.(*mockRescanner)
-		gotUpdateCalls := mockRescan.updateArgs.Len()
-		require.Equal(t, wantUpdateCalls, gotUpdateCalls)
+			require.NotNil(t, nc.rescanActor)
+
+			state, err := nc.rescanActor.CurrentState()
+			require.NoError(t, err)
+
+			cur, ok := state.(*rescanv2.StateCurrent)
+			require.True(t, ok, "expected StateCurrent, got %T", state)
+			require.Len(
+				t, cur.Watch.Addrs,
+				wantNotifyReceivedCalls*len(addrs),
+			)
+		})
 	}
 }
 
@@ -111,108 +188,159 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 // out of the channel to verify the number of messages received is the number
 // expected (i.e., wantMsgs == gotMsgs).
 func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
-	var (
-		addrs     []btcutil.Address
-		nc        = newMockNeutrinoClient()
-		wantMsgs  = 100
-		gotMsgs   = 0
-		msgCh     = make(chan string, wantMsgs)
-		msgPrefix = "successfully called"
+	for _, mode := range rescanModes {
+		t.Run(mode.name, func(t *testing.T) {
+			var (
+				addrs     []btcutil.Address
+				nc        = newMockNeutrinoClient(mode.useActorRescan)
+				wantMsgs  = 100
+				gotMsgs   = 0
+				msgCh     = make(chan string, wantMsgs)
+				errCh     = make(chan error, wantMsgs)
+				msgPrefix = "successfully called"
 
-		// sendMsg writes a message to the buffered message channel.
-		sendMsg = func(s string) {
-			msgCh <- fmt.Sprintf("%s %s", msgPrefix, s)
-		}
-	)
+				sendMsg = func(s string) {
+					msgCh <- fmt.Sprintf("%s %s", msgPrefix, s)
+				}
+				sendErr = func(err error) {
+					errCh <- err
+				}
+			)
 
-	// Define closures to wrap desired neutrino client method calls.
+			startHash := testRescanStartHash(t, nc)
+			callRescan := func(wg *sync.WaitGroup) {
+				defer wg.Done()
 
-	// cleanup is the shared cleanup function for a closure executing
-	// a neutrino client method call.  It sends a message and then
-	// decrements the wait group counter.
-	cleanup := func(wg *sync.WaitGroup, s string) {
-		defer wg.Done()
-		sendMsg(s)
-	}
-
-	// callRescan calls the Rescan() method and asserts it completes
-	// with no errors. Rescan() is called with the hash of an empty header
-	// on each call.
-	startHash := new(wire.BlockHeader).BlockHash()
-	callRescan := func(wg *sync.WaitGroup) {
-		defer cleanup(wg, "rescan")
-
-		err := nc.Rescan(&startHash, addrs, nil)
-		require.NoError(t, err)
-	}
-
-	// callNotifyReceived calls the NotifyReceived() method and asserts it
-	// completes with no errors.
-	callNotifyReceived := func(wg *sync.WaitGroup) {
-		defer cleanup(wg, "notify received")
-
-		err := nc.NotifyReceived(addrs)
-		require.NoError(t, err)
-	}
-
-	// callNotifyBlocks calls the NotifyBlocks() method and asserts it
-	// completes with no errors.
-	callNotifyBlocks := func(wg *sync.WaitGroup) {
-		defer cleanup(wg, "notify blocks")
-
-		err := nc.NotifyBlocks()
-		require.NoError(t, err)
-	}
-
-	// executeCalls launches the wanted number of goroutines, waits
-	// for them to finish and signals all done by closing the returned
-	// channel.
-	executeCalls := func(n int) <-chan struct{} {
-		done := make(chan struct{})
-
-		go func() {
-			defer close(done)
-
-			var wg sync.WaitGroup
-			defer wg.Wait()
-
-			wg.Add(n)
-			for i := 0; i < n; i++ {
-				if i%3 == 0 {
-					go callRescan(&wg)
-					continue
+				err := nc.Rescan(&startHash, addrs, nil)
+				if err != nil {
+					sendErr(fmt.Errorf("rescan: %w", err))
+					return
 				}
 
-				if i%10 == 0 {
-					go callNotifyBlocks(&wg)
-					continue
-				}
-
-				go callNotifyReceived(&wg)
+				sendMsg("rescan")
 			}
-		}()
 
-		return done
+			callNotifyReceived := func(wg *sync.WaitGroup) {
+				defer wg.Done()
+
+				err := nc.NotifyReceived(addrs)
+				if err != nil {
+					sendErr(fmt.Errorf("notify received: %w", err))
+					return
+				}
+
+				sendMsg("notify received")
+			}
+
+			callNotifyBlocks := func(wg *sync.WaitGroup) {
+				defer wg.Done()
+
+				err := nc.NotifyBlocks()
+				if err != nil {
+					sendErr(fmt.Errorf("notify blocks: %w", err))
+					return
+				}
+
+				sendMsg("notify blocks")
+			}
+
+			executeCalls := func(n int) <-chan error {
+				done := make(chan error, 1)
+
+				go func() {
+					var wg sync.WaitGroup
+					wg.Add(n)
+					for i := 0; i < n; i++ {
+						if i%3 == 0 {
+							go callRescan(&wg)
+							continue
+						}
+
+						if i%10 == 0 {
+							go callNotifyBlocks(&wg)
+							continue
+						}
+
+						go callNotifyReceived(&wg)
+					}
+
+					wg.Wait()
+					close(msgCh)
+					close(errCh)
+
+					for str := range msgCh {
+						assert.Contains(t, str, msgPrefix)
+						gotMsgs++
+					}
+
+					var firstErr error
+					for err := range errCh {
+						if firstErr == nil {
+							firstErr = err
+						}
+					}
+
+					done <- firstErr
+					close(done)
+				}()
+
+				return done
+			}
+
+			err := nc.Start(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				nc.Stop()
+				nc.WaitForShutdown()
+			})
+
+			timeout := time.After(maxDur)
+			select {
+			case <-timeout:
+				t.Fatal("timed out")
+			case err := <-executeCalls(wantMsgs):
+				require.NoError(t, err)
+				require.Equal(t, wantMsgs, gotMsgs)
+			}
+		})
 	}
+}
 
-	// Start the client.
-	err := nc.Start(t.Context())
-	require.NoError(t, err)
+// TestNeutrinoClientStopWithActiveRescan ensures both backends can stop cleanly
+// after the client has started an active notification/rescan pipeline.
+func TestNeutrinoClientStopWithActiveRescan(t *testing.T) {
+	for _, mode := range rescanModes {
+		t.Run(mode.name, func(t *testing.T) {
+			nc := newMockNeutrinoClient(mode.useActorRescan)
 
-	// Wait for all calls to complete or test to time out.
-	timeout := time.After(maxDur)
-	select {
-	case <-timeout:
-		t.Fatal("timed out")
-	case <-executeCalls(wantMsgs):
-		// Ensure that exactly wantRoutines number of calls were made
-		// by counting the results on the message channel.
-		close(msgCh)
-		for str := range msgCh {
-			assert.Contains(t, str, msgPrefix)
-			gotMsgs++
-		}
+			err := nc.Start(t.Context())
+			require.NoError(t, err)
 
-		require.Equal(t, wantMsgs, gotMsgs)
+			addrs := []btcutil.Address{
+				testRescanAddr(t, mode.name+"-stop"),
+			}
+			err = nc.NotifyReceived(addrs)
+			require.NoError(t, err)
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				nc.Stop()
+				nc.WaitForShutdown()
+			}()
+
+			select {
+			case <-time.After(maxDur):
+				t.Fatal("timed out")
+			case <-done:
+			}
+
+			nc.clientMtx.Lock()
+			defer nc.clientMtx.Unlock()
+
+			require.False(t, nc.started)
+			require.Nil(t, nc.rescanActor)
+			require.Nil(t, nc.rescan)
+		})
 	}
 }

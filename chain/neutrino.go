@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightninglabs/neutrino/headerfs"
+	rescanv2 "github.com/lightninglabs/neutrino/rescan"
 )
 
 // ErrUnimplemented is returned when a certain method is not implemented for a
@@ -67,6 +68,21 @@ type NeutrinoClient struct {
 	// should ideally be synchronized by the same lock or via some other
 	// shared mechanism.
 	clientMtx sync.Mutex
+
+	// UseActorRescan enables the new actor+FSM based rescan pipeline.
+	// When true, NotifyReceived and Rescan delegate to the RescanActor
+	// instead of the channel-based rescan implementation.
+	UseActorRescan bool
+
+	// rescanActor is the actor-based rescan instance (only used when
+	// UseActorRescan is true).
+	rescanActor *rescanv2.RescanActor
+
+	// newActorChainSource optionally overrides construction of the
+	// chain source used by the actor-backed rescan path. Tests use this
+	// to supply a mock ChainSource while still exercising the real actor
+	// runtime and mailbox.
+	newActorChainSource func() neutrino.ChainSource
 }
 
 // A compile-time check to ensure that RPCClient satisfies the chain.Interface
@@ -76,11 +92,25 @@ var _ Interface = (*NeutrinoClient)(nil)
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
 // ChainService.
 func NewNeutrinoClient(chainParams *chaincfg.Params,
-	chainService *neutrino.ChainService) *NeutrinoClient {
+	chainService *neutrino.ChainService,
+	useActorRescan bool) *NeutrinoClient {
 
 	chainSource := &neutrino.RescanChainSource{
 		ChainService: chainService,
 	}
+
+	return NewNeutrinoClientWithChainSource(
+		chainParams, chainService, chainSource, useActorRescan,
+	)
+}
+
+// NewNeutrinoClientWithChainSource creates a new NeutrinoClient using a custom
+// chain source. This is primarily useful for tests that want to exercise the
+// real wrapper with a mock backend while preserving the production constructor
+// for the normal *neutrino.ChainService path.
+func NewNeutrinoClientWithChainSource(chainParams *chaincfg.Params,
+	chainService NeutrinoChainService, chainSource neutrino.ChainSource,
+	useActorRescan bool) *NeutrinoClient {
 
 	// Adapt the neutrino.NewRescan constructor to satisfy the
 	// newRescanFunc type by closing over the chainSource and
@@ -90,9 +120,13 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 	}
 
 	return &NeutrinoClient{
-		CS:          chainService,
-		chainParams: chainParams,
-		newRescan:   newRescan,
+		CS:             chainService,
+		chainParams:    chainParams,
+		newRescan:      newRescan,
+		UseActorRescan: useActorRescan,
+		newActorChainSource: func() neutrino.ChainSource {
+			return chainSource
+		},
 	}
 }
 
@@ -137,18 +171,42 @@ func (s *NeutrinoClient) Start(ctx context.Context) error {
 }
 
 // Stop replicates the RPC client's Stop method.
-//
-// TODO(mstreet3): The Stop method does not cancel the long-running rescan
-// goroutine.  This is a memory leak.  Stop should shutdown the rescan goroutine
-// and reset the scanning state of the NeutrinoClient to false.
 func (s *NeutrinoClient) Stop() {
+	var (
+		rescan     rescanner
+		rescanQuit chan struct{}
+		actor      *rescanv2.RescanActor
+	)
+
 	s.clientMtx.Lock()
-	defer s.clientMtx.Unlock()
 	if !s.started {
+		s.clientMtx.Unlock()
 		return
 	}
+
+	rescan = s.rescan
+	rescanQuit = s.rescanQuit
+	actor = s.rescanActor
+
 	close(s.quit)
 	s.started = false
+	s.scanning = false
+	s.rescan = nil
+	s.rescanErr = nil
+	s.rescanQuit = nil
+	s.rescanActor = nil
+	s.clientMtx.Unlock()
+
+	if rescanQuit != nil {
+		close(rescanQuit)
+	}
+	if rescan != nil {
+		rescan.WaitForShutdown()
+	}
+	if actor != nil {
+		actor.Stop()
+		actor.WaitForShutdown()
+	}
 }
 
 // WaitForShutdown replicates the RPC client's WaitForShutdown method.
@@ -398,9 +456,15 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []btcutil.Address,
 	outPoints map[wire.OutPoint]btcutil.Address) error {
 
-	// Obtain and hold the rescan mutex lock for the duration of the call.
+	// Keep the external rescan API serialized across both the legacy and
+	// actor-backed implementations.
 	s.rescanMtx.Lock()
 	defer s.rescanMtx.Unlock()
+
+	// If using the actor-based rescan, delegate to it.
+	if s.UseActorRescan {
+		return s.rescanActorRescan(startHash, addrs, outPoints)
+	}
 
 	s.clientMtx.Lock()
 	if !s.started {
@@ -509,9 +573,26 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
-	// Obtain and hold the rescan mutex lock for the duration of the call.
+	return s.NotifyReceivedWithHeight(addrs, nil)
+}
+
+// NotifyReceivedWithHeight is like NotifyReceived but also accepts an
+// optional rewind height. When rewindTo is non-nil, the rescan will
+// rewind to that height and re-check all subsequent blocks with the
+// updated watch list. This enables callers to specify the address
+// birthday/creation height for proper rewind support.
+func (s *NeutrinoClient) NotifyReceivedWithHeight(
+	addrs []btcutil.Address, rewindTo *uint32) error {
+
+	// Keep NotifyReceived serialized across both implementations so wallet-side
+	// semantics stay aligned while we run the actor path behind a flag.
 	s.rescanMtx.Lock()
 	defer s.rescanMtx.Unlock()
+
+	// If using the actor-based rescan, delegate to it.
+	if s.UseActorRescan {
+		return s.notifyReceivedActor(addrs, rewindTo)
+	}
 
 	s.clientMtx.Lock()
 
@@ -544,6 +625,234 @@ func (s *NeutrinoClient) NotifyReceived(addrs []btcutil.Address) error {
 	s.rescan = newRescan
 	s.rescanErr = s.rescan.Start()
 	s.clientMtx.Unlock()
+	return nil
+}
+
+// newRescanChainSource creates the ChainSource used by the actor-backed
+// rescan path.
+func (s *NeutrinoClient) newRescanChainSource() (neutrino.ChainSource, error) {
+	if s.newActorChainSource != nil {
+		return s.newActorChainSource(), nil
+	}
+
+	chainService, ok := s.CS.(*neutrino.ChainService)
+	if !ok {
+		return nil, fmt.Errorf("actor rescan requires *neutrino.ChainService, got %T", s.CS)
+	}
+
+	return &neutrino.RescanChainSource{
+		ChainService: chainService,
+	}, nil
+}
+
+// buildActorCallbacks constructs the rescan actor callbacks that adapt the
+// new actor outbox events to the existing NeutrinoClient notification
+// methods.
+func (s *NeutrinoClient) buildActorCallbacks(
+	chainSource neutrino.ChainSource) rescanv2.Callbacks {
+
+	return rescanv2.Callbacks{
+		OnFilteredBlockConnected: s.onFilteredBlockConnected,
+		OnBlockConnected: func(height int32,
+			hdr *wire.BlockHeader, ts time.Time) {
+
+			// Adapt to old rpcclient callback signature:
+			// (hash, height, time).
+			hash := hdr.BlockHash()
+			s.onBlockConnected(&hash, height, ts)
+		},
+		OnBlockDisconnected: func(height int32,
+			hdr *wire.BlockHeader) {
+
+			// Adapt to old rpcclient callback signature:
+			// (hash, height, time).
+			hash := hdr.BlockHash()
+			s.onBlockDisconnected(
+				&hash, height, hdr.Timestamp,
+			)
+		},
+		OnRescanProgress: func(height int32) {
+			select {
+			case s.enqueueNotification <- &RescanProgress{
+				Height: height,
+			}:
+			case <-s.quit:
+			}
+		},
+		OnRescanFinished: func(height int32) {
+			bestBlock, err := chainSource.BestBlock()
+			if err != nil {
+				return
+			}
+			select {
+			case s.enqueueNotification <- &RescanFinished{
+				Hash:   &bestBlock.Hash,
+				Height: bestBlock.Height,
+			}:
+			case <-s.quit:
+			}
+		},
+		OnTxConfirmed: func(txHash chainhash.Hash) {
+			// Mark as confirmed on the broadcaster to prevent
+			// unnecessary rebroadcasts.
+			cs, ok := s.CS.(interface {
+				MarkAsConfirmed(chainhash.Hash)
+			})
+			if ok {
+				cs.MarkAsConfirmed(txHash)
+			}
+		},
+	}
+}
+
+// stopRescanActor stops the current rescan actor if running. The caller
+// must NOT hold clientMtx (this method acquires/releases it internally
+// to avoid holding the lock during shutdown).
+func (s *NeutrinoClient) stopRescanActor() {
+	s.clientMtx.Lock()
+	actor := s.rescanActor
+	s.rescanActor = nil
+	s.clientMtx.Unlock()
+
+	if actor != nil {
+		actor.Stop()
+		actor.WaitForShutdown()
+	}
+}
+
+// notifyReceivedActor handles NotifyReceived when UseActorRescan is enabled.
+func (s *NeutrinoClient) notifyReceivedActor(addrs []btcutil.Address,
+	rewindTo *uint32) error {
+
+	s.clientMtx.Lock()
+	actor := s.rescanActor
+	startTime := s.startTime
+	s.clientMtx.Unlock()
+
+	// If actor already running, just add the addresses.
+	if actor != nil {
+		return actor.AddWatchAddrs(addrs, nil, rewindTo)
+	}
+
+	chainSource, err := s.newRescanChainSource()
+	if err != nil {
+		return err
+	}
+
+	// Get the best block to use as the starting point.
+	bestBlock, err := chainSource.BestBlock()
+	if err != nil {
+		return fmt.Errorf("can't get best block: %w", err)
+	}
+	header, err := chainSource.GetBlockHeaderByHeight(
+		uint32(bestBlock.Height),
+	)
+	if err != nil {
+		return fmt.Errorf("can't get header at height %d: %w",
+			bestBlock.Height, err)
+	}
+
+	actor = rescanv2.NewRescanActor(rescanv2.ActorConfig{
+		Chain: chainSource,
+		StartStamp: headerfs.BlockStamp{
+			Hash:   bestBlock.Hash,
+			Height: bestBlock.Height,
+		},
+		StartHeader: *header,
+		StartTime:   startTime,
+		WatchAddrs:  addrs,
+		Callbacks:   s.buildActorCallbacks(chainSource),
+	})
+
+	s.clientMtx.Lock()
+	s.rescanActor = actor
+	s.scanning = true
+
+	// Don't need RescanFinished or RescanProgress notifications for
+	// NotifyReceived — we're just adding addresses to watch.
+	s.finished = true
+	s.lastProgressSent = true
+	s.clientMtx.Unlock()
+
+	actor.Start()
+
+	return nil
+}
+
+// rescanActorRescan handles Rescan when UseActorRescan is enabled.
+func (s *NeutrinoClient) rescanActorRescan(startHash *chainhash.Hash,
+	addrs []btcutil.Address,
+	outPoints map[wire.OutPoint]btcutil.Address) error {
+
+	s.clientMtx.Lock()
+	if !s.started {
+		s.clientMtx.Unlock()
+		return fmt.Errorf("can't do a rescan when the chain client " +
+			"is not started")
+	}
+	actor := s.rescanActor
+	startTime := s.startTime
+	s.clientMtx.Unlock()
+
+	// Stop existing actor before wiring in the replacement, but do it outside
+	// clientMtx so actor callbacks can still flow through the notification
+	// loop while shutdown drains.
+	if actor != nil {
+		s.stopRescanActor()
+	}
+
+	chainSource, err := s.newRescanChainSource()
+	if err != nil {
+		return err
+	}
+
+	// Get the start block header.
+	header, height, err := chainSource.GetBlockHeader(startHash)
+	if err != nil {
+		return fmt.Errorf("can't get block header for hash %v: %w",
+			startHash, err)
+	}
+
+	// Convert outpoints to InputWithScript.
+	inputsToWatch := make(
+		[]neutrino.InputWithScript, 0, len(outPoints),
+	)
+	for op, addr := range outPoints {
+		addrScript, err := txscript.PayToAddrScript(addr)
+		if err != nil {
+			return err
+		}
+		inputsToWatch = append(
+			inputsToWatch, neutrino.InputWithScript{
+				OutPoint: op,
+				PkScript: addrScript,
+			},
+		)
+	}
+
+	actor = rescanv2.NewRescanActor(rescanv2.ActorConfig{
+		Chain: chainSource,
+		StartStamp: headerfs.BlockStamp{
+			Hash:   *startHash,
+			Height: int32(height),
+		},
+		StartHeader: *header,
+		StartTime:   startTime,
+		WatchAddrs:  addrs,
+		WatchInputs: inputsToWatch,
+		Callbacks:   s.buildActorCallbacks(chainSource),
+	})
+
+	s.clientMtx.Lock()
+	s.rescanActor = actor
+	s.scanning = true
+	s.finished = false
+	s.lastProgressSent = false
+	s.isRescan = true
+	s.clientMtx.Unlock()
+
+	actor.Start()
+
 	return nil
 }
 
