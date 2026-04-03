@@ -371,3 +371,45 @@ func TestNullInt32ToUint32(t *testing.T) {
 		})
 	}
 }
+
+// TestNullableInt32ToSQLInt32 checks that optional int32 values become a valid
+// sql.NullInt32 only when the pointer is present.
+func TestNullableInt32ToSQLInt32(t *testing.T) {
+	t.Parallel()
+
+	value := int32(42)
+
+	require.Equal(t, sql.NullInt32{}, nullableInt32ToSQLInt32(nil))
+	require.Equal(t,
+		sql.NullInt32{Int32: value, Valid: true},
+		nullableInt32ToSQLInt32(&value),
+	)
+}
+
+// TestNullableInt32ToSQLInt64 checks that optional int32 values become a valid
+// sql.NullInt64 only when the pointer is present.
+func TestNullableInt32ToSQLInt64(t *testing.T) {
+	t.Parallel()
+
+	value := int32(42)
+
+	require.Equal(t, sql.NullInt64{}, nullableInt32ToSQLInt64(nil))
+	require.Equal(t,
+		sql.NullInt64{Int64: int64(value), Valid: true},
+		nullableInt32ToSQLInt64(&value),
+	)
+}
+
+// TestNullableUint32ToSQLInt64 checks that optional uint32 values become a
+// valid sql.NullInt64 only when the pointer is present.
+func TestNullableUint32ToSQLInt64(t *testing.T) {
+	t.Parallel()
+
+	value := uint32(42)
+
+	require.Equal(t, sql.NullInt64{}, nullableUint32ToSQLInt64(nil))
+	require.Equal(t,
+		sql.NullInt64{Int64: int64(value), Valid: true},
+		nullableUint32ToSQLInt64(&value),
+	)
+}

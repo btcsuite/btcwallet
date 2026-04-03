@@ -331,13 +331,10 @@ func (s sqliteAccountGetQueries) byNumber(ctx context.Context,
 	return getAccount(
 		ctx, s.q.GetAccountByWalletScopeAndNumber,
 		sqlcsqlite.GetAccountByWalletScopeAndNumberParams{
-			WalletID: int64(query.WalletID),
-			Purpose:  int64(query.Scope.Purpose),
-			CoinType: int64(query.Scope.Coin),
-			AccountNumber: sql.NullInt64{
-				Int64: int64(*query.AccountNumber),
-				Valid: true,
-			},
+			WalletID:      int64(query.WalletID),
+			Purpose:       int64(query.Scope.Purpose),
+			CoinType:      int64(query.Scope.Coin),
+			AccountNumber: nullableUint32ToSQLInt64(query.AccountNumber),
 		}, query, sqliteAccountRowToInfo,
 	)
 }
@@ -369,14 +366,11 @@ func (s sqliteAccountRenameQueries) byNumber(ctx context.Context,
 	return renameAccount(
 		ctx, s.q.UpdateAccountNameByWalletScopeAndNumber,
 		sqlcsqlite.UpdateAccountNameByWalletScopeAndNumberParams{
-			NewName:  params.NewName,
-			WalletID: int64(params.WalletID),
-			Purpose:  int64(params.Scope.Purpose),
-			CoinType: int64(params.Scope.Coin),
-			AccountNumber: sql.NullInt64{
-				Int64: int64(*params.AccountNumber),
-				Valid: true,
-			},
+			NewName:       params.NewName,
+			WalletID:      int64(params.WalletID),
+			Purpose:       int64(params.Scope.Purpose),
+			CoinType:      int64(params.Scope.Coin),
+			AccountNumber: nullableUint32ToSQLInt64(params.AccountNumber),
 		}, params,
 	)
 }
