@@ -44,12 +44,12 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
-        ?3 IS NULL
-        OR acc.account_number = ?3
+        cast(?3 AS INTEGER) IS NULL
+        OR acc.account_number = cast(?3 AS INTEGER)
     )
     AND (
-        ?4 IS NULL
-        OR ?4 = 0
+        cast(?4 AS INTEGER) IS NULL
+        OR cast(?4 AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -57,10 +57,10 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= ?4
+        ) >= cast(?4 AS INTEGER)
     )
     AND (
-        ?5 IS NULL
+        cast(?5 AS INTEGER) IS NULL
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -68,11 +68,11 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= ?5
+        ) <= cast(?5 AS INTEGER)
     )
     AND (
-        ?6 IS NULL
-        OR ?6 = 0
+        cast(?6 AS INTEGER) IS NULL
+        OR cast(?6 AS INTEGER) = 0
         OR NOT t.is_coinbase
         OR (
             CASE
@@ -81,17 +81,17 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= ?6
+        ) >= cast(?6 AS INTEGER)
     )
 `
 
 type BalanceParams struct {
 	NowUtc           time.Time
 	WalletID         int64
-	AccountNumber    interface{}
-	MinConfirms      interface{}
-	MaxConfirms      interface{}
-	CoinbaseMaturity interface{}
+	AccountNumber    sql.NullInt64
+	MinConfirms      sql.NullInt64
+	MaxConfirms      sql.NullInt64
+	CoinbaseMaturity sql.NullInt64
 }
 
 type BalanceRow struct {
@@ -522,12 +522,12 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
-        ?2 IS NULL
-        OR acc.account_number = ?2
+        cast(?2 AS INTEGER) IS NULL
+        OR acc.account_number = cast(?2 AS INTEGER)
     )
     AND (
-        ?3 IS NULL
-        OR ?3 = 0
+        cast(?3 AS INTEGER) IS NULL
+        OR cast(?3 AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -535,10 +535,10 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= ?3
+        ) >= cast(?3 AS INTEGER)
     )
     AND (
-        ?4 IS NULL
+        cast(?4 AS INTEGER) IS NULL
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -546,16 +546,16 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= ?4
+        ) <= cast(?4 AS INTEGER)
     )
 ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
 	WalletID      int64
-	AccountNumber interface{}
-	MinConfirms   interface{}
-	MaxConfirms   interface{}
+	AccountNumber sql.NullInt64
+	MinConfirms   sql.NullInt64
+	MaxConfirms   sql.NullInt64
 }
 
 type ListUtxosRow struct {
