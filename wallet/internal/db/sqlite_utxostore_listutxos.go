@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -40,22 +41,22 @@ func (s *SqliteStore) ListUTXOs(ctx context.Context,
 	return utxos, nil
 }
 
-// optionalUint32Int64Sqlite converts an optional uint32 filter into the
+// optionalUint32Int64Sqlite converts an optional uint32 filter into the typed
 // nullable form used by sqlite sqlc queries.
-func optionalUint32Int64Sqlite(value *uint32) any {
+func optionalUint32Int64Sqlite(value *uint32) sql.NullInt64 {
 	if value == nil {
-		return nil
+		return sql.NullInt64{}
 	}
 
-	return int64(*value)
+	return sql.NullInt64{Int64: int64(*value), Valid: true}
 }
 
-// optionalInt32Sqlite converts an optional int32 filter into the nullable form
-// used by sqlite sqlc queries.
-func optionalInt32Sqlite(value *int32) any {
+// optionalInt32Sqlite converts an optional int32 filter into the typed nullable
+// form used by sqlite sqlc queries.
+func optionalInt32Sqlite(value *int32) sql.NullInt64 {
 	if value == nil {
-		return nil
+		return sql.NullInt64{}
 	}
 
-	return *value
+	return sql.NullInt64{Int64: int64(*value), Valid: true}
 }
