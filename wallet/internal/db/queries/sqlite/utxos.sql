@@ -139,12 +139,12 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
-        sqlc.narg('account_number') IS NULL
-        OR acc.account_number = sqlc.narg('account_number')
+        cast(sqlc.narg('account_number') AS INTEGER) IS NULL
+        OR acc.account_number = cast(sqlc.narg('account_number') AS INTEGER)
     )
     AND (
-        sqlc.narg('min_confirms') IS NULL
-        OR sqlc.narg('min_confirms') = 0
+        cast(sqlc.narg('min_confirms') AS INTEGER) IS NULL
+        OR cast(sqlc.narg('min_confirms') AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -152,10 +152,10 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= sqlc.narg('min_confirms')
+        ) >= cast(sqlc.narg('min_confirms') AS INTEGER)
     )
     AND (
-        sqlc.narg('max_confirms') IS NULL
+        cast(sqlc.narg('max_confirms') AS INTEGER) IS NULL
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -163,7 +163,7 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= sqlc.narg('max_confirms')
+        ) <= cast(sqlc.narg('max_confirms') AS INTEGER)
     )
 ORDER BY u.amount, t.tx_hash, u.output_index;
 
@@ -220,12 +220,12 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
-        sqlc.narg('account_number') IS NULL
-        OR acc.account_number = sqlc.narg('account_number')
+        cast(sqlc.narg('account_number') AS INTEGER) IS NULL
+        OR acc.account_number = cast(sqlc.narg('account_number') AS INTEGER)
     )
     AND (
-        sqlc.narg('min_confirms') IS NULL
-        OR sqlc.narg('min_confirms') = 0
+        cast(sqlc.narg('min_confirms') AS INTEGER) IS NULL
+        OR cast(sqlc.narg('min_confirms') AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -233,10 +233,10 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= sqlc.narg('min_confirms')
+        ) >= cast(sqlc.narg('min_confirms') AS INTEGER)
     )
     AND (
-        sqlc.narg('max_confirms') IS NULL
+        cast(sqlc.narg('max_confirms') AS INTEGER) IS NULL
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -244,11 +244,11 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= sqlc.narg('max_confirms')
+        ) <= cast(sqlc.narg('max_confirms') AS INTEGER)
     )
     AND (
-        sqlc.narg('coinbase_maturity') IS NULL
-        OR sqlc.narg('coinbase_maturity') = 0
+        cast(sqlc.narg('coinbase_maturity') AS INTEGER) IS NULL
+        OR cast(sqlc.narg('coinbase_maturity') AS INTEGER) = 0
         OR NOT t.is_coinbase
         OR (
             CASE
@@ -257,7 +257,7 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= sqlc.narg('coinbase_maturity')
+        ) >= cast(sqlc.narg('coinbase_maturity') AS INTEGER)
     );
 
 -- name: ListSpendingTxIDsByParentTxID :many
