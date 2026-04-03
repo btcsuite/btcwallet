@@ -94,6 +94,33 @@ func uint32ToNullInt32(v uint32) (sql.NullInt32, error) {
 	return sql.NullInt32{Int32: toInt32, Valid: true}, nil
 }
 
+// nullableInt32ToSQLInt32 converts an optional int32 to sql.NullInt32.
+func nullableInt32ToSQLInt32(v *int32) sql.NullInt32 {
+	if v == nil {
+		return sql.NullInt32{}
+	}
+
+	return sql.NullInt32{Int32: *v, Valid: true}
+}
+
+// nullableInt32ToSQLInt64 converts an optional int32 to sql.NullInt64.
+func nullableInt32ToSQLInt64(v *int32) sql.NullInt64 {
+	if v == nil {
+		return sql.NullInt64{}
+	}
+
+	return sql.NullInt64{Int64: int64(*v), Valid: true}
+}
+
+// nullableUint32ToSQLInt64 converts an optional uint32 to sql.NullInt64.
+func nullableUint32ToSQLInt64(v *uint32) sql.NullInt64 {
+	if v == nil {
+		return sql.NullInt64{}
+	}
+
+	return sql.NullInt64{Int64: int64(*v), Valid: true}
+}
+
 // nullInt32ToUint32 safely casts a sql.NullInt32 to an uint32, returning
 // an error if the value is out of range or invalid.
 func nullInt32ToUint32(n sql.NullInt32) (uint32, error) {

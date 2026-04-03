@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -17,9 +16,9 @@ func (s *SqliteStore) ListUTXOs(ctx context.Context,
 
 	rows, err := s.queries.ListUtxos(ctx, sqlcsqlite.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
-		AccountNumber: optionalUint32Int64Sqlite(query.Account),
-		MinConfirms:   optionalInt32Sqlite(query.MinConfs),
-		MaxConfirms:   optionalInt32Sqlite(query.MaxConfs),
+		AccountNumber: nullableUint32ToSQLInt64(query.Account),
+		MinConfirms:   nullableInt32ToSQLInt64(query.MinConfs),
+		MaxConfirms:   nullableInt32ToSQLInt64(query.MaxConfs),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list utxos: %w", err)
@@ -39,24 +38,4 @@ func (s *SqliteStore) ListUTXOs(ctx context.Context,
 	}
 
 	return utxos, nil
-}
-
-// optionalUint32Int64Sqlite converts an optional uint32 filter into the typed
-// nullable form used by sqlite sqlc queries.
-func optionalUint32Int64Sqlite(value *uint32) sql.NullInt64 {
-	if value == nil {
-		return sql.NullInt64{}
-	}
-
-	return sql.NullInt64{Int64: int64(*value), Valid: true}
-}
-
-// optionalInt32Sqlite converts an optional int32 filter into the typed nullable
-// form used by sqlite sqlc queries.
-func optionalInt32Sqlite(value *int32) sql.NullInt64 {
-	if value == nil {
-		return sql.NullInt64{}
-	}
-
-	return sql.NullInt64{Int64: int64(*value), Valid: true}
 }
