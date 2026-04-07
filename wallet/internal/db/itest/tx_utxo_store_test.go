@@ -302,6 +302,207 @@ func TestCreateTxRejectsDuplicateTx(t *testing.T) {
 	require.True(t, ok)
 }
 
+// TestCreateTxConfirmsExistingUnminedRow verifies that CreateTx reuses one live
+// unmined row when the same transaction later arrives with confirming block
+// metadata.
+//
+// Scenario:
+//   - One wallet already stores the transaction in its unmined history.
+//
+// Setup:
+//   - Create one wallet-owned credited transaction in pending state.
+//   - Create one matching confirming block fixture for the same transaction
+//     hash.
+//
+// Action:
+//   - Call CreateTx again with the same transaction hash and confirming block.
+//
+// Assertions:
+//   - The existing row remains stored once.
+//   - The transaction becomes confirmed and published.
+//   - The existing label remains unchanged.
+func TestCreateTxConfirmsExistingUnminedRow(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-confirm-existing-unmined")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	queries := store.Queries()
+	confirmedBlock := CreateBlockFixture(t, queries, 250)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000500, 0),
+		Status:   db.TxStatusPending,
+		Label:    "seed",
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000600, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+		Label:    "ignored",
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, info.Block)
+	require.Equal(t, confirmedBlock.Height, info.Block.Height)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+	require.Equal(t, "seed", info.Label)
+
+	unminedTxs, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletID,
+		UnminedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, unminedTxs)
+
+	confirmedTxs, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletID,
+		StartHeight: confirmedBlock.Height,
+		EndHeight:   confirmedBlock.Height,
+	})
+	require.NoError(t, err)
+	require.Len(t, confirmedTxs, 1)
+	require.Equal(t, tx.TxHash(), confirmedTxs[0].Hash)
+}
+
+// TestCreateTxConfirmedWinnerInvalidatesConflictBranch verifies that a newly
+// confirmed transaction invalidates the conflicting unmined branch before it
+// claims the shared wallet-owned input.
+//
+// Scenario:
+//   - One wallet-owned output already has one unmined spend chain.
+//   - A confirmed conflicting transaction later arrives for the same outpoint.
+//
+// Setup:
+//   - Create one wallet-owned parent credit.
+//   - Insert one unmined child and one unmined grandchild depending on it.
+//   - Build one confirmed conflicting transaction spending the same parent
+//     outpoint.
+//
+// Action:
+//   - Insert the confirmed conflicting transaction through CreateTx.
+//
+// Assertions:
+//   - The direct conflicting root becomes replaced.
+//   - The descendant row becomes failed.
+//   - The confirmed winner is stored.
+//   - The parent outpoint remains spent instead of returning to the UTXO set.
+func TestCreateTxConfirmedWinnerInvalidatesConflictBranch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-confirmed-conflict-winner")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710001500, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	spentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	firstChild := newRegularTx(
+		[]wire.OutPoint{spentOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x51}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       firstChild,
+		Received: time.Unix(1710001510, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	grandchild := newRegularTx(
+		[]wire.OutPoint{{Hash: firstChild.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 3000, PkScript: []byte{0x52}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       grandchild,
+		Received: time.Unix(1710001520, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 260)
+	confirmedWinner := newRegularTx(
+		[]wire.OutPoint{spentOutPoint},
+		[]*wire.TxOut{{Value: 3500, PkScript: []byte{0x53}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedWinner,
+		Received: time.Unix(1710001530, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	childInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     firstChild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, childInfo.Block)
+	require.Equal(t, db.TxStatusReplaced, childInfo.Status)
+
+	grandchildInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     grandchild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, grandchildInfo.Block)
+	require.Equal(t, db.TxStatusFailed, grandchildInfo.Status)
+
+	winnerInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     confirmedWinner.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, winnerInfo.Block)
+	require.Equal(t, db.TxStatusPublished, winnerInfo.Status)
+
+	_, err = store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: spentOutPoint,
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
 // TestGetTxReturnsStoredPendingTx verifies that GetTx rebuilds the public
 // transaction view for one stored unmined row.
 //
