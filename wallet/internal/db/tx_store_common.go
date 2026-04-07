@@ -636,11 +636,14 @@ func validateUpdateTxState(state UpdateTxState, isCoinbase bool) error {
 			ErrInvalidParam, state.Status, ErrInvalidStatus)
 	}
 
-	// Only disconnected coinbase rows become orphaned. Ordinary
-	// transactions use the replaced/failed states instead, so UpdateTx
-	// must reject orphaned transitions for non-coinbase history.
-	if !isCoinbase && state.Status == TxStatusOrphaned {
-		return fmt.Errorf("%w: non-coinbase txns cannot be orphaned: %w",
+	// UpdateTx is row-local only. Any invalidating or orphaning transition must
+	// flow through the event-shaped APIs that also reconcile dependent branch
+	// state.
+	if state.Status == TxStatusFailed ||
+		state.Status == TxStatusReplaced ||
+		state.Status == TxStatusOrphaned {
+
+		return fmt.Errorf("%w: UpdateTx cannot invalidate txns: %w",
 			ErrInvalidParam, ErrInvalidStatus)
 	}
 
@@ -651,11 +654,11 @@ func validateUpdateTxState(state UpdateTxState, isCoinbase bool) error {
 			ErrInvalidParam, ErrInvalidStatus)
 	}
 
-	// A unmined coinbase row only appears after rollback disconnects its block,
-	// at which point the row must be marked orphaned rather than treated as an
-	// active unmined transaction.
-	if isCoinbase && state.Block == nil && state.Status != TxStatusOrphaned {
-		return fmt.Errorf("%w: unmined coinbase txns must be orphaned: %w",
+	// Coinbase state transitions are event-shaped only. CreateTx records the
+	// mined fact, while RollbackToBlock clears the block reference and rewrites
+	// the row orphaned. UpdateTx therefore never patches coinbase state.
+	if isCoinbase {
+		return fmt.Errorf("%w: UpdateTx cannot patch coinbase tx state: %w",
 			ErrInvalidParam, ErrInvalidStatus)
 	}
 

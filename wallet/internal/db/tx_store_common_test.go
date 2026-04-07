@@ -916,6 +916,70 @@ func TestUpdateTxWithOpsEmptyPatch(t *testing.T) {
 	require.Equal(t, []string{"load"}, ops.calls)
 }
 
+// TestUpdateTxWithOpsRejectsInvalidatingStates verifies that UpdateTx rejects
+// branch-affecting state transitions before any backend write begins.
+func TestUpdateTxWithOpsRejectsInvalidatingStates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		isCoinbase bool
+		state      UpdateTxState
+	}{
+		{
+			name: "failed rejected",
+			state: UpdateTxState{
+				Status: TxStatusFailed,
+			},
+		},
+		{
+			name: "replaced rejected",
+			state: UpdateTxState{
+				Status: TxStatusReplaced,
+			},
+		},
+		{
+			name: "orphaned rejected",
+			state: UpdateTxState{
+				Status: TxStatusOrphaned,
+			},
+		},
+		{
+			name:       "coinbase orphaned rejected",
+			isCoinbase: true,
+			state: UpdateTxState{
+				Status: TxStatusOrphaned,
+			},
+		},
+		{
+			name:       "coinbase confirmed patch rejected",
+			isCoinbase: true,
+			state: UpdateTxState{
+				Status: TxStatusPublished,
+				Block:  testBlock(55),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := UpdateTxParams{
+				WalletID: 5,
+				Txid:     chainhash.Hash{1},
+				State:    &test.state,
+			}
+			ops := &stubUpdateTxOps{isCoinbase: test.isCoinbase}
+
+			err := updateTxWithOps(context.Background(), params, ops)
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.ErrorIs(t, err, ErrInvalidStatus)
+			require.Equal(t, []string{"load"}, ops.calls)
+		})
+	}
+}
+
 // stubUpdateTxOps records how the shared UpdateTx helper drives one backend
 // adapter while letting tests control the loaded metadata.
 type stubUpdateTxOps struct {
