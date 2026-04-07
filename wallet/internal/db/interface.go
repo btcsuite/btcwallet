@@ -299,8 +299,10 @@ type TxStore interface {
 	// immutable transaction facts such as the serialized transaction bytes,
 	// created credits, or spent-input edges.
 	//
-	// UpdateTx is the only public tx-store API that may attach, replace, or
-	// clear confirming block metadata.
+	// UpdateTx is row-local only. It may attach, replace, or clear confirming
+	// block metadata for one tx, but it must not perform branch invalidation.
+	// Callers must use CreateTx, InvalidateUnminedTx, or RollbackToBlock for
+	// graph-affecting lifecycle changes.
 	UpdateTx(ctx context.Context, params UpdateTxParams) error
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
