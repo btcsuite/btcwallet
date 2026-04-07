@@ -28,13 +28,17 @@ func (s *SqliteStore) CreateTx(ctx context.Context,
 	}
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return createTxWithOps(ctx, req, &sqliteCreateTxOps{qtx: qtx})
+		return createTxWithOps(ctx, req, &sqliteCreateTxOps{
+			sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+				qtx: qtx,
+			},
+		})
 	})
 }
 
 // sqliteCreateTxOps adapts sqlite sqlc queries to the shared CreateTx flow.
 type sqliteCreateTxOps struct {
-	qtx *sqlcsqlite.Queries
+	sqliteInvalidateUnminedTxOps
 
 	blockHeight sql.NullInt64
 }

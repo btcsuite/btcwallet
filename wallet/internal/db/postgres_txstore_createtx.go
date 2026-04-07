@@ -28,13 +28,17 @@ func (s *PostgresStore) CreateTx(ctx context.Context,
 	}
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return createTxWithOps(ctx, req, &pgCreateTxOps{qtx: qtx})
+		return createTxWithOps(ctx, req, &pgCreateTxOps{
+			pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
+				qtx: qtx,
+			},
+		})
 	})
 }
 
 // pgCreateTxOps adapts postgres sqlc queries to the shared CreateTx flow.
 type pgCreateTxOps struct {
-	qtx *sqlcpg.Queries
+	pgInvalidateUnminedTxOps
 
 	blockHeight sql.NullInt32
 }
