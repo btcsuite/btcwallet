@@ -88,6 +88,97 @@ func (o *pgCreateTxOps) prepareBlock(ctx context.Context,
 	return nil
 }
 
+// listConflictTxns returns the direct conflict root IDs plus the matching tx
+// hashes used for descendant discovery.
+func (o *pgCreateTxOps) listConflictTxns(ctx context.Context,
+	req createTxRequest) ([]int64, []chainhash.Hash, error) {
+
+	rootIDs, err := collectPgConflictRootIDs(ctx, o.qtx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(rootIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	rows, err := o.qtx.ListUnminedTransactions(ctx, int64(req.params.WalletID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	return buildPgConflictRoots(rows, rootIDs)
+}
+
+// collectPgConflictRootIDs returns the active unmined spender row IDs
+// that currently own any wallet-controlled input spent by the incoming tx.
+func collectPgConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
+	req createTxRequest) (map[int64]struct{}, error) {
+
+	if blockchain.IsCoinBaseTx(req.params.Tx) {
+		return map[int64]struct{}{}, nil
+	}
+
+	rootIDs := make(map[int64]struct{}, len(req.params.Tx.TxIn))
+	for inputIndex, txIn := range req.params.Tx.TxIn {
+		outputIndex, err := uint32ToInt32(txIn.PreviousOutPoint.Index)
+		if err != nil {
+			return nil, fmt.Errorf("convert input outpoint index %d: %w",
+				inputIndex, err)
+		}
+
+		spentByTxID, err := qtx.GetUtxoSpendByOutpoint(
+			ctx, sqlcpg.GetUtxoSpendByOutpointParams{
+				WalletID:    int64(req.params.WalletID),
+				TxHash:      txIn.PreviousOutPoint.Hash[:],
+				OutputIndex: outputIndex,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+
+			return nil, fmt.Errorf("lookup input conflict %d: %w", inputIndex,
+				err)
+		}
+
+		if !spentByTxID.Valid {
+			continue
+		}
+
+		rootIDs[spentByTxID.Int64] = struct{}{}
+	}
+
+	return rootIDs, nil
+}
+
+// buildPgConflictRoots maps the selected unmined rows into ordered root IDs and
+// the matching root hashes used for descendant discovery.
+func buildPgConflictRoots(rows []sqlcpg.ListUnminedTransactionsRow,
+	rootIDSet map[int64]struct{}) (
+	[]int64, []chainhash.Hash, error) {
+
+	rootIDs := make([]int64, 0, len(rootIDSet))
+
+	rootHashes := make([]chainhash.Hash, 0, len(rootIDSet))
+	for _, row := range rows {
+		if _, ok := rootIDSet[row.ID]; !ok {
+			continue
+		}
+
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("tx hash: %w", err)
+		}
+
+		rootIDs = append(rootIDs, row.ID)
+		rootHashes = append(rootHashes, *txHash)
+	}
+
+	return rootIDs, rootHashes, nil
+}
+
 // insert stores one new postgres transaction row for CreateTx.
 func (o *pgCreateTxOps) insert(ctx context.Context,
 	req createTxRequest) (int64, error) {
@@ -121,6 +212,48 @@ func (o *pgCreateTxOps) markInputsSpent(ctx context.Context,
 	req createTxRequest, txID int64) error {
 
 	return markInputsSpentPg(ctx, o.qtx, req.params, txID)
+}
+
+// markTxnsReplaced marks the provided direct conflict roots replaced in one
+// batch update.
+func (o *pgCreateTxOps) markTxnsReplaced(
+	ctx context.Context, walletID int64, txIDs []int64) error {
+
+	_, err := o.qtx.UpdateTransactionStatusByIDs(
+		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
+			WalletID: walletID,
+			Status:   int16(TxStatusReplaced),
+			TxIds:    txIDs,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark txns replaced: %w", err)
+	}
+
+	return nil
+}
+
+// insertReplacementEdges records replacement-history edges from each direct
+// conflict root to the newly inserted confirmed transaction row.
+func (o *pgCreateTxOps) insertReplacementEdges(
+	ctx context.Context, walletID int64, replacedTxIDs []int64,
+	replacementTxID int64) error {
+
+	for _, replacedTxID := range replacedTxIDs {
+		_, err := o.qtx.InsertTxReplacementEdge(
+			ctx, sqlcpg.InsertTxReplacementEdgeParams{
+				WalletID:        walletID,
+				ReplacedTxID:    replacedTxID,
+				ReplacementTxID: replacementTxID,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("insert replacement edge for %d: %w",
+				replacedTxID, err)
+		}
+	}
+
+	return nil
 }
 
 // insertCreditsPg inserts one wallet-owned UTXO row for each credited output of

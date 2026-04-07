@@ -90,6 +90,92 @@ func (o *sqliteCreateTxOps) prepareBlock(ctx context.Context,
 	return nil
 }
 
+// listConflictTxns returns the direct conflict root IDs plus the matching tx
+// hashes used for descendant discovery.
+func (o *sqliteCreateTxOps) listConflictTxns(ctx context.Context,
+	req createTxRequest) ([]int64, []chainhash.Hash, error) {
+
+	rootIDs, err := collectSqliteConflictRootIDs(ctx, o.qtx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(rootIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	rows, err := o.qtx.ListUnminedTransactions(ctx, int64(req.params.WalletID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	return buildSqliteConflictRoots(rows, rootIDs)
+}
+
+// collectSqliteConflictRootIDs returns the active unmined spender row
+// IDs that currently own any wallet-controlled input spent by the incoming tx.
+func collectSqliteConflictRootIDs(ctx context.Context,
+	qtx *sqlcsqlite.Queries,
+	req createTxRequest) (map[int64]struct{}, error) {
+
+	if blockchain.IsCoinBaseTx(req.params.Tx) {
+		return map[int64]struct{}{}, nil
+	}
+
+	rootIDs := make(map[int64]struct{}, len(req.params.Tx.TxIn))
+	for inputIndex, txIn := range req.params.Tx.TxIn {
+		spentByTxID, err := qtx.GetUtxoSpendByOutpoint(
+			ctx, sqlcsqlite.GetUtxoSpendByOutpointParams{
+				WalletID:    int64(req.params.WalletID),
+				TxHash:      txIn.PreviousOutPoint.Hash[:],
+				OutputIndex: int64(txIn.PreviousOutPoint.Index),
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+
+			return nil, fmt.Errorf("lookup input conflict %d: %w", inputIndex,
+				err)
+		}
+
+		if !spentByTxID.Valid {
+			continue
+		}
+
+		rootIDs[spentByTxID.Int64] = struct{}{}
+	}
+
+	return rootIDs, nil
+}
+
+// buildSqliteConflictRoots maps the selected unmined rows into ordered root IDs
+// and the matching root hashes used for descendant discovery.
+func buildSqliteConflictRoots(rows []sqlcsqlite.ListUnminedTransactionsRow,
+	rootIDSet map[int64]struct{}) (
+	[]int64, []chainhash.Hash, error) {
+
+	rootIDs := make([]int64, 0, len(rootIDSet))
+
+	rootHashes := make([]chainhash.Hash, 0, len(rootIDSet))
+	for _, row := range rows {
+		if _, ok := rootIDSet[row.ID]; !ok {
+			continue
+		}
+
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("tx hash: %w", err)
+		}
+
+		rootIDs = append(rootIDs, row.ID)
+		rootHashes = append(rootHashes, *txHash)
+	}
+
+	return rootIDs, rootHashes, nil
+}
+
 // insert stores one new sqlite transaction row for CreateTx.
 func (o *sqliteCreateTxOps) insert(ctx context.Context,
 	req createTxRequest) (int64, error) {
@@ -126,6 +212,48 @@ func (o *sqliteCreateTxOps) markInputsSpent(ctx context.Context,
 	req createTxRequest, txID int64) error {
 
 	return markInputsSpentSqlite(ctx, o.qtx, req.params, txID)
+}
+
+// markTxnsReplaced marks the provided direct conflict roots replaced in one
+// batch update.
+func (o *sqliteCreateTxOps) markTxnsReplaced(
+	ctx context.Context, walletID int64, txIDs []int64) error {
+
+	_, err := o.qtx.UpdateTransactionStatusByIDs(
+		ctx, sqlcsqlite.UpdateTransactionStatusByIDsParams{
+			WalletID: walletID,
+			Status:   int64(TxStatusReplaced),
+			TxIds:    txIDs,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark txns replaced: %w", err)
+	}
+
+	return nil
+}
+
+// insertReplacementEdges records replacement-history edges from each direct
+// conflict root to the newly inserted confirmed transaction row.
+func (o *sqliteCreateTxOps) insertReplacementEdges(
+	ctx context.Context, walletID int64, replacedTxIDs []int64,
+	replacementTxID int64) error {
+
+	for _, replacedTxID := range replacedTxIDs {
+		_, err := o.qtx.InsertTxReplacementEdge(
+			ctx, sqlcsqlite.InsertTxReplacementEdgeParams{
+				WalletID:        walletID,
+				ReplacedTxID:    replacedTxID,
+				ReplacementTxID: replacementTxID,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("insert replacement edge for %d: %w",
+				replacedTxID, err)
+		}
+	}
+
+	return nil
 }
 
 // insertCreditsSqlite inserts one wallet-owned UTXO row for each credited
