@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -319,28 +320,55 @@ func TestNewCreateTxRequest(t *testing.T) {
 func TestCreateTxWithOpsInsert(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Build one prepared CreateTx request and one stub adapter.
+	// Arrange: Build one prepared CreateTx request and one mock adapter.
 	req := testCreateTxRequest(t)
-	ops := &stubCreateTxOps{insertTxID: 11}
+
+	var (
+		insertReq createTxRequest
+		creditsID int64
+		inputsID  int64
+	)
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadExisting", mock.Anything, req).Return(
+		nil, errCreateTxExistingNotFound).Once()
+
+	ops.On("prepareBlock", mock.Anything, req).Return(nil).Once()
+
+	ops.On("insert", mock.Anything, req).Return(int64(11), nil).Run(
+		func(args mock.Arguments) {
+			reqArg, ok := args.Get(1).(createTxRequest)
+			require.True(t, ok)
+			insertReq = reqArg
+		},
+	).Once()
+
+	ops.On("insertCredits", mock.Anything, req, int64(11)).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+			creditsID = txID
+		},
+	).Once()
+
+	ops.On("markInputsSpent", mock.Anything, req, int64(11)).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+			inputsID = txID
+		},
+	).Once()
 
 	// Act: Run createTxWithOps.
 	err := createTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
 
-	// Assert: The shared flow executes the expected write sequence.
-	require.Equal(t,
-		[]string{
-			"load-existing",
-			"prepare-block",
-			"insert",
-			"credits",
-			"inputs",
-		},
-		ops.calls,
-	)
-	require.Equal(t, int64(11), ops.creditsTxID)
-	require.Equal(t, int64(11), ops.inputsTxID)
-	require.Equal(t, req.txHash, ops.insertReq.txHash)
+	// Assert: The shared flow uses the inserted tx ID consistently.
+	require.Equal(t, int64(11), creditsID)
+	require.Equal(t, int64(11), inputsID)
+	require.Equal(t, req.txHash, insertReq.txHash)
 }
 
 // TestCreateTxWithOpsDuplicate verifies that the shared CreateTx helper maps an
@@ -349,11 +377,14 @@ func TestCreateTxWithOpsDuplicate(t *testing.T) {
 	t.Parallel()
 
 	req := testCreateTxRequest(t)
-	ops := &stubCreateTxOps{existing: &createTxExistingTarget{id: 4}}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadExisting", mock.Anything, req).Return(
+		&createTxExistingTarget{id: 4}, nil).Once()
 
 	err := createTxWithOps(context.Background(), req, ops)
 	require.ErrorIs(t, err, ErrTxAlreadyExists)
-	require.Equal(t, []string{"load-existing"}, ops.calls)
 }
 
 // TestCreateTxWithOpsConfirmExisting verifies that the shared CreateTx flow can
@@ -372,15 +403,20 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ops := &stubCreateTxOps{existing: &createTxExistingTarget{
+	existing := createTxExistingTarget{
 		id:       7,
 		status:   TxStatusPending,
 		hasBlock: false,
-	}}
+	}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadExisting", mock.Anything, req).Return(&existing, nil).Once()
+
+	ops.On("confirmExisting", mock.Anything, req, existing).Return(nil).Once()
 
 	err = createTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
-	require.Equal(t, []string{"load-existing", "confirm-existing"}, ops.calls)
 }
 
 // TestCreateTxWithOpsReplaceConflicts verifies that the shared CreateTx flow
@@ -399,27 +435,40 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ops := &stubCreateTxOps{
-		insertTxID:     11,
-		conflictIDs:    []int64{5},
-		conflictHashes: []chainhash.Hash{{9}},
-	}
+	rootIDs := []int64{5}
+	rootHashes := []chainhash.Hash{{9}}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadExisting", mock.Anything, req).Return(
+		nil, errCreateTxExistingNotFound).Once()
+
+	ops.On("prepareBlock", mock.Anything, req).Return(nil).Once()
+
+	ops.On("insert", mock.Anything, req).Return(int64(11), nil).Once()
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		rootIDs, rootHashes, nil,
+	).Once()
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(5)).Return(
+		[]unminedTxRecord(nil), nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(5), int64(5)).Return(nil).
+		Once()
+
+	ops.On("markTxnsReplaced", mock.Anything, int64(5), []int64{5}).Return(nil).
+		Once()
+
+	ops.On("insertReplacementEdges", mock.Anything, int64(5), []int64{5},
+		int64(11)).Return(nil).Once()
+
+	ops.On("insertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
+
+	ops.On("markInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	err = createTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
-	require.Equal(t, []string{
-		"load-existing",
-		"prepare-block",
-		"insert",
-		"list-conflicts",
-		"list-unmined-records",
-		"clear-spent-utxos",
-		"mark-txns-replaced",
-		"insert-replacement-edges",
-		"credits",
-		"inputs",
-	}, ops.calls)
-	require.Equal(t, int64(11), ops.replacedConflictTxID)
 }
 
 // testBlock builds a simple block fixture for CreateTx validation tests.
@@ -452,183 +501,221 @@ func testCoinbaseMsgTx() *wire.MsgTx {
 	return tx
 }
 
-// stubCreateTxOps records how the shared CreateTx helper drives one backend
-// adapter while letting each test control the returned transaction IDs.
-type stubCreateTxOps struct {
-	existing       *createTxExistingTarget
-	insertTxID     int64
-	conflictIDs    []int64
-	conflictHashes []chainhash.Hash
-	unminedTxns    []unminedTxRecord
-
-	listConflictsErr error
-	listUnminedErr   error
-	clearSpentErr    error
-	markFailedErr    error
-
-	calls                []string
-	insertReq            createTxRequest
-	creditsTxID          int64
-	inputsTxID           int64
-	clearedTxIDs         []int64
-	replacedTxIDs        []int64
-	failedTxIDs          []int64
-	replacementEdgeTxIDs []int64
-	replacedConflictTxID int64
+// mockCreateTxOps is a mock implementation of createTxOps.
+type mockCreateTxOps struct {
+	mock.Mock
 }
 
-var _ createTxOps = (*stubCreateTxOps)(nil)
+var _ createTxOps = (*mockCreateTxOps)(nil)
 
-// loadExisting records that the shared flow checked whether the tx hash already
-// exists and returns the test-controlled result.
-func (s *stubCreateTxOps) loadExisting(_ context.Context,
-	_ createTxRequest) (*createTxExistingTarget, error) {
+// loadExisting implements createTxOps.
+func (m *mockCreateTxOps) loadExisting(ctx context.Context,
+	req createTxRequest) (*createTxExistingTarget, error) {
 
-	s.calls = append(s.calls, "load-existing")
-
-	return s.existing, nil
-}
-
-// confirmExisting records that the shared flow promoted one existing row.
-func (s *stubCreateTxOps) confirmExisting(_ context.Context,
-	_ createTxRequest,
-	_ createTxExistingTarget) error {
-
-	s.calls = append(s.calls, "confirm-existing")
-
-	return nil
-}
-
-// prepareBlock records that the shared flow validated any optional block
-// assignment before insert.
-func (s *stubCreateTxOps) prepareBlock(_ context.Context,
-	_ createTxRequest) error {
-
-	s.calls = append(s.calls, "prepare-block")
-
-	return nil
-}
-
-// listConflictTxns records that the shared flow checked for direct wallet-owned
-// conflicts after insert and before input claims.
-func (s *stubCreateTxOps) listConflictTxns(_ context.Context,
-	_ createTxRequest) ([]int64, []chainhash.Hash, error) {
-
-	s.calls = append(s.calls, "list-conflicts")
-
-	if s.listConflictsErr != nil {
-		return nil, nil, s.listConflictsErr
+	args := m.Called(ctx, req)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
 	}
 
-	return s.conflictIDs, s.conflictHashes, nil
-}
-
-// loadInvalidateTarget satisfies the embedded invalidateUnminedTxOps interface
-// for the shared CreateTx orchestration tests.
-func (s *stubCreateTxOps) loadInvalidateTarget(_ context.Context, _ uint32,
-	_ chainhash.Hash) (invalidateUnminedTxTarget, error) {
-
-	return invalidateUnminedTxTarget{}, nil
-}
-
-// listUnminedTxRecords satisfies the embedded invalidateUnminedTxOps interface
-// for the shared CreateTx orchestration tests.
-func (s *stubCreateTxOps) listUnminedTxRecords(_ context.Context,
-	_ int64) ([]unminedTxRecord, error) {
-
-	s.calls = append(s.calls, "list-unmined-records")
-
-	if s.listUnminedErr != nil {
-		return nil, s.listUnminedErr
+	existing, ok := args.Get(0).(*createTxExistingTarget)
+	if !ok {
+		return nil, mockTypeError("loadExisting result")
 	}
 
-	return s.unminedTxns, nil
+	return existing, args.Error(1)
 }
 
-// clearSpentUtxos satisfies the embedded invalidateUnminedTxOps interface for
-// the shared CreateTx orchestration tests.
-func (s *stubCreateTxOps) clearSpentUtxos(_ context.Context, _ int64,
+// confirmExisting implements createTxOps.
+func (m *mockCreateTxOps) confirmExisting(ctx context.Context,
+	req createTxRequest, existing createTxExistingTarget) error {
+
+	args := m.Called(ctx, req, existing)
+
+	return args.Error(0)
+}
+
+// prepareBlock implements createTxOps.
+func (m *mockCreateTxOps) prepareBlock(ctx context.Context,
+	req createTxRequest) error {
+
+	args := m.Called(ctx, req)
+
+	return args.Error(0)
+}
+
+// listConflictTxns implements createTxOps.
+func (m *mockCreateTxOps) listConflictTxns(ctx context.Context,
+	req createTxRequest) ([]int64, []chainhash.Hash, error) {
+
+	args := m.Called(ctx, req)
+	if args.Get(0) == nil {
+		return nil, nil, args.Error(2)
+	}
+
+	txIDs, ok := args.Get(0).([]int64)
+	if !ok {
+		return nil, nil, mockTypeError("listConflictTxns ids")
+	}
+
+	hashes, ok := args.Get(1).([]chainhash.Hash)
+	if !ok {
+		return nil, nil, mockTypeError("listConflictTxns hashes")
+	}
+
+	return txIDs, hashes, args.Error(2)
+}
+
+// loadInvalidateTarget implements invalidateUnminedTxOps.
+func (m *mockCreateTxOps) loadInvalidateTarget(ctx context.Context,
+	walletID uint32,
+	txHash chainhash.Hash) (invalidateUnminedTxTarget, error) {
+
+	var zeroTarget invalidateUnminedTxTarget
+
+	args := m.Called(ctx, walletID, txHash)
+	if args.Get(0) == nil {
+		return zeroTarget, args.Error(1)
+	}
+
+	target, ok := args.Get(0).(invalidateUnminedTxTarget)
+	if !ok {
+		return zeroTarget, mockTypeError("loadInvalidateTarget result")
+	}
+
+	return target, args.Error(1)
+}
+
+// listUnminedTxRecords implements invalidateUnminedTxOps.
+func (m *mockCreateTxOps) listUnminedTxRecords(ctx context.Context,
+	walletID int64) ([]unminedTxRecord, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	records, ok := args.Get(0).([]unminedTxRecord)
+	if !ok {
+		return nil, mockTypeError("listUnminedTxRecords result")
+	}
+
+	return records, args.Error(1)
+}
+
+// clearSpentUtxos implements invalidateUnminedTxOps.
+func (m *mockCreateTxOps) clearSpentUtxos(ctx context.Context, walletID int64,
 	txID int64) error {
 
-	s.calls = append(s.calls, "clear-spent-utxos")
-	s.clearedTxIDs = append(s.clearedTxIDs, txID)
+	args := m.Called(ctx, walletID, txID)
 
-	if s.clearSpentErr != nil {
-		return s.clearSpentErr
-	}
-
-	return nil
+	return args.Error(0)
 }
 
-// markTxnsFailed satisfies the embedded invalidateUnminedTxOps interface for
-// the shared CreateTx orchestration tests.
-func (s *stubCreateTxOps) markTxnsFailed(_ context.Context, _ int64,
+// markTxnsFailed implements invalidateUnminedTxOps.
+func (m *mockCreateTxOps) markTxnsFailed(ctx context.Context, walletID int64,
 	txIDs []int64) error {
 
-	s.calls = append(s.calls, "mark-txns-failed")
-	s.failedTxIDs = append([]int64(nil), txIDs...)
+	args := m.Called(ctx, walletID, txIDs)
 
-	if s.markFailedErr != nil {
-		return s.markFailedErr
-	}
-
-	return nil
+	return args.Error(0)
 }
 
-// markTxnsReplaced satisfies the replacement hooks CreateTx uses for direct
-// conflict reconciliation.
-func (s *stubCreateTxOps) markTxnsReplaced(_ context.Context, _ int64,
+// markTxnsReplaced implements createTxOps.
+func (m *mockCreateTxOps) markTxnsReplaced(ctx context.Context, walletID int64,
 	txIDs []int64) error {
 
-	s.calls = append(s.calls, "mark-txns-replaced")
-	s.replacedTxIDs = append([]int64(nil), txIDs...)
+	args := m.Called(ctx, walletID, txIDs)
 
-	return nil
+	return args.Error(0)
 }
 
-// insertReplacementEdges satisfies the replacement hooks CreateTx uses for
-// direct conflict reconciliation.
-func (s *stubCreateTxOps) insertReplacementEdges(_ context.Context, _ int64,
-	replacedTxIDs []int64, replacementTxID int64) error {
+// insertReplacementEdges implements createTxOps.
+func (m *mockCreateTxOps) insertReplacementEdges(ctx context.Context,
+	walletID int64, replacedTxIDs []int64, replacementTxID int64) error {
 
-	s.calls = append(s.calls, "insert-replacement-edges")
-	s.replacementEdgeTxIDs = append([]int64(nil), replacedTxIDs...)
-	s.replacedConflictTxID = replacementTxID
+	args := m.Called(ctx, walletID, replacedTxIDs, replacementTxID)
 
-	return nil
+	return args.Error(0)
 }
 
-// insert records the request that the shared flow would store as a fresh
-// transaction row.
-func (s *stubCreateTxOps) insert(_ context.Context,
+// insert implements createTxOps.
+func (m *mockCreateTxOps) insert(ctx context.Context,
 	req createTxRequest) (int64, error) {
 
-	s.calls = append(s.calls, "insert")
-	s.insertReq = req
+	args := m.Called(ctx, req)
 
-	return s.insertTxID, nil
+	txID, ok := args.Get(0).(int64)
+	if !ok {
+		return 0, mockTypeError("insert result")
+	}
+
+	return txID, args.Error(1)
 }
 
-// insertCredits records the transaction ID the shared flow used when
-// reconciling wallet-owned outputs.
-func (s *stubCreateTxOps) insertCredits(_ context.Context,
-	_ createTxRequest, txID int64) error {
+// insertCredits implements createTxOps.
+func (m *mockCreateTxOps) insertCredits(ctx context.Context,
+	req createTxRequest, txID int64) error {
 
-	s.calls = append(s.calls, "credits")
-	s.creditsTxID = txID
+	args := m.Called(ctx, req, txID)
 
-	return nil
+	return args.Error(0)
 }
 
-// markInputsSpent records the transaction ID the shared flow used when
-// attaching wallet-owned spent inputs.
-func (s *stubCreateTxOps) markInputsSpent(_ context.Context,
-	_ createTxRequest, txID int64) error {
+// markInputsSpent implements createTxOps.
+func (m *mockCreateTxOps) markInputsSpent(ctx context.Context,
+	req createTxRequest, txID int64) error {
 
-	s.calls = append(s.calls, "inputs")
-	s.inputsTxID = txID
+	args := m.Called(ctx, req, txID)
 
-	return nil
+	return args.Error(0)
+}
+
+// mockUpdateTxOps is a mock implementation of updateTxOps.
+type mockUpdateTxOps struct {
+	mock.Mock
+}
+
+var _ updateTxOps = (*mockUpdateTxOps)(nil)
+
+// loadIsCoinbase implements updateTxOps.
+func (m *mockUpdateTxOps) loadIsCoinbase(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash) (bool, error) {
+
+	args := m.Called(ctx, walletID, txHash)
+
+	isCoinbase, ok := args.Get(0).(bool)
+	if !ok {
+		return false, mockTypeError("loadIsCoinbase result")
+	}
+
+	return isCoinbase, args.Error(1)
+}
+
+// prepareState implements updateTxOps.
+func (m *mockUpdateTxOps) prepareState(ctx context.Context,
+	state UpdateTxState) error {
+
+	args := m.Called(ctx, state)
+
+	return args.Error(0)
+}
+
+// updateLabel implements updateTxOps.
+func (m *mockUpdateTxOps) updateLabel(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash, label string) error {
+
+	args := m.Called(ctx, walletID, txHash, label)
+
+	return args.Error(0)
+}
+
+// updateState implements updateTxOps.
+func (m *mockUpdateTxOps) updateState(ctx context.Context, walletID uint32,
+	txHash chainhash.Hash, state UpdateTxState) error {
+
+	args := m.Called(ctx, walletID, txHash, state)
+
+	return args.Error(0)
 }
 
 // testCreateTxRequest builds one valid normalized CreateTx request for the
@@ -668,17 +755,20 @@ func TestCollectConflictDescendants(t *testing.T) {
 			PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{2}, Index: 0},
 		}}},
 	}}
-	ops := &stubCreateTxOps{unminedTxns: candidates}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
 
 	rootIDs := []int64{11, 12}
 	rootHashes := []chainhash.Hash{{1}, {2}}
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		candidates, nil).Once()
 
 	descendantIDs, err := collectConflictDescendants(
 		context.Background(), 7, rootHashes, rootIDs, ops,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []int64{13}, descendantIDs)
-	require.Equal(t, []string{"list-unmined-records"}, ops.calls)
 }
 
 // TestHandleTxConflicts verifies the shared replacement flow for
@@ -712,29 +802,36 @@ func TestHandleTxConflicts(t *testing.T) {
 		}}},
 	}}
 
-	ops := &stubCreateTxOps{
-		conflictIDs:    []int64{1},
-		conflictHashes: []chainhash.Hash{rootHash},
-		unminedTxns:    candidates,
-	}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{rootHash}, nil,
+	).Once()
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		candidates, nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
+		Once()
+
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
+		Once()
+
+	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1},
+		int64(9)).Return(nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
+		Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(nil).
+		Once()
+
+	ops.On("markTxnsFailed", mock.Anything, int64(7), []int64{2, 3}).
+		Return(nil).Once()
 
 	err = handleTxConflicts(t.Context(), req, 9, ops)
 	require.NoError(t, err)
-	require.Equal(t, []string{
-		"list-conflicts",
-		"list-unmined-records",
-		"clear-spent-utxos",
-		"mark-txns-replaced",
-		"insert-replacement-edges",
-		"clear-spent-utxos",
-		"clear-spent-utxos",
-		"mark-txns-failed",
-	}, ops.calls)
-	require.Equal(t, []int64{1, 2, 3}, ops.clearedTxIDs)
-	require.Equal(t, []int64{1}, ops.replacedTxIDs)
-	require.Equal(t, []int64{2, 3}, ops.failedTxIDs)
-	require.Equal(t, []int64{1}, ops.replacementEdgeTxIDs)
-	require.Equal(t, int64(9), ops.replacedConflictTxID)
 }
 
 // TestHandleTxConflictsKeepsDirectRootsReplaced verifies that a
@@ -755,10 +852,17 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ops := &stubCreateTxOps{
-		conflictIDs:    []int64{1, 2},
-		conflictHashes: []chainhash.Hash{rootAHash, rootBHash},
-		unminedTxns: []unminedTxRecord{{
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1, 2},
+		[]chainhash.Hash{rootAHash, rootBHash},
+		nil,
+	).Once()
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		[]unminedTxRecord{{
 			id:   2,
 			hash: rootBHash,
 			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
@@ -770,25 +874,23 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
 				PreviousOutPoint: wire.OutPoint{Hash: rootBHash, Index: 0},
 			}}},
-		}},
-	}
+		}}, nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
+		Once()
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
+		Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1, 2}).Return(nil).
+		Once()
+	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1, 2},
+		int64(9)).Return(nil).Once()
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(nil).
+		Once()
+	ops.On("markTxnsFailed", mock.Anything, int64(7), []int64{3}).Return(nil).
+		Once()
 
 	err = handleTxConflicts(t.Context(), req, 9, ops)
 	require.NoError(t, err)
-	require.Equal(t, []string{
-		"list-conflicts",
-		"list-unmined-records",
-		"clear-spent-utxos",
-		"clear-spent-utxos",
-		"mark-txns-replaced",
-		"insert-replacement-edges",
-		"clear-spent-utxos",
-		"mark-txns-failed",
-	}, ops.calls)
-	require.Equal(t, []int64{1, 2, 3}, ops.clearedTxIDs)
-	require.Equal(t, []int64{1, 2}, ops.replacedTxIDs)
-	require.Equal(t, []int64{3}, ops.failedTxIDs)
-	require.Equal(t, []int64{1, 2}, ops.replacementEdgeTxIDs)
 }
 
 // TestHandleTxConflictsNoDescendants verifies that the helper
@@ -805,25 +907,25 @@ func TestHandleTxConflictsNoDescendants(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ops := &stubCreateTxOps{
-		conflictIDs:    []int64{1},
-		conflictHashes: []chainhash.Hash{{1}},
-	}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{{1}}, nil,
+	).Once()
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		[]unminedTxRecord(nil), nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
+		Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
+		Once()
+	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1},
+		int64(9)).Return(nil).Once()
 
 	err = handleTxConflicts(t.Context(), req, 9, ops)
 	require.NoError(t, err)
-	require.Equal(t, []string{
-		"list-conflicts",
-		"list-unmined-records",
-		"clear-spent-utxos",
-		"mark-txns-replaced",
-		"insert-replacement-edges",
-	}, ops.calls)
-	require.Equal(t, []int64{1}, ops.clearedTxIDs)
-	require.Equal(t, []int64{1}, ops.replacedTxIDs)
-	require.Empty(t, ops.failedTxIDs)
-	require.Equal(t, []int64{1}, ops.replacementEdgeTxIDs)
-	require.Equal(t, int64(9), ops.replacedConflictTxID)
 }
 
 // TestHandleTxConflictsMarkFailedError verifies that the helper records
@@ -840,10 +942,15 @@ func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ops := &stubCreateTxOps{
-		conflictIDs:    []int64{1},
-		conflictHashes: []chainhash.Hash{{1}},
-		unminedTxns: []unminedTxRecord{{
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{{1}}, nil,
+	).Once()
+
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		[]unminedTxRecord{{
 			id:   2,
 			hash: chainhash.Hash{2},
 			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
@@ -852,22 +959,22 @@ func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 					Index: 0,
 				},
 			}}},
-		}},
-		markFailedErr: errConflictMarkFailed,
-	}
+		}}, nil).Once()
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(nil).
+		Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(nil).
+		Once()
+	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1},
+		int64(9)).Return(nil).Once()
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
+		Once()
+	ops.On("markTxnsFailed", mock.Anything, int64(7), []int64{2}).Return(
+		errConflictMarkFailed).Once()
 
 	err = handleTxConflicts(t.Context(), req, 9, ops)
 	require.ErrorIs(t, err, errConflictMarkFailed)
 	require.ErrorContains(t, err, "mark conflict descendants failed")
-	require.Equal(t, []string{
-		"list-conflicts",
-		"list-unmined-records",
-		"clear-spent-utxos",
-		"mark-txns-replaced",
-		"insert-replacement-edges",
-		"clear-spent-utxos",
-		"mark-txns-failed",
-	}, ops.calls)
 }
 
 // TestUpdateTxWithOpsLabelAndState verifies that the shared UpdateTx workflow
@@ -885,19 +992,45 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 			Status: TxStatusPublished,
 		},
 	}
-	ops := &stubUpdateTxOps{isCoinbase: false}
+
+	var (
+		updatedLabel string
+		updatedState UpdateTxState
+	)
+
+	ops := &mockUpdateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
+		Return(false, nil).Once()
+
+	ops.On("prepareState", mock.Anything, UpdateTxState{
+		Status: TxStatusPublished,
+	}).Return(nil).Once()
+
+	ops.On("updateLabel", mock.Anything, uint32(5), chainhash.Hash{1},
+		label).Return(nil).Run(func(args mock.Arguments) {
+		labelArg, ok := args.Get(3).(string)
+		require.True(t, ok)
+		updatedLabel = labelArg
+	}).Once()
+
+	ops.On("updateState", mock.Anything, uint32(5), chainhash.Hash{1},
+		UpdateTxState{Status: TxStatusPublished}).Return(nil).Run(
+		func(args mock.Arguments) {
+			stateArg, ok := args.Get(3).(UpdateTxState)
+			require.True(t, ok)
+			updatedState = stateArg
+		},
+	).Once()
 
 	// Act: Run updateTxWithOps against a stub backend adapter.
 	err := updateTxWithOps(context.Background(), params, ops)
 	require.NoError(t, err)
 
-	// Assert: The shared flow loads, prepares, and applies both patches.
-	require.Equal(t,
-		[]string{"load", "prepare-state", "label", "state"},
-		ops.calls,
-	)
-	require.Equal(t, label, ops.updatedLabel)
-	require.Equal(t, TxStatusPublished, ops.updatedState.Status)
+	// Assert: The shared flow applies both patches.
+	require.Equal(t, label, updatedLabel)
+	require.Equal(t, TxStatusPublished, updatedState.Status)
 }
 
 // TestUpdateTxWithOpsEmptyPatch verifies that the shared UpdateTx helper
@@ -909,11 +1042,14 @@ func TestUpdateTxWithOpsEmptyPatch(t *testing.T) {
 		WalletID: 5,
 		Txid:     chainhash.Hash{1},
 	}
-	ops := &stubUpdateTxOps{isCoinbase: false}
+	ops := &mockUpdateTxOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).Return(
+		false, nil).Once()
 
 	err := updateTxWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrInvalidParam)
-	require.Equal(t, []string{"load"}, ops.calls)
 }
 
 // TestUpdateTxWithOpsRejectsInvalidatingStates verifies that UpdateTx rejects
@@ -970,65 +1106,15 @@ func TestUpdateTxWithOpsRejectsInvalidatingStates(t *testing.T) {
 				Txid:     chainhash.Hash{1},
 				State:    &test.state,
 			}
-			ops := &stubUpdateTxOps{isCoinbase: test.isCoinbase}
+			ops := &mockUpdateTxOps{}
+			t.Cleanup(func() { ops.AssertExpectations(t) })
+
+			ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
+				Return(test.isCoinbase, nil).Once()
 
 			err := updateTxWithOps(context.Background(), params, ops)
 			require.ErrorIs(t, err, ErrInvalidParam)
 			require.ErrorIs(t, err, ErrInvalidStatus)
-			require.Equal(t, []string{"load"}, ops.calls)
 		})
 	}
-}
-
-// stubUpdateTxOps records how the shared UpdateTx helper drives one backend
-// adapter while letting tests control the loaded metadata.
-type stubUpdateTxOps struct {
-	isCoinbase   bool
-	calls        []string
-	updatedLabel string
-	updatedState UpdateTxState
-}
-
-var _ updateTxOps = (*stubUpdateTxOps)(nil)
-
-// loadIsCoinbase records that the shared flow loaded the existing transaction
-// row metadata.
-func (s *stubUpdateTxOps) loadIsCoinbase(_ context.Context, _ uint32,
-	_ chainhash.Hash) (bool, error) {
-
-	s.calls = append(s.calls, "load")
-
-	return s.isCoinbase, nil
-}
-
-// prepareState records that the shared flow validated and prepared one state
-// patch before applying it.
-func (s *stubUpdateTxOps) prepareState(_ context.Context,
-	_ UpdateTxState) error {
-
-	s.calls = append(s.calls, "prepare-state")
-
-	return nil
-}
-
-// updateLabel records the label value the shared flow asked the backend to
-// write.
-func (s *stubUpdateTxOps) updateLabel(_ context.Context, _ uint32,
-	_ chainhash.Hash, label string) error {
-
-	s.calls = append(s.calls, "label")
-	s.updatedLabel = label
-
-	return nil
-}
-
-// updateState records the state patch the shared flow asked the backend to
-// write.
-func (s *stubUpdateTxOps) updateState(_ context.Context, _ uint32,
-	_ chainhash.Hash, state UpdateTxState) error {
-
-	s.calls = append(s.calls, "state")
-	s.updatedState = state
-
-	return nil
 }
