@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -328,7 +329,13 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 
 	// Assert: The shared flow executes the expected write sequence.
 	require.Equal(t,
-		[]string{"load-existing", "prepare-block", "insert", "credits", "inputs"},
+		[]string{
+			"load-existing",
+			"prepare-block",
+			"insert",
+			"credits",
+			"inputs",
+		},
 		ops.calls,
 	)
 	require.Equal(t, int64(11), ops.creditsTxID)
@@ -376,6 +383,45 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	require.Equal(t, []string{"load-existing", "confirm-existing"}, ops.calls)
 }
 
+// TestCreateTxWithOpsReplaceConflicts verifies that the shared CreateTx flow
+// rewrites direct conflict roots to replaced state after inserting the
+// confirmed winner and before that winner claims the shared spent-parent edge.
+func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	ops := &stubCreateTxOps{
+		insertTxID:     11,
+		conflictIDs:    []int64{5},
+		conflictHashes: []chainhash.Hash{{9}},
+	}
+
+	err = createTxWithOps(context.Background(), req, ops)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"load-existing",
+		"prepare-block",
+		"insert",
+		"list-conflicts",
+		"list-unmined-records",
+		"clear-spent-utxos",
+		"mark-txns-replaced",
+		"insert-replacement-edges",
+		"credits",
+		"inputs",
+	}, ops.calls)
+	require.Equal(t, int64(11), ops.replacedConflictTxID)
+}
+
 // testBlock builds a simple block fixture for CreateTx validation tests.
 func testBlock(height uint32) *Block {
 	return &Block{
@@ -409,13 +455,26 @@ func testCoinbaseMsgTx() *wire.MsgTx {
 // stubCreateTxOps records how the shared CreateTx helper drives one backend
 // adapter while letting each test control the returned transaction IDs.
 type stubCreateTxOps struct {
-	existing   *createTxExistingTarget
-	insertTxID int64
+	existing       *createTxExistingTarget
+	insertTxID     int64
+	conflictIDs    []int64
+	conflictHashes []chainhash.Hash
+	unminedTxns    []unminedTxRecord
 
-	calls       []string
-	insertReq   createTxRequest
-	creditsTxID int64
-	inputsTxID  int64
+	listConflictsErr error
+	listUnminedErr   error
+	clearSpentErr    error
+	markFailedErr    error
+
+	calls                []string
+	insertReq            createTxRequest
+	creditsTxID          int64
+	inputsTxID           int64
+	clearedTxIDs         []int64
+	replacedTxIDs        []int64
+	failedTxIDs          []int64
+	replacementEdgeTxIDs []int64
+	replacedConflictTxID int64
 }
 
 var _ createTxOps = (*stubCreateTxOps)(nil)
@@ -427,16 +486,13 @@ func (s *stubCreateTxOps) loadExisting(_ context.Context,
 
 	s.calls = append(s.calls, "load-existing")
 
-	if s.existing == nil {
-		return nil, errCreateTxExistingNotFound
-	}
-
 	return s.existing, nil
 }
 
 // confirmExisting records that the shared flow promoted one existing row.
 func (s *stubCreateTxOps) confirmExisting(_ context.Context,
-	_ createTxRequest, _ createTxExistingTarget) error {
+	_ createTxRequest,
+	_ createTxExistingTarget) error {
 
 	s.calls = append(s.calls, "confirm-existing")
 
@@ -449,6 +505,95 @@ func (s *stubCreateTxOps) prepareBlock(_ context.Context,
 	_ createTxRequest) error {
 
 	s.calls = append(s.calls, "prepare-block")
+
+	return nil
+}
+
+// listConflictTxns records that the shared flow checked for direct wallet-owned
+// conflicts after insert and before input claims.
+func (s *stubCreateTxOps) listConflictTxns(_ context.Context,
+	_ createTxRequest) ([]int64, []chainhash.Hash, error) {
+
+	s.calls = append(s.calls, "list-conflicts")
+
+	if s.listConflictsErr != nil {
+		return nil, nil, s.listConflictsErr
+	}
+
+	return s.conflictIDs, s.conflictHashes, nil
+}
+
+// loadInvalidateTarget satisfies the embedded invalidateUnminedTxOps interface
+// for the shared CreateTx orchestration tests.
+func (s *stubCreateTxOps) loadInvalidateTarget(_ context.Context, _ uint32,
+	_ chainhash.Hash) (invalidateUnminedTxTarget, error) {
+
+	return invalidateUnminedTxTarget{}, nil
+}
+
+// listUnminedTxRecords satisfies the embedded invalidateUnminedTxOps interface
+// for the shared CreateTx orchestration tests.
+func (s *stubCreateTxOps) listUnminedTxRecords(_ context.Context,
+	_ int64) ([]unminedTxRecord, error) {
+
+	s.calls = append(s.calls, "list-unmined-records")
+
+	if s.listUnminedErr != nil {
+		return nil, s.listUnminedErr
+	}
+
+	return s.unminedTxns, nil
+}
+
+// clearSpentUtxos satisfies the embedded invalidateUnminedTxOps interface for
+// the shared CreateTx orchestration tests.
+func (s *stubCreateTxOps) clearSpentUtxos(_ context.Context, _ int64,
+	txID int64) error {
+
+	s.calls = append(s.calls, "clear-spent-utxos")
+	s.clearedTxIDs = append(s.clearedTxIDs, txID)
+
+	if s.clearSpentErr != nil {
+		return s.clearSpentErr
+	}
+
+	return nil
+}
+
+// markTxnsFailed satisfies the embedded invalidateUnminedTxOps interface for
+// the shared CreateTx orchestration tests.
+func (s *stubCreateTxOps) markTxnsFailed(_ context.Context, _ int64,
+	txIDs []int64) error {
+
+	s.calls = append(s.calls, "mark-txns-failed")
+	s.failedTxIDs = append([]int64(nil), txIDs...)
+
+	if s.markFailedErr != nil {
+		return s.markFailedErr
+	}
+
+	return nil
+}
+
+// markTxnsReplaced satisfies the replacement hooks CreateTx uses for direct
+// conflict reconciliation.
+func (s *stubCreateTxOps) markTxnsReplaced(_ context.Context, _ int64,
+	txIDs []int64) error {
+
+	s.calls = append(s.calls, "mark-txns-replaced")
+	s.replacedTxIDs = append([]int64(nil), txIDs...)
+
+	return nil
+}
+
+// insertReplacementEdges satisfies the replacement hooks CreateTx uses for
+// direct conflict reconciliation.
+func (s *stubCreateTxOps) insertReplacementEdges(_ context.Context, _ int64,
+	replacedTxIDs []int64, replacementTxID int64) error {
+
+	s.calls = append(s.calls, "insert-replacement-edges")
+	s.replacementEdgeTxIDs = append([]int64(nil), replacedTxIDs...)
+	s.replacedConflictTxID = replacementTxID
 
 	return nil
 }
@@ -501,6 +646,228 @@ func testCreateTxRequest(t *testing.T) createTxRequest {
 	require.NoError(t, err)
 
 	return req
+}
+
+var errConflictMarkFailed = errors.New("mark failed")
+
+// TestCollectConflictDescendants verifies that the helper derives the direct
+// root IDs and descendant IDs from the current unmined graph snapshot.
+func TestCollectConflictDescendants(t *testing.T) {
+	t.Parallel()
+
+	candidates := []unminedTxRecord{{
+		id:   12,
+		hash: chainhash.Hash{2},
+		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+			PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0},
+		}}},
+	}, {
+		id:   13,
+		hash: chainhash.Hash{3},
+		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+			PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{2}, Index: 0},
+		}}},
+	}}
+	ops := &stubCreateTxOps{unminedTxns: candidates}
+
+	rootIDs := []int64{11, 12}
+	rootHashes := []chainhash.Hash{{1}, {2}}
+
+	descendantIDs, err := collectConflictDescendants(
+		context.Background(), 7, rootHashes, rootIDs, ops,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []int64{13}, descendantIDs)
+	require.Equal(t, []string{"list-unmined-records"}, ops.calls)
+}
+
+// TestHandleTxConflicts verifies the shared replacement flow for
+// one direct conflict root and its dependent descendants.
+func TestHandleTxConflicts(t *testing.T) {
+	t.Parallel()
+
+	rootHash := chainhash.Hash{1}
+	childHash := chainhash.Hash{2}
+	grandchildHash := chainhash.Hash{3}
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	candidates := []unminedTxRecord{{
+		id:   2,
+		hash: childHash,
+		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+			PreviousOutPoint: wire.OutPoint{Hash: rootHash, Index: 0},
+		}}},
+	}, {
+		id:   3,
+		hash: grandchildHash,
+		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+			PreviousOutPoint: wire.OutPoint{Hash: childHash, Index: 0},
+		}}},
+	}}
+
+	ops := &stubCreateTxOps{
+		conflictIDs:    []int64{1},
+		conflictHashes: []chainhash.Hash{rootHash},
+		unminedTxns:    candidates,
+	}
+
+	err = handleTxConflicts(t.Context(), req, 9, ops)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"list-conflicts",
+		"list-unmined-records",
+		"clear-spent-utxos",
+		"mark-txns-replaced",
+		"insert-replacement-edges",
+		"clear-spent-utxos",
+		"clear-spent-utxos",
+		"mark-txns-failed",
+	}, ops.calls)
+	require.Equal(t, []int64{1, 2, 3}, ops.clearedTxIDs)
+	require.Equal(t, []int64{1}, ops.replacedTxIDs)
+	require.Equal(t, []int64{2, 3}, ops.failedTxIDs)
+	require.Equal(t, []int64{1}, ops.replacementEdgeTxIDs)
+	require.Equal(t, int64(9), ops.replacedConflictTxID)
+}
+
+// TestHandleTxConflictsKeepsDirectRootsReplaced verifies that a
+// direct conflict root stays replaced even when it also spends another direct
+// root and would otherwise appear in the descendant walk.
+func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
+	t.Parallel()
+
+	rootAHash := chainhash.Hash{1}
+	rootBHash := chainhash.Hash{2}
+	childHash := chainhash.Hash{3}
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &stubCreateTxOps{
+		conflictIDs:    []int64{1, 2},
+		conflictHashes: []chainhash.Hash{rootAHash, rootBHash},
+		unminedTxns: []unminedTxRecord{{
+			id:   2,
+			hash: rootBHash,
+			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{Hash: rootAHash, Index: 0},
+			}}},
+		}, {
+			id:   3,
+			hash: childHash,
+			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{Hash: rootBHash, Index: 0},
+			}}},
+		}},
+	}
+
+	err = handleTxConflicts(t.Context(), req, 9, ops)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"list-conflicts",
+		"list-unmined-records",
+		"clear-spent-utxos",
+		"clear-spent-utxos",
+		"mark-txns-replaced",
+		"insert-replacement-edges",
+		"clear-spent-utxos",
+		"mark-txns-failed",
+	}, ops.calls)
+	require.Equal(t, []int64{1, 2, 3}, ops.clearedTxIDs)
+	require.Equal(t, []int64{1, 2}, ops.replacedTxIDs)
+	require.Equal(t, []int64{3}, ops.failedTxIDs)
+	require.Equal(t, []int64{1, 2}, ops.replacementEdgeTxIDs)
+}
+
+// TestHandleTxConflictsNoDescendants verifies that the helper
+// skips the descendant-failure batch when no dependent branch exists.
+func TestHandleTxConflictsNoDescendants(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &stubCreateTxOps{
+		conflictIDs:    []int64{1},
+		conflictHashes: []chainhash.Hash{{1}},
+	}
+
+	err = handleTxConflicts(t.Context(), req, 9, ops)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"list-conflicts",
+		"list-unmined-records",
+		"clear-spent-utxos",
+		"mark-txns-replaced",
+		"insert-replacement-edges",
+	}, ops.calls)
+	require.Equal(t, []int64{1}, ops.clearedTxIDs)
+	require.Equal(t, []int64{1}, ops.replacedTxIDs)
+	require.Empty(t, ops.failedTxIDs)
+	require.Equal(t, []int64{1}, ops.replacementEdgeTxIDs)
+	require.Equal(t, int64(9), ops.replacedConflictTxID)
+}
+
+// TestHandleTxConflictsMarkFailedError verifies that the helper records
+// replacement edges before returning descendant failure errors.
+func TestHandleTxConflictsMarkFailedError(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &stubCreateTxOps{
+		conflictIDs:    []int64{1},
+		conflictHashes: []chainhash.Hash{{1}},
+		unminedTxns: []unminedTxRecord{{
+			id:   2,
+			hash: chainhash.Hash{2},
+			tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  chainhash.Hash{1},
+					Index: 0,
+				},
+			}}},
+		}},
+		markFailedErr: errConflictMarkFailed,
+	}
+
+	err = handleTxConflicts(t.Context(), req, 9, ops)
+	require.ErrorIs(t, err, errConflictMarkFailed)
+	require.ErrorContains(t, err, "mark conflict descendants failed")
+	require.Equal(t, []string{
+		"list-conflicts",
+		"list-unmined-records",
+		"clear-spent-utxos",
+		"mark-txns-replaced",
+		"insert-replacement-edges",
+		"clear-spent-utxos",
+		"mark-txns-failed",
+	}, ops.calls)
 }
 
 // TestUpdateTxWithOpsLabelAndState verifies that the shared UpdateTx workflow
