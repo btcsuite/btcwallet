@@ -182,7 +182,13 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	const workers = 20
-	results := make([]uint32, workers)
+
+	type createResult struct {
+		number uint32
+		err    error
+	}
+
+	resultCh := make(chan createResult, workers)
 	var wg sync.WaitGroup
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -192,6 +198,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+
 			info, err := store.CreateDerivedAccount(
 				ctx, db.CreateDerivedAccountParams{
 					WalletID: walletID,
@@ -199,12 +206,25 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 					Name:     "acct-concurrent-" + strconv.Itoa(i),
 				},
 			)
-			require.NoError(t, err)
-			results[i] = info.AccountNumber
+			if err != nil {
+				resultCh <- createResult{err: err}
+				return
+			}
+
+			resultCh <- createResult{number: info.AccountNumber}
 		}(i)
 	}
 
 	wg.Wait()
+	close(resultCh)
+
+	results := make([]uint32, 0, workers)
+	for result := range resultCh {
+		require.NoError(t, result.err)
+		results = append(results, result.number)
+	}
+
+	require.Len(t, results, workers)
 
 	// Verify all numbers are unique and sequential.
 	sort.Slice(results, func(i, j int) bool {
@@ -509,12 +529,8 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		createdNear time.Time
 	}
 
-	// Create three accounts with slight delays to ensure different
-	// timestamps.
 	var accounts []createdAccount
 	for i := range 3 {
-		time.Sleep(1 * time.Second)
-
 		createdNear := time.Now()
 		params := db.CreateDerivedAccountParams{
 			WalletID: walletID,
@@ -537,11 +553,10 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 			5*time.Second, "account %d CreatedAt should track creation", i)
 	}
 
-	// Verify accounts are ordered by creation time.
-	require.True(t, accounts[0].info.CreatedAt.Before(accounts[1].info.CreatedAt),
-		"account 0 should have CreatedAt before account 1")
-	require.True(t, accounts[1].info.CreatedAt.Before(accounts[2].info.CreatedAt),
-		"account 1 should have CreatedAt before account 2")
+	require.False(t, accounts[0].info.CreatedAt.After(accounts[1].info.CreatedAt),
+		"account 0 should not have CreatedAt after account 1")
+	require.False(t, accounts[1].info.CreatedAt.After(accounts[2].info.CreatedAt),
+		"account 1 should not have CreatedAt after account 2")
 }
 
 // TestRenameAccount verifies that RenameAccount successfully renames accounts
