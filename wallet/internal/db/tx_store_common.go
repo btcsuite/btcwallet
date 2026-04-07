@@ -18,7 +18,7 @@ var (
 
 	// ErrInvalidStatus is returned when a transaction status is unknown or not
 	// allowed for the requested operation.
-	ErrInvalidStatus = errors.New("invalid transaction status")
+	ErrInvalidStatus = errors.New("invalid tx status")
 
 	// ErrIndexOutOfRange is returned when a referenced transaction input or
 	// output index does not exist.
@@ -36,7 +36,7 @@ var (
 
 	// ErrDeleteRequiresLeaf indicates that DeleteTx only accepts unmined
 	// transactions with no child spenders.
-	ErrDeleteRequiresLeaf = errors.New("delete requires a leaf transaction")
+	ErrDeleteRequiresLeaf = errors.New("delete requires a leaf tx")
 )
 
 // serializeMsgTx serializes a wire.MsgTx so it can be stored in the
