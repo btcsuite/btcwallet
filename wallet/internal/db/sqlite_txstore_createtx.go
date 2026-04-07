@@ -15,10 +15,11 @@ import (
 // credits, and any spend edges created by its inputs.
 //
 // The full write runs inside ExecuteTx so the transaction row, created UTXOs,
-// and spent-parent markers are either committed together or not at all.
-// Received timestamps are normalized to UTC before insert. CreateTx is
-// insert-only and returns ErrTxAlreadyExists if the wallet already stores the
-// tx hash.
+// spent-parent markers, and any required invalidation are either committed
+// together or not at all. Received timestamps are normalized to UTC before
+// insert. When the wallet already stores the same unmined transaction hash,
+// CreateTx may promote that existing row to confirmed state instead of
+// inserting a duplicate.
 func (s *SqliteStore) CreateTx(ctx context.Context,
 	params CreateTxParams) error {
 
@@ -45,28 +46,65 @@ type sqliteCreateTxOps struct {
 
 var _ createTxOps = (*sqliteCreateTxOps)(nil)
 
-// hasExisting reports whether the wallet already stores the requested tx hash.
-func (o *sqliteCreateTxOps) hasExisting(ctx context.Context,
-	req createTxRequest) (bool, error) {
+// loadExisting loads any existing wallet-scoped row for the requested tx hash.
+func (o *sqliteCreateTxOps) loadExisting(ctx context.Context,
+	req createTxRequest) (*createTxExistingTarget, error) {
 
-	_, err := o.qtx.GetTransactionMetaByHash(
+	meta, err := o.qtx.GetTransactionMetaByHash(
 		ctx,
 		sqlcsqlite.GetTransactionMetaByHashParams{
 			WalletID: int64(req.params.WalletID),
 			TxHash:   req.txHash[:],
 		},
 	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errCreateTxExistingNotFound
+		}
 
-	// Exit early if there is no error.
-	if err == nil {
-		return true, nil
+		return nil, fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	status, err := parseTxStatus(meta.TxStatus)
+	if err != nil {
+		return nil, err
 	}
 
-	return false, fmt.Errorf("get tx metadata: %w", err)
+	return &createTxExistingTarget{
+		id:         meta.ID,
+		status:     status,
+		hasBlock:   meta.BlockHeight.Valid,
+		isCoinbase: meta.IsCoinbase,
+	}, nil
+}
+
+// confirmExisting promotes one existing unmined row to its confirmed state.
+func (o *sqliteCreateTxOps) confirmExisting(ctx context.Context,
+	req createTxRequest,
+	_ createTxExistingTarget) error {
+
+	blockHeight, err := requireBlockMatchesSqlite(ctx, o.qtx, req.params.Block)
+	if err != nil {
+		return fmt.Errorf("require confirming block: %w", err)
+	}
+
+	rows, err := o.qtx.UpdateTransactionStateByHash(
+		ctx, sqlcsqlite.UpdateTransactionStateByHashParams{
+			BlockHeight: sql.NullInt64{Int64: blockHeight, Valid: true},
+			Status:      int64(TxStatusPublished),
+			WalletID:    int64(req.params.WalletID),
+			TxHash:      req.txHash[:],
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update tx state query: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("tx %s: %w", req.txHash, ErrTxNotFound)
+	}
+
+	return nil
 }
 
 // prepareBlock validates the optional confirming block and caches the sqlite

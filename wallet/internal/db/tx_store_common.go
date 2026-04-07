@@ -256,6 +256,18 @@ func newCreateTxRequest(params CreateTxParams) (createTxRequest, error) {
 	}, nil
 }
 
+// createTxExistingTarget is the normalized metadata the shared CreateTx flow
+// needs when the wallet already stores the requested tx hash.
+type createTxExistingTarget struct {
+	id         int64
+	status     TxStatus
+	hasBlock   bool
+	isCoinbase bool
+}
+
+var errCreateTxExistingNotFound = errors.New("create tx existing target not " +
+	"found")
+
 // createTxOps is the small semantic adapter CreateTx needs from one SQL
 // backend.
 //
@@ -265,8 +277,6 @@ func newCreateTxRequest(params CreateTxParams) (createTxRequest, error) {
 //     inserting a duplicate
 //   - validate and cache any confirming block metadata before later writes use
 //     it
-//   - when the incoming tx is confirmed, discover and invalidate any direct
-//     conflict roots before the new row claims their wallet-owned inputs
 //   - insert the base transaction row exactly once when no existing row can be
 //     reused
 //   - insert every wallet-owned credited output as a UTXO
@@ -278,9 +288,15 @@ func newCreateTxRequest(params CreateTxParams) (createTxRequest, error) {
 // creation, and spent-input claims must either all observe the same tx row or
 // all roll back together.
 type createTxOps interface {
-	// hasExisting reports whether CreateTx would collide with an existing
-	// wallet-scoped transaction row for the same hash.
-	hasExisting(ctx context.Context, req createTxRequest) (bool, error)
+	// loadExisting loads any existing wallet-scoped transaction row for the
+	// same hash.
+	loadExisting(ctx context.Context, req createTxRequest) (
+		*createTxExistingTarget, error)
+
+	// confirmExisting reuses one existing row when CreateTx learns about the
+	// same transaction with confirming block context later.
+	confirmExisting(ctx context.Context, req createTxRequest,
+		existing createTxExistingTarget) error
 
 	// prepareBlock validates and caches any optional confirming block metadata
 	// the later insert step needs.
@@ -298,6 +314,55 @@ type createTxOps interface {
 	markInputsSpent(ctx context.Context, req createTxRequest, txID int64) error
 }
 
+// checkReuseCreateTx reports whether CreateTx should reuse an existing wallet-
+// scoped row instead of inserting a new one.
+func checkReuseCreateTx(req createTxRequest,
+	existing createTxExistingTarget) bool {
+
+	if req.params.Block == nil {
+		return false
+	}
+
+	if req.params.Status != TxStatusPublished {
+		return false
+	}
+
+	if existing.hasBlock {
+		return false
+	}
+
+	if existing.isCoinbase {
+		return false
+	}
+
+	if !isUnminedStatus(existing.status) {
+		return false
+	}
+
+	return true
+}
+
+// loadCreateTxExisting resolves any wallet-scoped row already stored for the
+// requested tx hash and reports whether one was found.
+func loadCreateTxExisting(ctx context.Context, req createTxRequest,
+	ops createTxOps) (*createTxExistingTarget, bool, error) {
+
+	existing, err := ops.loadExisting(ctx, req)
+	if err != nil && !errors.Is(err, errCreateTxExistingNotFound) {
+		return nil, false, fmt.Errorf("load create tx target: %w", err)
+	}
+
+	if errors.Is(err, errCreateTxExistingNotFound) {
+		return nil, false, nil
+	}
+
+	if existing == nil {
+		return nil, false, nil
+	}
+
+	return existing, true, nil
+}
+
 // createTxWithOps runs the backend-independent CreateTx orchestration once the
 // caller has opened a backend-specific SQL transaction.
 //
@@ -307,14 +372,22 @@ type createTxOps interface {
 func createTxWithOps(ctx context.Context, req createTxRequest,
 	ops createTxOps) error {
 
-	exists, err := ops.hasExisting(ctx, req)
+	existing, foundExisting, err := loadCreateTxExisting(ctx, req, ops)
 	if err != nil {
-		return fmt.Errorf("prepare create tx: check existing tx: %w", err)
+		return err
 	}
 
-	if exists {
-		return fmt.Errorf("prepare create tx: tx %s: %w", req.txHash,
-			ErrTxAlreadyExists)
+	if foundExisting {
+		if !checkReuseCreateTx(req, *existing) {
+			return fmt.Errorf("tx %s: %w", req.txHash, ErrTxAlreadyExists)
+		}
+
+		err = ops.confirmExisting(ctx, req, *existing)
+		if err != nil {
+			return fmt.Errorf("confirm existing tx: %w", err)
+		}
+
+		return nil
 	}
 
 	err = ops.prepareBlock(ctx, req)

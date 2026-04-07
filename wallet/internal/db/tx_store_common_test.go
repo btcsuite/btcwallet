@@ -328,7 +328,7 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 
 	// Assert: The shared flow executes the expected write sequence.
 	require.Equal(t,
-		[]string{"exists", "prepare-block", "insert", "credits", "inputs"},
+		[]string{"load-existing", "prepare-block", "insert", "credits", "inputs"},
 		ops.calls,
 	)
 	require.Equal(t, int64(11), ops.creditsTxID)
@@ -342,11 +342,38 @@ func TestCreateTxWithOpsDuplicate(t *testing.T) {
 	t.Parallel()
 
 	req := testCreateTxRequest(t)
-	ops := &stubCreateTxOps{hasExistingResult: true}
+	ops := &stubCreateTxOps{existing: &createTxExistingTarget{id: 4}}
 
 	err := createTxWithOps(context.Background(), req, ops)
 	require.ErrorIs(t, err, ErrTxAlreadyExists)
-	require.Equal(t, []string{"exists"}, ops.calls)
+	require.Equal(t, []string{"load-existing"}, ops.calls)
+}
+
+// TestCreateTxWithOpsConfirmExisting verifies that the shared CreateTx flow can
+// promote one existing unmined row to confirmed state instead of inserting a
+// duplicate row.
+func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	ops := &stubCreateTxOps{existing: &createTxExistingTarget{
+		id:       7,
+		status:   TxStatusPending,
+		hasBlock: false,
+	}}
+
+	err = createTxWithOps(context.Background(), req, ops)
+	require.NoError(t, err)
+	require.Equal(t, []string{"load-existing", "confirm-existing"}, ops.calls)
 }
 
 // testBlock builds a simple block fixture for CreateTx validation tests.
@@ -382,8 +409,8 @@ func testCoinbaseMsgTx() *wire.MsgTx {
 // stubCreateTxOps records how the shared CreateTx helper drives one backend
 // adapter while letting each test control the returned transaction IDs.
 type stubCreateTxOps struct {
-	hasExistingResult bool
-	insertTxID        int64
+	existing   *createTxExistingTarget
+	insertTxID int64
 
 	calls       []string
 	insertReq   createTxRequest
@@ -393,14 +420,27 @@ type stubCreateTxOps struct {
 
 var _ createTxOps = (*stubCreateTxOps)(nil)
 
-// hasExisting records that the shared flow checked whether the tx hash already
+// loadExisting records that the shared flow checked whether the tx hash already
 // exists and returns the test-controlled result.
-func (s *stubCreateTxOps) hasExisting(_ context.Context,
-	_ createTxRequest) (bool, error) {
+func (s *stubCreateTxOps) loadExisting(_ context.Context,
+	_ createTxRequest) (*createTxExistingTarget, error) {
 
-	s.calls = append(s.calls, "exists")
+	s.calls = append(s.calls, "load-existing")
 
-	return s.hasExistingResult, nil
+	if s.existing == nil {
+		return nil, errCreateTxExistingNotFound
+	}
+
+	return s.existing, nil
+}
+
+// confirmExisting records that the shared flow promoted one existing row.
+func (s *stubCreateTxOps) confirmExisting(_ context.Context,
+	_ createTxRequest, _ createTxExistingTarget) error {
+
+	s.calls = append(s.calls, "confirm-existing")
+
+	return nil
 }
 
 // prepareBlock records that the shared flow validated any optional block
