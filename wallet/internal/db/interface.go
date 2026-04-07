@@ -76,11 +76,11 @@ var (
 
 	// ErrTxNotFound is returned when a transaction is not found in the
 	// database.
-	ErrTxNotFound = errors.New("transaction not found")
+	ErrTxNotFound = errors.New("tx not found")
 
 	// ErrTxAlreadyExists is returned when CreateTx is asked to insert a
 	// wallet-scoped transaction hash that already exists.
-	ErrTxAlreadyExists = errors.New("transaction already exists")
+	ErrTxAlreadyExists = errors.New("tx already exists")
 
 	// ErrBlockNotFound is returned when a transaction operation references a
 	// block height that does not exist in the shared blocks table.
