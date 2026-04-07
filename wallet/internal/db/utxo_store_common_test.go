@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,9 +197,13 @@ func TestLeaseOutputWithOps(t *testing.T) {
 		ID:       LockID{7},
 		Duration: time.Minute,
 	}
-	ops := &stubLeaseOutputOps{
-		acquireExpiration: time.Unix(333, 0).In(time.FixedZone("X", 3600)),
-	}
+	acquireExpiration := time.Unix(333, 0).In(time.FixedZone("X", 3600))
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	nowMatcher := mock.AnythingOfType("time.Time")
+	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+		acquireExpiration, nil).Once()
 
 	// Act: Run the shared LeaseOutput flow.
 	lease, err := leaseOutputWithOps(context.Background(), params, ops)
@@ -208,7 +213,6 @@ func TestLeaseOutputWithOps(t *testing.T) {
 	require.Equal(t, params.OutPoint, lease.OutPoint)
 	require.Equal(t, LockID(params.ID), lease.LockID)
 	require.Equal(t, time.UTC, lease.Expiration.Location())
-	require.Equal(t, []string{"acquire"}, ops.calls)
 }
 
 // TestLeaseOutputWithOpsRejectsNonPositiveDuration verifies that the shared
@@ -222,11 +226,13 @@ func TestLeaseOutputWithOpsRejectsNonPositiveDuration(t *testing.T) {
 		ID:       LockID{7},
 		Duration: 0,
 	}
-	ops := &stubLeaseOutputOps{}
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
 
 	_, err := leaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrInvalidParam)
-	require.Empty(t, ops.calls)
+	ops.AssertNotCalled(t, "acquire", mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything)
 }
 
 // TestLeaseOutputWithOpsMissingUtxo verifies that the shared LeaseOutput helper
@@ -240,13 +246,17 @@ func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 		ID:       LockID{7},
 		Duration: time.Minute,
 	}
-	ops := &stubLeaseOutputOps{
-		acquireErr: errLeaseOutputNoRow,
-	}
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	nowMatcher := mock.AnythingOfType("time.Time")
+	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+		time.Time{}, errLeaseOutputNoRow).Once()
+
+	ops.On("hasUtxo", mock.Anything, params).Return(false, nil).Once()
 
 	_, err := leaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
-	require.Equal(t, []string{"acquire", "has-utxo"}, ops.calls)
 }
 
 // TestLeaseOutputWithOpsAlreadyLeased verifies that the shared LeaseOutput
@@ -260,14 +270,17 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 		ID:       LockID{7},
 		Duration: time.Minute,
 	}
-	ops := &stubLeaseOutputOps{
-		acquireErr:    errLeaseOutputNoRow,
-		hasUtxoResult: true,
-	}
+	ops := &mockLeaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	nowMatcher := mock.AnythingOfType("time.Time")
+	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+		time.Time{}, errLeaseOutputNoRow).Once()
+
+	ops.On("hasUtxo", mock.Anything, params).Return(true, nil).Once()
 
 	_, err := leaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrOutputAlreadyLeased)
-	require.Equal(t, []string{"acquire", "has-utxo"}, ops.calls)
 }
 
 // TestReleaseOutputWithOps verifies that the shared ReleaseOutput helper
@@ -281,17 +294,19 @@ func TestReleaseOutputWithOps(t *testing.T) {
 		OutPoint: testLeaseOutPoint(),
 		ID:       [32]byte{9},
 	}
-	ops := &stubReleaseOutputOps{
-		lookupUtxoIDResult: 11,
-		releaseRows:        1,
-	}
+	ops := &mockReleaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+
+	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+		int64(1), nil).Once()
 
 	// Act: Run the shared ReleaseOutput flow.
 	err := releaseOutputWithOps(context.Background(), params, ops)
 
 	// Assert: The helper stops after the successful delete path.
 	require.NoError(t, err)
-	require.Equal(t, []string{"lookup-utxo", "release"}, ops.calls)
 }
 
 // TestReleaseOutputWithOpsMissingUtxo verifies that the shared ReleaseOutput
@@ -304,13 +319,14 @@ func TestReleaseOutputWithOpsMissingUtxo(t *testing.T) {
 		OutPoint: testLeaseOutPoint(),
 		ID:       [32]byte{9},
 	}
-	ops := &stubReleaseOutputOps{
-		lookupUtxoIDErr: errReleaseOutputUtxoNotFound,
-	}
+	ops := &mockReleaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	ops.On("lookupUtxoID", mock.Anything, params).Return(
+		int64(0), errReleaseOutputUtxoNotFound).Once()
 
 	err := releaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
-	require.Equal(t, []string{"lookup-utxo"}, ops.calls)
 }
 
 // TestReleaseOutputWithOpsWrongLock verifies that the shared ReleaseOutput
@@ -323,17 +339,20 @@ func TestReleaseOutputWithOpsWrongLock(t *testing.T) {
 		OutPoint: testLeaseOutPoint(),
 		ID:       [32]byte{9},
 	}
-	ops := &stubReleaseOutputOps{
-		lookupUtxoIDResult: 11,
-		activeLockIDResult: []byte{1, 2, 3},
-	}
+	ops := &mockReleaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	releaseTimeMatcher := mock.AnythingOfType("time.Time")
+	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+
+	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+		int64(0), nil).Once()
+
+	ops.On("activeLockID", mock.Anything, uint32(5), int64(11),
+		releaseTimeMatcher).Return([]byte{1, 2, 3}, nil).Once()
 
 	err := releaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrOutputUnlockNotAllowed)
-	require.Equal(t,
-		[]string{"lookup-utxo", "release", "active-lock"},
-		ops.calls,
-	)
 }
 
 // TestReleaseOutputWithOpsMissingActiveLease verifies that the shared
@@ -347,94 +366,108 @@ func TestReleaseOutputWithOpsMissingActiveLease(t *testing.T) {
 		OutPoint: testLeaseOutPoint(),
 		ID:       [32]byte{9},
 	}
-	ops := &stubReleaseOutputOps{
-		lookupUtxoIDResult: 11,
-		activeLockIDErr:    errReleaseOutputNoActiveLease,
-	}
+	ops := &mockReleaseOutputOps{}
+	t.Cleanup(func() { ops.AssertExpectations(t) })
+
+	releaseTimeMatcher := mock.AnythingOfType("time.Time")
+	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+
+	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+		int64(0), nil).Once()
+
+	ops.On("activeLockID", mock.Anything, uint32(5), int64(11),
+		releaseTimeMatcher).Return(nil, errReleaseOutputNoActiveLease).Once()
 
 	err := releaseOutputWithOps(context.Background(), params, ops)
 	require.NoError(t, err)
-	require.Equal(t,
-		[]string{"lookup-utxo", "release", "active-lock"},
-		ops.calls,
-	)
 }
 
-// stubLeaseOutputOps records how the shared LeaseOutput helper drives one
-// backend adapter while letting each test control the returned results.
-type stubLeaseOutputOps struct {
-	acquireExpiration time.Time
-	acquireErr        error
-	hasUtxoResult     bool
-
-	calls []string
+// mockLeaseOutputOps is a mock implementation of leaseOutputOps.
+type mockLeaseOutputOps struct {
+	mock.Mock
 }
 
-var _ leaseOutputOps = (*stubLeaseOutputOps)(nil)
+var _ leaseOutputOps = (*mockLeaseOutputOps)(nil)
 
-// acquire records the shared write attempt and returns the test-controlled
-// lease result.
-func (s *stubLeaseOutputOps) acquire(_ context.Context,
-	_ LeaseOutputParams, _ time.Time, _ time.Time) (time.Time, error) {
+// acquire implements leaseOutputOps.
+func (m *mockLeaseOutputOps) acquire(ctx context.Context,
+	params LeaseOutputParams, start time.Time,
+	expiration time.Time) (time.Time, error) {
 
-	s.calls = append(s.calls, "acquire")
+	args := m.Called(ctx, params, start, expiration)
 
-	return s.acquireExpiration, s.acquireErr
+	leaseExpiration, ok := args.Get(0).(time.Time)
+	if !ok {
+		return time.Time{}, errMockType
+	}
+
+	return leaseExpiration, args.Error(1)
 }
 
-// hasUtxo records the fallback ownership lookup and returns the test-controlled
-// result.
-func (s *stubLeaseOutputOps) hasUtxo(_ context.Context,
-	_ LeaseOutputParams) (bool, error) {
+// hasUtxo implements leaseOutputOps.
+func (m *mockLeaseOutputOps) hasUtxo(ctx context.Context,
+	params LeaseOutputParams) (bool, error) {
 
-	s.calls = append(s.calls, "has-utxo")
+	args := m.Called(ctx, params)
 
-	return s.hasUtxoResult, nil
+	hasUtxo, ok := args.Get(0).(bool)
+	if !ok {
+		return false, errMockType
+	}
+
+	return hasUtxo, args.Error(1)
 }
 
-// stubReleaseOutputOps records how the shared ReleaseOutput helper drives one
-// backend adapter while letting each test control the returned results.
-type stubReleaseOutputOps struct {
-	lookupUtxoIDResult int64
-	lookupUtxoIDErr    error
-	releaseRows        int64
-	releaseErr         error
-	activeLockIDResult []byte
-	activeLockIDErr    error
-
-	calls []string
+// mockReleaseOutputOps is a mock implementation of releaseOutputOps.
+type mockReleaseOutputOps struct {
+	mock.Mock
 }
 
-var _ releaseOutputOps = (*stubReleaseOutputOps)(nil)
+var _ releaseOutputOps = (*mockReleaseOutputOps)(nil)
 
-// lookupUtxoID records the shared outpoint lookup and returns the test-
-// controlled result.
-func (s *stubReleaseOutputOps) lookupUtxoID(_ context.Context,
-	_ ReleaseOutputParams) (int64, error) {
+// lookupUtxoID implements releaseOutputOps.
+func (m *mockReleaseOutputOps) lookupUtxoID(ctx context.Context,
+	params ReleaseOutputParams) (int64, error) {
 
-	s.calls = append(s.calls, "lookup-utxo")
+	args := m.Called(ctx, params)
 
-	return s.lookupUtxoIDResult, s.lookupUtxoIDErr
+	utxoID, ok := args.Get(0).(int64)
+	if !ok {
+		return 0, errMockType
+	}
+
+	return utxoID, args.Error(1)
 }
 
-// release records the shared delete attempt and returns the test-controlled row
-// count.
-func (s *stubReleaseOutputOps) release(_ context.Context, _ uint32,
-	_ int64, _ [32]byte) (int64, error) {
+// release implements releaseOutputOps.
+func (m *mockReleaseOutputOps) release(ctx context.Context, walletID uint32,
+	utxoID int64, lockID [32]byte) (int64, error) {
 
-	s.calls = append(s.calls, "release")
+	args := m.Called(ctx, walletID, utxoID, lockID)
 
-	return s.releaseRows, s.releaseErr
+	releasedRows, ok := args.Get(0).(int64)
+	if !ok {
+		return 0, errMockType
+	}
+
+	return releasedRows, args.Error(1)
 }
 
-// activeLockID records the fallback active-lock lookup and returns the test-
-// controlled result.
-func (s *stubReleaseOutputOps) activeLockID(_ context.Context, _ uint32,
-	_ int64, _ time.Time) ([]byte, error) {
+// activeLockID implements releaseOutputOps.
+func (m *mockReleaseOutputOps) activeLockID(ctx context.Context,
+	walletID uint32, utxoID int64, now time.Time) ([]byte, error) {
 
-	s.calls = append(s.calls, "active-lock")
+	args := m.Called(ctx, walletID, utxoID, now)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 
-	return s.activeLockIDResult, s.activeLockIDErr
+	lockID, ok := args.Get(0).([]byte)
+	if !ok {
+		return nil, errMockType
+	}
+
+	return lockID, args.Error(1)
 }
 
 // testLeaseOutPoint builds one stable outpoint fixture for shared UTXO lease
