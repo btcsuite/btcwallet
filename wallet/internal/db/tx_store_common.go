@@ -663,18 +663,22 @@ func collectDirectChildTxIDs(parentHash chainhash.Hash,
 	return childIDs
 }
 
-// collectDescendantTxIDs returns every unmined transaction that depends on any
-// of the provided root hashes, including indirect descendants discovered
-// through newly invalidated child hashes.
-func collectDescendantTxIDs(rootHashes map[chainhash.Hash]struct{},
-	candidates []unminedTxRecord) []int64 {
+// collectDescendantTxIDs returns every discovered descendant in the original
+// candidate order. Any ID also listed in rootIDs is excluded so direct roots
+// can keep their own state transition instead of being treated as descendants.
+func collectDescendantTxIDs(rootHashes []chainhash.Hash,
+	rootIDs []int64, candidates []unminedTxRecord) []int64 {
 
 	invalidHashes := make(map[chainhash.Hash]struct{}, len(rootHashes))
-	for hash := range rootHashes {
+	for _, hash := range rootHashes {
 		invalidHashes[hash] = struct{}{}
 	}
 
 	invalidIDs := make(map[int64]struct{}, len(candidates))
+
+	// Walk the candidate set to a fixed point. Each time we discover one
+	// new descendant we add its hash to invalidHashes, which may cause
+	// later passes to discover txns that depend on that child.
 	for changed := true; changed; {
 		changed = false
 
@@ -693,14 +697,20 @@ func collectDescendantTxIDs(rootHashes map[chainhash.Hash]struct{},
 		}
 	}
 
-	descendantIDs := make([]int64, 0, len(invalidIDs))
+	// Direct roots are handled separately by the caller, so remove them here
+	// before the ordered descendant slice is materialized.
+	for _, rootID := range rootIDs {
+		delete(invalidIDs, rootID)
+	}
+
+	orderedIDs := make([]int64, 0, len(invalidIDs))
 	for _, candidate := range candidates {
 		if _, ok := invalidIDs[candidate.id]; ok {
-			descendantIDs = append(descendantIDs, candidate.id)
+			orderedIDs = append(orderedIDs, candidate.id)
 		}
 	}
 
-	return descendantIDs
+	return orderedIDs
 }
 
 // invalidateRollbackDescendants clears spend edges and marks failed every
@@ -718,12 +728,7 @@ func invalidateRollbackDescendants(ctx context.Context,
 				"wallet %d: %w", walletID, err)
 		}
 
-		rootHashSet := make(map[chainhash.Hash]struct{}, len(rootHashes))
-		for _, rootHash := range rootHashes {
-			rootHashSet[rootHash] = struct{}{}
-		}
-
-		descendantIDs := collectDescendantTxIDs(rootHashSet, candidates)
+		descendantIDs := collectDescendantTxIDs(rootHashes, nil, candidates)
 		if len(descendantIDs) == 0 {
 			continue
 		}
