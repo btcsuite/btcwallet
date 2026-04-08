@@ -84,7 +84,7 @@ func (s *SqliteStore) CreateWallet(ctx context.Context,
 			)
 		}
 
-		info, err = buildSqliteWalletInfo(sqliteWalletRowParams{
+		info, err = buildWalletInfo(walletRowParams{
 			id:                     row.ID,
 			name:                   row.WalletName,
 			isImported:             row.IsImported,
@@ -127,7 +127,7 @@ func (s *SqliteStore) GetWallet(ctx context.Context,
 		return nil, fmt.Errorf("get wallet: %w", err)
 	}
 
-	return buildSqliteWalletInfo(sqliteWalletRowParams{
+	return buildWalletInfo(walletRowParams{
 		id:                     row.ID,
 		name:                   row.WalletName,
 		isImported:             row.IsImported,
@@ -148,7 +148,7 @@ func (s *SqliteStore) ListWallets(ctx context.Context,
 	query db.ListWalletsQuery) (page.Result[db.WalletInfo, uint32], error) {
 
 	rows, err := s.queries.ListWallets(
-		ctx, sqliteListWalletsParams(query.Page),
+		ctx, listWalletsParams(query.Page),
 	)
 	if err != nil {
 		return page.Result[db.WalletInfo, uint32]{},
@@ -157,7 +157,7 @@ func (s *SqliteStore) ListWallets(ctx context.Context,
 
 	items := make([]db.WalletInfo, len(rows))
 	for i, row := range rows {
-		item, errMap := sqliteListWalletRowToInfo(row)
+		item, errMap := listWalletRowToInfo(row)
 		if errMap != nil {
 			return page.Result[db.WalletInfo, uint32]{},
 				fmt.Errorf("list wallets page: map row: %w", errMap)
@@ -195,7 +195,7 @@ func (s *SqliteStore) UpdateWallet(ctx context.Context,
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
-			err := ensureBlockExistsSqlite(
+			err := ensureBlockExists(
 				ctx, qtx, params.SyncedTo,
 			)
 			if err != nil {
@@ -205,7 +205,7 @@ func (s *SqliteStore) UpdateWallet(ctx context.Context,
 		}
 
 		if params.BirthdayBlock != nil {
-			err := ensureBlockExistsSqlite(
+			err := ensureBlockExists(
 				ctx, qtx, params.BirthdayBlock,
 			)
 			if err != nil {
@@ -214,7 +214,7 @@ func (s *SqliteStore) UpdateWallet(ctx context.Context,
 			}
 		}
 
-		syncParams := buildUpdateSyncParamsSqlite(params)
+		syncParams := buildUpdateSyncParams(params)
 
 		rowsAffected, err := qtx.UpdateWalletSyncState(ctx, syncParams)
 		if err != nil {
@@ -281,9 +281,9 @@ func (s *SqliteStore) UpdateWalletSecrets(ctx context.Context,
 	return nil
 }
 
-// sqliteWalletRowParams holds the parameters needed to build a
+// walletRowParams holds the parameters needed to build a
 // WalletInfo from a wallet row.
-type sqliteWalletRowParams struct {
+type walletRowParams struct {
 	id                     int64
 	name                   string
 	isImported             bool
@@ -298,12 +298,12 @@ type sqliteWalletRowParams struct {
 	birthdayBlockTimestamp sql.NullInt64
 }
 
-// sqliteListWalletRowToInfo converts a ListWallets result row to a WalletInfo
+// listWalletRowToInfo converts a ListWallets result row to a WalletInfo
 // struct for pagination.
-func sqliteListWalletRowToInfo(
+func listWalletRowToInfo(
 	row sqlcsqlite.ListWalletsRow) (*db.WalletInfo, error) {
 
-	return buildSqliteWalletInfo(sqliteWalletRowParams{
+	return buildWalletInfo(walletRowParams{
 		id:                     row.ID,
 		name:                   row.WalletName,
 		isImported:             row.IsImported,
@@ -319,9 +319,9 @@ func sqliteListWalletRowToInfo(
 	})
 }
 
-// sqliteListWalletsParams translates a page request to ListWallets query
+// listWalletsParams translates a page request to ListWallets query
 // parameters, handling optional cursor setup for pagination.
-func sqliteListWalletsParams(
+func listWalletsParams(
 	req page.Request[uint32]) sqlcsqlite.ListWalletsParams {
 
 	params := sqlcsqlite.ListWalletsParams{
@@ -335,9 +335,9 @@ func sqliteListWalletsParams(
 	return params
 }
 
-// buildSqliteWalletInfo constructs a WalletInfo from the given wallet
+// buildWalletInfo constructs a WalletInfo from the given wallet
 // row parameters.
-func buildSqliteWalletInfo(row sqliteWalletRowParams) (*db.WalletInfo, error) {
+func buildWalletInfo(row walletRowParams) (*db.WalletInfo, error) {
 	walletID, err := db.Int64ToUint32(row.id)
 	if err != nil {
 		return nil, err
@@ -361,7 +361,7 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*db.WalletInfo, error) {
 	}
 
 	if row.syncedHeight.Valid {
-		block, err := buildSqliteBlock(
+		block, err := buildBlock(
 			row.syncedHeight,
 			row.syncedBlockHash,
 			row.syncedBlockTimestamp,
@@ -374,7 +374,7 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*db.WalletInfo, error) {
 	}
 
 	if row.birthdayHeight.Valid {
-		block, err := buildSqliteBlock(
+		block, err := buildBlock(
 			row.birthdayHeight,
 			row.birthdayBlockHash,
 			row.birthdayBlockTimestamp,
@@ -389,9 +389,9 @@ func buildSqliteWalletInfo(row sqliteWalletRowParams) (*db.WalletInfo, error) {
 	return info, nil
 }
 
-// buildUpdateSyncParamsSqlite constructs the UpdateWalletSyncStateParams from
+// buildUpdateSyncParams constructs the UpdateWalletSyncStateParams from
 // the given UpdateWalletParams.
-func buildUpdateSyncParamsSqlite(
+func buildUpdateSyncParams(
 	params db.UpdateWalletParams) sqlcsqlite.UpdateWalletSyncStateParams {
 
 	syncParams := sqlcsqlite.UpdateWalletSyncStateParams{

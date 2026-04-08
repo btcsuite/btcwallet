@@ -34,15 +34,15 @@ func (s *SqliteStore) GetUtxo(ctx context.Context,
 		return nil, fmt.Errorf("get utxo: %w", err)
 	}
 
-	return utxoInfoFromSqliteRow(
+	return utxoInfoFromRow(
 		row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
 		row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
 	)
 }
 
-// utxoInfoFromSqliteRow converts one normalized sqlite query row into the
+// utxoInfoFromRow converts one normalized sqlite query row into the
 // public UtxoInfo shape.
-func utxoInfoFromSqliteRow(hash []byte, outputIndex int64, amount int64,
+func utxoInfoFromRow(hash []byte, outputIndex int64, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight sql.NullInt64) (*db.UtxoInfo, error) {
 
