@@ -6,7 +6,7 @@ type Result[T any, C any] struct {
 	// page.
 	Items []T
 
-	// Next is the after to use for fetching the next page. It is nil when
-	// no more pages exist.
+	// Next is the after to use for fetching the next page. It is nil when no
+	// more pages exist.
 	Next *C
 }

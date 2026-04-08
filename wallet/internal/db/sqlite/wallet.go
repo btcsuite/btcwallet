@@ -147,6 +147,10 @@ func (s *Store) GetWallet(ctx context.Context,
 func (s *Store) ListWallets(ctx context.Context,
 	query db.ListWalletsQuery) (page.Result[db.WalletInfo, uint32], error) {
 
+	if query.Page.Limit == 0 {
+		return page.Result[db.WalletInfo, uint32]{}, db.ErrInvalidPageLimit
+	}
+
 	rows, err := s.queries.ListWallets(
 		ctx, listWalletsParams(query.Page),
 	)
@@ -167,7 +171,7 @@ func (s *Store) ListWallets(ctx context.Context,
 	}
 
 	result := page.BuildResult(
-		query.Page, items,
+		items, query.Page.Limit,
 		func(item db.WalletInfo) uint32 {
 			return item.ID
 		},
@@ -325,11 +329,11 @@ func listWalletsParams(
 	req page.Request[uint32]) sqlc.ListWalletsParams {
 
 	params := sqlc.ListWalletsParams{
-		PageLimit: int64(req.QueryLimit()),
+		PageLimit: int64(req.Limit) + 1,
 	}
 
-	if cursor, ok := req.After(); ok {
-		params.CursorID = int64(cursor)
+	if req.After != nil {
+		params.CursorID = int64(*req.After)
 	}
 
 	return params
