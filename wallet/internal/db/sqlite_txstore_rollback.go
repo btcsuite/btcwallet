@@ -32,7 +32,7 @@ var _ rollbackToBlockOps = (*sqliteRollbackToBlockOps)(nil)
 // listRollbackRootHashes loads the coinbase roots that a rollback disconnects
 // and groups them by wallet.
 func (o sqliteRollbackToBlockOps) listRollbackRootHashes(ctx context.Context,
-	height uint32) (map[uint32]map[chainhash.Hash]struct{}, error) {
+	height uint32) (map[uint32][]chainhash.Hash, error) {
 
 	rows, err := o.qtx.ListRollbackCoinbaseRoots(ctx, int64(height))
 	if err != nil {
@@ -138,13 +138,13 @@ func (o sqliteRollbackToBlockOps) markDescendantsFailed(
 }
 
 // groupRollbackCoinbaseRootsSqlite groups rollback-affected coinbase hashes by
-// wallet so descendant invalidation can reuse wallet-scoped unmined queries.
+// wallet while preserving the query order inside each wallet bucket.
 func groupRollbackCoinbaseRootsSqlite(
 	rows []sqlcsqlite.ListRollbackCoinbaseRootsRow) (
-	map[uint32]map[chainhash.Hash]struct{}, error) {
+	map[uint32][]chainhash.Hash, error) {
 
 	rootHashesByWallet := make(
-		map[uint32]map[chainhash.Hash]struct{}, len(rows),
+		map[uint32][]chainhash.Hash, len(rows),
 	)
 	for _, row := range rows {
 		walletID, err := int64ToUint32(row.WalletID)
@@ -157,11 +157,9 @@ func groupRollbackCoinbaseRootsSqlite(
 			return nil, fmt.Errorf("rollback coinbase hash: %w", err)
 		}
 
-		if _, ok := rootHashesByWallet[walletID]; !ok {
-			rootHashesByWallet[walletID] = make(map[chainhash.Hash]struct{})
-		}
-
-		rootHashesByWallet[walletID][*txHash] = struct{}{}
+		rootHashesByWallet[walletID] = append(
+			rootHashesByWallet[walletID], *txHash,
+		)
 	}
 
 	return rootHashesByWallet, nil
