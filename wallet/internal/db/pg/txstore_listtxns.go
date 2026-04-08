@@ -1,9 +1,10 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
@@ -15,7 +16,7 @@ import (
 // including retained invalid history such as orphaned or failed transactions,
 // while the confirmed path is bounded by the requested height range.
 func (s *PostgresStore) ListTxns(ctx context.Context,
-	query ListTxnsQuery) ([]TxInfo, error) {
+	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	if query.UnminedOnly {
 		return s.listTxnsWithoutBlockPg(ctx, query.WalletID)
@@ -29,14 +30,14 @@ func (s *PostgresStore) ListTxns(ctx context.Context,
 // retained invalid history that rollback or invalidation flows left without a
 // confirming block.
 func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
-	walletID uint32) ([]TxInfo, error) {
+	walletID uint32) ([]db.TxInfo, error) {
 
 	rows, err := s.queries.ListTransactionsWithoutBlock(ctx, int64(walletID))
 	if err != nil {
 		return nil, fmt.Errorf("list txns without block: %w", err)
 	}
 
-	infos := make([]TxInfo, len(rows))
+	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
 		info, err := txInfoFromPgRow(
 			row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
@@ -55,14 +56,14 @@ func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
 // listConfirmedTxnsPg loads the confirmed height-range view used by ListTxns
 // when callers query mined history.
 func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
-	query ListTxnsQuery) ([]TxInfo, error) {
+	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
-	startHeight, err := Uint32ToInt32(query.StartHeight)
+	startHeight, err := db.Uint32ToInt32(query.StartHeight)
 	if err != nil {
 		return nil, fmt.Errorf("convert start height: %w", err)
 	}
 
-	endHeight, err := Uint32ToInt32(query.EndHeight)
+	endHeight, err := db.Uint32ToInt32(query.EndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("convert end height: %w", err)
 	}
@@ -78,7 +79,7 @@ func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
 		return nil, fmt.Errorf("list txns by height: %w", err)
 	}
 
-	infos := make([]TxInfo, len(rows))
+	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
 		block, err := buildPgBlock(
 			row.BlockHeight,
@@ -89,7 +90,7 @@ func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
 			return nil, err
 		}
 
-		info, err := BuildTxInfo(
+		info, err := db.BuildTxInfo(
 			row.TxHash, row.RawTx, row.ReceivedTime, block,
 			int64(row.TxStatus), row.TxLabel,
 		)

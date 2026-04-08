@@ -1,9 +1,10 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"testing"
 	"time"
 
@@ -106,13 +107,13 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	err = createOps.InsertReplacementEdges(
 		t.Context(), 1, []int64{2}, 3,
 	)
-	require.ErrorContains(t, err, "Insert replacement edge")
+	require.ErrorContains(t, err, "insert replacement edge")
 
-	err = markInputsSpentPg(t.Context(), qtx, CreateTxParams{
+	err = markInputsSpentPg(t.Context(), qtx, db.CreateTxParams{
 		WalletID: 1,
 		Tx:       testRegularMsgTx(),
 		Received: time.Unix(1, 0),
-		Status:   TxStatusPending,
+		Status:   db.TxStatusPending,
 	}, 7)
 	require.ErrorContains(t, err, "mark spent input 0")
 
@@ -140,16 +141,16 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	require.ErrorContains(t, err, "update rollback coinbase state query")
 
 	updateOps.blockHeight = sql.NullInt32{}
-	updateOps.status = int16(TxStatusPublished)
+	updateOps.status = int16(db.TxStatusPublished)
 	err = updateOps.UpdateState(t.Context(), 1, chainhash.Hash{1},
-		UpdateTxState{Status: TxStatusPublished})
+		db.UpdateTxState{Status: db.TxStatusPublished})
 	require.ErrorContains(t, err, "update tx state query")
 
 	err = updateOps.UpdateLabel(t.Context(), 1, chainhash.Hash{1}, "note")
 	require.ErrorContains(t, err, "update tx label query")
 
 	_, err = releaseOps.Release(t.Context(), 1, 2, [32]byte{1})
-	require.ErrorContains(t, err, "Release lease row")
+	require.ErrorContains(t, err, "release lease row")
 }
 
 // TestPgBackendHelpersRejectOverflow verifies the remaining postgres helper
@@ -157,7 +158,7 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	t.Parallel()
 
-	req, err := NewCreateTxRequest(CreateTxParams{
+	req, err := db.NewCreateTxRequest(db.CreateTxParams{
 		WalletID: 1,
 		Tx: &wire.MsgTx{
 			Version: wire.TxVersion,
@@ -170,7 +171,7 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 			TxOut: []*wire.TxOut{{Value: 1, PkScript: []byte{0x51}}},
 		},
 		Received: time.Unix(1, 0),
-		Status:   TxStatusPending,
+		Status:   db.TxStatusPending,
 	})
 	require.NoError(t, err)
 
@@ -182,7 +183,7 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	_, err = creditExistsPg(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
 	require.ErrorContains(t, err, "convert credit index")
 
-	err = markInputsSpentPg(t.Context(), nil, CreateTxParams{
+	err = markInputsSpentPg(t.Context(), nil, db.CreateTxParams{
 		WalletID: 1,
 		Tx: &wire.MsgTx{
 			Version: wire.TxVersion,
@@ -193,7 +194,7 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 				},
 			}},
 		},
-		Status: TxStatusPending,
+		Status: db.TxStatusPending,
 	}, 3)
 	require.ErrorContains(t, err, "convert input outpoint index 0")
 
@@ -216,14 +217,14 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 
 	leaseOps := &pgLeaseOutputOps{}
 
-	_, err = leaseOps.Acquire(t.Context(), LeaseOutputParams{
+	_, err = leaseOps.Acquire(t.Context(), db.LeaseOutputParams{
 		WalletID: 1,
 		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: ^uint32(0)},
 		ID:       [32]byte{1},
 	}, time.Now(), time.Now().Add(time.Minute))
 	require.ErrorContains(t, err, "convert output index")
 
-	_, err = leaseOps.HasUtxo(t.Context(), LeaseOutputParams{
+	_, err = leaseOps.HasUtxo(t.Context(), db.LeaseOutputParams{
 		WalletID: 1,
 		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: ^uint32(0)},
 		ID:       [32]byte{1},

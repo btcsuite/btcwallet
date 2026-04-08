@@ -4,6 +4,7 @@ package db
 
 import (
 	"database/sql"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )

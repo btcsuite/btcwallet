@@ -1,10 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -13,10 +14,10 @@ import (
 // InvalidateUnminedTx atomically invalidates one wallet-owned unmined
 // transaction branch and marks the root plus descendants failed.
 func (s *PostgresStore) InvalidateUnminedTx(ctx context.Context,
-	params InvalidateUnminedTxParams) error {
+	params db.InvalidateUnminedTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return InvalidateUnminedTxWithOps(
+		return db.InvalidateUnminedTxWithOps(
 			ctx, params, pgInvalidateUnminedTxOps{qtx: qtx},
 		)
 	})
@@ -28,12 +29,12 @@ type pgInvalidateUnminedTxOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ InvalidateUnminedTxOps = (*pgInvalidateUnminedTxOps)(nil)
+var _ db.InvalidateUnminedTxOps = (*pgInvalidateUnminedTxOps)(nil)
 
 // LoadInvalidateTarget loads the root tx metadata used by the shared
 // invalidation workflow.
 func (o pgInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
-	walletID uint32, txHash chainhash.Hash) (InvalidateUnminedTxTarget, error) {
+	walletID uint32, txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
 		ctx, sqlcpg.GetTransactionMetaByHashParams{
@@ -43,20 +44,20 @@ func (o pgInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return InvalidateUnminedTxTarget{}, fmt.Errorf("tx %s: %w", txHash,
-				ErrTxNotFound)
+			return db.InvalidateUnminedTxTarget{}, fmt.Errorf("tx %s: %w", txHash,
+				db.ErrTxNotFound)
 		}
 
-		return InvalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
+		return db.InvalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
 			err)
 	}
 
-	status, err := ParseTxStatus(int64(row.TxStatus))
+	status, err := db.ParseTxStatus(int64(row.TxStatus))
 	if err != nil {
-		return InvalidateUnminedTxTarget{}, err
+		return db.InvalidateUnminedTxTarget{}, err
 	}
 
-	return InvalidateUnminedTxTarget{
+	return db.InvalidateUnminedTxTarget{
 		ID:         row.ID,
 		TxHash:     txHash,
 		Status:     status,
@@ -68,14 +69,14 @@ func (o pgInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 // ListUnminedTxRecords loads and decodes the wallet's active unmined
 // transaction rows.
 func (o pgInvalidateUnminedTxOps) ListUnminedTxRecords(
-	ctx context.Context, walletID int64) ([]UnminedTxRecord, error) {
+	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
 	if err != nil {
 		return nil, fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	return BuildUnminedTxRecords(rows,
+	return db.BuildUnminedTxRecords(rows,
 		func(row sqlcpg.ListUnminedTransactionsRow) (int64, []byte, []byte) {
 			return row.ID, row.TxHash, row.RawTx
 		},
@@ -111,7 +112,7 @@ func (o pgInvalidateUnminedTxOps) MarkTxnsFailed(
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
 		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
-			Status:   int16(TxStatusFailed),
+			Status:   int16(db.TxStatusFailed),
 			TxIds:    txIDs,
 		},
 	)
