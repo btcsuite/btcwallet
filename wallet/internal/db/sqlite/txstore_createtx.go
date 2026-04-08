@@ -30,25 +30,25 @@ func (s *SqliteStore) CreateTx(ctx context.Context,
 	}
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return db.CreateTxWithOps(ctx, req, &sqliteCreateTxOps{
-			sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+		return db.CreateTxWithOps(ctx, req, &createTxOps{
+			invalidateUnminedTxOps: invalidateUnminedTxOps{
 				qtx: qtx,
 			},
 		})
 	})
 }
 
-// sqliteCreateTxOps adapts sqlite sqlc queries to the shared CreateTx flow.
-type sqliteCreateTxOps struct {
-	sqliteInvalidateUnminedTxOps
+// createTxOps adapts sqlite sqlc queries to the shared CreateTx flow.
+type createTxOps struct {
+	invalidateUnminedTxOps
 
 	blockHeight sql.NullInt64
 }
 
-var _ db.CreateTxOps = (*sqliteCreateTxOps)(nil)
+var _ db.CreateTxOps = (*createTxOps)(nil)
 
 // LoadExisting loads any existing wallet-scoped row for the requested tx hash.
-func (o *sqliteCreateTxOps) LoadExisting(ctx context.Context,
+func (o *createTxOps) LoadExisting(ctx context.Context,
 	req db.CreateTxRequest) (*db.CreateTxExistingTarget, error) {
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
@@ -80,11 +80,11 @@ func (o *sqliteCreateTxOps) LoadExisting(ctx context.Context,
 }
 
 // ConfirmExisting promotes one existing unmined row to its confirmed state.
-func (o *sqliteCreateTxOps) ConfirmExisting(ctx context.Context,
+func (o *createTxOps) ConfirmExisting(ctx context.Context,
 	req db.CreateTxRequest,
 	_ db.CreateTxExistingTarget) error {
 
-	blockHeight, err := requireBlockMatchesSqlite(ctx, o.qtx, req.Params.Block)
+	blockHeight, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
 	if err != nil {
 		return fmt.Errorf("require confirming block: %w", err)
 	}
@@ -110,7 +110,7 @@ func (o *sqliteCreateTxOps) ConfirmExisting(ctx context.Context,
 
 // PrepareBlock validates the optional confirming block and caches the sqlite
 // block-height value that the later Insert query will store.
-func (o *sqliteCreateTxOps) PrepareBlock(ctx context.Context,
+func (o *createTxOps) PrepareBlock(ctx context.Context,
 	req db.CreateTxRequest) error {
 
 	o.blockHeight = sql.NullInt64{}
@@ -119,7 +119,7 @@ func (o *sqliteCreateTxOps) PrepareBlock(ctx context.Context,
 		return nil
 	}
 
-	height, err := requireBlockMatchesSqlite(ctx, o.qtx, req.Params.Block)
+	height, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
 	if err != nil {
 		return err
 	}
@@ -131,10 +131,10 @@ func (o *sqliteCreateTxOps) PrepareBlock(ctx context.Context,
 
 // ListConflictTxns returns the direct conflict root IDs plus the matching tx
 // hashes used for descendant discovery.
-func (o *sqliteCreateTxOps) ListConflictTxns(ctx context.Context,
+func (o *createTxOps) ListConflictTxns(ctx context.Context,
 	req db.CreateTxRequest) ([]int64, []chainhash.Hash, error) {
 
-	rootIDs, err := collectSqliteConflictRootIDs(ctx, o.qtx, req)
+	rootIDs, err := collectConflictRootIDs(ctx, o.qtx, req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -148,12 +148,12 @@ func (o *sqliteCreateTxOps) ListConflictTxns(ctx context.Context,
 		return nil, nil, fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	return buildSqliteConflictRoots(rows, rootIDs)
+	return buildConflictRoots(rows, rootIDs)
 }
 
-// collectSqliteConflictRootIDs returns the active unmined spender row
+// collectConflictRootIDs returns the active unmined spender row
 // IDs that currently own any wallet-controlled input spent by the incoming tx.
-func collectSqliteConflictRootIDs(ctx context.Context,
+func collectConflictRootIDs(ctx context.Context,
 	qtx *sqlcsqlite.Queries,
 	req db.CreateTxRequest) (map[int64]struct{}, error) {
 
@@ -189,9 +189,9 @@ func collectSqliteConflictRootIDs(ctx context.Context,
 	return rootIDs, nil
 }
 
-// buildSqliteConflictRoots maps the selected unmined rows into ordered root IDs
+// buildConflictRoots maps the selected unmined rows into ordered root IDs
 // and the matching root hashes used for descendant discovery.
-func buildSqliteConflictRoots(rows []sqlcsqlite.ListUnminedTransactionsRow,
+func buildConflictRoots(rows []sqlcsqlite.ListUnminedTransactionsRow,
 	rootIDSet map[int64]struct{}) (
 	[]int64, []chainhash.Hash, error) {
 
@@ -216,7 +216,7 @@ func buildSqliteConflictRoots(rows []sqlcsqlite.ListUnminedTransactionsRow,
 }
 
 // Insert stores one new sqlite transaction row for CreateTx.
-func (o *sqliteCreateTxOps) Insert(ctx context.Context,
+func (o *createTxOps) Insert(ctx context.Context,
 	req db.CreateTxRequest) (int64, error) {
 
 	txID, err := o.qtx.InsertTransaction(
@@ -240,22 +240,22 @@ func (o *sqliteCreateTxOps) Insert(ctx context.Context,
 }
 
 // InsertCredits stores any wallet-owned outputs created by the transaction.
-func (o *sqliteCreateTxOps) InsertCredits(ctx context.Context,
+func (o *createTxOps) InsertCredits(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {
 
-	return insertCreditsSqlite(ctx, o.qtx, req.Params, txID)
+	return insertCredits(ctx, o.qtx, req.Params, txID)
 }
 
 // MarkInputsSpent records wallet-owned inputs spent by the transaction.
-func (o *sqliteCreateTxOps) MarkInputsSpent(ctx context.Context,
+func (o *createTxOps) MarkInputsSpent(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {
 
-	return markInputsSpentSqlite(ctx, o.qtx, req.Params, txID)
+	return markInputsSpent(ctx, o.qtx, req.Params, txID)
 }
 
 // MarkTxnsReplaced marks the provided direct conflict roots replaced in one
 // batch update.
-func (o *sqliteCreateTxOps) MarkTxnsReplaced(
+func (o *createTxOps) MarkTxnsReplaced(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
@@ -274,7 +274,7 @@ func (o *sqliteCreateTxOps) MarkTxnsReplaced(
 
 // InsertReplacementEdges records replacement-history edges from each direct
 // conflict root to the newly inserted confirmed transaction row.
-func (o *sqliteCreateTxOps) InsertReplacementEdges(
+func (o *createTxOps) InsertReplacementEdges(
 	ctx context.Context, walletID int64, replacedTxIDs []int64,
 	replacementTxID int64) error {
 
@@ -295,13 +295,13 @@ func (o *sqliteCreateTxOps) InsertReplacementEdges(
 	return nil
 }
 
-// insertCreditsSqlite inserts one wallet-owned UTXO row for each credited
+// insertCredits inserts one wallet-owned UTXO row for each credited
 // output of the transaction being stored.
-func insertCreditsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func insertCredits(ctx context.Context, qtx *sqlcsqlite.Queries,
 	params db.CreateTxParams, txID int64) error {
 
 	for index := range params.Credits {
-		creditExists, err := creditExistsSqlite(
+		creditExists, err := creditExists(
 			ctx, qtx, params.WalletID, params.Tx.TxHash(), index,
 		)
 		if err != nil {
@@ -344,9 +344,9 @@ func insertCreditsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	return nil
 }
 
-// creditExistsSqlite reports whether the wallet already has a UTXO row for the
+// creditExists reports whether the wallet already has a UTXO row for the
 // given credited output, even if that output is now spent by a child tx.
-func creditExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func creditExists(ctx context.Context, qtx *sqlcsqlite.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, error) {
 
 	_, err := qtx.GetUtxoSpendByOutpoint(
@@ -368,7 +368,7 @@ func creditExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	return true, nil
 }
 
-// markInputsSpentSqlite attaches wallet-owned outpoints spent by the stored
+// markInputsSpent attaches wallet-owned outpoints spent by the stored
 // transaction to its row ID and input indexes.
 //
 // If another wallet transaction already owns the spend edge for a
@@ -376,7 +376,7 @@ func creditExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 // instead of silently storing a second spender. Inputs that reference a
 // wallet-owned output whose parent transaction is already invalid fail with
 // ErrTxInputInvalidParent.
-func markInputsSpentSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func markInputsSpent(ctx context.Context, qtx *sqlcsqlite.Queries,
 	params db.CreateTxParams, txID int64) error {
 
 	if blockchain.IsCoinBaseTx(params.Tx) {
@@ -399,7 +399,7 @@ func markInputsSpentSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 		}
 
 		if rowsAffected == 0 {
-			err = ensureSpendConflictSqlite(
+			err = ensureSpendConflict(
 				ctx, qtx, params.WalletID, txIn.PreviousOutPoint.Hash,
 				int64(txIn.PreviousOutPoint.Index), txID,
 			)
@@ -412,11 +412,11 @@ func markInputsSpentSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	return nil
 }
 
-// ensureSpendConflictSqlite reports ErrTxInputConflict when the referenced
+// ensureSpendConflict reports ErrTxInputConflict when the referenced
 // outpoint is wallet-owned, still eligible for spending, and already attached
 // to another transaction. If the wallet owns the parent output but that parent
 // is already invalid, the helper returns ErrTxInputInvalidParent instead.
-func ensureSpendConflictSqlite(ctx context.Context,
+func ensureSpendConflict(ctx context.Context,
 	qtx *sqlcsqlite.Queries, walletID uint32, txHash chainhash.Hash,
 	outputIndex int64, txID int64) error {
 
@@ -429,7 +429,7 @@ func ensureSpendConflictSqlite(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ensureWalletParentValidSqlite(
+			return ensureWalletParentValid(
 				ctx, qtx, walletID, txHash, outputIndex,
 			)
 		}
@@ -444,10 +444,10 @@ func ensureSpendConflictSqlite(ctx context.Context,
 	return nil
 }
 
-// ensureWalletParentValidSqlite reports ErrTxInputInvalidParent when the
+// ensureWalletParentValid reports ErrTxInputInvalidParent when the
 // wallet owns the referenced outpoint but its parent transaction is already
 // invalid.
-func ensureWalletParentValidSqlite(ctx context.Context,
+func ensureWalletParentValid(ctx context.Context,
 	qtx *sqlcsqlite.Queries, walletID uint32, txHash chainhash.Hash,
 	outputIndex int64) error {
 

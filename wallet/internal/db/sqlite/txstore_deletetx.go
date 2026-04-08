@@ -22,23 +22,23 @@ func (s *SqliteStore) DeleteTx(ctx context.Context,
 	params db.DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return db.DeleteTxWithOps(ctx, params, sqliteDeleteTxOps{qtx: qtx})
+		return db.DeleteTxWithOps(ctx, params, deleteTxOps{qtx: qtx})
 	})
 }
 
-// sqliteDeleteTxOps adapts sqlite sqlc queries to the shared DeleteTx flow.
-type sqliteDeleteTxOps struct {
+// deleteTxOps adapts sqlite sqlc queries to the shared DeleteTx flow.
+type deleteTxOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ db.DeleteTxOps = (*sqliteDeleteTxOps)(nil)
+var _ db.DeleteTxOps = (*deleteTxOps)(nil)
 
 // LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
-func (o sqliteDeleteTxOps) LoadDeleteTarget(ctx context.Context,
+func (o deleteTxOps) LoadDeleteTarget(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
-	meta, err := getDeleteTxMetaSqlite(ctx, o.qtx, walletID, txHash)
+	meta, err := getDeleteTxMeta(ctx, o.qtx, walletID, txHash)
 	if err != nil {
 		return 0, err
 	}
@@ -48,15 +48,15 @@ func (o sqliteDeleteTxOps) LoadDeleteTarget(ctx context.Context,
 
 // EnsureLeaf rejects DeleteTx when the target still has direct unmined child
 // spenders.
-func (o sqliteDeleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
+func (o deleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, txID int64) error {
 
-	return ensureDeleteLeafSqlite(ctx, o.qtx, walletID, txHash, txID)
+	return ensureDeleteLeaf(ctx, o.qtx, walletID, txHash, txID)
 }
 
 // ClearSpentUtxos restores any wallet-owned parent outputs the transaction had
 // marked spent.
-func (o sqliteDeleteTxOps) ClearSpentUtxos(ctx context.Context,
+func (o deleteTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -75,7 +75,7 @@ func (o sqliteDeleteTxOps) ClearSpentUtxos(ctx context.Context,
 
 // DeleteCreatedUtxos removes any wallet-owned outputs created by the
 // transaction being deleted.
-func (o sqliteDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
+func (o deleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.DeleteUtxosByTxID(
@@ -94,7 +94,7 @@ func (o sqliteDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 
 // DeleteUnminedTransaction removes the target unmined row after its dependent
 // wallet state has been cleaned up.
-func (o sqliteDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
+func (o deleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
 	rows, err := o.qtx.DeleteUnminedTransactionByHash(
@@ -111,10 +111,10 @@ func (o sqliteDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	return rows, nil
 }
 
-// ensureDeleteLeafSqlite rejects DeleteTx requests for transactions that still
+// ensureDeleteLeaf rejects DeleteTx requests for transactions that still
 // have direct unmined child spenders, including children that spend non-credit
 // parent outputs.
-func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func ensureDeleteLeaf(ctx context.Context, qtx *sqlcsqlite.Queries,
 	walletID uint32, txHash chainhash.Hash, txID int64) error {
 
 	rows, err := qtx.ListUnminedTransactions(ctx, int64(walletID))
@@ -151,9 +151,9 @@ func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	return nil
 }
 
-// getDeleteTxMetaSqlite loads the transaction metadata DeleteTx needs and
+// getDeleteTxMeta loads the transaction metadata DeleteTx needs and
 // enforces the unmined precondition up front.
-func getDeleteTxMetaSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func getDeleteTxMeta(ctx context.Context, qtx *sqlcsqlite.Queries,
 	walletID uint32, txHash chainhash.Hash) (
 	sqlcsqlite.GetTransactionMetaByHashRow, error) {
 

@@ -14,7 +14,7 @@ func TestUtxoInfoFromSqliteRowInvalidOutputIndex(t *testing.T) {
 	t.Parallel()
 
 	hash := chainhash.Hash{13}
-	_, err := utxoInfoFromSqliteRow(
+	_, err := utxoInfoFromRow(
 		hash[:], -1, 1000, []byte{0x57}, time.Unix(888, 0), false,
 		sql.NullInt64{},
 	)
@@ -26,7 +26,7 @@ func TestUtxoInfoFromSqliteRowInvalidBlockHeight(t *testing.T) {
 	t.Parallel()
 
 	hash := chainhash.Hash{14}
-	_, err := utxoInfoFromSqliteRow(
+	_, err := utxoInfoFromRow(
 		hash[:], 0, 1000, []byte{0x58}, time.Unix(999, 0), false,
 		sql.NullInt64{Int64: -1, Valid: true},
 	)

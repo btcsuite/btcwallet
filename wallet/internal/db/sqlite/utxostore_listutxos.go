@@ -27,7 +27,7 @@ func (s *SqliteStore) ListUTXOs(ctx context.Context,
 
 	utxos := make([]db.UtxoInfo, len(rows))
 	for i, row := range rows {
-		utxo, err := utxoInfoFromSqliteRow(
+		utxo, err := utxoInfoFromRow(
 			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
 			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
 		)
