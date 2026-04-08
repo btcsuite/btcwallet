@@ -7,22 +7,21 @@ import (
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlassetsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	_ "modernc.org/sqlite" // Import sqlite driver for sqlite database/sql support.
 )
 
-// SqliteStore is the SQLite implementation of the WalletStore interface.
-
-type SqliteStore struct {
+// Store is the SQLite implementation of the WalletStore interface.
+type Store struct {
 	db      *sql.DB
-	queries *sqlcsqlite.Queries
+	queries *sqlc.Queries
 }
 
-// NewSqliteStore creates a new SQLite-based WalletStore. It handles the full
+// NewStore creates a new SQLite-based WalletStore. It handles the full
 // connection setup including DSN construction with pragmas, connection
 // opening, health checks, connection pool configuration, and migration
 // application.
-func NewSqliteStore(ctx context.Context, cfg db.SqliteConfig) (*SqliteStore,
+func NewStore(ctx context.Context, cfg Config) (*Store,
 	error) {
 
 	err := cfg.Validate()
@@ -59,7 +58,7 @@ func NewSqliteStore(ctx context.Context, cfg db.SqliteConfig) (*SqliteStore,
 	dbConn.SetMaxIdleConns(maxConns)
 	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlcsqlite.New(dbConn)
+	queries := sqlc.New(dbConn)
 
 	err = sqlassetsqlite.ApplyMigrations(dbConn)
 	if err != nil {
@@ -67,14 +66,14 @@ func NewSqliteStore(ctx context.Context, cfg db.SqliteConfig) (*SqliteStore,
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
-	return &SqliteStore{
+	return &Store{
 		db:      dbConn,
 		queries: queries,
 	}, nil
 }
 
 // Close closes the database connection.
-func (s *SqliteStore) Close() error {
+func (s *Store) Close() error {
 	err := s.db.Close()
 	if err != nil {
 		return fmt.Errorf("close database: %w", err)
@@ -87,8 +86,8 @@ func (s *SqliteStore) Close() error {
 // receives a transactional query executor and should perform all database
 // operations using it. The transaction will be automatically committed on
 // success or rolled back on error.
-func (s *SqliteStore) ExecuteTx(ctx context.Context,
-	fn func(*sqlcsqlite.Queries) error) error {
+func (s *Store) ExecuteTx(ctx context.Context,
+	fn func(*sqlc.Queries) error) error {
 
 	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)

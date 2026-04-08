@@ -3,19 +3,19 @@ package sqlite
 import (
 	"context"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // ListUTXOs lists all current wallet-owned UTXOs matching the caller filters.
 //
 // The result set is already constrained to outputs whose creating
 // transactions are still in `pending` or `published` status.
-func (s *SqliteStore) ListUTXOs(ctx context.Context,
+func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
-	rows, err := s.queries.ListUtxos(ctx, sqlcsqlite.ListUtxosParams{
+	rows, err := s.queries.ListUtxos(ctx, sqlc.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
 		AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
 		MinConfirms:   db.NullableInt32ToSQLInt64(query.MinConfs),

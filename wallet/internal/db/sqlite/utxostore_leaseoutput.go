@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // LeaseOutput atomically acquires or renews a lease for one current UTXO.
@@ -16,12 +16,12 @@ import (
 // The lease lookup and acquisition run in one transaction so competing calls
 // cannot observe a partially-written lease. Expiration timestamps are
 // normalized to UTC before Insert.
-func (s *SqliteStore) LeaseOutput(ctx context.Context,
+func (s *Store) LeaseOutput(ctx context.Context,
 	params db.LeaseOutputParams) (*db.LeasedOutput, error) {
 
 	var lease *db.LeasedOutput
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		acquiredLease, err := db.LeaseOutputWithOps(
 			ctx, params, &leaseOutputOps{qtx: qtx},
 		)
@@ -43,7 +43,7 @@ func (s *SqliteStore) LeaseOutput(ctx context.Context,
 // leaseOutputOps adapts sqlite sqlc queries to the shared LeaseOutput
 // workflow.
 type leaseOutputOps struct {
-	qtx *sqlcsqlite.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
@@ -55,7 +55,7 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 	expiresAt time.Time) (time.Time, error) {
 
 	expiration, err := o.qtx.AcquireUtxoLease(
-		ctx, sqlcsqlite.AcquireUtxoLeaseParams{
+		ctx, sqlc.AcquireUtxoLeaseParams{
 			WalletID:    int64(params.WalletID),
 			LockID:      params.ID[:],
 			ExpiresAt:   expiresAt,
@@ -81,7 +81,7 @@ func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	params db.LeaseOutputParams) (bool, error) {
 
 	_, err := o.qtx.GetUtxoIDByOutpoint(
-		ctx, sqlcsqlite.GetUtxoIDByOutpointParams{
+		ctx, sqlc.GetUtxoIDByOutpointParams{
 			WalletID:    int64(params.WalletID),
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: int64(params.OutPoint.Index),
