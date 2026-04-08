@@ -9,7 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +21,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	ctx := context.Background()
 	loadOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row: newRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
@@ -33,7 +33,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	block := testBlock(8)
 	confirmOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row: newRow(
 					t,
 					"SELECT ?, ?, ?",
@@ -53,7 +53,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	prepareOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row: newRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
@@ -65,7 +65,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	conflictOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row:      newRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
 			}),
@@ -79,7 +79,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 func TestReleaseOutputOpsAdditionalBranches(t *testing.T) {
 	t.Parallel()
 
-	ops := &releaseOutputOps{qtx: sqlcsqlite.New(rowDBTX{
+	ops := &releaseOutputOps{qtx: sqlc.New(rowDBTX{
 		row: newRow(t, "SELECT 1 FROM missing_table"),
 	})}
 
@@ -99,15 +99,15 @@ func TestUpdateTxOpsAdditionalBranches(t *testing.T) {
 
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
-	loadOps := &updateTxOps{qtx: sqlcsqlite.New(rowDBTX{
+	loadOps := &updateTxOps{qtx: sqlc.New(rowDBTX{
 		row: newRow(t, "SELECT 1 FROM missing_table"),
 	})}
 	stateOps := &updateTxOps{
-		qtx:         sqlcsqlite.New(rowDBTX{rows: 0}),
+		qtx:         sqlc.New(rowDBTX{rows: 0}),
 		blockHeight: sql.NullInt64{},
 		status:      int64(db.TxStatusPublished),
 	}
-	labelOps := &updateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
+	labelOps := &updateTxOps{qtx: sqlc.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")

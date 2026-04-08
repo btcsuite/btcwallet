@@ -4,17 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
-// Ensure SqliteStore satisfies the AccountStore interface.
-var _ db.AccountStore = (*SqliteStore)(nil)
+// Ensure Store satisfies the AccountStore interface.
+var _ db.AccountStore = (*Store)(nil)
 
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
-func (s *SqliteStore) GetAccount(ctx context.Context,
+func (s *Store) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	getQueries := accountGetQueries{q: s.queries}
@@ -26,7 +26,7 @@ func (s *SqliteStore) GetAccount(ctx context.Context,
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
 // filtered by name or key scope.
-func (s *SqliteStore) ListAccounts(ctx context.Context,
+func (s *Store) ListAccounts(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
 	listQueries := accountListQueries{q: s.queries}
@@ -38,7 +38,7 @@ func (s *SqliteStore) ListAccounts(ctx context.Context,
 
 // RenameAccount changes the name of an account. The account can be identified
 // by its old name or its account number.
-func (s *SqliteStore) RenameAccount(ctx context.Context,
+func (s *Store) RenameAccount(ctx context.Context,
 	params db.RenameAccountParams) error {
 
 	renameQueries := accountRenameQueries{q: s.queries}
@@ -51,7 +51,7 @@ func (s *SqliteStore) RenameAccount(ctx context.Context,
 // CreateDerivedAccount creates a new derived account with the given name and
 // scope. If the key scope does not exist, it is created with NULL encrypted
 // keys using the address schema provided by the caller.
-func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
+func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
 
 	paramsErr := params.Validate()
@@ -61,7 +61,7 @@ func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 
 	var info *db.AccountInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -70,7 +70,7 @@ func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 		}
 
 		row, err := qtx.CreateDerivedAccount(
-			ctx, sqlcsqlite.CreateDerivedAccountParams{
+			ctx, sqlc.CreateDerivedAccountParams{
 				ScopeID:     scopeID,
 				AccountName: params.Name,
 				OriginID:    int64(db.DerivedAccount),
@@ -108,18 +108,18 @@ func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 
 // ensureKeyScope retrieves an existing key scope or creates it if missing
 // for SQLite. It returns the scope ID once available.
-func ensureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
+func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, scope db.KeyScope) (int64, error) {
 
 	return db.EnsureKeyScope(
 		ctx, qtx.GetKeyScopeByWalletAndScope,
-		sqlcsqlite.GetKeyScopeByWalletAndScopeParams{
+		sqlc.GetKeyScopeByWalletAndScopeParams{
 			WalletID: int64(walletID),
 			Purpose:  int64(scope.Purpose),
 			CoinType: int64(scope.Coin),
 		}, qtx.CreateKeyScope,
-		func(addrSchema db.ScopeAddrSchema) sqlcsqlite.CreateKeyScopeParams {
-			return sqlcsqlite.CreateKeyScopeParams{
+		func(addrSchema db.ScopeAddrSchema) sqlc.CreateKeyScopeParams {
+			return sqlc.CreateKeyScopeParams{
 				WalletID:            int64(walletID),
 				Purpose:             int64(scope.Purpose),
 				CoinType:            int64(scope.Coin),
@@ -132,7 +132,7 @@ func ensureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
 				),
 			}
 		},
-		func(row sqlcsqlite.KeyScope) int64 { return row.ID }, scope,
+		func(row sqlc.KeyScope) int64 { return row.ID }, scope,
 	)
 }
 
@@ -140,12 +140,12 @@ func ensureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
 // public key. If the key scope does not exist, it is created with NULL
 // encrypted keys using the address schema provided by the caller. Imported
 // accounts have NULL account_number since they don't follow BIP44 derivation.
-func (s *SqliteStore) CreateImportedAccount(ctx context.Context,
+func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
 
 	var props *db.AccountProperties
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		var err error
 
 		props, err = db.CreateImportedAccount(
@@ -157,7 +157,7 @@ func (s *SqliteStore) CreateImportedAccount(ctx context.Context,
 			},
 			qtx.CreateImportedAccount,
 			buildCreateImportedAccountArgs(params),
-			func(row sqlcsqlite.CreateImportedAccountRow) int64 {
+			func(row sqlc.CreateImportedAccountRow) int64 {
 				return row.ID
 			},
 			qtx.CreateAccountSecret, buildCreateAccountSecretArgs(params),
@@ -179,12 +179,12 @@ func (s *SqliteStore) CreateImportedAccount(ctx context.Context,
 // CreateImportedAccountParams for SQLite.
 func buildCreateImportedAccountArgs(
 	params db.CreateImportedAccountParams,
-) func(int64, bool) sqlcsqlite.CreateImportedAccountParams {
+) func(int64, bool) sqlc.CreateImportedAccountParams {
 
 	return func(scopeID int64,
-		isWatchOnly bool) sqlcsqlite.CreateImportedAccountParams {
+		isWatchOnly bool) sqlc.CreateImportedAccountParams {
 
-		return sqlcsqlite.CreateImportedAccountParams{
+		return sqlc.CreateImportedAccountParams{
 			ScopeID:            scopeID,
 			AccountName:        params.Name,
 			OriginID:           int64(db.ImportedAccount),
@@ -202,10 +202,10 @@ func buildCreateImportedAccountArgs(
 // CreateAccountSecretParams for SQLite.
 func buildCreateAccountSecretArgs(
 	params db.CreateImportedAccountParams,
-) func(int64) sqlcsqlite.CreateAccountSecretParams {
+) func(int64) sqlc.CreateAccountSecretParams {
 
-	return func(accountID int64) sqlcsqlite.CreateAccountSecretParams {
-		return sqlcsqlite.CreateAccountSecretParams{
+	return func(accountID int64) sqlc.CreateAccountSecretParams {
+		return sqlc.CreateAccountSecretParams{
 			AccountID:           accountID,
 			EncryptedPrivateKey: params.EncryptedPrivateKey,
 		}
@@ -214,7 +214,7 @@ func buildCreateAccountSecretArgs(
 
 // getAccountProps fetches full account properties from the database and
 // converts the row to AccountProperties.
-func getAccountProps(ctx context.Context, qtx *sqlcsqlite.Queries,
+func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	accountID int64) (*db.AccountProperties, error) {
 
 	row, err := qtx.GetAccountPropsById(ctx, accountID)
@@ -246,13 +246,13 @@ func getAccountProps(ctx context.Context, qtx *sqlcsqlite.Queries,
 // that share the same field structure. This enables a single generic conversion
 // function to handle all account query result types.
 type accountInfoRow interface {
-	sqlcsqlite.GetAccountByScopeAndNameRow |
-		sqlcsqlite.GetAccountByScopeAndNumberRow |
-		sqlcsqlite.GetAccountByWalletScopeAndNameRow |
-		sqlcsqlite.GetAccountByWalletScopeAndNumberRow |
-		sqlcsqlite.ListAccountsByWalletRow |
-		sqlcsqlite.ListAccountsByWalletScopeRow |
-		sqlcsqlite.ListAccountsByWalletAndNameRow
+	sqlc.GetAccountByScopeAndNameRow |
+		sqlc.GetAccountByScopeAndNumberRow |
+		sqlc.GetAccountByWalletScopeAndNameRow |
+		sqlc.GetAccountByWalletScopeAndNumberRow |
+		sqlc.ListAccountsByWalletRow |
+		sqlc.ListAccountsByWalletScopeRow |
+		sqlc.ListAccountsByWalletAndNameRow
 }
 
 // accountRowToInfo converts a SQLite account row to an AccountInfo
@@ -263,7 +263,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
-	base := sqlcsqlite.GetAccountByScopeAndNameRow(row)
+	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int64]{
 		AccountNumber:    base.AccountNumber,
@@ -282,7 +282,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 
 // accountListQueries groups SQLite account listing query methods.
 type accountListQueries struct {
-	q *sqlcsqlite.Queries
+	q *sqlc.Queries
 }
 
 // byScope lists accounts filtered by wallet ID and key scope.
@@ -291,7 +291,7 @@ func (s accountListQueries) byScope(ctx context.Context,
 
 	return db.ListAccounts(
 		ctx, s.q.ListAccountsByWalletScope,
-		sqlcsqlite.ListAccountsByWalletScopeParams{
+		sqlc.ListAccountsByWalletScopeParams{
 			WalletID: int64(query.WalletID),
 			Purpose:  int64(query.Scope.Purpose),
 			CoinType: int64(query.Scope.Coin),
@@ -305,7 +305,7 @@ func (s accountListQueries) byName(ctx context.Context,
 
 	return db.ListAccounts(
 		ctx, s.q.ListAccountsByWalletAndName,
-		sqlcsqlite.ListAccountsByWalletAndNameParams{
+		sqlc.ListAccountsByWalletAndNameParams{
 			WalletID:    int64(query.WalletID),
 			AccountName: *query.Name,
 		}, accountRowToInfo,
@@ -324,7 +324,7 @@ func (s accountListQueries) all(ctx context.Context,
 
 // accountGetQueries groups SQLite account retrieval query methods.
 type accountGetQueries struct {
-	q *sqlcsqlite.Queries
+	q *sqlc.Queries
 }
 
 // byNumber retrieves an account by wallet ID, scope, and account number.
@@ -333,7 +333,7 @@ func (s accountGetQueries) byNumber(ctx context.Context,
 
 	return db.GetAccount(
 		ctx, s.q.GetAccountByWalletScopeAndNumber,
-		sqlcsqlite.GetAccountByWalletScopeAndNumberParams{
+		sqlc.GetAccountByWalletScopeAndNumberParams{
 			WalletID:      int64(query.WalletID),
 			Purpose:       int64(query.Scope.Purpose),
 			CoinType:      int64(query.Scope.Coin),
@@ -347,7 +347,7 @@ func (s accountGetQueries) byName(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	return db.GetAccount(ctx, s.q.GetAccountByWalletScopeAndName,
-		sqlcsqlite.GetAccountByWalletScopeAndNameParams{
+		sqlc.GetAccountByWalletScopeAndNameParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
 			CoinType:    int64(query.Scope.Coin),
@@ -358,7 +358,7 @@ func (s accountGetQueries) byName(ctx context.Context,
 
 // accountRenameQueries groups SQLite account rename query methods.
 type accountRenameQueries struct {
-	q *sqlcsqlite.Queries
+	q *sqlc.Queries
 }
 
 // byNumber renames an account identified by wallet ID, scope, and account
@@ -368,7 +368,7 @@ func (s accountRenameQueries) byNumber(ctx context.Context,
 
 	return db.RenameAccount(
 		ctx, s.q.UpdateAccountNameByWalletScopeAndNumber,
-		sqlcsqlite.UpdateAccountNameByWalletScopeAndNumberParams{
+		sqlc.UpdateAccountNameByWalletScopeAndNumberParams{
 			NewName:       params.NewName,
 			WalletID:      int64(params.WalletID),
 			Purpose:       int64(params.Scope.Purpose),
@@ -385,7 +385,7 @@ func (s accountRenameQueries) byName(ctx context.Context,
 
 	return db.RenameAccount(
 		ctx, s.q.UpdateAccountNameByWalletScopeAndName,
-		sqlcsqlite.UpdateAccountNameByWalletScopeAndNameParams{
+		sqlc.UpdateAccountNameByWalletScopeAndNameParams{
 			NewName:  params.NewName,
 			WalletID: int64(params.WalletID),
 			Purpose:  int64(params.Scope.Purpose),

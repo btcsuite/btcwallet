@@ -65,24 +65,24 @@ func TestNewPostgresStoreConnectionFailure(t *testing.T) {
 	require.Nil(t, store)
 }
 
-func TestNewSqliteStoreValidateConfig(t *testing.T) {
+func TestSQLiteNewStoreValidateConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
-		cfg     db.SqliteConfig
+		cfg     dbsqlite.Config
 		wantErr error
 	}{
 		{
 			name: "empty DB path",
-			cfg: db.SqliteConfig{
+			cfg: dbsqlite.Config{
 				DBPath: "",
 			},
 			wantErr: db.ErrEmptyDBPath,
 		},
 		{
 			name: "negative max connections",
-			cfg: db.SqliteConfig{
+			cfg: dbsqlite.Config{
 				DBPath:         "/tmp/test.db",
 				MaxConnections: -1,
 			},
@@ -94,21 +94,21 @@ func TestNewSqliteStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := dbsqlite.NewSqliteStore(t.Context(), tc.cfg)
+			store, err := dbsqlite.NewStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
 	}
 }
 
-func TestNewSqliteStoreSuccess(t *testing.T) {
+func TestSQLiteNewStoreSuccess(t *testing.T) {
 	t.Parallel()
 
-	cfg := db.SqliteConfig{
+	cfg := dbsqlite.Config{
 		DBPath: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 
-	store, err := dbsqlite.NewSqliteStore(t.Context(), cfg)
+	store, err := dbsqlite.NewStore(t.Context(), cfg)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 

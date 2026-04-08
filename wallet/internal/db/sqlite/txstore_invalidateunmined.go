@@ -5,18 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // InvalidateUnminedTx atomically invalidates one wallet-owned unmined
 // transaction branch and marks the root plus descendants failed.
-func (s *SqliteStore) InvalidateUnminedTx(ctx context.Context,
+func (s *Store) InvalidateUnminedTx(ctx context.Context,
 	params db.InvalidateUnminedTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.InvalidateUnminedTxWithOps(
 			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)
@@ -26,7 +26,7 @@ func (s *SqliteStore) InvalidateUnminedTx(ctx context.Context,
 // invalidateUnminedTxOps adapts sqlite sqlc queries to the shared
 // InvalidateUnminedTx workflow.
 type invalidateUnminedTxOps struct {
-	qtx *sqlcsqlite.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
@@ -38,7 +38,7 @@ func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
-		ctx, sqlcsqlite.GetTransactionMetaByHashParams{
+		ctx, sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -79,7 +79,7 @@ func (o invalidateUnminedTxOps) ListUnminedTxRecords(
 	}
 
 	return db.BuildUnminedTxRecords(
-		rows, func(row sqlcsqlite.ListUnminedTransactionsRow) (
+		rows, func(row sqlc.ListUnminedTransactionsRow) (
 			int64, []byte, []byte) {
 
 			return row.ID, row.TxHash, row.RawTx
@@ -93,7 +93,7 @@ func (o invalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx, sqlcsqlite.ClearUtxosSpentByTxIDParams{
+		ctx, sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID: walletID,
 			SpentByTxID: sql.NullInt64{
 				Int64: txID,
@@ -114,7 +114,7 @@ func (o invalidateUnminedTxOps) MarkTxnsFailed(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
-		ctx, sqlcsqlite.UpdateTransactionStatusByIDsParams{
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
 			Status:   int64(db.TxStatusFailed),
 			TxIds:    txIDs,

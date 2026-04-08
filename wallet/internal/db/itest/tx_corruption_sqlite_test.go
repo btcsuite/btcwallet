@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +19,7 @@ import (
 // corruptTransactionStatus writes an invalid tx status into one stored row while
 // sqlite check constraints are disabled inside the surrounding transaction. The
 // corruption itests use this to verify that reads reject impossible tx states.
-func corruptTransactionStatus(t *testing.T, store *dbsqlite.SqliteStore,
+func corruptTransactionStatus(t *testing.T, store *dbsqlite.Store,
 	walletID uint32, txHash chainhash.Hash, status int64) {
 	t.Helper()
 
@@ -55,7 +54,7 @@ func corruptTransactionStatus(t *testing.T, store *dbsqlite.SqliteStore,
 // corruptTransactionHash writes malformed tx-hash bytes into one stored row
 // while sqlite check constraints are disabled. The corruption itests then
 // verify that hash decoding fails with the expected error path.
-func corruptTransactionHash(t *testing.T, store *dbsqlite.SqliteStore,
+func corruptTransactionHash(t *testing.T, store *dbsqlite.Store,
 	walletID uint32, txHash chainhash.Hash, hash []byte) {
 	t.Helper()
 
@@ -90,7 +89,7 @@ func corruptTransactionHash(t *testing.T, store *dbsqlite.SqliteStore,
 // corruptTransactionBlockHeight writes an invalid block height after first
 // creating a matching block row in sqlite. The corruption itests use this to
 // verify that reads reject impossible confirmation metadata.
-func corruptTransactionBlockHeight(t *testing.T, store *dbsqlite.SqliteStore,
+func corruptTransactionBlockHeight(t *testing.T, store *dbsqlite.Store,
 	walletID uint32, txHash chainhash.Hash, height int64) {
 	t.Helper()
 
@@ -135,7 +134,7 @@ func corruptTransactionBlockHeight(t *testing.T, store *dbsqlite.SqliteStore,
 // corruptUtxoOutputIndex writes an invalid output index into one stored UTXO
 // while sqlite check constraints are disabled. The corruption itests then
 // verify that UTXO decoding rejects the malformed persisted value.
-func corruptUtxoOutputIndex(t *testing.T, store *dbsqlite.SqliteStore,
+func corruptUtxoOutputIndex(t *testing.T, store *dbsqlite.Store,
 	walletID uint32, txHash chainhash.Hash, oldIndex uint32, newIndex int64) {
 	t.Helper()
 
@@ -171,7 +170,7 @@ func corruptUtxoOutputIndex(t *testing.T, store *dbsqlite.SqliteStore,
 // corruptActiveLeaseLockID writes an invalid lease lock ID into one active
 // lease row while sqlite check constraints are disabled. The corruption itests
 // use this to verify that lease reads reject malformed lock identifiers.
-func corruptActiveLeaseLockID(t *testing.T, store *dbsqlite.SqliteStore,
+func corruptActiveLeaseLockID(t *testing.T, store *dbsqlite.Store,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32, lockID []byte) {
 	t.Helper()
 

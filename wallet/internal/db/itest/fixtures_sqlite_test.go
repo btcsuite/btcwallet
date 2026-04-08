@@ -10,19 +10,19 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
 // CreateBlockFixture inserts a test block into the database and returns it.
-func CreateBlockFixture(t *testing.T, queries *sqlcsqlite.Queries,
+func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
 	height uint32) db.Block {
 	t.Helper()
 
 	block := NewBlockFixture(height)
 	err := queries.InsertBlock(
-		t.Context(), sqlcsqlite.InsertBlockParams{
+		t.Context(), sqlc.InsertBlockParams{
 			BlockHeight:    int64(block.Height),
 			HeaderHash:     block.Hash[:],
 			BlockTimestamp: block.Timestamp.Unix(),
@@ -35,12 +35,12 @@ func CreateBlockFixture(t *testing.T, queries *sqlcsqlite.Queries,
 
 // CreateAccountWithNumber creates an account with a specific account number.
 // Used to test account number overflow without creating billions of accounts.
-func CreateAccountWithNumber(t *testing.T, queries *sqlcsqlite.Queries,
+func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 	scopeID int64, accountNumber uint32, name string) {
 	t.Helper()
 
 	_, err := queries.CreateDerivedAccountWithNumber(
-		t.Context(), sqlcsqlite.CreateDerivedAccountWithNumberParams{
+		t.Context(), sqlc.CreateDerivedAccountWithNumberParams{
 			ScopeID:       scopeID,
 			AccountNumber: sql.NullInt64{Int64: int64(accountNumber), Valid: true},
 			AccountName:   name,
@@ -54,12 +54,12 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlcsqlite.Queries,
 // CreateAddressWithIndex creates a derived address with a specific address
 // index. Used to test address index overflow without creating billions of
 // addresses.
-func CreateAddressWithIndex(t *testing.T, queries *sqlcsqlite.Queries,
+func CreateAddressWithIndex(t *testing.T, queries *sqlc.Queries,
 	accountID int64, branch uint32, index uint32) {
 	t.Helper()
 
 	_, err := queries.CreateDerivedAddress(
-		t.Context(), sqlcsqlite.CreateDerivedAddressParams{
+		t.Context(), sqlc.CreateDerivedAddressParams{
 			AccountID:     accountID,
 			ScriptPubKey:  RandomBytes(20),
 			TypeID:        int64(db.WitnessPubKey),
@@ -99,12 +99,12 @@ func UpdateAccountNextInternalIndex(t *testing.T, dbConn *sql.DB,
 }
 
 // GetKeyScopeID retrieves the scope ID for a given wallet and key scope.
-func GetKeyScopeID(t *testing.T, queries *sqlcsqlite.Queries,
+func GetKeyScopeID(t *testing.T, queries *sqlc.Queries,
 	walletID uint32, scope db.KeyScope) int64 {
 	t.Helper()
 
 	row, err := queries.GetKeyScopeByWalletAndScope(
-		t.Context(), sqlcsqlite.GetKeyScopeByWalletAndScopeParams{
+		t.Context(), sqlc.GetKeyScopeByWalletAndScopeParams{
 			WalletID: int64(walletID),
 			Purpose:  int64(scope.Purpose),
 			CoinType: int64(scope.Coin),
@@ -116,13 +116,13 @@ func GetKeyScopeID(t *testing.T, queries *sqlcsqlite.Queries,
 }
 
 // GetAccountID retrieves the account ID for a given scope and account name.
-func GetAccountID(t *testing.T, queries *sqlcsqlite.Queries,
+func GetAccountID(t *testing.T, queries *sqlc.Queries,
 	scopeID int64, accountName string) int64 {
 	t.Helper()
 
 	row, err := queries.GetAccountByScopeAndName(
 		t.Context(),
-		sqlcsqlite.GetAccountByScopeAndNameParams{
+		sqlc.GetAccountByScopeAndNameParams{
 			ScopeID:     scopeID,
 			AccountName: accountName,
 		},
@@ -132,12 +132,12 @@ func GetAccountID(t *testing.T, queries *sqlcsqlite.Queries,
 	return row.ID
 }
 
-func getAddressID(t *testing.T, queries *sqlcsqlite.Queries,
+func getAddressID(t *testing.T, queries *sqlc.Queries,
 	scriptPubKey []byte, walletID uint32) int64 {
 	t.Helper()
 
 	addr, err := queries.GetAddressByScriptPubKey(
-		t.Context(), sqlcsqlite.GetAddressByScriptPubKeyParams{
+		t.Context(), sqlc.GetAddressByScriptPubKeyParams{
 			ScriptPubKey: scriptPubKey,
 			WalletID:     int64(walletID),
 		},
@@ -147,8 +147,8 @@ func getAddressID(t *testing.T, queries *sqlcsqlite.Queries,
 	return addr.ID
 }
 
-func GetAddressSecret(t *testing.T, queries *sqlcsqlite.Queries,
-	addressID int64) (sqlcsqlite.GetAddressSecretRow, error) {
+func GetAddressSecret(t *testing.T, queries *sqlc.Queries,
+	addressID int64) (sqlc.GetAddressSecretRow, error) {
 	t.Helper()
 
 	return queries.GetAddressSecret(t.Context(), addressID)
@@ -190,9 +190,9 @@ func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 
 	t.Helper()
 
-	require.IsType(t, &dbsqlite.SqliteStore{}, store)
+	require.IsType(t, &dbsqlite.Store{}, store)
 
-	sqliteStore := store.(*dbsqlite.SqliteStore)
+	sqliteStore := store.(*dbsqlite.Store)
 	queries := sqliteStore.Queries()
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,

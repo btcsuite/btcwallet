@@ -36,29 +36,6 @@ var (
 	ErrEmptyDSN = errors.New("DSN is required")
 )
 
-// SqliteConfig holds the configuration for the SQLite database.
-type SqliteConfig struct {
-	// DBPath is the filesystem path to the SQLite database file.
-	DBPath string
-
-	// MaxConnections is the maximum number of open connections to the
-	// database. Set to zero to use DefaultMaxConnections.
-	MaxConnections int
-}
-
-// Validate checks that the SqliteConfig values are valid.
-func (c *SqliteConfig) Validate() error {
-	if c.DBPath == "" {
-		return ErrEmptyDBPath
-	}
-
-	if c.MaxConnections < 0 {
-		return ErrNegativeMaxConns
-	}
-
-	return nil
-}
-
 // PostgresConfig holds the configuration for the PostgreSQL database.
 type PostgresConfig struct {
 	// Dsn is the database connection string.
