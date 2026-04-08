@@ -100,3 +100,51 @@ func TestCreateTxRejectsDuplicateConfirmedTransaction(t *testing.T) {
 	err = store.CreateTx(t.Context(), params)
 	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
 }
+
+// TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow verifies that
+// re-confirming an existing unmined row still requires the confirming block to
+// exist in block history.
+func TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-missing-confirming-block")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 4600, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000860, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	err = store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000861, 0),
+			Block: &db.Block{
+				Hash:      RandomHash(),
+				Height:    999,
+				Timestamp: time.Unix(1710000862, 0),
+			},
+			Status:  db.TxStatusPublished,
+			Credits: map[uint32]address.Address{0: nil},
+		},
+	)
+	require.ErrorContains(t, err, "require confirming block")
+}

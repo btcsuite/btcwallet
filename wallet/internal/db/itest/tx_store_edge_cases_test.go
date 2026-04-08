@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -199,4 +200,39 @@ func TestTxReadsReturnQueryErrorsWhenClosed(t *testing.T) {
 		},
 	)
 	require.ErrorContains(t, err, "list txns by height")
+}
+
+// TestUpdateTxRejectsTooLongLabel verifies that backend label updates surface
+// query errors when the requested label exceeds the stored column limit.
+func TestUpdateTxRejectsTooLongLabel(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-update-label-too-long")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9100, PkScript: []byte{0x51}}},
+	)
+	err := store.CreateTx(
+		t.Context(),
+		db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710001600, 0),
+			Status:   db.TxStatusPending,
+		},
+	)
+	require.NoError(t, err)
+
+	label := strings.Repeat("x", 501)
+	err = store.UpdateTx(
+		t.Context(),
+		db.UpdateTxParams{
+			WalletID: walletID,
+			Txid:     tx.TxHash(),
+			Label:    &label,
+		},
+	)
+	require.ErrorContains(t, err, "update tx label")
 }
