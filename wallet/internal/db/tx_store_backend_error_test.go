@@ -317,14 +317,16 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	}}, map[int64]struct{}{1: {}})
 	require.ErrorContains(t, err, "tx hash")
 
-	_, err = (&pgLeaseOutputOps{}).acquire(t.Context(), LeaseOutputParams{
+	leaseOps := &pgLeaseOutputOps{}
+
+	_, err = leaseOps.acquire(t.Context(), LeaseOutputParams{
 		WalletID: 1,
 		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: ^uint32(0)},
 		ID:       [32]byte{1},
 	}, time.Now(), time.Now().Add(time.Minute))
 	require.ErrorContains(t, err, "convert output index")
 
-	_, err = (&pgLeaseOutputOps{}).hasUtxo(t.Context(), LeaseOutputParams{
+	_, err = leaseOps.hasUtxo(t.Context(), LeaseOutputParams{
 		WalletID: 1,
 		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: ^uint32(0)},
 		ID:       [32]byte{1},

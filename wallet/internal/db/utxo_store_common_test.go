@@ -201,7 +201,9 @@ func TestLeaseOutputWithOps(t *testing.T) {
 	}
 	acquireExpiration := time.Unix(333, 0).In(time.FixedZone("X", 3600))
 	ops := &mockLeaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
@@ -229,7 +231,9 @@ func TestLeaseOutputWithOpsRejectsNonPositiveDuration(t *testing.T) {
 		Duration: 0,
 	}
 	ops := &mockLeaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	_, err := leaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrInvalidParam)
@@ -249,7 +253,9 @@ func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 		Duration: time.Minute,
 	}
 	ops := &mockLeaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
@@ -273,7 +279,9 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 		Duration: time.Minute,
 	}
 	ops := &mockLeaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
 	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
@@ -297,7 +305,9 @@ func TestReleaseOutputWithOps(t *testing.T) {
 		ID:       [32]byte{9},
 	}
 	ops := &mockReleaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
 
@@ -322,7 +332,9 @@ func TestReleaseOutputWithOpsMissingUtxo(t *testing.T) {
 		ID:       [32]byte{9},
 	}
 	ops := &mockReleaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("lookupUtxoID", mock.Anything, params).Return(
 		int64(0), errReleaseOutputUtxoNotFound).Once()
@@ -342,7 +354,9 @@ func TestReleaseOutputWithOpsWrongLock(t *testing.T) {
 		ID:       [32]byte{9},
 	}
 	ops := &mockReleaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	releaseTimeMatcher := mock.AnythingOfType("time.Time")
 	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
@@ -369,7 +383,9 @@ func TestReleaseOutputWithOpsMissingActiveLease(t *testing.T) {
 		ID:       [32]byte{9},
 	}
 	ops := &mockReleaseOutputOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	releaseTimeMatcher := mock.AnythingOfType("time.Time")
 	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()

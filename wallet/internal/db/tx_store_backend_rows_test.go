@@ -78,7 +78,9 @@ func newSQLiteRow(t *testing.T, query string, args ...interface{}) *sql.Row {
 
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
 
 	return db.QueryRowContext(t.Context(), query, args...)
 }
@@ -90,14 +92,15 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	req := testCreateTxRequest(t)
 	ctx := context.Background()
-
-	_, err := (&pgCreateTxOps{
+	loadOps := &pgCreateTxOps{
 		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
 			}),
 		},
-	}).loadExisting(ctx, req)
+	}
+
+	_, err := loadOps.loadExisting(ctx, req)
 	require.ErrorContains(t, err, "get tx metadata")
 
 	block := &Block{
@@ -105,7 +108,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 		Height:    7,
 		Timestamp: time.Unix(77, 0),
 	}
-	err = (&pgCreateTxOps{
+	confirmOps := &pgCreateTxOps{
 		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row: newSQLiteRow(
@@ -116,20 +119,22 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 				rows: 0,
 			}),
 		},
-	}).confirmExisting(ctx, createTxRequest{
+	}
+	err = confirmOps.confirmExisting(ctx, createTxRequest{
 		params: CreateTxParams{WalletID: 1, Block: block},
 		txHash: chainhash.Hash{9},
 	}, createTxExistingTarget{})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
-	_, _, err = (&pgCreateTxOps{
+	conflictOps := &pgCreateTxOps{
 		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
 			}),
 		},
-	}).listConflictTxns(ctx, req)
+	}
+	_, _, err = conflictOps.listConflictTxns(ctx, req)
 	require.ErrorContains(t, err, "list unmined txns")
 }
 
@@ -141,14 +146,15 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	req := testCreateTxRequest(t)
 	ctx := context.Background()
-
-	_, err := (&sqliteCreateTxOps{
+	loadOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
 				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
 			}),
 		},
-	}).loadExisting(ctx, req)
+	}
+
+	_, err := loadOps.loadExisting(ctx, req)
 	require.ErrorContains(t, err, "get tx metadata")
 
 	block := &Block{
@@ -156,7 +162,7 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 		Height:    8,
 		Timestamp: time.Unix(88, 0),
 	}
-	err = (&sqliteCreateTxOps{
+	confirmOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
 				row: newSQLiteRow(
@@ -167,31 +173,34 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 				rows: 0,
 			}),
 		},
-	}).confirmExisting(ctx, createTxRequest{
+	}
+	err = confirmOps.confirmExisting(ctx, createTxRequest{
 		params: CreateTxParams{WalletID: 1, Block: block},
 		txHash: chainhash.Hash{9},
 	}, createTxExistingTarget{})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
-	err = (&sqliteCreateTxOps{
+	prepareOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
 				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
 			}),
 		},
-	}).prepareBlock(ctx, createTxRequest{
+	}
+	err = prepareOps.prepareBlock(ctx, createTxRequest{
 		params: CreateTxParams{WalletID: 1, Block: block},
 	})
 	require.ErrorContains(t, err, "get block by height")
 
-	_, _, err = (&sqliteCreateTxOps{
+	conflictOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
 				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
 			}),
 		},
-	}).listConflictTxns(ctx, req)
+	}
+	_, _, err = conflictOps.listConflictTxns(ctx, req)
 	require.ErrorContains(t, err, "list unmined txns")
 }
 
@@ -212,4 +221,64 @@ func TestSqliteReleaseOutputOpsAdditionalBranches(t *testing.T) {
 
 	_, err = ops.activeLockID(context.Background(), 1, 2, time.Now())
 	require.ErrorContains(t, err, "lookup active lease row")
+}
+
+// TestPgUpdateTxOpsAdditionalBranches covers the remaining postgres UpdateTx
+// helper branches that are hard to reach through public integration tests
+// alone.
+func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	txHash := chainhash.Hash{9}
+	loadOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{
+		row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+	})}
+	stateOps := &pgUpdateTxOps{
+		qtx:         sqlcpg.New(rowDBTX{rows: 0}),
+		blockHeight: sql.NullInt32{},
+		status:      int16(TxStatusPublished),
+	}
+	labelOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
+
+	_, err := loadOps.loadIsCoinbase(ctx, 1, txHash)
+	require.ErrorContains(t, err, "get tx metadata")
+
+	err = stateOps.updateState(ctx, 1, txHash, UpdateTxState{
+		Status: TxStatusPublished,
+	})
+	require.ErrorIs(t, err, ErrTxNotFound)
+
+	err = labelOps.updateLabel(ctx, 1, txHash, "note")
+	require.ErrorIs(t, err, ErrTxNotFound)
+}
+
+// TestSqliteUpdateTxOpsAdditionalBranches covers the remaining sqlite UpdateTx
+// helper branches that are hard to reach through public integration tests
+// alone.
+func TestSqliteUpdateTxOpsAdditionalBranches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	txHash := chainhash.Hash{9}
+	loadOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{
+		row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+	})}
+	stateOps := &sqliteUpdateTxOps{
+		qtx:         sqlcsqlite.New(rowDBTX{rows: 0}),
+		blockHeight: sql.NullInt64{},
+		status:      int64(TxStatusPublished),
+	}
+	labelOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
+
+	_, err := loadOps.loadIsCoinbase(ctx, 1, txHash)
+	require.ErrorContains(t, err, "get tx metadata")
+
+	err = stateOps.updateState(ctx, 1, txHash, UpdateTxState{
+		Status: TxStatusPublished,
+	})
+	require.ErrorIs(t, err, ErrTxNotFound)
+
+	err = labelOps.updateLabel(ctx, 1, txHash, "note")
+	require.ErrorIs(t, err, ErrTxNotFound)
 }

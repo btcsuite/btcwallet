@@ -365,7 +365,9 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 	)
 
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("loadExisting", mock.Anything, req).Return(
 		nil, errCreateTxExistingNotFound).Once()
@@ -413,7 +415,9 @@ func TestCreateTxWithOpsDuplicate(t *testing.T) {
 
 	req := testCreateTxRequest(t)
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("loadExisting", mock.Anything, req).Return(
 		&createTxExistingTarget{id: 4}, nil).Once()
@@ -444,7 +448,9 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 		hasBlock: false,
 	}
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("loadExisting", mock.Anything, req).Return(&existing, nil).Once()
 
@@ -473,7 +479,9 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	rootIDs := []int64{5}
 	rootHashes := []chainhash.Hash{{9}}
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("loadExisting", mock.Anything, req).Return(
 		nil, errCreateTxExistingNotFound).Once()
@@ -791,7 +799,9 @@ func TestCollectConflictDescendants(t *testing.T) {
 		}}},
 	}}
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	rootIDs := []int64{11, 12}
 	rootHashes := []chainhash.Hash{{1}, {2}}
@@ -838,7 +848,9 @@ func TestHandleTxConflicts(t *testing.T) {
 	}}
 
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("listConflictTxns", mock.Anything, req).Return(
 		[]int64{1}, []chainhash.Hash{rootHash}, nil,
@@ -888,7 +900,9 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 	require.NoError(t, err)
 
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("listConflictTxns", mock.Anything, req).Return(
 		[]int64{1, 2},
@@ -915,8 +929,8 @@ func TestHandleTxConflictsKeepsDirectRootsReplaced(t *testing.T) {
 		Once()
 	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(nil).
 		Once()
-	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1, 2}).Return(nil).
-		Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1, 2}).
+		Return(nil).Once()
 	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1, 2},
 		int64(9)).Return(nil).Once()
 	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(nil).
@@ -943,7 +957,9 @@ func TestHandleTxConflictsNoDescendants(t *testing.T) {
 	require.NoError(t, err)
 
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("listConflictTxns", mock.Anything, req).Return(
 		[]int64{1}, []chainhash.Hash{{1}}, nil,
@@ -978,7 +994,9 @@ func TestHandleTxConflictsMarkFailedError(t *testing.T) {
 	require.NoError(t, err)
 
 	ops := &mockCreateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("listConflictTxns", mock.Anything, req).Return(
 		[]int64{1}, []chainhash.Hash{{1}}, nil,
@@ -1034,7 +1052,9 @@ func TestUpdateTxWithOpsLabelAndState(t *testing.T) {
 	)
 
 	ops := &mockUpdateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
 	ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
 		Return(false, nil).Once()
@@ -1078,10 +1098,12 @@ func TestUpdateTxWithOpsEmptyPatch(t *testing.T) {
 		Txid:     chainhash.Hash{1},
 	}
 	ops := &mockUpdateTxOps{}
-	t.Cleanup(func() { ops.AssertExpectations(t) })
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
-	ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).Return(
-		false, nil).Once()
+	ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
+		Return(false, nil).Once()
 
 	err := updateTxWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrInvalidParam)
@@ -1142,10 +1164,13 @@ func TestUpdateTxWithOpsRejectsInvalidatingStates(t *testing.T) {
 				State:    &test.state,
 			}
 			ops := &mockUpdateTxOps{}
-			t.Cleanup(func() { ops.AssertExpectations(t) })
+			t.Cleanup(func() {
+				ops.AssertExpectations(t)
+			})
 
-			ops.On("loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1}).
-				Return(test.isCoinbase, nil).Once()
+			ops.On(
+				"loadIsCoinbase", mock.Anything, uint32(5), chainhash.Hash{1},
+			).Return(test.isCoinbase, nil).Once()
 
 			err := updateTxWithOps(context.Background(), params, ops)
 			require.ErrorIs(t, err, ErrInvalidParam)
