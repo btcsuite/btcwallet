@@ -32,15 +32,15 @@ func (s *SqliteStore) GetTx(ctx context.Context,
 		return nil, fmt.Errorf("get tx: %w", err)
 	}
 
-	return txInfoFromSqliteRow(
+	return txInfoFromRow(
 		row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
 		row.BlockHash, row.BlockTimestamp, row.TxStatus, row.TxLabel,
 	)
 }
 
-// txInfoFromSqliteRow converts one normalized sqlite query row into the public
+// txInfoFromRow converts one normalized sqlite query row into the public
 // TxInfo shape.
-func txInfoFromSqliteRow(hash []byte, rawTx []byte, received time.Time,
+func txInfoFromRow(hash []byte, rawTx []byte, received time.Time,
 	blockHeight sql.NullInt64, blockHash []byte, blockTimestamp sql.NullInt64,
 	status int64, label string) (*db.TxInfo, error) {
 
@@ -52,7 +52,7 @@ func txInfoFromSqliteRow(hash []byte, rawTx []byte, received time.Time,
 	// Unmined rows legitimately have no block metadata, so only build the Block
 	// shape when the row still carries a valid height.
 	if blockHeight.Valid {
-		block, err = buildSqliteBlock(blockHeight, blockHash, blockTimestamp)
+		block, err = buildBlock(blockHeight, blockHash, blockTimestamp)
 		if err != nil {
 			return nil, err
 		}

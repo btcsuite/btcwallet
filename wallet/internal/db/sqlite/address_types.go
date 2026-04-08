@@ -7,9 +7,9 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
-// sqliteAddressTypeRowToInfo converts a SQLite address type row to an
+// addressTypeRowToInfo converts a SQLite address type row to an
 // AddressTypeInfo struct.
-func sqliteAddressTypeRowToInfo(row sqlcsqlite.AddressType) (db.AddressTypeInfo,
+func addressTypeRowToInfo(row sqlcsqlite.AddressType) (db.AddressTypeInfo,
 	error) {
 
 	addrType, err := db.IDToAddressType(row.ID)
@@ -29,7 +29,7 @@ func (s *SqliteStore) ListAddressTypes(ctx context.Context) (
 	[]db.AddressTypeInfo, error) {
 
 	return db.ListAddressTypes(
-		ctx, s.queries.ListAddressTypes, sqliteAddressTypeRowToInfo,
+		ctx, s.queries.ListAddressTypes, addressTypeRowToInfo,
 	)
 }
 
@@ -40,6 +40,6 @@ func (s *SqliteStore) GetAddressType(ctx context.Context,
 
 	return db.GetAddressTypeByID(
 		ctx, s.queries.GetAddressTypeByID, int64(id), id,
-		sqliteAddressTypeRowToInfo,
+		addressTypeRowToInfo,
 	)
 }

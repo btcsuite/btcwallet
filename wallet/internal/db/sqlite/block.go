@@ -11,9 +11,9 @@ import (
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
-// buildSqliteBlock constructs a Block from the given SQLite block
+// buildBlock constructs a Block from the given SQLite block
 // fields.
-func buildSqliteBlock(height sql.NullInt64, hash []byte,
+func buildBlock(height sql.NullInt64, hash []byte,
 	timestamp sql.NullInt64) (*db.Block, error) {
 
 	height32, err := db.Int64ToUint32(height.Int64)
@@ -24,9 +24,9 @@ func buildSqliteBlock(height sql.NullInt64, hash []byte,
 	return db.BuildBlock(hash, height32, timestamp.Int64)
 }
 
-// ensureBlockExistsSqlite ensures that a block exists in the database. If it
+// ensureBlockExists ensures that a block exists in the database. If it
 // doesn't exist, it inserts it.
-func ensureBlockExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func ensureBlockExists(ctx context.Context, qtx *sqlcsqlite.Queries,
 	block *db.Block) error {
 
 	height := int64(block.Height)
@@ -45,9 +45,9 @@ func ensureBlockExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	return nil
 }
 
-// requireBlockMatchesSqlite loads the shared block row for the provided height
+// requireBlockMatches loads the shared block row for the provided height
 // and verifies that its stored metadata matches the supplied block reference.
-func requireBlockMatchesSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
+func requireBlockMatches(ctx context.Context, qtx *sqlcsqlite.Queries,
 	block *db.Block) (int64, error) {
 
 	height := int64(block.Height)

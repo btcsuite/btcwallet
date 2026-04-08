@@ -19,17 +19,17 @@ func (s *SqliteStore) ListTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	if query.UnminedOnly {
-		return s.listTxnsWithoutBlockSqlite(ctx, query.WalletID)
+		return s.listTxnsWithoutBlock(ctx, query.WalletID)
 	}
 
-	return s.listConfirmedTxnsSqlite(ctx, query)
+	return s.listConfirmedTxns(ctx, query)
 }
 
-// listTxnsWithoutBlockSqlite loads every transaction row that currently has no
+// listTxnsWithoutBlock loads every transaction row that currently has no
 // confirming block. This includes the active unmined set together with any
 // retained invalid history that rollback or invalidation flows left without a
 // confirming block.
-func (s *SqliteStore) listTxnsWithoutBlockSqlite(ctx context.Context,
+func (s *SqliteStore) listTxnsWithoutBlock(ctx context.Context,
 	walletID uint32) ([]db.TxInfo, error) {
 
 	rows, err := s.queries.ListTransactionsWithoutBlock(ctx, int64(walletID))
@@ -39,7 +39,7 @@ func (s *SqliteStore) listTxnsWithoutBlockSqlite(ctx context.Context,
 
 	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
-		info, err := txInfoFromSqliteRow(
+		info, err := txInfoFromRow(
 			row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
 			row.BlockHash, row.BlockTimestamp, row.TxStatus, row.TxLabel,
 		)
@@ -53,9 +53,9 @@ func (s *SqliteStore) listTxnsWithoutBlockSqlite(ctx context.Context,
 	return infos, nil
 }
 
-// listConfirmedTxnsSqlite loads the confirmed height-range view used by
+// listConfirmedTxns loads the confirmed height-range view used by
 // ListTxns when callers query mined history.
-func (s *SqliteStore) listConfirmedTxnsSqlite(ctx context.Context,
+func (s *SqliteStore) listConfirmedTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	rows, err := s.queries.ListTransactionsByHeightRange(
@@ -71,7 +71,7 @@ func (s *SqliteStore) listConfirmedTxnsSqlite(ctx context.Context,
 
 	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
-		block, err := buildSqliteBlock(
+		block, err := buildBlock(
 			row.BlockHeight,
 			row.BlockHash,
 			sql.NullInt64{Int64: row.BlockTimestamp, Valid: true},

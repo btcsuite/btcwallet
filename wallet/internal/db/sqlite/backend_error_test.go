@@ -17,8 +17,8 @@ func TestDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
 	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
-	deleteOps := sqliteDeleteTxOps{qtx: qtx}
-	rollbackOps := sqliteRollbackToBlockOps{qtx: qtx}
+	deleteOps := deleteTxOps{qtx: qtx}
+	rollbackOps := rollbackToBlockOps{qtx: qtx}
 
 	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
 	require.ErrorContains(t, err, "clear spent utxo rows")
@@ -46,13 +46,13 @@ func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
 	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
-	createOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{qtx: qtx},
+	createOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
-	invalidateOps := sqliteInvalidateUnminedTxOps{qtx: qtx}
-	rollbackOps := sqliteRollbackToBlockOps{qtx: qtx}
-	updateOps := &sqliteUpdateTxOps{qtx: qtx}
-	releaseOps := sqliteReleaseOutputOps{qtx: qtx}
+	invalidateOps := invalidateUnminedTxOps{qtx: qtx}
+	rollbackOps := rollbackToBlockOps{qtx: qtx}
+	updateOps := &updateTxOps{qtx: qtx}
+	releaseOps := releaseOutputOps{qtx: qtx}
 
 	err := createOps.MarkTxnsReplaced(t.Context(), 1, []int64{2})
 	require.ErrorContains(t, err, "mark txns replaced")
@@ -60,7 +60,7 @@ func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 	err = createOps.InsertReplacementEdges(t.Context(), 1, []int64{2}, 3)
 	require.ErrorContains(t, err, "insert replacement edge")
 
-	err = markInputsSpentSqlite(t.Context(), qtx, db.CreateTxParams{
+	err = markInputsSpent(t.Context(), qtx, db.CreateTxParams{
 		WalletID: 1,
 		Tx:       testRegularMsgTx(),
 		Received: time.Unix(1, 0),

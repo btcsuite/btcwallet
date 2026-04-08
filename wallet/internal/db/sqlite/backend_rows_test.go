@@ -19,10 +19,10 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	req := testCreateTxRequest(t)
 	ctx := context.Background()
-	loadOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+	loadOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
+				row: newRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
 	}
@@ -31,10 +31,10 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	require.ErrorContains(t, err, "get tx metadata")
 
 	block := testBlock(8)
-	confirmOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+	confirmOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(
+				row: newRow(
 					t,
 					"SELECT ?, ?, ?",
 					int64(block.Height),
@@ -51,10 +51,10 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	}, db.CreateTxExistingTarget{})
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 
-	prepareOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+	prepareOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
+				row: newRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
 	}
@@ -63,10 +63,10 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "get block by height")
 
-	conflictOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
+	conflictOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
+				row:      newRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
 			}),
 		},
@@ -79,8 +79,8 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 func TestReleaseOutputOpsAdditionalBranches(t *testing.T) {
 	t.Parallel()
 
-	ops := &sqliteReleaseOutputOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
+	ops := &releaseOutputOps{qtx: sqlcsqlite.New(rowDBTX{
+		row: newRow(t, "SELECT 1 FROM missing_table"),
 	})}
 
 	_, err := ops.LookupUtxoID(context.Background(), db.ReleaseOutputParams{
@@ -99,15 +99,15 @@ func TestUpdateTxOpsAdditionalBranches(t *testing.T) {
 
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
-	loadOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
+	loadOps := &updateTxOps{qtx: sqlcsqlite.New(rowDBTX{
+		row: newRow(t, "SELECT 1 FROM missing_table"),
 	})}
-	stateOps := &sqliteUpdateTxOps{
+	stateOps := &updateTxOps{
 		qtx:         sqlcsqlite.New(rowDBTX{rows: 0}),
 		blockHeight: sql.NullInt64{},
 		status:      int64(db.TxStatusPublished),
 	}
-	labelOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
+	labelOps := &updateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")
