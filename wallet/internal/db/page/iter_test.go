@@ -8,17 +8,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// errTest is a sentinel error used across page package tests to
-// verify error propagation through pagination helpers.
+// errTest is a sentinel error used across page package tests.
 var errTest = errors.New("test error")
 
 // intPtr returns a pointer to the given int value. It is used in tests to
-// construct Result literals that require a *int after.
+// construct Result literals that require a *int cursor.
 func intPtr(v int) *int {
 	return &v
 }
 
-// TestIterTraversal tests the traversal of items using the page iterator.
+// TestIterTraversal verifies that Iter walks all pages in order.
 func TestIterTraversal(t *testing.T) {
 	t.Parallel()
 
@@ -83,8 +82,8 @@ func TestIterTraversal(t *testing.T) {
 				gotItems    []int
 			)
 
-			fetchPage := func(_ context.Context, query int) (Result[int, int],
-				error) {
+			fetchPage := func(_ context.Context,
+				query int) (Result[int, int], error) {
 
 				require.Less(t, fetchCalls, len(tc.pages))
 				require.Equal(t, fetchCalls, query)
@@ -111,9 +110,7 @@ func TestIterTraversal(t *testing.T) {
 				return query + 1
 			}
 
-			for item, err := range Iter(
-				t.Context(), 0, fetchPage, setCursor,
-			) {
+			for item, err := range Iter(t.Context(), 0, fetchPage, setCursor) {
 				require.NoError(t, err)
 
 				gotItems = append(gotItems, item)
@@ -128,13 +125,14 @@ func TestIterTraversal(t *testing.T) {
 }
 
 // TestIterFetchErrorOnFirstCall verifies that Iter yields the error immediately
-// when fetchPage fails on the very first call, before any items are produced.
+// when fetchPage fails on the first call, before any items are produced.
 func TestIterFetchErrorOnFirstCall(t *testing.T) {
 	t.Parallel()
 
-	gotItems := make([]int, 0)
-
-	var iterErr error
+	var (
+		gotItems = make([]int, 0)
+		iterErr  error
+	)
 
 	fetchPage := func(_ context.Context, _ int) (Result[int, int], error) {
 		return Result[int, int]{}, errTest
@@ -144,9 +142,7 @@ func TestIterFetchErrorOnFirstCall(t *testing.T) {
 		return 0
 	}
 
-	for item, err := range Iter(
-		t.Context(), 0, fetchPage, setCursor,
-	) {
+	for item, err := range Iter(t.Context(), 0, fetchPage, setCursor) {
 		if err != nil {
 			iterErr = err
 			break
@@ -168,14 +164,10 @@ func TestIterFetchErrorAfterTwoPages(t *testing.T) {
 		fetchCalls  int
 		nextCursors []int
 		iterErr     error
+		gotItems    = make([]int, 0, 4)
 	)
 
-	gotItems := make([]int, 0)
-
-	fetchPage := func(
-		_ context.Context, _ int,
-	) (Result[int, int], error) {
-
+	fetchPage := func(_ context.Context, _ int) (Result[int, int], error) {
 		fetchCalls++
 		switch fetchCalls {
 		case 1:
@@ -198,9 +190,7 @@ func TestIterFetchErrorAfterTwoPages(t *testing.T) {
 		return query + 1
 	}
 
-	for item, err := range Iter(
-		t.Context(), 0, fetchPage, setCursor,
-	) {
+	for item, err := range Iter(t.Context(), 0, fetchPage, setCursor) {
 		if err != nil {
 			iterErr = err
 			break
@@ -242,11 +232,8 @@ func TestIterContextCancellation(t *testing.T) {
 			wantFetchCalls:   1,
 		},
 		{
-			name: "cancel mid-page stops before next yield",
-			pages: [][]int{
-				{1, 2, 3},
-				{4, 5},
-			},
+			name:             "cancel mid-page stops before next yield",
+			pages:            [][]int{{1, 2, 3}, {4, 5}},
 			cancelAfterItems: 1,
 			wantItems:        []int{1},
 			wantFetchCalls:   1,
@@ -270,25 +257,21 @@ func TestIterContextCancellation(t *testing.T) {
 				cancel()
 			}
 
-			fetchPage := func(ctx context.Context, _ int) (Result[int, int],
-				error) {
+			fetchPage := func(ctx context.Context,
+				_ int) (Result[int, int], error) {
 
 				err := ctx.Err()
 				if err != nil {
 					fetchCalls++
-
 					return Result[int, int]{}, err
 				}
 
 				require.Less(t, fetchCalls, len(tc.pages))
-
 				items := tc.pages[fetchCalls]
 				fetchCalls++
 
-				result := Result[int, int]{
-					Items: items,
-				}
-				if len(items) > 0 {
+				result := Result[int, int]{Items: items}
+				if fetchCalls < len(tc.pages) && len(items) > 0 {
 					last := items[len(items)-1]
 					result.Next = &last
 				}
@@ -300,9 +283,7 @@ func TestIterContextCancellation(t *testing.T) {
 				return query + 1
 			}
 
-			for item, err := range Iter(
-				ctx, 0, fetchPage, setCursor,
-			) {
+			for item, err := range Iter(ctx, 0, fetchPage, setCursor) {
 				if err != nil {
 					iterErr = err
 					break
@@ -323,8 +304,8 @@ func TestIterContextCancellation(t *testing.T) {
 	}
 }
 
-// TestIterConsumerBreaks tests the page iterator when the consumer breaks out
-// of the loop.
+// TestIterConsumerBreaks verifies that Iter stops without fetching another page
+// when the consumer breaks early.
 func TestIterConsumerBreaks(t *testing.T) {
 	t.Parallel()
 
@@ -345,9 +326,6 @@ func TestIterConsumerBreaks(t *testing.T) {
 			wantNextCalls:  0,
 		},
 		{
-			// The consumer stops after consuming all items in the first page.
-			// setCursor is never called because the break happens before the
-			// iterator advances to the next page.
 			name:           "at page boundary",
 			pages:          [][]int{{1, 2}, {3, 4}},
 			stopAfter:      2,
@@ -367,8 +345,8 @@ func TestIterConsumerBreaks(t *testing.T) {
 				gotItems   []int
 			)
 
-			fetchPage := func(_ context.Context, _ int) (Result[int, int],
-				error) {
+			fetchPage := func(_ context.Context,
+				_ int) (Result[int, int], error) {
 
 				require.Less(t, fetchCalls, len(tc.pages))
 
@@ -376,9 +354,7 @@ func TestIterConsumerBreaks(t *testing.T) {
 				hasMore := fetchCalls < len(tc.pages)-1
 				fetchCalls++
 
-				result := Result[int, int]{
-					Items: items,
-				}
+				result := Result[int, int]{Items: items}
 				if hasMore && len(items) > 0 {
 					last := items[len(items)-1]
 					result.Next = &last
@@ -389,13 +365,10 @@ func TestIterConsumerBreaks(t *testing.T) {
 
 			setCursor := func(query int, cursor int) int {
 				nextCalls++
-
 				return query + cursor
 			}
 
-			for item, err := range Iter(
-				t.Context(), 0, fetchPage, setCursor,
-			) {
+			for item, err := range Iter(t.Context(), 0, fetchPage, setCursor) {
 				require.NoError(t, err)
 
 				gotItems = append(gotItems, item)
@@ -411,8 +384,8 @@ func TestIterConsumerBreaks(t *testing.T) {
 	}
 }
 
-// TestIterNextNilTermination verifies Iter stops when Next becomes nil,
-// without requiring an extra empty-page fetch.
+// TestIterNextNilTermination verifies Iter stops when Next becomes nil without
+// requiring an extra empty-page fetch.
 func TestIterNextNilTermination(t *testing.T) {
 	t.Parallel()
 
@@ -433,7 +406,7 @@ func TestIterNextNilTermination(t *testing.T) {
 			wantNextCalls:  0,
 		},
 		{
-			name: "multi-page, stops mid",
+			name: "multi-page stops at nil next",
 			pages: []Result[int, int]{
 				{Items: []int{1, 2}, Next: intPtr(2)},
 				{Items: []int{3}},
@@ -454,8 +427,8 @@ func TestIterNextNilTermination(t *testing.T) {
 				gotItems   []int
 			)
 
-			fetchPage := func(_ context.Context, _ int) (Result[int, int],
-				error) {
+			fetchPage := func(_ context.Context,
+				_ int) (Result[int, int], error) {
 
 				require.Less(t, fetchCalls, len(tc.pages))
 
@@ -471,9 +444,7 @@ func TestIterNextNilTermination(t *testing.T) {
 				return query + 1
 			}
 
-			for item, err := range Iter(
-				t.Context(), 0, fetchPage, setCursor,
-			) {
+			for item, err := range Iter(t.Context(), 0, fetchPage, setCursor) {
 				require.NoError(t, err)
 
 				gotItems = append(gotItems, item)

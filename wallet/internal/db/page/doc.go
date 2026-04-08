@@ -5,15 +5,15 @@
 //
 // A [Request] carries the parameters for a single page fetch: page limit,
 // and an optional after that identifies where the previous page ended.
-// The zero value requests the first page at [DefaultLimit].
 //
 // A [Result] carries the items returned by one fetch together with
-// [Result.Next]. Pass *Next back to [Request.WithAfter] to advance to the
-// next page.
+// [Result.Next]. Assign [Result.Next] to [Request.After] to advance to the next
+// page.
 //
-// Queries fetch normalizedLimit+1 rows internally and return at most
-// normalizedLimit items. If the extra row exists, [Result.Next] is non-nil.
-// If it does not, [Result.Next] is nil and the current page is the last page.
+// Stores require [Request.Limit] to be positive, fetch one extra row
+// internally, and return at most the requested number of items. If the extra
+// row exists, [Result.Next] is non-nil. If it does not, [Result.Next] is nil
+// and the current page is the last page.
 //
 // # Iterating
 //
@@ -24,8 +24,8 @@
 //
 // # Store integration
 //
-// Stores typically translate [Request.After] into an optional backend
-// query parameter, fetch [Request.QueryLimit] rows with a single ordered
-// SQL query, map the raw rows to domain items, and then call
-// [BuildResult] to derive [Result.Next].
+// Stores typically translate [Request.After] into an optional backend query
+// parameter, validate [Request.Limit], fetch `limit+1` rows with a single
+// ordered SQL query, and call [BuildResult] to derive [Result.Next] from the
+// last returned item when another page exists.
 package page

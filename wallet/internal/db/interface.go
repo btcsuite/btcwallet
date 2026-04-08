@@ -50,6 +50,10 @@ var (
 	// field combinations.
 	ErrInvalidAddressQuery = errors.New("ScriptPubKey must be provided")
 
+	// ErrInvalidPageLimit is returned when a paginated query is called with a
+	// zero page limit.
+	ErrInvalidPageLimit = errors.New("page limit must be greater than zero")
+
 	// ErrMissingScriptPubKey is returned when creating an imported
 	// address without the required script public key.
 	ErrMissingScriptPubKey = errors.New("script pubkey required")
