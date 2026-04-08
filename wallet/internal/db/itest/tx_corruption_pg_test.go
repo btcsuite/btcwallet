@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +19,7 @@ import (
 // corruptTransactionStatus writes an invalid tx status after dropping the
 // validating constraints that normally reject it. The corruption itests use
 // this to verify that reads reject impossible tx states.
-func corruptTransactionStatus(t *testing.T, store *dbpg.PostgresStore,
+func corruptTransactionStatus(t *testing.T, store *dbpg.Store,
 	walletID uint32, txHash chainhash.Hash, status int64) {
 	t.Helper()
 
@@ -50,7 +49,7 @@ func corruptTransactionStatus(t *testing.T, store *dbpg.PostgresStore,
 // corruptTransactionHash writes malformed tx-hash bytes after dropping the
 // fixed-length hash check. The corruption itests then verify that hash
 // decoding fails with the expected error path.
-func corruptTransactionHash(t *testing.T, store *dbpg.PostgresStore,
+func corruptTransactionHash(t *testing.T, store *dbpg.Store,
 	walletID uint32, txHash chainhash.Hash, hash []byte) {
 	t.Helper()
 
@@ -76,7 +75,7 @@ func corruptTransactionHash(t *testing.T, store *dbpg.PostgresStore,
 // the non-negative height check and creating a matching block row. The
 // corruption itests use this to verify that reads reject impossible
 // confirmation metadata.
-func corruptTransactionBlockHeight(t *testing.T, store *dbpg.PostgresStore,
+func corruptTransactionBlockHeight(t *testing.T, store *dbpg.Store,
 	walletID uint32, txHash chainhash.Hash, height int64) {
 	t.Helper()
 
@@ -111,7 +110,7 @@ func corruptTransactionBlockHeight(t *testing.T, store *dbpg.PostgresStore,
 // corruptUtxoOutputIndex writes an invalid output index after dropping the
 // non-negative output-index check. The corruption itests then verify that UTXO
 // decoding rejects the malformed persisted value.
-func corruptUtxoOutputIndex(t *testing.T, store *dbpg.PostgresStore,
+func corruptUtxoOutputIndex(t *testing.T, store *dbpg.Store,
 	walletID uint32, txHash chainhash.Hash, oldIndex uint32, newIndex int64) {
 	t.Helper()
 
@@ -137,7 +136,7 @@ func corruptUtxoOutputIndex(t *testing.T, store *dbpg.PostgresStore,
 // corruptActiveLeaseLockID writes an invalid lease lock ID after dropping the
 // fixed-length lock-id check. The corruption itests use this to verify that
 // lease reads reject malformed lock identifiers.
-func corruptActiveLeaseLockID(t *testing.T, store *dbpg.PostgresStore,
+func corruptActiveLeaseLockID(t *testing.T, store *dbpg.Store,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32, lockID []byte) {
 	t.Helper()
 
