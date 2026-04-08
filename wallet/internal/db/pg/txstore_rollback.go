@@ -7,7 +7,7 @@ import (
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // RollbackToBlock atomically removes every block at or above the provided

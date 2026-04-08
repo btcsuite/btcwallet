@@ -10,7 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
