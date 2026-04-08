@@ -580,7 +580,7 @@ type rollbackToBlockOps interface {
 	// listRollbackRootHashes returns the coinbase roots disconnected by the
 	// rollback, grouped by wallet for the later descendant walk.
 	listRollbackRootHashes(ctx context.Context,
-		height uint32) (map[uint32]map[chainhash.Hash]struct{}, error)
+		height uint32) (map[uint32][]chainhash.Hash, error)
 
 	// rewindWalletSyncStateHeights clamps wallet sync-state references
 	// below the rollback boundary before block rows are removed.
@@ -706,7 +706,7 @@ func collectDescendantTxIDs(rootHashes map[chainhash.Hash]struct{},
 // invalidateRollbackDescendants clears spend edges and marks failed every
 // unmined descendant discovered from the provided wallet-scoped rollback roots.
 func invalidateRollbackDescendants(ctx context.Context,
-	rootHashesByWallet map[uint32]map[chainhash.Hash]struct{},
+	rootHashesByWallet map[uint32][]chainhash.Hash,
 	ops rollbackToBlockOps) error {
 
 	for walletID, rootHashes := range rootHashesByWallet {
@@ -718,7 +718,12 @@ func invalidateRollbackDescendants(ctx context.Context,
 				"wallet %d: %w", walletID, err)
 		}
 
-		descendantIDs := collectDescendantTxIDs(rootHashes, candidates)
+		rootHashSet := make(map[chainhash.Hash]struct{}, len(rootHashes))
+		for _, rootHash := range rootHashes {
+			rootHashSet[rootHash] = struct{}{}
+		}
+
+		descendantIDs := collectDescendantTxIDs(rootHashSet, candidates)
 		if len(descendantIDs) == 0 {
 			continue
 		}
