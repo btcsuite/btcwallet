@@ -8,7 +8,7 @@ import (
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // LeaseOutput atomically acquires or renews a lease for one current UTXO.

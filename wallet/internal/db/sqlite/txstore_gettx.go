@@ -8,7 +8,7 @@ import (
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // GetTx retrieves one wallet-scoped transaction snapshot by hash.

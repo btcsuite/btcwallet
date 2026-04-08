@@ -5,7 +5,7 @@ package sqlite
 import (
 	"database/sql"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // DB returns the underlying *sql.DB connection for integration testing.
