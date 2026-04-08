@@ -344,6 +344,19 @@ func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
 	derivationPath DerivationPath, acctInfo *accountInfo) (
 	ManagedAddress, error) {
 
+	return s.keyToManagedOnUnlock(
+		derivedKey, derivationPath, acctInfo, true,
+	)
+}
+
+// keyToManagedOnUnlock is identical to keyToManaged but allows callers to
+// skip appending the managed address to deriveOnUnlock.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) keyToManagedOnUnlock(
+	derivedKey *hdkeychain.ExtendedKey, derivationPath DerivationPath,
+	acctInfo *accountInfo, onUnlock bool) (ManagedAddress, error) {
+
 	// Choose the appropriate type of address to derive since it's possible
 	// for a watch-only account to have a different schema from the
 	// manager's.
@@ -361,7 +374,7 @@ func (s *ScopedKeyManager) keyToManaged(derivedKey *hdkeychain.ExtendedKey,
 		return nil, err
 	}
 
-	if !derivedKey.IsPrivate() {
+	if !derivedKey.IsPrivate() && onUnlock {
 		// Add the managed address to the list of addresses that need
 		// their private keys derived when the address manager is next
 		// unlocked.
@@ -775,6 +788,17 @@ func (s *ScopedKeyManager) deriveKeyFromPath(ns walletdb.ReadBucket,
 func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	row *dbChainAddressRow) (ManagedAddress, error) {
 
+	return s.chainAddressRowToManagedOnUnlock(ns, row, true)
+}
+
+// chainAddressRowToManagedOnUnlock is identical to chainAddressRowToManaged
+// but allows callers to skip deriveOnUnlock updates for the loaded address.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) chainAddressRowToManagedOnUnlock(
+	ns walletdb.ReadBucket, row *dbChainAddressRow,
+	onUnlock bool) (ManagedAddress, error) {
+
 	private := !s.rootManager.IsLocked() && !s.rootManager.WatchOnly()
 
 	addressKey, acctKey, masterKeyFingerprint, err := s.deriveKeyFromPath(
@@ -788,14 +812,15 @@ func (s *ScopedKeyManager) chainAddressRowToManaged(ns walletdb.ReadBucket,
 	if err != nil {
 		return nil, err
 	}
-	return s.keyToManaged(
+
+	return s.keyToManagedOnUnlock(
 		addressKey, DerivationPath{
 			InternalAccount:      row.account,
 			Account:              acctKey.ChildIndex(),
 			Branch:               row.branch,
 			Index:                row.index,
 			MasterKeyFingerprint: masterKeyFingerprint,
-		}, acctInfo,
+		}, acctInfo, onUnlock,
 	)
 }
 
@@ -872,9 +897,20 @@ func (s *ScopedKeyManager) witnessScriptAddressRowToManaged(
 func (s *ScopedKeyManager) rowInterfaceToManaged(ns walletdb.ReadBucket,
 	rowInterface interface{}) (ManagedAddress, error) {
 
+	return s.rowInterfaceToManagedOnUnlock(ns, rowInterface, true)
+}
+
+// rowInterfaceToManagedOnUnlock is identical to rowInterfaceToManaged but
+// allows callers to skip deriveOnUnlock updates for loaded chained addresses.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) rowInterfaceToManagedOnUnlock(
+	ns walletdb.ReadBucket, rowInterface interface{},
+	onUnlock bool) (ManagedAddress, error) {
+
 	switch row := rowInterface.(type) {
 	case *dbChainAddressRow:
-		return s.chainAddressRowToManaged(ns, row)
+		return s.chainAddressRowToManagedOnUnlock(ns, row, onUnlock)
 
 	case *dbImportedAddressRow:
 		return s.importedAddressRowToManaged(row)
@@ -890,12 +926,12 @@ func (s *ScopedKeyManager) rowInterfaceToManaged(ns walletdb.ReadBucket,
 	return nil, managerError(ErrDatabase, str, nil)
 }
 
-// loadAndCacheAddress attempts to load the passed address from the database
-// and caches the associated managed address.
+// loadAddressOnUnlock attempts to load the passed address from the database
+// and optionally append it to deriveOnUnlock.
 //
 // This function MUST be called with the manager lock held for writes.
-func (s *ScopedKeyManager) loadAndCacheAddress(ns walletdb.ReadBucket,
-	address btcutil.Address) (ManagedAddress, error) {
+func (s *ScopedKeyManager) loadAddressOnUnlock(ns walletdb.ReadBucket,
+	address btcutil.Address, onUnlock bool) (ManagedAddress, error) {
 
 	// Attempt to load the raw address information from the database.
 	rowInterface, err := fetchAddress(ns, &s.scope, address.ScriptAddress())
@@ -904,14 +940,36 @@ func (s *ScopedKeyManager) loadAndCacheAddress(ns walletdb.ReadBucket,
 			desc := fmt.Sprintf("failed to fetch address '%s': %v",
 				address.ScriptAddress(), merr.Description)
 			merr.Description = desc
+
 			return nil, merr
 		}
+
 		return nil, maybeConvertDbError(err)
 	}
 
 	// Create a new managed address for the specific type of address based
 	// on type.
-	managedAddr, err := s.rowInterfaceToManaged(ns, rowInterface)
+	return s.rowInterfaceToManagedOnUnlock(ns, rowInterface, onUnlock)
+}
+
+// loadAddress attempts to load the passed address from the database without
+// caching the associated managed address.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) loadAddress(ns walletdb.ReadBucket,
+	address btcutil.Address) (ManagedAddress, error) {
+
+	return s.loadAddressOnUnlock(ns, address, false)
+}
+
+// loadAndCacheAddress attempts to load the passed address from the database
+// and caches the associated managed address.
+//
+// This function MUST be called with the manager lock held for writes.
+func (s *ScopedKeyManager) loadAndCacheAddress(ns walletdb.ReadBucket,
+	address btcutil.Address) (ManagedAddress, error) {
+
+	managedAddr, err := s.loadAddressOnUnlock(ns, address, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1157,19 +1215,14 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 
 		// Now that we've written the address, we'll read it back from
 		// disk to ensure that it's the same address we have in memory.
-		diskAddr, err := s.loadAndCacheAddress(ns, ma.Address())
+		// We use loadAddress rather than loadAndCacheAddress so a
+		// dry-run rollback cannot leak the preview address to s.addrs.
+		diskAddr, err := s.loadAddress(ns, ma.Address())
 		if err != nil {
 			return nil, maybeConvertDbError(err)
 		}
 
 		if ma.Address().String() != diskAddr.Address().String() {
-			// The address didn't match up, so we'll manually
-			// delete it from the cache.
-			delete(
-				s.addrs,
-				addrKey(diskAddr.Address().ScriptAddress()),
-			)
-
 			return nil, fmt.Errorf("%w (disk read): "+
 				"expected %v, got %v", ErrAddrMismatch,
 				diskAddr.Address().String(),
@@ -2569,9 +2622,24 @@ func (s *ScopedKeyManager) cloneKeyWithVersion(key *hdkeychain.ExtendedKey) (
 }
 
 // InvalidateAccountCache invalidates the cache for the given account, forcing a
-// database read to retrieve the account information.
+// database read to retrieve the account information. It also removes pending
+// deriveOnUnlock entries for the account to prevent stale entries from
+// breaking later unlocks after a dry-run rollback.
 func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+
 	delete(s.acctInfo, account)
+
+	// Remove any deriveOnUnlock entries that reference this account.
+	// During a dry-run rollback, loadAccountInfo may append entries here
+	// for the account's last derived addresses. After rollback, those
+	// entries would cause the next Unlock to fail with account not found.
+	filtered := make([]*unlockDeriveInfo, 0, len(s.deriveOnUnlock))
+	for _, info := range s.deriveOnUnlock {
+		if info.managedAddr.InternalAccount() != account {
+			filtered = append(filtered, info)
+		}
+	}
+	s.deriveOnUnlock = filtered
 }
