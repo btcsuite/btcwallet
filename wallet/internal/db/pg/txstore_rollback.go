@@ -18,21 +18,21 @@ func (s *PostgresStore) RollbackToBlock(ctx context.Context,
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		return db.RollbackToBlockWithOps(ctx, height,
-			pgRollbackToBlockOps{qtx: qtx})
+			rollbackToBlockOps{qtx: qtx})
 	})
 }
 
-// pgRollbackToBlockOps adapts postgres sqlc queries to the shared rollback
+// rollbackToBlockOps adapts postgres sqlc queries to the shared rollback
 // sequence.
-type pgRollbackToBlockOps struct {
+type rollbackToBlockOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ db.RollbackToBlockOps = (*pgRollbackToBlockOps)(nil)
+var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
 
 // ListRollbackRootHashes loads the coinbase roots that a rollback disconnects
 // and groups them by wallet.
-func (o pgRollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
+func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 	height uint32) (map[uint32][]chainhash.Hash, error) {
 
 	rollbackHeight, err := db.Uint32ToInt32(height)
@@ -45,12 +45,12 @@ func (o pgRollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 		return nil, fmt.Errorf("query rollback coinbase roots: %w", err)
 	}
 
-	return groupRollbackCoinbaseRootsPg(rows)
+	return groupRollbackCoinbaseRoots(rows)
 }
 
 // RewindWalletSyncStateHeights clamps wallet sync-state references below the
 // rollback boundary before the block rows are deleted.
-func (o pgRollbackToBlockOps) RewindWalletSyncStateHeights(
+func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	ctx context.Context, height uint32) error {
 
 	// PostgreSQL stores block heights as INTEGER today, so rollback still needs
@@ -89,7 +89,7 @@ func (o pgRollbackToBlockOps) RewindWalletSyncStateHeights(
 
 // DeleteBlocksAtOrAboveHeight removes the shared block rows after sync-state
 // references have been rewound.
-func (o pgRollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
+func (o rollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 	ctx context.Context, height uint32) error {
 
 	rollbackHeight, err := db.Uint32ToInt32(height)
@@ -107,7 +107,7 @@ func (o pgRollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 
 // MarkTxRootsOrphaned rewrites each disconnected coinbase root to the
 // orphaned state once its confirming block has been deleted.
-func (o pgRollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
+func (o rollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 	walletID uint32, rootHashes []chainhash.Hash) error {
 
 	for _, txHash := range rootHashes {
@@ -137,7 +137,7 @@ func (o pgRollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 
 // ListUnminedTxRecords loads and decodes every unmined transaction row for the
 // wallet so the shared helper can inspect raw inputs for descendant edges.
-func (o pgRollbackToBlockOps) ListUnminedTxRecords(
+func (o rollbackToBlockOps) ListUnminedTxRecords(
 	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
@@ -154,7 +154,7 @@ func (o pgRollbackToBlockOps) ListUnminedTxRecords(
 
 // ClearDescendantSpends removes any wallet-owned spend edges claimed by one
 // invalid descendant transaction before its status is rewritten.
-func (o pgRollbackToBlockOps) ClearDescendantSpends(
+func (o rollbackToBlockOps) ClearDescendantSpends(
 	ctx context.Context, walletID int64, descendantID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -175,7 +175,7 @@ func (o pgRollbackToBlockOps) ClearDescendantSpends(
 
 // MarkDescendantsFailed batch-marks the collected rollback descendants as
 // failed once every dependent spend edge has been cleared.
-func (o pgRollbackToBlockOps) MarkDescendantsFailed(
+func (o rollbackToBlockOps) MarkDescendantsFailed(
 	ctx context.Context, walletID int64, descendantIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
@@ -192,9 +192,9 @@ func (o pgRollbackToBlockOps) MarkDescendantsFailed(
 	return nil
 }
 
-// groupRollbackCoinbaseRootsPg groups rollback-affected coinbase hashes by
+// groupRollbackCoinbaseRoots groups rollback-affected coinbase hashes by
 // wallet while preserving the query order inside each wallet bucket.
-func groupRollbackCoinbaseRootsPg(rows []sqlcpg.ListRollbackCoinbaseRootsRow) (
+func groupRollbackCoinbaseRoots(rows []sqlcpg.ListRollbackCoinbaseRootsRow) (
 	map[uint32][]chainhash.Hash, error) {
 
 	rootHashesByWallet := make(

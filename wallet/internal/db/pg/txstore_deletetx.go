@@ -22,23 +22,23 @@ func (s *PostgresStore) DeleteTx(ctx context.Context,
 	params db.DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return db.DeleteTxWithOps(ctx, params, pgDeleteTxOps{qtx: qtx})
+		return db.DeleteTxWithOps(ctx, params, deleteTxOps{qtx: qtx})
 	})
 }
 
-// pgDeleteTxOps adapts postgres sqlc queries to the shared DeleteTx flow.
-type pgDeleteTxOps struct {
+// deleteTxOps adapts postgres sqlc queries to the shared DeleteTx flow.
+type deleteTxOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ db.DeleteTxOps = (*pgDeleteTxOps)(nil)
+var _ db.DeleteTxOps = (*deleteTxOps)(nil)
 
 // LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
-func (o pgDeleteTxOps) LoadDeleteTarget(ctx context.Context, walletID uint32,
+func (o deleteTxOps) LoadDeleteTarget(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash) (int64, error) {
 
-	meta, err := getDeleteTxMetaPg(ctx, o.qtx, walletID, txHash)
+	meta, err := getDeleteTxMeta(ctx, o.qtx, walletID, txHash)
 	if err != nil {
 		return 0, err
 	}
@@ -48,15 +48,15 @@ func (o pgDeleteTxOps) LoadDeleteTarget(ctx context.Context, walletID uint32,
 
 // EnsureLeaf rejects DeleteTx when the target still has direct unmined child
 // spenders.
-func (o pgDeleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
+func (o deleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, txID int64) error {
 
-	return ensureDeleteLeafPg(ctx, o.qtx, walletID, txHash, txID)
+	return ensureDeleteLeaf(ctx, o.qtx, walletID, txHash, txID)
 }
 
 // ClearSpentUtxos restores any wallet-owned parent outputs the transaction had
 // marked spent.
-func (o pgDeleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
+func (o deleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
 	txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -75,7 +75,7 @@ func (o pgDeleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
 
 // DeleteCreatedUtxos removes any wallet-owned outputs created by the
 // transaction being deleted.
-func (o pgDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
+func (o deleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.DeleteUtxosByTxID(
@@ -94,7 +94,7 @@ func (o pgDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 
 // DeleteUnminedTransaction removes the target unmined row after its dependent
 // wallet state has been cleaned up.
-func (o pgDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
+func (o deleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
 	rows, err := o.qtx.DeleteUnminedTransactionByHash(
@@ -111,10 +111,10 @@ func (o pgDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	return rows, nil
 }
 
-// ensureDeleteLeafPg rejects DeleteTx requests for transactions that still have
+// ensureDeleteLeaf rejects DeleteTx requests for transactions that still have
 // direct unmined child spenders, including children that spend non-credit
 // parent outputs.
-func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
+func ensureDeleteLeaf(ctx context.Context, qtx *sqlcpg.Queries,
 	walletID uint32, txHash chainhash.Hash, txID int64) error {
 
 	rows, err := qtx.ListUnminedTransactions(ctx, int64(walletID))
@@ -148,9 +148,9 @@ func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
 	return nil
 }
 
-// getDeleteTxMetaPg loads the transaction metadata DeleteTx needs and enforces
+// getDeleteTxMeta loads the transaction metadata DeleteTx needs and enforces
 // the unmined precondition up front.
-func getDeleteTxMetaPg(ctx context.Context, qtx *sqlcpg.Queries,
+func getDeleteTxMeta(ctx context.Context, qtx *sqlcpg.Queries,
 	walletID uint32, txHash chainhash.Hash) (
 	sqlcpg.GetTransactionMetaByHashRow, error) {
 
