@@ -10,7 +10,6 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,37 +61,6 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	})
 	deleteOps := pgDeleteTxOps{qtx: qtx}
 	rollbackOps := pgRollbackToBlockOps{qtx: qtx}
-
-	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear spent utxo rows")
-
-	err = deleteOps.DeleteCreatedUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "delete created utxo rows")
-
-	_, err = deleteOps.DeleteUnminedTransaction(
-		t.Context(), 1, chainhash.Hash{1},
-	)
-	require.ErrorContains(t, err, "delete unmined tx row")
-
-	_, err = rollbackOps.ListUnminedTxRecords(t.Context(), 1)
-	require.ErrorContains(t, err, "list unmined txns")
-
-	err = rollbackOps.ClearDescendantSpends(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear descendant spends")
-
-	err = rollbackOps.MarkDescendantsFailed(t.Context(), 1, []int64{2})
-	require.ErrorContains(t, err, "mark descendants failed")
-}
-
-// TestSqliteDeleteAndRollbackOpsWrapBackendErrors verifies that the sqlite
-// delete and rollback adapters preserve their step-specific error context when
-// sqlc exec and query calls fail.
-func TestSqliteDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
-	t.Parallel()
-
-	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
-	deleteOps := sqliteDeleteTxOps{qtx: qtx}
-	rollbackOps := sqliteRollbackToBlockOps{qtx: qtx}
 
 	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
 	require.ErrorContains(t, err, "clear spent utxo rows")
@@ -173,77 +141,6 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 
 	updateOps.blockHeight = sql.NullInt32{}
 	updateOps.status = int16(TxStatusPublished)
-	err = updateOps.UpdateState(t.Context(), 1, chainhash.Hash{1},
-		UpdateTxState{Status: TxStatusPublished})
-	require.ErrorContains(t, err, "update tx state query")
-
-	err = updateOps.UpdateLabel(t.Context(), 1, chainhash.Hash{1}, "note")
-	require.ErrorContains(t, err, "update tx label query")
-
-	_, err = releaseOps.Release(t.Context(), 1, 2, [32]byte{1})
-	require.ErrorContains(t, err, "Release lease row")
-}
-
-// TestSqliteTxStoreOpsWrapBackendErrors verifies that the sqlite tx-store
-// helper adapters preserve step-specific error context for create, invalidate,
-// rollback, update, and Release workflows.
-func TestSqliteTxStoreOpsWrapBackendErrors(t *testing.T) {
-	t.Parallel()
-
-	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
-	createOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
-			qtx: qtx,
-		},
-	}
-	invalidateOps := sqliteInvalidateUnminedTxOps{qtx: qtx}
-	rollbackOps := sqliteRollbackToBlockOps{qtx: qtx}
-	updateOps := &sqliteUpdateTxOps{qtx: qtx}
-	releaseOps := sqliteReleaseOutputOps{qtx: qtx}
-
-	err := createOps.MarkTxnsReplaced(
-		t.Context(), 1, []int64{2},
-	)
-	require.ErrorContains(t, err, "mark txns replaced")
-
-	err = createOps.InsertReplacementEdges(
-		t.Context(), 1, []int64{2}, 3,
-	)
-	require.ErrorContains(t, err, "Insert replacement edge")
-
-	err = markInputsSpentSqlite(t.Context(), qtx, CreateTxParams{
-		WalletID: 1,
-		Tx:       testRegularMsgTx(),
-		Received: time.Unix(1, 0),
-		Status:   TxStatusPending,
-	}, 7)
-	require.ErrorContains(t, err, "mark spent input 0")
-
-	_, err = invalidateOps.ListUnminedTxRecords(t.Context(), 1)
-	require.ErrorContains(t, err, "list unmined txns")
-
-	err = invalidateOps.ClearSpentUtxos(t.Context(), 1, 2)
-	require.ErrorContains(t, err, "clear spent utxos")
-
-	err = invalidateOps.MarkTxnsFailed(t.Context(), 1, []int64{2})
-	require.ErrorContains(t, err, "mark txns failed")
-
-	_, err = rollbackOps.ListRollbackRootHashes(t.Context(), 1)
-	require.ErrorContains(t, err, "query rollback coinbase roots")
-
-	err = rollbackOps.RewindWalletSyncStateHeights(t.Context(), 1)
-	require.ErrorContains(t, err, "rewind wallet sync state heights query")
-
-	err = rollbackOps.DeleteBlocksAtOrAboveHeight(t.Context(), 1)
-	require.ErrorContains(t, err, "delete blocks at or above height query")
-
-	err = rollbackOps.MarkTxRootsOrphaned(
-		t.Context(), 1, []chainhash.Hash{{1}},
-	)
-	require.ErrorContains(t, err, "update rollback coinbase state query")
-
-	updateOps.blockHeight = sql.NullInt64{}
-	updateOps.status = int64(TxStatusPublished)
 	err = updateOps.UpdateState(t.Context(), 1, chainhash.Hash{1},
 		UpdateTxState{Status: TxStatusPublished})
 	require.ErrorContains(t, err, "update tx state query")

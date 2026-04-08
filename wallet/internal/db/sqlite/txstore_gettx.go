@@ -1,10 +1,11 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -15,7 +16,7 @@ import (
 // The returned TxInfo is rebuilt from normalized SQL columns; missing rows map
 // to ErrTxNotFound for the requested wallet/hash pair.
 func (s *SqliteStore) GetTx(ctx context.Context,
-	query GetTxQuery) (*TxInfo, error) {
+	query db.GetTxQuery) (*db.TxInfo, error) {
 
 	row, err := s.queries.GetTransactionByHash(
 		ctx, sqlcsqlite.GetTransactionByHashParams{
@@ -25,7 +26,7 @@ func (s *SqliteStore) GetTx(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("tx %s: %w", query.Txid, ErrTxNotFound)
+			return nil, fmt.Errorf("tx %s: %w", query.Txid, db.ErrTxNotFound)
 		}
 
 		return nil, fmt.Errorf("get tx: %w", err)
@@ -41,10 +42,10 @@ func (s *SqliteStore) GetTx(ctx context.Context,
 // TxInfo shape.
 func txInfoFromSqliteRow(hash []byte, rawTx []byte, received time.Time,
 	blockHeight sql.NullInt64, blockHash []byte, blockTimestamp sql.NullInt64,
-	status int64, label string) (*TxInfo, error) {
+	status int64, label string) (*db.TxInfo, error) {
 
 	var (
-		block *Block
+		block *db.Block
 		err   error
 	)
 
@@ -57,5 +58,5 @@ func txInfoFromSqliteRow(hash []byte, rawTx []byte, received time.Time,
 		}
 	}
 
-	return BuildTxInfo(hash, rawTx, received, block, status, label)
+	return db.BuildTxInfo(hash, rawTx, received, block, status, label)
 }

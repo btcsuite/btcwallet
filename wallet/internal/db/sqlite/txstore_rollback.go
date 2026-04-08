@@ -1,9 +1,10 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -16,7 +17,7 @@ func (s *SqliteStore) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return RollbackToBlockWithOps(ctx, height,
+		return db.RollbackToBlockWithOps(ctx, height,
 			sqliteRollbackToBlockOps{qtx: qtx})
 	})
 }
@@ -27,7 +28,7 @@ type sqliteRollbackToBlockOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ RollbackToBlockOps = (*sqliteRollbackToBlockOps)(nil)
+var _ db.RollbackToBlockOps = (*sqliteRollbackToBlockOps)(nil)
 
 // ListRollbackRootHashes loads the coinbase roots that a rollback disconnects
 // and groups them by wallet.
@@ -92,7 +93,7 @@ func (o sqliteRollbackToBlockOps) MarkTxRootsOrphaned(
 		rows, err := o.qtx.UpdateTransactionStateByHash(
 			ctx, sqlcsqlite.UpdateTransactionStateByHashParams{
 				BlockHeight: sql.NullInt64{},
-				Status:      int64(TxStatusOrphaned),
+				Status:      int64(db.TxStatusOrphaned),
 				WalletID:    int64(walletID),
 				TxHash:      txHash[:],
 			},
@@ -102,7 +103,7 @@ func (o sqliteRollbackToBlockOps) MarkTxRootsOrphaned(
 		}
 
 		if rows == 0 {
-			return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+			return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 	}
 
@@ -112,14 +113,14 @@ func (o sqliteRollbackToBlockOps) MarkTxRootsOrphaned(
 // ListUnminedTxRecords loads and decodes every unmined transaction row for the
 // wallet so the shared helper can inspect raw inputs for descendant edges.
 func (o sqliteRollbackToBlockOps) ListUnminedTxRecords(
-	ctx context.Context, walletID int64) ([]UnminedTxRecord, error) {
+	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
 	if err != nil {
 		return nil, fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	return BuildUnminedTxRecords(rows,
+	return db.BuildUnminedTxRecords(rows,
 		func(row sqlcsqlite.ListUnminedTransactionsRow) (
 			int64, []byte, []byte) {
 
@@ -157,7 +158,7 @@ func (o sqliteRollbackToBlockOps) MarkDescendantsFailed(
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
 		ctx, sqlcsqlite.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
-			Status:   int64(TxStatusFailed),
+			Status:   int64(db.TxStatusFailed),
 			TxIds:    descendantIDs,
 		},
 	)
@@ -178,7 +179,7 @@ func groupRollbackCoinbaseRootsSqlite(
 		map[uint32][]chainhash.Hash, len(rows),
 	)
 	for _, row := range rows {
-		walletID, err := Int64ToUint32(row.WalletID)
+		walletID, err := db.Int64ToUint32(row.WalletID)
 		if err != nil {
 			return nil, fmt.Errorf("rollback coinbase wallet id: %w", err)
 		}

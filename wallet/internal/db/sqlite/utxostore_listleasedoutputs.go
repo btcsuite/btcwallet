@@ -1,8 +1,9 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -10,7 +11,7 @@ import (
 
 // ListLeasedOutputs lists all active leases for current wallet-owned UTXOs.
 func (s *SqliteStore) ListLeasedOutputs(ctx context.Context,
-	walletID uint32) ([]LeasedOutput, error) {
+	walletID uint32) ([]db.LeasedOutput, error) {
 
 	nowUTC := time.Now().UTC()
 
@@ -24,14 +25,14 @@ func (s *SqliteStore) ListLeasedOutputs(ctx context.Context,
 		return nil, fmt.Errorf("list active utxo leases: %w", err)
 	}
 
-	leases := make([]LeasedOutput, len(rows))
+	leases := make([]db.LeasedOutput, len(rows))
 	for i, row := range rows {
-		outputIndex, err := Int64ToUint32(row.OutputIndex)
+		outputIndex, err := db.Int64ToUint32(row.OutputIndex)
 		if err != nil {
 			return nil, fmt.Errorf("lease output index: %w", err)
 		}
 
-		lease, err := BuildLeasedOutput(
+		lease, err := db.BuildLeasedOutput(
 			row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
 		)
 		if err != nil {

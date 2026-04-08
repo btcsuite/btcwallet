@@ -1,10 +1,11 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -17,10 +18,10 @@ import (
 // spent-input edges stay owned by CreateTx and the internal rollback/delete
 // flows.
 func (s *SqliteStore) UpdateTx(ctx context.Context,
-	params UpdateTxParams) error {
+	params db.UpdateTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return UpdateTxWithOps(ctx, params, &sqliteUpdateTxOps{qtx: qtx})
+		return db.UpdateTxWithOps(ctx, params, &sqliteUpdateTxOps{qtx: qtx})
 	})
 }
 
@@ -38,7 +39,7 @@ type sqliteUpdateTxOps struct {
 	status int64
 }
 
-var _ UpdateTxOps = (*sqliteUpdateTxOps)(nil)
+var _ db.UpdateTxOps = (*sqliteUpdateTxOps)(nil)
 
 // LoadIsCoinbase loads the existing row metadata UpdateTx needs before it can
 // validate one patch.
@@ -54,7 +55,7 @@ func (o *sqliteUpdateTxOps) LoadIsCoinbase(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+			return false, fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
 		return false, fmt.Errorf("get tx metadata: %w", err)
@@ -66,7 +67,7 @@ func (o *sqliteUpdateTxOps) LoadIsCoinbase(ctx context.Context,
 // PrepareState validates any referenced confirming block and captures the
 // sqlite-specific state params for the later row update.
 func (o *sqliteUpdateTxOps) PrepareState(ctx context.Context,
-	state UpdateTxState) error {
+	state db.UpdateTxState) error {
 
 	blockHeight := sql.NullInt64{}
 
@@ -102,7 +103,7 @@ func (o *sqliteUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 	}
 
 	return nil
@@ -111,7 +112,7 @@ func (o *sqliteUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 // UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
 func (o *sqliteUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
-	txHash chainhash.Hash, _ UpdateTxState) error {
+	txHash chainhash.Hash, _ db.UpdateTxState) error {
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx,
@@ -127,7 +128,7 @@ func (o *sqliteUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 	}
 
 	return nil
