@@ -4,7 +4,7 @@ import (
 	"context"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // sqliteAddressTypeRowToInfo converts a SQLite address type row to an

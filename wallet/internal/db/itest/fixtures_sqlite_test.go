@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/stretchr/testify/require"
 )

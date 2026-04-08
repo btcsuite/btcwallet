@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // staticResult is a minimal sql.Result stub with a caller-controlled row count.

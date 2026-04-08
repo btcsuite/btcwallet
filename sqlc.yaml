@@ -24,11 +24,11 @@ sql:
         emit_prepared_queries: true
 
   - engine: "sqlite"
-    schema: "wallet/internal/db/migrations/sqlite"
-    queries: "wallet/internal/db/queries/sqlite"
+    schema: "wallet/internal/sql/sqlite/migrations"
+    queries: "wallet/internal/sql/sqlite/queries"
     gen:
       go:
-        out: "wallet/internal/db/sqlc/sqlite"
+        out: "wallet/internal/sql/sqlite/sqlc"
         package: "sqlcsqlite"
 
         # This is the driver package that sqlc will use in the generated code.

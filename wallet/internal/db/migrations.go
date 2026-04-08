@@ -10,12 +10,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/database/sqlite"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
-
-//go:embed migrations/sqlite/*.sql
-var sqliteFS embed.FS
 
 //go:embed migrations/postgres/*.sql
 var postgresFS embed.FS
@@ -59,17 +55,6 @@ func applyMigrations(db *sql.DB, migrationFS fs.FS, path string, dbName string,
 	}
 
 	return nil
-}
-
-// ApplySQLiteMigrations applies all SQLite migrations to the database.
-//
-// NOTE: not ready for production use.
-func ApplySQLiteMigrations(db *sql.DB) error {
-	return applyMigrations(db, sqliteFS, "migrations/sqlite", "sqlite",
-		func(db *sql.DB) (database.Driver, error) {
-			return sqlite.WithInstance(db, &sqlite.Config{})
-		},
-	)
 }
 
 // ApplyPostgresMigrations applies all PostgreSQL migrations to the database.
