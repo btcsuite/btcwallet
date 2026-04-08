@@ -6,7 +6,7 @@ import (
 	"fmt"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // Ensure PostgresStore satisfies the AccountStore interface.

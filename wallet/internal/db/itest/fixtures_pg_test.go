@@ -11,7 +11,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/require"
 )
 

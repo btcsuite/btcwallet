@@ -6,8 +6,9 @@ import (
 	"fmt"
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlassetpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
 )
 
@@ -54,7 +55,7 @@ func NewPostgresStore(ctx context.Context, cfg db.PostgresConfig) (*PostgresStor
 
 	queries := sqlcpg.New(dbConn)
 
-	err = db.ApplyPostgresMigrations(dbConn)
+	err = sqlassetpg.ApplyMigrations(dbConn)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
