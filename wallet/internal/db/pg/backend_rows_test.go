@@ -92,8 +92,8 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	req := testCreateTxRequest(t)
 	ctx := context.Background()
-	loadOps := &pgCreateTxOps{
-		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
+	loadOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 			}),
@@ -108,8 +108,8 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 		Height:    7,
 		Timestamp: time.Unix(77, 0),
 	}
-	confirmOps := &pgCreateTxOps{
-		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
+	confirmOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row: newSQLiteRow(
 					t, "SELECT ?, ?, ?",
@@ -126,8 +126,8 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	}, db.CreateTxExistingTarget{})
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 
-	conflictOps := &pgCreateTxOps{
-		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
+	conflictOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
 				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
@@ -146,15 +146,15 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
-	loadOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{
+	loadOps := &updateTxOps{qtx: sqlcpg.New(rowDBTX{
 		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 	})}
-	stateOps := &pgUpdateTxOps{
+	stateOps := &updateTxOps{
 		qtx:         sqlcpg.New(rowDBTX{rows: 0}),
 		blockHeight: sql.NullInt32{},
 		status:      int16(db.TxStatusPublished),
 	}
-	labelOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
+	labelOps := &updateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")

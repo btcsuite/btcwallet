@@ -39,15 +39,15 @@ func (s *PostgresStore) GetUtxo(ctx context.Context,
 		return nil, fmt.Errorf("get utxo: %w", err)
 	}
 
-	return utxoInfoFromPgRow(
+	return utxoInfoFromRow(
 		row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
 		row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
 	)
 }
 
-// utxoInfoFromPgRow converts one normalized postgres query row into the public
+// utxoInfoFromRow converts one normalized postgres query row into the public
 // UtxoInfo shape.
-func utxoInfoFromPgRow(hash []byte, outputIndex int32, amount int64,
+func utxoInfoFromRow(hash []byte, outputIndex int32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight sql.NullInt32) (*db.UtxoInfo, error) {
 

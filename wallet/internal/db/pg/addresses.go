@@ -27,7 +27,7 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 			sqlcpg.GetAddressByScriptPubKeyParams{
 				ScriptPubKey: q.ScriptPubKey,
 				WalletID:     int64(q.WalletID),
-			}, pgAddressRowToInfo,
+			}, addressRowToInfo,
 		)
 	}
 
@@ -38,7 +38,7 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 func (s *PostgresStore) ListAddresses(ctx context.Context,
 	query db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
 
-	items, err := pgListAddressesByAccount(ctx, s.queries, query)
+	items, err := listAddressesByAccount(ctx, s.queries, query)
 	if err != nil {
 		return page.Result[db.AddressInfo, uint32]{}, err
 	}
@@ -67,7 +67,7 @@ func (s *PostgresStore) GetAddressSecret(ctx context.Context,
 	addressID uint32) (*db.AddressSecret, error) {
 
 	return db.GetAddressSecret(
-		ctx, s.queries.GetAddressSecret, addressID, pgAddressSecretRowToSecret,
+		ctx, s.queries.GetAddressSecret, addressID, addressSecretRowToSecret,
 	)
 }
 
@@ -82,14 +82,14 @@ func (s *PostgresStore) NewDerivedAddress(ctx context.Context,
 		sqlcpg.GetAccountByWalletScopeAndNameRow,
 		db.AccountLookupKey,
 		sqlcpg.CreateDerivedAddressRow]{
-		GetAccount:    pgGetAccountFromKey(s.queries),
+		GetAccount:    getAccountFromKey(s.queries),
 		AccountParams: db.AccountKeyFromParams,
-		GetAccountID:  newDerivedAddressGetAccountIDPg,
-		GetExtIndex:   newDerivedAddressGetExtIndexPg,
-		GetIntIndex:   newDerivedAddressGetIntIndexPg,
-		CreateAddr:    newDerivedAddressCreateAddrPg,
-		RowID:         newDerivedAddressRowIDPg,
-		RowCreatedAt:  newDerivedAddressRowCreatedAtPg,
+		GetAccountID:  derivedAddressGetAccountID,
+		GetExtIndex:   derivedAddressGetExtIndex,
+		GetIntIndex:   derivedAddressGetIntIndex,
+		CreateAddr:    derivedAddressCreateAddr,
+		RowID:         derivedAddressRowID,
+		RowCreatedAt:  derivedAddressRowCreatedAt,
 	}
 
 	return db.NewDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
@@ -106,22 +106,22 @@ func (s *PostgresStore) NewImportedAddress(ctx context.Context,
 		sqlcpg.CreateImportedAddressParams,
 		sqlcpg.CreateImportedAddressRow,
 		sqlcpg.InsertAddressSecretParams]{
-		GetAccount:    pgGetAccountFromKey(s.queries),
+		GetAccount:    getAccountFromKey(s.queries),
 		AccountParams: db.AccountKeyFromImportedParams,
-		GetAccountID:  newImportedAddressGetAccountIDPg,
-		CreateAddr:    pgCreateImportedAddress,
-		CreateParams:  createImportedAddressParamsPg,
-		InsertSecret:  pgInsertAddressSecret,
-		SecretParams:  insertAddressSecretParamsPg,
-		RowID:         importedAddressRowIDPg,
-		RowCreatedAt:  importedAddressRowCreatedAtPg,
+		GetAccountID:  importedAddressGetAccountID,
+		CreateAddr:    createImportedAddress,
+		CreateParams:  createImportedAddressParams,
+		InsertSecret:  insertAddressSecret,
+		SecretParams:  insertAddressSecretParams,
+		RowID:         importedAddressRowID,
+		RowCreatedAt:  importedAddressRowCreatedAt,
 	}
 
 	return db.NewImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
 }
 
-// pgGetAccountFromKey returns a helper to look up accounts by key.
-func pgGetAccountFromKey(qtx *sqlcpg.Queries) func(context.Context,
+// getAccountFromKey returns a helper to look up accounts by key.
+func getAccountFromKey(qtx *sqlcpg.Queries) func(context.Context,
 	db.AccountLookupKey) (sqlcpg.GetAccountByWalletScopeAndNameRow, error) {
 
 	return func(ctx context.Context,
@@ -139,29 +139,29 @@ func pgGetAccountFromKey(qtx *sqlcpg.Queries) func(context.Context,
 	}
 }
 
-// newDerivedAddressGetAccountIDPg extracts the account ID from a row.
-func newDerivedAddressGetAccountIDPg(
+// derivedAddressGetAccountID extracts the account ID from a row.
+func derivedAddressGetAccountID(
 	row sqlcpg.GetAccountByWalletScopeAndNameRow) int64 {
 
 	return row.ID
 }
 
-// newDerivedAddressGetExtIndexPg returns the external index query.
-func newDerivedAddressGetExtIndexPg(qtx *sqlcpg.Queries) func(context.Context,
+// derivedAddressGetExtIndex returns the external index query.
+func derivedAddressGetExtIndex(qtx *sqlcpg.Queries) func(context.Context,
 	int64) (int64, error) {
 
 	return qtx.GetAndIncrementNextExternalIndex
 }
 
-// newDerivedAddressGetIntIndexPg returns the internal index query.
-func newDerivedAddressGetIntIndexPg(qtx *sqlcpg.Queries) func(context.Context,
+// derivedAddressGetIntIndex returns the internal index query.
+func derivedAddressGetIntIndex(qtx *sqlcpg.Queries) func(context.Context,
 	int64) (int64, error) {
 
 	return qtx.GetAndIncrementNextInternalIndex
 }
 
-// newDerivedAddressCreateAddrPg returns the derived address insert helper.
-func newDerivedAddressCreateAddrPg(qtx *sqlcpg.Queries) func(context.Context,
+// derivedAddressCreateAddr returns the derived address insert helper.
+func derivedAddressCreateAddr(qtx *sqlcpg.Queries) func(context.Context,
 	int64, db.AddressType, uint32, uint32, []byte) (sqlcpg.CreateDerivedAddressRow,
 	error) {
 
@@ -195,42 +195,42 @@ func newDerivedAddressCreateAddrPg(qtx *sqlcpg.Queries) func(context.Context,
 	}
 }
 
-// newDerivedAddressRowIDPg returns the created address ID.
-func newDerivedAddressRowIDPg(row sqlcpg.CreateDerivedAddressRow) int64 {
+// derivedAddressRowID returns the created address ID.
+func derivedAddressRowID(row sqlcpg.CreateDerivedAddressRow) int64 {
 	return row.ID
 }
 
-// newDerivedAddressRowCreatedAtPg returns the CreatedAt timestamp.
-func newDerivedAddressRowCreatedAtPg(
+// derivedAddressRowCreatedAt returns the CreatedAt timestamp.
+func derivedAddressRowCreatedAt(
 	row sqlcpg.CreateDerivedAddressRow) time.Time {
 
 	return row.CreatedAt
 }
 
-// newImportedAddressGetAccountIDPg extracts the account ID from a row.
-func newImportedAddressGetAccountIDPg(
+// importedAddressGetAccountID extracts the account ID from a row.
+func importedAddressGetAccountID(
 	row sqlcpg.GetAccountByWalletScopeAndNameRow) int64 {
 
 	return row.ID
 }
 
-// pgCreateImportedAddress returns the imported address insert helper.
-func pgCreateImportedAddress(qtx *sqlcpg.Queries) func(context.Context,
+// createImportedAddress returns the imported address insert helper.
+func createImportedAddress(qtx *sqlcpg.Queries) func(context.Context,
 	sqlcpg.CreateImportedAddressParams) (sqlcpg.CreateImportedAddressRow,
 	error) {
 
 	return qtx.CreateImportedAddress
 }
 
-// pgInsertAddressSecret returns the secret insert helper.
-func pgInsertAddressSecret(qtx *sqlcpg.Queries) func(context.Context,
+// insertAddressSecret returns the secret insert helper.
+func insertAddressSecret(qtx *sqlcpg.Queries) func(context.Context,
 	sqlcpg.InsertAddressSecretParams) error {
 
 	return qtx.InsertAddressSecret
 }
 
-// createImportedAddressParamsPg maps imported params to sqlc params.
-func createImportedAddressParamsPg(accountID int64,
+// createImportedAddressParams maps imported params to sqlc params.
+func createImportedAddressParams(accountID int64,
 	params db.NewImportedAddressParams) sqlcpg.CreateImportedAddressParams {
 
 	return sqlcpg.CreateImportedAddressParams{
@@ -241,8 +241,8 @@ func createImportedAddressParamsPg(accountID int64,
 	}
 }
 
-// insertAddressSecretParamsPg maps imported params to secret params.
-func insertAddressSecretParamsPg(addressID int64,
+// insertAddressSecretParams maps imported params to secret params.
+func insertAddressSecretParams(addressID int64,
 	params db.NewImportedAddressParams) sqlcpg.InsertAddressSecretParams {
 
 	return sqlcpg.InsertAddressSecretParams{
@@ -252,21 +252,21 @@ func insertAddressSecretParamsPg(addressID int64,
 	}
 }
 
-// importedAddressRowIDPg returns the created address ID.
-func importedAddressRowIDPg(row sqlcpg.CreateImportedAddressRow) int64 {
+// importedAddressRowID returns the created address ID.
+func importedAddressRowID(row sqlcpg.CreateImportedAddressRow) int64 {
 	return row.ID
 }
 
-// importedAddressRowCreatedAtPg returns the CreatedAt timestamp.
-func importedAddressRowCreatedAtPg(
+// importedAddressRowCreatedAt returns the CreatedAt timestamp.
+func importedAddressRowCreatedAt(
 	row sqlcpg.CreateImportedAddressRow) time.Time {
 
 	return row.CreatedAt
 }
 
-// pgAddressSecretRowToSecret converts a PostgreSQL address secret row to an
+// addressSecretRowToSecret converts a PostgreSQL address secret row to an
 // AddressSecret struct.
-func pgAddressSecretRowToSecret(
+func addressSecretRowToSecret(
 	row sqlcpg.GetAddressSecretRow) (*db.AddressSecret, error) {
 
 	return db.AddressSecretRowToSecret(db.AddressSecretRow{
@@ -276,17 +276,17 @@ func pgAddressSecretRowToSecret(
 	})
 }
 
-// pgAddressInfoRow is a type constraint that unifies all PostgreSQL address
+// addressInfoRow is a type constraint that unifies all PostgreSQL address
 // row types that share the same field structure. This enables a single
 // generic conversion function to handle all address query result types.
-type pgAddressInfoRow interface {
+type addressInfoRow interface {
 	sqlcpg.GetAddressByScriptPubKeyRow |
 		sqlcpg.ListAddressesByAccountRow
 }
 
-// pgAddressRowToInfo converts a PostgreSQL address row to an AddressInfo
+// addressRowToInfo converts a PostgreSQL address row to an AddressInfo
 // struct.
-func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*db.AddressInfo, error) {
+func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlcpg.GetAddressByScriptPubKeyRow(row)
@@ -316,13 +316,13 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*db.AddressInfo, error) {
 	return info, nil
 }
 
-// pgListAddressesByAccount lists addresses filtered by wallet ID, key scope,
+// listAddressesByAccount lists addresses filtered by wallet ID, key scope,
 // and account name, with pagination support.
-func pgListAddressesByAccount(ctx context.Context, q *sqlcpg.Queries,
+func listAddressesByAccount(ctx context.Context, q *sqlcpg.Queries,
 	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
 
 	rows, err := q.ListAddressesByAccount(
-		ctx, pgBuildAddressPageParams(query),
+		ctx, buildAddressPageParams(query),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list addresses by account: %w", err)
@@ -330,7 +330,7 @@ func pgListAddressesByAccount(ctx context.Context, q *sqlcpg.Queries,
 
 	items := make([]db.AddressInfo, len(rows))
 	for i, row := range rows {
-		item, err := pgAddressRowToInfo(row)
+		item, err := addressRowToInfo(row)
 		if err != nil {
 			return nil,
 				fmt.Errorf("list addresses by account: map address row: %w",
@@ -343,9 +343,9 @@ func pgListAddressesByAccount(ctx context.Context, q *sqlcpg.Queries,
 	return items, nil
 }
 
-// pgBuildAddressPageParams translates a ListAddresses query to
+// buildAddressPageParams translates a ListAddresses query to
 // ListAddressesByAccount parameters, handling pagination cursors.
-func pgBuildAddressPageParams(
+func buildAddressPageParams(
 	q db.ListAddressesQuery) sqlcpg.ListAddressesByAccountParams {
 
 	params := sqlcpg.ListAddressesByAccountParams{
