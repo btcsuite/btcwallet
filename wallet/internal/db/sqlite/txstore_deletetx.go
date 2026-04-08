@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // DeleteTx atomically removes one unmined transaction and restores any wallet
@@ -18,17 +18,17 @@ import (
 // terminal invalid-history rows remain part of the wallet timeline. The
 // transaction must also be a leaf among the wallet's unmined transactions so
 // the delete cannot detach child spenders from their parent history.
-func (s *SqliteStore) DeleteTx(ctx context.Context,
+func (s *Store) DeleteTx(ctx context.Context,
 	params db.DeleteTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.DeleteTxWithOps(ctx, params, deleteTxOps{qtx: qtx})
 	})
 }
 
 // deleteTxOps adapts sqlite sqlc queries to the shared DeleteTx flow.
 type deleteTxOps struct {
-	qtx *sqlcsqlite.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.DeleteTxOps = (*deleteTxOps)(nil)
@@ -61,7 +61,7 @@ func (o deleteTxOps) ClearSpentUtxos(ctx context.Context,
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
 		ctx,
-		sqlcsqlite.ClearUtxosSpentByTxIDParams{
+		sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID:    int64(walletID),
 			SpentByTxID: sql.NullInt64{Int64: txID, Valid: true},
 		},
@@ -80,7 +80,7 @@ func (o deleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 
 	_, err := o.qtx.DeleteUtxosByTxID(
 		ctx,
-		sqlcsqlite.DeleteUtxosByTxIDParams{
+		sqlc.DeleteUtxosByTxIDParams{
 			WalletID: int64(walletID),
 			TxID:     txID,
 		},
@@ -99,7 +99,7 @@ func (o deleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 
 	rows, err := o.qtx.DeleteUnminedTransactionByHash(
 		ctx,
-		sqlcsqlite.DeleteUnminedTransactionByHashParams{
+		sqlc.DeleteUnminedTransactionByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -114,7 +114,7 @@ func (o deleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 // ensureDeleteLeaf rejects DeleteTx requests for transactions that still
 // have direct unmined child spenders, including children that spend non-credit
 // parent outputs.
-func ensureDeleteLeaf(ctx context.Context, qtx *sqlcsqlite.Queries,
+func ensureDeleteLeaf(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash, txID int64) error {
 
 	rows, err := qtx.ListUnminedTransactions(ctx, int64(walletID))
@@ -124,7 +124,7 @@ func ensureDeleteLeaf(ctx context.Context, qtx *sqlcsqlite.Queries,
 
 	candidates, err := db.BuildUnminedTxRecords(
 		rows,
-		func(row sqlcsqlite.ListUnminedTransactionsRow) (int64,
+		func(row sqlc.ListUnminedTransactionsRow) (int64,
 			[]byte, []byte) {
 
 			return row.ID, row.TxHash, row.RawTx
@@ -153,33 +153,33 @@ func ensureDeleteLeaf(ctx context.Context, qtx *sqlcsqlite.Queries,
 
 // getDeleteTxMeta loads the transaction metadata DeleteTx needs and
 // enforces the unmined precondition up front.
-func getDeleteTxMeta(ctx context.Context, qtx *sqlcsqlite.Queries,
+func getDeleteTxMeta(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash) (
-	sqlcsqlite.GetTransactionMetaByHashRow, error) {
+	sqlc.GetTransactionMetaByHashRow, error) {
 
 	meta, err := qtx.GetTransactionMetaByHash(
-		ctx, sqlcsqlite.GetTransactionMetaByHashParams{
+		ctx, sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return sqlcsqlite.GetTransactionMetaByHashRow{},
+			return sqlc.GetTransactionMetaByHashRow{},
 				fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
-		return sqlcsqlite.GetTransactionMetaByHashRow{},
+		return sqlc.GetTransactionMetaByHashRow{},
 			fmt.Errorf("get tx metadata: %w", err)
 	}
 
 	status, err := db.ParseTxStatus(meta.TxStatus)
 	if err != nil {
-		return sqlcsqlite.GetTransactionMetaByHashRow{}, err
+		return sqlc.GetTransactionMetaByHashRow{}, err
 	}
 
 	if meta.BlockHeight.Valid || !db.IsUnminedStatus(status) {
-		return sqlcsqlite.GetTransactionMetaByHashRow{},
+		return sqlc.GetTransactionMetaByHashRow{},
 			fmt.Errorf("delete tx %s: %w", txHash,
 				db.ErrDeleteRequiresUnmined)
 	}

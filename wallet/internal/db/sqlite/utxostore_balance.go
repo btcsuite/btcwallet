@@ -3,20 +3,20 @@ package sqlite
 import (
 	"context"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // Balance returns the sum of wallet-owned current UTXOs after optional filters.
-func (s *SqliteStore) Balance(ctx context.Context,
+func (s *Store) Balance(ctx context.Context,
 	params db.BalanceParams) (db.BalanceResult, error) {
 
 	nowUTC := time.Now().UTC()
 
-	balance, err := s.queries.Balance(ctx, sqlcsqlite.BalanceParams{
+	balance, err := s.queries.Balance(ctx, sqlc.BalanceParams{
 		NowUtc:           nowUTC,
 		WalletID:         int64(params.WalletID),
 		AccountNumber:    db.NullableUint32ToSQLInt64(params.Account),

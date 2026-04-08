@@ -5,21 +5,21 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // GetUtxo retrieves one current wallet-owned UTXO by outpoint.
 //
 // The output must still be unspent and its creating transaction must still be
 // in `pending` or `published` status.
-func (s *SqliteStore) GetUtxo(ctx context.Context,
+func (s *Store) GetUtxo(ctx context.Context,
 	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
 	row, err := s.queries.GetUtxoByOutpoint(
-		ctx, sqlcsqlite.GetUtxoByOutpointParams{
+		ctx, sqlc.GetUtxoByOutpointParams{
 			WalletID:    int64(query.WalletID),
 			TxHash:      query.OutPoint.Hash[:],
 			OutputIndex: int64(query.OutPoint.Index),

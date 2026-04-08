@@ -5,21 +5,21 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // GetTx retrieves one wallet-scoped transaction snapshot by hash.
 //
 // The returned TxInfo is rebuilt from normalized SQL columns; missing rows map
 // to ErrTxNotFound for the requested wallet/hash pair.
-func (s *SqliteStore) GetTx(ctx context.Context,
+func (s *Store) GetTx(ctx context.Context,
 	query db.GetTxQuery) (*db.TxInfo, error) {
 
 	row, err := s.queries.GetTransactionByHash(
-		ctx, sqlcsqlite.GetTransactionByHashParams{
+		ctx, sqlc.GetTransactionByHashParams{
 			WalletID: int64(query.WalletID),
 			TxHash:   query.Txid[:],
 		},
