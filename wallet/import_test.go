@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -292,4 +293,150 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	addrManaged, err := w.AddressInfo(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
+}
+
+// TestImportAccountDryRunNoAddrLeak verifies that ImportAccountDryRun does not
+// leak in-memory state after the dry-run transaction is rolled back.
+// Previously, preview addresses populated ScopedKeyManager.addrs immediately
+// during derivation but were never cleaned up on rollback, causing
+// Manager.Address to succeed while Manager.AddrAccount failed with "address not
+// found", a split-brain inconsistency.
+func TestImportAccountDryRunNoAddrLeak(t *testing.T) {
+	t.Parallel()
+
+	// Use the bip84 test case: accountIndex=1 (non-zero, non-default).
+	var tc *testCase
+	for _, cc := range testCases {
+		if cc.accountIndex == 1 &&
+			cc.expectedScope == waddrmgr.KeyScopeBIP0084 {
+
+			tc = cc
+			break
+		}
+	}
+	require.NotNil(t, tc, "expected bip84 test case with accountIndex=1")
+
+	t.Run("watch-only", func(t *testing.T) {
+		t.Parallel()
+
+		w, cleanup := testWalletWatchingOnly(t)
+		defer cleanup()
+
+		testDryRunNoLeak(t, w, tc)
+	})
+
+	t.Run("normal wallet unlock after dry-run", func(t *testing.T) {
+		t.Parallel()
+
+		w, cleanup := testWallet(t)
+		defer cleanup()
+
+		root, err := hdkeychain.NewKeyFromString(tc.masterPriv)
+		require.NoError(t, err)
+
+		acctPub := deriveAcctPubKey(
+			t, root, tc.expectedScope,
+			hardenedKey(tc.accountIndex),
+		)
+
+		// Dry-run only; do NOT commit a real import afterward, because
+		// importing a watch-only account into a normal wallet leaves
+		// keys that cannot be decrypted on unlock.
+		_, extAddrs, intAddrs, err := w.ImportAccountDryRun(
+			"dryrun-test", acctPub,
+			root.ParentFingerprint(), &tc.addrType, 1,
+		)
+		require.NoError(t, err)
+		require.Len(t, extAddrs, 1)
+		require.Len(t, intAddrs, 1)
+
+		// On a normal wallet, dry-run address derivation previously
+		// appended stale entries to deriveOnUnlock through
+		// keyToManaged. After rollback, these referenced a
+		// non-existent account and caused the next Unlock to fail
+		// with "account not found".
+		w.Lock()
+
+		err = w.Unlock(
+			[]byte("world"), time.After(10*time.Minute),
+		)
+		require.NoError(t, err, "unlock after dry-run must succeed")
+	})
+}
+
+// testDryRunNoLeak performs a dry-run import, verifies no in-memory state was
+// leaked afterward, and then confirms a real import still works.
+func testDryRunNoLeak(t *testing.T, w *Wallet, tc *testCase) {
+	t.Helper()
+
+	root, err := hdkeychain.NewKeyFromString(tc.masterPriv)
+	require.NoError(t, err)
+
+	acctPub := deriveAcctPubKey(
+		t, root, tc.expectedScope, hardenedKey(tc.accountIndex),
+	)
+
+	// Perform a dry-run import. This should return preview addresses but
+	// must not leave any residual state in memory.
+	_, extAddrs, intAddrs, err := w.ImportAccountDryRun(
+		"dryrun-test", acctPub, root.ParentFingerprint(),
+		&tc.addrType, 1,
+	)
+	require.NoError(t, err)
+	require.Len(t, extAddrs, 1)
+	require.Len(t, intAddrs, 1)
+
+	// After the dry-run, the preview addresses must NOT be visible via
+	// the wallet's address lookups. If they are, the address cache was
+	// leaked.
+	have, err := w.HaveAddress(extAddrs[0].Address())
+	require.NoError(t, err)
+	require.False(t, have, "external dry-run address leaked into cache")
+
+	have, err = w.HaveAddress(intAddrs[0].Address())
+	require.NoError(t, err)
+	require.False(t, have, "internal dry-run address leaked into cache")
+
+	// Verify Address/AddrAccount consistency: both must fail with
+	// ErrAddressNotFound, not just any error. A split-brain would show
+	// Address succeeding from cache while AddrAccount fails from the
+	// rolled-back DB.
+	_, err = w.AccountOfAddress(extAddrs[0].Address())
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound),
+		"AccountOfAddress should return ErrAddressNotFound for "+
+			"dry-run addr, got: %v", err,
+	)
+
+	_, err = w.AccountOfAddress(intAddrs[0].Address())
+	require.True(
+		t, waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound),
+		"AccountOfAddress should return ErrAddressNotFound for "+
+			"dry-run addr, got: %v", err,
+	)
+
+	// Now do a real import and derive addresses to confirm the normal
+	// flow is unaffected.
+	acct, err := w.ImportAccount(
+		"real-test", acctPub, root.ParentFingerprint(), &tc.addrType,
+	)
+	require.NoError(t, err)
+
+	extAddr, err := w.NewAddress(acct.AccountNumber, tc.expectedScope)
+	require.NoError(t, err)
+	require.Equal(t, tc.expectedAddr, extAddr.String())
+
+	intAddr, err := w.NewChangeAddress(acct.AccountNumber, tc.expectedScope)
+	require.NoError(t, err)
+	require.Equal(t, tc.expectedChangeAddr, intAddr.String())
+
+	// After the real import, lookups must succeed consistently.
+	have, err = w.HaveAddress(extAddr)
+	require.NoError(t, err)
+	require.True(t, have, "committed address should be visible")
+
+	_, err = w.AccountOfAddress(extAddr)
+	require.NoError(
+		t, err, "AccountOfAddress should succeed for committed addr",
+	)
 }
