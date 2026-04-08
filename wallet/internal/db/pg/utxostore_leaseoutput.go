@@ -23,7 +23,7 @@ func (s *PostgresStore) LeaseOutput(ctx context.Context,
 
 	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		acquiredLease, err := db.LeaseOutputWithOps(
-			ctx, params, &pgLeaseOutputOps{qtx: qtx},
+			ctx, params, &leaseOutputOps{qtx: qtx},
 		)
 		if err != nil {
 			return err
@@ -40,17 +40,17 @@ func (s *PostgresStore) LeaseOutput(ctx context.Context,
 	return lease, nil
 }
 
-// pgLeaseOutputOps adapts postgres sqlc queries to the shared LeaseOutput
+// leaseOutputOps adapts postgres sqlc queries to the shared LeaseOutput
 // workflow.
-type pgLeaseOutputOps struct {
+type leaseOutputOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ db.LeaseOutputOps = (*pgLeaseOutputOps)(nil)
+var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
 
 // Acquire attempts to write or renew one postgres lease row for the requested
 // outpoint.
-func (o *pgLeaseOutputOps) Acquire(ctx context.Context,
+func (o *leaseOutputOps) Acquire(ctx context.Context,
 	params db.LeaseOutputParams, nowUTC time.Time,
 	expiresAt time.Time) (time.Time, error) {
 
@@ -82,7 +82,7 @@ func (o *pgLeaseOutputOps) Acquire(ctx context.Context,
 
 // HasUtxo reports whether the requested outpoint still exists as a current
 // wallet-owned UTXO.
-func (o *pgLeaseOutputOps) HasUtxo(ctx context.Context,
+func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	params db.LeaseOutputParams) (bool, error) {
 
 	outputIndex, err := db.Uint32ToInt32(params.OutPoint.Index)

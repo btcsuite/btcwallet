@@ -60,8 +60,8 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 		execErr:  errDummy,
 		queryErr: errDummy,
 	})
-	deleteOps := pgDeleteTxOps{qtx: qtx}
-	rollbackOps := pgRollbackToBlockOps{qtx: qtx}
+	deleteOps := deleteTxOps{qtx: qtx}
+	rollbackOps := rollbackToBlockOps{qtx: qtx}
 
 	err := deleteOps.ClearSpentUtxos(t.Context(), 1, 2)
 	require.ErrorContains(t, err, "clear spent utxo rows")
@@ -91,13 +91,13 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
 	qtx := sqlcpg.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
-	createOps := &pgCreateTxOps{
-		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{qtx: qtx},
+	createOps := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
-	invalidateOps := pgInvalidateUnminedTxOps{qtx: qtx}
-	rollbackOps := pgRollbackToBlockOps{qtx: qtx}
-	updateOps := &pgUpdateTxOps{qtx: qtx}
-	releaseOps := pgReleaseOutputOps{qtx: qtx}
+	invalidateOps := invalidateUnminedTxOps{qtx: qtx}
+	rollbackOps := rollbackToBlockOps{qtx: qtx}
+	updateOps := &updateTxOps{qtx: qtx}
+	releaseOps := releaseOutputOps{qtx: qtx}
 
 	err := createOps.MarkTxnsReplaced(
 		t.Context(), 1, []int64{2},
@@ -109,7 +109,7 @@ func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "insert replacement edge")
 
-	err = markInputsSpentPg(t.Context(), qtx, db.CreateTxParams{
+	err = markInputsSpent(t.Context(), qtx, db.CreateTxParams{
 		WalletID: 1,
 		Tx:       testRegularMsgTx(),
 		Received: time.Unix(1, 0),
@@ -175,15 +175,15 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = collectPgConflictRootIDs(
+	_, err = collectConflictRootIDs(
 		t.Context(), nil, req,
 	)
 	require.ErrorContains(t, err, "convert input outpoint index 0")
 
-	_, err = creditExistsPg(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
+	_, err = creditExists(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
 	require.ErrorContains(t, err, "convert credit index")
 
-	err = markInputsSpentPg(t.Context(), nil, db.CreateTxParams{
+	err = markInputsSpent(t.Context(), nil, db.CreateTxParams{
 		WalletID: 1,
 		Tx: &wire.MsgTx{
 			Version: wire.TxVersion,
@@ -198,24 +198,24 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	}, 3)
 	require.ErrorContains(t, err, "convert input outpoint index 0")
 
-	err = pgRollbackToBlockOps{}.RewindWalletSyncStateHeights(
+	err = rollbackToBlockOps{}.RewindWalletSyncStateHeights(
 		t.Context(), ^uint32(0),
 	)
 	require.ErrorContains(t, err, "convert rollback height")
 
-	err = pgRollbackToBlockOps{}.DeleteBlocksAtOrAboveHeight(
+	err = rollbackToBlockOps{}.DeleteBlocksAtOrAboveHeight(
 		t.Context(), ^uint32(0),
 	)
 	require.ErrorContains(t, err, "convert rollback height")
 
-	_, _, err = buildPgConflictRoots([]sqlcpg.ListUnminedTransactionsRow{{
+	_, _, err = buildConflictRoots([]sqlcpg.ListUnminedTransactionsRow{{
 		ID:       1,
 		TxHash:   []byte{1},
 		TxStatus: 0,
 	}}, map[int64]struct{}{1: {}})
 	require.ErrorContains(t, err, "tx hash")
 
-	leaseOps := &pgLeaseOutputOps{}
+	leaseOps := &leaseOutputOps{}
 
 	_, err = leaseOps.Acquire(t.Context(), db.LeaseOutputParams{
 		WalletID: 1,

@@ -18,22 +18,22 @@ func (s *PostgresStore) InvalidateUnminedTx(ctx context.Context,
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		return db.InvalidateUnminedTxWithOps(
-			ctx, params, pgInvalidateUnminedTxOps{qtx: qtx},
+			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)
 	})
 }
 
-// pgInvalidateUnminedTxOps adapts postgres sqlc queries to the shared
+// invalidateUnminedTxOps adapts postgres sqlc queries to the shared
 // InvalidateUnminedTx workflow.
-type pgInvalidateUnminedTxOps struct {
+type invalidateUnminedTxOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ db.InvalidateUnminedTxOps = (*pgInvalidateUnminedTxOps)(nil)
+var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
 
 // LoadInvalidateTarget loads the root tx metadata used by the shared
 // invalidation workflow.
-func (o pgInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
+func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
@@ -68,7 +68,7 @@ func (o pgInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 
 // ListUnminedTxRecords loads and decodes the wallet's active unmined
 // transaction rows.
-func (o pgInvalidateUnminedTxOps) ListUnminedTxRecords(
+func (o invalidateUnminedTxOps) ListUnminedTxRecords(
 	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
@@ -85,7 +85,7 @@ func (o pgInvalidateUnminedTxOps) ListUnminedTxRecords(
 
 // ClearSpentUtxos restores any wallet-owned parent outputs spent by the given
 // transaction row.
-func (o pgInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
+func (o invalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -106,7 +106,7 @@ func (o pgInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 
 // MarkTxnsFailed marks the provided tx rows failed in one
 // batch update.
-func (o pgInvalidateUnminedTxOps) MarkTxnsFailed(
+func (o invalidateUnminedTxOps) MarkTxnsFailed(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(

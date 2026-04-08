@@ -11,9 +11,9 @@ import (
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// buildPgBlock constructs a Block from the given PostgreSQL block
+// buildBlock constructs a Block from the given PostgreSQL block
 // fields.
-func buildPgBlock(height sql.NullInt32, hash []byte,
+func buildBlock(height sql.NullInt32, hash []byte,
 	timestamp sql.NullInt64) (*db.Block, error) {
 
 	height32, err := db.NullInt32ToUint32(height)
@@ -24,8 +24,8 @@ func buildPgBlock(height sql.NullInt32, hash []byte,
 	return db.BuildBlock(hash, height32, timestamp.Int64)
 }
 
-// ensureBlockExistsPg ensures that a block exists in the database.
-func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
+// ensureBlockExists ensures that a block exists in the database.
+func ensureBlockExists(ctx context.Context, qtx *sqlcpg.Queries,
 	block *db.Block) error {
 
 	height, err := db.Uint32ToInt32(block.Height)
@@ -47,9 +47,9 @@ func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 	return nil
 }
 
-// requireBlockMatchesPg loads the shared block row for the provided height and
+// requireBlockMatches loads the shared block row for the provided height and
 // verifies that its stored metadata matches the supplied block reference.
-func requireBlockMatchesPg(ctx context.Context, qtx *sqlcpg.Queries,
+func requireBlockMatches(ctx context.Context, qtx *sqlcpg.Queries,
 	block *db.Block) (int32, error) {
 
 	height, err := db.Uint32ToInt32(block.Height)

@@ -19,17 +19,17 @@ func (s *PostgresStore) ListTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	if query.UnminedOnly {
-		return s.listTxnsWithoutBlockPg(ctx, query.WalletID)
+		return s.listTxnsWithoutBlock(ctx, query.WalletID)
 	}
 
-	return s.listConfirmedTxnsPg(ctx, query)
+	return s.listConfirmedTxns(ctx, query)
 }
 
-// listTxnsWithoutBlockPg loads every transaction row that currently has no
+// listTxnsWithoutBlock loads every transaction row that currently has no
 // confirming block. This includes the active unmined set together with any
 // retained invalid history that rollback or invalidation flows left without a
 // confirming block.
-func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
+func (s *PostgresStore) listTxnsWithoutBlock(ctx context.Context,
 	walletID uint32) ([]db.TxInfo, error) {
 
 	rows, err := s.queries.ListTransactionsWithoutBlock(ctx, int64(walletID))
@@ -39,7 +39,7 @@ func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
 
 	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
-		info, err := txInfoFromPgRow(
+		info, err := txInfoFromRow(
 			row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
 			row.BlockHash, row.BlockTimestamp, int64(row.TxStatus), row.TxLabel,
 		)
@@ -53,9 +53,9 @@ func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
 	return infos, nil
 }
 
-// listConfirmedTxnsPg loads the confirmed height-range view used by ListTxns
+// listConfirmedTxns loads the confirmed height-range view used by ListTxns
 // when callers query mined history.
-func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
+func (s *PostgresStore) listConfirmedTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	startHeight, err := db.Uint32ToInt32(query.StartHeight)
@@ -81,7 +81,7 @@ func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
 
 	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
-		block, err := buildPgBlock(
+		block, err := buildBlock(
 			row.BlockHeight,
 			row.BlockHash,
 			sql.NullInt64{Int64: row.BlockTimestamp, Valid: true},

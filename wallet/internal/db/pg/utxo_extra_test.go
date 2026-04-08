@@ -14,7 +14,7 @@ func TestUtxoInfoFromPgRowInvalidOutputIndex(t *testing.T) {
 	t.Parallel()
 
 	hash := chainhash.Hash{15}
-	_, err := utxoInfoFromPgRow(
+	_, err := utxoInfoFromRow(
 		hash[:], -1, 1000, []byte{0x59}, time.Unix(1000, 0), false,
 		sql.NullInt32{},
 	)
@@ -26,7 +26,7 @@ func TestUtxoInfoFromPgRowInvalidBlockHeight(t *testing.T) {
 	t.Parallel()
 
 	hash := chainhash.Hash{16}
-	_, err := utxoInfoFromPgRow(
+	_, err := utxoInfoFromRow(
 		hash[:], 0, 1000, []byte{0x5a}, time.Unix(1001, 0), false,
 		sql.NullInt32{Int32: -1, Valid: true},
 	)
