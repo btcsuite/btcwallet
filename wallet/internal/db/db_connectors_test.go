@@ -10,24 +10,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewPostgresStoreValidateConfig(t *testing.T) {
+func TestPostgresNewStoreValidateConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
-		cfg     db.PostgresConfig
+		cfg     dbpg.Config
 		wantErr error
 	}{
 		{
 			name: "empty DSN",
-			cfg: db.PostgresConfig{
+			cfg: dbpg.Config{
 				Dsn: "",
 			},
 			wantErr: db.ErrEmptyDSN,
 		},
 		{
 			name: "negative max connections",
-			cfg: db.PostgresConfig{
+			cfg: dbpg.Config{
 				Dsn:            "postgres://test",
 				MaxConnections: -1,
 			},
@@ -39,22 +39,22 @@ func TestNewPostgresStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := dbpg.NewPostgresStore(t.Context(), tc.cfg)
+			store, err := dbpg.NewStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
 	}
 }
 
-func TestNewPostgresStoreConnectionFailure(t *testing.T) {
+func TestPostgresNewStoreConnectionFailure(t *testing.T) {
 	t.Parallel()
 
 	// Valid config, but hits a connection failure.
-	cfg := db.PostgresConfig{
+	cfg := dbpg.Config{
 		Dsn: "postgres://localhost:1/testdb",
 	}
 
-	store, err := dbpg.NewPostgresStore(t.Context(), cfg)
+	store, err := dbpg.NewStore(t.Context(), cfg)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ping database")
 	require.NotErrorIs(t, err, db.ErrEmptyDSN)

@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // ListTxns lists wallet-scoped transactions using either the confirmed-range
@@ -15,7 +15,7 @@ import (
 // The no-confirming-block path returns every row without a confirming block,
 // including retained invalid history such as orphaned or failed transactions,
 // while the confirmed path is bounded by the requested height range.
-func (s *PostgresStore) ListTxns(ctx context.Context,
+func (s *Store) ListTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	if query.UnminedOnly {
@@ -29,7 +29,7 @@ func (s *PostgresStore) ListTxns(ctx context.Context,
 // confirming block. This includes the active unmined set together with any
 // retained invalid history that rollback or invalidation flows left without a
 // confirming block.
-func (s *PostgresStore) listTxnsWithoutBlock(ctx context.Context,
+func (s *Store) listTxnsWithoutBlock(ctx context.Context,
 	walletID uint32) ([]db.TxInfo, error) {
 
 	rows, err := s.queries.ListTransactionsWithoutBlock(ctx, int64(walletID))
@@ -55,7 +55,7 @@ func (s *PostgresStore) listTxnsWithoutBlock(ctx context.Context,
 
 // listConfirmedTxns loads the confirmed height-range view used by ListTxns
 // when callers query mined history.
-func (s *PostgresStore) listConfirmedTxns(ctx context.Context,
+func (s *Store) listConfirmedTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	startHeight, err := db.Uint32ToInt32(query.StartHeight)
@@ -69,7 +69,7 @@ func (s *PostgresStore) listConfirmedTxns(ctx context.Context,
 	}
 
 	rows, err := s.queries.ListTransactionsByHeightRange(
-		ctx, sqlcpg.ListTransactionsByHeightRangeParams{
+		ctx, sqlc.ListTransactionsByHeightRangeParams{
 			WalletID:    int64(query.WalletID),
 			StartHeight: startHeight,
 			EndHeight:   endHeight,

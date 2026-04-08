@@ -4,13 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,7 +56,7 @@ func (e errorDBTX) QueryRowContext(context.Context, string,
 func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlcpg.New(errorDBTX{
+	qtx := sqlc.New(errorDBTX{
 		execErr:  errDummy,
 		queryErr: errDummy,
 	})
@@ -90,7 +90,7 @@ func TestPgDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 func TestPgTxStoreOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlcpg.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
+	qtx := sqlc.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
 	createOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}
@@ -208,7 +208,7 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "convert rollback height")
 
-	_, _, err = buildConflictRoots([]sqlcpg.ListUnminedTransactionsRow{{
+	_, _, err = buildConflictRoots([]sqlc.ListUnminedTransactionsRow{{
 		ID:       1,
 		TxHash:   []byte{1},
 		TxStatus: 0,

@@ -2,10 +2,7 @@ package db
 
 import (
 	"errors"
-	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -35,33 +32,3 @@ var (
 	// ErrEmptyDSN is returned when the DSN string is empty.
 	ErrEmptyDSN = errors.New("DSN is required")
 )
-
-// PostgresConfig holds the configuration for the PostgreSQL database.
-type PostgresConfig struct {
-	// Dsn is the database connection string.
-	Dsn string
-
-	// MaxConnections is the maximum number of open connections to the
-	// database. Set to zero to use DefaultMaxConnections.
-	MaxConnections int
-}
-
-// Validate checks that the PostgresConfig values are valid.
-func (c *PostgresConfig) Validate() error {
-	if c.Dsn == "" {
-		return ErrEmptyDSN
-	}
-
-	// Parse the DSN using pgx to ensure it's a valid PostgreSQL
-	// connection string.
-	_, err := pgx.ParseConfig(c.Dsn)
-	if err != nil {
-		return fmt.Errorf("invalid DSN: %w", err)
-	}
-
-	if c.MaxConnections < 0 {
-		return ErrNegativeMaxConns
-	}
-
-	return nil
-}
