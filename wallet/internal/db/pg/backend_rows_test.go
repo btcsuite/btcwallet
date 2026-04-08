@@ -3,12 +3,12 @@ package pg
 import (
 	"context"
 	"database/sql"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
@@ -94,7 +94,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	ctx := context.Background()
 	loadOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcpg.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
@@ -110,7 +110,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	}
 	confirmOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcpg.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row: newSQLiteRow(
 					t, "SELECT ?, ?, ?",
 					int64(block.Height), block.Hash[:],
@@ -128,7 +128,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 
 	conflictOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
-			qtx: sqlcpg.New(rowDBTX{
+			qtx: sqlc.New(rowDBTX{
 				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
 				queryErr: errDummy,
 			}),
@@ -146,15 +146,15 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
-	loadOps := &updateTxOps{qtx: sqlcpg.New(rowDBTX{
+	loadOps := &updateTxOps{qtx: sqlc.New(rowDBTX{
 		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 	})}
 	stateOps := &updateTxOps{
-		qtx:         sqlcpg.New(rowDBTX{rows: 0}),
+		qtx:         sqlc.New(rowDBTX{rows: 0}),
 		blockHeight: sql.NullInt32{},
 		status:      int16(db.TxStatusPublished),
 	}
-	labelOps := &updateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
+	labelOps := &updateTxOps{qtx: sqlc.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")

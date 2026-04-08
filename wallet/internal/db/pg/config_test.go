@@ -1,29 +1,30 @@
-package db
+package pg
 
 import (
 	"testing"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
-// TestPostgresConfigValidateSuccess tests valid PostgresConfig scenarios.
-func TestPostgresConfigValidateSuccess(t *testing.T) {
+// TestConfigValidateSuccess tests valid Config scenarios.
+func TestConfigValidateSuccess(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name   string
-		config PostgresConfig
+		config Config
 	}{
 		{
 			name: "valid config with all fields set",
-			config: PostgresConfig{
+			config: Config{
 				Dsn:            "postgres://user:pass@localhost/db",
 				MaxConnections: 25,
 			},
 		},
 		{
 			name: "valid config with zero max connections",
-			config: PostgresConfig{
+			config: Config{
 				Dsn:            "postgres://localhost/db",
 				MaxConnections: 0,
 			},
@@ -40,27 +41,27 @@ func TestPostgresConfigValidateSuccess(t *testing.T) {
 	}
 }
 
-// TestPostgresConfigValidateErrors tests PostgresConfig validation errors.
-func TestPostgresConfigValidateErrors(t *testing.T) {
+// TestConfigValidateErrors tests Config validation errors.
+func TestConfigValidateErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name           string
-		config         PostgresConfig
+		config         Config
 		expectedErr    error
 		expectAnyError bool
 	}{
 		{
 			name: "empty DSN",
-			config: PostgresConfig{
+			config: Config{
 				Dsn:            "",
 				MaxConnections: 10,
 			},
-			expectedErr: ErrEmptyDSN,
+			expectedErr: db.ErrEmptyDSN,
 		},
 		{
 			name: "invalid DSN format",
-			config: PostgresConfig{
+			config: Config{
 				Dsn:            "://invalid",
 				MaxConnections: 10,
 			},
@@ -68,11 +69,11 @@ func TestPostgresConfigValidateErrors(t *testing.T) {
 		},
 		{
 			name: "negative max connections",
-			config: PostgresConfig{
+			config: Config{
 				Dsn:            "postgres://localhost/db",
 				MaxConnections: -5,
 			},
-			expectedErr: ErrNegativeMaxConns,
+			expectedErr: db.ErrNegativeMaxConns,
 		},
 	}
 

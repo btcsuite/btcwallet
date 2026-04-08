@@ -4,27 +4,29 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// Ensure PostgresStore satisfies the AccountStore interface.
-var _ db.AccountStore = (*PostgresStore)(nil)
+// Ensure Store satisfies the AccountStore interface.
+var _ db.AccountStore = (*Store)(nil)
 
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
-func (s *PostgresStore) GetAccount(ctx context.Context,
+func (s *Store) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	getQueries := accountGetQueries{q: s.queries}
 
-	return db.GetAccountByQuery(ctx, query, getQueries.byNumber, getQueries.byName)
+	return db.GetAccountByQuery(
+		ctx, query, getQueries.byNumber, getQueries.byName,
+	)
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
 // filtered by name or key scope.
-func (s *PostgresStore) ListAccounts(ctx context.Context,
+func (s *Store) ListAccounts(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
 	listQueries := accountListQueries{q: s.queries}
@@ -36,7 +38,7 @@ func (s *PostgresStore) ListAccounts(ctx context.Context,
 
 // RenameAccount changes the name of an account. The account can be identified
 // by its old name or its account number.
-func (s *PostgresStore) RenameAccount(ctx context.Context,
+func (s *Store) RenameAccount(ctx context.Context,
 	params db.RenameAccountParams) error {
 
 	renameQueries := accountRenameQueries{q: s.queries}
@@ -49,7 +51,7 @@ func (s *PostgresStore) RenameAccount(ctx context.Context,
 // CreateDerivedAccount creates a new derived account with the given name and
 // scope. If the key scope does not exist, it is created with NULL encrypted
 // keys using the address schema provided by the caller.
-func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
+func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
 
 	paramsErr := params.Validate()
@@ -59,7 +61,7 @@ func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
 
 	var info *db.AccountInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -78,7 +80,7 @@ func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
 		}
 
 		row, err := qtx.CreateDerivedAccount(
-			ctx, sqlcpg.CreateDerivedAccountParams{
+			ctx, sqlc.CreateDerivedAccountParams{
 				ScopeID:     scopeID,
 				AccountName: params.Name,
 				OriginID:    int16(db.DerivedAccount),
@@ -118,12 +120,12 @@ func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
 // public key. If the key scope does not exist, it is created with NULL
 // encrypted keys using the address schema provided by the caller. Imported
 // accounts have NULL account_number since they don't follow BIP44 derivation.
-func (s *PostgresStore) CreateImportedAccount(ctx context.Context,
+func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
 
 	var props *db.AccountProperties
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		var err error
 
 		props, err = db.CreateImportedAccount(
@@ -131,7 +133,7 @@ func (s *PostgresStore) CreateImportedAccount(ctx context.Context,
 				return ensureKeyScope(ctx, qtx, params.WalletID, params.Scope)
 			}, qtx.CreateImportedAccount,
 			buildCreateImportedAccountArgs(params),
-			func(row sqlcpg.CreateImportedAccountRow) int64 { return row.ID },
+			func(row sqlc.CreateImportedAccountRow) int64 { return row.ID },
 			qtx.CreateAccountSecret, buildCreateAccountSecretArgs(params),
 			func(accountID int64) (*db.AccountProperties, error) {
 				return getAccountProps(ctx, qtx, accountID)
@@ -151,12 +153,12 @@ func (s *PostgresStore) CreateImportedAccount(ctx context.Context,
 // CreateImportedAccountParams for PostgreSQL.
 func buildCreateImportedAccountArgs(
 	params db.CreateImportedAccountParams,
-) func(int64, bool) sqlcpg.CreateImportedAccountParams {
+) func(int64, bool) sqlc.CreateImportedAccountParams {
 
 	return func(scopeID int64,
-		isWatchOnly bool) sqlcpg.CreateImportedAccountParams {
+		isWatchOnly bool) sqlc.CreateImportedAccountParams {
 
-		return sqlcpg.CreateImportedAccountParams{
+		return sqlc.CreateImportedAccountParams{
 			ScopeID:            scopeID,
 			AccountName:        params.Name,
 			OriginID:           int16(db.ImportedAccount),
@@ -174,10 +176,10 @@ func buildCreateImportedAccountArgs(
 // CreateAccountSecretParams for PostgreSQL.
 func buildCreateAccountSecretArgs(
 	params db.CreateImportedAccountParams,
-) func(int64) sqlcpg.CreateAccountSecretParams {
+) func(int64) sqlc.CreateAccountSecretParams {
 
-	return func(accountID int64) sqlcpg.CreateAccountSecretParams {
-		return sqlcpg.CreateAccountSecretParams{
+	return func(accountID int64) sqlc.CreateAccountSecretParams {
+		return sqlc.CreateAccountSecretParams{
 			AccountID:           accountID,
 			EncryptedPrivateKey: params.EncryptedPrivateKey,
 		}
@@ -186,7 +188,7 @@ func buildCreateAccountSecretArgs(
 
 // getAccountProps fetches full account properties from the database and
 // converts the row to AccountProperties.
-func getAccountProps(ctx context.Context, qtx *sqlcpg.Queries,
+func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	accountID int64) (*db.AccountProperties, error) {
 
 	row, err := qtx.GetAccountPropsById(ctx, accountID)
@@ -216,18 +218,18 @@ func getAccountProps(ctx context.Context, qtx *sqlcpg.Queries,
 
 // ensureKeyScope retrieves an existing key scope or creates it if missing for
 // PostgreSQL. It returns the scope ID once available.
-func ensureKeyScope(ctx context.Context, qtx *sqlcpg.Queries, walletID uint32,
+func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 	scope db.KeyScope) (int64, error) {
 
 	return db.EnsureKeyScope(
 		ctx, qtx.GetKeyScopeByWalletAndScope,
-		sqlcpg.GetKeyScopeByWalletAndScopeParams{
+		sqlc.GetKeyScopeByWalletAndScopeParams{
 			WalletID: int64(walletID),
 			Purpose:  int64(scope.Purpose),
 			CoinType: int64(scope.Coin),
 		}, qtx.CreateKeyScope,
-		func(addrSchema db.ScopeAddrSchema) sqlcpg.CreateKeyScopeParams {
-			return sqlcpg.CreateKeyScopeParams{
+		func(addrSchema db.ScopeAddrSchema) sqlc.CreateKeyScopeParams {
+			return sqlc.CreateKeyScopeParams{
 				WalletID:            int64(walletID),
 				Purpose:             int64(scope.Purpose),
 				CoinType:            int64(scope.Coin),
@@ -240,7 +242,7 @@ func ensureKeyScope(ctx context.Context, qtx *sqlcpg.Queries, walletID uint32,
 				),
 			}
 		},
-		func(row sqlcpg.KeyScope) int64 {
+		func(row sqlc.KeyScope) int64 {
 			return row.ID
 		}, scope,
 	)
@@ -250,13 +252,13 @@ func ensureKeyScope(ctx context.Context, qtx *sqlcpg.Queries, walletID uint32,
 // that share the same field structure. This enables a single generic conversion
 // function to handle all account query result types.
 type accountInfoRow interface {
-	sqlcpg.GetAccountByScopeAndNameRow |
-		sqlcpg.GetAccountByScopeAndNumberRow |
-		sqlcpg.GetAccountByWalletScopeAndNameRow |
-		sqlcpg.GetAccountByWalletScopeAndNumberRow |
-		sqlcpg.ListAccountsByWalletRow |
-		sqlcpg.ListAccountsByWalletScopeRow |
-		sqlcpg.ListAccountsByWalletAndNameRow
+	sqlc.GetAccountByScopeAndNameRow |
+		sqlc.GetAccountByScopeAndNumberRow |
+		sqlc.GetAccountByWalletScopeAndNameRow |
+		sqlc.GetAccountByWalletScopeAndNumberRow |
+		sqlc.ListAccountsByWalletRow |
+		sqlc.ListAccountsByWalletScopeRow |
+		sqlc.ListAccountsByWalletAndNameRow
 }
 
 // accountRowToInfo converts a PostgreSQL account row to an AccountInfo
@@ -265,7 +267,7 @@ type accountInfoRow interface {
 func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
-	base := sqlcpg.GetAccountByScopeAndNameRow(row)
+	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int16]{
 		AccountNumber:    base.AccountNumber,
@@ -284,7 +286,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 
 // accountListQueries groups PostgreSQL account listing query methods.
 type accountListQueries struct {
-	q *sqlcpg.Queries
+	q *sqlc.Queries
 }
 
 // byScope lists accounts filtered by wallet ID and key scope.
@@ -293,7 +295,7 @@ func (p accountListQueries) byScope(ctx context.Context,
 
 	return db.ListAccounts(
 		ctx, p.q.ListAccountsByWalletScope,
-		sqlcpg.ListAccountsByWalletScopeParams{
+		sqlc.ListAccountsByWalletScopeParams{
 			WalletID: int64(query.WalletID),
 			Purpose:  int64(query.Scope.Purpose),
 			CoinType: int64(query.Scope.Coin),
@@ -307,7 +309,7 @@ func (p accountListQueries) byName(ctx context.Context,
 
 	return db.ListAccounts(
 		ctx, p.q.ListAccountsByWalletAndName,
-		sqlcpg.ListAccountsByWalletAndNameParams{
+		sqlc.ListAccountsByWalletAndNameParams{
 			WalletID:    int64(query.WalletID),
 			AccountName: *query.Name,
 		}, accountRowToInfo,
@@ -326,7 +328,7 @@ func (p accountListQueries) all(ctx context.Context,
 
 // accountGetQueries groups PostgreSQL account retrieval query methods.
 type accountGetQueries struct {
-	q *sqlcpg.Queries
+	q *sqlc.Queries
 }
 
 // byNumber retrieves an account by wallet ID, scope, and account number.
@@ -335,7 +337,7 @@ func (p accountGetQueries) byNumber(ctx context.Context,
 
 	return db.GetAccount(
 		ctx, p.q.GetAccountByWalletScopeAndNumber,
-		sqlcpg.GetAccountByWalletScopeAndNumberParams{
+		sqlc.GetAccountByWalletScopeAndNumberParams{
 			WalletID:      int64(query.WalletID),
 			Purpose:       int64(query.Scope.Purpose),
 			CoinType:      int64(query.Scope.Coin),
@@ -350,7 +352,7 @@ func (p accountGetQueries) byName(ctx context.Context,
 
 	return db.GetAccount(
 		ctx, p.q.GetAccountByWalletScopeAndName,
-		sqlcpg.GetAccountByWalletScopeAndNameParams{
+		sqlc.GetAccountByWalletScopeAndNameParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
 			CoinType:    int64(query.Scope.Coin),
@@ -361,7 +363,7 @@ func (p accountGetQueries) byName(ctx context.Context,
 
 // accountRenameQueries groups PostgreSQL account rename query methods.
 type accountRenameQueries struct {
-	q *sqlcpg.Queries
+	q *sqlc.Queries
 }
 
 // byNumber renames an account identified by wallet ID, scope, and account
@@ -371,7 +373,7 @@ func (p accountRenameQueries) byNumber(ctx context.Context,
 
 	return db.RenameAccount(
 		ctx, p.q.UpdateAccountNameByWalletScopeAndNumber,
-		sqlcpg.UpdateAccountNameByWalletScopeAndNumberParams{
+		sqlc.UpdateAccountNameByWalletScopeAndNumberParams{
 			NewName:       params.NewName,
 			WalletID:      int64(params.WalletID),
 			Purpose:       int64(params.Scope.Purpose),
@@ -388,7 +390,7 @@ func (p accountRenameQueries) byName(ctx context.Context,
 
 	return db.RenameAccount(
 		ctx, p.q.UpdateAccountNameByWalletScopeAndName,
-		sqlcpg.UpdateAccountNameByWalletScopeAndNameParams{
+		sqlc.UpdateAccountNameByWalletScopeAndNameParams{
 			NewName:  params.NewName,
 			WalletID: int64(params.WalletID),
 			Purpose:  int64(params.Scope.Purpose),

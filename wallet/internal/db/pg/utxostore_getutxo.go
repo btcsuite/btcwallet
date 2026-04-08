@@ -5,17 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // GetUtxo retrieves one current wallet-owned UTXO by outpoint.
 //
 // The output must still be unspent and its creating transaction must still be
 // in `pending` or `published` status.
-func (s *PostgresStore) GetUtxo(ctx context.Context,
+func (s *Store) GetUtxo(ctx context.Context,
 	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
 	outputIndex, err := db.Uint32ToInt32(query.OutPoint.Index)
@@ -24,7 +24,7 @@ func (s *PostgresStore) GetUtxo(ctx context.Context,
 	}
 
 	row, err := s.queries.GetUtxoByOutpoint(
-		ctx, sqlcpg.GetUtxoByOutpointParams{
+		ctx, sqlc.GetUtxoByOutpointParams{
 			WalletID:    int64(query.WalletID),
 			TxHash:      query.OutPoint.Hash[:],
 			OutputIndex: outputIndex,
