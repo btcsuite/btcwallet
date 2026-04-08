@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlassetsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	_ "modernc.org/sqlite" // Import sqlite driver for sqlite database/sql support.
 )
 
@@ -61,7 +61,7 @@ func NewSqliteStore(ctx context.Context, cfg db.SqliteConfig) (*SqliteStore,
 
 	queries := sqlcsqlite.New(dbConn)
 
-	err = db.ApplySQLiteMigrations(dbConn)
+	err = sqlassetsqlite.ApplyMigrations(dbConn)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
+	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // ListTxns lists wallet-scoped transactions using either the confirmed-range
