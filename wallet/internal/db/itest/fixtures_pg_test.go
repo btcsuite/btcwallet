@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 	"github.com/stretchr/testify/require"
 )
@@ -189,9 +190,9 @@ func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 
 	t.Helper()
 
-	require.IsType(t, &db.PostgresStore{}, store)
+	require.IsType(t, &dbpg.PostgresStore{}, store)
 
-	pgStore := store.(*db.PostgresStore)
+	pgStore := store.(*dbpg.PostgresStore)
 	queries := pgStore.Queries()
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,

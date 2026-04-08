@@ -1,9 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
@@ -19,7 +21,7 @@ type PostgresStore struct {
 // NewPostgresStore creates a new PostgreSQL-based WalletStore. It handles
 // the full connection setup including config validation, connection opening,
 // health checks, connection pool configuration, and migration application.
-func NewPostgresStore(ctx context.Context, cfg PostgresConfig) (*PostgresStore,
+func NewPostgresStore(ctx context.Context, cfg db.PostgresConfig) (*PostgresStore,
 	error) {
 
 	err := cfg.Validate()
@@ -27,39 +29,39 @@ func NewPostgresStore(ctx context.Context, cfg PostgresConfig) (*PostgresStore,
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	db, err := sql.Open("pgx", cfg.Dsn)
+	dbConn, err := sql.Open("pgx", cfg.Dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	connCtx, cancel := context.WithTimeout(ctx, DefaultConnectionTimeout)
+	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
 	defer cancel()
 
-	err = db.PingContext(connCtx)
+	err = dbConn.PingContext(connCtx)
 	if err != nil {
-		_ = db.Close()
+		_ = dbConn.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	maxConns := DefaultMaxConnections
+	maxConns := db.DefaultMaxConnections
 	if cfg.MaxConnections > 0 {
 		maxConns = cfg.MaxConnections
 	}
 
-	db.SetMaxOpenConns(maxConns)
-	db.SetMaxIdleConns(maxConns)
-	db.SetConnMaxIdleTime(DefaultConnIdleLifetime)
+	dbConn.SetMaxOpenConns(maxConns)
+	dbConn.SetMaxIdleConns(maxConns)
+	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlcpg.New(db)
+	queries := sqlcpg.New(dbConn)
 
-	err = ApplyPostgresMigrations(db)
+	err = db.ApplyPostgresMigrations(dbConn)
 	if err != nil {
-		_ = db.Close()
+		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
 	return &PostgresStore{
-		db:      db,
+		db:      dbConn,
 		queries: queries,
 	}, nil
 }
@@ -81,7 +83,7 @@ func (s *PostgresStore) Close() error {
 func (s *PostgresStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcpg.Queries) error) error {
 
-	return ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
+	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)
 		return fn(qtx)
 	})

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +39,7 @@ func TestNewPostgresStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := db.NewPostgresStore(t.Context(), tc.cfg)
+			store, err := dbpg.NewPostgresStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
@@ -53,7 +54,7 @@ func TestNewPostgresStoreConnectionFailure(t *testing.T) {
 		Dsn: "postgres://localhost:1/testdb",
 	}
 
-	store, err := db.NewPostgresStore(t.Context(), cfg)
+	store, err := dbpg.NewPostgresStore(t.Context(), cfg)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ping database")
 	require.NotErrorIs(t, err, db.ErrEmptyDSN)
