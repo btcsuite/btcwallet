@@ -1153,3 +1153,309 @@ func TestUpdateTxWithOpsRejectsInvalidatingStates(t *testing.T) {
 		})
 	}
 }
+
+var errCreateTxTest = errors.New("create tx test")
+
+// TestCheckReuseCreateTx verifies the shared reuse decision for existing rows.
+func TestCheckReuseCreateTx(t *testing.T) {
+	t.Parallel()
+
+	coinbaseReq, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 9,
+		Tx:       testCoinbaseMsgTx(),
+		Received: time.Unix(555, 0),
+		Block:    testBlock(22),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	confirmedReq, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 9,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(556, 0),
+		Block:    testBlock(23),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		req      createTxRequest
+		existing createTxExistingTarget
+		want     bool
+	}{
+		{
+			name: "confirmed unmined row reused",
+			req:  confirmedReq,
+			existing: createTxExistingTarget{
+				status: TxStatusPending,
+			},
+			want: true,
+		},
+		{
+			name: "missing block not reused",
+			req:  testCreateTxRequest(t),
+			existing: createTxExistingTarget{
+				status: TxStatusPending,
+			},
+		},
+		{
+			name: "existing confirmed row not reused",
+			req:  confirmedReq,
+			existing: createTxExistingTarget{
+				status:   TxStatusPublished,
+				hasBlock: true,
+			},
+		},
+		{
+			name: "non coinbase orphan not reused",
+			req:  confirmedReq,
+			existing: createTxExistingTarget{
+				status: TxStatusOrphaned,
+			},
+		},
+		{
+			name: "orphaned coinbase reused",
+			req:  coinbaseReq,
+			existing: createTxExistingTarget{
+				status:     TxStatusOrphaned,
+				isCoinbase: true,
+			},
+			want: true,
+		},
+		{
+			name: "coinbase row not reused for non coinbase tx",
+			req:  confirmedReq,
+			existing: createTxExistingTarget{
+				status:     TxStatusOrphaned,
+				isCoinbase: true,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want,
+				checkReuseCreateTx(test.req, test.existing))
+		})
+	}
+}
+
+// TestLoadCreateTxExisting verifies not-found and wrapped-error handling for
+// the shared existing-row lookup.
+func TestLoadCreateTxExisting(t *testing.T) {
+	t.Parallel()
+
+	req := testCreateTxRequest(t)
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("loadExisting", mock.Anything, req).Return(
+		nil, errCreateTxExistingNotFound).Once()
+
+	existing, found, err := loadCreateTxExisting(context.Background(), req, ops)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, existing)
+
+	ops.On("loadExisting", mock.Anything, req).Return(nil, nil).Once()
+
+	existing, found, err = loadCreateTxExisting(context.Background(), req, ops)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, existing)
+
+	ops.On("loadExisting", mock.Anything, req).Return(
+		nil, errCreateTxTest,
+	).Once()
+
+	_, _, err = loadCreateTxExisting(context.Background(), req, ops)
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "load create tx target")
+}
+
+// TestHandleRootTxnsClearError verifies that root spend-clearing failures are
+// returned before the helper mutates any later replacement state.
+func TestHandleRootTxnsClearError(t *testing.T) {
+	t.Parallel()
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("clearSpentUtxos", mock.Anything, int64(9), int64(1)).Return(
+		errCreateTxTest).Once()
+
+	err := handleRootTxns(context.Background(), 9, []int64{1}, 11, ops)
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "clear replaced root spent utxos")
+}
+
+// TestHandleTxConflictsEdgeError verifies that replacement edge writes are
+// wrapped after the branch state has been updated.
+func TestHandleTxConflictsEdgeError(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{{1}}, nil,
+	).Once()
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		[]unminedTxRecord(nil), nil).Once()
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
+		nil,
+	).Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(
+		nil,
+	).Once()
+	ops.On("insertReplacementEdges", mock.Anything, int64(7), []int64{1},
+		int64(9)).Return(errCreateTxTest).Once()
+
+	err = handleTxConflicts(context.Background(), req, 9, ops)
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "record conflict replacement edges")
+}
+
+// TestHandleTxConflictsListError verifies that the helper returns
+// descendant-discovery load failures before mutating the branch.
+func TestHandleTxConflictsListError(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{{1}}, nil,
+	).Once()
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		nil, errCreateTxTest).Once()
+
+	err = handleTxConflicts(context.Background(), req, 9, ops)
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "list create tx conflict candidates")
+}
+
+// TestHandleTxConflictsMarkReplacedError verifies that the helper wraps
+// direct-root replacement failures.
+func TestHandleTxConflictsMarkReplacedError(t *testing.T) {
+	t.Parallel()
+
+	req, err := newCreateTxRequest(CreateTxParams{
+		WalletID: 7,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("listConflictTxns", mock.Anything, req).Return(
+		[]int64{1}, []chainhash.Hash{{1}}, nil,
+	).Once()
+	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+		[]unminedTxRecord(nil), nil).Once()
+	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
+		nil,
+	).Once()
+	ops.On("markTxnsReplaced", mock.Anything, int64(7), []int64{1}).Return(
+		errCreateTxTest).Once()
+
+	err = handleTxConflicts(context.Background(), req, 9, ops)
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "mark direct conflicts replaced")
+}
+
+// TestValidateUpdateTxState verifies the remaining shared UpdateTx state
+// invariants not covered by the integration tests.
+func TestValidateUpdateTxState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		state      UpdateTxState
+		isCoinbase bool
+		wantErr    error
+	}{
+		{
+			name:    "invalid status",
+			state:   UpdateTxState{Status: TxStatus(99)},
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "non coinbase cannot orphan",
+			state:   UpdateTxState{Status: TxStatusOrphaned},
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name: "confirmed must be published",
+			state: UpdateTxState{
+				Status: TxStatusFailed,
+				Block:  testBlock(44),
+			},
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:       "coinbase patch rejected",
+			state:      UpdateTxState{Status: TxStatusPublished},
+			isCoinbase: true,
+			wantErr:    ErrInvalidParam,
+		},
+		{
+			name: "published confirmed valid",
+			state: UpdateTxState{
+				Status: TxStatusPublished,
+				Block:  testBlock(45),
+			},
+			wantErr: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateUpdateTxState(test.state, test.isCoinbase)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
