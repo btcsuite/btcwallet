@@ -1,9 +1,10 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -16,7 +17,7 @@ func (s *PostgresStore) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return RollbackToBlockWithOps(ctx, height,
+		return db.RollbackToBlockWithOps(ctx, height,
 			pgRollbackToBlockOps{qtx: qtx})
 	})
 }
@@ -27,14 +28,14 @@ type pgRollbackToBlockOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ RollbackToBlockOps = (*pgRollbackToBlockOps)(nil)
+var _ db.RollbackToBlockOps = (*pgRollbackToBlockOps)(nil)
 
 // ListRollbackRootHashes loads the coinbase roots that a rollback disconnects
 // and groups them by wallet.
 func (o pgRollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 	height uint32) (map[uint32][]chainhash.Hash, error) {
 
-	rollbackHeight, err := Uint32ToInt32(height)
+	rollbackHeight, err := db.Uint32ToInt32(height)
 	if err != nil {
 		return nil, fmt.Errorf("convert rollback height: %w", err)
 	}
@@ -60,14 +61,14 @@ func (o pgRollbackToBlockOps) RewindWalletSyncStateHeights(
 	//
 	// TODO(yy): Fix it when we are in year 42000, which will give us 800 years
 	// before it's reached.
-	rollbackHeight, err := Uint32ToInt32(height)
+	rollbackHeight, err := db.Uint32ToInt32(height)
 	if err != nil {
 		return fmt.Errorf("convert rollback height: %w", err)
 	}
 
 	newHeight := sql.NullInt32{}
 	if height > 0 {
-		newHeight, err = Uint32ToNullInt32(height - 1)
+		newHeight, err = db.Uint32ToNullInt32(height - 1)
 		if err != nil {
 			return fmt.Errorf("convert new height: %w", err)
 		}
@@ -91,7 +92,7 @@ func (o pgRollbackToBlockOps) RewindWalletSyncStateHeights(
 func (o pgRollbackToBlockOps) DeleteBlocksAtOrAboveHeight(
 	ctx context.Context, height uint32) error {
 
-	rollbackHeight, err := Uint32ToInt32(height)
+	rollbackHeight, err := db.Uint32ToInt32(height)
 	if err != nil {
 		return fmt.Errorf("convert rollback height: %w", err)
 	}
@@ -117,7 +118,7 @@ func (o pgRollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 		rows, err := o.qtx.UpdateTransactionStateByHash(
 			ctx, sqlcpg.UpdateTransactionStateByHashParams{
 				BlockHeight: sql.NullInt32{},
-				Status:      int16(TxStatusOrphaned),
+				Status:      int16(db.TxStatusOrphaned),
 				WalletID:    int64(walletID),
 				TxHash:      txHash[:],
 			},
@@ -127,7 +128,7 @@ func (o pgRollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 		}
 
 		if rows == 0 {
-			return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+			return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 	}
 
@@ -137,14 +138,14 @@ func (o pgRollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 // ListUnminedTxRecords loads and decodes every unmined transaction row for the
 // wallet so the shared helper can inspect raw inputs for descendant edges.
 func (o pgRollbackToBlockOps) ListUnminedTxRecords(
-	ctx context.Context, walletID int64) ([]UnminedTxRecord, error) {
+	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
 	if err != nil {
 		return nil, fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	return BuildUnminedTxRecords(rows,
+	return db.BuildUnminedTxRecords(rows,
 		func(row sqlcpg.ListUnminedTransactionsRow) (int64, []byte, []byte) {
 			return row.ID, row.TxHash, row.RawTx
 		},
@@ -180,7 +181,7 @@ func (o pgRollbackToBlockOps) MarkDescendantsFailed(
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
 		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
-			Status:   int16(TxStatusFailed),
+			Status:   int16(db.TxStatusFailed),
 			TxIds:    descendantIDs,
 		},
 	)
@@ -200,7 +201,7 @@ func groupRollbackCoinbaseRootsPg(rows []sqlcpg.ListRollbackCoinbaseRootsRow) (
 		map[uint32][]chainhash.Hash, len(rows),
 	)
 	for _, row := range rows {
-		walletID, err := Int64ToUint32(row.WalletID)
+		walletID, err := db.Int64ToUint32(row.WalletID)
 		if err != nil {
 			return nil, fmt.Errorf("rollback coinbase wallet id: %w", err)
 		}

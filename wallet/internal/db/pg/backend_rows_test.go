@@ -1,8 +1,9 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"testing"
 	"time"
 
@@ -101,7 +102,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	_, err := loadOps.LoadExisting(ctx, req)
 	require.ErrorContains(t, err, "get tx metadata")
 
-	block := &Block{
+	block := &db.Block{
 		Hash:      chainhash.Hash{3},
 		Height:    7,
 		Timestamp: time.Unix(77, 0),
@@ -118,11 +119,11 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
-	err = confirmOps.ConfirmExisting(ctx, CreateTxRequest{
-		Params: CreateTxParams{WalletID: 1, Block: block},
+	err = confirmOps.ConfirmExisting(ctx, db.CreateTxRequest{
+		Params: db.CreateTxParams{WalletID: 1, Block: block},
 		TxHash: chainhash.Hash{9},
-	}, CreateTxExistingTarget{})
-	require.ErrorIs(t, err, ErrTxNotFound)
+	}, db.CreateTxExistingTarget{})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
 
 	conflictOps := &pgCreateTxOps{
 		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
@@ -150,18 +151,18 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 	stateOps := &pgUpdateTxOps{
 		qtx:         sqlcpg.New(rowDBTX{rows: 0}),
 		blockHeight: sql.NullInt32{},
-		status:      int16(TxStatusPublished),
+		status:      int16(db.TxStatusPublished),
 	}
 	labelOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")
 
-	err = stateOps.UpdateState(ctx, 1, txHash, UpdateTxState{
-		Status: TxStatusPublished,
+	err = stateOps.UpdateState(ctx, 1, txHash, db.UpdateTxState{
+		Status: db.TxStatusPublished,
 	})
-	require.ErrorIs(t, err, ErrTxNotFound)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
 
 	err = labelOps.UpdateLabel(ctx, 1, txHash, "note")
-	require.ErrorIs(t, err, ErrTxNotFound)
+	require.ErrorIs(t, err, db.ErrTxNotFound)
 }

@@ -1,10 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -21,15 +22,15 @@ import (
 // CreateTx may promote that existing row to confirmed state instead of
 // inserting a duplicate.
 func (s *PostgresStore) CreateTx(ctx context.Context,
-	params CreateTxParams) error {
+	params db.CreateTxParams) error {
 
-	req, err := NewCreateTxRequest(params)
+	req, err := db.NewCreateTxRequest(params)
 	if err != nil {
 		return err
 	}
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return CreateTxWithOps(ctx, req, &pgCreateTxOps{
+		return db.CreateTxWithOps(ctx, req, &pgCreateTxOps{
 			pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
 				qtx: qtx,
 			},
@@ -44,11 +45,11 @@ type pgCreateTxOps struct {
 	blockHeight sql.NullInt32
 }
 
-var _ CreateTxOps = (*pgCreateTxOps)(nil)
+var _ db.CreateTxOps = (*pgCreateTxOps)(nil)
 
 // LoadExisting loads any existing wallet-scoped row for the requested tx hash.
 func (o *pgCreateTxOps) LoadExisting(ctx context.Context,
-	req CreateTxRequest) (*CreateTxExistingTarget, error) {
+	req db.CreateTxRequest) (*db.CreateTxExistingTarget, error) {
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
 		ctx,
@@ -59,18 +60,18 @@ func (o *pgCreateTxOps) LoadExisting(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrCreateTxExistingNotFound
+			return nil, db.ErrCreateTxExistingNotFound
 		}
 
 		return nil, fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := ParseTxStatus(int64(meta.TxStatus))
+	status, err := db.ParseTxStatus(int64(meta.TxStatus))
 	if err != nil {
 		return nil, err
 	}
 
-	return &CreateTxExistingTarget{
+	return &db.CreateTxExistingTarget{
 		ID:         meta.ID,
 		Status:     status,
 		HasBlock:   meta.BlockHeight.Valid,
@@ -80,8 +81,8 @@ func (o *pgCreateTxOps) LoadExisting(ctx context.Context,
 
 // ConfirmExisting promotes one existing unmined row to its confirmed state.
 func (o *pgCreateTxOps) ConfirmExisting(ctx context.Context,
-	req CreateTxRequest,
-	_ CreateTxExistingTarget) error {
+	req db.CreateTxRequest,
+	_ db.CreateTxExistingTarget) error {
 
 	blockHeight, err := requireBlockMatchesPg(ctx, o.qtx, req.Params.Block)
 	if err != nil {
@@ -91,7 +92,7 @@ func (o *pgCreateTxOps) ConfirmExisting(ctx context.Context,
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx, sqlcpg.UpdateTransactionStateByHashParams{
 			BlockHeight: sql.NullInt32{Int32: blockHeight, Valid: true},
-			Status:      int16(TxStatusPublished),
+			Status:      int16(db.TxStatusPublished),
 			WalletID:    int64(req.Params.WalletID),
 			TxHash:      req.TxHash[:],
 		},
@@ -101,7 +102,7 @@ func (o *pgCreateTxOps) ConfirmExisting(ctx context.Context,
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxNotFound)
+		return fmt.Errorf("tx %s: %w", req.TxHash, db.ErrTxNotFound)
 	}
 
 	return nil
@@ -110,7 +111,7 @@ func (o *pgCreateTxOps) ConfirmExisting(ctx context.Context,
 // PrepareBlock validates the optional confirming block and caches the postgres
 // block-height value that the later Insert query will store.
 func (o *pgCreateTxOps) PrepareBlock(ctx context.Context,
-	req CreateTxRequest) error {
+	req db.CreateTxRequest) error {
 
 	o.blockHeight = sql.NullInt32{}
 
@@ -131,7 +132,7 @@ func (o *pgCreateTxOps) PrepareBlock(ctx context.Context,
 // ListConflictTxns returns the direct conflict root IDs plus the matching tx
 // hashes used for descendant discovery.
 func (o *pgCreateTxOps) ListConflictTxns(ctx context.Context,
-	req CreateTxRequest) ([]int64, []chainhash.Hash, error) {
+	req db.CreateTxRequest) ([]int64, []chainhash.Hash, error) {
 
 	rootIDs, err := collectPgConflictRootIDs(ctx, o.qtx, req)
 	if err != nil {
@@ -153,7 +154,7 @@ func (o *pgCreateTxOps) ListConflictTxns(ctx context.Context,
 // collectPgConflictRootIDs returns the active unmined spender row IDs
 // that currently own any wallet-controlled input spent by the incoming tx.
 func collectPgConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
-	req CreateTxRequest) (map[int64]struct{}, error) {
+	req db.CreateTxRequest) (map[int64]struct{}, error) {
 
 	if blockchain.IsCoinBaseTx(req.Params.Tx) {
 		return map[int64]struct{}{}, nil
@@ -161,7 +162,7 @@ func collectPgConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
 
 	rootIDs := make(map[int64]struct{}, len(req.Params.Tx.TxIn))
 	for inputIndex, txIn := range req.Params.Tx.TxIn {
-		outputIndex, err := Uint32ToInt32(txIn.PreviousOutPoint.Index)
+		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
 		if err != nil {
 			return nil, fmt.Errorf("convert input outpoint index %d: %w",
 				inputIndex, err)
@@ -221,7 +222,7 @@ func buildPgConflictRoots(rows []sqlcpg.ListUnminedTransactionsRow,
 
 // Insert stores one new postgres transaction row for CreateTx.
 func (o *pgCreateTxOps) Insert(ctx context.Context,
-	req CreateTxRequest) (int64, error) {
+	req db.CreateTxRequest) (int64, error) {
 
 	txID, err := o.qtx.InsertTransaction(ctx, sqlcpg.InsertTransactionParams{
 		WalletID:     int64(req.Params.WalletID),
@@ -234,7 +235,7 @@ func (o *pgCreateTxOps) Insert(ctx context.Context,
 		TxLabel:      req.Params.Label,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("Insert tx row: %w", err)
+		return 0, fmt.Errorf("insert tx row: %w", err)
 	}
 
 	return txID, nil
@@ -242,14 +243,14 @@ func (o *pgCreateTxOps) Insert(ctx context.Context,
 
 // InsertCredits stores any wallet-owned outputs created by the transaction.
 func (o *pgCreateTxOps) InsertCredits(ctx context.Context,
-	req CreateTxRequest, txID int64) error {
+	req db.CreateTxRequest, txID int64) error {
 
 	return insertCreditsPg(ctx, o.qtx, req.Params, txID)
 }
 
 // MarkInputsSpent records wallet-owned inputs spent by the transaction.
 func (o *pgCreateTxOps) MarkInputsSpent(ctx context.Context,
-	req CreateTxRequest, txID int64) error {
+	req db.CreateTxRequest, txID int64) error {
 
 	return markInputsSpentPg(ctx, o.qtx, req.Params, txID)
 }
@@ -262,7 +263,7 @@ func (o *pgCreateTxOps) MarkTxnsReplaced(
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
 		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
-			Status:   int16(TxStatusReplaced),
+			Status:   int16(db.TxStatusReplaced),
 			TxIds:    txIDs,
 		},
 	)
@@ -288,7 +289,7 @@ func (o *pgCreateTxOps) InsertReplacementEdges(
 			},
 		)
 		if err != nil {
-			return fmt.Errorf("Insert replacement edge for %d: %w",
+			return fmt.Errorf("insert replacement edge for %d: %w",
 				replacedTxID, err)
 		}
 	}
@@ -299,7 +300,7 @@ func (o *pgCreateTxOps) InsertReplacementEdges(
 // insertCreditsPg inserts one wallet-owned UTXO row for each credited output of
 // the transaction being stored.
 func insertCreditsPg(ctx context.Context, qtx *sqlcpg.Queries,
-	params CreateTxParams, txID int64) error {
+	params db.CreateTxParams, txID int64) error {
 
 	for index := range params.Credits {
 		creditExists, err := creditExistsPg(
@@ -324,13 +325,13 @@ func insertCreditsPg(ctx context.Context, qtx *sqlcpg.Queries,
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("credit output %d: %w", index,
-					ErrAddressNotFound)
+					db.ErrAddressNotFound)
 			}
 
 			return fmt.Errorf("resolve credit address %d: %w", index, err)
 		}
 
-		outputIndex, err := Uint32ToInt32(index)
+		outputIndex, err := db.Uint32ToInt32(index)
 		if err != nil {
 			return fmt.Errorf("convert credit index %d: %w", index, err)
 		}
@@ -343,7 +344,7 @@ func insertCreditsPg(ctx context.Context, qtx *sqlcpg.Queries,
 			AddressID:   addrRow.ID,
 		})
 		if err != nil {
-			return fmt.Errorf("Insert credit output %d: %w", index, err)
+			return fmt.Errorf("insert credit output %d: %w", index, err)
 		}
 	}
 
@@ -355,7 +356,7 @@ func insertCreditsPg(ctx context.Context, qtx *sqlcpg.Queries,
 func creditExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, error) {
 
-	convertedIndex, err := Uint32ToInt32(outputIndex)
+	convertedIndex, err := db.Uint32ToInt32(outputIndex)
 	if err != nil {
 		return false, fmt.Errorf("convert credit index %d: %w", outputIndex,
 			err)
@@ -389,20 +390,20 @@ func creditExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 // wallet-owned output whose parent transaction is already invalid fail with
 // ErrTxInputInvalidParent.
 func markInputsSpentPg(ctx context.Context, qtx *sqlcpg.Queries,
-	params CreateTxParams, txID int64) error {
+	params db.CreateTxParams, txID int64) error {
 
 	if blockchain.IsCoinBaseTx(params.Tx) {
 		return nil
 	}
 
 	for inputIndex, txIn := range params.Tx.TxIn {
-		outputIndex, err := Uint32ToInt32(txIn.PreviousOutPoint.Index)
+		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
 		if err != nil {
 			return fmt.Errorf("convert input outpoint index %d: %w", inputIndex,
 				err)
 		}
 
-		spentInputIndex, err := Int64ToInt32(int64(inputIndex))
+		spentInputIndex, err := db.Int64ToInt32(int64(inputIndex))
 		if err != nil {
 			return fmt.Errorf("convert input index %d: %w", inputIndex, err)
 		}
@@ -458,7 +459,7 @@ func ensureSpendConflictPg(ctx context.Context, qtx *sqlcpg.Queries,
 	}
 
 	if spendByTxID.Valid && spendByTxID.Int64 != txID {
-		return ErrTxInputConflict
+		return db.ErrTxInputConflict
 	}
 
 	return nil
@@ -481,7 +482,7 @@ func ensureWalletParentValidPg(ctx context.Context, qtx *sqlcpg.Queries,
 	}
 
 	if hasInvalid {
-		return ErrTxInputInvalidParent
+		return db.ErrTxInputInvalidParent
 	}
 
 	return nil

@@ -1,8 +1,9 @@
-package db
+package pg
 
 import (
 	"context"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
@@ -12,14 +13,14 @@ import (
 // The result set is already constrained to outputs whose creating
 // transactions are still in `pending` or `published` status.
 func (s *PostgresStore) ListUTXOs(ctx context.Context,
-	query ListUtxosQuery) ([]UtxoInfo, error) {
+	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
 	rows, err := s.queries.ListUtxos(ctx, buildListUtxosParamsPg(query))
 	if err != nil {
 		return nil, fmt.Errorf("list utxos: %w", err)
 	}
 
-	utxos := make([]UtxoInfo, len(rows))
+	utxos := make([]db.UtxoInfo, len(rows))
 	for i, row := range rows {
 		utxo, err := utxoInfoFromPgRow(
 			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
@@ -37,11 +38,11 @@ func (s *PostgresStore) ListUTXOs(ctx context.Context,
 
 // buildListUtxosParamsPg prepares the typed nullable filters required by the
 // postgres ListUtxos query.
-func buildListUtxosParamsPg(query ListUtxosQuery) sqlcpg.ListUtxosParams {
+func buildListUtxosParamsPg(query db.ListUtxosQuery) sqlcpg.ListUtxosParams {
 	return sqlcpg.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
-		AccountNumber: NullableUint32ToSQLInt64(query.Account),
-		MinConfirms:   NullableInt32ToSQLInt32(query.MinConfs),
-		MaxConfirms:   NullableInt32ToSQLInt32(query.MaxConfs),
+		AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
+		MinConfirms:   db.NullableInt32ToSQLInt32(query.MinConfs),
+		MaxConfirms:   db.NullableInt32ToSQLInt32(query.MaxConfs),
 	}
 }

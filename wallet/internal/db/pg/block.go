@@ -1,4 +1,4 @@
-package db
+package pg
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
 )
@@ -13,21 +14,21 @@ import (
 // buildPgBlock constructs a Block from the given PostgreSQL block
 // fields.
 func buildPgBlock(height sql.NullInt32, hash []byte,
-	timestamp sql.NullInt64) (*Block, error) {
+	timestamp sql.NullInt64) (*db.Block, error) {
 
-	height32, err := NullInt32ToUint32(height)
+	height32, err := db.NullInt32ToUint32(height)
 	if err != nil {
 		return nil, fmt.Errorf("block height: %w", err)
 	}
 
-	return BuildBlock(hash, height32, timestamp.Int64)
+	return db.BuildBlock(hash, height32, timestamp.Int64)
 }
 
 // ensureBlockExistsPg ensures that a block exists in the database.
 func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
-	block *Block) error {
+	block *db.Block) error {
 
-	height, err := Uint32ToInt32(block.Height)
+	height, err := db.Uint32ToInt32(block.Height)
 	if err != nil {
 		return fmt.Errorf("convert block height: %w", err)
 	}
@@ -49,9 +50,9 @@ func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 // requireBlockMatchesPg loads the shared block row for the provided height and
 // verifies that its stored metadata matches the supplied block reference.
 func requireBlockMatchesPg(ctx context.Context, qtx *sqlcpg.Queries,
-	block *Block) (int32, error) {
+	block *db.Block) (int32, error) {
 
-	height, err := Uint32ToInt32(block.Height)
+	height, err := db.Uint32ToInt32(block.Height)
 	if err != nil {
 		return 0, fmt.Errorf("convert block height: %w", err)
 	}
@@ -60,7 +61,7 @@ func requireBlockMatchesPg(ctx context.Context, qtx *sqlcpg.Queries,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("block %d: %w", block.Height,
-				ErrBlockNotFound)
+				db.ErrBlockNotFound)
 		}
 
 		return 0, fmt.Errorf("get block by height: %w", err)
@@ -68,12 +69,12 @@ func requireBlockMatchesPg(ctx context.Context, qtx *sqlcpg.Queries,
 
 	if !bytes.Equal(storedBlock.HeaderHash, block.Hash[:]) {
 		return 0, fmt.Errorf("block %d header hash: %w", block.Height,
-			ErrBlockMismatch)
+			db.ErrBlockMismatch)
 	}
 
 	if storedBlock.BlockTimestamp != block.Timestamp.Unix() {
 		return 0, fmt.Errorf("block %d timestamp: %w", block.Height,
-			ErrBlockMismatch)
+			db.ErrBlockMismatch)
 	}
 
 	return height, nil
