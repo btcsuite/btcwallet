@@ -4,19 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // RollbackToBlock atomically removes every block at or above the provided
 // height and rewrites wallet sync-state references so the block delete can
 // succeed.
-func (s *SqliteStore) RollbackToBlock(ctx context.Context,
+func (s *Store) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.RollbackToBlockWithOps(ctx, height,
 			rollbackToBlockOps{qtx: qtx})
 	})
@@ -25,7 +25,7 @@ func (s *SqliteStore) RollbackToBlock(ctx context.Context,
 // rollbackToBlockOps adapts sqlite sqlc queries to the shared rollback
 // sequence.
 type rollbackToBlockOps struct {
-	qtx *sqlcsqlite.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.RollbackToBlockOps = (*rollbackToBlockOps)(nil)
@@ -54,7 +54,7 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	}
 
 	_, err := o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, sqlcsqlite.RewindWalletSyncStateHeightsForRollbackParams{
+		ctx, sqlc.RewindWalletSyncStateHeightsForRollbackParams{
 			RollbackHeight: int64(height),
 			NewHeight:      newHeight,
 		},
@@ -91,7 +91,7 @@ func (o rollbackToBlockOps) MarkTxRootsOrphaned(
 		// block reference and become orphaned in the same
 		// row-local state patch.
 		rows, err := o.qtx.UpdateTransactionStateByHash(
-			ctx, sqlcsqlite.UpdateTransactionStateByHashParams{
+			ctx, sqlc.UpdateTransactionStateByHashParams{
 				BlockHeight: sql.NullInt64{},
 				Status:      int64(db.TxStatusOrphaned),
 				WalletID:    int64(walletID),
@@ -121,7 +121,7 @@ func (o rollbackToBlockOps) ListUnminedTxRecords(
 	}
 
 	return db.BuildUnminedTxRecords(rows,
-		func(row sqlcsqlite.ListUnminedTransactionsRow) (
+		func(row sqlc.ListUnminedTransactionsRow) (
 			int64, []byte, []byte) {
 
 			return row.ID, row.TxHash, row.RawTx
@@ -135,7 +135,7 @@ func (o rollbackToBlockOps) ClearDescendantSpends(
 	ctx context.Context, walletID int64, descendantID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx, sqlcsqlite.ClearUtxosSpentByTxIDParams{
+		ctx, sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID: walletID,
 			SpentByTxID: sql.NullInt64{
 				Int64: descendantID,
@@ -156,7 +156,7 @@ func (o rollbackToBlockOps) MarkDescendantsFailed(
 	ctx context.Context, walletID int64, descendantIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
-		ctx, sqlcsqlite.UpdateTransactionStatusByIDsParams{
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
 			Status:   int64(db.TxStatusFailed),
 			TxIds:    descendantIDs,
@@ -172,7 +172,7 @@ func (o rollbackToBlockOps) MarkDescendantsFailed(
 // groupRollbackCoinbaseRoots groups rollback-affected coinbase hashes by
 // wallet while preserving the query order inside each wallet bucket.
 func groupRollbackCoinbaseRoots(
-	rows []sqlcsqlite.ListRollbackCoinbaseRootsRow) (
+	rows []sqlc.ListRollbackCoinbaseRootsRow) (
 	map[uint32][]chainhash.Hash, error) {
 
 	rootHashesByWallet := make(

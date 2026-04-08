@@ -7,7 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,7 +16,7 @@ import (
 func TestDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
+	qtx := sqlc.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
 	deleteOps := deleteTxOps{qtx: qtx}
 	rollbackOps := rollbackToBlockOps{qtx: qtx}
 
@@ -45,7 +45,7 @@ func TestDeleteAndRollbackOpsWrapBackendErrors(t *testing.T) {
 func TestTxStoreOpsWrapBackendErrors(t *testing.T) {
 	t.Parallel()
 
-	qtx := sqlcsqlite.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
+	qtx := sqlc.New(errorDBTX{execErr: errDummy, queryErr: errDummy})
 	createOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{qtx: qtx},
 	}

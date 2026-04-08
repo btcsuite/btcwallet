@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // UpdateTx patches the mutable metadata for one wallet-scoped transaction.
@@ -17,10 +17,10 @@ import (
 // one SQL transaction. Immutable transaction facts such as raw_tx, credits, and
 // spent-input edges stay owned by CreateTx and the internal rollback/delete
 // flows.
-func (s *SqliteStore) UpdateTx(ctx context.Context,
+func (s *Store) UpdateTx(ctx context.Context,
 	params db.UpdateTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.UpdateTxWithOps(ctx, params, &updateTxOps{qtx: qtx})
 	})
 }
@@ -28,7 +28,7 @@ func (s *SqliteStore) UpdateTx(ctx context.Context,
 // updateTxOps adapts sqlite sqlc queries to the shared UpdateTx flow.
 type updateTxOps struct {
 	// qtx is the transaction-scoped sqlite query set used by UpdateTx.
-	qtx *sqlcsqlite.Queries
+	qtx *sqlc.Queries
 
 	// blockHeight caches the validated sqlite block-height wrapper prepared for
 	// the later state update query.
@@ -48,7 +48,7 @@ func (o *updateTxOps) LoadIsCoinbase(ctx context.Context,
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
 		ctx,
-		sqlcsqlite.GetTransactionMetaByHashParams{
+		sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -92,7 +92,7 @@ func (o *updateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 
 	rows, err := o.qtx.UpdateTransactionLabelByHash(
 		ctx,
-		sqlcsqlite.UpdateTransactionLabelByHashParams{
+		sqlc.UpdateTransactionLabelByHashParams{
 			Label:    label,
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
@@ -116,7 +116,7 @@ func (o *updateTxOps) UpdateState(ctx context.Context, walletID uint32,
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx,
-		sqlcsqlite.UpdateTransactionStateByHashParams{
+		sqlc.UpdateTransactionStateByHashParams{
 			BlockHeight: o.blockHeight,
 			Status:      o.status,
 			WalletID:    int64(walletID),

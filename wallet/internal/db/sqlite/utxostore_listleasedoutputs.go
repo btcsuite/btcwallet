@@ -3,20 +3,20 @@ package sqlite
 import (
 	"context"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // ListLeasedOutputs lists all active leases for current wallet-owned UTXOs.
-func (s *SqliteStore) ListLeasedOutputs(ctx context.Context,
+func (s *Store) ListLeasedOutputs(ctx context.Context,
 	walletID uint32) ([]db.LeasedOutput, error) {
 
 	nowUTC := time.Now().UTC()
 
 	rows, err := s.queries.ListActiveUtxoLeases(
-		ctx, sqlcsqlite.ListActiveUtxoLeasesParams{
+		ctx, sqlc.ListActiveUtxoLeasesParams{
 			WalletID: int64(walletID),
 			NowUtc:   nowUTC,
 		},
