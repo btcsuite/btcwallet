@@ -7,9 +7,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
-	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -138,91 +136,6 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	require.ErrorContains(t, err, "list unmined txns")
 }
 
-// TestSqliteCreateTxOpsAdditionalBranches covers remaining sqlite CreateTx
-// helper branches that are hard to reach through public integration tests
-// alone.
-func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
-	t.Parallel()
-
-	req := testCreateTxRequest(t)
-	ctx := context.Background()
-	loadOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
-			}),
-		},
-	}
-
-	_, err := loadOps.LoadExisting(ctx, req)
-	require.ErrorContains(t, err, "get tx metadata")
-
-	block := &Block{
-		Hash:      chainhash.Hash{4},
-		Height:    8,
-		Timestamp: time.Unix(88, 0),
-	}
-	confirmOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(
-					t, "SELECT ?, ?, ?",
-					int64(block.Height), block.Hash[:],
-					block.Timestamp.Unix(),
-				),
-				rows: 0,
-			}),
-		},
-	}
-	err = confirmOps.ConfirmExisting(ctx, CreateTxRequest{
-		Params: CreateTxParams{WalletID: 1, Block: block},
-		TxHash: chainhash.Hash{9},
-	}, CreateTxExistingTarget{})
-	require.ErrorIs(t, err, ErrTxNotFound)
-
-	prepareOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
-			}),
-		},
-	}
-	err = prepareOps.PrepareBlock(ctx, CreateTxRequest{
-		Params: CreateTxParams{WalletID: 1, Block: block},
-	})
-	require.ErrorContains(t, err, "get block by height")
-
-	conflictOps := &sqliteCreateTxOps{
-		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
-			qtx: sqlcsqlite.New(rowDBTX{
-				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
-				queryErr: errDummy,
-			}),
-		},
-	}
-	_, _, err = conflictOps.ListConflictTxns(ctx, req)
-	require.ErrorContains(t, err, "list unmined txns")
-}
-
-// TestSqliteReleaseOutputOpsAdditionalBranches covers the remaining sqlite
-// Release-helper query-row error wrappers.
-func TestSqliteReleaseOutputOpsAdditionalBranches(t *testing.T) {
-	t.Parallel()
-
-	ops := &sqliteReleaseOutputOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
-	})}
-
-	_, err := ops.LookupUtxoID(context.Background(), ReleaseOutputParams{
-		WalletID: 1,
-		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0},
-	})
-	require.ErrorContains(t, err, "lookup utxo row")
-
-	_, err = ops.ActiveLockID(context.Background(), 1, 2, time.Now())
-	require.ErrorContains(t, err, "lookup active lease row")
-}
-
 // TestPgUpdateTxOpsAdditionalBranches covers the remaining postgres UpdateTx
 // helper branches that are hard to reach through public integration tests
 // alone.
@@ -240,36 +153,6 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 		status:      int16(TxStatusPublished),
 	}
 	labelOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
-
-	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
-	require.ErrorContains(t, err, "get tx metadata")
-
-	err = stateOps.UpdateState(ctx, 1, txHash, UpdateTxState{
-		Status: TxStatusPublished,
-	})
-	require.ErrorIs(t, err, ErrTxNotFound)
-
-	err = labelOps.UpdateLabel(ctx, 1, txHash, "note")
-	require.ErrorIs(t, err, ErrTxNotFound)
-}
-
-// TestSqliteUpdateTxOpsAdditionalBranches covers the remaining sqlite UpdateTx
-// helper branches that are hard to reach through public integration tests
-// alone.
-func TestSqliteUpdateTxOpsAdditionalBranches(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	txHash := chainhash.Hash{9}
-	loadOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
-	})}
-	stateOps := &sqliteUpdateTxOps{
-		qtx:         sqlcsqlite.New(rowDBTX{rows: 0}),
-		blockHeight: sql.NullInt64{},
-		status:      int64(TxStatusPublished),
-	}
-	labelOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
 
 	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")

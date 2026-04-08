@@ -1,8 +1,9 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -11,23 +12,23 @@ import (
 
 // Balance returns the sum of wallet-owned current UTXOs after optional filters.
 func (s *SqliteStore) Balance(ctx context.Context,
-	params BalanceParams) (BalanceResult, error) {
+	params db.BalanceParams) (db.BalanceResult, error) {
 
 	nowUTC := time.Now().UTC()
 
 	balance, err := s.queries.Balance(ctx, sqlcsqlite.BalanceParams{
 		NowUtc:           nowUTC,
 		WalletID:         int64(params.WalletID),
-		AccountNumber:    NullableUint32ToSQLInt64(params.Account),
-		MinConfirms:      NullableInt32ToSQLInt64(params.MinConfs),
-		MaxConfirms:      NullableInt32ToSQLInt64(params.MaxConfs),
-		CoinbaseMaturity: NullableInt32ToSQLInt64(params.CoinbaseMaturity),
+		AccountNumber:    db.NullableUint32ToSQLInt64(params.Account),
+		MinConfirms:      db.NullableInt32ToSQLInt64(params.MinConfs),
+		MaxConfirms:      db.NullableInt32ToSQLInt64(params.MaxConfs),
+		CoinbaseMaturity: db.NullableInt32ToSQLInt64(params.CoinbaseMaturity),
 	})
 	if err != nil {
-		return BalanceResult{}, fmt.Errorf("balance: %w", err)
+		return db.BalanceResult{}, fmt.Errorf("balance: %w", err)
 	}
 
-	return BalanceResult{
+	return db.BalanceResult{
 		Total:  btcutil.Amount(balance.TotalBalance),
 		Locked: btcutil.Amount(balance.LockedBalance),
 	}, nil

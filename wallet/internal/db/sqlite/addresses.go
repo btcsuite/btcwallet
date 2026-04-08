@@ -1,4 +1,4 @@
-package db
+package sqlite
 
 import (
 	"context"
@@ -7,21 +7,22 @@ import (
 	"iter"
 	"time"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
 
-var _ AddressStore = (*SqliteStore)(nil)
+var _ db.AddressStore = (*SqliteStore)(nil)
 
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
 func (s *SqliteStore) GetAddress(ctx context.Context,
-	query GetAddressQuery) (*AddressInfo, error) {
+	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
-	getByScript := func(ctx context.Context, q GetAddressQuery) (*AddressInfo,
-		error) {
+	getByScript := func(ctx context.Context,
+		q db.GetAddressQuery) (*db.AddressInfo, error) {
 
-		return GetAddress(
+		return db.GetAddress(
 			ctx, s.queries.GetAddressByScriptPubKey,
 			sqlcsqlite.GetAddressByScriptPubKeyParams{
 				WalletID:     int64(q.WalletID),
@@ -30,21 +31,21 @@ func (s *SqliteStore) GetAddress(ctx context.Context,
 		)
 	}
 
-	return GetAddressByQuery(ctx, query, getByScript)
+	return db.GetAddressByQuery(ctx, query, getByScript)
 }
 
 // ListAddresses returns a page of addresses matching the given query.
 func (s *SqliteStore) ListAddresses(ctx context.Context,
-	query ListAddressesQuery) (page.Result[AddressInfo, uint32], error) {
+	query db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
 
 	items, err := sqliteListAddressesByAccount(ctx, s.queries, query)
 	if err != nil {
-		return page.Result[AddressInfo, uint32]{}, err
+		return page.Result[db.AddressInfo, uint32]{}, err
 	}
 
 	result := page.BuildResult(
 		query.Page, items,
-		func(item AddressInfo) uint32 {
+		func(item db.AddressInfo) uint32 {
 			return item.ID
 		},
 	)
@@ -54,18 +55,18 @@ func (s *SqliteStore) ListAddresses(ctx context.Context,
 
 // IterAddresses returns an iterator over paginated address results.
 func (s *SqliteStore) IterAddresses(ctx context.Context,
-	query ListAddressesQuery) iter.Seq2[AddressInfo, error] {
+	query db.ListAddressesQuery) iter.Seq2[db.AddressInfo, error] {
 
 	return page.Iter(
-		ctx, query, s.ListAddresses, NextListAddressesQuery,
+		ctx, query, s.ListAddresses, db.NextListAddressesQuery,
 	)
 }
 
 // GetAddressSecret retrieves the encrypted secret information for an address.
 func (s *SqliteStore) GetAddressSecret(ctx context.Context,
-	addressID uint32) (*AddressSecret, error) {
+	addressID uint32) (*db.AddressSecret, error) {
 
-	return GetAddressSecret(
+	return db.GetAddressSecret(
 		ctx, s.queries.GetAddressSecret, addressID,
 		sqliteAddressSecretRowToSecret,
 	)
@@ -74,16 +75,16 @@ func (s *SqliteStore) GetAddressSecret(ctx context.Context,
 // NewDerivedAddress creates a new address for a given account and key
 // scope.
 func (s *SqliteStore) NewDerivedAddress(ctx context.Context,
-	params NewDerivedAddressParams,
-	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
+	params db.NewDerivedAddressParams,
+	deriveFn db.AddressDerivationFunc) (*db.AddressInfo, error) {
 
-	adapters := DerivedAddressAdapters[
+	adapters := db.DerivedAddressAdapters[
 		*sqlcsqlite.Queries,
 		sqlcsqlite.GetAccountByWalletScopeAndNameRow,
-		AccountLookupKey,
+		db.AccountLookupKey,
 		sqlcsqlite.CreateDerivedAddressRow]{
 		GetAccount:    sqliteGetAccountFromKey(s.queries),
-		AccountParams: AccountKeyFromParams,
+		AccountParams: db.AccountKeyFromParams,
 		GetAccountID:  newDerivedAddressGetAccountIDSQLite,
 		GetExtIndex:   newDerivedAddressGetExtIndexSQLite,
 		GetIntIndex:   newDerivedAddressGetIntIndexSQLite,
@@ -92,22 +93,24 @@ func (s *SqliteStore) NewDerivedAddress(ctx context.Context,
 		RowCreatedAt:  newDerivedAddressRowCreatedAtSQLite,
 	}
 
-	return NewDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
+	return db.NewDerivedAddressWithTx(
+		ctx, params, s.ExecuteTx, adapters, deriveFn,
+	)
 }
 
 // NewImportedAddress imports a new address, script, or private key.
 func (s *SqliteStore) NewImportedAddress(ctx context.Context,
-	params NewImportedAddressParams) (*AddressInfo, error) {
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
-	adapters := ImportedAddressAdapters[
+	adapters := db.ImportedAddressAdapters[
 		*sqlcsqlite.Queries,
 		sqlcsqlite.GetAccountByWalletScopeAndNameRow,
-		AccountLookupKey,
+		db.AccountLookupKey,
 		sqlcsqlite.CreateImportedAddressParams,
 		sqlcsqlite.CreateImportedAddressRow,
 		sqlcsqlite.InsertAddressSecretParams]{
 		GetAccount:    sqliteGetAccountFromKey(s.queries),
-		AccountParams: AccountKeyFromImportedParams,
+		AccountParams: db.AccountKeyFromImportedParams,
 		GetAccountID:  newImportedAddressGetAccountIDSQLite,
 		CreateAddr:    sqliteCreateImportedAddress,
 		CreateParams:  createImportedAddressParamsSQLite,
@@ -117,15 +120,15 @@ func (s *SqliteStore) NewImportedAddress(ctx context.Context,
 		RowCreatedAt:  importedAddressRowCreatedAtSQLite,
 	}
 
-	return NewImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
+	return db.NewImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
 }
 
 // sqliteGetAccountFromKey returns a helper to look up accounts by key.
 func sqliteGetAccountFromKey(qtx *sqlcsqlite.Queries) func(context.Context,
-	AccountLookupKey) (sqlcsqlite.GetAccountByWalletScopeAndNameRow, error) {
+	db.AccountLookupKey) (sqlcsqlite.GetAccountByWalletScopeAndNameRow, error) {
 
 	return func(ctx context.Context,
-		key AccountLookupKey) (sqlcsqlite.GetAccountByWalletScopeAndNameRow,
+		key db.AccountLookupKey) (sqlcsqlite.GetAccountByWalletScopeAndNameRow,
 		error) {
 
 		return qtx.GetAccountByWalletScopeAndName(
@@ -162,10 +165,12 @@ func newDerivedAddressGetIntIndexSQLite(
 
 // newDerivedAddressCreateAddrSQLite returns the derived address insert helper.
 func newDerivedAddressCreateAddrSQLite(
-	qtx *sqlcsqlite.Queries) func(context.Context, int64, AddressType, uint32,
-	uint32, []byte) (sqlcsqlite.CreateDerivedAddressRow, error) {
+	qtx *sqlcsqlite.Queries,
+) func(context.Context, int64, db.AddressType, uint32, uint32, []byte) (
+	sqlcsqlite.CreateDerivedAddressRow, error,
+) {
 
-	return func(ctx context.Context, accountID int64, addrType AddressType,
+	return func(ctx context.Context, accountID int64, addrType db.AddressType,
 		branch uint32, index uint32,
 		scriptPubKey []byte) (sqlcsqlite.CreateDerivedAddressRow, error) {
 
@@ -226,7 +231,7 @@ func sqliteInsertAddressSecret(qtx *sqlcsqlite.Queries) func(context.Context,
 
 // createImportedAddressParamsSQLite maps imported params to sqlc params.
 func createImportedAddressParamsSQLite(accountID int64,
-	params NewImportedAddressParams) sqlcsqlite.CreateImportedAddressParams {
+	params db.NewImportedAddressParams) sqlcsqlite.CreateImportedAddressParams {
 
 	return sqlcsqlite.CreateImportedAddressParams{
 		AccountID:    accountID,
@@ -250,7 +255,7 @@ func importedAddressRowCreatedAtSQLite(
 
 // insertAddressSecretParamsSQLite maps imported params to secret params.
 func insertAddressSecretParamsSQLite(addressID int64,
-	params NewImportedAddressParams) sqlcsqlite.InsertAddressSecretParams {
+	params db.NewImportedAddressParams) sqlcsqlite.InsertAddressSecretParams {
 
 	return sqlcsqlite.InsertAddressSecretParams{
 		AddressID:        addressID,
@@ -262,9 +267,9 @@ func insertAddressSecretParamsSQLite(addressID int64,
 // sqliteAddressSecretRowToSecret converts a SQLite address secret row to an
 // AddressSecret struct.
 func sqliteAddressSecretRowToSecret(
-	row sqlcsqlite.GetAddressSecretRow) (*AddressSecret, error) {
+	row sqlcsqlite.GetAddressSecretRow) (*db.AddressSecret, error) {
 
-	return AddressSecretRowToSecret(AddressSecretRow{
+	return db.AddressSecretRowToSecret(db.AddressSecretRow{
 		AddressID:        row.AddressID,
 		EncryptedPrivKey: row.EncryptedPrivKey,
 		EncryptedScript:  row.EncryptedScript,
@@ -281,13 +286,13 @@ type sqliteAddressInfoRow interface {
 
 // sqliteAddressRowToInfo converts a SQLite address row to an AddressInfo
 // struct.
-func sqliteAddressRowToInfo[T sqliteAddressInfoRow](row T) (*AddressInfo,
+func sqliteAddressRowToInfo[T sqliteAddressInfoRow](row T) (*db.AddressInfo,
 	error) {
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlcsqlite.GetAddressByScriptPubKeyRow(row)
 
-	info, err := addressRowToInfo(AddressInfoRow[int64, int64]{
+	info, err := db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
 		ID:            base.ID,
 		AccountID:     base.AccountID,
 		TypeID:        base.TypeID,
@@ -299,8 +304,8 @@ func sqliteAddressRowToInfo[T sqliteAddressInfoRow](row T) (*AddressInfo,
 		AddressIndex:  base.AddressIndex,
 		ScriptPubKey:  base.ScriptPubKey,
 		PubKey:        base.PubKey,
-		IDToAddrType:  IDToAddressType[int64],
-		IDToOrigin:    IDToOrigin[int64],
+		IDToAddrType:  db.IDToAddressType[int64],
+		IDToOrigin:    db.IDToOrigin[int64],
 	})
 	if err != nil {
 		return nil, err
@@ -312,7 +317,7 @@ func sqliteAddressRowToInfo[T sqliteAddressInfoRow](row T) (*AddressInfo,
 // sqliteListAddressesByAccount lists addresses filtered by wallet ID, key
 // scope, and account name, with pagination support.
 func sqliteListAddressesByAccount(ctx context.Context, q *sqlcsqlite.Queries,
-	query ListAddressesQuery) ([]AddressInfo, error) {
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
 
 	rows, err := q.ListAddressesByAccount(
 		ctx, sqliteBuildAddressPageParams(query),
@@ -321,7 +326,7 @@ func sqliteListAddressesByAccount(ctx context.Context, q *sqlcsqlite.Queries,
 		return nil, fmt.Errorf("list addresses by account: %w", err)
 	}
 
-	items := make([]AddressInfo, len(rows))
+	items := make([]db.AddressInfo, len(rows))
 	for i, row := range rows {
 		item, err := sqliteAddressRowToInfo(row)
 		if err != nil {
@@ -339,7 +344,7 @@ func sqliteListAddressesByAccount(ctx context.Context, q *sqlcsqlite.Queries,
 // sqliteBuildAddressPageParams translates a ListAddresses query to
 // ListAddressesByAccount parameters, handling pagination cursors.
 func sqliteBuildAddressPageParams(
-	q ListAddressesQuery) sqlcsqlite.ListAddressesByAccountParams {
+	q db.ListAddressesQuery) sqlcsqlite.ListAddressesByAccountParams {
 
 	params := sqlcsqlite.ListAddressesByAccountParams{
 		WalletID:    int64(q.WalletID),

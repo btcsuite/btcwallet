@@ -21,8 +21,8 @@ var (
 	errInvalidAccountOrigin = errors.New("invalid account origin")
 )
 
-// validate validates required fields for creating a derived account.
-func (params *CreateDerivedAccountParams) validate() error {
+// Validate validates required fields for creating a derived account.
+func (params *CreateDerivedAccountParams) Validate() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
 	}
@@ -30,8 +30,8 @@ func (params *CreateDerivedAccountParams) validate() error {
 	return nil
 }
 
-// validate validates required fields for creating an imported account.
-func (params *CreateImportedAccountParams) validate() error {
+// Validate validates required fields for creating an imported account.
+func (params *CreateImportedAccountParams) Validate() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
 	}
@@ -43,8 +43,8 @@ func (params *CreateImportedAccountParams) validate() error {
 	return nil
 }
 
-// isWatchOnly returns true if the account is watch-only.
-func (params *CreateImportedAccountParams) isWatchOnly() bool {
+// IsWatchOnly returns true if the account is watch-only.
+func (params *CreateImportedAccountParams) IsWatchOnly() bool {
 	return len(params.EncryptedPrivateKey) == 0
 }
 
@@ -511,12 +511,12 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	getProps func(accountID int64) (*AccountProperties, error),
 ) (*AccountProperties, error) {
 
-	err := params.validate()
+	err := params.Validate()
 	if err != nil {
 		return nil, err
 	}
 
-	isWatchOnly := params.isWatchOnly()
+	isWatchOnly := params.IsWatchOnly()
 
 	scopeID, err := ensureScope()
 	if err != nil {

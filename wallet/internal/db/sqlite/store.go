@@ -1,15 +1,18 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 	_ "modernc.org/sqlite" // Import sqlite driver for sqlite database/sql support.
 )
 
 // SqliteStore is the SQLite implementation of the WalletStore interface.
+
 type SqliteStore struct {
 	db      *sql.DB
 	queries *sqlcsqlite.Queries
@@ -19,7 +22,7 @@ type SqliteStore struct {
 // connection setup including DSN construction with pragmas, connection
 // opening, health checks, connection pool configuration, and migration
 // application.
-func NewSqliteStore(ctx context.Context, cfg SqliteConfig) (*SqliteStore,
+func NewSqliteStore(ctx context.Context, cfg db.SqliteConfig) (*SqliteStore,
 	error) {
 
 	err := cfg.Validate()
@@ -33,39 +36,39 @@ func NewSqliteStore(ctx context.Context, cfg SqliteConfig) (*SqliteStore,
 	dsn += "&_pragma=busy_timeout=5000"
 	dsn += "&_time_format=sqlite"
 
-	db, err := sql.Open("sqlite", dsn)
+	dbConn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	connCtx, cancel := context.WithTimeout(ctx, DefaultConnectionTimeout)
+	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
 	defer cancel()
 
-	err = db.PingContext(connCtx)
+	err = dbConn.PingContext(connCtx)
 	if err != nil {
-		_ = db.Close()
+		_ = dbConn.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	maxConns := DefaultMaxConnections
+	maxConns := db.DefaultMaxConnections
 	if cfg.MaxConnections > 0 {
 		maxConns = cfg.MaxConnections
 	}
 
-	db.SetMaxOpenConns(maxConns)
-	db.SetMaxIdleConns(maxConns)
-	db.SetConnMaxIdleTime(DefaultConnIdleLifetime)
+	dbConn.SetMaxOpenConns(maxConns)
+	dbConn.SetMaxIdleConns(maxConns)
+	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlcsqlite.New(db)
+	queries := sqlcsqlite.New(dbConn)
 
-	err = ApplySQLiteMigrations(db)
+	err = db.ApplySQLiteMigrations(dbConn)
 	if err != nil {
-		_ = db.Close()
+		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
 	return &SqliteStore{
-		db:      db,
+		db:      dbConn,
 		queries: queries,
 	}, nil
 }
@@ -87,7 +90,7 @@ func (s *SqliteStore) Close() error {
 func (s *SqliteStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcsqlite.Queries) error) error {
 
-	return ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
+	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)
 		return fn(qtx)
 	})

@@ -1,4 +1,4 @@
-package db
+package sqlite
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
 )
@@ -13,20 +14,20 @@ import (
 // buildSqliteBlock constructs a Block from the given SQLite block
 // fields.
 func buildSqliteBlock(height sql.NullInt64, hash []byte,
-	timestamp sql.NullInt64) (*Block, error) {
+	timestamp sql.NullInt64) (*db.Block, error) {
 
-	height32, err := Int64ToUint32(height.Int64)
+	height32, err := db.Int64ToUint32(height.Int64)
 	if err != nil {
 		return nil, fmt.Errorf("block height: %w", err)
 	}
 
-	return BuildBlock(hash, height32, timestamp.Int64)
+	return db.BuildBlock(hash, height32, timestamp.Int64)
 }
 
 // ensureBlockExistsSqlite ensures that a block exists in the database. If it
 // doesn't exist, it inserts it.
 func ensureBlockExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
-	block *Block) error {
+	block *db.Block) error {
 
 	height := int64(block.Height)
 
@@ -47,7 +48,7 @@ func ensureBlockExistsSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 // requireBlockMatchesSqlite loads the shared block row for the provided height
 // and verifies that its stored metadata matches the supplied block reference.
 func requireBlockMatchesSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
-	block *Block) (int64, error) {
+	block *db.Block) (int64, error) {
 
 	height := int64(block.Height)
 
@@ -55,7 +56,7 @@ func requireBlockMatchesSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("block %d: %w", block.Height,
-				ErrBlockNotFound)
+				db.ErrBlockNotFound)
 		}
 
 		return 0, fmt.Errorf("get block by height: %w", err)
@@ -63,12 +64,12 @@ func requireBlockMatchesSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 
 	if !bytes.Equal(storedBlock.HeaderHash, block.Hash[:]) {
 		return 0, fmt.Errorf("block %d header hash: %w", block.Height,
-			ErrBlockMismatch)
+			db.ErrBlockMismatch)
 	}
 
 	if storedBlock.BlockTimestamp != block.Timestamp.Unix() {
 		return 0, fmt.Errorf("block %d timestamp: %w", block.Height,
-			ErrBlockMismatch)
+			db.ErrBlockMismatch)
 	}
 
 	return height, nil

@@ -290,7 +290,7 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*AddressInfo, error) {
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlcpg.GetAddressByScriptPubKeyRow(row)
 
-	info, err := addressRowToInfo(AddressInfoRow[int16, int16]{
+	info, err := AddressRowToInfo(AddressInfoRow[int16, int16]{
 		ID:            base.ID,
 		AccountID:     base.AccountID,
 		TypeID:        base.TypeID,
