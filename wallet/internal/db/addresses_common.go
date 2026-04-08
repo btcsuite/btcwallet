@@ -78,9 +78,9 @@ func GetAddressSecret[Row any](ctx context.Context,
 	return nil, fmt.Errorf("get address secret: %w", err)
 }
 
-// validate validates the required fields for creating an imported address.
+// Validate validates the required fields for creating an imported address.
 // Returns sentinel errors on failure.
-func (p NewImportedAddressParams) validate() error {
+func (p NewImportedAddressParams) Validate() error {
 	if len(p.ScriptPubKey) == 0 {
 		return ErrMissingScriptPubKey
 	}
@@ -88,9 +88,9 @@ func (p NewImportedAddressParams) validate() error {
 	return nil
 }
 
-// isWatchOnly returns true if the params include neither a private key nor
+// IsWatchOnly returns true if the params include neither a private key nor
 // a redeem or witness script.
-func (p NewImportedAddressParams) isWatchOnly() bool {
+func (p NewImportedAddressParams) IsWatchOnly() bool {
 	noPrivKey := len(p.EncryptedPrivateKey) == 0
 	noScript := len(p.EncryptedScript) == 0
 
@@ -227,7 +227,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 	}
 
 	addrID := rowID(addrRow)
-	if !params.isWatchOnly() {
+	if !params.IsWatchOnly() {
 		err = insertFn(qtx)(ctx, insertArgs(addrID, params))
 		if err != nil {
 			return nil, fmt.Errorf("insert address secret: %w", err)
@@ -247,7 +247,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		Origin:       ImportedAccount,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
-		IsWatchOnly:  params.isWatchOnly(),
+		IsWatchOnly:  params.IsWatchOnly(),
 	}, nil
 }
 
@@ -301,9 +301,9 @@ func convertAddressPath(origin AccountOrigin, branch,
 	return addrBranch, addrIndex, nil
 }
 
-// addressRowToInfo converts raw database field values into an AddressInfo
+// AddressRowToInfo converts raw database field values into an AddressInfo
 // struct. It handles type conversion and validation for each field.
-func addressRowToInfo[TypeID, OriginIDType any](
+func AddressRowToInfo[TypeID, OriginIDType any](
 	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
 
 	id, accountID, err := convertAddressIDs(row.ID, row.AccountID)
@@ -611,7 +611,7 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
 		AddrRow, SecretParams]) (*AddressInfo, error) {
 
-	validationErr := params.validate()
+	validationErr := params.Validate()
 	if validationErr != nil {
 		return nil, validationErr
 	}

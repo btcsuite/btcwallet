@@ -1,9 +1,11 @@
-package db
+package db_test
 
 import (
 	"path/filepath"
 	"testing"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -12,23 +14,23 @@ func TestNewPostgresStoreValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     PostgresConfig
+		cfg     db.PostgresConfig
 		wantErr error
 	}{
 		{
 			name: "empty DSN",
-			cfg: PostgresConfig{
+			cfg: db.PostgresConfig{
 				Dsn: "",
 			},
-			wantErr: ErrEmptyDSN,
+			wantErr: db.ErrEmptyDSN,
 		},
 		{
 			name: "negative max connections",
-			cfg: PostgresConfig{
+			cfg: db.PostgresConfig{
 				Dsn:            "postgres://test",
 				MaxConnections: -1,
 			},
-			wantErr: ErrNegativeMaxConns,
+			wantErr: db.ErrNegativeMaxConns,
 		},
 	}
 
@@ -36,7 +38,7 @@ func TestNewPostgresStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := NewPostgresStore(t.Context(), tc.cfg)
+			store, err := db.NewPostgresStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
@@ -47,15 +49,15 @@ func TestNewPostgresStoreConnectionFailure(t *testing.T) {
 	t.Parallel()
 
 	// Valid config, but hits a connection failure.
-	cfg := PostgresConfig{
+	cfg := db.PostgresConfig{
 		Dsn: "postgres://localhost:1/testdb",
 	}
 
-	store, err := NewPostgresStore(t.Context(), cfg)
+	store, err := db.NewPostgresStore(t.Context(), cfg)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ping database")
-	require.NotErrorIs(t, err, ErrEmptyDSN)
-	require.NotErrorIs(t, err, ErrNegativeMaxConns)
+	require.NotErrorIs(t, err, db.ErrEmptyDSN)
+	require.NotErrorIs(t, err, db.ErrNegativeMaxConns)
 
 	// We are asserting nil here because it's not an integration test, so we
 	// are not able to create a postgres database and connect to it.
@@ -67,23 +69,23 @@ func TestNewSqliteStoreValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     SqliteConfig
+		cfg     db.SqliteConfig
 		wantErr error
 	}{
 		{
 			name: "empty DB path",
-			cfg: SqliteConfig{
+			cfg: db.SqliteConfig{
 				DBPath: "",
 			},
-			wantErr: ErrEmptyDBPath,
+			wantErr: db.ErrEmptyDBPath,
 		},
 		{
 			name: "negative max connections",
-			cfg: SqliteConfig{
+			cfg: db.SqliteConfig{
 				DBPath:         "/tmp/test.db",
 				MaxConnections: -1,
 			},
-			wantErr: ErrNegativeMaxConns,
+			wantErr: db.ErrNegativeMaxConns,
 		},
 	}
 
@@ -91,7 +93,7 @@ func TestNewSqliteStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := NewSqliteStore(t.Context(), tc.cfg)
+			store, err := dbsqlite.NewSqliteStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
@@ -101,11 +103,11 @@ func TestNewSqliteStoreValidateConfig(t *testing.T) {
 func TestNewSqliteStoreSuccess(t *testing.T) {
 	t.Parallel()
 
-	cfg := SqliteConfig{
+	cfg := db.SqliteConfig{
 		DBPath: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 
-	store, err := NewSqliteStore(t.Context(), cfg)
+	store, err := dbsqlite.NewSqliteStore(t.Context(), cfg)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 

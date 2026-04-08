@@ -1,10 +1,11 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -16,10 +17,10 @@ import (
 // The ownership check and lease deletion run in one transaction so callers
 // cannot unlock a UTXO using stale state from a separate read.
 func (s *SqliteStore) ReleaseOutput(ctx context.Context,
-	params ReleaseOutputParams) error {
+	params db.ReleaseOutputParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return ReleaseOutputWithOps(
+		return db.ReleaseOutputWithOps(
 			ctx, params, &sqliteReleaseOutputOps{qtx: qtx},
 		)
 	})
@@ -31,12 +32,12 @@ type sqliteReleaseOutputOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ ReleaseOutputOps = (*sqliteReleaseOutputOps)(nil)
+var _ db.ReleaseOutputOps = (*sqliteReleaseOutputOps)(nil)
 
 // LookupUtxoID resolves the wallet-owned outpoint to its stable sqlite UTXO row
 // ID.
 func (o *sqliteReleaseOutputOps) LookupUtxoID(ctx context.Context,
-	params ReleaseOutputParams) (int64, error) {
+	params db.ReleaseOutputParams) (int64, error) {
 
 	utxoID, err := o.qtx.GetUtxoIDByOutpoint(
 		ctx, sqlcsqlite.GetUtxoIDByOutpointParams{
@@ -47,7 +48,7 @@ func (o *sqliteReleaseOutputOps) LookupUtxoID(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, ErrReleaseOutputUtxoNotFound
+			return 0, db.ErrReleaseOutputUtxoNotFound
 		}
 
 		return 0, fmt.Errorf("lookup utxo row: %w", err)
@@ -69,7 +70,7 @@ func (o *sqliteReleaseOutputOps) Release(ctx context.Context, walletID uint32,
 		},
 	)
 	if err != nil {
-		return 0, fmt.Errorf("Release lease row: %w", err)
+		return 0, fmt.Errorf("release lease row: %w", err)
 	}
 
 	return rows, nil
@@ -80,7 +81,7 @@ func (o *sqliteReleaseOutputOps) Release(ctx context.Context, walletID uint32,
 func (o *sqliteReleaseOutputOps) ActiveLockID(ctx context.Context,
 	walletID uint32, utxoID int64, nowUTC time.Time) ([]byte, error) {
 
-	ActiveLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
+	activeLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
 		ctx, sqlcsqlite.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
@@ -89,11 +90,11 @@ func (o *sqliteReleaseOutputOps) ActiveLockID(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrReleaseOutputNoActiveLease
+			return nil, db.ErrReleaseOutputNoActiveLease
 		}
 
 		return nil, fmt.Errorf("lookup active lease row: %w", err)
 	}
 
-	return ActiveLockID, nil
+	return activeLockID, nil
 }

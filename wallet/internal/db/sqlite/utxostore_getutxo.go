@@ -1,10 +1,11 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -15,7 +16,7 @@ import (
 // The output must still be unspent and its creating transaction must still be
 // in `pending` or `published` status.
 func (s *SqliteStore) GetUtxo(ctx context.Context,
-	query GetUtxoQuery) (*UtxoInfo, error) {
+	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
 	row, err := s.queries.GetUtxoByOutpoint(
 		ctx, sqlcsqlite.GetUtxoByOutpointParams{
@@ -27,7 +28,7 @@ func (s *SqliteStore) GetUtxo(ctx context.Context,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("utxo %s: %w", query.OutPoint,
-				ErrUtxoNotFound)
+				db.ErrUtxoNotFound)
 		}
 
 		return nil, fmt.Errorf("get utxo: %w", err)
@@ -43,16 +44,16 @@ func (s *SqliteStore) GetUtxo(ctx context.Context,
 // public UtxoInfo shape.
 func utxoInfoFromSqliteRow(hash []byte, outputIndex int64, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
-	blockHeight sql.NullInt64) (*UtxoInfo, error) {
+	blockHeight sql.NullInt64) (*db.UtxoInfo, error) {
 
-	index, err := Int64ToUint32(outputIndex)
+	index, err := db.Int64ToUint32(outputIndex)
 	if err != nil {
 		return nil, fmt.Errorf("utxo output index: %w", err)
 	}
 
 	var height *uint32
 	if blockHeight.Valid {
-		heightValue, err := Int64ToUint32(blockHeight.Int64)
+		heightValue, err := db.Int64ToUint32(blockHeight.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("utxo block height: %w", err)
 		}
@@ -60,7 +61,7 @@ func utxoInfoFromSqliteRow(hash []byte, outputIndex int64, amount int64,
 		height = &heightValue
 	}
 
-	return BuildUtxoInfo(
+	return db.BuildUtxoInfo(
 		hash, index, amount, pkScript, received, isCoinbase, height,
 	)
 }

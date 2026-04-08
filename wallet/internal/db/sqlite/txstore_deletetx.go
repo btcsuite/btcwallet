@@ -1,10 +1,11 @@
-package db
+package sqlite
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/sqlite"
@@ -18,10 +19,10 @@ import (
 // transaction must also be a leaf among the wallet's unmined transactions so
 // the delete cannot detach child spenders from their parent history.
 func (s *SqliteStore) DeleteTx(ctx context.Context,
-	params DeleteTxParams) error {
+	params db.DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return DeleteTxWithOps(ctx, params, sqliteDeleteTxOps{qtx: qtx})
+		return db.DeleteTxWithOps(ctx, params, sqliteDeleteTxOps{qtx: qtx})
 	})
 }
 
@@ -30,7 +31,7 @@ type sqliteDeleteTxOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ DeleteTxOps = (*sqliteDeleteTxOps)(nil)
+var _ db.DeleteTxOps = (*sqliteDeleteTxOps)(nil)
 
 // LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
@@ -121,7 +122,7 @@ func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 		return fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	candidates, err := BuildUnminedTxRecords(
+	candidates, err := db.BuildUnminedTxRecords(
 		rows,
 		func(row sqlcsqlite.ListUnminedTransactionsRow) (int64,
 			[]byte, []byte) {
@@ -142,9 +143,9 @@ func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 		filtered = append(filtered, candidate)
 	}
 
-	if len(CollectDirectChildTxIDs(txHash, filtered)) > 0 {
+	if len(db.CollectDirectChildTxIDs(txHash, filtered)) > 0 {
 		return fmt.Errorf("delete tx %s: %w", txHash,
-			ErrDeleteRequiresLeaf)
+			db.ErrDeleteRequiresLeaf)
 	}
 
 	return nil
@@ -165,22 +166,22 @@ func getDeleteTxMetaSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return sqlcsqlite.GetTransactionMetaByHashRow{},
-				fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+				fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
 		return sqlcsqlite.GetTransactionMetaByHashRow{},
 			fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := ParseTxStatus(meta.TxStatus)
+	status, err := db.ParseTxStatus(meta.TxStatus)
 	if err != nil {
 		return sqlcsqlite.GetTransactionMetaByHashRow{}, err
 	}
 
-	if meta.BlockHeight.Valid || !IsUnminedStatus(status) {
+	if meta.BlockHeight.Valid || !db.IsUnminedStatus(status) {
 		return sqlcsqlite.GetTransactionMetaByHashRow{},
 			fmt.Errorf("delete tx %s: %w", txHash,
-				ErrDeleteRequiresUnmined)
+				db.ErrDeleteRequiresUnmined)
 	}
 
 	return meta, nil
