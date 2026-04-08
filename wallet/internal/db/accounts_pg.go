@@ -51,7 +51,7 @@ func (s *PostgresStore) RenameAccount(ctx context.Context,
 func (s *PostgresStore) CreateDerivedAccount(ctx context.Context,
 	params CreateDerivedAccountParams) (*AccountInfo, error) {
 
-	paramsErr := params.validate()
+	paramsErr := params.Validate()
 	if paramsErr != nil {
 		return nil, paramsErr
 	}
