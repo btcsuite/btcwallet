@@ -21,12 +21,12 @@ func (s *PostgresStore) UpdateTx(ctx context.Context,
 	params db.UpdateTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return db.UpdateTxWithOps(ctx, params, &pgUpdateTxOps{qtx: qtx})
+		return db.UpdateTxWithOps(ctx, params, &updateTxOps{qtx: qtx})
 	})
 }
 
-// pgUpdateTxOps adapts postgres sqlc queries to the shared UpdateTx flow.
-type pgUpdateTxOps struct {
+// updateTxOps adapts postgres sqlc queries to the shared UpdateTx flow.
+type updateTxOps struct {
 	// qtx is the transaction-scoped postgres query set used by UpdateTx.
 	qtx *sqlcpg.Queries
 
@@ -39,11 +39,11 @@ type pgUpdateTxOps struct {
 	status int16
 }
 
-var _ db.UpdateTxOps = (*pgUpdateTxOps)(nil)
+var _ db.UpdateTxOps = (*updateTxOps)(nil)
 
 // LoadIsCoinbase loads the existing row metadata UpdateTx needs before it can
 // validate one patch.
-func (o *pgUpdateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
+func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash) (bool, error) {
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
@@ -66,13 +66,13 @@ func (o *pgUpdateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 
 // PrepareState validates any referenced confirming block and captures the
 // postgres-specific state params for the later row update.
-func (o *pgUpdateTxOps) PrepareState(ctx context.Context,
+func (o *updateTxOps) PrepareState(ctx context.Context,
 	state db.UpdateTxState) error {
 
 	blockHeight := sql.NullInt32{}
 
 	if state.Block != nil {
-		height, err := requireBlockMatchesPg(ctx, o.qtx, state.Block)
+		height, err := requireBlockMatches(ctx, o.qtx, state.Block)
 		if err != nil {
 			return fmt.Errorf("require confirming block: %w", err)
 		}
@@ -88,7 +88,7 @@ func (o *pgUpdateTxOps) PrepareState(ctx context.Context,
 
 // UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
-func (o *pgUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
+func (o *updateTxOps) UpdateState(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, _ db.UpdateTxState) error {
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
@@ -112,7 +112,7 @@ func (o *pgUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
 }
 
 // UpdateLabel writes one user-visible label change.
-func (o *pgUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
+func (o *updateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, label string) error {
 
 	rows, err := o.qtx.UpdateTransactionLabelByHash(

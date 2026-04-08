@@ -84,7 +84,7 @@ func (s *PostgresStore) CreateWallet(ctx context.Context,
 			)
 		}
 
-		info, err = buildPgWalletInfo(pgWalletRowParams{
+		info, err = buildWalletInfo(walletRowParams{
 			id:                     row.ID,
 			name:                   row.WalletName,
 			isImported:             row.IsImported,
@@ -127,7 +127,7 @@ func (s *PostgresStore) GetWallet(ctx context.Context,
 		return nil, fmt.Errorf("get wallet: %w", err)
 	}
 
-	return buildPgWalletInfo(pgWalletRowParams{
+	return buildWalletInfo(walletRowParams{
 		id:                     row.ID,
 		name:                   row.WalletName,
 		isImported:             row.IsImported,
@@ -147,7 +147,7 @@ func (s *PostgresStore) GetWallet(ctx context.Context,
 func (s *PostgresStore) ListWallets(ctx context.Context,
 	query db.ListWalletsQuery) (page.Result[db.WalletInfo, uint32], error) {
 
-	rows, err := s.queries.ListWallets(ctx, pgListWalletsParams(query.Page))
+	rows, err := s.queries.ListWallets(ctx, listWalletsParams(query.Page))
 	if err != nil {
 		return page.Result[db.WalletInfo, uint32]{},
 			fmt.Errorf("list wallets page: %w", err)
@@ -155,7 +155,7 @@ func (s *PostgresStore) ListWallets(ctx context.Context,
 
 	items := make([]db.WalletInfo, len(rows))
 	for i, row := range rows {
-		item, errMap := pgListWalletRowToInfo(row)
+		item, errMap := listWalletRowToInfo(row)
 		if errMap != nil {
 			return page.Result[db.WalletInfo, uint32]{},
 				fmt.Errorf("list wallets page: map row: %w", errMap)
@@ -193,7 +193,7 @@ func (s *PostgresStore) UpdateWallet(ctx context.Context,
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
-			err := ensureBlockExistsPg(ctx, qtx, params.SyncedTo)
+			err := ensureBlockExists(ctx, qtx, params.SyncedTo)
 			if err != nil {
 				return fmt.Errorf("ensure synced block: %w",
 					err)
@@ -201,7 +201,7 @@ func (s *PostgresStore) UpdateWallet(ctx context.Context,
 		}
 
 		if params.BirthdayBlock != nil {
-			err := ensureBlockExistsPg(
+			err := ensureBlockExists(
 				ctx, qtx, params.BirthdayBlock,
 			)
 			if err != nil {
@@ -210,7 +210,7 @@ func (s *PostgresStore) UpdateWallet(ctx context.Context,
 			}
 		}
 
-		syncParams, err := buildUpdateSyncParamsPg(params)
+		syncParams, err := buildUpdateSyncParams(params)
 		if err != nil {
 			return err
 		}
@@ -280,9 +280,9 @@ func (s *PostgresStore) UpdateWalletSecrets(ctx context.Context,
 	return nil
 }
 
-// pgWalletRowParams holds the parameters needed to build a WalletInfo
+// walletRowParams holds the parameters needed to build a WalletInfo
 // from a wallet row.
-type pgWalletRowParams struct {
+type walletRowParams struct {
 	id                     int64
 	name                   string
 	isImported             bool
@@ -297,10 +297,10 @@ type pgWalletRowParams struct {
 	birthdayBlockTimestamp sql.NullInt64
 }
 
-// pgListWalletRowToInfo converts a ListWallets result row to a WalletInfo
+// listWalletRowToInfo converts a ListWallets result row to a WalletInfo
 // struct for pagination.
-func pgListWalletRowToInfo(row sqlcpg.ListWalletsRow) (*db.WalletInfo, error) {
-	return buildPgWalletInfo(pgWalletRowParams{
+func listWalletRowToInfo(row sqlcpg.ListWalletsRow) (*db.WalletInfo, error) {
+	return buildWalletInfo(walletRowParams{
 		id:                     row.ID,
 		name:                   row.WalletName,
 		isImported:             row.IsImported,
@@ -316,9 +316,9 @@ func pgListWalletRowToInfo(row sqlcpg.ListWalletsRow) (*db.WalletInfo, error) {
 	})
 }
 
-// pgListWalletsParams translates a page request to ListWallets query
+// listWalletsParams translates a page request to ListWallets query
 // parameters, handling optional cursor setup for pagination.
-func pgListWalletsParams(
+func listWalletsParams(
 	req page.Request[uint32]) sqlcpg.ListWalletsParams {
 
 	params := sqlcpg.ListWalletsParams{
@@ -335,9 +335,9 @@ func pgListWalletsParams(
 	return params
 }
 
-// buildPgWalletInfo constructs a WalletInfo from the given wallet row
+// buildWalletInfo constructs a WalletInfo from the given wallet row
 // parameters.
-func buildPgWalletInfo(row pgWalletRowParams) (*db.WalletInfo, error) {
+func buildWalletInfo(row walletRowParams) (*db.WalletInfo, error) {
 	walletID, err := db.Int64ToUint32(row.id)
 	if err != nil {
 		return nil, err
@@ -356,7 +356,7 @@ func buildPgWalletInfo(row pgWalletRowParams) (*db.WalletInfo, error) {
 	}
 
 	if row.syncedHeight.Valid {
-		block, err := buildPgBlock(
+		block, err := buildBlock(
 			row.syncedHeight,
 			row.syncedBlockHash,
 			row.syncedBlockTimestamp,
@@ -369,7 +369,7 @@ func buildPgWalletInfo(row pgWalletRowParams) (*db.WalletInfo, error) {
 	}
 
 	if row.birthdayHeight.Valid {
-		block, err := buildPgBlock(
+		block, err := buildBlock(
 			row.birthdayHeight,
 			row.birthdayBlockHash,
 			row.birthdayBlockTimestamp,
@@ -384,9 +384,9 @@ func buildPgWalletInfo(row pgWalletRowParams) (*db.WalletInfo, error) {
 	return info, nil
 }
 
-// buildUpdateSyncParamsPg constructs the UpdateWalletSyncStateParams from
+// buildUpdateSyncParams constructs the UpdateWalletSyncStateParams from
 // the given UpdateWalletParams.
-func buildUpdateSyncParamsPg(params db.UpdateWalletParams) (
+func buildUpdateSyncParams(params db.UpdateWalletParams) (
 	sqlcpg.UpdateWalletSyncStateParams, error) {
 
 	syncParams := sqlcpg.UpdateWalletSyncStateParams{

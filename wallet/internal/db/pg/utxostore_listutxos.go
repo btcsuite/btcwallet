@@ -15,14 +15,14 @@ import (
 func (s *PostgresStore) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
-	rows, err := s.queries.ListUtxos(ctx, buildListUtxosParamsPg(query))
+	rows, err := s.queries.ListUtxos(ctx, buildListUtxosParams(query))
 	if err != nil {
 		return nil, fmt.Errorf("list utxos: %w", err)
 	}
 
 	utxos := make([]db.UtxoInfo, len(rows))
 	for i, row := range rows {
-		utxo, err := utxoInfoFromPgRow(
+		utxo, err := utxoInfoFromRow(
 			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
 			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
 		)
@@ -36,9 +36,9 @@ func (s *PostgresStore) ListUTXOs(ctx context.Context,
 	return utxos, nil
 }
 
-// buildListUtxosParamsPg prepares the typed nullable filters required by the
+// buildListUtxosParams prepares the typed nullable filters required by the
 // postgres ListUtxos query.
-func buildListUtxosParamsPg(query db.ListUtxosQuery) sqlcpg.ListUtxosParams {
+func buildListUtxosParams(query db.ListUtxosQuery) sqlcpg.ListUtxosParams {
 	return sqlcpg.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
 		AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
