@@ -1,10 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -18,10 +19,10 @@ import (
 // transaction must also be a leaf among the wallet's unmined transactions so
 // the delete cannot detach child spenders from their parent history.
 func (s *PostgresStore) DeleteTx(ctx context.Context,
-	params DeleteTxParams) error {
+	params db.DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return DeleteTxWithOps(ctx, params, pgDeleteTxOps{qtx: qtx})
+		return db.DeleteTxWithOps(ctx, params, pgDeleteTxOps{qtx: qtx})
 	})
 }
 
@@ -30,7 +31,7 @@ type pgDeleteTxOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ DeleteTxOps = (*pgDeleteTxOps)(nil)
+var _ db.DeleteTxOps = (*pgDeleteTxOps)(nil)
 
 // LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
@@ -121,7 +122,7 @@ func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
 		return fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	candidates, err := BuildUnminedTxRecords(rows,
+	candidates, err := db.BuildUnminedTxRecords(rows,
 		func(row sqlcpg.ListUnminedTransactionsRow) (int64, []byte, []byte) {
 			return row.ID, row.TxHash, row.RawTx
 		},
@@ -139,9 +140,9 @@ func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
 		filtered = append(filtered, candidate)
 	}
 
-	if len(CollectDirectChildTxIDs(txHash, filtered)) > 0 {
+	if len(db.CollectDirectChildTxIDs(txHash, filtered)) > 0 {
 		return fmt.Errorf("delete tx %s: %w", txHash,
-			ErrDeleteRequiresLeaf)
+			db.ErrDeleteRequiresLeaf)
 	}
 
 	return nil
@@ -162,22 +163,22 @@ func getDeleteTxMetaPg(ctx context.Context, qtx *sqlcpg.Queries,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return sqlcpg.GetTransactionMetaByHashRow{},
-				fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+				fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
 		return sqlcpg.GetTransactionMetaByHashRow{},
 			fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := ParseTxStatus(int64(meta.TxStatus))
+	status, err := db.ParseTxStatus(int64(meta.TxStatus))
 	if err != nil {
 		return sqlcpg.GetTransactionMetaByHashRow{}, err
 	}
 
-	if meta.BlockHeight.Valid || !IsUnminedStatus(status) {
+	if meta.BlockHeight.Valid || !db.IsUnminedStatus(status) {
 		return sqlcpg.GetTransactionMetaByHashRow{},
 			fmt.Errorf("delete tx %s: %w", txHash,
-				ErrDeleteRequiresUnmined)
+				db.ErrDeleteRequiresUnmined)
 	}
 
 	return meta, nil

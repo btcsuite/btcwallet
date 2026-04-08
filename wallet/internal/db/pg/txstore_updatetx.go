@@ -1,10 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -17,10 +18,10 @@ import (
 // spent-input edges stay owned by CreateTx and the internal rollback/delete
 // flows.
 func (s *PostgresStore) UpdateTx(ctx context.Context,
-	params UpdateTxParams) error {
+	params db.UpdateTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return UpdateTxWithOps(ctx, params, &pgUpdateTxOps{qtx: qtx})
+		return db.UpdateTxWithOps(ctx, params, &pgUpdateTxOps{qtx: qtx})
 	})
 }
 
@@ -38,7 +39,7 @@ type pgUpdateTxOps struct {
 	status int16
 }
 
-var _ UpdateTxOps = (*pgUpdateTxOps)(nil)
+var _ db.UpdateTxOps = (*pgUpdateTxOps)(nil)
 
 // LoadIsCoinbase loads the existing row metadata UpdateTx needs before it can
 // validate one patch.
@@ -54,7 +55,7 @@ func (o *pgUpdateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+			return false, fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
 		return false, fmt.Errorf("get tx metadata: %w", err)
@@ -66,7 +67,7 @@ func (o *pgUpdateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 // PrepareState validates any referenced confirming block and captures the
 // postgres-specific state params for the later row update.
 func (o *pgUpdateTxOps) PrepareState(ctx context.Context,
-	state UpdateTxState) error {
+	state db.UpdateTxState) error {
 
 	blockHeight := sql.NullInt32{}
 
@@ -88,7 +89,7 @@ func (o *pgUpdateTxOps) PrepareState(ctx context.Context,
 // UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
 func (o *pgUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
-	txHash chainhash.Hash, _ UpdateTxState) error {
+	txHash chainhash.Hash, _ db.UpdateTxState) error {
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx,
@@ -104,7 +105,7 @@ func (o *pgUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 	}
 
 	return nil
@@ -127,7 +128,7 @@ func (o *pgUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("tx %s: %w", txHash, ErrTxNotFound)
+		return fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 	}
 
 	return nil

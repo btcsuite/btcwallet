@@ -1,10 +1,11 @@
-package db
+package pg
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
 	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
@@ -15,9 +16,9 @@ import (
 // The output must still be unspent and its creating transaction must still be
 // in `pending` or `published` status.
 func (s *PostgresStore) GetUtxo(ctx context.Context,
-	query GetUtxoQuery) (*UtxoInfo, error) {
+	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
-	outputIndex, err := Uint32ToInt32(query.OutPoint.Index)
+	outputIndex, err := db.Uint32ToInt32(query.OutPoint.Index)
 	if err != nil {
 		return nil, fmt.Errorf("convert output index: %w", err)
 	}
@@ -32,7 +33,7 @@ func (s *PostgresStore) GetUtxo(ctx context.Context,
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("utxo %s: %w", query.OutPoint,
-				ErrUtxoNotFound)
+				db.ErrUtxoNotFound)
 		}
 
 		return nil, fmt.Errorf("get utxo: %w", err)
@@ -48,16 +49,16 @@ func (s *PostgresStore) GetUtxo(ctx context.Context,
 // UtxoInfo shape.
 func utxoInfoFromPgRow(hash []byte, outputIndex int32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
-	blockHeight sql.NullInt32) (*UtxoInfo, error) {
+	blockHeight sql.NullInt32) (*db.UtxoInfo, error) {
 
-	index, err := Int64ToUint32(int64(outputIndex))
+	index, err := db.Int64ToUint32(int64(outputIndex))
 	if err != nil {
 		return nil, fmt.Errorf("utxo output index: %w", err)
 	}
 
 	var height *uint32
 	if blockHeight.Valid {
-		heightValue, err := NullInt32ToUint32(blockHeight)
+		heightValue, err := db.NullInt32ToUint32(blockHeight)
 		if err != nil {
 			return nil, fmt.Errorf("utxo block height: %w", err)
 		}
@@ -65,7 +66,7 @@ func utxoInfoFromPgRow(hash []byte, outputIndex int32, amount int64,
 		height = &heightValue
 	}
 
-	return BuildUtxoInfo(
+	return db.BuildUtxoInfo(
 		hash, index, amount, pkScript, received, isCoinbase, height,
 	)
 }

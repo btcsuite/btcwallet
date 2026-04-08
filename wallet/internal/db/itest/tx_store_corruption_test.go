@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +22,7 @@ func dropTableForCorruption(t *testing.T, store interface{ DB() *sql.DB },
 	t.Helper()
 
 	stmt := fmt.Sprintf("DROP TABLE %s", table)
-	if _, ok := any(store).(*db.PostgresStore); ok {
+	if _, ok := any(store).(*dbpg.PostgresStore); ok {
 		stmt += " CASCADE"
 	}
 
