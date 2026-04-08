@@ -108,8 +108,8 @@ func (r rowDBTX) QueryRowContext(context.Context, string,
 	return &sql.Row{}
 }
 
-// newSQLiteRow creates a query row backed by an in-memory sqlite database.
-func newSQLiteRow(t *testing.T, query string, args ...any) *sql.Row {
+// newRow creates a query row backed by an in-memory sqlite database.
+func newRow(t *testing.T, query string, args ...any) *sql.Row {
 	t.Helper()
 
 	dbConn, err := sql.Open("sqlite", ":memory:")

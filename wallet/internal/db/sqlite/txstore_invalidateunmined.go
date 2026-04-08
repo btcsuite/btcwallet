@@ -18,22 +18,22 @@ func (s *SqliteStore) InvalidateUnminedTx(ctx context.Context,
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		return db.InvalidateUnminedTxWithOps(
-			ctx, params, sqliteInvalidateUnminedTxOps{qtx: qtx},
+			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)
 	})
 }
 
-// sqliteInvalidateUnminedTxOps adapts sqlite sqlc queries to the shared
+// invalidateUnminedTxOps adapts sqlite sqlc queries to the shared
 // InvalidateUnminedTx workflow.
-type sqliteInvalidateUnminedTxOps struct {
+type invalidateUnminedTxOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ db.InvalidateUnminedTxOps = (*sqliteInvalidateUnminedTxOps)(nil)
+var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
 
 // LoadInvalidateTarget loads the root tx metadata used by the shared
 // invalidation workflow.
-func (o sqliteInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
+func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	walletID uint32,
 	txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
 
@@ -70,7 +70,7 @@ func (o sqliteInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 
 // ListUnminedTxRecords loads and decodes the wallet's active unmined
 // transaction rows.
-func (o sqliteInvalidateUnminedTxOps) ListUnminedTxRecords(
+func (o invalidateUnminedTxOps) ListUnminedTxRecords(
 	ctx context.Context, walletID int64) ([]db.UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
@@ -89,7 +89,7 @@ func (o sqliteInvalidateUnminedTxOps) ListUnminedTxRecords(
 
 // ClearSpentUtxos restores any wallet-owned parent outputs spent by the given
 // transaction row.
-func (o sqliteInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
+func (o invalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -110,7 +110,7 @@ func (o sqliteInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 
 // MarkTxnsFailed marks the provided tx rows failed in one
 // batch update.
-func (o sqliteInvalidateUnminedTxOps) MarkTxnsFailed(
+func (o invalidateUnminedTxOps) MarkTxnsFailed(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(

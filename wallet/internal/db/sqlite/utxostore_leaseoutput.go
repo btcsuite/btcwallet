@@ -23,7 +23,7 @@ func (s *SqliteStore) LeaseOutput(ctx context.Context,
 
 	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		acquiredLease, err := db.LeaseOutputWithOps(
-			ctx, params, &sqliteLeaseOutputOps{qtx: qtx},
+			ctx, params, &leaseOutputOps{qtx: qtx},
 		)
 		if err != nil {
 			return err
@@ -40,17 +40,17 @@ func (s *SqliteStore) LeaseOutput(ctx context.Context,
 	return lease, nil
 }
 
-// sqliteLeaseOutputOps adapts sqlite sqlc queries to the shared LeaseOutput
+// leaseOutputOps adapts sqlite sqlc queries to the shared LeaseOutput
 // workflow.
-type sqliteLeaseOutputOps struct {
+type leaseOutputOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ db.LeaseOutputOps = (*sqliteLeaseOutputOps)(nil)
+var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
 
 // Acquire attempts to write or renew one sqlite lease row for the requested
 // outpoint.
-func (o *sqliteLeaseOutputOps) Acquire(ctx context.Context,
+func (o *leaseOutputOps) Acquire(ctx context.Context,
 	params db.LeaseOutputParams, nowUTC time.Time,
 	expiresAt time.Time) (time.Time, error) {
 
@@ -77,7 +77,7 @@ func (o *sqliteLeaseOutputOps) Acquire(ctx context.Context,
 
 // HasUtxo reports whether the requested outpoint still exists as a current
 // wallet-owned UTXO.
-func (o *sqliteLeaseOutputOps) HasUtxo(ctx context.Context,
+func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	params db.LeaseOutputParams) (bool, error) {
 
 	_, err := o.qtx.GetUtxoIDByOutpoint(
