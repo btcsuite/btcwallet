@@ -3,11 +3,11 @@
 version: "2"
 sql:
   - engine: "postgresql"
-    schema: "wallet/internal/db/migrations/postgres"
-    queries: "wallet/internal/db/queries/postgres"
+    schema: "wallet/internal/sql/pg/migrations"
+    queries: "wallet/internal/sql/pg/queries"
     gen:
       go:
-        out: "wallet/internal/db/sqlc/postgres"
+        out: "wallet/internal/sql/pg/sqlc"
         package: "sqlcpg"
 
         # This is the driver package that sqlc will use in the generated code.

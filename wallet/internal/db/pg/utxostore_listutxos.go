@@ -5,7 +5,7 @@ import (
 	"fmt"
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/db/sqlc/postgres"
+	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // ListUTXOs lists all current wallet-owned UTXOs matching the caller filters.

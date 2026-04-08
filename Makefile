@@ -8,14 +8,15 @@ GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
 
 # SQL directories.
-SQL_MIGRATIONS_DIR := wallet/internal/db/migrations
-SQL_QUERIES_DIR := wallet/internal/db/queries
+SQL_DIR := wallet/internal/sql
 
 # SQL file paths.
-SQL_POSTGRES_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/postgres
-SQL_POSTGRES_QUERIES := $(SQL_QUERIES_DIR)/postgres
-SQL_SQLITE_MIGRATIONS := $(SQL_MIGRATIONS_DIR)/sqlite
-SQL_SQLITE_QUERIES := $(SQL_QUERIES_DIR)/sqlite
+SQL_POSTGRES_DIR := $(SQL_DIR)/pg
+SQL_POSTGRES_MIGRATIONS := $(SQL_POSTGRES_DIR)/migrations
+SQL_POSTGRES_QUERIES := $(SQL_POSTGRES_DIR)/queries
+SQL_SQLITE_DIR := $(SQL_DIR)/sqlite
+SQL_SQLITE_MIGRATIONS := $(SQL_SQLITE_DIR)/migrations
+SQL_SQLITE_QUERIES := $(SQL_SQLITE_DIR)/queries
 
 RM := rm -f
 CP := cp
@@ -262,7 +263,7 @@ sql-format:
 #? sql-check: Verify SQL migration and query files are formatted correctly (like 'make fmt-check')
 sql-format-check: sql-format
 	@$(call print, "Checking SQL formatting.")
-	if test -n "$$(git status --porcelain '$(SQL_MIGRATIONS_DIR)/**/*.sql' '$(SQL_QUERIES_DIR)/**/*.sql')"; then echo "SQL files not formatted correctly, please run 'make sql-format' again!"; git status; git diff; exit 1; fi
+	if test -n "$$(git status --porcelain '$(SQL_DIR)/**/*.sql')"; then echo "SQL files not formatted correctly, please run 'make sql-format' again!"; git status; git diff; exit 1; fi
 
 #? sql-lint: Lint SQL migration and query files and fix issues (like 'make lint')
 sql-lint:
