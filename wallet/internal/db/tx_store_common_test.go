@@ -80,6 +80,41 @@ func TestParseTxStatus(t *testing.T) {
 	}
 }
 
+// TestParseTxStatusNegativeValue verifies that parseTxStatus rejects negative
+// stored values before they can map into the public TxStatus enum.
+func TestParseTxStatusNegativeValue(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseTxStatus(-1)
+	require.ErrorIs(t, err, ErrInvalidStatus)
+}
+
+// TestIsUnminedStatus verifies the delete-specific classification for each
+// tx status.
+func TestIsUnminedStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status TxStatus
+		want   bool
+	}{
+		{name: "pending", status: TxStatusPending, want: true},
+		{name: "published", status: TxStatusPublished, want: true},
+		{name: "replaced", status: TxStatusReplaced, want: false},
+		{name: "failed", status: TxStatusFailed, want: false},
+		{name: "orphaned", status: TxStatusOrphaned, want: false},
+		{name: "unknown", status: TxStatus(99), want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want, isUnminedStatus(test.status))
+		})
+	}
+}
+
 // TestBuildTxInfo verifies the shared row-to-domain conversion used by both
 // SQL backends when returning a valid TxInfo value.
 func TestBuildTxInfo(t *testing.T) {
