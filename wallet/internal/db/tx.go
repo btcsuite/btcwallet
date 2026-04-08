@@ -10,7 +10,7 @@ import (
 // the transaction lifecycle: begin, commit, and rollback on error.
 //
 // This is a helper function used by the public ExecuteTx methods on
-// PostgresStore and sqlite.Store. It guarantees that the transaction
+// pg.Store and sqlite.Store. It guarantees that the transaction
 // will be either committed (on success) or rolled back (on error or panic).
 func ExecInTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)

@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // ReleaseOutput atomically releases a lease when the caller provides the
@@ -16,10 +16,10 @@ import (
 //
 // The ownership check and lease deletion run in one transaction so callers
 // cannot unlock a UTXO using stale state from a separate read.
-func (s *PostgresStore) ReleaseOutput(ctx context.Context,
+func (s *Store) ReleaseOutput(ctx context.Context,
 	params db.ReleaseOutputParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.ReleaseOutputWithOps(
 			ctx, params, &releaseOutputOps{qtx: qtx},
 		)
@@ -29,7 +29,7 @@ func (s *PostgresStore) ReleaseOutput(ctx context.Context,
 // releaseOutputOps adapts postgres sqlc queries to the shared ReleaseOutput
 // workflow.
 type releaseOutputOps struct {
-	qtx *sqlcpg.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.ReleaseOutputOps = (*releaseOutputOps)(nil)
@@ -45,7 +45,7 @@ func (o *releaseOutputOps) LookupUtxoID(ctx context.Context,
 	}
 
 	utxoID, err := o.qtx.GetUtxoIDByOutpoint(
-		ctx, sqlcpg.GetUtxoIDByOutpointParams{
+		ctx, sqlc.GetUtxoIDByOutpointParams{
 			WalletID:    int64(params.WalletID),
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: outputIndex,
@@ -68,7 +68,7 @@ func (o *releaseOutputOps) Release(ctx context.Context, walletID uint32,
 	utxoID int64, lockID [32]byte) (int64, error) {
 
 	rows, err := o.qtx.ReleaseUtxoLease(
-		ctx, sqlcpg.ReleaseUtxoLeaseParams{
+		ctx, sqlc.ReleaseUtxoLeaseParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
 			LockID:   lockID[:],
@@ -87,7 +87,7 @@ func (o *releaseOutputOps) ActiveLockID(ctx context.Context, walletID uint32,
 	utxoID int64, nowUTC time.Time) ([]byte, error) {
 
 	activeLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
-		ctx, sqlcpg.GetActiveUtxoLeaseLockIDParams{
+		ctx, sqlc.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
 			NowUtc:   nowUTC,

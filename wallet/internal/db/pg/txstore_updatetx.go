@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // UpdateTx patches the mutable metadata for one wallet-scoped transaction.
@@ -17,10 +17,10 @@ import (
 // one SQL transaction. Immutable transaction facts such as raw_tx, credits, and
 // spent-input edges stay owned by CreateTx and the internal rollback/delete
 // flows.
-func (s *PostgresStore) UpdateTx(ctx context.Context,
+func (s *Store) UpdateTx(ctx context.Context,
 	params db.UpdateTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.UpdateTxWithOps(ctx, params, &updateTxOps{qtx: qtx})
 	})
 }
@@ -28,7 +28,7 @@ func (s *PostgresStore) UpdateTx(ctx context.Context,
 // updateTxOps adapts postgres sqlc queries to the shared UpdateTx flow.
 type updateTxOps struct {
 	// qtx is the transaction-scoped postgres query set used by UpdateTx.
-	qtx *sqlcpg.Queries
+	qtx *sqlc.Queries
 
 	// blockHeight caches the validated postgres block-height wrapper prepared
 	// for the later state update query.
@@ -48,7 +48,7 @@ func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
 		ctx,
-		sqlcpg.GetTransactionMetaByHashParams{
+		sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -93,7 +93,7 @@ func (o *updateTxOps) UpdateState(ctx context.Context, walletID uint32,
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx,
-		sqlcpg.UpdateTransactionStateByHashParams{
+		sqlc.UpdateTransactionStateByHashParams{
 			BlockHeight: o.blockHeight,
 			Status:      o.status,
 			WalletID:    int64(walletID),
@@ -117,7 +117,7 @@ func (o *updateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 
 	rows, err := o.qtx.UpdateTransactionLabelByHash(
 		ctx,
-		sqlcpg.UpdateTransactionLabelByHashParams{
+		sqlc.UpdateTransactionLabelByHashParams{
 			Label:    label,
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],

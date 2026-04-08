@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"time"
 
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // LeaseOutput atomically acquires or renews a lease for one current UTXO.
@@ -16,12 +16,12 @@ import (
 // The lease lookup and acquisition run in one transaction so competing calls
 // cannot observe a partially-written lease. Expiration timestamps are
 // normalized to UTC before Insert.
-func (s *PostgresStore) LeaseOutput(ctx context.Context,
+func (s *Store) LeaseOutput(ctx context.Context,
 	params db.LeaseOutputParams) (*db.LeasedOutput, error) {
 
 	var lease *db.LeasedOutput
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		acquiredLease, err := db.LeaseOutputWithOps(
 			ctx, params, &leaseOutputOps{qtx: qtx},
 		)
@@ -43,7 +43,7 @@ func (s *PostgresStore) LeaseOutput(ctx context.Context,
 // leaseOutputOps adapts postgres sqlc queries to the shared LeaseOutput
 // workflow.
 type leaseOutputOps struct {
-	qtx *sqlcpg.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.LeaseOutputOps = (*leaseOutputOps)(nil)
@@ -60,7 +60,7 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 	}
 
 	expiration, err := o.qtx.AcquireUtxoLease(
-		ctx, sqlcpg.AcquireUtxoLeaseParams{
+		ctx, sqlc.AcquireUtxoLeaseParams{
 			WalletID:    int64(params.WalletID),
 			LockID:      params.ID[:],
 			ExpiresAt:   expiresAt,
@@ -91,7 +91,7 @@ func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 	}
 
 	_, err = o.qtx.GetUtxoIDByOutpoint(
-		ctx, sqlcpg.GetUtxoIDByOutpointParams{
+		ctx, sqlc.GetUtxoIDByOutpointParams{
 			WalletID:    int64(params.WalletID),
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: outputIndex,

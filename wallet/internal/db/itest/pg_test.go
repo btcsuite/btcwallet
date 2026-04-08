@@ -21,7 +21,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -193,7 +193,7 @@ func sanitizedPgDBName(t *testing.T) string {
 // limit allows, exhausting the PostgreSQL connection pool. Avoid this by
 // creating NewTestStore inside each parallel subtest so its lifecycle is tied
 // to the subtest's parallel slot.
-func NewTestStore(t *testing.T) *dbpg.PostgresStore {
+func NewTestStore(t *testing.T) *dbpg.Store {
 	t.Helper()
 	ctx := t.Context()
 
@@ -223,12 +223,12 @@ func NewTestStore(t *testing.T) *dbpg.PostgresStore {
 	// Build the connection string for the test database.
 	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
 
-	cfg := db.PostgresConfig{
+	cfg := dbpg.Config{
 		Dsn:            testConnStr,
 		MaxConnections: 0,
 	}
 
-	store, err := dbpg.NewPostgresStore(t.Context(), cfg)
+	store, err := dbpg.NewStore(t.Context(), cfg)
 	require.NoError(t, err, "failed to create postgres store")
 
 	t.Cleanup(func() {
@@ -240,14 +240,14 @@ func NewTestStore(t *testing.T) *dbpg.PostgresStore {
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
 // provided parent transaction hash.
-func childSpendingTxIDs(t *testing.T, store *dbpg.PostgresStore,
+func childSpendingTxIDs(t *testing.T, store *dbpg.Store,
 	walletID uint32,
 	txHash chainhash.Hash) []int64 {
 
 	t.Helper()
 
 	meta, err := store.Queries().GetTransactionMetaByHash(
-		t.Context(), sqlcpg.GetTransactionMetaByHashParams{
+		t.Context(), sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -255,7 +255,7 @@ func childSpendingTxIDs(t *testing.T, store *dbpg.PostgresStore,
 	require.NoError(t, err)
 
 	childIDs, err := store.Queries().ListSpendingTxIDsByParentTxID(
-		t.Context(), sqlcpg.ListSpendingTxIDsByParentTxIDParams{
+		t.Context(), sqlc.ListSpendingTxIDsByParentTxIDParams{
 			WalletID: int64(walletID),
 			TxID:     meta.ID,
 		},
@@ -273,13 +273,13 @@ func childSpendingTxIDs(t *testing.T, store *dbpg.PostgresStore,
 
 // txIDByHash returns the database row ID for the given wallet-scoped
 // transaction hash and reports whether the row exists.
-func txIDByHash(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
+func txIDByHash(t *testing.T, store *dbpg.Store, walletID uint32,
 	txHash chainhash.Hash) (int64, bool) {
 
 	t.Helper()
 
 	meta, err := store.Queries().GetTransactionMetaByHash(
-		t.Context(), sqlcpg.GetTransactionMetaByHashParams{
+		t.Context(), sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -297,13 +297,13 @@ func txIDByHash(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
 
 // rawTxByHash returns the serialized transaction bytes for the given
 // wallet-scoped transaction hash.
-func rawTxByHash(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
+func rawTxByHash(t *testing.T, store *dbpg.Store, walletID uint32,
 	txHash chainhash.Hash) []byte {
 
 	t.Helper()
 
 	row, err := store.Queries().GetTransactionByHash(
-		t.Context(), sqlcpg.GetTransactionByHashParams{
+		t.Context(), sqlc.GetTransactionByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
@@ -315,7 +315,7 @@ func rawTxByHash(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
 
 // setTxStatus rewrites one wallet-scoped transaction row to the provided
 // status using the internal status-update query.
-func setTxStatus(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
+func setTxStatus(t *testing.T, store *dbpg.Store, walletID uint32,
 	txHash chainhash.Hash, status db.TxStatus) {
 
 	t.Helper()
@@ -324,7 +324,7 @@ func setTxStatus(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
 	require.True(t, ok)
 
 	rows, err := store.Queries().UpdateTransactionStatusByIDs(
-		t.Context(), sqlcpg.UpdateTransactionStatusByIDsParams{
+		t.Context(), sqlc.UpdateTransactionStatusByIDsParams{
 			WalletID: int64(walletID),
 			Status:   int16(status),
 			TxIds:    []int64{txID},
@@ -336,14 +336,14 @@ func setTxStatus(t *testing.T, store *dbpg.PostgresStore, walletID uint32,
 
 // walletUtxoExists reports whether one wallet-scoped outpoint is currently
 // present in the UTXO set.
-func walletUtxoExists(t *testing.T, store *dbpg.PostgresStore,
+func walletUtxoExists(t *testing.T, store *dbpg.Store,
 	walletID uint32,
 	outPoint wire.OutPoint) bool {
 
 	t.Helper()
 
 	_, err := store.Queries().GetUtxoIDByOutpoint(
-		t.Context(), sqlcpg.GetUtxoIDByOutpointParams{
+		t.Context(), sqlc.GetUtxoIDByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      outPoint.Hash[:],
 			OutputIndex: int32(outPoint.Index),

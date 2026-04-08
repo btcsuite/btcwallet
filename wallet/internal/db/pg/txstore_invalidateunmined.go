@@ -5,18 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // InvalidateUnminedTx atomically invalidates one wallet-owned unmined
 // transaction branch and marks the root plus descendants failed.
-func (s *PostgresStore) InvalidateUnminedTx(ctx context.Context,
+func (s *Store) InvalidateUnminedTx(ctx context.Context,
 	params db.InvalidateUnminedTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.InvalidateUnminedTxWithOps(
 			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)
@@ -26,7 +26,7 @@ func (s *PostgresStore) InvalidateUnminedTx(ctx context.Context,
 // invalidateUnminedTxOps adapts postgres sqlc queries to the shared
 // InvalidateUnminedTx workflow.
 type invalidateUnminedTxOps struct {
-	qtx *sqlcpg.Queries
+	qtx *sqlc.Queries
 }
 
 var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
@@ -34,18 +34,20 @@ var _ db.InvalidateUnminedTxOps = (*invalidateUnminedTxOps)(nil)
 // LoadInvalidateTarget loads the root tx metadata used by the shared
 // invalidation workflow.
 func (o invalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
-	walletID uint32, txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
+	walletID uint32,
+	txHash chainhash.Hash) (db.InvalidateUnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
-		ctx, sqlcpg.GetTransactionMetaByHashParams{
+		ctx, sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(walletID),
 			TxHash:   txHash[:],
 		},
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return db.InvalidateUnminedTxTarget{}, fmt.Errorf("tx %s: %w", txHash,
-				db.ErrTxNotFound)
+			return db.InvalidateUnminedTxTarget{}, fmt.Errorf(
+				"tx %s: %w", txHash, db.ErrTxNotFound,
+			)
 		}
 
 		return db.InvalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
@@ -77,7 +79,7 @@ func (o invalidateUnminedTxOps) ListUnminedTxRecords(
 	}
 
 	return db.BuildUnminedTxRecords(rows,
-		func(row sqlcpg.ListUnminedTransactionsRow) (int64, []byte, []byte) {
+		func(row sqlc.ListUnminedTransactionsRow) (int64, []byte, []byte) {
 			return row.ID, row.TxHash, row.RawTx
 		},
 	)
@@ -89,7 +91,7 @@ func (o invalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
-		ctx, sqlcpg.ClearUtxosSpentByTxIDParams{
+		ctx, sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID: walletID,
 			SpentByTxID: sql.NullInt64{
 				Int64: txID,
@@ -110,7 +112,7 @@ func (o invalidateUnminedTxOps) MarkTxnsFailed(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
-		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
 			Status:   int16(db.TxStatusFailed),
 			TxIds:    txIDs,

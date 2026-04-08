@@ -9,22 +9,22 @@ import (
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
-// Ensure PostgresStore satisfies the WalletStore interface.
-var _ db.WalletStore = (*PostgresStore)(nil)
+// Ensure Store satisfies the WalletStore interface.
+var _ db.WalletStore = (*Store)(nil)
 
 // CreateWallet creates a new wallet in the database with the provided
 // parameters. It returns the created wallet info or an error if the
 // creation fails.
-func (s *PostgresStore) CreateWallet(ctx context.Context,
+func (s *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
 
 	var info *db.WalletInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		walletParams := sqlcpg.CreateWalletParams{
+	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+		walletParams := sqlc.CreateWalletParams{
 			WalletName:              params.Name,
 			IsImported:              params.IsImported,
 			ManagerVersion:          params.ManagerVersion,
@@ -39,7 +39,7 @@ func (s *PostgresStore) CreateWallet(ctx context.Context,
 			return fmt.Errorf("create wallet: %w", err)
 		}
 
-		secretsParams := sqlcpg.InsertWalletSecretsParams{
+		secretsParams := sqlc.InsertWalletSecretsParams{
 			WalletID:               id,
 			MasterPrivParams:       params.MasterKeyPrivParams,
 			EncryptedCryptoPrivKey: params.EncryptedCryptoPrivKey,
@@ -63,7 +63,7 @@ func (s *PostgresStore) CreateWallet(ctx context.Context,
 			}
 		}
 
-		syncParams := sqlcpg.InsertWalletSyncStateParams{
+		syncParams := sqlc.InsertWalletSyncStateParams{
 			WalletID:          id,
 			SyncedHeight:      sql.NullInt32{},
 			BirthdayHeight:    sql.NullInt32{},
@@ -114,7 +114,7 @@ func (s *PostgresStore) CreateWallet(ctx context.Context,
 // GetWallet retrieves information about a wallet given its name. It
 // returns a WalletInfo struct containing the wallet's properties or an
 // error if the wallet is not found.
-func (s *PostgresStore) GetWallet(ctx context.Context,
+func (s *Store) GetWallet(ctx context.Context,
 	name string) (*db.WalletInfo, error) {
 
 	row, err := s.queries.GetWalletByName(ctx, name)
@@ -144,7 +144,7 @@ func (s *PostgresStore) GetWallet(ctx context.Context,
 }
 
 // ListWallets returns a page of wallets matching the given query.
-func (s *PostgresStore) ListWallets(ctx context.Context,
+func (s *Store) ListWallets(ctx context.Context,
 	query db.ListWalletsQuery) (page.Result[db.WalletInfo, uint32], error) {
 
 	rows, err := s.queries.ListWallets(ctx, listWalletsParams(query.Page))
@@ -175,7 +175,7 @@ func (s *PostgresStore) ListWallets(ctx context.Context,
 }
 
 // IterWallets returns an iterator over paginated wallet results.
-func (s *PostgresStore) IterWallets(ctx context.Context,
+func (s *Store) IterWallets(ctx context.Context,
 	query db.ListWalletsQuery) iter.Seq2[db.WalletInfo, error] {
 
 	return page.Iter(
@@ -187,10 +187,10 @@ func (s *PostgresStore) IterWallets(ctx context.Context,
 // birthday, birthday block, or sync state. The specific fields to
 // update are provided in the UpdateWalletParams struct. It returns an
 // error if the update fails.
-func (s *PostgresStore) UpdateWallet(ctx context.Context,
+func (s *Store) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
 			err := ensureBlockExists(ctx, qtx, params.SyncedTo)
@@ -233,7 +233,7 @@ func (s *PostgresStore) UpdateWallet(ctx context.Context,
 // Deterministic (HD) seed of the wallet. This seed is sensitive
 // information and is returned in its encrypted form. It returns the
 // encrypted seed as a byte slice or an error if the retrieval fails.
-func (s *PostgresStore) GetEncryptedHDSeed(ctx context.Context,
+func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 	walletID uint32) ([]byte, error) {
 
 	secrets, err := s.queries.GetWalletSecrets(ctx, int64(walletID))
@@ -256,10 +256,10 @@ func (s *PostgresStore) GetEncryptedHDSeed(ctx context.Context,
 }
 
 // UpdateWalletSecrets updates the secrets for the wallet.
-func (s *PostgresStore) UpdateWalletSecrets(ctx context.Context,
+func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	params db.UpdateWalletSecretsParams) error {
 
-	secretsParams := sqlcpg.UpdateWalletSecretsParams{
+	secretsParams := sqlc.UpdateWalletSecretsParams{
 		MasterPrivParams:         params.MasterPrivParams,
 		EncryptedCryptoPrivKey:   params.EncryptedCryptoPrivKey,
 		EncryptedCryptoScriptKey: params.EncryptedCryptoScriptKey,
@@ -299,7 +299,7 @@ type walletRowParams struct {
 
 // listWalletRowToInfo converts a ListWallets result row to a WalletInfo
 // struct for pagination.
-func listWalletRowToInfo(row sqlcpg.ListWalletsRow) (*db.WalletInfo, error) {
+func listWalletRowToInfo(row sqlc.ListWalletsRow) (*db.WalletInfo, error) {
 	return buildWalletInfo(walletRowParams{
 		id:                     row.ID,
 		name:                   row.WalletName,
@@ -319,9 +319,9 @@ func listWalletRowToInfo(row sqlcpg.ListWalletsRow) (*db.WalletInfo, error) {
 // listWalletsParams translates a page request to ListWallets query
 // parameters, handling optional cursor setup for pagination.
 func listWalletsParams(
-	req page.Request[uint32]) sqlcpg.ListWalletsParams {
+	req page.Request[uint32]) sqlc.ListWalletsParams {
 
-	params := sqlcpg.ListWalletsParams{
+	params := sqlc.ListWalletsParams{
 		PageLimit: int64(req.QueryLimit()),
 	}
 
@@ -387,9 +387,9 @@ func buildWalletInfo(row walletRowParams) (*db.WalletInfo, error) {
 // buildUpdateSyncParams constructs the UpdateWalletSyncStateParams from
 // the given UpdateWalletParams.
 func buildUpdateSyncParams(params db.UpdateWalletParams) (
-	sqlcpg.UpdateWalletSyncStateParams, error) {
+	sqlc.UpdateWalletSyncStateParams, error) {
 
-	syncParams := sqlcpg.UpdateWalletSyncStateParams{
+	syncParams := sqlc.UpdateWalletSyncStateParams{
 		WalletID: int64(params.WalletID),
 	}
 

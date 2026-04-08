@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // CreateTx atomically records a wallet-scoped transaction row, its
@@ -21,7 +21,7 @@ import (
 // Insert. When the wallet already stores the same unmined transaction hash,
 // CreateTx may promote that existing row to confirmed state instead of
 // inserting a duplicate.
-func (s *PostgresStore) CreateTx(ctx context.Context,
+func (s *Store) CreateTx(ctx context.Context,
 	params db.CreateTxParams) error {
 
 	req, err := db.NewCreateTxRequest(params)
@@ -29,7 +29,7 @@ func (s *PostgresStore) CreateTx(ctx context.Context,
 		return err
 	}
 
-	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
+	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
 		return db.CreateTxWithOps(ctx, req, &createTxOps{
 			invalidateUnminedTxOps: invalidateUnminedTxOps{
 				qtx: qtx,
@@ -53,7 +53,7 @@ func (o *createTxOps) LoadExisting(ctx context.Context,
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
 		ctx,
-		sqlcpg.GetTransactionMetaByHashParams{
+		sqlc.GetTransactionMetaByHashParams{
 			WalletID: int64(req.Params.WalletID),
 			TxHash:   req.TxHash[:],
 		},
@@ -90,7 +90,7 @@ func (o *createTxOps) ConfirmExisting(ctx context.Context,
 	}
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
-		ctx, sqlcpg.UpdateTransactionStateByHashParams{
+		ctx, sqlc.UpdateTransactionStateByHashParams{
 			BlockHeight: sql.NullInt32{Int32: blockHeight, Valid: true},
 			Status:      int16(db.TxStatusPublished),
 			WalletID:    int64(req.Params.WalletID),
@@ -153,7 +153,7 @@ func (o *createTxOps) ListConflictTxns(ctx context.Context,
 
 // collectConflictRootIDs returns the active unmined spender row IDs
 // that currently own any wallet-controlled input spent by the incoming tx.
-func collectConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
+func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 	req db.CreateTxRequest) (map[int64]struct{}, error) {
 
 	if blockchain.IsCoinBaseTx(req.Params.Tx) {
@@ -169,7 +169,7 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
 		}
 
 		spentByTxID, err := qtx.GetUtxoSpendByOutpoint(
-			ctx, sqlcpg.GetUtxoSpendByOutpointParams{
+			ctx, sqlc.GetUtxoSpendByOutpointParams{
 				WalletID:    int64(req.Params.WalletID),
 				TxHash:      txIn.PreviousOutPoint.Hash[:],
 				OutputIndex: outputIndex,
@@ -196,7 +196,7 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlcpg.Queries,
 
 // buildConflictRoots maps the selected unmined rows into ordered root IDs and
 // the matching root hashes used for descendant discovery.
-func buildConflictRoots(rows []sqlcpg.ListUnminedTransactionsRow,
+func buildConflictRoots(rows []sqlc.ListUnminedTransactionsRow,
 	rootIDSet map[int64]struct{}) (
 	[]int64, []chainhash.Hash, error) {
 
@@ -224,7 +224,7 @@ func buildConflictRoots(rows []sqlcpg.ListUnminedTransactionsRow,
 func (o *createTxOps) Insert(ctx context.Context,
 	req db.CreateTxRequest) (int64, error) {
 
-	txID, err := o.qtx.InsertTransaction(ctx, sqlcpg.InsertTransactionParams{
+	txID, err := o.qtx.InsertTransaction(ctx, sqlc.InsertTransactionParams{
 		WalletID:     int64(req.Params.WalletID),
 		TxHash:       req.TxHash[:],
 		RawTx:        req.RawTx,
@@ -261,7 +261,7 @@ func (o *createTxOps) MarkTxnsReplaced(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(
-		ctx, sqlcpg.UpdateTransactionStatusByIDsParams{
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
 			WalletID: walletID,
 			Status:   int16(db.TxStatusReplaced),
 			TxIds:    txIDs,
@@ -282,7 +282,7 @@ func (o *createTxOps) InsertReplacementEdges(
 
 	for _, replacedTxID := range replacedTxIDs {
 		_, err := o.qtx.InsertTxReplacementEdge(
-			ctx, sqlcpg.InsertTxReplacementEdgeParams{
+			ctx, sqlc.InsertTxReplacementEdgeParams{
 				WalletID:        walletID,
 				ReplacedTxID:    replacedTxID,
 				ReplacementTxID: replacementTxID,
@@ -299,7 +299,7 @@ func (o *createTxOps) InsertReplacementEdges(
 
 // insertCredits inserts one wallet-owned UTXO row for each credited output of
 // the transaction being stored.
-func insertCredits(ctx context.Context, qtx *sqlcpg.Queries,
+func insertCredits(ctx context.Context, qtx *sqlc.Queries,
 	params db.CreateTxParams, txID int64) error {
 
 	for index := range params.Credits {
@@ -317,7 +317,7 @@ func insertCredits(ctx context.Context, qtx *sqlcpg.Queries,
 		pkScript := params.Tx.TxOut[index].PkScript
 
 		addrRow, err := qtx.GetAddressByScriptPubKey(
-			ctx, sqlcpg.GetAddressByScriptPubKeyParams{
+			ctx, sqlc.GetAddressByScriptPubKeyParams{
 				ScriptPubKey: pkScript,
 				WalletID:     int64(params.WalletID),
 			},
@@ -336,7 +336,7 @@ func insertCredits(ctx context.Context, qtx *sqlcpg.Queries,
 			return fmt.Errorf("convert credit index %d: %w", index, err)
 		}
 
-		_, err = qtx.InsertUtxo(ctx, sqlcpg.InsertUtxoParams{
+		_, err = qtx.InsertUtxo(ctx, sqlc.InsertUtxoParams{
 			WalletID:    int64(params.WalletID),
 			TxID:        txID,
 			OutputIndex: outputIndex,
@@ -353,7 +353,7 @@ func insertCredits(ctx context.Context, qtx *sqlcpg.Queries,
 
 // creditExists reports whether the wallet already has a UTXO row for the
 // given credited output, even if that output is now spent by a child tx.
-func creditExists(ctx context.Context, qtx *sqlcpg.Queries,
+func creditExists(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, error) {
 
 	convertedIndex, err := db.Uint32ToInt32(outputIndex)
@@ -363,7 +363,7 @@ func creditExists(ctx context.Context, qtx *sqlcpg.Queries,
 	}
 
 	_, err = qtx.GetUtxoSpendByOutpoint(
-		ctx, sqlcpg.GetUtxoSpendByOutpointParams{
+		ctx, sqlc.GetUtxoSpendByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
 			OutputIndex: convertedIndex,
@@ -389,7 +389,7 @@ func creditExists(ctx context.Context, qtx *sqlcpg.Queries,
 // instead of silently storing a second spender. Inputs that reference a
 // wallet-owned output whose parent transaction is already invalid fail with
 // ErrTxInputInvalidParent.
-func markInputsSpent(ctx context.Context, qtx *sqlcpg.Queries,
+func markInputsSpent(ctx context.Context, qtx *sqlc.Queries,
 	params db.CreateTxParams, txID int64) error {
 
 	if blockchain.IsCoinBaseTx(params.Tx) {
@@ -408,7 +408,7 @@ func markInputsSpent(ctx context.Context, qtx *sqlcpg.Queries,
 			return fmt.Errorf("convert input index %d: %w", inputIndex, err)
 		}
 
-		rowsAffected, err := qtx.MarkUtxoSpent(ctx, sqlcpg.MarkUtxoSpentParams{
+		rowsAffected, err := qtx.MarkUtxoSpent(ctx, sqlc.MarkUtxoSpentParams{
 			WalletID:        int64(params.WalletID),
 			TxHash:          txIn.PreviousOutPoint.Hash[:],
 			OutputIndex:     outputIndex,
@@ -437,12 +437,12 @@ func markInputsSpent(ctx context.Context, qtx *sqlcpg.Queries,
 // is wallet-owned, still eligible for spending, and already attached to another
 // transaction. If the wallet owns the parent output but that parent is already
 // invalid, the helper returns ErrTxInputInvalidParent instead.
-func ensureSpendConflict(ctx context.Context, qtx *sqlcpg.Queries,
+func ensureSpendConflict(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex int32,
 	txID int64) error {
 
 	spendByTxID, err := qtx.GetUtxoSpendByOutpoint(
-		ctx, sqlcpg.GetUtxoSpendByOutpointParams{
+		ctx, sqlc.GetUtxoSpendByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
 			OutputIndex: outputIndex,
@@ -467,11 +467,11 @@ func ensureSpendConflict(ctx context.Context, qtx *sqlcpg.Queries,
 
 // ensureWalletParentValid reports ErrTxInputInvalidParent when the wallet
 // owns the referenced outpoint but its parent transaction is already invalid.
-func ensureWalletParentValid(ctx context.Context, qtx *sqlcpg.Queries,
+func ensureWalletParentValid(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex int32) error {
 
 	hasInvalid, err := qtx.HasInvalidWalletUtxoByOutpoint(
-		ctx, sqlcpg.HasInvalidWalletUtxoByOutpointParams{
+		ctx, sqlc.HasInvalidWalletUtxoByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
 			OutputIndex: outputIndex,

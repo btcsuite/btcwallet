@@ -7,22 +7,21 @@ import (
 
 	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlassetpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
-
-	sqlcpg "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
 )
 
-// PostgresStore is the PostgreSQL implementation of the
+// Store is the PostgreSQL implementation of the
 // WalletStore interface.
-type PostgresStore struct {
+type Store struct {
 	db      *sql.DB
-	queries *sqlcpg.Queries
+	queries *sqlc.Queries
 }
 
-// NewPostgresStore creates a new PostgreSQL-based WalletStore. It handles
+// NewStore creates a new PostgreSQL-based WalletStore. It handles
 // the full connection setup including config validation, connection opening,
 // health checks, connection pool configuration, and migration application.
-func NewPostgresStore(ctx context.Context, cfg db.PostgresConfig) (*PostgresStore,
+func NewStore(ctx context.Context, cfg Config) (*Store,
 	error) {
 
 	err := cfg.Validate()
@@ -53,7 +52,7 @@ func NewPostgresStore(ctx context.Context, cfg db.PostgresConfig) (*PostgresStor
 	dbConn.SetMaxIdleConns(maxConns)
 	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlcpg.New(dbConn)
+	queries := sqlc.New(dbConn)
 
 	err = sqlassetpg.ApplyMigrations(dbConn)
 	if err != nil {
@@ -61,14 +60,14 @@ func NewPostgresStore(ctx context.Context, cfg db.PostgresConfig) (*PostgresStor
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
-	return &PostgresStore{
+	return &Store{
 		db:      dbConn,
 		queries: queries,
 	}, nil
 }
 
 // Close closes the database connection.
-func (s *PostgresStore) Close() error {
+func (s *Store) Close() error {
 	err := s.db.Close()
 	if err != nil {
 		return fmt.Errorf("close database: %w", err)
@@ -81,8 +80,8 @@ func (s *PostgresStore) Close() error {
 // receives a transactional query executor and should perform all database
 // operations using it. The transaction will be automatically committed on
 // success or rolled back on error.
-func (s *PostgresStore) ExecuteTx(ctx context.Context,
-	fn func(*sqlcpg.Queries) error) error {
+func (s *Store) ExecuteTx(ctx context.Context,
+	fn func(*sqlc.Queries) error) error {
 
 	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)

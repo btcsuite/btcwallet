@@ -11,15 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testBlock builds one deterministic test block.
-func testBlock(height uint32) *db.Block {
-	return &db.Block{
-		Hash:      chainhash.Hash{byte(height), 1, 2, 3},
-		Height:    height,
-		Timestamp: time.Unix(int64(height), 0),
-	}
-}
-
 // testRegularMsgTx builds one simple non-coinbase transaction fixture.
 func testRegularMsgTx() *wire.MsgTx {
 	return &wire.MsgTx{
