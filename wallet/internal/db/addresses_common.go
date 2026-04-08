@@ -364,7 +364,7 @@ func getAddress[T any, Args any](ctx context.Context,
 func nextListAddressesQuery(q ListAddressesQuery,
 	cursor uint32) ListAddressesQuery {
 
-	q.Page = q.Page.WithAfter(cursor)
+	q.Page.After = &cursor
 
 	return q
 }

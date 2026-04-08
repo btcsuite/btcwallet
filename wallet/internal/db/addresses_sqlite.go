@@ -37,13 +37,17 @@ func (s *SqliteStore) GetAddress(ctx context.Context,
 func (s *SqliteStore) ListAddresses(ctx context.Context,
 	query ListAddressesQuery) (page.Result[AddressInfo, uint32], error) {
 
+	if query.Page.Limit == 0 {
+		return page.Result[AddressInfo, uint32]{}, ErrInvalidPageLimit
+	}
+
 	items, err := sqliteListAddressesByAccount(ctx, s.queries, query)
 	if err != nil {
 		return page.Result[AddressInfo, uint32]{}, err
 	}
 
 	result := page.BuildResult(
-		query.Page, items,
+		items, query.Page.Limit,
 		func(item AddressInfo) uint32 {
 			return item.ID
 		},
@@ -346,11 +350,11 @@ func sqliteBuildAddressPageParams(
 		Purpose:     int64(q.Scope.Purpose),
 		CoinType:    int64(q.Scope.Coin),
 		AccountName: q.AccountName,
-		PageLimit:   int64(q.Page.QueryLimit()),
+		PageLimit:   int64(q.Page.Limit) + 1,
 	}
 
-	if cursor, ok := q.Page.After(); ok {
-		params.CursorID = int64(cursor)
+	if q.Page.After != nil {
+		params.CursorID = int64(*q.Page.After)
 	}
 
 	return params
