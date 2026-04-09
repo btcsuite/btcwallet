@@ -87,7 +87,7 @@ func (s *SqliteStore) Close() error {
 func (s *SqliteStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcsqlite.Queries) error) error {
 
-	return execInTx(ctx, s.db, func(tx *sql.Tx) error {
+	return ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)
 		return fn(qtx)
 	})

@@ -13,9 +13,9 @@ import (
 // incorrect.
 var errInvalidAddressType = errors.New("invalid address type")
 
-// idToAddressType safely converts an integer to AddressType. It returns an
+// IDToAddressType safely converts an integer to AddressType. It returns an
 // error if the value does not correspond to a known AddressType value.
-func idToAddressType[T ~int16 | ~int64](v T) (AddressType, error) {
+func IDToAddressType[T ~int16 | ~int64](v T) (AddressType, error) {
 	if v < 0 || v > T(Anchor) {
 		return 0, fmt.Errorf("%w: %d", errInvalidAddressType, v)
 	}
@@ -23,9 +23,9 @@ func idToAddressType[T ~int16 | ~int64](v T) (AddressType, error) {
 	return AddressType(v), nil
 }
 
-// listAddressTypes is a generic helper that retrieves all address types from
+// ListAddressTypes is a generic helper that retrieves all address types from
 // the database and converts them to AddressTypeInfo structs.
-func listAddressTypes[Row any](ctx context.Context,
+func ListAddressTypes[Row any](ctx context.Context,
 	lister func(context.Context) ([]Row, error),
 	toInfo func(Row) (AddressTypeInfo, error)) ([]AddressTypeInfo, error) {
 
@@ -48,10 +48,10 @@ func listAddressTypes[Row any](ctx context.Context,
 	return types, nil
 }
 
-// getAddressTypeByID is a generic helper that retrieves a single address type
+// GetAddressTypeByID is a generic helper that retrieves a single address type
 // by its ID and converts it to an AddressTypeInfo struct. It returns
 // ErrAddressTypeNotFound if no matching type is found.
-func getAddressTypeByID[Row any, ID any](ctx context.Context,
+func GetAddressTypeByID[Row any, ID any](ctx context.Context,
 	getter func(context.Context, ID) (Row, error), queryID ID, id AddressType,
 	toInfo func(Row) (AddressTypeInfo, error)) (AddressTypeInfo, error) {
 

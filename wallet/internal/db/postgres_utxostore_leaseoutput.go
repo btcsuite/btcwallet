@@ -14,14 +14,14 @@ import (
 //
 // The lease lookup and acquisition run in one transaction so competing calls
 // cannot observe a partially-written lease. Expiration timestamps are
-// normalized to UTC before insert.
+// normalized to UTC before Insert.
 func (s *PostgresStore) LeaseOutput(ctx context.Context,
 	params LeaseOutputParams) (*LeasedOutput, error) {
 
 	var lease *LeasedOutput
 
 	err := s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		acquiredLease, err := leaseOutputWithOps(
+		acquiredLease, err := LeaseOutputWithOps(
 			ctx, params, &pgLeaseOutputOps{qtx: qtx},
 		)
 		if err != nil {
@@ -45,15 +45,15 @@ type pgLeaseOutputOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ leaseOutputOps = (*pgLeaseOutputOps)(nil)
+var _ LeaseOutputOps = (*pgLeaseOutputOps)(nil)
 
-// acquire attempts to write or renew one postgres lease row for the requested
+// Acquire attempts to write or renew one postgres lease row for the requested
 // outpoint.
-func (o *pgLeaseOutputOps) acquire(ctx context.Context,
+func (o *pgLeaseOutputOps) Acquire(ctx context.Context,
 	params LeaseOutputParams, nowUTC time.Time,
 	expiresAt time.Time) (time.Time, error) {
 
-	outputIndex, err := uint32ToInt32(params.OutPoint.Index)
+	outputIndex, err := Uint32ToInt32(params.OutPoint.Index)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("convert output index: %w", err)
 	}
@@ -73,18 +73,18 @@ func (o *pgLeaseOutputOps) acquire(ctx context.Context,
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, errLeaseOutputNoRow
+		return time.Time{}, ErrLeaseOutputNoRow
 	}
 
-	return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
+	return time.Time{}, fmt.Errorf("Acquire lease row: %w", err)
 }
 
-// hasUtxo reports whether the requested outpoint still exists as a current
+// HasUtxo reports whether the requested outpoint still exists as a current
 // wallet-owned UTXO.
-func (o *pgLeaseOutputOps) hasUtxo(ctx context.Context,
+func (o *pgLeaseOutputOps) HasUtxo(ctx context.Context,
 	params LeaseOutputParams) (bool, error) {
 
-	outputIndex, err := uint32ToInt32(params.OutPoint.Index)
+	outputIndex, err := Uint32ToInt32(params.OutPoint.Index)
 	if err != nil {
 		return false, fmt.Errorf("convert output index: %w", err)
 	}

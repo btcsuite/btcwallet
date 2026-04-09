@@ -18,7 +18,7 @@ func (s *SqliteStore) GetAccount(ctx context.Context,
 
 	getQueries := sqliteAccountGetQueries{q: s.queries}
 
-	return getAccountByQuery(ctx, query, getQueries.byNumber, getQueries.byName)
+	return GetAccountByQuery(ctx, query, getQueries.byNumber, getQueries.byName)
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
@@ -28,7 +28,7 @@ func (s *SqliteStore) ListAccounts(ctx context.Context,
 
 	listQueries := sqliteAccountListQueries{q: s.queries}
 
-	return listAccountsByQuery(
+	return ListAccountsByQuery(
 		ctx, query, listQueries.byScope, listQueries.byName, listQueries.all,
 	)
 }
@@ -40,7 +40,7 @@ func (s *SqliteStore) RenameAccount(ctx context.Context,
 
 	renameQueries := sqliteAccountRenameQueries{q: s.queries}
 
-	return renameAccountByQuery(
+	return RenameAccountByQuery(
 		ctx, params, renameQueries.byNumber, renameQueries.byName,
 	)
 }
@@ -81,15 +81,15 @@ func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 		if !row.AccountNumber.Valid {
 			// This should never happen unless the query is modified
 			// incorrectly.
-			return errNilDBAccountNumber
+			return ErrNilDBAccountNumber
 		}
 
-		accNumber, err := int64ToUint32(row.AccountNumber.Int64)
+		accNumber, err := Int64ToUint32(row.AccountNumber.Int64)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrMaxAccountNumberReached, err)
 		}
 
-		info = buildAccountInfo(
+		info = BuildAccountInfo(
 			accNumber, params.Name, DerivedAccount, 0, 0, 0, false,
 			row.CreatedAt, params.Scope,
 		)
@@ -108,7 +108,7 @@ func (s *SqliteStore) CreateDerivedAccount(ctx context.Context,
 func sqliteEnsureKeyScope(ctx context.Context, qtx *sqlcsqlite.Queries,
 	walletID uint32, scope KeyScope) (int64, error) {
 
-	return ensureKeyScope(
+	return EnsureKeyScope(
 		ctx, qtx.GetKeyScopeByWalletAndScope,
 		sqlcsqlite.GetKeyScopeByWalletAndScopeParams{
 			WalletID: int64(walletID),
@@ -145,7 +145,7 @@ func (s *SqliteStore) CreateImportedAccount(ctx context.Context,
 	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
 		var err error
 
-		props, err = createImportedAccount(
+		props, err = CreateImportedAccount(
 			ctx, params,
 			func() (int64, error) {
 				return sqliteEnsureKeyScope(
@@ -219,7 +219,7 @@ func sqliteGetAccountProps(ctx context.Context, qtx *sqlcsqlite.Queries,
 		return nil, fmt.Errorf("get account props: %w", err)
 	}
 
-	return accountPropsRowToProps(accountPropsRow[int64, int64]{
+	return AccountPropsRowToProps(AccountPropsRow[int64, int64]{
 		AccountNumber:      row.AccountNumber,
 		AccountName:        row.AccountName,
 		OriginID:           row.OriginID,
@@ -234,8 +234,8 @@ func sqliteGetAccountProps(ctx context.Context, qtx *sqlcsqlite.Queries,
 		CoinType:           row.CoinType,
 		InternalTypeID:     row.InternalTypeID,
 		ExternalTypeID:     row.ExternalTypeID,
-		IDToAddrType:       idToAddressType[int64],
-		IDToOriginType:     idToAccountOrigin[int64],
+		IDToAddrType:       IDToAddressType[int64],
+		IDToOriginType:     IDToAccountOrigin[int64],
 	})
 }
 
@@ -262,7 +262,7 @@ func sqliteAccountRowToInfo[T sqliteAccountInfoRow](row T) (*AccountInfo,
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlcsqlite.GetAccountByScopeAndNameRow(row)
 
-	return accountRowToInfo(accountInfoRow[int64]{
+	return AccountRowToInfo(AccountInfoRow[int64]{
 		AccountNumber:    base.AccountNumber,
 		AccountName:      base.AccountName,
 		OriginID:         base.OriginID,
@@ -273,7 +273,7 @@ func sqliteAccountRowToInfo[T sqliteAccountInfoRow](row T) (*AccountInfo,
 		CreatedAt:        base.CreatedAt,
 		Purpose:          base.Purpose,
 		CoinType:         base.CoinType,
-		IDToOriginType:   idToAccountOrigin[int64],
+		IDToOriginType:   IDToAccountOrigin[int64],
 	})
 }
 
@@ -286,7 +286,7 @@ type sqliteAccountListQueries struct {
 func (s sqliteAccountListQueries) byScope(ctx context.Context,
 	query ListAccountsQuery) ([]AccountInfo, error) {
 
-	return listAccounts(
+	return ListAccounts(
 		ctx, s.q.ListAccountsByWalletScope,
 		sqlcsqlite.ListAccountsByWalletScopeParams{
 			WalletID: int64(query.WalletID),
@@ -300,7 +300,7 @@ func (s sqliteAccountListQueries) byScope(ctx context.Context,
 func (s sqliteAccountListQueries) byName(ctx context.Context,
 	query ListAccountsQuery) ([]AccountInfo, error) {
 
-	return listAccounts(
+	return ListAccounts(
 		ctx, s.q.ListAccountsByWalletAndName,
 		sqlcsqlite.ListAccountsByWalletAndNameParams{
 			WalletID:    int64(query.WalletID),
@@ -313,7 +313,7 @@ func (s sqliteAccountListQueries) byName(ctx context.Context,
 func (s sqliteAccountListQueries) all(ctx context.Context,
 	query ListAccountsQuery) ([]AccountInfo, error) {
 
-	return listAccounts(
+	return ListAccounts(
 		ctx, s.q.ListAccountsByWallet, int64(query.WalletID),
 		sqliteAccountRowToInfo,
 	)
@@ -328,13 +328,13 @@ type sqliteAccountGetQueries struct {
 func (s sqliteAccountGetQueries) byNumber(ctx context.Context,
 	query GetAccountQuery) (*AccountInfo, error) {
 
-	return getAccount(
+	return GetAccount(
 		ctx, s.q.GetAccountByWalletScopeAndNumber,
 		sqlcsqlite.GetAccountByWalletScopeAndNumberParams{
 			WalletID:      int64(query.WalletID),
 			Purpose:       int64(query.Scope.Purpose),
 			CoinType:      int64(query.Scope.Coin),
-			AccountNumber: nullableUint32ToSQLInt64(query.AccountNumber),
+			AccountNumber: NullableUint32ToSQLInt64(query.AccountNumber),
 		}, query, sqliteAccountRowToInfo,
 	)
 }
@@ -343,7 +343,7 @@ func (s sqliteAccountGetQueries) byNumber(ctx context.Context,
 func (s sqliteAccountGetQueries) byName(ctx context.Context,
 	query GetAccountQuery) (*AccountInfo, error) {
 
-	return getAccount(ctx, s.q.GetAccountByWalletScopeAndName,
+	return GetAccount(ctx, s.q.GetAccountByWalletScopeAndName,
 		sqlcsqlite.GetAccountByWalletScopeAndNameParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
@@ -363,14 +363,14 @@ type sqliteAccountRenameQueries struct {
 func (s sqliteAccountRenameQueries) byNumber(ctx context.Context,
 	params RenameAccountParams) error {
 
-	return renameAccount(
+	return RenameAccount(
 		ctx, s.q.UpdateAccountNameByWalletScopeAndNumber,
 		sqlcsqlite.UpdateAccountNameByWalletScopeAndNumberParams{
 			NewName:       params.NewName,
 			WalletID:      int64(params.WalletID),
 			Purpose:       int64(params.Scope.Purpose),
 			CoinType:      int64(params.Scope.Coin),
-			AccountNumber: nullableUint32ToSQLInt64(params.AccountNumber),
+			AccountNumber: NullableUint32ToSQLInt64(params.AccountNumber),
 		}, params,
 	)
 }
@@ -380,7 +380,7 @@ func (s sqliteAccountRenameQueries) byNumber(ctx context.Context,
 func (s sqliteAccountRenameQueries) byName(ctx context.Context,
 	params RenameAccountParams) error {
 
-	return renameAccount(
+	return RenameAccount(
 		ctx, s.q.UpdateAccountNameByWalletScopeAndName,
 		sqlcsqlite.UpdateAccountNameByWalletScopeAndNameParams{
 			NewName:  params.NewName,

@@ -19,7 +19,7 @@ func (s *SqliteStore) ReleaseOutput(ctx context.Context,
 	params ReleaseOutputParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return releaseOutputWithOps(
+		return ReleaseOutputWithOps(
 			ctx, params, &sqliteReleaseOutputOps{qtx: qtx},
 		)
 	})
@@ -31,11 +31,11 @@ type sqliteReleaseOutputOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ releaseOutputOps = (*sqliteReleaseOutputOps)(nil)
+var _ ReleaseOutputOps = (*sqliteReleaseOutputOps)(nil)
 
-// lookupUtxoID resolves the wallet-owned outpoint to its stable sqlite UTXO row
+// LookupUtxoID resolves the wallet-owned outpoint to its stable sqlite UTXO row
 // ID.
-func (o *sqliteReleaseOutputOps) lookupUtxoID(ctx context.Context,
+func (o *sqliteReleaseOutputOps) LookupUtxoID(ctx context.Context,
 	params ReleaseOutputParams) (int64, error) {
 
 	utxoID, err := o.qtx.GetUtxoIDByOutpoint(
@@ -47,7 +47,7 @@ func (o *sqliteReleaseOutputOps) lookupUtxoID(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, errReleaseOutputUtxoNotFound
+			return 0, ErrReleaseOutputUtxoNotFound
 		}
 
 		return 0, fmt.Errorf("lookup utxo row: %w", err)
@@ -56,9 +56,9 @@ func (o *sqliteReleaseOutputOps) lookupUtxoID(ctx context.Context,
 	return utxoID, nil
 }
 
-// release attempts to delete the sqlite lease row for the provided UTXO ID and
+// Release attempts to delete the sqlite lease row for the provided UTXO ID and
 // lock ID.
-func (o *sqliteReleaseOutputOps) release(ctx context.Context, walletID uint32,
+func (o *sqliteReleaseOutputOps) Release(ctx context.Context, walletID uint32,
 	utxoID int64, lockID [32]byte) (int64, error) {
 
 	rows, err := o.qtx.ReleaseUtxoLease(
@@ -69,18 +69,18 @@ func (o *sqliteReleaseOutputOps) release(ctx context.Context, walletID uint32,
 		},
 	)
 	if err != nil {
-		return 0, fmt.Errorf("release lease row: %w", err)
+		return 0, fmt.Errorf("Release lease row: %w", err)
 	}
 
 	return rows, nil
 }
 
-// activeLockID returns the currently active sqlite lease lock ID for the
+// ActiveLockID returns the currently active sqlite lease lock ID for the
 // provided UTXO ID.
-func (o *sqliteReleaseOutputOps) activeLockID(ctx context.Context,
+func (o *sqliteReleaseOutputOps) ActiveLockID(ctx context.Context,
 	walletID uint32, utxoID int64, nowUTC time.Time) ([]byte, error) {
 
-	activeLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
+	ActiveLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
 		ctx, sqlcsqlite.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
@@ -89,11 +89,11 @@ func (o *sqliteReleaseOutputOps) activeLockID(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errReleaseOutputNoActiveLease
+			return nil, ErrReleaseOutputNoActiveLease
 		}
 
 		return nil, fmt.Errorf("lookup active lease row: %w", err)
 	}
 
-	return activeLockID, nil
+	return ActiveLockID, nil
 }

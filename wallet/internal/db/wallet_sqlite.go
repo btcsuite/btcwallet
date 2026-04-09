@@ -180,7 +180,7 @@ func (s *SqliteStore) IterWallets(ctx context.Context,
 	query ListWalletsQuery) iter.Seq2[WalletInfo, error] {
 
 	return page.Iter(
-		ctx, query, s.ListWallets, nextListWalletsQuery,
+		ctx, query, s.ListWallets, NextListWalletsQuery,
 	)
 }
 
@@ -337,12 +337,12 @@ func sqliteListWalletsParams(
 // buildSqliteWalletInfo constructs a WalletInfo from the given wallet
 // row parameters.
 func buildSqliteWalletInfo(row sqliteWalletRowParams) (*WalletInfo, error) {
-	walletID, err := int64ToUint32(row.id)
+	walletID, err := Int64ToUint32(row.id)
 	if err != nil {
 		return nil, err
 	}
 
-	mgrVer, err := int64ToInt32(row.managerVersion)
+	mgrVer, err := Int64ToInt32(row.managerVersion)
 	if err != nil {
 		return nil, err
 	}
