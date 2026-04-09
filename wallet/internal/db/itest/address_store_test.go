@@ -133,9 +133,9 @@ func TestNewImportedAddress(t *testing.T) {
 	queries := store.Queries()
 	walletID := newWallet(t, store, "wallet-imported-addresses")
 
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0086, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0086, "imported")
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -252,7 +252,7 @@ func TestNewImportedAddress(t *testing.T) {
 				t, queries, params.ScriptPubKey, walletID,
 			)
 
-			secret, err := getAddressSecret(t, queries, addressID)
+			secret, err := GetAddressSecret(t, queries, addressID)
 			require.NoError(t, err)
 			if tc.providePrivateKey {
 				require.Equal(
@@ -276,8 +276,8 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 	store := NewTestStore(t)
 	queries := store.Queries()
 	walletID := newWallet(t, store, "wallet-encrypted-script")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
-	createImportedAccount(
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+	CreateImportedAccount(
 		t, store, walletID, db.KeyScopeBIP0049Plus, "imported",
 	)
 
@@ -365,7 +365,7 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 				t, queries, params.ScriptPubKey, walletID,
 			)
 
-			secret, err := getAddressSecret(t, queries, addressID)
+			secret, err := GetAddressSecret(t, queries, addressID)
 			require.NoError(t, err)
 
 			require.Equal(t, tc.encryptedScript, secret.EncryptedScript)
@@ -387,7 +387,7 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 	store := NewTestStore(t)
 	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-imported-counter")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
 	const importedAddrCount = 5
 	addressIDs := make([]uint32, 0, importedAddrCount)
@@ -435,7 +435,7 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	store := NewTestStore(t)
 	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-imported-counter-concurrent")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
 	const workers = 20
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -517,7 +517,7 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-duplicate-import")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
 	// Set up encryption parameters (same for both imports).
 	scriptPubKey := RandomBytes(32)
@@ -550,7 +550,7 @@ func TestGetAddressSecret(t *testing.T) {
 
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-secrets")
-	createImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
 
 	testCases := []struct {
 		name              string
@@ -628,7 +628,7 @@ func TestGetAddress(t *testing.T) {
 				accountStore db.AccountStore,
 				walletID uint32) db.GetAddressQuery {
 
-				createImportedAccount(
+				CreateImportedAccount(
 					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
 				)
 

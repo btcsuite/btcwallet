@@ -17,9 +17,9 @@ var (
 	ErrInvalidNullInt = errors.New("invalid NullInt")
 )
 
-// int64ToUint32 safely casts an int64 to an uint32, returning an error
+// Int64ToUint32 safely casts an int64 to an uint32, returning an error
 // if the value is out of range.
-func int64ToUint32(v int64) (uint32, error) {
+func Int64ToUint32(v int64) (uint32, error) {
 	if v < 0 || v > math.MaxUint32 {
 		return 0, fmt.Errorf("could not cast %d to uint32: %w", v,
 			ErrCastingOverflow)
@@ -28,9 +28,9 @@ func int64ToUint32(v int64) (uint32, error) {
 	return uint32(v), nil
 }
 
-// int64ToInt32 safely casts an int64 to an int32, returning an error
+// Int64ToInt32 safely casts an int64 to an int32, returning an error
 // if the value is out of range.
-func int64ToInt32(v int64) (int32, error) {
+func Int64ToInt32(v int64) (int32, error) {
 	if v < math.MinInt32 || v > math.MaxInt32 {
 		return 0, fmt.Errorf("could not cast %d to int32: %w", v,
 			ErrCastingOverflow)
@@ -50,9 +50,9 @@ func int64ToUint8(v int64) (uint8, error) {
 	return uint8(v), nil
 }
 
-// int16ToUint8 safely casts an int16 to an uint8, returning an error
+// Int16ToUint8 safely casts an int16 to an uint8, returning an error
 // if the value is out of range.
-func int16ToUint8(v int16) (uint8, error) {
+func Int16ToUint8(v int16) (uint8, error) {
 	if v < 0 || v > math.MaxUint8 {
 		return 0, fmt.Errorf("could not cast %d to uint8: %w", v,
 			ErrCastingOverflow)
@@ -61,9 +61,9 @@ func int16ToUint8(v int16) (uint8, error) {
 	return uint8(v), nil
 }
 
-// uint32ToInt32 safely casts an uint32 to an int32, returning an error
+// Uint32ToInt32 safely casts an uint32 to an int32, returning an error
 // if the value is out of range.
-func uint32ToInt32(v uint32) (int32, error) {
+func Uint32ToInt32(v uint32) (int32, error) {
 	if v > math.MaxInt32 {
 		return 0, fmt.Errorf("could not cast %d to int32: %w", v,
 			ErrCastingOverflow)
@@ -72,9 +72,9 @@ func uint32ToInt32(v uint32) (int32, error) {
 	return int32(v), nil
 }
 
-// uint32ToInt16 safely casts an uint32 to an int16, returning an error
+// Uint32ToInt16 safely casts an uint32 to an int16, returning an error
 // if the value is out of range.
-func uint32ToInt16(v uint32) (int16, error) {
+func Uint32ToInt16(v uint32) (int16, error) {
 	if v > math.MaxInt16 {
 		return 0, fmt.Errorf("could not cast %d to int16: %w", v,
 			ErrCastingOverflow)
@@ -83,10 +83,10 @@ func uint32ToInt16(v uint32) (int16, error) {
 	return int16(v), nil
 }
 
-// uint32ToNullInt32 safely casts an uint32 to a sql.NullInt32, returning
+// Uint32ToNullInt32 safely casts an uint32 to a sql.NullInt32, returning
 // an error if the value is out of range.
-func uint32ToNullInt32(v uint32) (sql.NullInt32, error) {
-	toInt32, err := uint32ToInt32(v)
+func Uint32ToNullInt32(v uint32) (sql.NullInt32, error) {
+	toInt32, err := Uint32ToInt32(v)
 	if err != nil {
 		return sql.NullInt32{}, err
 	}
@@ -94,8 +94,8 @@ func uint32ToNullInt32(v uint32) (sql.NullInt32, error) {
 	return sql.NullInt32{Int32: toInt32, Valid: true}, nil
 }
 
-// nullableInt32ToSQLInt32 converts an optional int32 to sql.NullInt32.
-func nullableInt32ToSQLInt32(v *int32) sql.NullInt32 {
+// NullableInt32ToSQLInt32 converts an optional int32 to sql.NullInt32.
+func NullableInt32ToSQLInt32(v *int32) sql.NullInt32 {
 	if v == nil {
 		return sql.NullInt32{}
 	}
@@ -103,8 +103,8 @@ func nullableInt32ToSQLInt32(v *int32) sql.NullInt32 {
 	return sql.NullInt32{Int32: *v, Valid: true}
 }
 
-// nullableInt32ToSQLInt64 converts an optional int32 to sql.NullInt64.
-func nullableInt32ToSQLInt64(v *int32) sql.NullInt64 {
+// NullableInt32ToSQLInt64 converts an optional int32 to sql.NullInt64.
+func NullableInt32ToSQLInt64(v *int32) sql.NullInt64 {
 	if v == nil {
 		return sql.NullInt64{}
 	}
@@ -112,8 +112,8 @@ func nullableInt32ToSQLInt64(v *int32) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(*v), Valid: true}
 }
 
-// nullableUint32ToSQLInt64 converts an optional uint32 to sql.NullInt64.
-func nullableUint32ToSQLInt64(v *uint32) sql.NullInt64 {
+// NullableUint32ToSQLInt64 converts an optional uint32 to sql.NullInt64.
+func NullableUint32ToSQLInt64(v *uint32) sql.NullInt64 {
 	if v == nil {
 		return sql.NullInt64{}
 	}
@@ -121,9 +121,9 @@ func nullableUint32ToSQLInt64(v *uint32) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(*v), Valid: true}
 }
 
-// nullInt32ToUint32 safely casts a sql.NullInt32 to an uint32, returning
+// NullInt32ToUint32 safely casts a sql.NullInt32 to an uint32, returning
 // an error if the value is out of range or invalid.
-func nullInt32ToUint32(n sql.NullInt32) (uint32, error) {
+func NullInt32ToUint32(n sql.NullInt32) (uint32, error) {
 	if !n.Valid {
 		return 0, fmt.Errorf("could not cast invalid NullInt32 to uint32: %w",
 			ErrInvalidNullInt)

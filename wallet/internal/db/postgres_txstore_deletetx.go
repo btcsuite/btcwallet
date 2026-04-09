@@ -21,7 +21,7 @@ func (s *PostgresStore) DeleteTx(ctx context.Context,
 	params DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return deleteTxWithOps(ctx, params, pgDeleteTxOps{qtx: qtx})
+		return DeleteTxWithOps(ctx, params, pgDeleteTxOps{qtx: qtx})
 	})
 }
 
@@ -30,11 +30,11 @@ type pgDeleteTxOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ deleteTxOps = (*pgDeleteTxOps)(nil)
+var _ DeleteTxOps = (*pgDeleteTxOps)(nil)
 
-// loadDeleteTarget loads and validates the unmined transaction row DeleteTx is
+// LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
-func (o pgDeleteTxOps) loadDeleteTarget(ctx context.Context, walletID uint32,
+func (o pgDeleteTxOps) LoadDeleteTarget(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash) (int64, error) {
 
 	meta, err := getDeleteTxMetaPg(ctx, o.qtx, walletID, txHash)
@@ -45,17 +45,17 @@ func (o pgDeleteTxOps) loadDeleteTarget(ctx context.Context, walletID uint32,
 	return meta.ID, nil
 }
 
-// ensureLeaf rejects DeleteTx when the target still has direct unmined child
+// EnsureLeaf rejects DeleteTx when the target still has direct unmined child
 // spenders.
-func (o pgDeleteTxOps) ensureLeaf(ctx context.Context, walletID uint32,
+func (o pgDeleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, txID int64) error {
 
 	return ensureDeleteLeafPg(ctx, o.qtx, walletID, txHash, txID)
 }
 
-// clearSpentUtxos restores any wallet-owned parent outputs the transaction had
+// ClearSpentUtxos restores any wallet-owned parent outputs the transaction had
 // marked spent.
-func (o pgDeleteTxOps) clearSpentUtxos(ctx context.Context, walletID uint32,
+func (o pgDeleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
 	txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -72,9 +72,9 @@ func (o pgDeleteTxOps) clearSpentUtxos(ctx context.Context, walletID uint32,
 	return nil
 }
 
-// deleteCreatedUtxos removes any wallet-owned outputs created by the
+// DeleteCreatedUtxos removes any wallet-owned outputs created by the
 // transaction being deleted.
-func (o pgDeleteTxOps) deleteCreatedUtxos(ctx context.Context,
+func (o pgDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.DeleteUtxosByTxID(
@@ -91,9 +91,9 @@ func (o pgDeleteTxOps) deleteCreatedUtxos(ctx context.Context,
 	return nil
 }
 
-// deleteUnminedTransaction removes the target unmined row after its dependent
+// DeleteUnminedTransaction removes the target unmined row after its dependent
 // wallet state has been cleaned up.
-func (o pgDeleteTxOps) deleteUnminedTransaction(ctx context.Context,
+func (o pgDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
 	rows, err := o.qtx.DeleteUnminedTransactionByHash(
@@ -121,7 +121,7 @@ func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
 		return fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	candidates, err := buildUnminedTxRecords(rows,
+	candidates, err := BuildUnminedTxRecords(rows,
 		func(row sqlcpg.ListUnminedTransactionsRow) (int64, []byte, []byte) {
 			return row.ID, row.TxHash, row.RawTx
 		},
@@ -132,14 +132,14 @@ func ensureDeleteLeafPg(ctx context.Context, qtx *sqlcpg.Queries,
 
 	filtered := candidates[:0]
 	for _, candidate := range candidates {
-		if candidate.id == txID {
+		if candidate.ID == txID {
 			continue
 		}
 
 		filtered = append(filtered, candidate)
 	}
 
-	if len(collectDirectChildTxIDs(txHash, filtered)) > 0 {
+	if len(CollectDirectChildTxIDs(txHash, filtered)) > 0 {
 		return fmt.Errorf("delete tx %s: %w", txHash,
 			ErrDeleteRequiresLeaf)
 	}
@@ -169,12 +169,12 @@ func getDeleteTxMetaPg(ctx context.Context, qtx *sqlcpg.Queries,
 			fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := parseTxStatus(int64(meta.TxStatus))
+	status, err := ParseTxStatus(int64(meta.TxStatus))
 	if err != nil {
 		return sqlcpg.GetTransactionMetaByHashRow{}, err
 	}
 
-	if meta.BlockHeight.Valid || !isUnminedStatus(status) {
+	if meta.BlockHeight.Valid || !IsUnminedStatus(status) {
 		return sqlcpg.GetTransactionMetaByHashRow{},
 			fmt.Errorf("delete tx %s: %w", txHash,
 				ErrDeleteRequiresUnmined)

@@ -21,7 +21,7 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 	getByScript := func(ctx context.Context, q GetAddressQuery) (*AddressInfo,
 		error) {
 
-		return getAddress(
+		return GetAddress(
 			ctx, s.queries.GetAddressByScriptPubKey,
 			sqlcpg.GetAddressByScriptPubKeyParams{
 				ScriptPubKey: q.ScriptPubKey,
@@ -30,7 +30,7 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 		)
 	}
 
-	return getAddressByQuery(ctx, query, getByScript)
+	return GetAddressByQuery(ctx, query, getByScript)
 }
 
 // ListAddresses returns a page of addresses matching the given query.
@@ -57,7 +57,7 @@ func (s *PostgresStore) IterAddresses(ctx context.Context,
 	query ListAddressesQuery) iter.Seq2[AddressInfo, error] {
 
 	return page.Iter(
-		ctx, query, s.ListAddresses, nextListAddressesQuery,
+		ctx, query, s.ListAddresses, NextListAddressesQuery,
 	)
 }
 
@@ -65,7 +65,7 @@ func (s *PostgresStore) IterAddresses(ctx context.Context,
 func (s *PostgresStore) GetAddressSecret(ctx context.Context,
 	addressID uint32) (*AddressSecret, error) {
 
-	return getAddressSecret(
+	return GetAddressSecret(
 		ctx, s.queries.GetAddressSecret, addressID, pgAddressSecretRowToSecret,
 	)
 }
@@ -76,63 +76,63 @@ func (s *PostgresStore) NewDerivedAddress(ctx context.Context,
 	params NewDerivedAddressParams,
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
 
-	adapters := derivedAddressAdapters[
+	adapters := DerivedAddressAdapters[
 		*sqlcpg.Queries,
 		sqlcpg.GetAccountByWalletScopeAndNameRow,
-		accountLookupKey,
+		AccountLookupKey,
 		sqlcpg.CreateDerivedAddressRow]{
-		getAccount:    pgGetAccountFromKey(s.queries),
-		accountParams: accountKeyFromParams,
-		getAccountID:  newDerivedAddressGetAccountIDPg,
-		getExtIndex:   newDerivedAddressGetExtIndexPg,
-		getIntIndex:   newDerivedAddressGetIntIndexPg,
-		createAddr:    newDerivedAddressCreateAddrPg,
-		rowID:         newDerivedAddressRowIDPg,
-		rowCreatedAt:  newDerivedAddressRowCreatedAtPg,
+		GetAccount:    pgGetAccountFromKey(s.queries),
+		AccountParams: AccountKeyFromParams,
+		GetAccountID:  newDerivedAddressGetAccountIDPg,
+		GetExtIndex:   newDerivedAddressGetExtIndexPg,
+		GetIntIndex:   newDerivedAddressGetIntIndexPg,
+		CreateAddr:    newDerivedAddressCreateAddrPg,
+		RowID:         newDerivedAddressRowIDPg,
+		RowCreatedAt:  newDerivedAddressRowCreatedAtPg,
 	}
 
-	return newDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
+	return NewDerivedAddressWithTx(ctx, params, s.ExecuteTx, adapters, deriveFn)
 }
 
 // NewImportedAddress imports a new address, script, or private key.
 func (s *PostgresStore) NewImportedAddress(ctx context.Context,
 	params NewImportedAddressParams) (*AddressInfo, error) {
 
-	adapters := importedAddressAdapters[
+	adapters := ImportedAddressAdapters[
 		*sqlcpg.Queries,
 		sqlcpg.GetAccountByWalletScopeAndNameRow,
-		accountLookupKey,
+		AccountLookupKey,
 		sqlcpg.CreateImportedAddressParams,
 		sqlcpg.CreateImportedAddressRow,
 		sqlcpg.InsertAddressSecretParams]{
-		getAccount:    pgGetAccountFromKey(s.queries),
-		accountParams: accountKeyFromImportedParams,
-		getAccountID:  newImportedAddressGetAccountIDPg,
-		createAddr:    pgCreateImportedAddress,
-		createParams:  createImportedAddressParamsPg,
-		insertSecret:  pgInsertAddressSecret,
-		secretParams:  insertAddressSecretParamsPg,
-		rowID:         importedAddressRowIDPg,
-		rowCreatedAt:  importedAddressRowCreatedAtPg,
+		GetAccount:    pgGetAccountFromKey(s.queries),
+		AccountParams: AccountKeyFromImportedParams,
+		GetAccountID:  newImportedAddressGetAccountIDPg,
+		CreateAddr:    pgCreateImportedAddress,
+		CreateParams:  createImportedAddressParamsPg,
+		InsertSecret:  pgInsertAddressSecret,
+		SecretParams:  insertAddressSecretParamsPg,
+		RowID:         importedAddressRowIDPg,
+		RowCreatedAt:  importedAddressRowCreatedAtPg,
 	}
 
-	return newImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
+	return NewImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
 }
 
 // pgGetAccountFromKey returns a helper to look up accounts by key.
 func pgGetAccountFromKey(qtx *sqlcpg.Queries) func(context.Context,
-	accountLookupKey) (sqlcpg.GetAccountByWalletScopeAndNameRow, error) {
+	AccountLookupKey) (sqlcpg.GetAccountByWalletScopeAndNameRow, error) {
 
 	return func(ctx context.Context,
-		key accountLookupKey) (sqlcpg.GetAccountByWalletScopeAndNameRow,
+		key AccountLookupKey) (sqlcpg.GetAccountByWalletScopeAndNameRow,
 		error) {
 
 		return qtx.GetAccountByWalletScopeAndName(
 			ctx, sqlcpg.GetAccountByWalletScopeAndNameParams{
-				WalletID:    key.walletID,
-				Purpose:     key.purpose,
-				CoinType:    key.coinType,
-				AccountName: key.accountName,
+				WalletID:    key.WalletID,
+				Purpose:     key.Purpose,
+				CoinType:    key.CoinType,
+				AccountName: key.AccountName,
 			},
 		)
 	}
@@ -168,7 +168,7 @@ func newDerivedAddressCreateAddrPg(qtx *sqlcpg.Queries) func(context.Context,
 		branch uint32, index uint32,
 		scriptPubKey []byte) (sqlcpg.CreateDerivedAddressRow, error) {
 
-		branchNum, err := uint32ToInt16(branch)
+		branchNum, err := Uint32ToInt16(branch)
 		if err != nil {
 			return sqlcpg.CreateDerivedAddressRow{}, fmt.Errorf(
 				"address branch: %w", err,
@@ -268,7 +268,7 @@ func importedAddressRowCreatedAtPg(
 func pgAddressSecretRowToSecret(
 	row sqlcpg.GetAddressSecretRow) (*AddressSecret, error) {
 
-	return addressSecretRowToSecret(addressSecretRow{
+	return AddressSecretRowToSecret(AddressSecretRow{
 		AddressID:        row.AddressID,
 		EncryptedPrivKey: row.EncryptedPrivKey,
 		EncryptedScript:  row.EncryptedScript,
@@ -290,7 +290,7 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*AddressInfo, error) {
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlcpg.GetAddressByScriptPubKeyRow(row)
 
-	info, err := addressRowToInfo(addressInfoRow[int16, int16]{
+	info, err := addressRowToInfo(AddressInfoRow[int16, int16]{
 		ID:            base.ID,
 		AccountID:     base.AccountID,
 		TypeID:        base.TypeID,
@@ -305,8 +305,8 @@ func pgAddressRowToInfo[T pgAddressInfoRow](row T) (*AddressInfo, error) {
 		AddressIndex: base.AddressIndex,
 		ScriptPubKey: base.ScriptPubKey,
 		PubKey:       base.PubKey,
-		IDToAddrType: idToAddressType[int16],
-		IDToOrigin:   idToOrigin[int16],
+		IDToAddrType: IDToAddressType[int16],
+		IDToOrigin:   IDToOrigin[int16],
 	})
 	if err != nil {
 		return nil, err

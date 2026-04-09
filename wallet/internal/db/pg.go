@@ -81,7 +81,7 @@ func (s *PostgresStore) Close() error {
 func (s *PostgresStore) ExecuteTx(ctx context.Context,
 	fn func(*sqlcpg.Queries) error) error {
 
-	return execInTx(ctx, s.db, func(tx *sql.Tx) error {
+	return ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
 		qtx := s.queries.WithTx(tx)
 		return fn(qtx)
 	})

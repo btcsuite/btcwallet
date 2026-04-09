@@ -15,19 +15,19 @@ import (
 func buildPgBlock(height sql.NullInt32, hash []byte,
 	timestamp sql.NullInt64) (*Block, error) {
 
-	height32, err := nullInt32ToUint32(height)
+	height32, err := NullInt32ToUint32(height)
 	if err != nil {
 		return nil, fmt.Errorf("block height: %w", err)
 	}
 
-	return buildBlock(hash, height32, timestamp.Int64)
+	return BuildBlock(hash, height32, timestamp.Int64)
 }
 
 // ensureBlockExistsPg ensures that a block exists in the database.
 func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 	block *Block) error {
 
-	height, err := uint32ToInt32(block.Height)
+	height, err := Uint32ToInt32(block.Height)
 	if err != nil {
 		return fmt.Errorf("convert block height: %w", err)
 	}
@@ -51,7 +51,7 @@ func ensureBlockExistsPg(ctx context.Context, qtx *sqlcpg.Queries,
 func requireBlockMatchesPg(ctx context.Context, qtx *sqlcpg.Queries,
 	block *Block) (int32, error) {
 
-	height, err := uint32ToInt32(block.Height)
+	height, err := Uint32ToInt32(block.Height)
 	if err != nil {
 		return 0, fmt.Errorf("convert block height: %w", err)
 	}

@@ -7,9 +7,9 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 )
 
-// buildBlock constructs a Block from the provided components that are common
+// BuildBlock constructs a Block from the provided components that are common
 // across different database backends.
-func buildBlock(hash []byte, height uint32, timestamp int64) (*Block, error) {
+func BuildBlock(hash []byte, height uint32, timestamp int64) (*Block, error) {
 	h, err := chainhash.NewHash(hash)
 	if err != nil {
 		return nil, fmt.Errorf("block hash: %w", err)

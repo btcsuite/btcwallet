@@ -14,26 +14,26 @@ var (
 	ErrInvalidateTx = errors.New("invalidate tx")
 )
 
-// invalidateUnminedTxTarget is the normalized metadata the shared invalidation
+// InvalidateUnminedTxTarget is the normalized metadata the shared invalidation
 // workflow needs for the root transaction.
-type invalidateUnminedTxTarget struct {
-	// id is the backend row ID for the transaction being invalidated.
-	id int64
+type InvalidateUnminedTxTarget struct {
+	// ID is the backend row ID for the transaction being invalidated.
+	ID int64
 
-	// txHash is the network transaction hash used for descendant discovery.
-	txHash chainhash.Hash
+	// TxHash is the network transaction hash used for descendant discovery.
+	TxHash chainhash.Hash
 
-	// status is the wallet-relative state that must still be unmined.
-	status TxStatus
+	// Status is the wallet-relative state that must still be unmined.
+	Status TxStatus
 
-	// hasBlock reports whether the row is already confirmed in a block.
-	hasBlock bool
+	// HasBlock reports whether the row is already confirmed in a block.
+	HasBlock bool
 
-	// isCoinbase reports whether the row is a coinbase transaction.
-	isCoinbase bool
+	// IsCoinbase reports whether the row is a coinbase transaction.
+	IsCoinbase bool
 }
 
-// invalidateUnminedTxOps is the small backend adapter the shared
+// InvalidateUnminedTxOps is the small backend adapter the shared
 // InvalidateUnminedTx workflow needs.
 //
 // The shared invalidation algorithm is intentionally ordered:
@@ -49,47 +49,47 @@ type invalidateUnminedTxTarget struct {
 // invalid branch from retaining wallet-owned spend edges if any later step
 // fails. The backend adapters only supply query wiring and row-shape
 // conversions.
-type invalidateUnminedTxOps interface {
-	// loadInvalidateTarget loads the wallet-scoped root tx metadata.
-	loadInvalidateTarget(ctx context.Context, walletID uint32,
+type InvalidateUnminedTxOps interface {
+	// LoadInvalidateTarget loads the wallet-scoped root tx metadata.
+	LoadInvalidateTarget(ctx context.Context, walletID uint32,
 		txHash chainhash.Hash) (
-		invalidateUnminedTxTarget, error)
+		InvalidateUnminedTxTarget, error)
 
-	// listUnminedTxRecords loads the wallet's active unmined transaction rows
+	// ListUnminedTxRecords loads the wallet's active unmined transaction rows
 	// in the normalized shape the descendant walk expects.
-	listUnminedTxRecords(ctx context.Context, walletID int64) (
-		[]unminedTxRecord, error)
+	ListUnminedTxRecords(ctx context.Context, walletID int64) (
+		[]UnminedTxRecord, error)
 
-	// clearSpentUtxos restores any wallet-owned parent outputs spent by the
+	// ClearSpentUtxos restores any wallet-owned parent outputs spent by the
 	// given transaction row.
-	clearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
+	ClearSpentUtxos(ctx context.Context, walletID int64, txID int64) error
 
-	// markTxnsFailed batch-marks the provided tx rows as failed.
-	markTxnsFailed(ctx context.Context, walletID int64, txIDs []int64) error
+	// MarkTxnsFailed batch-marks the provided tx rows as failed.
+	MarkTxnsFailed(ctx context.Context, walletID int64, txIDs []int64) error
 }
 
 // validateUnminedTxTarget checks that the requested root is a current
 // unmined non-coinbase transaction.
-func validateUnminedTxTarget(target invalidateUnminedTxTarget) error {
-	if target.hasBlock {
-		return fmt.Errorf("tx %s is confirmed: %w", target.txHash,
+func validateUnminedTxTarget(target InvalidateUnminedTxTarget) error {
+	if target.HasBlock {
+		return fmt.Errorf("tx %s is confirmed: %w", target.TxHash,
 			ErrInvalidateTx)
 	}
 
-	if target.isCoinbase {
-		return fmt.Errorf("tx %s is coinbase: %w", target.txHash,
+	if target.IsCoinbase {
+		return fmt.Errorf("tx %s is coinbase: %w", target.TxHash,
 			ErrInvalidateTx)
 	}
 
-	if !isUnminedStatus(target.status) {
-		return fmt.Errorf("tx %s has status %d: %w", target.txHash,
-			target.status, ErrInvalidateTx)
+	if !IsUnminedStatus(target.Status) {
+		return fmt.Errorf("tx %s has status %d: %w", target.TxHash,
+			target.Status, ErrInvalidateTx)
 	}
 
 	return nil
 }
 
-// invalidateUnminedTxWithOps invalidates one wallet-owned unmined transaction
+// InvalidateUnminedTxWithOps invalidates one wallet-owned unmined transaction
 // root together with any descendant branch that depends on it.
 //
 // The helper performs descendant discovery before any spend-edge or status
@@ -97,10 +97,10 @@ func validateUnminedTxTarget(target invalidateUnminedTxTarget) error {
 // finally marks the combined branch failed. Keeping that ordering in one shared
 // helper ensures postgres and sqlite invalidate branches with identical wallet
 // semantics.
-func invalidateUnminedTxWithOps(ctx context.Context,
-	params InvalidateUnminedTxParams, ops invalidateUnminedTxOps) error {
+func InvalidateUnminedTxWithOps(ctx context.Context,
+	params InvalidateUnminedTxParams, ops InvalidateUnminedTxOps) error {
 
-	target, err := ops.loadInvalidateTarget(ctx, params.WalletID, params.Txid)
+	target, err := ops.LoadInvalidateTarget(ctx, params.WalletID, params.Txid)
 	if err != nil {
 		return fmt.Errorf("load invalidate tx target: %w", err)
 	}
@@ -110,32 +110,32 @@ func invalidateUnminedTxWithOps(ctx context.Context,
 		return err
 	}
 
-	candidates, err := ops.listUnminedTxRecords(ctx, int64(params.WalletID))
+	candidates, err := ops.ListUnminedTxRecords(ctx, int64(params.WalletID))
 	if err != nil {
 		return fmt.Errorf("list unmined invalidation txns: %w", err)
 	}
 
-	descendantIDs := collectDescendantTxIDs(
-		[]chainhash.Hash{target.txHash}, nil, candidates,
+	descendantIDs := CollectDescendantTxIDs(
+		[]chainhash.Hash{target.TxHash}, nil, candidates,
 	)
 
-	err = ops.clearSpentUtxos(ctx, int64(params.WalletID), target.id)
+	err = ops.ClearSpentUtxos(ctx, int64(params.WalletID), target.ID)
 	if err != nil {
 		return fmt.Errorf("clear root spent utxos: %w", err)
 	}
 
 	for _, descendantID := range descendantIDs {
-		err = ops.clearSpentUtxos(ctx, int64(params.WalletID), descendantID)
+		err = ops.ClearSpentUtxos(ctx, int64(params.WalletID), descendantID)
 		if err != nil {
 			return fmt.Errorf("clear descendant spent utxos: %w", err)
 		}
 	}
 
 	failedIDs := make([]int64, 0, len(descendantIDs)+1)
-	failedIDs = append(failedIDs, target.id)
+	failedIDs = append(failedIDs, target.ID)
 	failedIDs = append(failedIDs, descendantIDs...)
 
-	err = ops.markTxnsFailed(ctx, int64(params.WalletID), failedIDs)
+	err = ops.MarkTxnsFailed(ctx, int64(params.WalletID), failedIDs)
 	if err != nil {
 		return fmt.Errorf("mark invalidated txns failed: %w", err)
 	}

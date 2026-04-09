@@ -178,7 +178,7 @@ func (s *PostgresStore) IterWallets(ctx context.Context,
 	query ListWalletsQuery) iter.Seq2[WalletInfo, error] {
 
 	return page.Iter(
-		ctx, query, s.ListWallets, nextListWalletsQuery,
+		ctx, query, s.ListWallets, NextListWalletsQuery,
 	)
 }
 
@@ -337,7 +337,7 @@ func pgListWalletsParams(
 // buildPgWalletInfo constructs a WalletInfo from the given wallet row
 // parameters.
 func buildPgWalletInfo(row pgWalletRowParams) (*WalletInfo, error) {
-	walletID, err := int64ToUint32(row.id)
+	walletID, err := Int64ToUint32(row.id)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func buildUpdateSyncParamsPg(params UpdateWalletParams) (
 	}
 
 	if params.SyncedTo != nil {
-		syncedHeight, err := uint32ToNullInt32(params.SyncedTo.Height)
+		syncedHeight, err := Uint32ToNullInt32(params.SyncedTo.Height)
 		if err != nil {
 			return syncParams, err
 		}
@@ -409,7 +409,7 @@ func buildUpdateSyncParamsPg(params UpdateWalletParams) (
 	}
 
 	if params.BirthdayBlock != nil {
-		birthdayHeight, err := uint32ToNullInt32(
+		birthdayHeight, err := Uint32ToNullInt32(
 			params.BirthdayBlock.Height,
 		)
 		if err != nil {

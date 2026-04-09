@@ -15,49 +15,49 @@ var (
 	errInvalidateCommonTest = errors.New("invalidate common test")
 
 	errInvalidateMockLoadInvalidateTargetType = errors.New(
-		"loadInvalidateTarget result is not invalidateUnminedTxTarget",
+		"LoadInvalidateTarget result is not InvalidateUnminedTxTarget",
 	)
 
 	errInvalidateMockListUnminedType = errors.New(
-		"listUnminedTxRecords result is not []unminedTxRecord",
+		"ListUnminedTxRecords result is not []UnminedTxRecord",
 	)
 )
 
 // mockInvalidateUnminedTxOps is a mock implementation of
-// invalidateUnminedTxOps.
+// InvalidateUnminedTxOps.
 type mockInvalidateUnminedTxOps struct {
 	mock.Mock
 }
 
-// loadInvalidateTarget implements invalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) loadInvalidateTarget(ctx context.Context,
+// LoadInvalidateTarget implements InvalidateUnminedTxOps.
+func (m *mockInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
 	walletID uint32,
-	txHash chainhash.Hash) (invalidateUnminedTxTarget, error) {
+	txHash chainhash.Hash) (InvalidateUnminedTxTarget, error) {
 
 	args := m.Called(ctx, walletID, txHash)
 	if args.Get(0) == nil {
-		return invalidateUnminedTxTarget{}, args.Error(1)
+		return InvalidateUnminedTxTarget{}, args.Error(1)
 	}
 
-	target, ok := args.Get(0).(invalidateUnminedTxTarget)
+	target, ok := args.Get(0).(InvalidateUnminedTxTarget)
 	if !ok {
-		return invalidateUnminedTxTarget{},
+		return InvalidateUnminedTxTarget{},
 			errInvalidateMockLoadInvalidateTargetType
 	}
 
 	return target, args.Error(1)
 }
 
-// listUnminedTxRecords implements invalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) listUnminedTxRecords(ctx context.Context,
-	walletID int64) ([]unminedTxRecord, error) {
+// ListUnminedTxRecords implements InvalidateUnminedTxOps.
+func (m *mockInvalidateUnminedTxOps) ListUnminedTxRecords(ctx context.Context,
+	walletID int64) ([]UnminedTxRecord, error) {
 
 	args := m.Called(ctx, walletID)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 
-	records, ok := args.Get(0).([]unminedTxRecord)
+	records, ok := args.Get(0).([]UnminedTxRecord)
 	if !ok {
 		return nil, errInvalidateMockListUnminedType
 	}
@@ -65,8 +65,8 @@ func (m *mockInvalidateUnminedTxOps) listUnminedTxRecords(ctx context.Context,
 	return records, args.Error(1)
 }
 
-// clearSpentUtxos implements invalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) clearSpentUtxos(ctx context.Context,
+// ClearSpentUtxos implements InvalidateUnminedTxOps.
+func (m *mockInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	args := m.Called(ctx, walletID, txID)
@@ -74,8 +74,8 @@ func (m *mockInvalidateUnminedTxOps) clearSpentUtxos(ctx context.Context,
 	return args.Error(0)
 }
 
-// markTxnsFailed implements invalidateUnminedTxOps.
-func (m *mockInvalidateUnminedTxOps) markTxnsFailed(ctx context.Context,
+// MarkTxnsFailed implements InvalidateUnminedTxOps.
+func (m *mockInvalidateUnminedTxOps) MarkTxnsFailed(ctx context.Context,
 	walletID int64, txIDs []int64) error {
 
 	args := m.Called(ctx, walletID, txIDs)
@@ -90,56 +90,56 @@ func TestValidateInvalidateUnminedTxTarget(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		target  invalidateUnminedTxTarget
+		target  InvalidateUnminedTxTarget
 		wantErr error
 	}{
 		{
 			name: "pending root",
-			target: invalidateUnminedTxTarget{
-				txHash:   chainhash.Hash{1},
-				status:   TxStatusPending,
-				hasBlock: false,
+			target: InvalidateUnminedTxTarget{
+				TxHash:   chainhash.Hash{1},
+				Status:   TxStatusPending,
+				HasBlock: false,
 			},
 		},
 		{
 			name: "published root",
-			target: invalidateUnminedTxTarget{
-				txHash:   chainhash.Hash{2},
-				status:   TxStatusPublished,
-				hasBlock: false,
+			target: InvalidateUnminedTxTarget{
+				TxHash:   chainhash.Hash{2},
+				Status:   TxStatusPublished,
+				HasBlock: false,
 			},
 		},
 		{
 			name: "confirmed root rejected",
-			target: invalidateUnminedTxTarget{
-				txHash:   chainhash.Hash{3},
-				status:   TxStatusPublished,
-				hasBlock: true,
+			target: InvalidateUnminedTxTarget{
+				TxHash:   chainhash.Hash{3},
+				Status:   TxStatusPublished,
+				HasBlock: true,
 			},
 			wantErr: ErrInvalidateTx,
 		},
 		{
 			name: "failed root rejected",
-			target: invalidateUnminedTxTarget{
-				txHash: chainhash.Hash{4},
-				status: TxStatusFailed,
+			target: InvalidateUnminedTxTarget{
+				TxHash: chainhash.Hash{4},
+				Status: TxStatusFailed,
 			},
 			wantErr: ErrInvalidateTx,
 		},
 		{
 			name: "coinbase root rejected",
-			target: invalidateUnminedTxTarget{
-				txHash:     chainhash.Hash{5},
-				status:     TxStatusPublished,
-				isCoinbase: true,
+			target: InvalidateUnminedTxTarget{
+				TxHash:     chainhash.Hash{5},
+				Status:     TxStatusPublished,
+				IsCoinbase: true,
 			},
 			wantErr: ErrInvalidateTx,
 		},
 		{
 			name: "orphaned root rejected",
-			target: invalidateUnminedTxTarget{
-				txHash: chainhash.Hash{6},
-				status: TxStatusOrphaned,
+			target: InvalidateUnminedTxTarget{
+				TxHash: chainhash.Hash{6},
+				Status: TxStatusOrphaned,
 			},
 			wantErr: ErrInvalidateTx,
 		},
@@ -164,16 +164,16 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	childHash := chainhash.Hash{2}
 	grandchildHash := chainhash.Hash{3}
 
-	candidates := []unminedTxRecord{{
-		id:   2,
-		hash: childHash,
-		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+	candidates := []UnminedTxRecord{{
+		ID:   2,
+		Hash: childHash,
+		Tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
 			PreviousOutPoint: wire.OutPoint{Hash: rootHash, Index: 0},
 		}}},
 	}, {
-		id:   3,
-		hash: grandchildHash,
-		tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
+		ID:   3,
+		Hash: grandchildHash,
+		Tx: &wire.MsgTx{TxIn: []*wire.TxIn{{
 			PreviousOutPoint: wire.OutPoint{Hash: childHash, Index: 0},
 		}}},
 	}}
@@ -186,45 +186,49 @@ func TestInvalidateUnminedTxWithOps(t *testing.T) {
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("loadInvalidateTarget", mock.Anything, uint32(7), rootHash).Return(
-		invalidateUnminedTxTarget{
-			id:     1,
-			txHash: rootHash,
-			status: TxStatusPublished,
+	ops.On("LoadInvalidateTarget", mock.Anything, uint32(7), rootHash).Return(
+		InvalidateUnminedTxTarget{
+			ID:     1,
+			TxHash: rootHash,
+			Status: TxStatusPublished,
 		}, nil).Once()
 
-	ops.On("listUnminedTxRecords", mock.Anything, int64(7)).Return(
+	ops.On("ListUnminedTxRecords", mock.Anything, int64(7)).Return(
 		candidates, nil).Once()
 
-	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
+	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(1)).Return(
 		nil).Run(func(args mock.Arguments) {
 		txID, ok := args.Get(2).(int64)
 		require.True(t, ok)
+
 		cleared = append(cleared, txID)
 	}).Once()
 
-	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(
+	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(2)).Return(
 		nil).Run(func(args mock.Arguments) {
 		txID, ok := args.Get(2).(int64)
 		require.True(t, ok)
+
 		cleared = append(cleared, txID)
 	}).Once()
 
-	ops.On("clearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(
+	ops.On("ClearSpentUtxos", mock.Anything, int64(7), int64(3)).Return(
 		nil).Run(func(args mock.Arguments) {
 		txID, ok := args.Get(2).(int64)
 		require.True(t, ok)
+
 		cleared = append(cleared, txID)
 	}).Once()
 
-	ops.On("markTxnsFailed", mock.Anything, int64(7), []int64{1, 2, 3}).Return(
+	ops.On("MarkTxnsFailed", mock.Anything, int64(7), []int64{1, 2, 3}).Return(
 		nil).Run(func(args mock.Arguments) {
 		txIDs, ok := args.Get(2).([]int64)
 		require.True(t, ok)
+
 		failedIDs = append([]int64(nil), txIDs...)
 	}).Once()
 
-	err := invalidateUnminedTxWithOps(
+	err := InvalidateUnminedTxWithOps(
 		t.Context(),
 		InvalidateUnminedTxParams{WalletID: 7, Txid: rootHash},
 		ops,
@@ -250,33 +254,35 @@ func TestInvalidateUnminedTxWithOpsNoDescendants(t *testing.T) {
 	ops := &mockInvalidateUnminedTxOps{}
 	t.Cleanup(func() { ops.AssertExpectations(t) })
 
-	ops.On("loadInvalidateTarget",
+	ops.On("LoadInvalidateTarget",
 		mock.Anything, uint32(8), chainhash.Hash{9},
 	).Return(
-		invalidateUnminedTxTarget{
-			id:     4,
-			txHash: chainhash.Hash{9},
-			status: TxStatusPending,
+		InvalidateUnminedTxTarget{
+			ID:     4,
+			TxHash: chainhash.Hash{9},
+			Status: TxStatusPending,
 		}, nil).Once()
 
-	ops.On("listUnminedTxRecords", mock.Anything, int64(8)).Return(
-		[]unminedTxRecord(nil), nil).Once()
+	ops.On("ListUnminedTxRecords", mock.Anything, int64(8)).Return(
+		[]UnminedTxRecord(nil), nil).Once()
 
-	ops.On("clearSpentUtxos", mock.Anything, int64(8), int64(4)).Return(
+	ops.On("ClearSpentUtxos", mock.Anything, int64(8), int64(4)).Return(
 		nil).Run(func(args mock.Arguments) {
 		txID, ok := args.Get(2).(int64)
 		require.True(t, ok)
+
 		cleared = append(cleared, txID)
 	}).Once()
 
-	ops.On("markTxnsFailed", mock.Anything, int64(8), []int64{4}).Return(
+	ops.On("MarkTxnsFailed", mock.Anything, int64(8), []int64{4}).Return(
 		nil).Run(func(args mock.Arguments) {
 		txIDs, ok := args.Get(2).([]int64)
 		require.True(t, ok)
+
 		failedIDs = append([]int64(nil), txIDs...)
 	}).Once()
 
-	err := invalidateUnminedTxWithOps(
+	err := InvalidateUnminedTxWithOps(
 		t.Context(),
 		InvalidateUnminedTxParams{WalletID: 8, Txid: chainhash.Hash{9}},
 		ops,
@@ -297,11 +303,11 @@ func TestInvalidateUnminedTxWithOpsErrors(t *testing.T) {
 		ops := &mockInvalidateUnminedTxOps{}
 		t.Cleanup(func() { ops.AssertExpectations(t) })
 
-		ops.On("loadInvalidateTarget",
+		ops.On("LoadInvalidateTarget",
 			mock.Anything, uint32(8), chainhash.Hash{1}).Return(
 			nil, errInvalidateCommonTest).Once()
 
-		err := invalidateUnminedTxWithOps(
+		err := InvalidateUnminedTxWithOps(
 			t.Context(),
 			InvalidateUnminedTxParams{
 				WalletID: 8,
@@ -319,18 +325,18 @@ func TestInvalidateUnminedTxWithOpsErrors(t *testing.T) {
 		ops := &mockInvalidateUnminedTxOps{}
 		t.Cleanup(func() { ops.AssertExpectations(t) })
 
-		ops.On("loadInvalidateTarget",
+		ops.On("LoadInvalidateTarget",
 			mock.Anything, uint32(8), chainhash.Hash{2}).Return(
-			invalidateUnminedTxTarget{
-				id:     5,
-				txHash: chainhash.Hash{2},
-				status: TxStatusPublished,
+			InvalidateUnminedTxTarget{
+				ID:     5,
+				TxHash: chainhash.Hash{2},
+				Status: TxStatusPublished,
 			}, nil).Once()
 
-		ops.On("listUnminedTxRecords", mock.Anything, int64(8)).Return(
+		ops.On("ListUnminedTxRecords", mock.Anything, int64(8)).Return(
 			nil, errInvalidateCommonTest).Once()
 
-		err := invalidateUnminedTxWithOps(
+		err := InvalidateUnminedTxWithOps(
 			t.Context(),
 			InvalidateUnminedTxParams{
 				WalletID: 8,

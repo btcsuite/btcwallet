@@ -21,7 +21,7 @@ func (s *SqliteStore) DeleteTx(ctx context.Context,
 	params DeleteTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return deleteTxWithOps(ctx, params, sqliteDeleteTxOps{qtx: qtx})
+		return DeleteTxWithOps(ctx, params, sqliteDeleteTxOps{qtx: qtx})
 	})
 }
 
@@ -30,11 +30,11 @@ type sqliteDeleteTxOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ deleteTxOps = (*sqliteDeleteTxOps)(nil)
+var _ DeleteTxOps = (*sqliteDeleteTxOps)(nil)
 
-// loadDeleteTarget loads and validates the unmined transaction row DeleteTx is
+// LoadDeleteTarget loads and validates the unmined transaction row DeleteTx is
 // allowed to remove.
-func (o sqliteDeleteTxOps) loadDeleteTarget(ctx context.Context,
+func (o sqliteDeleteTxOps) LoadDeleteTarget(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
 	meta, err := getDeleteTxMetaSqlite(ctx, o.qtx, walletID, txHash)
@@ -45,17 +45,17 @@ func (o sqliteDeleteTxOps) loadDeleteTarget(ctx context.Context,
 	return meta.ID, nil
 }
 
-// ensureLeaf rejects DeleteTx when the target still has direct unmined child
+// EnsureLeaf rejects DeleteTx when the target still has direct unmined child
 // spenders.
-func (o sqliteDeleteTxOps) ensureLeaf(ctx context.Context, walletID uint32,
+func (o sqliteDeleteTxOps) EnsureLeaf(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, txID int64) error {
 
 	return ensureDeleteLeafSqlite(ctx, o.qtx, walletID, txHash, txID)
 }
 
-// clearSpentUtxos restores any wallet-owned parent outputs the transaction had
+// ClearSpentUtxos restores any wallet-owned parent outputs the transaction had
 // marked spent.
-func (o sqliteDeleteTxOps) clearSpentUtxos(ctx context.Context,
+func (o sqliteDeleteTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -72,9 +72,9 @@ func (o sqliteDeleteTxOps) clearSpentUtxos(ctx context.Context,
 	return nil
 }
 
-// deleteCreatedUtxos removes any wallet-owned outputs created by the
+// DeleteCreatedUtxos removes any wallet-owned outputs created by the
 // transaction being deleted.
-func (o sqliteDeleteTxOps) deleteCreatedUtxos(ctx context.Context,
+func (o sqliteDeleteTxOps) DeleteCreatedUtxos(ctx context.Context,
 	walletID uint32, txID int64) error {
 
 	_, err := o.qtx.DeleteUtxosByTxID(
@@ -91,9 +91,9 @@ func (o sqliteDeleteTxOps) deleteCreatedUtxos(ctx context.Context,
 	return nil
 }
 
-// deleteUnminedTransaction removes the target unmined row after its dependent
+// DeleteUnminedTransaction removes the target unmined row after its dependent
 // wallet state has been cleaned up.
-func (o sqliteDeleteTxOps) deleteUnminedTransaction(ctx context.Context,
+func (o sqliteDeleteTxOps) DeleteUnminedTransaction(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (int64, error) {
 
 	rows, err := o.qtx.DeleteUnminedTransactionByHash(
@@ -121,7 +121,7 @@ func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 		return fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	candidates, err := buildUnminedTxRecords(
+	candidates, err := BuildUnminedTxRecords(
 		rows,
 		func(row sqlcsqlite.ListUnminedTransactionsRow) (int64,
 			[]byte, []byte) {
@@ -135,14 +135,14 @@ func ensureDeleteLeafSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 
 	filtered := candidates[:0]
 	for _, candidate := range candidates {
-		if candidate.id == txID {
+		if candidate.ID == txID {
 			continue
 		}
 
 		filtered = append(filtered, candidate)
 	}
 
-	if len(collectDirectChildTxIDs(txHash, filtered)) > 0 {
+	if len(CollectDirectChildTxIDs(txHash, filtered)) > 0 {
 		return fmt.Errorf("delete tx %s: %w", txHash,
 			ErrDeleteRequiresLeaf)
 	}
@@ -172,12 +172,12 @@ func getDeleteTxMetaSqlite(ctx context.Context, qtx *sqlcsqlite.Queries,
 			fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := parseTxStatus(meta.TxStatus)
+	status, err := ParseTxStatus(meta.TxStatus)
 	if err != nil {
 		return sqlcsqlite.GetTransactionMetaByHashRow{}, err
 	}
 
-	if meta.BlockHeight.Valid || !isUnminedStatus(status) {
+	if meta.BlockHeight.Valid || !IsUnminedStatus(status) {
 		return sqlcsqlite.GetTransactionMetaByHashRow{},
 			fmt.Errorf("delete tx %s: %w", txHash,
 				ErrDeleteRequiresUnmined)

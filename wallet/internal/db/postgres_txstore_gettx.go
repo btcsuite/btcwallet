@@ -57,5 +57,5 @@ func txInfoFromPgRow(hash []byte, rawTx []byte, received time.Time,
 		}
 	}
 
-	return buildTxInfo(hash, rawTx, received, block, status, label)
+	return BuildTxInfo(hash, rawTx, received, block, status, label)
 }
