@@ -20,7 +20,7 @@ func (s *SqliteStore) UpdateTx(ctx context.Context,
 	params UpdateTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return updateTxWithOps(ctx, params, &sqliteUpdateTxOps{qtx: qtx})
+		return UpdateTxWithOps(ctx, params, &sqliteUpdateTxOps{qtx: qtx})
 	})
 }
 
@@ -38,11 +38,11 @@ type sqliteUpdateTxOps struct {
 	status int64
 }
 
-var _ updateTxOps = (*sqliteUpdateTxOps)(nil)
+var _ UpdateTxOps = (*sqliteUpdateTxOps)(nil)
 
-// loadIsCoinbase loads the existing row metadata UpdateTx needs before it can
+// LoadIsCoinbase loads the existing row metadata UpdateTx needs before it can
 // validate one patch.
-func (o *sqliteUpdateTxOps) loadIsCoinbase(ctx context.Context,
+func (o *sqliteUpdateTxOps) LoadIsCoinbase(ctx context.Context,
 	walletID uint32, txHash chainhash.Hash) (bool, error) {
 
 	meta, err := o.qtx.GetTransactionMetaByHash(
@@ -63,9 +63,9 @@ func (o *sqliteUpdateTxOps) loadIsCoinbase(ctx context.Context,
 	return meta.IsCoinbase, nil
 }
 
-// prepareState validates any referenced confirming block and captures the
+// PrepareState validates any referenced confirming block and captures the
 // sqlite-specific state params for the later row update.
-func (o *sqliteUpdateTxOps) prepareState(ctx context.Context,
+func (o *sqliteUpdateTxOps) PrepareState(ctx context.Context,
 	state UpdateTxState) error {
 
 	blockHeight := sql.NullInt64{}
@@ -85,8 +85,8 @@ func (o *sqliteUpdateTxOps) prepareState(ctx context.Context,
 	return nil
 }
 
-// updateLabel writes one user-visible label change.
-func (o *sqliteUpdateTxOps) updateLabel(ctx context.Context, walletID uint32,
+// UpdateLabel writes one user-visible label change.
+func (o *sqliteUpdateTxOps) UpdateLabel(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, label string) error {
 
 	rows, err := o.qtx.UpdateTransactionLabelByHash(
@@ -108,9 +108,9 @@ func (o *sqliteUpdateTxOps) updateLabel(ctx context.Context, walletID uint32,
 	return nil
 }
 
-// updateState writes one block/status patch after prepareState has validated
+// UpdateState writes one block/status patch after PrepareState has validated
 // any referenced block metadata.
-func (o *sqliteUpdateTxOps) updateState(ctx context.Context, walletID uint32,
+func (o *sqliteUpdateTxOps) UpdateState(ctx context.Context, walletID uint32,
 	txHash chainhash.Hash, _ UpdateTxState) error {
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(

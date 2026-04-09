@@ -146,7 +146,7 @@ func getAddressID(t *testing.T, queries *sqlcsqlite.Queries,
 	return addr.ID
 }
 
-func getAddressSecret(t *testing.T, queries *sqlcsqlite.Queries,
+func GetAddressSecret(t *testing.T, queries *sqlcsqlite.Queries,
 	addressID int64) (sqlcsqlite.GetAddressSecretRow, error) {
 	t.Helper()
 

@@ -27,41 +27,41 @@ var (
 	errInvalidDerivationPath = errors.New("invalid derivation path")
 )
 
-// accountLookupKey contains the fields needed to look up an account.
-type accountLookupKey struct {
-	walletID    int64
-	purpose     int64
-	coinType    int64
-	accountName string
+// AccountLookupKey contains the fields needed to look up an account.
+type AccountLookupKey struct {
+	WalletID    int64
+	Purpose     int64
+	CoinType    int64
+	AccountName string
 }
 
-// accountKeyFromParams extracts account lookup fields from params.
-func accountKeyFromParams(params NewDerivedAddressParams) accountLookupKey {
-	return accountLookupKey{
-		walletID:    int64(params.WalletID),
-		purpose:     int64(params.Scope.Purpose),
-		coinType:    int64(params.Scope.Coin),
-		accountName: params.AccountName,
+// AccountKeyFromParams extracts account lookup fields from params.
+func AccountKeyFromParams(params NewDerivedAddressParams) AccountLookupKey {
+	return AccountLookupKey{
+		WalletID:    int64(params.WalletID),
+		Purpose:     int64(params.Scope.Purpose),
+		CoinType:    int64(params.Scope.Coin),
+		AccountName: params.AccountName,
 	}
 }
 
-// accountKeyFromImportedParams extracts account lookup fields from imported
+// AccountKeyFromImportedParams extracts account lookup fields from imported
 // params using DefaultImportedAccountName.
-func accountKeyFromImportedParams(
-	params NewImportedAddressParams) accountLookupKey {
+func AccountKeyFromImportedParams(
+	params NewImportedAddressParams) AccountLookupKey {
 
-	return accountLookupKey{
-		walletID:    int64(params.WalletID),
-		purpose:     int64(params.Scope.Purpose),
-		coinType:    int64(params.Scope.Coin),
-		accountName: DefaultImportedAccountName,
+	return AccountLookupKey{
+		WalletID:    int64(params.WalletID),
+		Purpose:     int64(params.Scope.Purpose),
+		CoinType:    int64(params.Scope.Coin),
+		AccountName: DefaultImportedAccountName,
 	}
 }
 
-// getAddressSecret is a generic helper that retrieves address secret
+// GetAddressSecret is a generic helper that retrieves address secret
 // information using the provided getter function and converts it to an
 // AddressSecret with error handling.
-func getAddressSecret[Row any](ctx context.Context,
+func GetAddressSecret[Row any](ctx context.Context,
 	getter func(context.Context, int64) (Row, error), addressID uint32,
 	toSecret func(Row) (*AddressSecret, error)) (*AddressSecret, error) {
 
@@ -101,9 +101,9 @@ func (p NewImportedAddressParams) isWatchOnly() bool {
 	return false
 }
 
-// idToOrigin safely converts an integer to AccountOrigin. It returns an error
+// IDToOrigin safely converts an integer to AccountOrigin. It returns an error
 // if the value is outside [DerivedAccount, ImportedAccount].
-func idToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
+func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 	if v < 0 || v > T(ImportedAccount) {
 		return 0, fmt.Errorf("address origin: %d: %w", v, errInvalidOriginID)
 	}
@@ -111,10 +111,10 @@ func idToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 	return AccountOrigin(uint8(v)), nil
 }
 
-// addressInfoRow captures common fields from all address row types across
+// AddressInfoRow captures common fields from all address row types across
 // PostgreSQL and SQLite backends. Uses generic type parameters to handle
 // different ID types (int16 for PostgreSQL, int64 for SQLite).
-type addressInfoRow[TypeID, OriginIDType any] struct {
+type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// ID is the database unique identifier for the address.
 	ID int64
 
@@ -158,9 +158,9 @@ type addressInfoRow[TypeID, OriginIDType any] struct {
 	IDToOrigin func(OriginIDType) (AccountOrigin, error)
 }
 
-// addressSecretRow captures fields shared by address secret row types across
+// AddressSecretRow captures fields shared by address secret row types across
 // backends.
-type addressSecretRow struct {
+type AddressSecretRow struct {
 	// AddressID is the database unique identifier for the address.
 	AddressID int64
 
@@ -171,9 +171,9 @@ type addressSecretRow struct {
 	EncryptedScript []byte
 }
 
-// addressSecretRowToSecret converts raw secret row fields into an AddressSecret
+// AddressSecretRowToSecret converts raw secret row fields into an AddressSecret
 // with validation and ID conversion.
-func addressSecretRowToSecret(row addressSecretRow) (*AddressSecret, error) {
+func AddressSecretRowToSecret(row AddressSecretRow) (*AddressSecret, error) {
 	hasKey := len(row.EncryptedPrivKey) > 0
 	hasScript := len(row.EncryptedScript) > 0
 
@@ -182,7 +182,7 @@ func addressSecretRowToSecret(row addressSecretRow) (*AddressSecret, error) {
 			ErrSecretNotFound)
 	}
 
-	addrID, err := int64ToUint32(row.AddressID)
+	addrID, err := Int64ToUint32(row.AddressID)
 	if err != nil {
 		return nil, fmt.Errorf("address ID: %w", err)
 	}
@@ -197,12 +197,12 @@ func addressSecretRowToSecret(row addressSecretRow) (*AddressSecret, error) {
 // convertAddressIDs converts database IDs to their respective uint32 values
 // with error handling.
 func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
-	addrID, err := int64ToUint32(id)
+	addrID, err := Int64ToUint32(id)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address ID: %w", err)
 	}
 
-	acctID, err := int64ToUint32(accountID)
+	acctID, err := Int64ToUint32(accountID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("account ID: %w", err)
 	}
@@ -254,7 +254,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 // convertAddressMetadata converts address type and origin IDs with error
 // handling.
 func convertAddressMetadata[TypeID, OriginIDType any](
-	row addressInfoRow[TypeID, OriginIDType]) (AddressType, AccountOrigin,
+	row AddressInfoRow[TypeID, OriginIDType]) (AddressType, AccountOrigin,
 	error) {
 
 	addrType, err := row.IDToAddrType(row.TypeID)
@@ -288,12 +288,12 @@ func convertAddressPath(origin AccountOrigin, branch,
 		return 0, 0, errInvalidDerivationPath
 	}
 
-	addrBranch, err := int64ToUint32(branch.Int64)
+	addrBranch, err := Int64ToUint32(branch.Int64)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address branch: %w", err)
 	}
 
-	addrIndex, err := int64ToUint32(index.Int64)
+	addrIndex, err := Int64ToUint32(index.Int64)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address index: %w", err)
 	}
@@ -304,7 +304,7 @@ func convertAddressPath(origin AccountOrigin, branch,
 // addressRowToInfo converts raw database field values into an AddressInfo
 // struct. It handles type conversion and validation for each field.
 func addressRowToInfo[TypeID, OriginIDType any](
-	row addressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
+	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
 
 	id, accountID, err := convertAddressIDs(row.ID, row.AccountID)
 	if err != nil {
@@ -340,10 +340,10 @@ func addressRowToInfo[TypeID, OriginIDType any](
 	}, nil
 }
 
-// getAddress is a generic helper that retrieves a single address using the
+// GetAddress is a generic helper that retrieves a single address using the
 // provided getter function. It handles sql.ErrNoRows mapping and delegates
 // conversion to the toInfo function.
-func getAddress[T any, Args any](ctx context.Context,
+func GetAddress[T any, Args any](ctx context.Context,
 	getter func(context.Context, Args) (T, error), args Args,
 	toInfo func(T) (*AddressInfo, error)) (*AddressInfo, error) {
 
@@ -359,9 +359,9 @@ func getAddress[T any, Args any](ctx context.Context,
 	return nil, ErrAddressNotFound
 }
 
-// nextListAddressesQuery returns a query with its pagination cursor advanced to
+// NextListAddressesQuery returns a query with its pagination cursor advanced to
 // the provided value.
-func nextListAddressesQuery(q ListAddressesQuery,
+func NextListAddressesQuery(q ListAddressesQuery,
 	cursor uint32) ListAddressesQuery {
 
 	q.Page = q.Page.WithAfter(cursor)
@@ -369,78 +369,78 @@ func nextListAddressesQuery(q ListAddressesQuery,
 	return q
 }
 
-// derivedAddressAdapters groups the functions needed to create a
+// DerivedAddressAdapters groups the functions needed to create a
 // derived address across different database backends.
-type derivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
+type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	AddrRow any] struct {
 
-	// getAccount retrieves an account by the provided parameters.
-	getAccount func(context.Context, AccountParams) (AccountRow, error)
+	// GetAccount retrieves an account by the provided parameters.
+	GetAccount func(context.Context, AccountParams) (AccountRow, error)
 
-	// accountParams converts params to account lookup parameters.
-	accountParams func(NewDerivedAddressParams) AccountParams
+	// AccountParams converts params to account lookup parameters.
+	AccountParams func(NewDerivedAddressParams) AccountParams
 
-	// getAccountID extracts the account ID from an account row.
-	getAccountID func(AccountRow) int64
+	// GetAccountID extracts the account ID from an account row.
+	GetAccountID func(AccountRow) int64
 
-	// getExtIndex returns a function to get the external index.
-	getExtIndex func(QTX) func(context.Context, int64) (int64, error)
+	// GetExtIndex returns a function to get the external index.
+	GetExtIndex func(QTX) func(context.Context, int64) (int64, error)
 
-	// getIntIndex returns a function to get the internal index.
-	getIntIndex func(QTX) func(context.Context, int64) (int64, error)
+	// GetIntIndex returns a function to get the internal index.
+	GetIntIndex func(QTX) func(context.Context, int64) (int64, error)
 
-	// createAddr returns a function to create an address row.
-	createAddr func(QTX) func(context.Context, int64, AddressType, uint32,
+	// CreateAddr returns a function to create an address row.
+	CreateAddr func(QTX) func(context.Context, int64, AddressType, uint32,
 		uint32, []byte) (AddrRow, error)
 
-	// rowID extracts the ID from an address row.
-	rowID func(AddrRow) int64
+	// RowID extracts the ID from an address row.
+	RowID func(AddrRow) int64
 
-	// rowCreatedAt extracts the creation time from an address row.
-	rowCreatedAt func(AddrRow) time.Time
+	// RowCreatedAt extracts the creation time from an address row.
+	RowCreatedAt func(AddrRow) time.Time
 }
 
-// importedAddressAdapters groups the functions needed to create an
+// ImportedAddressAdapters groups the functions needed to create an
 // imported address across different database backends.
-type importedAddressAdapters[QTX any, AccountRow any,
+type ImportedAddressAdapters[QTX any, AccountRow any,
 	AccountParams any, CreateArgs any, AddrRow any,
 	SecretParams any] struct {
 
-	// getAccount retrieves an account by the provided parameters.
-	getAccount func(context.Context, AccountParams) (AccountRow, error)
+	// GetAccount retrieves an account by the provided parameters.
+	GetAccount func(context.Context, AccountParams) (AccountRow, error)
 
-	// accountParams converts params to account lookup parameters.
-	accountParams func(NewImportedAddressParams) AccountParams
+	// AccountParams converts params to account lookup parameters.
+	AccountParams func(NewImportedAddressParams) AccountParams
 
-	// getAccountID extracts the account ID from an account row.
-	getAccountID func(AccountRow) int64
+	// GetAccountID extracts the account ID from an account row.
+	GetAccountID func(AccountRow) int64
 
-	// createAddr returns a function to create an address row.
-	createAddr func(QTX) func(context.Context, CreateArgs) (AddrRow, error)
+	// CreateAddr returns a function to create an address row.
+	CreateAddr func(QTX) func(context.Context, CreateArgs) (AddrRow, error)
 
-	// createParams converts accountID and params to address creation
+	// CreateParams converts accountID and params to address creation
 	// parameters.
-	createParams func(int64, NewImportedAddressParams) CreateArgs
+	CreateParams func(int64, NewImportedAddressParams) CreateArgs
 
-	// insertSecret returns a function to insert address secret.
-	insertSecret func(QTX) func(context.Context, SecretParams) error
+	// InsertSecret returns a function to insert address secret.
+	InsertSecret func(QTX) func(context.Context, SecretParams) error
 
-	// secretParams converts address ID and params to secret parameters.
-	secretParams func(int64, NewImportedAddressParams) SecretParams
+	// SecretParams converts address ID and params to secret parameters.
+	SecretParams func(int64, NewImportedAddressParams) SecretParams
 
-	// rowID extracts the ID from an address row.
-	rowID func(AddrRow) int64
+	// RowID extracts the ID from an address row.
+	RowID func(AddrRow) int64
 
-	// rowCreatedAt extracts the creation time from an address row.
-	rowCreatedAt func(AddrRow) time.Time
+	// RowCreatedAt extracts the creation time from an address row.
+	RowCreatedAt func(AddrRow) time.Time
 }
 
-// getAddressFunc defines a function signature for retrieving a single address.
-type getAddressFunc func(context.Context, GetAddressQuery) (*AddressInfo, error)
+// GetAddressFunc defines a function signature for retrieving a single address.
+type GetAddressFunc func(context.Context, GetAddressQuery) (*AddressInfo, error)
 
-// getAddressByQuery validates the query and executes the script-based lookup.
-func getAddressByQuery(ctx context.Context, query GetAddressQuery,
-	getter getAddressFunc) (*AddressInfo, error) {
+// GetAddressByQuery validates the query and executes the script-based lookup.
+func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
+	getter GetAddressFunc) (*AddressInfo, error) {
 
 	if len(query.ScriptPubKey) == 0 {
 		return nil, ErrInvalidAddressQuery
@@ -534,13 +534,13 @@ func derivedAddressInput(ctx context.Context,
 		return 0, 0, 0, nil, ErrMaxAddressIndexReached
 	}
 
-	index, err := int64ToUint32(indexValue)
+	index, err := Int64ToUint32(indexValue)
 	if err != nil {
 		return 0, 0, 0, nil, fmt.Errorf(
 			"address index: %w", err)
 	}
 
-	acctID, err := int64ToUint32(accountID)
+	acctID, err := Int64ToUint32(accountID)
 	if err != nil {
 		return 0, 0, 0, nil, fmt.Errorf(
 			"account ID: %w", err)
@@ -555,27 +555,27 @@ func derivedAddressInput(ctx context.Context,
 	return addrType, branch, index, derivedData.ScriptPubKey, nil
 }
 
-// newDerivedAddressWithTx combines transaction execution, account lookup,
+// NewDerivedAddressWithTx combines transaction execution, account lookup,
 // and derived address creation in one helper.
-func newDerivedAddressWithTx[QTX any, AccountRow any,
+func NewDerivedAddressWithTx[QTX any, AccountRow any,
 	AccountParams any, AddrRow any](ctx context.Context,
 	params NewDerivedAddressParams,
 	executeTx func(context.Context, func(QTX) error) error,
-	adapters derivedAddressAdapters[QTX, AccountRow, AccountParams, AddrRow],
+	adapters DerivedAddressAdapters[QTX, AccountRow, AccountParams, AddrRow],
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
 
 	var result *AddressInfo
 
 	err := executeTx(ctx, func(qtx QTX) error {
-		row, err := adapters.getAccount(ctx, adapters.accountParams(params))
+		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
 			info, errAddr := createDerivedAddress(
-				ctx, params, adapters.getAccountID(row),
-				adapters.getExtIndex(qtx),
-				adapters.getIntIndex(qtx),
-				adapters.createAddr(qtx),
-				adapters.rowID,
-				adapters.rowCreatedAt, deriveFn)
+				ctx, params, adapters.GetAccountID(row),
+				adapters.GetExtIndex(qtx),
+				adapters.GetIntIndex(qtx),
+				adapters.CreateAddr(qtx),
+				adapters.RowID,
+				adapters.RowCreatedAt, deriveFn)
 			if errAddr != nil {
 				return errAddr
 			}
@@ -586,10 +586,11 @@ func newDerivedAddressWithTx[QTX any, AccountRow any,
 		}
 
 		if errors.Is(err, sql.ErrNoRows) {
-			key := accountKeyFromParams(params)
+			key := AccountKeyFromParams(params)
 
 			return fmt.Errorf("account %q in scope %d/%d: %w",
-				key.accountName, key.purpose, key.coinType, ErrAccountNotFound)
+				key.AccountName, key.Purpose, key.CoinType,
+				ErrAccountNotFound)
 		}
 
 		return fmt.Errorf("get account: %w", err)
@@ -601,13 +602,13 @@ func newDerivedAddressWithTx[QTX any, AccountRow any,
 	return result, nil
 }
 
-// newImportedAddressWithTx combines transaction execution, account lookup,
+// NewImportedAddressWithTx combines transaction execution, account lookup,
 // and imported address creation in one helper.
-func newImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
+func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	CreateArgs any, AddrRow any, SecretParams any](
 	ctx context.Context, params NewImportedAddressParams,
 	executeTx func(context.Context, func(QTX) error) error,
-	adapters importedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
+	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
 		AddrRow, SecretParams]) (*AddressInfo, error) {
 
 	validationErr := params.validate()
@@ -618,17 +619,17 @@ func newImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	var result *AddressInfo
 
 	err := executeTx(ctx, func(qtx QTX) error {
-		row, err := adapters.getAccount(ctx, adapters.accountParams(params))
+		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
-			acctID := adapters.getAccountID(row)
+			acctID := adapters.GetAccountID(row)
 
 			info, errAddr := newImportedAddressTx(
-				ctx, adapters.createAddr(qtx),
-				adapters.createParams(acctID, params),
-				adapters.insertSecret, qtx,
-				adapters.secretParams, params, acctID,
-				adapters.rowID,
-				adapters.rowCreatedAt)
+				ctx, adapters.CreateAddr(qtx),
+				adapters.CreateParams(acctID, params),
+				adapters.InsertSecret, qtx,
+				adapters.SecretParams, params, acctID,
+				adapters.RowID,
+				adapters.RowCreatedAt)
 			if errAddr != nil {
 				return errAddr
 			}
@@ -639,10 +640,11 @@ func newImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 		}
 
 		if errors.Is(err, sql.ErrNoRows) {
-			key := accountKeyFromImportedParams(params)
+			key := AccountKeyFromImportedParams(params)
 
 			return fmt.Errorf("account %q in scope %d/%d: %w",
-				key.accountName, key.purpose, key.coinType, ErrAccountNotFound)
+				key.AccountName, key.Purpose, key.CoinType,
+				ErrAccountNotFound)
 		}
 
 		return fmt.Errorf("get account: %w", err)

@@ -16,9 +16,9 @@ func (s *SqliteStore) ListUTXOs(ctx context.Context,
 
 	rows, err := s.queries.ListUtxos(ctx, sqlcsqlite.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
-		AccountNumber: nullableUint32ToSQLInt64(query.Account),
-		MinConfirms:   nullableInt32ToSQLInt64(query.MinConfs),
-		MaxConfirms:   nullableInt32ToSQLInt64(query.MaxConfs),
+		AccountNumber: NullableUint32ToSQLInt64(query.Account),
+		MinConfirms:   NullableInt32ToSQLInt64(query.MinConfs),
+		MaxConfirms:   NullableInt32ToSQLInt64(query.MaxConfs),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list utxos: %w", err)

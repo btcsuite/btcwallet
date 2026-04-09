@@ -14,14 +14,14 @@ import (
 //
 // The lease lookup and acquisition run in one transaction so competing calls
 // cannot observe a partially-written lease. Expiration timestamps are
-// normalized to UTC before insert.
+// normalized to UTC before Insert.
 func (s *SqliteStore) LeaseOutput(ctx context.Context,
 	params LeaseOutputParams) (*LeasedOutput, error) {
 
 	var lease *LeasedOutput
 
 	err := s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		acquiredLease, err := leaseOutputWithOps(
+		acquiredLease, err := LeaseOutputWithOps(
 			ctx, params, &sqliteLeaseOutputOps{qtx: qtx},
 		)
 		if err != nil {
@@ -45,11 +45,11 @@ type sqliteLeaseOutputOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ leaseOutputOps = (*sqliteLeaseOutputOps)(nil)
+var _ LeaseOutputOps = (*sqliteLeaseOutputOps)(nil)
 
-// acquire attempts to write or renew one sqlite lease row for the requested
+// Acquire attempts to write or renew one sqlite lease row for the requested
 // outpoint.
-func (o *sqliteLeaseOutputOps) acquire(ctx context.Context,
+func (o *sqliteLeaseOutputOps) Acquire(ctx context.Context,
 	params LeaseOutputParams, nowUTC time.Time,
 	expiresAt time.Time) (time.Time, error) {
 
@@ -65,18 +65,18 @@ func (o *sqliteLeaseOutputOps) acquire(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return time.Time{}, errLeaseOutputNoRow
+			return time.Time{}, ErrLeaseOutputNoRow
 		}
 
-		return time.Time{}, fmt.Errorf("acquire lease row: %w", err)
+		return time.Time{}, fmt.Errorf("Acquire lease row: %w", err)
 	}
 
 	return expiration, nil
 }
 
-// hasUtxo reports whether the requested outpoint still exists as a current
+// HasUtxo reports whether the requested outpoint still exists as a current
 // wallet-owned UTXO.
-func (o *sqliteLeaseOutputOps) hasUtxo(ctx context.Context,
+func (o *sqliteLeaseOutputOps) HasUtxo(ctx context.Context,
 	params LeaseOutputParams) (bool, error) {
 
 	_, err := o.qtx.GetUtxoIDByOutpoint(

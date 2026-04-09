@@ -16,7 +16,7 @@ func (s *SqliteStore) InvalidateUnminedTx(ctx context.Context,
 	params InvalidateUnminedTxParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcsqlite.Queries) error {
-		return invalidateUnminedTxWithOps(
+		return InvalidateUnminedTxWithOps(
 			ctx, params, sqliteInvalidateUnminedTxOps{qtx: qtx},
 		)
 	})
@@ -28,12 +28,12 @@ type sqliteInvalidateUnminedTxOps struct {
 	qtx *sqlcsqlite.Queries
 }
 
-var _ invalidateUnminedTxOps = (*sqliteInvalidateUnminedTxOps)(nil)
+var _ InvalidateUnminedTxOps = (*sqliteInvalidateUnminedTxOps)(nil)
 
-// loadInvalidateTarget loads the root tx metadata used by the shared
+// LoadInvalidateTarget loads the root tx metadata used by the shared
 // invalidation workflow.
-func (o sqliteInvalidateUnminedTxOps) loadInvalidateTarget(ctx context.Context,
-	walletID uint32, txHash chainhash.Hash) (invalidateUnminedTxTarget, error) {
+func (o sqliteInvalidateUnminedTxOps) LoadInvalidateTarget(ctx context.Context,
+	walletID uint32, txHash chainhash.Hash) (InvalidateUnminedTxTarget, error) {
 
 	row, err := o.qtx.GetTransactionMetaByHash(
 		ctx, sqlcsqlite.GetTransactionMetaByHashParams{
@@ -43,39 +43,39 @@ func (o sqliteInvalidateUnminedTxOps) loadInvalidateTarget(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return invalidateUnminedTxTarget{}, fmt.Errorf("tx %s: %w", txHash,
+			return InvalidateUnminedTxTarget{}, fmt.Errorf("tx %s: %w", txHash,
 				ErrTxNotFound)
 		}
 
-		return invalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
+		return InvalidateUnminedTxTarget{}, fmt.Errorf("get tx metadata: %w",
 			err)
 	}
 
-	status, err := parseTxStatus(row.TxStatus)
+	status, err := ParseTxStatus(row.TxStatus)
 	if err != nil {
-		return invalidateUnminedTxTarget{}, err
+		return InvalidateUnminedTxTarget{}, err
 	}
 
-	return invalidateUnminedTxTarget{
-		id:         row.ID,
-		txHash:     txHash,
-		status:     status,
-		hasBlock:   row.BlockHeight.Valid,
-		isCoinbase: row.IsCoinbase,
+	return InvalidateUnminedTxTarget{
+		ID:         row.ID,
+		TxHash:     txHash,
+		Status:     status,
+		HasBlock:   row.BlockHeight.Valid,
+		IsCoinbase: row.IsCoinbase,
 	}, nil
 }
 
-// listUnminedTxRecords loads and decodes the wallet's active unmined
+// ListUnminedTxRecords loads and decodes the wallet's active unmined
 // transaction rows.
-func (o sqliteInvalidateUnminedTxOps) listUnminedTxRecords(
-	ctx context.Context, walletID int64) ([]unminedTxRecord, error) {
+func (o sqliteInvalidateUnminedTxOps) ListUnminedTxRecords(
+	ctx context.Context, walletID int64) ([]UnminedTxRecord, error) {
 
 	rows, err := o.qtx.ListUnminedTransactions(ctx, walletID)
 	if err != nil {
 		return nil, fmt.Errorf("list unmined txns: %w", err)
 	}
 
-	return buildUnminedTxRecords(
+	return BuildUnminedTxRecords(
 		rows, func(row sqlcsqlite.ListUnminedTransactionsRow) (
 			int64, []byte, []byte) {
 
@@ -84,9 +84,9 @@ func (o sqliteInvalidateUnminedTxOps) listUnminedTxRecords(
 	)
 }
 
-// clearSpentUtxos restores any wallet-owned parent outputs spent by the given
+// ClearSpentUtxos restores any wallet-owned parent outputs spent by the given
 // transaction row.
-func (o sqliteInvalidateUnminedTxOps) clearSpentUtxos(ctx context.Context,
+func (o sqliteInvalidateUnminedTxOps) ClearSpentUtxos(ctx context.Context,
 	walletID int64, txID int64) error {
 
 	_, err := o.qtx.ClearUtxosSpentByTxID(
@@ -105,9 +105,9 @@ func (o sqliteInvalidateUnminedTxOps) clearSpentUtxos(ctx context.Context,
 	return nil
 }
 
-// markTxnsFailed marks the provided tx rows failed in one
+// MarkTxnsFailed marks the provided tx rows failed in one
 // batch update.
-func (o sqliteInvalidateUnminedTxOps) markTxnsFailed(
+func (o sqliteInvalidateUnminedTxOps) MarkTxnsFailed(
 	ctx context.Context, walletID int64, txIDs []int64) error {
 
 	_, err := o.qtx.UpdateTransactionStatusByIDs(

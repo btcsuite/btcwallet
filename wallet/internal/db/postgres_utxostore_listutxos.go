@@ -40,8 +40,8 @@ func (s *PostgresStore) ListUTXOs(ctx context.Context,
 func buildListUtxosParamsPg(query ListUtxosQuery) sqlcpg.ListUtxosParams {
 	return sqlcpg.ListUtxosParams{
 		WalletID:      int64(query.WalletID),
-		AccountNumber: nullableUint32ToSQLInt64(query.Account),
-		MinConfirms:   nullableInt32ToSQLInt32(query.MinConfs),
-		MaxConfirms:   nullableInt32ToSQLInt32(query.MaxConfs),
+		AccountNumber: NullableUint32ToSQLInt64(query.Account),
+		MinConfirms:   NullableInt32ToSQLInt32(query.MinConfs),
+		MaxConfirms:   NullableInt32ToSQLInt32(query.MaxConfs),
 	}
 }

@@ -57,12 +57,12 @@ func (s *PostgresStore) listTxnsWithoutBlockPg(ctx context.Context,
 func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
 	query ListTxnsQuery) ([]TxInfo, error) {
 
-	startHeight, err := uint32ToInt32(query.StartHeight)
+	startHeight, err := Uint32ToInt32(query.StartHeight)
 	if err != nil {
 		return nil, fmt.Errorf("convert start height: %w", err)
 	}
 
-	endHeight, err := uint32ToInt32(query.EndHeight)
+	endHeight, err := Uint32ToInt32(query.EndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("convert end height: %w", err)
 	}
@@ -89,7 +89,7 @@ func (s *PostgresStore) listConfirmedTxnsPg(ctx context.Context,
 			return nil, err
 		}
 
-		info, err := buildTxInfo(
+		info, err := BuildTxInfo(
 			row.TxHash, row.RawTx, row.ReceivedTime, block,
 			int64(row.TxStatus), row.TxLabel,
 		)

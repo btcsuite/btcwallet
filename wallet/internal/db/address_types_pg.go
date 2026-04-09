@@ -9,7 +9,7 @@ import (
 // pgAddressTypeRowToInfo converts a PostgreSQL address type row to an
 // AddressTypeInfo struct.
 func pgAddressTypeRowToInfo(row sqlcpg.AddressType) (AddressTypeInfo, error) {
-	addrType, err := idToAddressType(row.ID)
+	addrType, err := IDToAddressType(row.ID)
 	if err != nil {
 		return AddressTypeInfo{}, err
 	}
@@ -25,7 +25,7 @@ func pgAddressTypeRowToInfo(row sqlcpg.AddressType) (AddressTypeInfo, error) {
 func (s *PostgresStore) ListAddressTypes(ctx context.Context) (
 	[]AddressTypeInfo, error) {
 
-	return listAddressTypes(
+	return ListAddressTypes(
 		ctx, s.queries.ListAddressTypes, pgAddressTypeRowToInfo,
 	)
 }
@@ -35,7 +35,7 @@ func (s *PostgresStore) ListAddressTypes(ctx context.Context) (
 func (s *PostgresStore) GetAddressType(ctx context.Context,
 	id AddressType) (AddressTypeInfo, error) {
 
-	return getAddressTypeByID(
+	return GetAddressTypeByID(
 		ctx, s.queries.GetAddressTypeByID, int16(id), id,
 		pgAddressTypeRowToInfo,
 	)

@@ -486,9 +486,9 @@ func TestListAccountsOrdering(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	// Create accounts in mixed order: imported, derived, imported, derived.
-	createImportedAccount(t, store, walletID, scope, "imported-first")
+	CreateImportedAccount(t, store, walletID, scope, "imported-first")
 	createDerivedAccount(t, store, walletID, scope, "derived-0")
-	createImportedAccount(t, store, walletID, scope, "imported-second")
+	CreateImportedAccount(t, store, walletID, scope, "imported-second")
 	createDerivedAccount(t, store, walletID, scope, "derived-1")
 
 	query := db.ListAccountsQuery{
@@ -793,10 +793,10 @@ func createDerivedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 	require.NoError(t, err)
 }
 
-// createImportedAccount creates a new imported account with the given name,
+// CreateImportedAccount creates a new imported account with the given name,
 // scope, and wallet ID using the provided account store. A random public key
 // is generated for the account.
-func createImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
+func CreateImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 	scope db.KeyScope, name string) {
 
 	t.Helper()

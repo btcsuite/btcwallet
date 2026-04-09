@@ -45,14 +45,14 @@ func utxoInfoFromSqliteRow(hash []byte, outputIndex int64, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight sql.NullInt64) (*UtxoInfo, error) {
 
-	index, err := int64ToUint32(outputIndex)
+	index, err := Int64ToUint32(outputIndex)
 	if err != nil {
 		return nil, fmt.Errorf("utxo output index: %w", err)
 	}
 
 	var height *uint32
 	if blockHeight.Valid {
-		heightValue, err := int64ToUint32(blockHeight.Int64)
+		heightValue, err := Int64ToUint32(blockHeight.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("utxo block height: %w", err)
 		}
@@ -60,7 +60,7 @@ func utxoInfoFromSqliteRow(hash []byte, outputIndex int64, amount int64,
 		height = &heightValue
 	}
 
-	return buildUtxoInfo(
+	return BuildUtxoInfo(
 		hash, index, amount, pkScript, received, isCoinbase, height,
 	)
 }
