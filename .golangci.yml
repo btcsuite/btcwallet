@@ -149,6 +149,13 @@ linters:
           # Allow returning unwrapped errors in tests.
           - wrapcheck
 
+      # The split backend packages intentionally forward many calls into the
+      # shared db helpers. Keep wrapcheck enabled elsewhere while the package
+      # split settles.
+      - path: wallet/internal/db/(pg|sqlite)/.*\.go
+        linters:
+          - wrapcheck
+
       - path: mock*
         linters:
           - revive
