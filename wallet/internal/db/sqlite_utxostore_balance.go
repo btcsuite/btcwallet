@@ -18,10 +18,10 @@ func (s *SqliteStore) Balance(ctx context.Context,
 	balance, err := s.queries.Balance(ctx, sqlcsqlite.BalanceParams{
 		NowUtc:           nowUTC,
 		WalletID:         int64(params.WalletID),
-		AccountNumber:    nullableUint32ToSQLInt64(params.Account),
-		MinConfirms:      nullableInt32ToSQLInt64(params.MinConfs),
-		MaxConfirms:      nullableInt32ToSQLInt64(params.MaxConfs),
-		CoinbaseMaturity: nullableInt32ToSQLInt64(params.CoinbaseMaturity),
+		AccountNumber:    NullableUint32ToSQLInt64(params.Account),
+		MinConfirms:      NullableInt32ToSQLInt64(params.MinConfs),
+		MaxConfirms:      NullableInt32ToSQLInt64(params.MaxConfs),
+		CoinbaseMaturity: NullableInt32ToSQLInt64(params.CoinbaseMaturity),
 	})
 	if err != nil {
 		return BalanceResult{}, fmt.Errorf("balance: %w", err)

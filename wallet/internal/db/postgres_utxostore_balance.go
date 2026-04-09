@@ -18,10 +18,10 @@ func (s *PostgresStore) Balance(ctx context.Context,
 	balance, err := s.queries.Balance(ctx, sqlcpg.BalanceParams{
 		NowUtc:           nowUTC,
 		WalletID:         int64(params.WalletID),
-		AccountNumber:    nullableUint32ToSQLInt64(params.Account),
-		MinConfirms:      nullableInt32ToSQLInt32(params.MinConfs),
-		MaxConfirms:      nullableInt32ToSQLInt32(params.MaxConfs),
-		CoinbaseMaturity: nullableInt32ToSQLInt32(params.CoinbaseMaturity),
+		AccountNumber:    NullableUint32ToSQLInt64(params.Account),
+		MinConfirms:      NullableInt32ToSQLInt32(params.MinConfs),
+		MaxConfirms:      NullableInt32ToSQLInt32(params.MaxConfs),
+		CoinbaseMaturity: NullableInt32ToSQLInt32(params.CoinbaseMaturity),
 	})
 	if err != nil {
 		return BalanceResult{}, fmt.Errorf("balance: %w", err)

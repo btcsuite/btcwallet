@@ -79,7 +79,7 @@ func (s *SqliteStore) listConfirmedTxnsSqlite(ctx context.Context,
 			return nil, err
 		}
 
-		info, err := buildTxInfo(
+		info, err := BuildTxInfo(
 			row.TxHash, row.RawTx, row.ReceivedTime, block, row.TxStatus,
 			row.TxLabel,
 		)

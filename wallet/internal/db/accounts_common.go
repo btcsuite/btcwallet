@@ -9,10 +9,10 @@ import (
 )
 
 var (
-	// errNilDBAccountNumber is returned when the database returns a nil account
+	// ErrNilDBAccountNumber is returned when the database returns a nil account
 	// number. In practice, this should never happen, but it's possible if the
 	// database is modified incorrectly or the query is incorrect.
-	errNilDBAccountNumber = errors.New("database returned nil account number")
+	ErrNilDBAccountNumber = errors.New("database returned nil account number")
 
 	// errInvalidAccountOrigin is returned when an account origin ID from the
 	// database does not correspond to a known AccountOrigin value. In practice,
@@ -48,9 +48,9 @@ func (params *CreateImportedAccountParams) isWatchOnly() bool {
 	return len(params.EncryptedPrivateKey) == 0
 }
 
-// accountPropsRow represents the raw database fields needed to construct
+// AccountPropsRow represents the raw database fields needed to construct
 // AccountProperties.
-type accountPropsRow[AddrTypeId, AccOriginId any] struct {
+type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
 	AccountNumber      sql.NullInt64
 	AccountName        string
 	OriginID           AccOriginId
@@ -74,17 +74,17 @@ type accountPropsRow[AddrTypeId, AccOriginId any] struct {
 func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	uint32, error) {
 
-	externalKeyCount, err := int64ToUint32(external)
+	externalKeyCount, err := Int64ToUint32(external)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("external key count: %w", err)
 	}
 
-	internalKeyCount, err := int64ToUint32(internal)
+	internalKeyCount, err := Int64ToUint32(internal)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("internal key count: %w", err)
 	}
 
-	importedKeyCount, err := int64ToUint32(imported)
+	importedKeyCount, err := Int64ToUint32(imported)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("imported key count: %w", err)
 	}
@@ -95,7 +95,7 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 // getAddrTypes extracts the internal and external address types from the row
 // and handles errors.
 func getAddrTypes[AddrTypeId, AccOriginId any](
-	row accountPropsRow[AddrTypeId, AccOriginId]) (AddressType, AddressType,
+	row AccountPropsRow[AddrTypeId, AccOriginId]) (AddressType, AddressType,
 	error) {
 
 	internalType, err := row.IDToAddrType(row.InternalTypeID)
@@ -111,18 +111,18 @@ func getAddrTypes[AddrTypeId, AccOriginId any](
 	return internalType, externalType, nil
 }
 
-// accountPropsRowToProps converts a database row containing full account
+// AccountPropsRowToProps converts a database row containing full account
 // properties into an AccountProperties struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
 // values.
-func accountPropsRowToProps[AddrTypeId, AccOriginId any](
-	row accountPropsRow[AddrTypeId, AccOriginId]) (*AccountProperties, error) {
+func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
+	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountProperties, error) {
 
 	var accountNum uint32
 	if row.AccountNumber.Valid {
 		var err error
 
-		accountNum, err = int64ToUint32(row.AccountNumber.Int64)
+		accountNum, err = Int64ToUint32(row.AccountNumber.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("account number: %w", err)
 		}
@@ -133,12 +133,12 @@ func accountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, fmt.Errorf("origin: %w", err)
 	}
 
-	purposeNum, err := int64ToUint32(row.Purpose)
+	purposeNum, err := Int64ToUint32(row.Purpose)
 	if err != nil {
 		return nil, fmt.Errorf("purpose: %w", err)
 	}
 
-	coinTypeNum, err := int64ToUint32(row.CoinType)
+	coinTypeNum, err := Int64ToUint32(row.CoinType)
 	if err != nil {
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
@@ -150,7 +150,7 @@ func accountPropsRowToProps[AddrTypeId, AccOriginId any](
 
 	var fingerprint uint32
 	if row.MasterFingerprint.Valid {
-		fingerprint, err = int64ToUint32(row.MasterFingerprint.Int64)
+		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("master fingerprint: %w", err)
 		}
@@ -203,9 +203,9 @@ func accountInfosFromRows[T any](rows []T,
 	return accounts, nil
 }
 
-// listAccounts is a generic helper that retrieves accounts using the provided
+// ListAccounts is a generic helper that retrieves accounts using the provided
 // list function and converts the results to AccountInfo structs.
-func listAccounts[T any, Args any](ctx context.Context,
+func ListAccounts[T any, Args any](ctx context.Context,
 	lister func(context.Context, Args) ([]T, error), args Args,
 	toInfo func(T) (*AccountInfo, error)) ([]AccountInfo, error) {
 
@@ -229,12 +229,12 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 	return addrSchema, nil
 }
 
-// buildAccountInfo creates an AccountInfo with the provided values and zeroed
+// BuildAccountInfo creates an AccountInfo with the provided values and zeroed
 // balances while we do not yet support balance tracking.
 //
 // TODO(stingelin): Add balance tracking support after transaction management is
 // implemented.
-func buildAccountInfo(accountNum uint32, accountName string,
+func BuildAccountInfo(accountNum uint32, accountName string,
 	origin AccountOrigin, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
 	scope KeyScope) *AccountInfo {
@@ -254,9 +254,9 @@ func buildAccountInfo(accountNum uint32, accountName string,
 	}
 }
 
-// idToAccountOrigin safely converts an integer to AccountOrigin. It returns an
+// IDToAccountOrigin safely converts an integer to AccountOrigin. It returns an
 // error if the value does not correspond to a known AccountOrigin value.
-func idToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
+func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 	if v < 0 || v > T(ImportedAccount) {
 		return 0, fmt.Errorf("%w: %d", errInvalidAccountOrigin, v)
 	}
@@ -264,9 +264,9 @@ func idToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 	return AccountOrigin(v), nil
 }
 
-// accountInfoRow represents the raw database fields needed to construct
+// AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
-type accountInfoRow[AccOriginId any] struct {
+type AccountInfoRow[AccOriginId any] struct {
 	AccountNumber    sql.NullInt64
 	AccountName      string
 	OriginID         AccOriginId
@@ -280,16 +280,16 @@ type accountInfoRow[AccOriginId any] struct {
 	IDToOriginType   func(AccOriginId) (AccountOrigin, error)
 }
 
-// accountRowToInfo converts raw database field values into an AccountInfo
+// AccountRowToInfo converts raw database field values into an AccountInfo
 // struct. It handles type conversion and validation for each field.
-func accountRowToInfo[AccOriginId any](
-	row accountInfoRow[AccOriginId]) (*AccountInfo, error) {
+func AccountRowToInfo[AccOriginId any](
+	row AccountInfoRow[AccOriginId]) (*AccountInfo, error) {
 
 	var accountNum uint32
 	if row.AccountNumber.Valid {
 		var err error
 
-		accountNum, err = int64ToUint32(row.AccountNumber.Int64)
+		accountNum, err = Int64ToUint32(row.AccountNumber.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("account number: %w", err)
 		}
@@ -300,12 +300,12 @@ func accountRowToInfo[AccOriginId any](
 		return nil, fmt.Errorf("origin: %w", err)
 	}
 
-	purposeNum, err := int64ToUint32(row.Purpose)
+	purposeNum, err := Int64ToUint32(row.Purpose)
 	if err != nil {
 		return nil, fmt.Errorf("purpose: %w", err)
 	}
 
-	coinTypeNum, err := int64ToUint32(row.CoinType)
+	coinTypeNum, err := Int64ToUint32(row.CoinType)
 	if err != nil {
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
@@ -317,16 +317,16 @@ func accountRowToInfo[AccOriginId any](
 		return nil, err
 	}
 
-	return buildAccountInfo(
+	return BuildAccountInfo(
 		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
 	), nil
 }
 
-// ensureKeyScope retrieves an existing key scope or creates it if missing. It
+// EnsureKeyScope retrieves an existing key scope or creates it if missing. It
 // returns the scope ID once available.
-func ensureKeyScope[Row any, GetArgs any, CreateArgs any](
+func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	ctx context.Context, getter func(context.Context, GetArgs) (Row, error),
 	getArgs GetArgs, creator func(context.Context, CreateArgs) (int64, error),
 	createArgs func(ScopeAddrSchema) CreateArgs, rowToID func(Row) int64,
@@ -373,13 +373,13 @@ func ensureKeyScope[Row any, GetArgs any, CreateArgs any](
 	return rowToID(scopeInfo), nil
 }
 
-// getAccountFunc defines a function signature for retrieving a single account.
-type getAccountFunc func(context.Context, GetAccountQuery) (*AccountInfo, error)
+// GetAccountFunc defines a function signature for retrieving a single account.
+type GetAccountFunc func(context.Context, GetAccountQuery) (*AccountInfo, error)
 
-// getAccountByQuery dispatches to the appropriate query based on the provided
+// GetAccountByQuery dispatches to the appropriate query based on the provided
 // account identifier.
-func getAccountByQuery(ctx context.Context, query GetAccountQuery,
-	getByNumber getAccountFunc, getByName getAccountFunc) (*AccountInfo,
+func GetAccountByQuery(ctx context.Context, query GetAccountQuery,
+	getByNumber GetAccountFunc, getByName GetAccountFunc) (*AccountInfo,
 	error) {
 
 	switch {
@@ -394,16 +394,16 @@ func getAccountByQuery(ctx context.Context, query GetAccountQuery,
 	}
 }
 
-// listAccountsFunc defines a function signature for listing accounts.
-type listAccountsFunc func(context.Context, ListAccountsQuery) ([]AccountInfo,
+// ListAccountsFunc defines a function signature for listing accounts.
+type ListAccountsFunc func(context.Context, ListAccountsQuery) ([]AccountInfo,
 	error)
 
-// listAccountsByQuery dispatches to the appropriate list query based on the
+// ListAccountsByQuery dispatches to the appropriate list query based on the
 // provided filters. It returns an error if both scope and name filters are
 // provided, as they are mutually exclusive.
-func listAccountsByQuery(ctx context.Context, query ListAccountsQuery,
-	listByScope listAccountsFunc, listByName listAccountsFunc,
-	listAll listAccountsFunc) ([]AccountInfo, error) {
+func ListAccountsByQuery(ctx context.Context, query ListAccountsQuery,
+	listByScope ListAccountsFunc, listByName ListAccountsFunc,
+	listAll ListAccountsFunc) ([]AccountInfo, error) {
 
 	switch {
 	case query.Scope != nil && query.Name != nil:
@@ -420,13 +420,13 @@ func listAccountsByQuery(ctx context.Context, query ListAccountsQuery,
 	}
 }
 
-// renameAccountFunc defines a function signature for renaming an account.
-type renameAccountFunc func(context.Context, RenameAccountParams) error
+// RenameAccountFunc defines a function signature for renaming an account.
+type RenameAccountFunc func(context.Context, RenameAccountParams) error
 
-// renameAccountByQuery dispatches to the appropriate rename query based on the
+// RenameAccountByQuery dispatches to the appropriate rename query based on the
 // provided account identifier (either account number or old name).
-func renameAccountByQuery(ctx context.Context, params RenameAccountParams,
-	renameByNumber renameAccountFunc, renameByName renameAccountFunc) error {
+func RenameAccountByQuery(ctx context.Context, params RenameAccountParams,
+	renameByNumber RenameAccountFunc, renameByName RenameAccountFunc) error {
 
 	if params.NewName == "" {
 		return ErrMissingAccountName
@@ -444,10 +444,10 @@ func renameAccountByQuery(ctx context.Context, params RenameAccountParams,
 	}
 }
 
-// getAccount is a generic helper that retrieves an account using the provided
+// GetAccount is a generic helper that retrieves an account using the provided
 // query function. It handles error mapping and delegates conversion to the
 // toInfo function.
-func getAccount[T any, Args any](ctx context.Context,
+func GetAccount[T any, Args any](ctx context.Context,
 	getter func(context.Context, Args) (T, error), args Args,
 	query GetAccountQuery, toInfo func(T) (*AccountInfo, error)) (*AccountInfo,
 	error) {
@@ -471,10 +471,10 @@ func getAccount[T any, Args any](ctx context.Context,
 		ErrAccountNotFound)
 }
 
-// renameAccount is a generic helper that updates an account name using the
+// RenameAccount is a generic helper that updates an account name using the
 // provided update function. It checks rows affected and returns an error if
 // the account was not found.
-func renameAccount[Args any](ctx context.Context,
+func RenameAccount[Args any](ctx context.Context,
 	update func(context.Context, Args) (int64, error), args Args,
 	params RenameAccountParams) error {
 
@@ -496,11 +496,11 @@ func renameAccount[Args any](ctx context.Context,
 		params.Scope.Purpose, params.Scope.Coin, ErrAccountNotFound)
 }
 
-// createImportedAccount is a generic helper that creates an imported account.
+// CreateImportedAccount is a generic helper that creates an imported account.
 // It handles ensuring the key scope exists, creating the account record,
 // optionally creating the account secret for non-watch-only accounts, and
 // fetching the full account properties from the database.
-func createImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
+func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	ctx context.Context, params CreateImportedAccountParams,
 	ensureScope func() (int64, error),
 	createAccount func(context.Context, CreateArgs) (CreateRow, error),

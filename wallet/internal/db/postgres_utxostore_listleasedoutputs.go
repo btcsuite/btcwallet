@@ -26,12 +26,12 @@ func (s *PostgresStore) ListLeasedOutputs(ctx context.Context,
 
 	leases := make([]LeasedOutput, len(rows))
 	for i, row := range rows {
-		outputIndex, err := int64ToUint32(int64(row.OutputIndex))
+		outputIndex, err := Int64ToUint32(int64(row.OutputIndex))
 		if err != nil {
 			return nil, fmt.Errorf("lease output index: %w", err)
 		}
 
-		lease, err := buildLeasedOutput(
+		lease, err := BuildLeasedOutput(
 			row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
 		)
 		if err != nil {

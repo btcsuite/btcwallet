@@ -39,7 +39,7 @@ type rowDBTX struct {
 
 // ExecContext implements the sqlc DBTX interface.
 func (r rowDBTX) ExecContext(context.Context, string,
-	...interface{}) (sql.Result, error) {
+	...any) (sql.Result, error) {
 
 	if r.execErr != nil {
 		return nil, r.execErr
@@ -55,14 +55,14 @@ func (r rowDBTX) PrepareContext(context.Context, string) (*sql.Stmt, error) {
 
 // QueryContext implements the sqlc DBTX interface.
 func (r rowDBTX) QueryContext(context.Context, string,
-	...interface{}) (*sql.Rows, error) {
+	...any) (*sql.Rows, error) {
 
 	return nil, r.queryErr
 }
 
 // QueryRowContext implements the sqlc DBTX interface.
 func (r rowDBTX) QueryRowContext(context.Context, string,
-	...interface{}) *sql.Row {
+	...any) *sql.Row {
 
 	if r.row != nil {
 		return r.row
@@ -73,7 +73,7 @@ func (r rowDBTX) QueryRowContext(context.Context, string,
 
 // newSQLiteRow creates a query row backed by an in-memory sqlite database so
 // sqlc scan paths can fail without standing up a real store.
-func newSQLiteRow(t *testing.T, query string, args ...interface{}) *sql.Row {
+func newSQLiteRow(t *testing.T, query string, args ...any) *sql.Row {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", ":memory:")
@@ -95,12 +95,12 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	loadOps := &pgCreateTxOps{
 		pgInvalidateUnminedTxOps: pgInvalidateUnminedTxOps{
 			qtx: sqlcpg.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
 	}
 
-	_, err := loadOps.loadExisting(ctx, req)
+	_, err := loadOps.LoadExisting(ctx, req)
 	require.ErrorContains(t, err, "get tx metadata")
 
 	block := &Block{
@@ -120,10 +120,10 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
-	err = confirmOps.confirmExisting(ctx, createTxRequest{
-		params: CreateTxParams{WalletID: 1, Block: block},
-		txHash: chainhash.Hash{9},
-	}, createTxExistingTarget{})
+	err = confirmOps.ConfirmExisting(ctx, CreateTxRequest{
+		Params: CreateTxParams{WalletID: 1, Block: block},
+		TxHash: chainhash.Hash{9},
+	}, CreateTxExistingTarget{})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
 	conflictOps := &pgCreateTxOps{
@@ -134,7 +134,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
-	_, _, err = conflictOps.listConflictTxns(ctx, req)
+	_, _, err = conflictOps.ListConflictTxns(ctx, req)
 	require.ErrorContains(t, err, "list unmined txns")
 }
 
@@ -149,12 +149,12 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 	loadOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
 	}
 
-	_, err := loadOps.loadExisting(ctx, req)
+	_, err := loadOps.LoadExisting(ctx, req)
 	require.ErrorContains(t, err, "get tx metadata")
 
 	block := &Block{
@@ -174,21 +174,21 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
-	err = confirmOps.confirmExisting(ctx, createTxRequest{
-		params: CreateTxParams{WalletID: 1, Block: block},
-		txHash: chainhash.Hash{9},
-	}, createTxExistingTarget{})
+	err = confirmOps.ConfirmExisting(ctx, CreateTxRequest{
+		Params: CreateTxParams{WalletID: 1, Block: block},
+		TxHash: chainhash.Hash{9},
+	}, CreateTxExistingTarget{})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
 	prepareOps := &sqliteCreateTxOps{
 		sqliteInvalidateUnminedTxOps: sqliteInvalidateUnminedTxOps{
 			qtx: sqlcsqlite.New(rowDBTX{
-				row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+				row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 			}),
 		},
 	}
-	err = prepareOps.prepareBlock(ctx, createTxRequest{
-		params: CreateTxParams{WalletID: 1, Block: block},
+	err = prepareOps.PrepareBlock(ctx, CreateTxRequest{
+		Params: CreateTxParams{WalletID: 1, Block: block},
 	})
 	require.ErrorContains(t, err, "get block by height")
 
@@ -200,26 +200,26 @@ func TestSqliteCreateTxOpsAdditionalBranches(t *testing.T) {
 			}),
 		},
 	}
-	_, _, err = conflictOps.listConflictTxns(ctx, req)
+	_, _, err = conflictOps.ListConflictTxns(ctx, req)
 	require.ErrorContains(t, err, "list unmined txns")
 }
 
 // TestSqliteReleaseOutputOpsAdditionalBranches covers the remaining sqlite
-// release-helper query-row error wrappers.
+// Release-helper query-row error wrappers.
 func TestSqliteReleaseOutputOpsAdditionalBranches(t *testing.T) {
 	t.Parallel()
 
 	ops := &sqliteReleaseOutputOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 	})}
 
-	_, err := ops.lookupUtxoID(context.Background(), ReleaseOutputParams{
+	_, err := ops.LookupUtxoID(context.Background(), ReleaseOutputParams{
 		WalletID: 1,
 		OutPoint: wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0},
 	})
 	require.ErrorContains(t, err, "lookup utxo row")
 
-	_, err = ops.activeLockID(context.Background(), 1, 2, time.Now())
+	_, err = ops.ActiveLockID(context.Background(), 1, 2, time.Now())
 	require.ErrorContains(t, err, "lookup active lease row")
 }
 
@@ -232,7 +232,7 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
 	loadOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 	})}
 	stateOps := &pgUpdateTxOps{
 		qtx:         sqlcpg.New(rowDBTX{rows: 0}),
@@ -241,15 +241,15 @@ func TestPgUpdateTxOpsAdditionalBranches(t *testing.T) {
 	}
 	labelOps := &pgUpdateTxOps{qtx: sqlcpg.New(rowDBTX{rows: 0})}
 
-	_, err := loadOps.loadIsCoinbase(ctx, 1, txHash)
+	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")
 
-	err = stateOps.updateState(ctx, 1, txHash, UpdateTxState{
+	err = stateOps.UpdateState(ctx, 1, txHash, UpdateTxState{
 		Status: TxStatusPublished,
 	})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
-	err = labelOps.updateLabel(ctx, 1, txHash, "note")
+	err = labelOps.UpdateLabel(ctx, 1, txHash, "note")
 	require.ErrorIs(t, err, ErrTxNotFound)
 }
 
@@ -262,7 +262,7 @@ func TestSqliteUpdateTxOpsAdditionalBranches(t *testing.T) {
 	ctx := context.Background()
 	txHash := chainhash.Hash{9}
 	loadOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{
-		row: newSQLiteRow(t, "SELECT * FROM missing_table"),
+		row: newSQLiteRow(t, "SELECT 1 FROM missing_table"),
 	})}
 	stateOps := &sqliteUpdateTxOps{
 		qtx:         sqlcsqlite.New(rowDBTX{rows: 0}),
@@ -271,14 +271,14 @@ func TestSqliteUpdateTxOpsAdditionalBranches(t *testing.T) {
 	}
 	labelOps := &sqliteUpdateTxOps{qtx: sqlcsqlite.New(rowDBTX{rows: 0})}
 
-	_, err := loadOps.loadIsCoinbase(ctx, 1, txHash)
+	_, err := loadOps.LoadIsCoinbase(ctx, 1, txHash)
 	require.ErrorContains(t, err, "get tx metadata")
 
-	err = stateOps.updateState(ctx, 1, txHash, UpdateTxState{
+	err = stateOps.UpdateState(ctx, 1, txHash, UpdateTxState{
 		Status: TxStatusPublished,
 	})
 	require.ErrorIs(t, err, ErrTxNotFound)
 
-	err = labelOps.updateLabel(ctx, 1, txHash, "note")
+	err = labelOps.UpdateLabel(ctx, 1, txHash, "note")
 	require.ErrorIs(t, err, ErrTxNotFound)
 }

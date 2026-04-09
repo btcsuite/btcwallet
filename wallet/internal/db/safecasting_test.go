@@ -38,7 +38,7 @@ func TestInt64ToUint32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := int64ToUint32(tc.val)
+			got, err := Int64ToUint32(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -88,7 +88,7 @@ func TestInt64ToInt32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := int64ToInt32(tc.val)
+			got, err := Int64ToInt32(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -188,7 +188,7 @@ func TestInt16ToUint8(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := int16ToUint8(tc.val)
+			got, err := Int16ToUint8(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -225,7 +225,7 @@ func TestUint32ToInt32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := uint32ToInt32(tc.val)
+			got, err := Uint32ToInt32(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -262,7 +262,7 @@ func TestUint32ToInt16(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := uint32ToInt16(tc.val)
+			got, err := Uint32ToInt16(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -310,7 +310,7 @@ func TestUint32ToNullInt32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := uint32ToNullInt32(tc.val)
+			got, err := Uint32ToNullInt32(tc.val)
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrCastingOverflow)
 				return
@@ -360,7 +360,7 @@ func TestNullInt32ToUint32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := nullInt32ToUint32(tc.val)
+			got, err := NullInt32ToUint32(tc.val)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				return
@@ -379,10 +379,10 @@ func TestNullableInt32ToSQLInt32(t *testing.T) {
 
 	value := int32(42)
 
-	require.Equal(t, sql.NullInt32{}, nullableInt32ToSQLInt32(nil))
+	require.Equal(t, sql.NullInt32{}, NullableInt32ToSQLInt32(nil))
 	require.Equal(t,
 		sql.NullInt32{Int32: value, Valid: true},
-		nullableInt32ToSQLInt32(&value),
+		NullableInt32ToSQLInt32(&value),
 	)
 }
 
@@ -393,10 +393,10 @@ func TestNullableInt32ToSQLInt64(t *testing.T) {
 
 	value := int32(42)
 
-	require.Equal(t, sql.NullInt64{}, nullableInt32ToSQLInt64(nil))
+	require.Equal(t, sql.NullInt64{}, NullableInt32ToSQLInt64(nil))
 	require.Equal(t,
 		sql.NullInt64{Int64: int64(value), Valid: true},
-		nullableInt32ToSQLInt64(&value),
+		NullableInt32ToSQLInt64(&value),
 	)
 }
 
@@ -407,9 +407,9 @@ func TestNullableUint32ToSQLInt64(t *testing.T) {
 
 	value := uint32(42)
 
-	require.Equal(t, sql.NullInt64{}, nullableUint32ToSQLInt64(nil))
+	require.Equal(t, sql.NullInt64{}, NullableUint32ToSQLInt64(nil))
 	require.Equal(t,
 		sql.NullInt64{Int64: int64(value), Valid: true},
-		nullableUint32ToSQLInt64(&value),
+		NullableUint32ToSQLInt64(&value),
 	)
 }

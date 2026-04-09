@@ -19,7 +19,7 @@ func (s *PostgresStore) ReleaseOutput(ctx context.Context,
 	params ReleaseOutputParams) error {
 
 	return s.ExecuteTx(ctx, func(qtx *sqlcpg.Queries) error {
-		return releaseOutputWithOps(
+		return ReleaseOutputWithOps(
 			ctx, params, &pgReleaseOutputOps{qtx: qtx},
 		)
 	})
@@ -31,14 +31,14 @@ type pgReleaseOutputOps struct {
 	qtx *sqlcpg.Queries
 }
 
-var _ releaseOutputOps = (*pgReleaseOutputOps)(nil)
+var _ ReleaseOutputOps = (*pgReleaseOutputOps)(nil)
 
-// lookupUtxoID resolves the wallet-owned outpoint to its stable postgres UTXO
+// LookupUtxoID resolves the wallet-owned outpoint to its stable postgres UTXO
 // row ID.
-func (o *pgReleaseOutputOps) lookupUtxoID(ctx context.Context,
+func (o *pgReleaseOutputOps) LookupUtxoID(ctx context.Context,
 	params ReleaseOutputParams) (int64, error) {
 
-	outputIndex, err := uint32ToInt32(params.OutPoint.Index)
+	outputIndex, err := Uint32ToInt32(params.OutPoint.Index)
 	if err != nil {
 		return 0, err
 	}
@@ -52,7 +52,7 @@ func (o *pgReleaseOutputOps) lookupUtxoID(ctx context.Context,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, errReleaseOutputUtxoNotFound
+			return 0, ErrReleaseOutputUtxoNotFound
 		}
 
 		return 0, fmt.Errorf("lookup utxo row: %w", err)
@@ -61,9 +61,9 @@ func (o *pgReleaseOutputOps) lookupUtxoID(ctx context.Context,
 	return utxoID, nil
 }
 
-// release attempts to delete the postgres lease row for the provided UTXO ID
+// Release attempts to delete the postgres lease row for the provided UTXO ID
 // and lock ID.
-func (o *pgReleaseOutputOps) release(ctx context.Context, walletID uint32,
+func (o *pgReleaseOutputOps) Release(ctx context.Context, walletID uint32,
 	utxoID int64, lockID [32]byte) (int64, error) {
 
 	rows, err := o.qtx.ReleaseUtxoLease(
@@ -74,18 +74,18 @@ func (o *pgReleaseOutputOps) release(ctx context.Context, walletID uint32,
 		},
 	)
 	if err != nil {
-		return 0, fmt.Errorf("release lease row: %w", err)
+		return 0, fmt.Errorf("Release lease row: %w", err)
 	}
 
 	return rows, nil
 }
 
-// activeLockID returns the currently active postgres lease lock ID for the
+// ActiveLockID returns the currently active postgres lease lock ID for the
 // provided UTXO ID.
-func (o *pgReleaseOutputOps) activeLockID(ctx context.Context, walletID uint32,
+func (o *pgReleaseOutputOps) ActiveLockID(ctx context.Context, walletID uint32,
 	utxoID int64, nowUTC time.Time) ([]byte, error) {
 
-	activeLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
+	ActiveLockID, err := o.qtx.GetActiveUtxoLeaseLockID(
 		ctx, sqlcpg.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
@@ -94,11 +94,11 @@ func (o *pgReleaseOutputOps) activeLockID(ctx context.Context, walletID uint32,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errReleaseOutputNoActiveLease
+			return nil, ErrReleaseOutputNoActiveLease
 		}
 
 		return nil, fmt.Errorf("lookup active lease row: %w", err)
 	}
 
-	return activeLockID, nil
+	return ActiveLockID, nil
 }

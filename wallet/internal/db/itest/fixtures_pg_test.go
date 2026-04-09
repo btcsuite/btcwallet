@@ -146,7 +146,7 @@ func getAddressID(t *testing.T, queries *sqlcpg.Queries, scriptPubKey []byte,
 	return addr.ID
 }
 
-func getAddressSecret(t *testing.T, queries *sqlcpg.Queries,
+func GetAddressSecret(t *testing.T, queries *sqlcpg.Queries,
 	addressID int64) (sqlcpg.GetAddressSecretRow, error) {
 	t.Helper()
 

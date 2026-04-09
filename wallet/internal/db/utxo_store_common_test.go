@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -65,7 +64,7 @@ func TestBuildOutPoint_InvalidHash(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestBuildUtxoInfo_Confirmed verifies that buildUtxoInfo preserves confirmed
+// TestBuildUtxoInfo_Confirmed verifies that BuildUtxoInfo preserves confirmed
 // UTXO metadata.
 //
 // Scenario:
@@ -85,7 +84,7 @@ func TestBuildUtxoInfo_Confirmed(t *testing.T) {
 	confirmedHeight := uint32(33)
 
 	// Act: Build the public UTXO view for the confirmed row.
-	confirmed, err := buildUtxoInfo(
+	confirmed, err := BuildUtxoInfo(
 		hash[:], 1, 1234, []byte{0x51}, time.Unix(111, 0), true,
 		&confirmedHeight,
 	)
@@ -97,7 +96,7 @@ func TestBuildUtxoInfo_Confirmed(t *testing.T) {
 	require.Equal(t, uint32(1), confirmed.OutPoint.Index)
 }
 
-// TestBuildUtxoInfo_Unconfirmed verifies that buildUtxoInfo maps unconfirmed
+// TestBuildUtxoInfo_Unconfirmed verifies that BuildUtxoInfo maps unconfirmed
 // rows to the public unmined sentinel.
 //
 // Scenario:
@@ -117,7 +116,7 @@ func TestBuildUtxoInfo_Unconfirmed(t *testing.T) {
 	hash := chainhash.Hash{9}
 
 	// Act: Build the public UTXO view for the unconfirmed row.
-	unconfirmed, err := buildUtxoInfo(
+	unconfirmed, err := BuildUtxoInfo(
 		hash[:], 2, 5678, []byte{0x52}, time.Unix(222, 0), false, nil,
 	)
 
@@ -149,7 +148,7 @@ func TestBuildLeasedOutput(t *testing.T) {
 	lockID[0] = 7
 
 	// Act: Build the public leased-output view.
-	lease, err := buildLeasedOutput(
+	lease, err := BuildLeasedOutput(
 		hash[:], 9, lockID, time.Unix(333, 0).In(time.FixedZone("X", 3600)),
 	)
 
@@ -161,7 +160,7 @@ func TestBuildLeasedOutput(t *testing.T) {
 	require.Equal(t, time.UTC, lease.Expiration.Location())
 }
 
-// TestBuildLeasedOutput_InvalidLockID verifies that buildLeasedOutput rejects
+// TestBuildLeasedOutput_InvalidLockID verifies that BuildLeasedOutput rejects
 // malformed lock IDs.
 //
 // Scenario:
@@ -181,14 +180,14 @@ func TestBuildLeasedOutput_InvalidLockID(t *testing.T) {
 	shortLockID := []byte{1, 2, 3}
 
 	// Act: Attempt to build the public leased-output view.
-	_, err := buildLeasedOutput(hash[:], 0, shortLockID, time.Now())
+	_, err := BuildLeasedOutput(hash[:], 0, shortLockID, time.Now())
 
 	// Assert: The helper returns the invalid-lock-ID sentinel.
 	require.ErrorIs(t, err, errInvalidLockID)
 }
 
 // TestLeaseOutputWithOps verifies that the shared LeaseOutput helper returns
-// the leased outpoint when the backend acquire step succeeds.
+// the leased outpoint when the backend Acquire step succeeds.
 func TestLeaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
@@ -206,11 +205,11 @@ func TestLeaseOutputWithOps(t *testing.T) {
 	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
-	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
 		acquireExpiration, nil).Once()
 
 	// Act: Run the shared LeaseOutput flow.
-	lease, err := leaseOutputWithOps(context.Background(), params, ops)
+	lease, err := LeaseOutputWithOps(context.Background(), params, ops)
 
 	// Assert: The helper returns the leased outpoint and UTC expiration.
 	require.NoError(t, err)
@@ -235,14 +234,14 @@ func TestLeaseOutputWithOpsRejectsNonPositiveDuration(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	_, err := leaseOutputWithOps(context.Background(), params, ops)
+	_, err := LeaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrInvalidParam)
-	ops.AssertNotCalled(t, "acquire", mock.Anything, mock.Anything,
+	ops.AssertNotCalled(t, "Acquire", mock.Anything, mock.Anything,
 		mock.Anything, mock.Anything)
 }
 
 // TestLeaseOutputWithOpsMissingUtxo verifies that the shared LeaseOutput helper
-// maps a no-row acquire and missing outpoint lookup to ErrUtxoNotFound.
+// maps a no-row Acquire and missing outpoint lookup to ErrUtxoNotFound.
 func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 	t.Parallel()
 
@@ -258,17 +257,17 @@ func TestLeaseOutputWithOpsMissingUtxo(t *testing.T) {
 	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
-	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, errLeaseOutputNoRow).Once()
+	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+		time.Time{}, ErrLeaseOutputNoRow).Once()
 
-	ops.On("hasUtxo", mock.Anything, params).Return(false, nil).Once()
+	ops.On("HasUtxo", mock.Anything, params).Return(false, nil).Once()
 
-	_, err := leaseOutputWithOps(context.Background(), params, ops)
+	_, err := LeaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
 }
 
 // TestLeaseOutputWithOpsAlreadyLeased verifies that the shared LeaseOutput
-// helper maps a no-row acquire and existing outpoint to ErrOutputAlreadyLeased.
+// helper maps a no-row Acquire and existing outpoint to ErrOutputAlreadyLeased.
 func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 	t.Parallel()
 
@@ -284,12 +283,12 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 	})
 
 	nowMatcher := mock.AnythingOfType("time.Time")
-	ops.On("acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
-		time.Time{}, errLeaseOutputNoRow).Once()
+	ops.On("Acquire", mock.Anything, params, nowMatcher, nowMatcher).Return(
+		time.Time{}, ErrLeaseOutputNoRow).Once()
 
-	ops.On("hasUtxo", mock.Anything, params).Return(true, nil).Once()
+	ops.On("HasUtxo", mock.Anything, params).Return(true, nil).Once()
 
-	_, err := leaseOutputWithOps(context.Background(), params, ops)
+	_, err := LeaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrOutputAlreadyLeased)
 }
 
@@ -298,7 +297,7 @@ func TestLeaseOutputWithOpsAlreadyLeased(t *testing.T) {
 func TestReleaseOutputWithOps(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Build one valid release request and one successful stub adapter.
+	// Arrange: Build one valid Release request and one successful stub adapter.
 	params := ReleaseOutputParams{
 		WalletID: 5,
 		OutPoint: testLeaseOutPoint(),
@@ -309,13 +308,13 @@ func TestReleaseOutputWithOps(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+	ops.On("LookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
 
-	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+	ops.On("Release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
 		int64(1), nil).Once()
 
 	// Act: Run the shared ReleaseOutput flow.
-	err := releaseOutputWithOps(context.Background(), params, ops)
+	err := ReleaseOutputWithOps(context.Background(), params, ops)
 
 	// Assert: The helper stops after the successful delete path.
 	require.NoError(t, err)
@@ -336,10 +335,10 @@ func TestReleaseOutputWithOpsMissingUtxo(t *testing.T) {
 		ops.AssertExpectations(t)
 	})
 
-	ops.On("lookupUtxoID", mock.Anything, params).Return(
-		int64(0), errReleaseOutputUtxoNotFound).Once()
+	ops.On("LookupUtxoID", mock.Anything, params).Return(
+		int64(0), ErrReleaseOutputUtxoNotFound).Once()
 
-	err := releaseOutputWithOps(context.Background(), params, ops)
+	err := ReleaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrUtxoNotFound)
 }
 
@@ -359,15 +358,16 @@ func TestReleaseOutputWithOpsWrongLock(t *testing.T) {
 	})
 
 	releaseTimeMatcher := mock.AnythingOfType("time.Time")
-	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
 
-	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+	ops.On("LookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+
+	ops.On("Release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
 		int64(0), nil).Once()
 
-	ops.On("activeLockID", mock.Anything, uint32(5), int64(11),
+	ops.On("ActiveLockID", mock.Anything, uint32(5), int64(11),
 		releaseTimeMatcher).Return([]byte{1, 2, 3}, nil).Once()
 
-	err := releaseOutputWithOps(context.Background(), params, ops)
+	err := ReleaseOutputWithOps(context.Background(), params, ops)
 	require.ErrorIs(t, err, ErrOutputUnlockNotAllowed)
 }
 
@@ -388,27 +388,28 @@ func TestReleaseOutputWithOpsMissingActiveLease(t *testing.T) {
 	})
 
 	releaseTimeMatcher := mock.AnythingOfType("time.Time")
-	ops.On("lookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
 
-	ops.On("release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
+	ops.On("LookupUtxoID", mock.Anything, params).Return(int64(11), nil).Once()
+
+	ops.On("Release", mock.Anything, uint32(5), int64(11), [32]byte{9}).Return(
 		int64(0), nil).Once()
 
-	ops.On("activeLockID", mock.Anything, uint32(5), int64(11),
-		releaseTimeMatcher).Return(nil, errReleaseOutputNoActiveLease).Once()
+	ops.On("ActiveLockID", mock.Anything, uint32(5), int64(11),
+		releaseTimeMatcher).Return(nil, ErrReleaseOutputNoActiveLease).Once()
 
-	err := releaseOutputWithOps(context.Background(), params, ops)
+	err := ReleaseOutputWithOps(context.Background(), params, ops)
 	require.NoError(t, err)
 }
 
-// mockLeaseOutputOps is a mock implementation of leaseOutputOps.
+// mockLeaseOutputOps is a mock implementation of LeaseOutputOps.
 type mockLeaseOutputOps struct {
 	mock.Mock
 }
 
-var _ leaseOutputOps = (*mockLeaseOutputOps)(nil)
+var _ LeaseOutputOps = (*mockLeaseOutputOps)(nil)
 
-// acquire implements leaseOutputOps.
-func (m *mockLeaseOutputOps) acquire(ctx context.Context,
+// Acquire implements LeaseOutputOps.
+func (m *mockLeaseOutputOps) Acquire(ctx context.Context,
 	params LeaseOutputParams, start time.Time,
 	expiration time.Time) (time.Time, error) {
 
@@ -422,29 +423,29 @@ func (m *mockLeaseOutputOps) acquire(ctx context.Context,
 	return leaseExpiration, args.Error(1)
 }
 
-// hasUtxo implements leaseOutputOps.
-func (m *mockLeaseOutputOps) hasUtxo(ctx context.Context,
+// HasUtxo implements LeaseOutputOps.
+func (m *mockLeaseOutputOps) HasUtxo(ctx context.Context,
 	params LeaseOutputParams) (bool, error) {
 
 	args := m.Called(ctx, params)
 
-	hasUtxo, ok := args.Get(0).(bool)
+	HasUtxo, ok := args.Get(0).(bool)
 	if !ok {
 		return false, errMockType
 	}
 
-	return hasUtxo, args.Error(1)
+	return HasUtxo, args.Error(1)
 }
 
-// mockReleaseOutputOps is a mock implementation of releaseOutputOps.
+// mockReleaseOutputOps is a mock implementation of ReleaseOutputOps.
 type mockReleaseOutputOps struct {
 	mock.Mock
 }
 
-var _ releaseOutputOps = (*mockReleaseOutputOps)(nil)
+var _ ReleaseOutputOps = (*mockReleaseOutputOps)(nil)
 
-// lookupUtxoID implements releaseOutputOps.
-func (m *mockReleaseOutputOps) lookupUtxoID(ctx context.Context,
+// LookupUtxoID implements ReleaseOutputOps.
+func (m *mockReleaseOutputOps) LookupUtxoID(ctx context.Context,
 	params ReleaseOutputParams) (int64, error) {
 
 	args := m.Called(ctx, params)
@@ -457,8 +458,8 @@ func (m *mockReleaseOutputOps) lookupUtxoID(ctx context.Context,
 	return utxoID, args.Error(1)
 }
 
-// release implements releaseOutputOps.
-func (m *mockReleaseOutputOps) release(ctx context.Context, walletID uint32,
+// Release implements ReleaseOutputOps.
+func (m *mockReleaseOutputOps) Release(ctx context.Context, walletID uint32,
 	utxoID int64, lockID [32]byte) (int64, error) {
 
 	args := m.Called(ctx, walletID, utxoID, lockID)
@@ -471,8 +472,8 @@ func (m *mockReleaseOutputOps) release(ctx context.Context, walletID uint32,
 	return releasedRows, args.Error(1)
 }
 
-// activeLockID implements releaseOutputOps.
-func (m *mockReleaseOutputOps) activeLockID(ctx context.Context,
+// ActiveLockID implements ReleaseOutputOps.
+func (m *mockReleaseOutputOps) ActiveLockID(ctx context.Context,
 	walletID uint32, utxoID int64, now time.Time) ([]byte, error) {
 
 	args := m.Called(ctx, walletID, utxoID, now)
@@ -494,13 +495,13 @@ func testLeaseOutPoint() wire.OutPoint {
 	return wire.OutPoint{Hash: chainhash.Hash{7}, Index: 1}
 }
 
-// TestBuildUtxoInfoMaxAmount verifies that buildUtxoInfo preserves the largest
+// TestBuildUtxoInfoMaxAmount verifies that BuildUtxoInfo preserves the largest
 // valid satoshi amount.
 func TestBuildUtxoInfoMaxAmount(t *testing.T) {
 	t.Parallel()
 
 	hash := chainhash.Hash{10}
-	info, err := buildUtxoInfo(
+	info, err := BuildUtxoInfo(
 		hash[:], 3, int64(btcutil.MaxSatoshi), []byte{0x53},
 		time.Unix(333, 0), false, nil,
 	)
@@ -510,81 +511,25 @@ func TestBuildUtxoInfoMaxAmount(t *testing.T) {
 	require.Equal(t, UnminedHeight, info.Height)
 }
 
-// TestBuildUtxoInfoInvalidHash verifies that buildUtxoInfo rejects malformed
+// TestBuildUtxoInfoInvalidHash verifies that BuildUtxoInfo rejects malformed
 // hash bytes.
 func TestBuildUtxoInfoInvalidHash(t *testing.T) {
 	t.Parallel()
 
-	_, err := buildUtxoInfo(
+	_, err := BuildUtxoInfo(
 		[]byte{1, 2, 3}, 6, 1000, []byte{0x56}, time.Unix(666, 0), false, nil,
 	)
 
 	require.Error(t, err)
 }
 
-// TestBuildLeasedOutputInvalidHash verifies that buildLeasedOutput rejects
+// TestBuildLeasedOutputInvalidHash verifies that BuildLeasedOutput rejects
 // malformed hash bytes.
 func TestBuildLeasedOutputInvalidHash(t *testing.T) {
 	t.Parallel()
 
 	lockID := make([]byte, 32)
-	_, err := buildLeasedOutput([]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0))
+	_, err := BuildLeasedOutput([]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0))
 
 	require.Error(t, err)
-}
-
-// TestUtxoInfoFromSqliteRowInvalidOutputIndex verifies that the sqlite row
-// decoder rejects output indexes outside the uint32 range.
-func TestUtxoInfoFromSqliteRowInvalidOutputIndex(t *testing.T) {
-	t.Parallel()
-
-	hash := chainhash.Hash{13}
-	_, err := utxoInfoFromSqliteRow(
-		hash[:], -1, 1000, []byte{0x57}, time.Unix(888, 0), false,
-		sql.NullInt64{},
-	)
-
-	require.ErrorContains(t, err, "utxo output index")
-}
-
-// TestUtxoInfoFromSqliteRowInvalidBlockHeight verifies that the sqlite row
-// decoder rejects invalid confirmed block heights.
-func TestUtxoInfoFromSqliteRowInvalidBlockHeight(t *testing.T) {
-	t.Parallel()
-
-	hash := chainhash.Hash{14}
-	_, err := utxoInfoFromSqliteRow(
-		hash[:], 0, 1000, []byte{0x58}, time.Unix(999, 0), false,
-		sql.NullInt64{Int64: -1, Valid: true},
-	)
-
-	require.ErrorContains(t, err, "utxo block height")
-}
-
-// TestUtxoInfoFromPgRowInvalidOutputIndex verifies that the postgres row
-// decoder rejects output indexes outside the uint32 range.
-func TestUtxoInfoFromPgRowInvalidOutputIndex(t *testing.T) {
-	t.Parallel()
-
-	hash := chainhash.Hash{15}
-	_, err := utxoInfoFromPgRow(
-		hash[:], -1, 1000, []byte{0x59}, time.Unix(1000, 0), false,
-		sql.NullInt32{},
-	)
-
-	require.ErrorContains(t, err, "utxo output index")
-}
-
-// TestUtxoInfoFromPgRowInvalidBlockHeight verifies that the postgres row
-// decoder rejects invalid confirmed block heights.
-func TestUtxoInfoFromPgRowInvalidBlockHeight(t *testing.T) {
-	t.Parallel()
-
-	hash := chainhash.Hash{16}
-	_, err := utxoInfoFromPgRow(
-		hash[:], 0, 1000, []byte{0x5a}, time.Unix(1001, 0), false,
-		sql.NullInt32{Int32: -1, Valid: true},
-	)
-
-	require.ErrorContains(t, err, "utxo block height")
 }
