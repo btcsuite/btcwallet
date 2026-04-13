@@ -4,7 +4,8 @@
 // # Core types
 //
 // A [Request] carries the parameters for a single page fetch: page limit,
-// and an optional after that identifies where the previous page ended.
+// and an optional after that identifies where the previous page ended. Use
+// [NewRequest] to construct a request with a positive page limit.
 //
 // A [Result] carries the items returned by one fetch together with
 // [Result.Next]. Assign [Result.Next] to [Request.After] to advance to the next
