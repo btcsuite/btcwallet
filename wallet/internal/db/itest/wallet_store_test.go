@@ -17,6 +17,16 @@ func uint32Ptr(v uint32) *uint32 {
 	return &v
 }
 
+// newTestReq constructs a valid pagination request for tests.
+func newTestReq[C any](t *testing.T, limit uint32) page.Request[C] {
+	t.Helper()
+
+	req, err := page.NewRequest[C](limit)
+	require.NoError(t, err)
+
+	return req
+}
+
 // TestCreateWallet verifies that CreateWallet correctly creates a wallet
 // and returns its information.
 func TestCreateWallet(t *testing.T) {
@@ -161,7 +171,7 @@ func TestListWallets(t *testing.T) {
 
 	// Initially empty.
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 10},
+		Page: newTestReq[uint32](t, 10),
 	}
 
 	pageResult, err := store.ListWallets(t.Context(), query)
@@ -214,7 +224,7 @@ func TestListWalletsPagination(t *testing.T) {
 	}
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	}
 
 	page1, err := store.ListWallets(t.Context(), query)
@@ -261,7 +271,7 @@ func TestListWalletsExactBoundary(t *testing.T) {
 	}
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	}
 
 	page1, err := store.ListWallets(t.Context(), query)
@@ -304,7 +314,7 @@ func TestIterWallets(t *testing.T) {
 	}
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	}
 	expected := flattenWalletPages(collectWalletPages(t, store, query))
 
@@ -332,7 +342,7 @@ func TestIterWalletsPaginated(t *testing.T) {
 	}
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	}
 
 	pages := collectWalletPages(t, store, query)
@@ -368,11 +378,11 @@ func TestListWalletsPagedFromCursor(t *testing.T) {
 		created = append(created, wallet)
 	}
 
+	pageReq := newTestReq[uint32](t, 2)
+	pageReq.After = uint32Ptr(created[1].ID)
+
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{
-			Limit: 2,
-			After: uint32Ptr(created[1].ID),
-		},
+		Page: pageReq,
 	}
 
 	pageResult, err := store.ListWallets(t.Context(), query)
@@ -428,7 +438,7 @@ func TestListWalletsPagedWithSyncMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 1},
+		Page: newTestReq[uint32](t, 1),
 	}
 
 	page1, err := store.ListWallets(t.Context(), query)
@@ -471,7 +481,7 @@ func TestListWalletsDeterministicPagination(t *testing.T) {
 	}
 
 	pages := collectWalletPages(t, store, db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	})
 	require.Len(t, pages, 3)
 	require.Len(t, pages[0].Items, 2)
@@ -539,7 +549,7 @@ func TestListWalletsInsertAfterCursor(t *testing.T) {
 	}
 
 	query := db.ListWalletsQuery{
-		Page: page.Request[uint32]{Limit: 2},
+		Page: newTestReq[uint32](t, 2),
 	}
 	page1, err := store.ListWallets(t.Context(), query)
 	require.NoError(t, err)
@@ -577,21 +587,21 @@ func TestListWalletsCursorEdges(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	staleReq := newTestReq[uint32](t, 2)
+	staleReq.After = uint32Ptr(math.MaxUint32)
+
 	stalePage, err := store.ListWallets(t.Context(), db.ListWalletsQuery{
-		Page: page.Request[uint32]{
-			Limit: 2,
-			After: uint32Ptr(math.MaxUint32),
-		},
+		Page: staleReq,
 	})
 	require.NoError(t, err)
 	require.Empty(t, stalePage.Items)
 	require.Nil(t, stalePage.Next)
 
+	zeroReq := newTestReq[uint32](t, 2)
+	zeroReq.After = uint32Ptr(0)
+
 	zeroPage, err := store.ListWallets(t.Context(), db.ListWalletsQuery{
-		Page: page.Request[uint32]{
-			Limit: 2,
-			After: uint32Ptr(0),
-		},
+		Page: zeroReq,
 	})
 	require.NoError(t, err)
 	require.Len(t, zeroPage.Items, 2)

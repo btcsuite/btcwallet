@@ -11,6 +11,44 @@ func intPtrRequest(v int) *int {
 	return &v
 }
 
+// TestNewRequest verifies NewRequest validates and stores the page limit.
+func TestNewRequest(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		limit     uint32
+		wantLimit uint32
+		wantErr   error
+	}{
+		{
+			name:    "zero limit rejected",
+			limit:   0,
+			wantErr: ErrInvalidLimit,
+		},
+		{
+			name:      "positive limit accepted",
+			limit:     5,
+			wantLimit: 5,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req, err := NewRequest[int](tc.limit)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.wantLimit, req.Limit())
+		})
+	}
+}
+
 // TestBuildResult verifies BuildResult assembles the correct Result using the
 // lookahead row trimming and Next logic.
 func TestBuildResult(t *testing.T) {
@@ -59,7 +97,10 @@ func TestBuildResult(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := BuildResult(tc.items, tc.limit, toCursor)
+			req, err := NewRequest[int](tc.limit)
+			require.NoError(t, err)
+
+			result := BuildResult(req, tc.items, toCursor)
 
 			require.Equal(t, tc.wantItems, result.Items)
 			require.Equal(t, tc.wantNext, result.Next)
