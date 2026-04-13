@@ -37,7 +37,7 @@ func (s *PostgresStore) GetAddress(ctx context.Context,
 func (s *PostgresStore) ListAddresses(ctx context.Context,
 	query ListAddressesQuery) (page.Result[AddressInfo, uint32], error) {
 
-	if query.Page.Limit == 0 {
+	if query.Page.Limit() == 0 {
 		return page.Result[AddressInfo, uint32]{}, ErrInvalidPageLimit
 	}
 
@@ -47,7 +47,7 @@ func (s *PostgresStore) ListAddresses(ctx context.Context,
 	}
 
 	result := page.BuildResult(
-		items, query.Page.Limit,
+		query.Page, items,
 		func(item AddressInfo) uint32 {
 			return item.ID
 		},
@@ -356,7 +356,7 @@ func pgBuildAddressPageParams(
 		Purpose:     int64(q.Scope.Purpose),
 		CoinType:    int64(q.Scope.Coin),
 		AccountName: q.AccountName,
-		PageLimit:   int64(q.Page.Limit) + 1,
+		PageLimit:   int64(q.Page.Limit()) + 1,
 	}
 
 	if q.Page.After != nil {

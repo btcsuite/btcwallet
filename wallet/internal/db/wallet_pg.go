@@ -146,7 +146,7 @@ func (s *PostgresStore) GetWallet(ctx context.Context,
 func (s *PostgresStore) ListWallets(ctx context.Context,
 	query ListWalletsQuery) (page.Result[WalletInfo, uint32], error) {
 
-	if query.Page.Limit == 0 {
+	if query.Page.Limit() == 0 {
 		return page.Result[WalletInfo, uint32]{}, ErrInvalidPageLimit
 	}
 
@@ -168,7 +168,7 @@ func (s *PostgresStore) ListWallets(ctx context.Context,
 	}
 
 	result := page.BuildResult(
-		items, query.Page.Limit,
+		query.Page, items,
 		func(item WalletInfo) uint32 {
 			return item.ID
 		},
@@ -323,7 +323,7 @@ func pgListWalletRowToInfo(row sqlcpg.ListWalletsRow) (*WalletInfo, error) {
 // parameters, handling optional cursor setup for pagination.
 func pgListWalletsParams(req page.Request[uint32]) sqlcpg.ListWalletsParams {
 	params := sqlcpg.ListWalletsParams{
-		PageLimit: int64(req.Limit) + 1,
+		PageLimit: int64(req.Limit()) + 1,
 	}
 
 	if req.After != nil {
