@@ -52,7 +52,7 @@ var (
 
 	// ErrInvalidPageLimit is returned when a paginated query is called with a
 	// zero page limit.
-	ErrInvalidPageLimit = errors.New("page limit must be greater than zero")
+	ErrInvalidPageLimit = page.ErrInvalidLimit
 
 	// ErrMissingScriptPubKey is returned when creating an imported
 	// address without the required script public key.
