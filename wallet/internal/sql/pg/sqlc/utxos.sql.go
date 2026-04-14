@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: utxos.sql
 
-package sqlcpg
+package sqlc
 
 import (
 	"context"
