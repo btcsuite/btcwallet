@@ -3,8 +3,8 @@ package pg
 import (
 	"context"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // addressTypeRowToInfo converts a PostgreSQL address type row to an
