@@ -51,3 +51,18 @@ func ApplyMigrations(db *sql.DB) error {
 
 	return nil
 }
+
+// RollbackMigrations rolls back all PostgreSQL migrations from the database.
+func RollbackMigrations(db *sql.DB) error {
+	m, err := newMigrationInstance(db)
+	if err != nil {
+		return err
+	}
+
+	err = m.Down()
+	if err != nil && !errors.Is(err, gomigrate.ErrNoChange) {
+		return fmt.Errorf("rollback migrations: %w", err)
+	}
+
+	return nil
+}
