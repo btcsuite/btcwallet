@@ -3,8 +3,8 @@ package sqlite
 import (
 	"context"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // addressTypeRowToInfo converts a SQLite address type row to an

@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // RollbackToBlock atomically removes every block at or above the provided

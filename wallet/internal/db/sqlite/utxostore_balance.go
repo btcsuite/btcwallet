@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // Balance returns the sum of wallet-owned current UTXOs after optional filters.

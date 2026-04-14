@@ -8,8 +8,8 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // CreateTx atomically records a wallet-scoped transaction row, its
