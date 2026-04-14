@@ -23,6 +23,12 @@ var (
 	// ErrAmbiguousTxCommit matches commit failures whose final database outcome
 	// is unknown because the commit may already have reached the backend before
 	// the client observed the failure.
+	//
+	// Callers should treat this differently from an ordinary commit failure and
+	// should not blindly retry the transaction. Write returns this through
+	// AmbiguousTxCommitError so callers can use errors.Is(err,
+	// ErrAmbiguousTxCommit) for policy checks while still inspecting the
+	// underlying classified backend error.
 	ErrAmbiguousTxCommit = errors.New("sql ambiguous tx commit")
 )
 
@@ -34,8 +40,8 @@ var (
 	errReadDelayOrder  = errors.New("read base delay exceeds max delay")
 )
 
-// AmbiguousTxCommitError wraps a classified commit error returned when Commit
-// fails after the final database outcome may already be decided by the
+// AmbiguousTxCommitError wraps a classified commit error returned by Write when
+// Commit fails after the final database outcome may already be decided by the
 // backend.
 //
 // This lets callers ask two independent questions about the same failure:
@@ -98,6 +104,25 @@ type ReadHooks interface {
 
 	// RecordRetryExhausted records that retry budget was exhausted.
 	RecordRetryExhausted()
+}
+
+// WriteHooks defines the runtime hooks needed by the shared transaction helper.
+type WriteHooks interface {
+	// CheckHealthy fails fast when the backend has already been marked
+	// unhealthy.
+	CheckHealthy() error
+
+	// ClassifyError maps backend failures into the shared SQL error model.
+	ClassifyError(err error) error
+
+	// RecordError records a classified SQL error.
+	RecordError(err error)
+
+	// RecordAmbiguousTxCommit records a commit failure with unknown outcome.
+	RecordAmbiguousTxCommit()
+
+	// RawDB returns the backend database handle used for transactions.
+	RawDB() *sql.DB
 }
 
 // ReadConfig holds caller-provided retry settings for Read.
@@ -273,6 +298,106 @@ func readAttempt[Q any, T any](ctx context.Context, hooks ReadHooks, queries Q,
 	//nolint:wrapcheck
 	// We need to return the exact classified error to be wrapped by Read.
 	return zero, true, classifiedErr
+}
+
+// Write executes a transactional SQL callback without retrying it.
+//
+// Write returns the callback result only after Commit succeeds. If Begin,
+// callback execution, or Commit fails, it returns the zero value of T together
+// with the resulting error.
+//
+// hooks supplies the shared health check, error classification, SQL error
+// recording, ambiguous-commit accounting, and raw database handle used by the
+// helper.
+//
+// bind converts the started *sql.Tx into the caller's transactional query
+// handle, such as a sqlc Queries value bound to that transaction.
+//
+// fn performs the transactional work with that bound handle. SQL and backend
+// callback failures are normalized through hooks.ClassifyError, while ordinary
+// domain errors pass through unchanged.
+//
+// If Commit fails after the backend may already have applied the transaction,
+// Write returns an AmbiguousTxCommitError. Callers should detect that case
+// with errors.Is(err, ErrAmbiguousTxCommit) before deciding whether retrying
+// or compensating work is safe.
+func Write[Q any, T any](ctx context.Context, hooks WriteHooks,
+	bind func(*sql.Tx) Q, fn func(Q) (T, error)) (T, error) {
+
+	var zero T
+
+	// Fail fast if a prior fatal backend error already poisoned the store.
+	err := hooks.CheckHealthy()
+	if err != nil {
+		return zero, fmt.Errorf("check store health: %w", err)
+	}
+
+	// Begin the transaction before invoking the callback so begin failures are
+	// still classified and recorded consistently.
+	tx, err := hooks.RawDB().BeginTx(ctx, nil)
+	if err != nil {
+		classifiedErr := hooks.ClassifyError(err)
+		hooks.RecordError(classifiedErr)
+
+		return zero, fmt.Errorf("begin tx: %w", classifiedErr)
+	}
+
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	// Callback errors are normalized through the backend classifier so SQL
+	// driver failures reach callers consistently while non-SQL domain errors
+	// pass through unchanged.
+	result, err := fn(bind(tx))
+	if err != nil {
+		classifiedErr := hooks.ClassifyError(err)
+		recordWriteCallbackError(hooks, classifiedErr)
+
+		return zero, normalizeWriteCallbackError(err, classifiedErr)
+	}
+
+	// Commit transport failures are wrapped so callers know the final
+	// transaction outcome is unknown.
+	err = tx.Commit()
+	if err != nil {
+		classifiedErr := hooks.ClassifyError(err)
+		hooks.RecordError(classifiedErr)
+
+		if isCommitTransportError(err) {
+			hooks.RecordAmbiguousTxCommit()
+
+			return zero, &AmbiguousTxCommitError{
+				Err: fmt.Errorf("commit tx: %w", classifiedErr),
+			}
+		}
+
+		return zero, fmt.Errorf("commit tx: %w", classifiedErr)
+	}
+
+	return result, nil
+}
+
+// normalizeWriteCallbackError preserves unchanged callback errors while
+// returning normalized SQL backend failures when classification added one.
+func normalizeWriteCallbackError(err, classifiedErr error) error {
+	var sqlErr *dberr.SQLError
+	if !errors.As(classifiedErr, &sqlErr) {
+		return err
+	}
+
+	return classifiedErr
+}
+
+// recordWriteCallbackError records one classified SQL callback error while
+// leaving non-SQL callback failures out of SQL error accounting.
+func recordWriteCallbackError(hooks WriteHooks, classifiedErr error) {
+	var sqlErr *dberr.SQLError
+	if !errors.As(classifiedErr, &sqlErr) {
+		return
+	}
+
+	hooks.RecordError(classifiedErr)
 }
 
 // retryDelay applies bounded exponential backoff for retry attempts.
