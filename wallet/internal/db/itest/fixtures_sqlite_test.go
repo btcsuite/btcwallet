@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -190,9 +190,9 @@ func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 
 	t.Helper()
 
-	require.IsType(t, &dbsqlite.Store{}, store)
+	require.IsType(t, &sqlite.Store{}, store)
 
-	sqliteStore := store.(*dbsqlite.Store)
+	sqliteStore := store.(*sqlite.Store)
 	queries := sqliteStore.Queries()
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,

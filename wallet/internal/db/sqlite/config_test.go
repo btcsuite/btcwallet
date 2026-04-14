@@ -3,7 +3,7 @@ package sqlite
 import (
 	"testing"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 

@@ -3,7 +3,7 @@ package pg
 import (
 	"fmt"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/jackc/pgx/v5"
 )
 

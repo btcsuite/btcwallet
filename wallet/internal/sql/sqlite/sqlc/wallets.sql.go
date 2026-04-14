@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: wallets.sql
 
-package sqlcsqlite
+package sqlc
 
 import (
 	"context"
