@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,20 +17,23 @@ import (
 
 // Test errors used by the runtime helper tests.
 var (
-	errRuntimeBusy  = errors.New("busy")
-	errRuntimeRetry = errors.New("retry")
-	errRuntimeOther = errors.New("other")
+	errRuntimeBusy     = errors.New("busy")
+	errRuntimeRetry    = errors.New("retry")
+	errRuntimeCallback = errors.New("callback failed")
+	errRuntimeOther    = errors.New("other")
+	errRuntimeUnused   = errors.New("unused")
 )
 
 // fakeStore implements the runtime hook interfaces for tests.
 type fakeStore struct {
-	healthyErr      error
-	classifyFn      func(error) error
-	errorCount      int
-	retryAttempts   int
-	retrySuccesses  int
-	retryExhausted  int
-	ambiguousCommit int
+	healthyErr       error
+	classifyFn       func(error) error
+	errorCount       int
+	retryAttempts    int
+	retrySuccesses   int
+	retryExhausted   int
+	ambiguousCommits int
+	db               *sql.DB
 }
 
 // CheckHealthy returns the configured health-check result for fakeStore.
@@ -66,36 +70,14 @@ func (s *fakeStore) RecordRetryExhausted() {
 	s.retryExhausted++
 }
 
-// TestAmbiguousTxCommitError verifies the sentinel-matching and unwrap
-// behavior of AmbiguousTxCommitError.
-func TestAmbiguousTxCommitError(t *testing.T) {
-	t.Parallel()
-
-	err := &AmbiguousTxCommitError{Err: io.EOF}
-	wrappedSentinel := fmt.Errorf("wrap: %w", ErrAmbiguousTxCommit)
-
-	require.ErrorIs(t, err, ErrAmbiguousTxCommit)
-	require.False(t, err.Is(wrappedSentinel))
-	require.Equal(t, io.EOF.Error(), err.Error())
-	require.ErrorIs(t, err, io.EOF)
-	require.Equal(
-		t, ErrAmbiguousTxCommit.Error(), (&AmbiguousTxCommitError{}).Error(),
-	)
-	require.NoError(t, (*AmbiguousTxCommitError)(nil).Unwrap())
+// RecordAmbiguousTxCommit increments the fake ambiguous-commit counter.
+func (s *fakeStore) RecordAmbiguousTxCommit() {
+	s.ambiguousCommits++
 }
 
-// TestCommitTransportError verifies that transport-shaped commit failures are
-// detected as ambiguous-outcome candidates.
-func TestCommitTransportError(t *testing.T) {
-	t.Parallel()
-
-	require.True(t, isCommitTransportError(io.EOF))
-	require.True(t, isCommitTransportError(driver.ErrBadConn))
-	require.True(t, isCommitTransportError(sql.ErrConnDone))
-	require.True(t, isCommitTransportError(netTimeoutError{}))
-	require.False(t, isCommitTransportError(errRuntimeOther))
-	require.NotNil(t, extractNetError(netTimeoutError{}))
-	require.Nil(t, extractNetError(errRuntimeOther))
+// RawDB returns the fake database handle used by transaction tests.
+func (s *fakeStore) RawDB() *sql.DB {
+	return s.db
 }
 
 // TestReadHealthyCheck verifies that unhealthy stores fail fast.
@@ -299,20 +281,241 @@ func TestReadUtilities(t *testing.T) {
 	require.NoError(t, unwrapContextError(sql.ErrNoRows))
 }
 
+// TestWriteHealthyCheck verifies that unhealthy stores fail fast before
+// starting a transaction.
+func TestWriteHealthyCheck(t *testing.T) {
+	t.Parallel()
+
+	hooks := &fakeStore{healthyErr: ErrStoreUnhealthy}
+	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
+		return struct{}{}
+	}, func(struct{}) (string, error) { return "", nil })
+	require.Empty(t, result)
+	require.ErrorIs(t, err, ErrStoreUnhealthy)
+}
+
+// TestWriteReturnsValue verifies that successful writes return their value only
+// after commit succeeds.
+func TestWriteReturnsValue(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{})
+	hooks := &fakeStore{db: dbConn}
+
+	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
+		return tx
+	}, func(*sql.Tx) (string, error) {
+		return "ok", nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", result)
+}
+
+// TestWriteBeginFailure verifies that begin failures are classified and
+// recorded.
+func TestWriteBeginFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{err: driver.ErrBadConn})
+	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+		return dberr.NewSQLError(
+			dberr.BackendPostgres, dberr.ReasonUnavailable, "", err,
+		)
+	}}
+
+	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
+		return struct{}{}
+	}, func(struct{}) (string, error) { return "", nil })
+
+	var sqlErr *dberr.SQLError
+
+	require.Empty(t, result)
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+	require.Equal(t, 1, hooks.errorCount)
+}
+
+// TestWriteCallbackErrorPassthrough verifies that non-SQL callback errors pass
+// through unchanged and do not leak a result value.
+func TestWriteCallbackErrorPassthrough(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{})
+	hooks := &fakeStore{db: dbConn}
+	callbackErr := errRuntimeCallback
+
+	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
+		return tx
+	}, func(*sql.Tx) (string, error) {
+		return "", callbackErr
+	})
+	require.Empty(t, result)
+	require.ErrorIs(t, err, callbackErr)
+	require.Zero(t, hooks.errorCount)
+}
+
+// TestWriteCallbackErrorClassified verifies that SQL-like callback failures are
+// normalized through the backend classifier before they reach callers.
+func TestWriteCallbackErrorClassified(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{})
+	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+		return dberr.NewSQLError(
+			dberr.BackendPostgres, dberr.ReasonConstraint, "23505", err,
+		)
+	}}
+
+	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
+		return tx
+	}, func(*sql.Tx) (string, error) {
+		return "", errRuntimeCallback
+	})
+
+	var sqlErr *dberr.SQLError
+
+	require.Empty(t, result)
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
+	require.Equal(t, 1, hooks.errorCount)
+}
+
+// TestWriteCommitAmbiguous verifies that transport failures during commit are
+// wrapped as ambiguous commit errors, recorded, and return a zero value.
+func TestWriteCommitAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{commitErr: io.EOF})
+	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+		return dberr.NewSQLError(
+			dberr.BackendPostgres, dberr.ReasonUnavailable,
+			"08006", err,
+		)
+	}}
+
+	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
+		return tx
+	}, func(*sql.Tx) (string, error) {
+		return "applied", nil
+	})
+	require.Empty(t, result)
+	require.ErrorIs(t, err, ErrAmbiguousTxCommit)
+
+	var sqlErr *dberr.SQLError
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+	require.Equal(t, 1, hooks.ambiguousCommits)
+	require.Equal(t, 1, hooks.errorCount)
+}
+
+// TestWriteCommitUnavailable verifies that classified availability errors
+// without a transport failure stay ordinary commit errors.
+func TestWriteCommitUnavailable(t *testing.T) {
+	t.Parallel()
+
+	dbConn := newTestDB(t, beginErrDriver{commitErr: errRuntimeOther})
+	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+		return dberr.NewSQLError(
+			dberr.BackendPostgres, dberr.ReasonUnavailable,
+			"08006", err,
+		)
+	}}
+
+	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
+		return tx
+	}, func(*sql.Tx) (string, error) {
+		return "applied", nil
+	})
+	require.Empty(t, result)
+	require.NotErrorIs(t, err, ErrAmbiguousTxCommit)
+
+	var sqlErr *dberr.SQLError
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+	require.Zero(t, hooks.ambiguousCommits)
+	require.Equal(t, 1, hooks.errorCount)
+}
+
 // immediateTimer returns a timer that fires immediately.
 func immediateTimer(time.Duration) *time.Timer {
 	return time.NewTimer(0)
 }
 
-// netTimeoutError is a test helper that reports a transport timeout.
-type netTimeoutError struct{}
-
-// Error returns the static timeout error string.
-func (e netTimeoutError) Error() string {
-	return "timeout"
+// beginErrDriver is a test SQL driver that injects begin and commit failures.
+type beginErrDriver struct {
+	err       error
+	commitErr error
 }
 
-// Timeout reports that the test error is a timeout.
-func (e netTimeoutError) Timeout() bool {
-	return true
+// Open returns a connection that injects the configured failures.
+func (d beginErrDriver) Open(string) (driver.Conn, error) {
+	return beginErrConn(d), nil
+}
+
+// beginErrConn is a test connection that injects begin and commit failures.
+type beginErrConn struct {
+	err       error
+	commitErr error
+}
+
+// Prepare returns an unused statement error for the test driver.
+func (c beginErrConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errRuntimeUnused
+}
+
+// Close reports success for the test connection close path.
+func (c beginErrConn) Close() error {
+	return nil
+}
+
+// Begin returns the legacy unused error because tests use BeginTx instead.
+func (c beginErrConn) Begin() (driver.Tx, error) {
+	return nil, errRuntimeUnused
+}
+
+// BeginTx returns the configured begin error or a transaction test double.
+func (c beginErrConn) BeginTx(ctx context.Context,
+	_ driver.TxOptions) (driver.Tx, error) {
+
+	_ = ctx
+
+	if c.err != nil {
+		return nil, c.err
+	}
+
+	return beginErrTx{commitErr: c.commitErr}, nil
+}
+
+// beginErrTx is a test transaction that injects a commit failure.
+type beginErrTx struct {
+	commitErr error
+}
+
+// Commit returns the configured commit error.
+func (tx beginErrTx) Commit() error {
+	return tx.commitErr
+}
+
+// Rollback reports success for the test rollback path.
+func (tx beginErrTx) Rollback() error {
+	return nil
+}
+
+// testDriverSeq keeps each registered test driver name unique.
+var testDriverSeq atomic.Uint64
+
+// newTestDB registers one test driver instance and opens a matching database.
+func newTestDB(t *testing.T, drv beginErrDriver) *sql.DB {
+	t.Helper()
+
+	name := fmt.Sprintf("runtime-test-%d", testDriverSeq.Add(1))
+	sql.Register(name, drv)
+
+	dbConn, err := sql.Open(name, "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbConn.Close())
+	})
+
+	return dbConn
 }
