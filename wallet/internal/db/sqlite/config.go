@@ -1,6 +1,6 @@
 package sqlite
 
-import db "github.com/btcsuite/btcwallet/wallet/internal/db"
+import "github.com/btcsuite/btcwallet/wallet/internal/db"
 
 // Config holds the configuration for the SQLite database.
 type Config struct {

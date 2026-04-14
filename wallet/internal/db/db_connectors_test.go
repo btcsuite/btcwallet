@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
-	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,19 +15,19 @@ func TestPostgresNewStoreValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     dbpg.Config
+		cfg     pg.Config
 		wantErr error
 	}{
 		{
 			name: "empty DSN",
-			cfg: dbpg.Config{
+			cfg: pg.Config{
 				Dsn: "",
 			},
 			wantErr: db.ErrEmptyDSN,
 		},
 		{
 			name: "negative max connections",
-			cfg: dbpg.Config{
+			cfg: pg.Config{
 				Dsn:            "postgres://test",
 				MaxConnections: -1,
 			},
@@ -39,7 +39,7 @@ func TestPostgresNewStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := dbpg.NewStore(t.Context(), tc.cfg)
+			store, err := pg.NewStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
@@ -50,11 +50,11 @@ func TestPostgresNewStoreConnectionFailure(t *testing.T) {
 	t.Parallel()
 
 	// Valid config, but hits a connection failure.
-	cfg := dbpg.Config{
+	cfg := pg.Config{
 		Dsn: "postgres://localhost:1/testdb",
 	}
 
-	store, err := dbpg.NewStore(t.Context(), cfg)
+	store, err := pg.NewStore(t.Context(), cfg)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "ping database")
 	require.NotErrorIs(t, err, db.ErrEmptyDSN)
@@ -70,19 +70,19 @@ func TestSQLiteNewStoreValidateConfig(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		cfg     dbsqlite.Config
+		cfg     sqlite.Config
 		wantErr error
 	}{
 		{
 			name: "empty DB path",
-			cfg: dbsqlite.Config{
+			cfg: sqlite.Config{
 				DBPath: "",
 			},
 			wantErr: db.ErrEmptyDBPath,
 		},
 		{
 			name: "negative max connections",
-			cfg: dbsqlite.Config{
+			cfg: sqlite.Config{
 				DBPath:         "/tmp/test.db",
 				MaxConnections: -1,
 			},
@@ -94,7 +94,7 @@ func TestSQLiteNewStoreValidateConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			store, err := dbsqlite.NewStore(t.Context(), tc.cfg)
+			store, err := sqlite.NewStore(t.Context(), tc.cfg)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, store)
 		})
@@ -104,11 +104,11 @@ func TestSQLiteNewStoreValidateConfig(t *testing.T) {
 func TestSQLiteNewStoreSuccess(t *testing.T) {
 	t.Parallel()
 
-	cfg := dbsqlite.Config{
+	cfg := sqlite.Config{
 		DBPath: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 
-	store, err := dbsqlite.NewStore(t.Context(), cfg)
+	store, err := sqlite.NewStore(t.Context(), cfg)
 	require.NoError(t, err)
 	require.NotNil(t, store)
 

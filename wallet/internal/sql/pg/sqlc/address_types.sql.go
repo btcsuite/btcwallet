@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: address_types.sql
 
-package sqlcpg
+package sqlc
 
 import (
 	"context"

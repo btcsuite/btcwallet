@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: address_types.sql
 
-package sqlcsqlite
+package sqlc
 
 import (
 	"context"

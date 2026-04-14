@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
 // buildBlock constructs a Block from the given PostgreSQL block

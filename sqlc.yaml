@@ -8,7 +8,7 @@ sql:
     gen:
       go:
         out: "wallet/internal/sql/pg/sqlc"
-        package: "sqlcpg"
+        package: "sqlc"
 
         # This is the driver package that sqlc will use in the generated code.
         sql_package: database/sql
@@ -29,7 +29,7 @@ sql:
     gen:
       go:
         out: "wallet/internal/sql/sqlite/sqlc"
-        package: "sqlcsqlite"
+        package: "sqlc"
 
         # This is the driver package that sqlc will use in the generated code.
         sql_package: database/sql
