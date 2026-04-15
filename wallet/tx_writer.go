@@ -6,10 +6,11 @@ package wallet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
 // TxWriter provides an interface for updating wallet txns.
@@ -24,7 +25,7 @@ var _ TxWriter = (*Wallet)(nil)
 
 // LabelTx adds a label to a tx. If a label already exists, it will be
 // overwritten.
-func (w *Wallet) LabelTx(_ context.Context,
+func (w *Wallet) LabelTx(ctx context.Context,
 	hash chainhash.Hash, label string) error {
 
 	err := w.state.validateStarted()
@@ -32,28 +33,17 @@ func (w *Wallet) LabelTx(_ context.Context,
 		return err
 	}
 
-	err = walletdb.Update(w.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
-		txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		// Check that the transaction is known to the wallet.
-		details, err := w.txStore.TxDetails(txmgrNs, &hash)
-		if err != nil {
-			return fmt.Errorf("failed to get tx details: %w", err)
-		}
-
-		if details == nil {
-			return ErrTxNotFound
-		}
-
-		err = w.txStore.PutTxLabel(txmgrNs, hash, label)
-		if err != nil {
-			return fmt.Errorf("failed to put tx label: %w", err)
-		}
-
-		return nil
+	err = w.store.UpdateTx(ctx, db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     hash,
+		Label:    &label,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update wallet db: %w", err)
+		if errors.Is(err, db.ErrTxNotFound) {
+			return fmt.Errorf("update tx label: %w", ErrTxNotFound)
+		}
+
+		return fmt.Errorf("update tx label: %w", err)
 	}
 
 	return nil
