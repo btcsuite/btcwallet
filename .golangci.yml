@@ -163,6 +163,12 @@ linters:
         linters:
           - forbidigo
 
+      # Allow deprecated entrypoints to be exercised from the kvdb adapter
+      # tests during the tx-writer migration.
+      - path: wallet/internal/db/kvdb/.*_test\.go
+        linters:
+          - staticcheck
+
 issues:
   # Show only new issues created after git revision `REV`.
   # Default: ""
