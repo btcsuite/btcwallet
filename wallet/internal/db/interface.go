@@ -121,15 +121,14 @@ var (
 // Until we break the wallet into independent components, we use this monolithic
 // Store abstraction as a transitional step.
 //
-// For this PR, Store only includes UTXOStore. Over time it is expected to grow
-// to include WalletStore, AccountStore, AddressStore, and TxStore as those
+// For this PR, Store includes UTXOStore and TxStore. Over time it is expected
+// to grow to include WalletStore, AccountStore, and AddressStore as those
 // callers migrate to the new internal db interfaces.
 //
 // TODO(yy): Break down wallet managers into independent components.
-//
-// TODO(yy): Remove the linter ignore once Store grows beyond UTXOStore.
 type Store interface {
 	UTXOStore
+	TxStore
 
 	// StatsSnapshot returns the current runtime counters tracked by the
 	// backend.

@@ -120,6 +120,69 @@ func (m *mockStore) Balance(ctx context.Context,
 	return result, args.Error(1)
 }
 
+// CreateTx implements the db.TxStore interface.
+func (m *mockStore) CreateTx(ctx context.Context,
+	params db.CreateTxParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
+// UpdateTx implements the db.TxStore interface.
+func (m *mockStore) UpdateTx(ctx context.Context,
+	params db.UpdateTxParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
+// GetTx implements the db.TxStore interface.
+func (m *mockStore) GetTx(ctx context.Context,
+	query db.GetTxQuery) (*db.TxInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.TxInfo), args.Error(1)
+}
+
+// ListTxns implements the db.TxStore interface.
+func (m *mockStore) ListTxns(ctx context.Context,
+	query db.ListTxnsQuery) ([]db.TxInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.TxInfo), args.Error(1)
+}
+
+// DeleteTx implements the db.TxStore interface.
+func (m *mockStore) DeleteTx(ctx context.Context,
+	params db.DeleteTxParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
+// InvalidateUnminedTx implements the db.TxStore interface.
+func (m *mockStore) InvalidateUnminedTx(ctx context.Context,
+	params db.InvalidateUnminedTxParams) error {
+
+	args := m.Called(ctx, params)
+	return args.Error(0)
+}
+
+// RollbackToBlock implements the db.TxStore interface.
+func (m *mockStore) RollbackToBlock(ctx context.Context, height uint32) error {
+	args := m.Called(ctx, height)
+
+	return args.Error(0)
+}
+
 // mockTxStore is a mock implementation of the wtxmgr.TxStore interface.
 type mockTxStore struct {
 	mock.Mock
