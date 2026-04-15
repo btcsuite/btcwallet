@@ -1268,33 +1268,6 @@ func (s *Store) Balance(ns walletdb.ReadBucket, minConf int32, syncHeight int32)
 	return bal, nil
 }
 
-// PutTxLabel validates transaction labels and writes them to disk if they
-// are non-zero and within the label length limit. The entry is keyed by the
-// transaction hash:
-// [0:32] Transaction hash (32 bytes)
-//
-// The label itself is written to disk in length value format:
-// [0:2] Label length
-// [2: +len] Label
-func (s *Store) PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
-	label string) error {
-
-	if len(label) == 0 {
-		return ErrEmptyLabel
-	}
-
-	if len(label) > TxLabelLimit {
-		return ErrLabelTooLong
-	}
-
-	labelBucket, err := ns.CreateBucketIfNotExists(bucketTxLabels)
-	if err != nil {
-		return err
-	}
-
-	return PutTxLabel(labelBucket, txid, label)
-}
-
 // PutTxLabel writes a label for a tx to the bucket provided. Note that it does
 // not perform any validation on the label provided, or check whether there is
 // an existing label for the txid.
