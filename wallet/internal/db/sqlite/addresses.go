@@ -7,9 +7,9 @@ import (
 	"iter"
 	"time"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 var _ db.AddressStore = (*Store)(nil)

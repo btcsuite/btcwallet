@@ -11,7 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,7 +22,7 @@ func dropTableForCorruption(t *testing.T, store interface{ DB() *sql.DB },
 	t.Helper()
 
 	stmt := fmt.Sprintf("DROP TABLE %s", table)
-	if _, ok := any(store).(*dbpg.Store); ok {
+	if _, ok := any(store).(*pg.Store); ok {
 		stmt += " CASCADE"
 	}
 
@@ -492,7 +492,7 @@ func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	// wallet_sync_states keeps direct block references with ON DELETE RESTRICT.
 	// PostgreSQL drops those dependent rows with CASCADE when the blocks table is
 	// removed, so rollback gets far enough to fail on the block delete instead.
-	_, ok := any(store).(*dbpg.Store)
+	_, ok := any(store).(*pg.Store)
 	if ok {
 		require.ErrorContains(t, err, "delete blocks at or above height")
 		return

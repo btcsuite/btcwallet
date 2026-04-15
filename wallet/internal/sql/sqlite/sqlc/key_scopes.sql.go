@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: key_scopes.sql
 
-package sqlcsqlite
+package sqlc
 
 import (
 	"context"

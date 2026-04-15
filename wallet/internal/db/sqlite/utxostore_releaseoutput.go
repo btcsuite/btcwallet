@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // ReleaseOutput atomically releases a lease when the caller provides the

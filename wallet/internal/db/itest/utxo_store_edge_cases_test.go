@@ -9,7 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -258,7 +258,7 @@ func TestGetUtxoAndLeaseRejectLargeOutputIndex(t *testing.T) {
 		},
 	)
 
-	if _, ok := any(store).(*dbpg.Store); ok {
+	if _, ok := any(store).(*pg.Store); ok {
 		require.ErrorContains(t, err, "convert output index")
 		require.ErrorContains(t, leaseErr, "convert output index")
 		require.ErrorContains(t, releaseErr, "could not cast")

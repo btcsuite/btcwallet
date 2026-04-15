@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"iter"
 
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
-	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
 // Ensure Store satisfies the WalletStore interface.
