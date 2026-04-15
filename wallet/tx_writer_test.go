@@ -7,6 +7,7 @@ package wallet
 import (
 	"testing"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -18,16 +19,12 @@ func TestLabelTxSuccess(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock the TxDetails call to simulate a known transaction.
-	// We return a non-nil TxDetails to pass the check.
-	mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
-		Return(&wtxmgr.TxDetails{}, nil).Once()
-
-	// Arrange: Mock the PutTxLabel call. We expect it to be called with
-	// the new label.
 	newLabel := "new label"
-	mocks.txStore.On("PutTxLabel", mock.Anything, *TstTxHash, newLabel).
-		Return(nil).Once()
+	mocks.store.On("UpdateTx", mock.Anything, db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     *TstTxHash,
+		Label:    &newLabel,
+	}).Return(nil).Once()
 
 	// Act: Call the LabelTx function.
 	err := w.LabelTx(t.Context(), *TstTxHash, newLabel)
@@ -35,7 +32,27 @@ func TestLabelTxSuccess(t *testing.T) {
 	// Assert: Check that there was no error and that the mocks were called
 	// as expected.
 	require.NoError(t, err)
-	mocks.txStore.AssertExpectations(t)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestLabelTxEmptyLabel tests that an empty label is forwarded to the store and
+// preserves the legacy label error.
+func TestLabelTxEmptyLabel(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	empty := ""
+	mocks.store.On("UpdateTx", mock.Anything, db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     *TstTxHash,
+		Label:    &empty,
+	}).Return(wtxmgr.ErrEmptyLabel).Once()
+
+	err := w.LabelTx(t.Context(), *TstTxHash, empty)
+
+	require.ErrorIs(t, err, wtxmgr.ErrEmptyLabel)
+	mocks.store.AssertExpectations(t)
 }
 
 // TestLabelTxNotFound tests that we get an error when we try to label a tx
@@ -45,15 +62,17 @@ func TestLabelTxNotFound(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock the TxDetails call to return nil, simulating a tx
-	// that is not known to the wallet.
-	mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
-		Return(nil, nil).Once()
+	label := "some label"
+	mocks.store.On("UpdateTx", mock.Anything, db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     *TstTxHash,
+		Label:    &label,
+	}).Return(db.ErrTxNotFound).Once()
 
 	// Act: Attempt to label a tx that is not known to the wallet.
-	err := w.LabelTx(t.Context(), *TstTxHash, "some label")
+	err := w.LabelTx(t.Context(), *TstTxHash, label)
 
 	// Assert: Check that the correct error is returned.
 	require.ErrorIs(t, err, ErrTxNotFound)
-	mocks.txStore.AssertExpectations(t)
+	mocks.store.AssertExpectations(t)
 }
