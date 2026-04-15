@@ -154,6 +154,12 @@ func (b *BitcoindBackend) Start() error {
 		"-regtest",
 		"-connect=" + b.minerAddr,
 
+		// bitcoind enables P2P v2 by default, but the shared btcd miner keeps
+		// v2 transport disabled by default. Pin bitcoind to v1 here so harness
+		// startup does not rely on downgrade timing during the first peer
+		// handshake.
+		"-v2transport=0",
+
 		// Enable wallet-required indexing and RPC auth.
 		"-txindex",
 		"-disablewallet",
