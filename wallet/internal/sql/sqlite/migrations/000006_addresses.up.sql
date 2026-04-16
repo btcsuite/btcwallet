@@ -73,13 +73,9 @@ WHERE
     address_branch IS NOT NULL
     AND address_index IS NOT NULL;
 
--- Unique index to prevent duplicate script_pub_key within the same account.
-CREATE UNIQUE INDEX uidx_addresses_account_script_pub_key
-ON addresses (account_id, script_pub_key);
-
--- Index on script_pub_key for efficient lookups by script pubkey.
--- Used by GetAddressByScriptPubKey.
-CREATE INDEX idx_addresses_script_pub_key ON addresses (script_pub_key);
+-- Unique index to prevent duplicate script_pub_key within the same wallet.
+CREATE UNIQUE INDEX uidx_addresses_wallet_script_pub_key
+ON addresses (wallet_id, script_pub_key);
 
 -- Index on (account_id, id) for efficient pagination of addresses by account.
 -- Used by ListAddressesByAccount for cursor-based pagination.

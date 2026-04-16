@@ -541,6 +541,145 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 	require.ErrorContains(t, err, "script_pub_key")
 }
 
+// TestNewImportedAddressDuplicateAcrossScopes verifies that imported-address
+// creation rejects the same script pubkey across different imported scopes in
+// one wallet.
+func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-duplicate-import-cross-scope")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+
+	scriptPubKey := RandomBytes(32)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			Scope:        db.KeyScopeBIP0044,
+			AddressType:  db.PubKeyHash,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+	require.ErrorContains(t, err, "script_pub_key")
+}
+
+// TestNewImportedAddressDuplicateAcrossWallets verifies that wallet-scoped
+// uniqueness allows the same script pubkey to be imported into different
+// wallets.
+func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	firstWalletID := newWallet(t, store, "wallet-duplicate-import-a")
+	secondWalletID := newWallet(t, store, "wallet-duplicate-import-b")
+
+	CreateImportedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+	)
+	CreateImportedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0084, "imported",
+	)
+
+	scriptPubKey := RandomBytes(32)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     firstWalletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     secondWalletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.NotZero(t, info.ID)
+	require.NotZero(t, info.AccountID)
+}
+
+// TestCreateImportedAddressRejectsWalletAccountMismatch verifies that the
+// composite wallet/account invariant is enforced by the database on direct
+// imported-address inserts.
+func TestCreateImportedAddressRejectsWalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	firstWalletID := newWallet(t, store, "wallet-raw-import-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-raw-import-mismatch-b")
+
+	CreateImportedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+	)
+	CreateImportedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0084, "imported",
+	)
+
+	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
+	firstAccountID := GetAccountID(t, queries, firstScopeID, "imported")
+
+	err := createImportedAddressRaw(
+		t.Context(), queries, secondWalletID, firstAccountID, RandomBytes(32),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+}
+
+// TestCreateDerivedAddressRejectsWalletAccountMismatch verifies that the
+// composite wallet/account invariant is enforced by the database on direct
+// derived-address inserts.
+func TestCreateDerivedAddressRejectsWalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	firstWalletID := newWallet(t, store, "wallet-raw-derived-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-raw-derived-mismatch-b")
+	accountName := "raw-derived"
+
+	createDerivedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, accountName,
+	)
+	createDerivedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0084, accountName,
+	)
+
+	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
+	firstAccountID := GetAccountID(t, queries, firstScopeID, accountName)
+
+	err := createDerivedAddressRaw(
+		t, queries, secondWalletID, firstAccountID, 0, 0, RandomBytes(20),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+}
+
 // TestGetAddressSecret verifies that GetAddressSecret correctly retrieves
 // address secrets for watch-only imported addresses and returns an error for
 // spendable addresses or non-existent address IDs.

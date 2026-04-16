@@ -250,3 +250,47 @@ func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,
 		"account-near-max")
 }
+
+// createImportedAddressRaw inserts an imported address directly through the
+// database so tests can validate wallet/account ownership invariants.
+func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
+	walletID uint32, accountID int64, scriptPubKey []byte) error {
+
+	_, err := queries.CreateImportedAddress(
+		ctx, sqlc.CreateImportedAddressParams{
+			WalletID:     int64(walletID),
+			AccountID:    accountID,
+			ScriptPubKey: scriptPubKey,
+			TypeID:       int64(db.WitnessPubKey),
+			PubKey:       RandomBytes(33),
+		},
+	)
+
+	return err
+}
+
+// createDerivedAddressRaw inserts a derived address directly through the
+// database so tests can validate wallet/account ownership invariants.
+func createDerivedAddressRaw(t *testing.T, queries *sqlc.Queries,
+	walletID uint32, accountID int64, branch uint32, index uint32,
+	scriptPubKey []byte) error {
+	_, err := queries.CreateDerivedAddress(
+		t.Context(), sqlc.CreateDerivedAddressParams{
+			WalletID:     int64(walletID),
+			AccountID:    accountID,
+			ScriptPubKey: scriptPubKey,
+			TypeID:       int64(db.WitnessPubKey),
+			AddressBranch: sql.NullInt64{
+				Int64: int64(branch),
+				Valid: true,
+			},
+			AddressIndex: sql.NullInt64{
+				Int64: int64(index),
+				Valid: true,
+			},
+			PubKey: nil,
+		},
+	)
+
+	return err
+}
