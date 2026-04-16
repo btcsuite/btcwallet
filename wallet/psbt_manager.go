@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -429,24 +430,33 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 			ErrUnableToExtractAddress, utxo.PkScript)
 	}
 
-	// We'll then use the address to look up the managed address from the
-	// database. This will give us access to the derivation information.
-	managedAddr, err := w.GetAddressInfo(ctx, addr)
+	var (
+		managedAddr waddrmgr.ManagedAddress
+		err         error
+	)
+
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
+
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("unable to get address info for %s: %w",
 			addr.String(), err)
 	}
 
-	// We'll ensure that the managed address is a public key address, as
-	// we can only decorate inputs for which we have the private key.
+	// We'll ensure that the managed address is a public key address, as we can
+	// only decorate inputs for which we have the private key.
 	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
 		return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
 			managedAddr.Address())
 	}
 
-	// With the managed address, we can now get the derivation information
-	// for the address.
+	// With the managed address, we can now get the derivation information for the
+	// address.
 	derivation, err := derivationForManagedAddress(pubKeyAddr)
 	if err != nil {
 		return err
@@ -663,12 +673,6 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) error {
 
-	// TODO(yy): The calls to `w.ScriptForOutput` and `w.AddressInfo` both
-	// involve database lookups. This could be optimized to a single
-	// database call to fetch all necessary address information. However,
-	// for now, this approach favors readability over micro-optimization,
-	// as this path is not performance-critical.
-	//
 	// First, we'll get the script information for the change output.
 	changeScriptInfo, err := w.ScriptForOutput(
 		ctx, *authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
@@ -677,14 +681,8 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 		return err
 	}
 
-	// Then, we'll get the managed address for the change output.
-	changeAddr, err := w.GetAddressInfo(ctx, changeScriptInfo.Addr.Address())
-	if err != nil {
-		return err
-	}
-
 	// We'll ensure that the change address is a public key address.
-	managedPubKeyAddr, ok := changeAddr.(waddrmgr.ManagedPubKeyAddress)
+	managedPubKeyAddr, ok := changeScriptInfo.Addr.(waddrmgr.ManagedPubKeyAddress)
 	if !ok {
 		return ErrChangeAddressNotManagedPubKey
 	}
