@@ -697,14 +697,7 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	}
 
 	// The address must be a public key address.
-	pubKeyAddr, ok := scriptInfo.Addr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, fmt.Errorf("%w: addr %s",
-			ErrNotPubKeyAddress, scriptInfo.Addr.Address())
-	}
-
-	// Get the private key for the derived address.
-	privKey, err := pubKeyAddr.PrivKey()
+	privKey, err := w.privKeyForOutput(*params.Output)
 	if err != nil {
 		return nil, fmt.Errorf("cannot get private key: %w", err)
 	}
@@ -722,6 +715,81 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	// With the private key retrieved and tweaked, we can now generate the
 	// unlocking script.
 	return signAndAssembleScript(params, privKey, &scriptInfo)
+}
+
+// privKeyForOutput returns the private key needed to sign for the given
+// previous output.
+func (w *Wallet) privKeyForOutput(output wire.TxOut) (
+	*btcec.PrivateKey, error) {
+
+	addr := extractAddrFromPKScript(output.PkScript, w.cfg.ChainParams)
+	if addr == nil {
+		return nil, fmt.Errorf("%w: from pkscript %x",
+			ErrUnableToExtractAddress, output.PkScript)
+	}
+
+	pubKeyAddr, err := w.loadManagedPubKeyAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.resolvePrivKey(pubKeyAddr)
+}
+
+// loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
+// access.
+func (w *Wallet) loadManagedPubKeyAddr(addr btcutil.Address) (
+	waddrmgr.ManagedPubKeyAddress, error) {
+
+	var pubKeyAddr waddrmgr.ManagedPubKeyAddress
+
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err := w.addrStore.Address(addrmgrNs, addr)
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+		pubKeyAddr, ok = managedAddr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+				managedAddr.Address())
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pubKeyAddr, nil
+}
+
+// resolvePrivKey resolves the private key for a managed pubkey address without
+// using output-script inspection as the private-key lookup seam.
+func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
+	*btcec.PrivateKey, error) {
+
+	// Imported spendable keys have no derivation path, so we fall back to the
+	// dedicated private-key lookup exposed by the managed pubkey address.
+	if pubKeyAddr.Imported() {
+		return pubKeyAddr.PrivKey()
+	}
+
+	keyScope, derivationPath, ok := pubKeyAddr.DerivationInfo()
+	if !ok {
+		return nil, fmt.Errorf("%w: addr=%v", ErrDerivationPathNotFound,
+			pubKeyAddr.Address())
+	}
+
+	accountManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return nil, err
+	}
+
+	return accountManager.DeriveFromKeyPathCache(derivationPath)
 }
 
 // signAndAssembleScript is a helper function that performs the final signing
