@@ -1006,31 +1006,6 @@ func inputYieldsPositively(credit *wire.TxOut,
 	return inputFee < btcutil.Amount(credit.Value)
 }
 
-func getScriptSize(addrType waddrmgr.AddressType) (int, error) {
-	switch addrType {
-	case waddrmgr.PubKeyHash:
-		return txsizes.P2PKHPkScriptSize, nil
-
-	case waddrmgr.NestedWitnessPubKey:
-		return txsizes.NestedP2WPKHPkScriptSize, nil
-
-	case waddrmgr.WitnessPubKey:
-		return txsizes.P2WPKHPkScriptSize, nil
-
-	case waddrmgr.TaprootPubKey:
-		return txsizes.P2TRPkScriptSize, nil
-
-	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
-		waddrmgr.TaprootScript:
-		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-
-	default:
-		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-	}
-}
-
 // addrMgrWithChangeSource returns the address manager bucket and a change
 // source that returns change addresses from said address manager. The change
 // addresses will come from the specified key scope and account, unless a key
@@ -1067,9 +1042,10 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	}
 
 	// Compute the expected size of the script for the change address type.
-	scriptSize, err := getScriptSize(addrType)
+	scriptSize, err := addrType.ScriptPubKeySize()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
 	}
 
 	newChangeScript := func() ([]byte, error) {

@@ -21,63 +21,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestKeyScopeFromAddrType tests the keyScopeFromAddrType method to ensure
-// it correctly maps address types to their corresponding key scopes.
-func TestKeyScopeFromAddrType(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name          string
-		addrType      waddrmgr.AddressType
-		expectedScope waddrmgr.KeyScope
-		expectedErr   error
-	}{
-		{
-			name:          "pubkey hash",
-			addrType:      waddrmgr.PubKeyHash,
-			expectedScope: waddrmgr.KeyScopeBIP0044,
-			expectedErr:   nil,
-		},
-		{
-			name:          "witness pubkey",
-			addrType:      waddrmgr.WitnessPubKey,
-			expectedScope: waddrmgr.KeyScopeBIP0084,
-			expectedErr:   nil,
-		},
-		{
-			name:          "nested witness pubkey",
-			addrType:      waddrmgr.NestedWitnessPubKey,
-			expectedScope: waddrmgr.KeyScopeBIP0049Plus,
-			expectedErr:   nil,
-		},
-		{
-			name:          "taproot pubkey",
-			addrType:      waddrmgr.TaprootPubKey,
-			expectedScope: waddrmgr.KeyScopeBIP0086,
-			expectedErr:   nil,
-		},
-		{
-			name:        "unknown address type",
-			addrType:    waddrmgr.WitnessScript,
-			expectedErr: ErrUnknownAddrType,
-		},
-	}
-
-	w := &Wallet{
-		cfg: Config{},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			scope, err := w.keyScopeFromAddrType(tc.addrType)
-			require.ErrorIs(t, err, tc.expectedErr)
-			require.Equal(t, tc.expectedScope, scope)
-		})
-	}
-}
-
 // TestNewAddress tests the NewAddress method, ensuring it can generate
 // various address types for different accounts and correctly handles both
 // internal and external address generation.
@@ -249,7 +192,7 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	// The first unused address should be the one we just created.
 	// GetUnusedAddress calls:
-	// - w.keyScopeFromAddrType
+	// - addrType.KeyScope
 	// - w.addrStore.FetchScopedKeyManager
 	// - w.findUnusedAddress (calls manager.LookupAccount and
 	//   ForEachAccountAddress)

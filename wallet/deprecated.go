@@ -5952,20 +5952,10 @@ func (w *Wallet) ImportAccountDryRun(name string,
 func (w *Wallet) ImportPublicKeyDeprecated(pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
-	// Determine what key scope the public key should belong to and import
-	// it into the key scope's default imported account.
-	var keyScope waddrmgr.KeyScope
-	switch addrType {
-	case waddrmgr.NestedWitnessPubKey:
-		keyScope = waddrmgr.KeyScopeBIP0049Plus
-
-	case waddrmgr.WitnessPubKey:
-		keyScope = waddrmgr.KeyScopeBIP0084
-
-	case waddrmgr.TaprootPubKey:
-		keyScope = waddrmgr.KeyScopeBIP0086
-
-	default:
+	// Determine what key scope the public key should belong to and import it into
+	// the key scope's default imported account.
+	keyScope, err := addrType.KeyScope()
+	if err != nil {
 		return fmt.Errorf("address type %v is not supported", addrType)
 	}
 
