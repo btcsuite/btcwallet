@@ -2200,6 +2200,20 @@ func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
 	}
 }
 
+// addInputInfoSegWitV0FromAddressInfo adds the UTXO and BIP32 derivation info
+// for a SegWit v0 PSBT input (p2wkh, np2wkh) from wallet-owned address
+// metadata.
+func addInputInfoSegWitV0FromAddressInfo(in *psbt.PInput, prevTx *wire.MsgTx,
+	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
+	addr AddressInfo, redeemScript []byte) {
+
+	addInputInfoSegWitV0Common(
+		in, prevTx, utxo, derivationInfo,
+		addr.AddrType.SpendType() == waddrmgr.SpendTypeNestedWitnessKey,
+		redeemScript,
+	)
+}
+
 // addInputInfoSegWitV1 adds the UTXO and BIP32 derivation info for a SegWit v1
 // PSBT input (p2tr) from the given wallet information.
 func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
