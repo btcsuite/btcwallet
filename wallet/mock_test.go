@@ -662,8 +662,8 @@ func (m *mockAccountStore) DeriveFromKeyPath(ns walletdb.ReadBucket,
 	return args.Get(0).(waddrmgr.ManagedAddress), args.Error(1)
 }
 
-// CanAddAccount implements the waddrmgr.AccountStore interface.
-func (m *mockAccountStore) CanAddAccount() error {
+// CanAddAccountDeprecated implements the waddrmgr.AccountStore interface.
+func (m *mockAccountStore) CanAddAccountDeprecated() error {
 	args := m.Called()
 	return args.Error(0)
 }

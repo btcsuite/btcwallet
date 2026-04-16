@@ -127,12 +127,6 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	// Validate that the scope manager can add this new account.
-	err = manager.CanAddAccount()
-	if err != nil {
-		return nil, err
-	}
-
 	var props *waddrmgr.AccountProperties
 
 	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {

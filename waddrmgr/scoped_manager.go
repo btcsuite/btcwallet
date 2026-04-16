@@ -1782,10 +1782,11 @@ func (s *ScopedKeyManager) LastInternalAddress(ns walletdb.ReadBucket,
 	return nil, managerError(ErrAddressNotFound, "no previous internal address", nil)
 }
 
-// CanAddAccount returns an error if a new account cannot be created.
-// This is the case if the manager is watch-only or is locked. A descriptive
-// error is returned in these cases.
-func (s *ScopedKeyManager) CanAddAccount() error {
+// CanAddAccountDeprecated returns an error if a new account cannot be created.
+//
+// Deprecated: use NewAccount directly so validation stays coupled to the
+// mutation path. This wrapper is only kept for legacy callers.
+func (s *ScopedKeyManager) CanAddAccountDeprecated() error {
 	if s.rootManager.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
@@ -1878,6 +1879,13 @@ func (s *ScopedKeyManager) NewAccount(ns walletdb.ReadWriteBucket, name string) 
 // NOTE: This function MUST be called with the manager lock held for writes.
 func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 	account uint32, name string) error {
+	if s.rootManager.WatchOnly() {
+		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
+	if s.rootManager.IsLocked() {
+		return managerError(ErrLocked, errLocked, nil)
+	}
 
 	// Validate the account name.
 	if err := ValidateAccountName(name); err != nil {

@@ -48,8 +48,7 @@ func (w *Wallet) NextAccount(scope waddrmgr.KeyScope, name string) (uint32, erro
 		return 0, err
 	}
 
-	// Validate that the scope manager can add this new account.
-	err = manager.CanAddAccount()
+	err = manager.CanAddAccountDeprecated()
 	if err != nil {
 		return 0, err
 	}

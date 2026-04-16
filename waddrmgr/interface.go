@@ -240,8 +240,12 @@ type AccountStore interface {
 	DeriveFromKeyPath(ns walletdb.ReadBucket,
 		path DerivationPath) (ManagedAddress, error)
 
-	// CanAddAccount returns an error if a new account cannot be created.
-	CanAddAccount() error
+	// CanAddAccountDeprecated returns an error if a new account cannot be
+	// created.
+	//
+	// Deprecated: use NewAccount directly so validation stays coupled to the
+	// mutation path. This is only kept for legacy callers.
+	CanAddAccountDeprecated() error
 
 	// NewAccount creates a new account.
 	NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error)
