@@ -38,6 +38,9 @@ CREATE TABLE accounts (
     -- DB ID of the account, primary key.
     id INTEGER PRIMARY KEY,
 
+    -- Reference to the wallet this account belongs to.
+    wallet_id INTEGER NOT NULL,
+
     -- Reference to the key scope this account belongs to.
     scope_id INTEGER NOT NULL,
 
@@ -82,9 +85,13 @@ CREATE TABLE accounts (
     -- Imported address counter must be non-negative.
     CHECK (imported_key_count >= 0),
 
-    -- Foreign key constraints to key scope. Using ON DELETE RESTRICT to ensure
-    -- that the key scope cannot be deleted if accounts still exist.
-    FOREIGN KEY (scope_id) REFERENCES key_scopes (id) ON DELETE RESTRICT,
+    -- Composite foreign key to key scopes. This ensures scope_id belongs to
+    -- the same wallet_id as the account row. Wallet ownership is transitively
+    -- enforced through key_scopes, which has its own FK to wallets. Using ON
+    -- DELETE RESTRICT to ensure that the wallet/scope cannot be deleted if
+    -- accounts still exist.
+    FOREIGN KEY (wallet_id, scope_id)
+    REFERENCES key_scopes (wallet_id, id) ON DELETE RESTRICT,
 
     -- Foreign key constraint to account origins. Using ON DELETE RESTRICT to
     -- ensure that the origin cannot be deleted if accounts still exist.
@@ -93,6 +100,9 @@ CREATE TABLE accounts (
 
 -- Index on foreign scope_id for faster lookups and joins.
 CREATE INDEX idx_accounts_scope ON accounts (scope_id);
+
+-- Unique index to support composite foreign keys from addresses.
+CREATE UNIQUE INDEX uidx_accounts_wallet_id_id ON accounts (wallet_id, id);
 
 -- Unique partial index to prevent duplicate account numbers within the same
 -- key scope. Only enforced for non-NULL account numbers (derived accounts).
