@@ -1058,22 +1058,12 @@ func addressTypeFromPurpose(purpose uint32) (waddrmgr.AddressType, error) {
 	// determine supported key scopes configured in the database, allowing
 	// for custom purposes (e.g., LND's 1017 purpose key) to be seamlessly
 	// supported without code changes here.
-	switch purpose {
-	case waddrmgr.KeyScopeBIP0044.Purpose:
-		return waddrmgr.PubKeyHash, nil
-
-	case waddrmgr.KeyScopeBIP0049Plus.Purpose:
-		return waddrmgr.NestedWitnessPubKey, nil
-
-	case waddrmgr.KeyScopeBIP0084.Purpose:
-		return waddrmgr.WitnessPubKey, nil
-
-	case waddrmgr.KeyScopeBIP0086.Purpose:
-		return waddrmgr.TaprootPubKey, nil
-
-	default:
+	addrType, err := waddrmgr.AddressTypeForPurpose(purpose)
+	if err != nil {
 		return 0, fmt.Errorf("%w: %d", ErrUnknownBip32Purpose, purpose)
 	}
+
+	return addrType, nil
 }
 
 // shouldSkipInput determines whether the input at the given index should be
