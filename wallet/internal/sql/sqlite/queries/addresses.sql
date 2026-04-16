@@ -25,9 +25,8 @@ SELECT
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
-WHERE a.script_pub_key = ? AND ks.wallet_id = ?;
+WHERE a.script_pub_key = ? AND a.wallet_id = ?;
 
 -- name: GetAddressSecret :one
 -- Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
@@ -47,18 +46,20 @@ WHERE a.id = ?;
 -- The index is allocated separately via GetAndIncrementNextExternalIndex
 -- or GetAndIncrementNextInternalIndex.
 INSERT INTO addresses (
+    wallet_id,
     account_id,
     script_pub_key,
     type_id,
     address_branch,
     address_index,
     pub_key
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 RETURNING id, created_at;
 
 -- name: CreateImportedAddress :one
 -- Creates an imported address (no derivation path, has script/pubkey).
 INSERT INTO addresses (
+    wallet_id,
     account_id,
     script_pub_key,
     type_id,
@@ -66,7 +67,7 @@ INSERT INTO addresses (
     address_index,
     pub_key
 ) VALUES (
-    ?1, ?2, ?3, NULL, NULL, ?4
+    ?1, ?2, ?3, ?4, NULL, NULL, ?5
 )
 RETURNING id, created_at;
 

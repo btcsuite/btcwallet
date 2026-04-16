@@ -12,6 +12,9 @@ CREATE TABLE addresses (
     -- DB ID of the address, primary key.
     id BIGSERIAL PRIMARY KEY,
 
+    -- Reference to the wallet this address belongs to.
+    wallet_id BIGINT NOT NULL,
+
     -- Reference to the account this address belongs to.
     account_id BIGINT NOT NULL,
 
@@ -51,9 +54,13 @@ CREATE TABLE addresses (
     -- Address index must be non-negative when set.
     CHECK (address_index IS NULL OR address_index >= 0),
 
-    -- Foreign key constraint to accounts. Using ON DELETE RESTRICT to ensure
-    -- that the account cannot be deleted if addresses still exist.
-    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT,
+    -- Composite foreign key to accounts. This ensures account_id belongs to
+    -- the same wallet_id as the address row. Wallet ownership is transitively
+    -- enforced through accounts, which has its own FK to wallets. Using ON
+    -- DELETE RESTRICT to ensure that the wallet/account cannot be deleted if
+    -- addresses still exist.
+    FOREIGN KEY (wallet_id, account_id)
+    REFERENCES accounts (wallet_id, id) ON DELETE RESTRICT,
 
     -- Foreign key constraint to address types. Using ON DELETE RESTRICT to
     -- ensure that the address type cannot be deleted if addresses still exist.
