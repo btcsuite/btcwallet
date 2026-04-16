@@ -91,7 +91,6 @@ func TestNewAccount(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -131,7 +130,6 @@ func TestNewAccount(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
 		Return(uint32(0), waddrmgr.ManagerError{
 			ErrorCode: waddrmgr.ErrDuplicateAccount,
@@ -154,8 +152,8 @@ func TestNewAccount(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").
-		Return(waddrmgr.ManagerError{
+	deps.accountManager.On("NewAccount", mock.Anything, "test2").
+		Return(uint32(0), waddrmgr.ManagerError{
 			ErrorCode: waddrmgr.ErrLocked,
 		}).Once()
 
@@ -178,7 +176,6 @@ func TestListAccounts(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -260,7 +257,6 @@ func TestListAccountsByScope(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scopeBIP84).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, accBIP84Name).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -278,7 +274,6 @@ func TestListAccountsByScope(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, accBIP49Name).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -378,7 +373,6 @@ func TestListAccountsByName(t *testing.T) {
 
 	deps.addrStore.On("FetchScopedKeyManager", scopeBIP84).
 		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, accBIP84Name).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -395,7 +389,6 @@ func TestListAccountsByName(t *testing.T) {
 
 	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
 		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, accBIP49Name).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -485,7 +478,6 @@ func TestGetAccount(t *testing.T) {
 	scope := waddrmgr.KeyScopeBIP0084
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -567,7 +559,6 @@ func TestRenameAccount(t *testing.T) {
 
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, oldName).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -677,7 +668,6 @@ func TestBalance(t *testing.T) {
 		Return(deps.accountManager, nil).
 		Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -994,7 +984,6 @@ func TestFetchAccountBalances(t *testing.T) {
 		deps.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084).
 			Return(deps.accountManager, nil).
 			Once()
-		deps.accountManager.On("CanAddAccount").Return(nil).Once()
 		deps.accountManager.On("NewAccount", mock.Anything, "acc1-bip84").
 			Return(uint32(1), nil).
 			Once()
@@ -1014,7 +1003,6 @@ func TestFetchAccountBalances(t *testing.T) {
 			"FetchScopedKeyManager", waddrmgr.KeyScopeBIP0049Plus,
 		).Return(deps.accountManager, nil).Once()
 
-		deps.accountManager.On("CanAddAccount").Return(nil).Once()
 		deps.accountManager.On("NewAccount", mock.Anything, "acc1-bip49").
 			Return(uint32(1), nil).
 			Once()
@@ -1154,7 +1142,6 @@ func TestFetchAccountBalances(t *testing.T) {
 				deps.addrStore.On(
 					"FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084,
 				).Return(deps.accountManager, nil).Once()
-				deps.accountManager.On("CanAddAccount").Return(nil).Once()
 				deps.accountManager.On(
 					"NewAccount", mock.Anything, "no-balance",
 				).Return(uint32(2), nil).Once()
@@ -1229,7 +1216,6 @@ func TestListAccountsWithBalances(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, acc1Name).
 		Return(uint32(1), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
@@ -1246,7 +1232,6 @@ func TestListAccountsWithBalances(t *testing.T) {
 	deps.addrStore.On("FetchScopedKeyManager", scope).
 		Return(deps.accountManager, nil).Once()
 
-	deps.accountManager.On("CanAddAccount").Return(nil).Once()
 	deps.accountManager.On("NewAccount", mock.Anything, acc2Name).
 		Return(uint32(2), nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(2)).
