@@ -41,6 +41,9 @@ CREATE TABLE key_scopes (
 CREATE UNIQUE INDEX uidx_key_scopes_wallet_purpose_coin
 ON key_scopes (wallet_id, purpose, coin_type);
 
+-- Unique index to support composite foreign keys scoped by wallet ownership.
+CREATE UNIQUE INDEX uidx_key_scopes_wallet_id_id ON key_scopes (wallet_id, id);
+
 -- Key Scope Secrets table to hold encrypted coin-type secrets for each scope.
 -- Separated from the main key_scopes table for security and access pattern isolation.
 -- Watch-only scopes may have no corresponding row in this table or have NULL
