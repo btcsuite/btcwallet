@@ -211,7 +211,7 @@ func TestNewAddress(t *testing.T) {
 
 			// Verify that the address is correctly marked as
 			// internal or external.
-			addrInfo, err := w.AddressInfo(t.Context(), addr)
+			addrInfo, err := w.GetAddressInfo(t.Context(), addr)
 			require.NoError(t, err)
 			require.Equal(t, tc.change, addrInfo.Internal())
 		})
@@ -409,9 +409,9 @@ func TestGetUnusedAddress(t *testing.T) {
 	require.Equal(t, changeAddr.String(), unusedChangeAddr.String())
 }
 
-// TestAddressInfo tests the AddressInfo method to ensure it returns correct
+// TestGetAddressInfo tests the GetAddressInfo method to ensure it returns
 // information for both internal and external addresses.
-func TestAddressInfo(t *testing.T) {
+func TestGetAddressInfo(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet.
@@ -445,7 +445,7 @@ func TestAddressInfo(t *testing.T) {
 	deps.addr.On("Imported").Return(false).Once()
 	deps.addr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 
-	extInfo, err := w.AddressInfo(t.Context(), extAddr)
+	extInfo, err := w.GetAddressInfo(t.Context(), extAddr)
 	require.NoError(t, err)
 
 	// Check the external address info.
@@ -481,7 +481,7 @@ func TestAddressInfo(t *testing.T) {
 	deps.addr.On("Imported").Return(false).Once()
 	deps.addr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 
-	intInfo, err := w.AddressInfo(t.Context(), intAddr)
+	intInfo, err := w.GetAddressInfo(t.Context(), intAddr)
 	require.NoError(t, err)
 
 	// Check the internal address info.
@@ -798,7 +798,7 @@ func TestImportPublicKey(t *testing.T) {
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
 
-	info, err := w.AddressInfo(t.Context(), addr)
+	info, err := w.GetAddressInfo(t.Context(), addr)
 	require.NoError(t, err)
 	require.NotNil(t, info)
 }
@@ -858,7 +858,7 @@ func TestImportTaprootScript(t *testing.T) {
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.taprootAddr, nil).Once()
 
-	info, err := w.AddressInfo(t.Context(), addr)
+	info, err := w.GetAddressInfo(t.Context(), addr)
 	require.NoError(t, err)
 	require.NotNil(t, info)
 }
