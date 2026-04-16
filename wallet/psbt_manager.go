@@ -431,7 +431,7 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 
 	// We'll then use the address to look up the managed address from the
 	// database. This will give us access to the derivation information.
-	managedAddr, err := w.AddressInfo(ctx, addr)
+	managedAddr, err := w.GetAddressInfo(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("unable to get address info for %s: %w",
 			addr.String(), err)
@@ -678,7 +678,7 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Then, we'll get the managed address for the change output.
-	changeAddr, err := w.AddressInfo(ctx, changeScriptInfo.Addr.Address())
+	changeAddr, err := w.GetAddressInfo(ctx, changeScriptInfo.Addr.Address())
 	if err != nil {
 		return err
 	}
