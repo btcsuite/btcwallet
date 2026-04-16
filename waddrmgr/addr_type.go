@@ -112,6 +112,48 @@ const (
 	DerivationSchemeBIP86
 )
 
+// AddressTypeForScope returns the default address type used by the given key
+// scope.
+func AddressTypeForScope(scope KeyScope) (AddressType, error) {
+	switch scope {
+	case KeyScopeBIP0044:
+		return PubKeyHash, nil
+
+	case KeyScopeBIP0049Plus:
+		return NestedWitnessPubKey, nil
+
+	case KeyScopeBIP0084:
+		return WitnessPubKey, nil
+
+	case KeyScopeBIP0086:
+		return TaprootPubKey, nil
+
+	default:
+		return 0, fmt.Errorf("%w: %v", ErrUnknownAddressType, scope)
+	}
+}
+
+// AddressTypeForPurpose returns the default address type used by the given BIP
+// purpose.
+func AddressTypeForPurpose(purpose uint32) (AddressType, error) {
+	switch purpose {
+	case KeyScopeBIP0044.Purpose:
+		return PubKeyHash, nil
+
+	case KeyScopeBIP0049Plus.Purpose:
+		return NestedWitnessPubKey, nil
+
+	case KeyScopeBIP0084.Purpose:
+		return WitnessPubKey, nil
+
+	case KeyScopeBIP0086.Purpose:
+		return TaprootPubKey, nil
+
+	default:
+		return 0, fmt.Errorf("%w: %d", ErrUnknownAddressType, purpose)
+	}
+}
+
 // SpendType returns the spend behavior implied by the address type. Unknown
 // address types return SpendTypeUnknown.
 func (a AddressType) SpendType() SpendType {
@@ -160,6 +202,51 @@ func (a AddressType) DerivationScheme() DerivationScheme {
 
 	default:
 		return DerivationSchemeNone
+	}
+}
+
+// KeyScope returns the preferred scoped-manager key scope for the address type.
+func (a AddressType) KeyScope() (KeyScope, error) {
+	switch a {
+	case PubKeyHash:
+		return KeyScopeBIP0044, nil
+
+	case NestedWitnessPubKey:
+		return KeyScopeBIP0049Plus, nil
+
+	case WitnessPubKey:
+		return KeyScopeBIP0084, nil
+
+	case TaprootPubKey:
+		return KeyScopeBIP0086, nil
+
+	default:
+		return KeyScope{}, fmt.Errorf("%w: %v", ErrUnsupportedAddressType, a)
+	}
+}
+
+// ScopeAddrSchema returns the scoped-manager external/internal schema for the
+// address type.
+func (a AddressType) ScopeAddrSchema() (*ScopeAddrSchema, error) {
+	switch a {
+	// BIP49 keeps nested witness on the external branch but uses native
+	// witness change outputs on the internal branch.
+	case NestedWitnessPubKey:
+		return &ScopeAddrSchema{
+			ExternalAddrType: NestedWitnessPubKey,
+			InternalAddrType: WitnessPubKey,
+		}, nil
+
+	// The other key-derived scopes use the same address type for both
+	// external receives and internal change.
+	case PubKeyHash, WitnessPubKey, TaprootPubKey:
+		return &ScopeAddrSchema{
+			ExternalAddrType: a,
+			InternalAddrType: a,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType, a)
 	}
 }
 
