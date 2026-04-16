@@ -4050,6 +4050,34 @@ func TestMergePsbtOutputs(t *testing.T) {
 	})
 }
 
+// TestAddInputInfoSegWitV0 tests the helper for adding SegWit v0 input info
+// from wallet-owned address metadata.
+func TestAddInputInfoSegWitV0(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Setup input parameters (prevTx, utxo, derivation).
+	in := &psbt.PInput{}
+	prevTx := wire.NewMsgTx(1)
+	utxo := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
+	derivation := &psbt.Bip32Derivation{PubKey: []byte{2}}
+	redeemScript := []byte{3}
+
+	// Act: Call the helper.
+	addInputInfoSegWitV0FromAddressInfo(
+		in, prevTx, utxo, derivation, AddressInfo{
+			AddrType: waddrmgr.NestedWitnessPubKey,
+		}, redeemScript,
+	)
+
+	// Assert: Verify fields are populated correctly.
+	require.Equal(t, prevTx, in.NonWitnessUtxo)
+	require.Equal(t, utxo.Value, in.WitnessUtxo.Value)
+	require.Equal(t, utxo.PkScript, in.WitnessUtxo.PkScript)
+	require.Equal(t, txscript.SigHashAll, in.SighashType)
+	require.Equal(t, derivation, in.Bip32Derivation[0])
+	require.Equal(t, redeemScript, in.RedeemScript)
+}
+
 // TestAddInputInfoSegWitV0Common tests the shared helper for adding SegWit v0
 // input info.
 func TestAddInputInfoSegWitV0Common(t *testing.T) {

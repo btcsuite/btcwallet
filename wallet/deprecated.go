@@ -37,6 +37,450 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
+var (
+	// bucketTxLabels is the name of the label sub bucket of the wtxmgr top
+	// level bucket that stores the mapping between a txid and a user-defined
+	// transaction label.
+	bucketTxLabels = []byte("l")
+)
+
+// CreateWithCallback is the same as Create with an added callback that will be
+// called in the same transaction the wallet structure is initialized.
+//
+// Deprecated: This compatibility helper is retained for the legacy loader
+// path.
+func CreateWithCallback(db walletdb.DB, pubPass, privPass []byte,
+	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
+	birthday time.Time, cb func(walletdb.ReadWriteTx) error) error {
+
+	return create(
+		db, pubPass, privPass, rootKey, params, birthday, false, cb,
+	)
+}
+
+// CreateWatchingOnlyWithCallback is the same as CreateWatchingOnly with an
+// added callback that will be called in the same transaction the wallet
+// structure is initialized.
+//
+// Deprecated: This compatibility helper is retained for the legacy loader
+// path.
+func CreateWatchingOnlyWithCallback(db walletdb.DB, pubPass []byte,
+	params *chaincfg.Params, birthday time.Time,
+	cb func(walletdb.ReadWriteTx) error) error {
+
+	return create(
+		db, pubPass, nil, nil, params, birthday, true, cb,
+	)
+}
+
+// CreateWatchingOnly creates a new watch-only wallet, writing it to an empty
+// database. No root key can be provided as this wallet will be watching only.
+// Likewise no private passphrase may be provided either.
+//
+// Deprecated: This compatibility helper is retained for the legacy loader
+// path.
+func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
+	params *chaincfg.Params, birthday time.Time) error {
+
+	return create(
+		db, pubPass, nil, nil, params, birthday, true, nil,
+	)
+}
+
+// create initializes the legacy single-wallet database layout.
+func create(db walletdb.DB, pubPass, privPass []byte,
+	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
+	birthday time.Time, isWatchingOnly bool,
+	cb func(walletdb.ReadWriteTx) error) error {
+
+	// If no root key was provided, we create one now from a random seed.
+	// But only if this is not a watching-only wallet where the accounts are
+	// created individually from their xpubs.
+	if !isWatchingOnly && rootKey == nil {
+		hdSeed, err := hdkeychain.GenerateSeed(
+			hdkeychain.RecommendedSeedLen,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Derive the master extended key from the seed.
+		rootKey, err = hdkeychain.NewMaster(hdSeed, params)
+		if err != nil {
+			return fmt.Errorf("failed to derive master extended key")
+		}
+	}
+
+	// We need a private key if this isn't a watching only wallet.
+	if !isWatchingOnly && rootKey != nil && !rootKey.IsPrivate() {
+		return fmt.Errorf("need extended private key for wallet that is not watching only")
+	}
+
+	return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		txmgrNs, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		err = waddrmgr.Create(
+			addrmgrNs, rootKey, pubPass, privPass, params, nil,
+			birthday,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = wtxmgr.Create(txmgrNs)
+		if err != nil {
+			return err
+		}
+
+		if cb != nil {
+			return cb(tx)
+		}
+
+		return nil
+	})
+}
+
+// RemoveDescendants attempts to remove any transaction from the wallet's tx
+// store that spends outputs created by the passed transaction.
+//
+// Deprecated: This compatibility helper will be removed once tx-writer
+// mutations are fully migrated.
+func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
+	txRecord, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		return err
+	}
+
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		wtxmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		return w.txStore.RemoveUnminedTx(wtxmgrNs, txRecord)
+	})
+}
+
+// BirthdayBlock returns the birthday block of the wallet.
+//
+// Deprecated: Use `Controller.Info` instead.
+func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
+	var birthdayBlock waddrmgr.BlockStamp
+
+	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		bb, _, err := w.addrStore.BirthdayBlock(addrmgrNs)
+		birthdayBlock = bb
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &birthdayBlock, nil
+}
+
+// AddrManager returns the internal address manager.
+//
+// Deprecated: This compatibility helper leaks the legacy address manager.
+func (w *Wallet) AddrManager() waddrmgr.AddrStore {
+	return w.addrStore
+}
+
+// NotificationServer returns the internal NotificationServer.
+//
+// Deprecated: This compatibility helper exposes the legacy notification server.
+func (w *Wallet) NotificationServer() *NotificationServer {
+	return w.NtfnServer
+}
+
+// DropTransactionHistory completely removes and re-creates the transaction
+// manager namespace from the given wallet database. This can be used to force a
+// full chain rescan of all wallet transaction and UTXO data. User-defined
+// transaction labels can optionally be kept by setting keepLabels to true.
+func DropTransactionHistory(db walletdb.DB, keepLabels bool) error {
+	log.Infof("Dropping btcwallet transaction history")
+
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		// If we want to keep our tx labels, we read them out so we can re-add
+		// them after we have deleted our wtxmgr.
+		var (
+			labels map[chainhash.Hash]string
+			err    error
+		)
+		if keepLabels {
+			labels, err = fetchAllLabels(tx)
+			if err != nil {
+				return err
+			}
+		}
+
+		err = tx.DeleteTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil && err != walletdb.ErrBucketNotFound {
+			return err
+		}
+		ns, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = wtxmgr.Create(ns)
+		if err != nil {
+			return err
+		}
+
+		// If we want to re-add our labels, we do so now.
+		if keepLabels {
+			if err := putTxLabels(ns, labels); err != nil {
+				return err
+			}
+		}
+
+		ns = tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		birthdayBlock, err := waddrmgr.FetchBirthdayBlock(ns)
+		if err != nil {
+			log.Warnf("Wallet does not have a birthday block set, falling back to rescan from genesis")
+
+			startBlock, err := waddrmgr.FetchStartBlock(ns)
+			if err != nil {
+				return err
+			}
+			return waddrmgr.PutSyncedTo(ns, startBlock)
+		}
+
+		// We'll need to remove our birthday block first because it serves as a
+		// barrier when updating our state to detect reorgs due to the wallet
+		// not storing all block hashes of the chain.
+		if err := waddrmgr.DeleteBirthdayBlock(ns); err != nil {
+			return err
+		}
+
+		if err := waddrmgr.PutSyncedTo(ns, &birthdayBlock); err != nil {
+			return err
+		}
+		return waddrmgr.PutBirthdayBlock(ns, birthdayBlock)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to drop and re-create namespace: %w", err)
+	}
+
+	return nil
+}
+
+// fetchAllLabels returns a map of hex-encoded txid to label.
+func fetchAllLabels(tx walletdb.ReadWriteTx) (map[chainhash.Hash]string,
+	error) {
+
+	// Get our top level bucket, if it does not exist we just exit.
+	txBucket := tx.ReadBucket(wtxmgrNamespaceKey)
+	if txBucket == nil {
+		return nil, nil
+	}
+
+	// If we do not have a labels bucket, there are no labels so we exit.
+	labelsBucket := txBucket.NestedReadBucket(bucketTxLabels)
+	if labelsBucket == nil {
+		return nil, nil
+	}
+
+	labels := make(map[chainhash.Hash]string)
+	if err := labelsBucket.ForEach(func(k, v []byte) error {
+		txid, err := chainhash.NewHash(k)
+		if err != nil {
+			return err
+		}
+
+		label, err := wtxmgr.DeserializeLabel(v)
+		if err != nil {
+			return err
+		}
+
+		labels[*txid] = label
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return labels, nil
+}
+
+// putTxLabels re-adds a nested labels bucket and entries to the bucket provided
+// if there are any labels present.
+func putTxLabels(ns walletdb.ReadWriteBucket,
+	labels map[chainhash.Hash]string) error {
+
+	if len(labels) == 0 {
+		return nil
+	}
+
+	labelBucket, err := ns.CreateBucketIfNotExists(bucketTxLabels)
+	if err != nil {
+		return err
+	}
+
+	for txid, label := range labels {
+		err := wtxmgr.PutTxLabel(labelBucket, txid, label)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// MakeMultiSigScript creates a multi-signature script that can be redeemed with
+// nRequired signatures of the passed keys and addresses. If the address is a
+// P2PKH address, the associated pubkey is looked up by the wallet if possible,
+// otherwise an error is returned for a missing pubkey.
+//
+// This function only works with pubkeys and P2PKH addresses derived from them.
+func (w *Wallet) MakeMultiSigScript(addrs []btcutil.Address,
+	nRequired int) ([]byte, error) {
+
+	pubKeys := make([]*btcutil.AddressPubKey, len(addrs))
+
+	var dbtx walletdb.ReadTx
+	var addrmgrNs walletdb.ReadBucket
+	defer func() {
+		if dbtx != nil {
+			_ = dbtx.Rollback()
+		}
+	}()
+
+	// The address list will made up either of addresses (pubkey hash), for
+	// which we need to look up the keys in wallet, straight pubkeys, or a
+	// mixture of the two.
+	for i, addr := range addrs {
+		switch addr := addr.(type) {
+		default:
+			return nil, errors.New("cannot make multisig script for a non-secp256k1 public key or P2PKH address")
+
+		case *btcutil.AddressPubKey:
+			pubKeys[i] = addr
+
+		case *btcutil.AddressPubKeyHash:
+			if dbtx == nil {
+				var err error
+
+				dbtx, err = w.cfg.DB.BeginReadTx()
+				if err != nil {
+					return nil, err
+				}
+				addrmgrNs = dbtx.ReadBucket(waddrmgrNamespaceKey)
+			}
+
+			addrInfo, err := w.addrStore.Address(addrmgrNs, addr)
+			if err != nil {
+				return nil, err
+			}
+			serializedPubKey := addrInfo.(waddrmgr.ManagedPubKeyAddress).
+				PubKey().SerializeCompressed()
+
+			pubKeyAddr, err := btcutil.NewAddressPubKey(
+				serializedPubKey, w.cfg.ChainParams,
+			)
+			if err != nil {
+				return nil, err
+			}
+			pubKeys[i] = pubKeyAddr
+		}
+	}
+
+	return txscript.MultiSigScript(pubKeys, nRequired)
+}
+
+// ImportP2SHRedeemScript adds a P2SH redeem script to the wallet.
+func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*btcutil.AddressScriptHash,
+	error) {
+
+	var p2shAddr *btcutil.AddressScriptHash
+
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// TODO(oga) blockstamp current block?
+		bs := &waddrmgr.BlockStamp{
+			Hash:   *w.ChainParams().GenesisHash,
+			Height: 0,
+		}
+
+		// As this is a regular P2SH script, we'll import this into the
+		// BIP0044 scope.
+		bip44Mgr, err := w.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScopeBIP0084,
+		)
+		if err != nil {
+			return err
+		}
+
+		addrInfo, err := bip44Mgr.ImportScript(addrmgrNs, script, bs)
+		if err != nil {
+			// Don't care if it's already there, but still have to set the
+			// p2shAddr since the address manager didn't return anything
+			// useful.
+			if waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress) {
+				// This function will never error as it always hashes the
+				// script to the correct length.
+				p2shAddr, _ = btcutil.NewAddressScriptHash(
+					script, w.cfg.ChainParams,
+				)
+				return nil
+			}
+			return err
+		}
+
+		p2shAddr = addrInfo.Address().(*btcutil.AddressScriptHash)
+		return nil
+	})
+
+	return p2shAddr, err
+}
+
+type unstableAPI struct {
+	w *Wallet
+}
+
+// UnstableAPI exposes additional unstable public APIs for a Wallet. These APIs
+// may be changed or removed at any time. Currently this type exists to ease the
+// transition, particularly for the legacy JSON-RPC server, from using exported
+// manager packages to a unified wallet package that exposes all functionality by
+// itself. New code should not be written using this API.
+func UnstableAPI(w *Wallet) unstableAPI { return unstableAPI{w} } // nolint:golint
+
+// TxDetails calls wtxmgr.Store.TxDetails under a single database view
+// transaction.
+func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails,
+	error) {
+
+	var details *wtxmgr.TxDetails
+	err := walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+		var err error
+
+		details, err = u.w.txStore.TxDetails(txmgrNs, txHash)
+		return err
+	})
+
+	return details, err
+}
+
+// RangeTransactions calls wtxmgr.Store.RangeTransactions under a single
+// database view transaction.
+func (u unstableAPI) RangeTransactions(begin, end int32,
+	f func([]wtxmgr.TxDetails) (bool, error)) error {
+
+	return walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
+		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+		return u.w.txStore.RangeTransactions(txmgrNs, begin, end, f)
+	})
+}
+
 // NextAccount creates the next account and returns its account number.  The
 // name must be unique to the account.  In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -794,7 +1238,14 @@ func (w *Wallet) FundPsbtDeprecated(packet *psbt.Packet, keyScope *waddrmgr.KeyS
 				"change addr: %w", err)
 		}
 
-		changeOutputInfo, err := createOutputInfo(changeTxOut, addr)
+		addrInfo, err := addressInfoFromManagedAddress(addr)
+		if err != nil {
+			return 0, fmt.Errorf("error adapting change addr: %w", err)
+		}
+
+		changeOutputInfo, err := createOutputInfoFromAddressInfo(
+			changeTxOut, addrInfo,
+		)
 		if err != nil {
 			return 0, fmt.Errorf("error adding output info to "+
 				"change output: %w", err)
@@ -849,11 +1300,16 @@ func (w *Wallet) DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown boo
 			return fmt.Errorf("error fetching UTXO: %w", err)
 		}
 
-		addr, witnessProgram, _, err := w.ScriptForOutputDeprecated(
+		addr, redeemScript, _, err := w.ScriptForOutputDeprecated(
 			utxo,
 		)
 		if err != nil {
 			return fmt.Errorf("error fetching UTXO script: %w", err)
+		}
+
+		addrInfo, err := addressInfoFromManagedAddress(addr)
+		if err != nil {
+			return fmt.Errorf("error adapting UTXO addr: %w", err)
 		}
 
 		switch {
@@ -863,9 +1319,9 @@ func (w *Wallet) DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown boo
 			)
 
 		default:
-			addInputInfoSegWitV0(
+			addInputInfoSegWitV0FromAddressInfo(
 				&packet.Inputs[idx], tx, utxo, derivationPath,
-				addr, witnessProgram,
+				addrInfo, redeemScript,
 			)
 		}
 	}
