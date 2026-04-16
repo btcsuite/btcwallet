@@ -13,17 +13,19 @@ import (
 
 const CreateDerivedAddress = `-- name: CreateDerivedAddress :one
 INSERT INTO addresses (
+    wallet_id,
     account_id,
     script_pub_key,
     type_id,
     address_branch,
     address_index,
     pub_key
-) VALUES ($1, $2, $3, $4, $5, $6)
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, created_at
 `
 
 type CreateDerivedAddressParams struct {
+	WalletID      int64
 	AccountID     int64
 	ScriptPubKey  []byte
 	TypeID        int16
@@ -42,6 +44,7 @@ type CreateDerivedAddressRow struct {
 // or GetAndIncrementNextInternalIndex.
 func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAddressStmt, CreateDerivedAddress,
+		arg.WalletID,
 		arg.AccountID,
 		arg.ScriptPubKey,
 		arg.TypeID,
@@ -56,6 +59,7 @@ func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAdd
 
 const CreateImportedAddress = `-- name: CreateImportedAddress :one
 INSERT INTO addresses (
+    wallet_id,
     account_id,
     script_pub_key,
     type_id,
@@ -63,12 +67,13 @@ INSERT INTO addresses (
     address_index,
     pub_key
 ) VALUES (
-    $1, $2, $3, NULL, NULL, $4
+    $1, $2, $3, $4, NULL, NULL, $5
 )
 RETURNING id, created_at
 `
 
 type CreateImportedAddressParams struct {
+	WalletID     int64
 	AccountID    int64
 	ScriptPubKey []byte
 	TypeID       int16
@@ -83,6 +88,7 @@ type CreateImportedAddressRow struct {
 // Creates an imported address (no derivation path, has script/pubkey).
 func (q *Queries) CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error) {
 	row := q.queryRow(ctx, q.createImportedAddressStmt, CreateImportedAddress,
+		arg.WalletID,
 		arg.AccountID,
 		arg.ScriptPubKey,
 		arg.TypeID,
@@ -108,9 +114,8 @@ SELECT
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
-WHERE a.script_pub_key = $1 AND ks.wallet_id = $2
+WHERE a.script_pub_key = $1 AND a.wallet_id = $2
 `
 
 type GetAddressByScriptPubKeyParams struct {
