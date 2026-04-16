@@ -251,6 +251,22 @@ func deterministicPrivKey(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
 	return privKey, pubKey
 }
 
+// expectDerivedSignerPrivKey wires the signer-private key lookup path for a
+// derived managed pubkey address.
+func expectDerivedSignerPrivKey(t *testing.T, mocks *mockWalletDeps,
+	scope waddrmgr.KeyScope, path waddrmgr.DerivationPath,
+	privKey *btcec.PrivateKey) {
+
+	t.Helper()
+
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(scope, path, true).Once()
+	mocks.addrStore.On("FetchScopedKeyManager", scope).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On("DeriveFromKeyPathCache", path).
+		Return(privKey, nil).Once()
+}
+
 // TestSignDigest tests the signing of a message digest with different signature
 // types.
 func TestSignDigest(t *testing.T) {
@@ -564,14 +580,21 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 	// fetch the key from the database.
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil)
+	).Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash).Twice()
 
 	// Configure the full mock chain to return the test private key.
 	//
 	// NOTE: We must use a copy since the ECDH method will zero out the key.
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+	expectDerivedSignerPrivKey(
+		t, mocks, waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, privKeyCopy,
+	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
 	// the unlocking script.
@@ -635,14 +658,21 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 	// when queried, will provide the private key for signing.
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil)
+	).Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Twice()
 
 	// Configure the full mock chain to return the test private key.
 	//
 	// NOTE: We must use a copy since the ECDH method will zero out the key.
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+	expectDerivedSignerPrivKey(
+		t, mocks, waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, privKeyCopy,
+	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
 	// the unlocking script.
@@ -710,7 +740,7 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	// program, so we mock that as well.
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil)
+	).Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(
 		waddrmgr.NestedWitnessPubKey).Twice()
 	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
@@ -719,7 +749,14 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	//
 	// NOTE: We must use a copy since the ECDH method will zero out the key.
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+	expectDerivedSignerPrivKey(
+		t, mocks, waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, privKeyCopy,
+	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
 	// the unlocking script.
@@ -785,14 +822,21 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	// when queried, will provide the private key for signing.
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil)
+	).Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.TaprootPubKey).Twice()
 
 	// Configure the full mock chain to return the test private key.
 	//
 	// NOTE: We must use a copy since the ECDH method will zero out the key.
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil)
+	expectDerivedSignerPrivKey(
+		t, mocks, waddrmgr.KeyScopeBIP0086, waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, privKeyCopy,
+	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
 	// the unlocking script. For Taproot, we must use a multi-output
@@ -901,12 +945,29 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
+		Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
 
-	// Mock private key retrieval failure.
-	mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
-		errPrivKeyMock).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0044,
+		waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, true,
+	).Once()
+	mocks.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0044).
+		Return(mocks.accountManager, nil).Once()
+	mocks.accountManager.On("DeriveFromKeyPathCache",
+		waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		},
+	).Return((*btcec.PrivateKey)(nil), errPrivKeyMock).Once()
 
 	params := &UnlockingScriptParams{
 		Tx:        tx,
@@ -947,11 +1008,18 @@ func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
+		Return(mocks.pubKeyAddr, nil).Twice()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash)
 
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	expectDerivedSignerPrivKey(
+		t, mocks, waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Account:         0,
+			Branch:          0,
+			Index:           0,
+		}, privKeyCopy,
+	)
 
 	// Define failing tweaker.
 	params := &UnlockingScriptParams{
@@ -997,9 +1065,10 @@ func TestComputeUnlockingScriptFail_UnsupportedAddr(t *testing.T) {
 
 	// Mock address store and managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
+		Return(mocks.pubKeyAddr, nil).Twice()
 
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	mocks.pubKeyAddr.On("Imported").Return(true).Once()
 	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Mock unsupported address type.
@@ -1042,9 +1111,10 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 
 	// Mock address lookup to return a valid managed address.
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
+		Return(mocks.pubKeyAddr, nil).Twice()
 
 	// Mock private key retrieval to succeed.
+	mocks.pubKeyAddr.On("Imported").Return(true).Once()
 	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Mock the address type to return an unknown type (e.g. 99) that falls
