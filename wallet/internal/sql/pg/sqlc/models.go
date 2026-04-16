@@ -11,6 +11,7 @@ import (
 
 type Account struct {
 	ID                 int64
+	WalletID           int64
 	ScopeID            int64
 	AccountNumber      sql.NullInt64
 	AccountName        string
