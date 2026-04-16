@@ -169,9 +169,9 @@ type AddressManager interface {
 		addrType waddrmgr.AddressType, change bool) (
 		address.Address, error)
 
-	// AddressInfo returns detailed information about a managed address. If
+	// GetAddressInfo returns detailed information about a managed address. If
 	// the address is not known to the wallet, an error is returned.
-	AddressInfo(ctx context.Context,
+	GetAddressInfo(ctx context.Context,
 		a address.Address) (waddrmgr.ManagedAddress, error)
 
 	// ListAddresses lists all addresses for a given account, including
@@ -523,7 +523,7 @@ func (w *Wallet) findUnusedAddress(manager waddrmgr.AccountStore,
 	return unusedAddr, err
 }
 
-// AddressInfo returns detailed information regarding a wallet address.
+// GetAddressInfo returns detailed information regarding a wallet address.
 //
 // This method provides metadata about a managed address, such as its type,
 // derivation path, and whether it's internal or compressed.
@@ -547,7 +547,7 @@ func (w *Wallet) findUnusedAddress(manager waddrmgr.AccountStore,
 //   - The operation is a direct database lookup, making its complexity roughly
 //     O(1) or O(log N) depending on the database backend's indexing strategy
 //     for addresses. It is a very fast operation.
-func (w *Wallet) AddressInfo(_ context.Context,
+func (w *Wallet) GetAddressInfo(_ context.Context,
 	a address.Address) (waddrmgr.ManagedAddress, error) {
 
 	err := w.state.validateStarted()
@@ -851,7 +851,7 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 
 	// We'll then use the address to look up the managed address from the
 	// database.
-	managedAddr, err := w.AddressInfo(ctx, addr)
+	managedAddr, err := w.GetAddressInfo(ctx, addr)
 	if err != nil {
 		return Script{}, fmt.Errorf("unable to get address info "+
 			"for %s: %w", addr.String(), err)
@@ -940,7 +940,7 @@ func (w *Wallet) GetDerivationInfo(ctx context.Context,
 	}
 
 	// We'll use the address to look up the derivation path.
-	managedAddr, err := w.AddressInfo(ctx, addr)
+	managedAddr, err := w.GetAddressInfo(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
