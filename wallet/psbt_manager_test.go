@@ -543,7 +543,7 @@ func TestDecorateInputErrImported(t *testing.T) {
 	).Return(mocks.pubKeyAddr, nil)
 
 	mocks.pubKeyAddr.On("Imported").Return(true)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -590,7 +590,7 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
 	)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -1166,7 +1166,7 @@ func TestAddChangeOutputInfoSuccess(t *testing.T) {
 	).Return(mocks.pubKeyAddr, nil)
 
 	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
 	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
 	// Removed Imported() as addChangeOutputInfo does not call it.
@@ -1309,7 +1309,7 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 	).Return(mocks.pubKeyAddr, nil)
 
 	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
 	// PubKey is not called because DerivationInfo returns false.
 	// DerivationInfo returns false (unknown/imported).
@@ -1509,7 +1509,7 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	)
 	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
 	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
 
 	// Act: Call populatePsbtPacket.
 	updatedPacket, changeIdx, err := w.populatePsbtPacket(
@@ -1648,7 +1648,7 @@ func TestFundPsbtWorkflow(t *testing.T) {
 		mock.MatchedBy(func(addr btcutil.Address) bool {
 			return addr.String() == p2wkhAddr.String()
 		}),
-	).Return(mocks.pubKeyAddr, nil).Times(3)
+	).Return(mocks.pubKeyAddr, nil).Times(2)
 
 	// --- Mock accountManager ---
 	// 3. Mock `accountManager.LookupAccount` for the default account:

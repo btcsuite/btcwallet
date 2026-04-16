@@ -170,8 +170,7 @@ type AddressManager interface {
 
 	// GetAddressInfo returns detailed information about a managed address. If
 	// the address is not known to the wallet, an error is returned.
-	GetAddressInfo(ctx context.Context,
-		a btcutil.Address) (waddrmgr.ManagedAddress, error)
+	GetAddressInfo(ctx context.Context, a btcutil.Address) (AddressInfo, error)
 
 	// ListAddresses lists all addresses for a given account, including
 	// their balances.
@@ -185,7 +184,7 @@ type AddressManager interface {
 	// ImportTaprootScript imports a taproot script for tracking and
 	// spending.
 	ImportTaprootScript(ctx context.Context,
-		tapscript waddrmgr.Tapscript) (waddrmgr.ManagedAddress, error)
+		tapscript waddrmgr.Tapscript) (AddressInfo, error)
 
 	// ScriptForOutput returns the address, witness program, and redeem
 	// script for a given UTXO.
@@ -546,12 +545,12 @@ func (w *Wallet) findUnusedAddress(manager waddrmgr.AccountStore,
 //   - The operation is a direct database lookup, making its complexity roughly
 //     O(1) or O(log N) depending on the database backend's indexing strategy
 //     for addresses. It is a very fast operation.
-func (w *Wallet) GetAddressInfo(_ context.Context,
-	a btcutil.Address) (waddrmgr.ManagedAddress, error) {
+func (w *Wallet) GetAddressInfo(_ context.Context, a btcutil.Address) (
+	AddressInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
 	var managedAddress waddrmgr.ManagedAddress
@@ -563,8 +562,11 @@ func (w *Wallet) GetAddressInfo(_ context.Context,
 
 		return err
 	})
+	if err != nil {
+		return AddressInfo{}, err
+	}
 
-	return managedAddress, err
+	return addressInfoFromManagedAddress(managedAddress)
 }
 
 // ListAddresses lists all addresses for a given account, including their
@@ -765,18 +767,18 @@ func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
 //   - Similar to ImportPublicKey, this operation is dominated by a database
 //     write, making it a fast operation with a complexity of roughly O(1).
 func (w *Wallet) ImportTaprootScript(_ context.Context,
-	tapscript waddrmgr.Tapscript) (waddrmgr.ManagedAddress, error) {
+	tapscript waddrmgr.Tapscript) (AddressInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
 	manager, err := w.addrStore.FetchScopedKeyManager(
 		waddrmgr.KeyScopeBIP0086,
 	)
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
 	var addr waddrmgr.ManagedAddress
@@ -791,15 +793,63 @@ func (w *Wallet) ImportTaprootScript(_ context.Context,
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
 	err = w.cfg.Chain.NotifyReceived([]btcutil.Address{addr.Address()})
 	if err != nil {
-		return nil, err
+		return AddressInfo{}, err
 	}
 
-	return addr, nil
+	return addressInfoFromManagedAddress(addr)
+}
+
+// buildScriptsForAddressInfo constructs the witness and redeem scripts for a
+// wallet-owned address metadata record and its corresponding pkScript.
+func buildScriptsForAddressInfo(addressInfo AddressInfo, pkScript []byte,
+	chainParams *chaincfg.Params) ([]byte, []byte, error) {
+
+	if addressInfo.PubKey == nil {
+		return nil, nil, fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+			addressInfo.Addr)
+	}
+
+	var (
+		witnessProgram []byte
+		redeemScript   []byte
+	)
+
+	switch {
+	case addressInfo.AddrType == waddrmgr.NestedWitnessPubKey:
+		pubKeyHash := btcutil.Hash160(
+			addressInfo.PubKey.SerializeCompressed(),
+		)
+
+		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+			pubKeyHash, chainParams,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		bldr := txscript.NewScriptBuilder()
+		bldr.AddData(witnessProgram)
+
+		redeemScript, err = bldr.Script()
+		if err != nil {
+			return nil, nil, err
+		}
+
+	default:
+		witnessProgram = pkScript
+	}
+
+	return witnessProgram, redeemScript, nil
 }
 
 // ScriptForOutput returns the address, witness program, and redeem script
@@ -850,7 +900,14 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 
 	// We'll then use the address to look up the managed address from the
 	// database.
-	managedAddr, err := w.GetAddressInfo(ctx, addr)
+	var managedAddr waddrmgr.ManagedAddress
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
+
+		return err
+	})
 	if err != nil {
 		return Script{}, fmt.Errorf("unable to get address info "+
 			"for %s: %w", addr.String(), err)
@@ -939,7 +996,15 @@ func (w *Wallet) GetDerivationInfo(ctx context.Context,
 	}
 
 	// We'll use the address to look up the derivation path.
-	managedAddr, err := w.GetAddressInfo(ctx, addr)
+	var managedAddr waddrmgr.ManagedAddress
+
+	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
+
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

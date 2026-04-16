@@ -195,7 +195,11 @@ func TestNewAddress(t *testing.T) {
 				Return(nil).
 				Once()
 
+			deps.addr.On("Address").Return(addr).Once()
+			deps.addr.On("AddrType").Return(tc.addrType).Once()
+			deps.addr.On("Imported").Return(false).Once()
 			deps.addr.On("Internal").Return(tc.change).Once()
+			deps.addr.On("Compressed").Return(true).Once()
 
 			// Attempt to generate a new address with the specified
 			// parameters.
@@ -213,7 +217,7 @@ func TestNewAddress(t *testing.T) {
 			// internal or external.
 			addrInfo, err := w.GetAddressInfo(t.Context(), addr)
 			require.NoError(t, err)
-			require.Equal(t, tc.change, addrInfo.Internal())
+			require.Equal(t, tc.change, addrInfo.Internal)
 		})
 	}
 }
@@ -449,11 +453,11 @@ func TestGetAddressInfo(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check the external address info.
-	require.Equal(t, extAddr.String(), extInfo.Address().String())
-	require.False(t, extInfo.Internal())
-	require.True(t, extInfo.Compressed())
-	require.False(t, extInfo.Imported())
-	require.Equal(t, waddrmgr.WitnessPubKey, extInfo.AddrType())
+	require.Equal(t, extAddr.String(), extInfo.Addr.String())
+	require.False(t, extInfo.Internal)
+	require.True(t, extInfo.Compressed)
+	require.False(t, extInfo.Imported)
+	require.Equal(t, waddrmgr.WitnessPubKey, extInfo.AddrType)
 
 	// Get a new internal address to test with.
 	addr, _ = btcutil.NewAddressWitnessPubKeyHash(
@@ -485,11 +489,11 @@ func TestGetAddressInfo(t *testing.T) {
 	require.NoError(t, err)
 
 	// Check the internal address info.
-	require.Equal(t, intAddr.String(), intInfo.Address().String())
-	require.True(t, intInfo.Internal())
-	require.True(t, intInfo.Compressed())
-	require.False(t, intInfo.Imported())
-	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType())
+	require.Equal(t, intAddr.String(), intInfo.Addr.String())
+	require.True(t, intInfo.Internal)
+	require.True(t, intInfo.Compressed)
+	require.False(t, intInfo.Imported)
+	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType)
 }
 
 // TestGetDerivationInfoExternalAddressSuccess tests that we can successfully
@@ -519,7 +523,11 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 	// Act: Get the derivation info for the address.
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
+	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 	deps.pubKeyAddr.On("Imported").Return(false).Once()
+	deps.pubKeyAddr.On("Internal").Return(false).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
 
 	privKey, _ := btcec.NewPrivateKey()
 	pubKey := privKey.PubKey()
@@ -581,7 +589,11 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 	// Act: Get the derivation info for the address.
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
+	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 	deps.pubKeyAddr.On("Imported").Return(false).Once()
+	deps.pubKeyAddr.On("Internal").Return(true).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
 
 	privKey, _ := btcec.NewPrivateKey()
 	pubKey := privKey.PubKey()
@@ -645,7 +657,7 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 		Return(deps.accountManager, nil).Once()
 	deps.accountManager.On("ImportPublicKey", mock.Anything, pubKey,
 		mock.Anything).Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Maybe()
+	deps.pubKeyAddr.On("Address").Return(addr).Twice()
 	deps.chain.On("NotifyReceived", []btcutil.Address{addr}).
 		Return(nil).Once()
 
@@ -656,7 +668,14 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	// imported key.
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 	deps.pubKeyAddr.On("Imported").Return(true).Once()
+	deps.pubKeyAddr.On("Internal").Return(false).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
+	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	deps.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
+	).Once()
 
 	_, err = w.GetDerivationInfo(t.Context(), addr)
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
@@ -797,6 +816,15 @@ func TestImportPublicKey(t *testing.T) {
 	// Check that the address is now managed by the wallet.
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
+	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	deps.pubKeyAddr.On("Imported").Return(true).Once()
+	deps.pubKeyAddr.On("Internal").Return(false).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
+	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	deps.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
+	).Once()
 
 	info, err := w.GetAddressInfo(t.Context(), addr)
 	require.NoError(t, err)
@@ -847,20 +875,19 @@ func TestImportTaprootScript(t *testing.T) {
 	deps.accountManager.On("ImportTaprootScript", mock.Anything,
 		mock.Anything, mock.Anything, uint8(1), false).
 		Return(deps.taprootAddr, nil).Once()
-	deps.taprootAddr.On("Address").Return(addr).Once()
+	deps.taprootAddr.On("Address").Return(addr).Twice()
+	deps.taprootAddr.On("AddrType").Return(waddrmgr.TaprootScript).Once()
+	deps.taprootAddr.On("Imported").Return(true).Once()
+	deps.taprootAddr.On("Internal").Return(false).Once()
+	deps.taprootAddr.On("Compressed").Return(false).Once()
 	deps.chain.On("NotifyReceived", []btcutil.Address{addr}).
 		Return(nil).Once()
 
-	_, err = w.ImportTaprootScript(t.Context(), tapscript)
+	info, err := w.ImportTaprootScript(t.Context(), tapscript)
 	require.NoError(t, err)
-
-	// Check that the address is now managed by the wallet.
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.taprootAddr, nil).Once()
-
-	info, err := w.GetAddressInfo(t.Context(), addr)
-	require.NoError(t, err)
-	require.NotNil(t, info)
+	require.Equal(t, addr, info.Addr)
+	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
+	require.True(t, info.Imported)
 }
 
 // TestScriptForOutput tests the ScriptForOutput method to ensure it returns the
