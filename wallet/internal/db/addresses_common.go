@@ -390,8 +390,8 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	GetIntIndex func(QTX) func(context.Context, int64) (int64, error)
 
 	// CreateAddr returns a function to create an address row.
-	CreateAddr func(QTX) func(context.Context, int64, AddressType, uint32,
-		uint32, []byte) (AddrRow, error)
+	CreateAddr func(QTX) func(context.Context, int64, int64, AddressType,
+		uint32, uint32, []byte) (AddrRow, error)
 
 	// RowID extracts the ID from an address row.
 	RowID func(AddrRow) int64
@@ -418,9 +418,9 @@ type ImportedAddressAdapters[QTX any, AccountRow any,
 	// CreateAddr returns a function to create an address row.
 	CreateAddr func(QTX) func(context.Context, CreateArgs) (AddrRow, error)
 
-	// CreateParams converts accountID and params to address creation
+	// CreateParams converts wallet/account IDs and params to address creation
 	// parameters.
-	CreateParams func(int64, NewImportedAddressParams) CreateArgs
+	CreateParams func(int64, int64, NewImportedAddressParams) CreateArgs
 
 	// InsertSecret returns a function to insert address secret.
 	InsertSecret func(QTX) func(context.Context, SecretParams) error
@@ -453,10 +453,10 @@ func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
 // derived address creation logic. It calls derivedAddressInput to prepare
 // inputs and then createFn to create the address.
 func createDerivedAddress[T any](ctx context.Context,
-	params NewDerivedAddressParams, accountID int64,
+	params NewDerivedAddressParams, walletID int64, accountID int64,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
-	createFn func(context.Context, int64, AddressType, uint32, uint32,
+	createFn func(context.Context, int64, int64, AddressType, uint32, uint32,
 		[]byte) (T, error),
 	rowID func(T) int64, rowCreatedAt func(T) time.Time,
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
@@ -469,7 +469,9 @@ func createDerivedAddress[T any](ctx context.Context,
 		return nil, err
 	}
 
-	row, err := createFn(ctx, accountID, addrType, branch, index, scriptPubKey)
+	row, err := createFn(
+		ctx, walletID, accountID, addrType, branch, index, scriptPubKey,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create address: %w", err)
 	}
@@ -570,7 +572,7 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
 			info, errAddr := createDerivedAddress(
-				ctx, params, adapters.GetAccountID(row),
+				ctx, params, int64(params.WalletID), adapters.GetAccountID(row),
 				adapters.GetExtIndex(qtx),
 				adapters.GetIntIndex(qtx),
 				adapters.CreateAddr(qtx),
@@ -625,7 +627,7 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 
 			info, errAddr := newImportedAddressTx(
 				ctx, adapters.CreateAddr(qtx),
-				adapters.CreateParams(acctID, params),
+				adapters.CreateParams(int64(params.WalletID), acctID, params),
 				adapters.InsertSecret, qtx,
 				adapters.SecretParams, params, acctID,
 				adapters.RowID,
