@@ -5,8 +5,6 @@
 // Package wallet provides the AddressManager interface for generating and
 // inspecting wallet addresses and scripts.
 //
-// TODO(yy): bring wrapcheck back when implementing the `Store` interface.
-//
 //nolint:wrapcheck
 package wallet
 
@@ -66,6 +64,72 @@ type AddressProperty struct {
 	// Balance is the total unspent balance of the address, including both
 	// confirmed and unconfirmed funds.
 	Balance btcutil.Amount
+}
+
+// AddressInfo describes wallet-owned metadata about one managed address.
+type AddressInfo struct {
+	// Addr is the bitcoin address itself.
+	Addr address.Address
+
+	// AddrType identifies the wallet-managed address type for this concrete
+	// address.
+	AddrType waddrmgr.AddressType
+
+	// Imported reports whether the address was imported instead of derived
+	// from a wallet scope.
+	Imported bool
+
+	// Internal reports whether the address belongs to the wallet's internal
+	// branch.
+	Internal bool
+
+	// Compressed reports whether the underlying pubkey address uses
+	// compressed keys.
+	Compressed bool
+
+	// PubKey is set for managed pubkey addresses.
+	PubKey *btcec.PublicKey
+
+	// Derivation is set when the wallet knows how to derive the address from a
+	// wallet scope.
+	Derivation *AddressDerivation
+}
+
+// AddressDerivation captures the wallet derivation metadata for one address.
+type AddressDerivation struct {
+	// KeyScope identifies the scope that owns the address.
+	KeyScope waddrmgr.KeyScope
+
+	// Account is the BIP-32 account within the scope.
+	Account uint32
+
+	// Branch is the BIP-32 branch within the scope.
+	Branch uint32
+
+	// Index is the child index within the branch.
+	Index uint32
+
+	// MasterKeyFingerprint is the root fingerprint used by
+	// hardware-wallet-aware flows.
+	MasterKeyFingerprint uint32
+}
+
+// OutputScriptInfo captures the address metadata and scripts needed to spend a
+// wallet-controlled output.
+type OutputScriptInfo struct {
+	AddressInfo
+
+	// WitnessProgram is the script passed as the witness subscript for witness
+	// signing. For native P2WPKH and P2TR spends, this is the output pkScript
+	// itself. For nested P2WPKH-in-P2SH spends, this is the inner witness
+	// program, for example `OP_0 <20-byte-key-hash>`.
+	WitnessProgram []byte
+
+	// RedeemScript is the P2SH redeem script that must be pushed into sigScript
+	// when the output is wrapped in P2SH. This is only set for nested witness
+	// spends, where it is a single push of the inner witness program. Native
+	// witness spends, such as P2WPKH and P2TR, leave this nil.
+	RedeemScript []byte
 }
 
 // Script represents the script information required to spend a UTXO.
@@ -136,6 +200,42 @@ type AddressManager interface {
 
 // A compile time check to ensure that Wallet implements the interface.
 var _ AddressManager = (*Wallet)(nil)
+
+// addressInfoFromManagedAddress converts one legacy managed address into the
+// wallet-owned metadata shape used by the prep work.
+func addressInfoFromManagedAddress(
+	managedAddr waddrmgr.ManagedAddress) (AddressInfo, error) {
+
+	info := AddressInfo{
+		Addr:       managedAddr.Address(),
+		AddrType:   managedAddr.AddrType(),
+		Imported:   managedAddr.Imported(),
+		Internal:   managedAddr.Internal(),
+		Compressed: managedAddr.Compressed(),
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return info, nil
+	}
+
+	info.PubKey = pubKeyAddr.PubKey()
+
+	keyScope, derivationPath, ok := pubKeyAddr.DerivationInfo()
+	if !ok {
+		return info, nil
+	}
+
+	info.Derivation = &AddressDerivation{
+		KeyScope:             keyScope,
+		Account:              derivationPath.Account,
+		Branch:               derivationPath.Branch,
+		Index:                derivationPath.Index,
+		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+	}
+
+	return info, nil
+}
 
 // NewAddress returns a new address for the given account and address type.
 // This method is a low-level primitive that will always derive a new, unused
