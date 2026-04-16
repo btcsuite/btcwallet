@@ -46,6 +46,52 @@ func TestCreateAccounts(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountRejectsWalletScopeMismatch verifies that the
+// composite wallet/scope invariant is enforced by the database on direct
+// derived-account inserts.
+func TestCreateDerivedAccountRejectsWalletScopeMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	firstWalletID := newWallet(t, store, "wallet-raw-derived-account-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-raw-derived-account-mismatch-b")
+	createDerivedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, "seed-derived-scope",
+	)
+
+	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
+
+	err := createDerivedAccountRaw(
+		t, store.DB(), secondWalletID, firstScopeID, 0, "raw-derived-mismatch",
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+}
+
+// TestCreateImportedAccountRejectsWalletScopeMismatch verifies that the
+// composite wallet/scope invariant is enforced by the database on direct
+// imported-account inserts.
+func TestCreateImportedAccountRejectsWalletScopeMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	firstWalletID := newWallet(t, store, "wallet-raw-imported-account-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-raw-imported-account-mismatch-b")
+	CreateImportedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, "seed-imported-scope",
+	)
+
+	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
+
+	err := createImportedAccountRaw(
+		t, store.DB(), secondWalletID, firstScopeID, "raw-imported-mismatch",
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "constraint")
+}
+
 // TestCreateDerivedAccountErrors verifies that CreateDerivedAccount returns
 // appropriate errors for invalid inputs.
 func TestCreateDerivedAccountErrors(t *testing.T) {
