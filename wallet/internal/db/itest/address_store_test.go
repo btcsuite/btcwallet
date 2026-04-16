@@ -935,6 +935,34 @@ func TestNewImportedAddress_NonExistentImportedAccount(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
 
+// TestNewImportedAddressWalletAccountMismatch verifies that imported address
+// creation rejects a wallet/scope lookup that only exists in another wallet.
+func TestNewImportedAddressWalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	firstWalletID := newWallet(t, store, "wallet-import-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-import-mismatch-b")
+
+	CreateImportedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+	)
+	CreateImportedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0044, "imported",
+	)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     secondWalletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: RandomBytes(32),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
 // TestGetAddressSecret_DerivedAddress verifies that calling GetAddressSecret
 // on a derived address returns db.ErrSecretNotFound (not ErrAddressNotFound).
 // This validates the LEFT JOIN: derived addresses exist in the addresses
@@ -1514,6 +1542,36 @@ func TestNewDerivedAddressErrors(t *testing.T) {
 	}
 }
 
+// TestNewDerivedAddress_WalletAccountMismatch verifies that derived address
+// creation rejects a wallet/scope/account lookup that resolves in another
+// wallet but not in the caller's wallet.
+func TestNewDerivedAddress_WalletAccountMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	firstWalletID := newWallet(t, store, "wallet-derived-mismatch-a")
+	secondWalletID := newWallet(t, store, "wallet-derived-mismatch-b")
+	accountName := "shared-name"
+
+	createDerivedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, accountName,
+	)
+	createDerivedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0044, accountName,
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    secondWalletID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: accountName,
+			Change:      false,
+		}, mockDeriveFunc(),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, info)
+}
+
 // TestNewDerivedAddressConcurrent verifies that concurrent address
 // creation produces unique sequential indexes without conflicts.
 func TestNewDerivedAddressConcurrent(t *testing.T) {
@@ -1706,7 +1764,7 @@ func TestNewDerivedAddressMaxIndex(t *testing.T) {
 	accountID := GetAccountID(t, queries, scopeID, "max-acct")
 
 	// Insert address at MaxUint32 - 1
-	CreateAddressWithIndex(t, queries, accountID, 0, math.MaxUint32-1)
+	CreateAddressWithIndex(t, queries, walletID, accountID, 0, math.MaxUint32-1)
 
 	// Set the counter to MaxUint32 so the next allocation gives us MaxUint32
 	UpdateAccountNextExternalIndex(t, dbConn, accountID, math.MaxUint32)
@@ -1746,7 +1804,7 @@ func TestNewDerivedAddressMaxIndexInternal(t *testing.T) {
 	accountID := GetAccountID(t, queries, scopeID, "max-acct")
 
 	// Insert address at MaxUint32 - 1 in the internal branch.
-	CreateAddressWithIndex(t, queries, accountID, 1, math.MaxUint32-1)
+	CreateAddressWithIndex(t, queries, walletID, accountID, 1, math.MaxUint32-1)
 
 	// Set the internal counter to MaxUint32 so the next allocation gives us
 	// MaxUint32.

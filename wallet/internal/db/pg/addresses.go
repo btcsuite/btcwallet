@@ -168,11 +168,11 @@ func derivedAddressGetIntIndex(qtx *sqlc.Queries) func(context.Context,
 
 // derivedAddressCreateAddr returns the derived address insert helper.
 func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
-	context.Context, int64, db.AddressType, uint32, uint32, []byte,
+	context.Context, int64, int64, db.AddressType, uint32, uint32, []byte,
 ) (sqlc.CreateDerivedAddressRow, error) {
 
-	return func(ctx context.Context, accountID int64, addrType db.AddressType,
-		branch uint32, index uint32,
+	return func(ctx context.Context, walletID int64, accountID int64,
+		addrType db.AddressType, branch uint32, index uint32,
 		scriptPubKey []byte) (sqlc.CreateDerivedAddressRow, error) {
 
 		branchNum, err := db.Uint32ToInt16(branch)
@@ -184,6 +184,7 @@ func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
 
 		return qtx.CreateDerivedAddress(
 			ctx, sqlc.CreateDerivedAddressParams{
+				WalletID:     walletID,
 				AccountID:    accountID,
 				ScriptPubKey: scriptPubKey,
 				TypeID:       int16(addrType),
@@ -236,10 +237,11 @@ func insertAddressSecret(qtx *sqlc.Queries) func(context.Context,
 }
 
 // createImportedAddressParams maps imported params to sqlc params.
-func createImportedAddressParams(accountID int64,
+func createImportedAddressParams(walletID int64, accountID int64,
 	params db.NewImportedAddressParams) sqlc.CreateImportedAddressParams {
 
 	return sqlc.CreateImportedAddressParams{
+		WalletID:     walletID,
 		AccountID:    accountID,
 		ScriptPubKey: params.ScriptPubKey,
 		TypeID:       int16(params.AddressType),
