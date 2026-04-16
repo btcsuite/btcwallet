@@ -33,6 +33,7 @@ func (q *Queries) CreateAccountSecret(ctx context.Context, arg CreateAccountSecr
 
 const CreateDerivedAccount = `-- name: CreateDerivedAccount :one
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
@@ -41,15 +42,21 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-VALUES (
-    $1,
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
     (
-        SELECT coalesce(max(account_number), -1) + 1
-        FROM accounts
-        WHERE scope_id = $1
-    ),
-    $2, $3, $4, $5, $6
-)
+        SELECT coalesce(max(a.account_number), -1) + 1
+        FROM accounts AS a
+        WHERE a.scope_id = $1
+    ) AS account_number,
+    $2 AS account_name,
+    $3 AS origin_id,
+    $4 AS encrypted_public_key,
+    $5 AS master_fingerprint,
+    $6 AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = $1
 RETURNING id, account_number, created_at
 `
 
@@ -88,22 +95,31 @@ func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAcc
 
 const CreateDerivedAccountWithNumber = `-- name: CreateDerivedAccountWithNumber :one
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
     origin_id,
     is_watch_only
 )
-VALUES ($1, $2, $3, $4, $5)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    $1 AS account_number,
+    $2 AS account_name,
+    $3 AS origin_id,
+    $4 AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = $5
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountWithNumberParams struct {
-	ScopeID       int64
 	AccountNumber sql.NullInt64
 	AccountName   string
 	OriginID      int16
 	IsWatchOnly   bool
+	ScopeID       int64
 }
 
 type CreateDerivedAccountWithNumberRow struct {
@@ -116,11 +132,11 @@ type CreateDerivedAccountWithNumberRow struct {
 // Used for testing account number overflow without creating billions of accounts.
 func (q *Queries) CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountWithNumberStmt, CreateDerivedAccountWithNumber,
-		arg.ScopeID,
 		arg.AccountNumber,
 		arg.AccountName,
 		arg.OriginID,
 		arg.IsWatchOnly,
+		arg.ScopeID,
 	)
 	var i CreateDerivedAccountWithNumberRow
 	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)
@@ -129,6 +145,7 @@ func (q *Queries) CreateDerivedAccountWithNumber(ctx context.Context, arg Create
 
 const CreateImportedAccount = `-- name: CreateImportedAccount :one
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
@@ -137,17 +154,27 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-VALUES ($1, NULL, $2, $3, $4, $5, $6)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    NULL AS account_number,
+    $1 AS account_name,
+    $2 AS origin_id,
+    $3 AS encrypted_public_key,
+    $4 AS master_fingerprint,
+    $5 AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = $6
 RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
-	ScopeID            int64
 	AccountName        string
 	OriginID           int16
 	EncryptedPublicKey []byte
 	MasterFingerprint  sql.NullInt64
 	IsWatchOnly        bool
+	ScopeID            int64
 }
 
 type CreateImportedAccountRow struct {
@@ -160,12 +187,12 @@ type CreateImportedAccountRow struct {
 // a sequential account number.
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
-		arg.ScopeID,
 		arg.AccountName,
 		arg.OriginID,
 		arg.EncryptedPublicKey,
 		arg.MasterFingerprint,
 		arg.IsWatchOnly,
+		arg.ScopeID,
 	)
 	var i CreateImportedAccountRow
 	err := row.Scan(&i.ID, &i.CreatedAt)
@@ -846,12 +873,12 @@ UPDATE accounts
 SET account_name = $1
 WHERE
     scope_id IN (
-        SELECT id
+        SELECT key_scopes.id
         FROM key_scopes
         WHERE
-            wallet_id = $2
-            AND purpose = $3
-            AND coin_type = $4
+            key_scopes.wallet_id = $2
+            AND key_scopes.purpose = $3
+            AND key_scopes.coin_type = $4
     )
     AND account_name = $5
 `
@@ -884,12 +911,12 @@ UPDATE accounts
 SET account_name = $1
 WHERE
     scope_id IN (
-        SELECT id
+        SELECT key_scopes.id
         FROM key_scopes
         WHERE
-            wallet_id = $2
-            AND purpose = $3
-            AND coin_type = $4
+            key_scopes.wallet_id = $2
+            AND key_scopes.purpose = $3
+            AND key_scopes.coin_type = $4
     )
     AND account_number = $5
 `

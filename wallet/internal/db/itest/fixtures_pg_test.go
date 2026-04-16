@@ -51,15 +51,67 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 	require.NoError(t, err)
 }
 
+// createDerivedAccountRaw inserts a derived account directly through the
+// database so tests can validate wallet/scope ownership invariants.
+func createDerivedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	scopeID int64, accountNumber uint32, name string) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO accounts (
+			wallet_id,
+			scope_id,
+			account_number,
+			account_name,
+			origin_id,
+			is_watch_only
+		) VALUES ($1, $2, $3, $4, $5, $6)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID, int64(accountNumber),
+		name, int16(db.DerivedAccount), false,
+	)
+
+	return err
+}
+
+// createImportedAccountRaw inserts an imported account directly through the
+// database so tests can validate wallet/scope ownership invariants.
+func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	scopeID int64, name string) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO accounts (
+			wallet_id,
+			scope_id,
+			account_number,
+			account_name,
+			origin_id,
+			encrypted_public_key,
+			is_watch_only
+		) VALUES ($1, $2, NULL, $3, $4, $5, $6)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID, name,
+		int16(db.ImportedAccount), RandomBytes(32), true,
+	)
+
+	return err
+}
+
 // CreateAddressWithIndex creates a derived address with a specific address
 // index. Used to test address index overflow without creating billions of
 // addresses.
 func CreateAddressWithIndex(t *testing.T, queries *sqlc.Queries,
-	accountID int64, branch int16, index uint32) {
+	walletID uint32, accountID int64, branch int16, index uint32) {
 	t.Helper()
 
 	_, err := queries.CreateDerivedAddress(
 		t.Context(), sqlc.CreateDerivedAddressParams{
+			WalletID:      int64(walletID),
 			AccountID:     accountID,
 			ScriptPubKey:  RandomBytes(20),
 			TypeID:        int16(db.WitnessPubKey),

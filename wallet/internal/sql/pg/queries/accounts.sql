@@ -31,6 +31,7 @@ SELECT pg_advisory_xact_lock(hashtextextended('account_scope', $1::BIGINT));
 -- to acquire the advisory lock and prevent race conditions.
 -- See LockAccountScope comments for why this is a separate statement.
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
@@ -39,15 +40,21 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-VALUES (
-    $1,
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
     (
-        SELECT coalesce(max(account_number), -1) + 1
-        FROM accounts
-        WHERE scope_id = $1
-    ),
-    $2, $3, $4, $5, $6
-)
+        SELECT coalesce(max(a.account_number), -1) + 1
+        FROM accounts AS a
+        WHERE a.scope_id = sqlc.arg('scope_id')
+    ) AS account_number,
+    sqlc.arg('account_name') AS account_name,
+    sqlc.arg('origin_id') AS origin_id,
+    sqlc.arg('encrypted_public_key') AS encrypted_public_key,
+    sqlc.arg('master_fingerprint') AS master_fingerprint,
+    sqlc.arg('is_watch_only') AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, account_number, created_at;
 
 -- name: CreateImportedAccount :one
@@ -55,6 +62,7 @@ RETURNING id, account_number, created_at;
 -- number. Imported accounts don't follow BIP44 derivation, so they don't need
 -- a sequential account number.
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
@@ -63,7 +71,17 @@ INSERT INTO accounts (
     master_fingerprint,
     is_watch_only
 )
-VALUES ($1, NULL, $2, $3, $4, $5, $6)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    NULL AS account_number,
+    sqlc.arg('account_name') AS account_name,
+    sqlc.arg('origin_id') AS origin_id,
+    sqlc.arg('encrypted_public_key') AS encrypted_public_key,
+    sqlc.arg('master_fingerprint') AS master_fingerprint,
+    sqlc.arg('is_watch_only') AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, created_at;
 
 -- name: CreateAccountSecret :exec
@@ -265,12 +283,12 @@ UPDATE accounts
 SET account_name = sqlc.arg(new_name)
 WHERE
     scope_id IN (
-        SELECT id
+        SELECT key_scopes.id
         FROM key_scopes
         WHERE
-            wallet_id = sqlc.arg(wallet_id)
-            AND purpose = sqlc.arg(purpose)
-            AND coin_type = sqlc.arg(coin_type)
+            key_scopes.wallet_id = sqlc.arg('wallet_id')
+            AND key_scopes.purpose = sqlc.arg('purpose')
+            AND key_scopes.coin_type = sqlc.arg('coin_type')
     )
     AND account_number = sqlc.arg(account_number);
 
@@ -280,12 +298,12 @@ UPDATE accounts
 SET account_name = sqlc.arg(new_name)
 WHERE
     scope_id IN (
-        SELECT id
+        SELECT key_scopes.id
         FROM key_scopes
         WHERE
-            wallet_id = sqlc.arg(wallet_id)
-            AND purpose = sqlc.arg(purpose)
-            AND coin_type = sqlc.arg(coin_type)
+            key_scopes.wallet_id = sqlc.arg('wallet_id')
+            AND key_scopes.purpose = sqlc.arg('purpose')
+            AND key_scopes.coin_type = sqlc.arg('coin_type')
     )
     AND account_name = sqlc.arg(old_name);
 
@@ -293,13 +311,22 @@ WHERE
 -- Test-only: Creates a derived account with a specific account number.
 -- Used for testing account number overflow without creating billions of accounts.
 INSERT INTO accounts (
+    wallet_id,
     scope_id,
     account_number,
     account_name,
     origin_id,
     is_watch_only
 )
-VALUES ($1, $2, $3, $4, $5)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    sqlc.arg('account_number') AS account_number,
+    sqlc.arg('account_name') AS account_name,
+    sqlc.arg('origin_id') AS origin_id,
+    sqlc.arg('is_watch_only') AS is_watch_only
+FROM key_scopes AS ks
+WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, account_number, created_at;
 
 -- name: GetAndIncrementNextExternalIndex :one
