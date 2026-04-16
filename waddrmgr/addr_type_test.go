@@ -6,6 +6,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestAddressTypeLookups verifies the supported address-type lookup paths.
+func TestAddressTypeLookups(t *testing.T) {
+	t.Parallel()
+
+	scope, err := PubKeyHash.KeyScope()
+	require.NoError(t, err)
+	require.Equal(t, KeyScopeBIP0044, scope)
+
+	schema, err := NestedWitnessPubKey.ScopeAddrSchema()
+	require.NoError(t, err)
+	require.Equal(t, NestedWitnessPubKey, schema.ExternalAddrType)
+	require.Equal(t, WitnessPubKey, schema.InternalAddrType)
+
+	addrTypeByScope, err := AddressTypeForScope(KeyScopeBIP0049Plus)
+	require.NoError(t, err)
+	require.Equal(t, NestedWitnessPubKey, addrTypeByScope)
+
+	addrTypeByPurpose, err := AddressTypeForPurpose(KeyScopeBIP0086.Purpose)
+	require.NoError(t, err)
+	require.Equal(t, TaprootPubKey, addrTypeByPurpose)
+
+	_, err = AddressTypeForScope(KeyScope{Purpose: 1017, Coin: 0})
+	require.ErrorIs(t, err, ErrUnknownAddressType)
+
+	_, err = AddressTypeForPurpose(1017)
+	require.ErrorIs(t, err, ErrUnknownAddressType)
+}
+
 // TestPubKeyAddressTypeMetadata verifies the common metadata for pubkey address
 // types.
 func TestPubKeyAddressTypeMetadata(t *testing.T) {
