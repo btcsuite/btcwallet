@@ -1,6 +1,7 @@
 package waddrmgr
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -10,6 +11,281 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
+
+// TestNewAccountCachesAccountInfo verifies that creating a new account makes it
+// visible in the scoped-manager cache without requiring a follow-up read.
+func TestNewAccountCachesAccountInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then fetch the scoped manager.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var account uint32
+
+	// Act: Create the new account through the scoped manager.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		account, err = scopedMgr.NewAccount(ns, "acct-1")
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Contains(t, scopedMgr.ActiveAccounts(), account)
+
+	// Assert: The new account is immediately visible in the cache.
+	scopedMgr.mtx.RLock()
+	acctInfo, ok := scopedMgr.acctInfo[account]
+	scopedMgr.mtx.RUnlock()
+	require.True(t, ok)
+	require.Equal(t, "acct-1", acctInfo.acctName)
+	require.Equal(t, uint32(0), acctInfo.nextExternalIndex)
+	require.Equal(t, uint32(0), acctInfo.nextInternalIndex)
+}
+
+// TestNewAccountWatchingOnlyCachesAccountInfo verifies that importing a
+// watch-only account updates the scoped-manager cache immediately.
+func TestNewAccountWatchingOnlyCachesAccountInfo(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create the manager, fetch the scoped manager, and derive the
+	// account public key to import.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	accountKey := deriveTestAccountKey(t)
+	require.NotNil(t, accountKey)
+
+	acctKeyPub, err := accountKey.Neuter()
+	require.NoError(t, err)
+
+	var account uint32
+
+	// Act: Import the watching-only account.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		account, err = scopedMgr.NewAccountWatchingOnly(
+			ns, "watch-1", acctKeyPub, 123, nil,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Contains(t, scopedMgr.ActiveAccounts(), account)
+
+	// Assert: The imported account metadata is immediately visible in the
+	// cache.
+	scopedMgr.mtx.RLock()
+	acctInfo, ok := scopedMgr.acctInfo[account]
+	scopedMgr.mtx.RUnlock()
+	require.True(t, ok)
+	require.Equal(t, "watch-1", acctInfo.acctName)
+	require.Equal(t, uint32(123), acctInfo.masterKeyFingerprint)
+	require.Nil(t, acctInfo.addrSchema)
+}
+
+// TestScopedManagerAddressCacheBounded verifies that the scoped-manager address
+// cache stays within its configured capacity while still reloading evicted
+// addresses from disk.
+func TestScopedManagerAddressCacheBounded(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then replace the scoped address
+	// cache with a one-entry cache.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	var firstAddr ManagedAddress
+
+	// Act: Derive two addresses so the first is evicted, then load the first
+	// address again from disk.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		addrs, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 2)
+		if err != nil {
+			return err
+		}
+
+		firstAddr = addrs[0]
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+
+	// Assert: The evicted address can still be reloaded and the cache remains
+	// bounded.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		addr, err := scopedMgr.Address(ns, firstAddr.Address())
+		require.NoError(t, err)
+		require.Equal(t, firstAddr.Address().String(), addr.Address().String())
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+}
+
+// TestForEachActiveAddressIgnoresCacheEviction verifies that active-address
+// iteration still walks the full DB-backed address set after cache eviction.
+func TestForEachActiveAddressIgnoresCacheEviction(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then force the scoped address cache
+	// down to one entry.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	// Act: Derive two addresses so one is evicted, then iterate the active
+	// addresses from the DB-backed manager state.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		_, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 2)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+
+	var seen []string
+
+	// Assert: Iteration still sees both active addresses even though the cache
+	// only holds one entry.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return scopedMgr.ForEachActiveAddress(
+			ns, func(addr btcutil.Address) error {
+				seen = append(seen, addr.String())
+				return nil
+			},
+		)
+	})
+	require.NoError(t, err)
+	require.Len(t, seen, 2)
+}
+
+// TestScopedManagerAddressEvictionLocksSecrets verifies that evicting an
+// address from the bounded cache zeroes any cleartext private key bytes held by
+// that managed address.
+func TestScopedManagerAddressEvictionLocksSecrets(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then force the scoped address cache
+	// down to one entry.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	scopedMgr.addrs = newAddrCache(1)
+
+	var firstAddr *managedAddress
+
+	// Act: Derive one address, capture its cleartext key bytes, then derive a
+	// second address so the first is evicted.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		addrs, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 1)
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+
+		firstAddr, ok = addrs[0].(*managedAddress)
+		if !ok {
+			return nil
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, firstAddr)
+	require.NotEmpty(t, firstAddr.privKeyCT)
+
+	firstPrivKeyCT := firstAddr.privKeyCT
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		_, err := scopedMgr.NextExternalAddresses(ns, DefaultAccountNum, 1)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	// Assert: Eviction zeroes and clears the original managed address's
+	// cleartext private key bytes.
+	require.Nil(t, firstAddr.privKeyCT)
+	require.True(t, bytes.Equal(
+		firstPrivKeyCT, make([]byte, len(firstPrivKeyCT)),
+	))
+	require.Equal(t, 1, scopedMgr.addrs.Len())
+}
 
 // TestDeriveAddrs verifies that DeriveAddrs correctly derives addresses using
 // in-memory state, producing the same results as database-backed derivation.

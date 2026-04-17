@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"maps"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -61,6 +60,13 @@ const (
 	// the wallet. With the default sisize, we'll allocate up to 320 KB to
 	// caching private keys (ignoring pointer overhead, etc).
 	defaultPrivKeyCacheSize = 10_000
+
+	// defaultAddrCacheSize is the default number of managed addresses that
+	// each scoped manager keeps hot in memory. We bound this by entry count
+	// rather than bytes because cached address records vary by type, but at
+	// the default size the LRU bookkeeping is still only on the order of
+	// 10 MiB while covering recent lookups for large wallets.
+	defaultAddrCacheSize = 100_000
 )
 
 // DerivationPath represents a derivation path from a particular key manager's
@@ -334,9 +340,9 @@ type ScopedKeyManager struct {
 	// derive any new accounts of child keys of accounts.
 	rootManager *Manager
 
-	// addrs is a cached map of all the addresses that we currently
-	// manage.
-	addrs map[addrKey]ManagedAddress
+	// addrs caches recently used managed addresses. The cache is bounded so a
+	// long-lived wallet does not retain an ever-growing in-memory address map.
+	addrs *lru.Cache[addrKey, *cachedAddr]
 
 	// acctInfo houses information about accounts including what is needed
 	// to generate deterministic chained keys for each created account.
@@ -718,11 +724,59 @@ type cachedKey struct {
 	key btcec.PrivateKey
 }
 
+// cachedAddr is an address-cache entry in the scoped manager LRU.
+type cachedAddr struct {
+	addr ManagedAddress
+}
+
+// secretWiper is implemented by cached address types that can eagerly zero
+// sensitive material from memory.
+type secretWiper interface {
+	lock()
+}
+
+// wipeAddressSecret zeroes any cleartext secret material held by one managed
+// address when the concrete type supports eager wiping.
+func wipeAddressSecret(addr ManagedAddress) {
+	if addr == nil {
+		return
+	}
+
+	if addr, ok := addr.(secretWiper); ok {
+		addr.lock()
+	}
+}
+
+// newAddrCache constructs one bounded address cache with eviction-time
+// zeroing for cached secret material.
+func newAddrCache(capacity uint64) *lru.Cache[addrKey, *cachedAddr] {
+	return lru.NewCache[addrKey, *cachedAddr](
+		capacity,
+		lru.WithDeleteCallback(func(_ addrKey, cachedAddr *cachedAddr) {
+			// The callback may be invoked with a nil entry during
+			// cache-internal delete paths, so guard before touching cached
+			// state.
+			if cachedAddr == nil {
+				return
+			}
+
+			// This zeroes cached secret material on eviction. It is not a mutex
+			// lock, so there is no corresponding unlock step.
+			wipeAddressSecret(cachedAddr.addr)
+		}),
+	)
+}
+
 // Size returns the size of this element. Rather than have the cache limit
 // based on bytes, we simply report that each element is of size 1, meaning we
 // can set our cached based on the amount of keys we want to store, rather than
 // the total size of all the keys.
 func (c *cachedKey) Size() (uint64, error) {
+	return 1, nil
+}
+
+// Size returns the size of the cached address entry.
+func (c *cachedAddr) Size() (uint64, error) {
 	return 1, nil
 }
 
@@ -990,7 +1044,10 @@ func (s *ScopedKeyManager) loadAndCacheAddress(ns walletdb.ReadBucket,
 	}
 
 	// Cache and return the new managed address.
-	s.addrs[addrKey(managedAddr.Address().ScriptAddress())] = managedAddr
+	_, _ = s.addrs.Put(
+		addrKey(managedAddr.Address().ScriptAddress()),
+		&cachedAddr{addr: managedAddr},
+	)
 
 	return managedAddr, nil
 }
@@ -1001,7 +1058,8 @@ func (s *ScopedKeyManager) loadAndCacheAddress(ns walletdb.ReadBucket,
 // This function MUST be called with the manager lock held for reads.
 func (s *ScopedKeyManager) existsAddress(ns walletdb.ReadBucket, addressID []byte) bool {
 	// Check the in-memory map first since it's faster than a db access.
-	if _, ok := s.addrs[addrKey(addressID)]; ok {
+	_, err := s.addrs.Get(addrKey(addressID))
+	if err == nil {
 		return true
 	}
 
@@ -1031,9 +1089,11 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 	// NOTE: Not using a defer on the lock here since a write lock is
 	// needed if the lookup fails.
 	s.mtx.RLock()
-	if ma, ok := s.addrs[addrKey(address.ScriptAddress())]; ok {
+
+	cachedAddr, err := s.addrs.Get(addrKey(address.ScriptAddress()))
+	if err == nil {
 		s.mtx.RUnlock()
-		return ma, nil
+		return cachedAddr.addr, nil
 	}
 	s.mtx.RUnlock()
 
@@ -1288,8 +1348,7 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		if ma.Address().String() != diskAddr.Address().String() {
 			// The address didn't match up, so we'll manually
 			// delete it from the cache.
-			delete(
-				s.addrs,
+			s.addrs.Delete(
 				addrKey(diskAddr.Address().ScriptAddress()),
 			)
 
@@ -1319,7 +1378,10 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 
 		for _, info := range addressInfo {
 			ma := info.managedAddr
-			s.addrs[addrKey(ma.Address().ScriptAddress())] = ma
+			_, _ = s.addrs.Put(
+				addrKey(ma.Address().ScriptAddress()),
+				&cachedAddr{addr: ma},
+			)
 
 			// Add the new managed address to the list of addresses
 			// that need their private keys derived when the
@@ -1529,7 +1591,10 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	// added to the db.
 	for _, info := range addressInfo {
 		ma := info.managedAddr
-		s.addrs[addrKey(ma.Address().ScriptAddress())] = ma
+		_, _ = s.addrs.Put(
+			addrKey(ma.Address().ScriptAddress()),
+			&cachedAddr{addr: ma},
+		)
 
 		// Add the new managed address to the list of addresses that
 		// need their private keys derived when the address manager is
@@ -1885,7 +1950,16 @@ func (s *ScopedKeyManager) newAccount(ns walletdb.ReadWriteBucket,
 	}
 
 	// Save last account metadata
-	return putLastAccount(ns, &s.scope, account)
+	err = putLastAccount(ns, &s.scope, account)
+	if err != nil {
+		return err
+	}
+
+	// Warm the account cache explicitly so callers do not need a follow-up
+	// AccountProperties read to make the new account visible in memory.
+	_, err = s.loadAccountInfo(ns, account)
+
+	return err
 }
 
 // NewAccountWatchingOnly is similar to NewAccount, but for watch-only wallets.
@@ -1974,7 +2048,16 @@ func (s *ScopedKeyManager) newAccountWatchingOnly(ns walletdb.ReadWriteBucket,
 	}
 
 	// Save last account metadata
-	return putLastAccount(ns, &s.scope, account)
+	err = putLastAccount(ns, &s.scope, account)
+	if err != nil {
+		return err
+	}
+
+	// Warm the account cache explicitly so callers do not need a follow-up
+	// AccountProperties read to make the new account visible in memory.
+	_, err = s.loadAccountInfo(ns, account)
+
+	return err
 }
 
 // RenameAccount renames an account stored in the manager based on the given
@@ -2333,7 +2416,10 @@ func (s *ScopedKeyManager) toImportedPrivateManagedAddress(
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
-	s.addrs[addrKey(managedAddr.Address().ScriptAddress())] = managedAddr
+	_, _ = s.addrs.Put(
+		addrKey(managedAddr.Address().ScriptAddress()),
+		&cachedAddr{addr: managedAddr},
+	)
 	return managedAddr, nil
 }
 
@@ -2356,7 +2442,10 @@ func (s *ScopedKeyManager) toImportedPublicManagedAddress(
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
-	s.addrs[addrKey(managedAddr.Address().ScriptAddress())] = managedAddr
+	_, _ = s.addrs.Put(
+		addrKey(managedAddr.Address().ScriptAddress()),
+		&cachedAddr{addr: managedAddr},
+	)
 	return managedAddr, nil
 }
 
@@ -2560,7 +2649,10 @@ func (s *ScopedKeyManager) importScriptAddress(ns walletdb.ReadWriteBucket,
 
 	// Add the new managed address to the cache of recent addresses and
 	// return it.
-	s.addrs[addrKey(scriptIdent)] = managedAddr
+	_, _ = s.addrs.Put(
+		addrKey(managedAddr.Address().ScriptAddress()),
+		&cachedAddr{addr: managedAddr},
+	)
 
 	if updateStartBlock {
 		// Now that the database has been updated, update the start block in
@@ -2614,7 +2706,7 @@ func (s *ScopedKeyManager) MarkUsed(ns walletdb.ReadWriteBucket,
 
 	// Clear caches which might have stale entries for used addresses
 	s.mtx.Lock()
-	delete(s.addrs, addrKey(addressID))
+	s.addrs.Delete(addrKey(addressID))
 	s.mtx.Unlock()
 	return nil
 }
@@ -2952,28 +3044,4 @@ func (s *ScopedKeyManager) deriveAddr(acctInfo *accountInfo, account, branch,
 	}
 
 	return addr, script, nil
-}
-
-// accountInfo returns a copy of the account info map.
-func (s *ScopedKeyManager) accountInfo() map[uint32]*accountInfo {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
-
-	acctInfoCopy := make(map[uint32]*accountInfo, len(s.acctInfo))
-	maps.Copy(acctInfoCopy, s.acctInfo)
-
-	return acctInfoCopy
-}
-
-// addresses returns a slice of all managed addresses.
-func (s *ScopedKeyManager) addresses() []ManagedAddress {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
-
-	addrs := make([]ManagedAddress, 0, len(s.addrs))
-	for _, ma := range s.addrs {
-		addrs = append(addrs, ma)
-	}
-
-	return addrs
 }

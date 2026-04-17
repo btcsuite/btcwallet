@@ -1402,7 +1402,11 @@ func testChangePassphrase(tc *testContext) bool {
 func testNewAccount(tc *testContext) bool {
 	if tc.watchingOnly {
 		// Creating new accounts in watching-only mode should return ErrWatchingOnly
-		err := tc.manager.CanAddAccount()
+		err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			_, err := tc.manager.NewAccount(ns, "acct-watch-only")
+			return err
+		})
 		if !checkManagerError(
 			tc.t, "Create account in watching-only mode", err,
 			ErrWatchingOnly,
@@ -1413,7 +1417,11 @@ func testNewAccount(tc *testContext) bool {
 		return true
 	}
 	// Creating new accounts when wallet is locked should return ErrLocked
-	err := tc.manager.CanAddAccount()
+	err := walletdb.Update(tc.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		_, err := tc.manager.NewAccount(ns, "acct-locked")
+		return err
+	})
 	if !checkManagerError(
 		tc.t, "Create account when wallet is locked", err, ErrLocked,
 	) {
@@ -2584,6 +2592,71 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to find addr: %v", err)
 	}
+}
+
+// TestManagerLockWipesLastAccountAddresses verifies that locking the root
+// manager also zeroes the cleartext private key bytes held by the account-level
+// last external and internal managed addresses.
+func TestManagerLockWipesLastAccountAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create and unlock a manager, then warm the default account info
+	// while unlocked so its cached last addresses hold cleartext private keys.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var (
+		lastExternalAddr *managedAddress
+		lastInternalAddr *managedAddress
+	)
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		scopedMgr.mtx.Lock()
+		defer scopedMgr.mtx.Unlock()
+
+		acctInfo, err := scopedMgr.loadAccountInfo(ns, DefaultAccountNum)
+		if err != nil {
+			return err
+		}
+
+		var ok bool
+
+		lastExternalAddr, ok = acctInfo.lastExternalAddr.(*managedAddress)
+		require.True(t, ok)
+
+		lastInternalAddr, ok = acctInfo.lastInternalAddr.(*managedAddress)
+		require.True(t, ok)
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, lastExternalAddr.privKeyCT)
+	require.NotEmpty(t, lastInternalAddr.privKeyCT)
+
+	// Act: Lock the root manager, which should wipe all cached cleartext key
+	// material.
+	mgr.mtx.Lock()
+	mgr.lock()
+	mgr.mtx.Unlock()
+
+	// Assert: The account-level last addresses no longer retain cleartext key
+	// bytes.
+	require.Nil(t, lastExternalAddr.privKeyCT)
+	require.Nil(t, lastInternalAddr.privKeyCT)
 }
 
 // TestRootHDKeyNeutering tests that callers are unable to create new scoped

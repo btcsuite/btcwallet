@@ -430,24 +430,31 @@ func (m *Manager) IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
 // TODO(yy): Rename this to wipe memory for priv keys.
 func (m *Manager) lock() {
 	for _, manager := range m.scopedManagers {
+		manager.mtx.Lock()
+
 		// Clear all of the account private keys.
-		for _, acctInfo := range manager.accountInfo() {
+		for _, acctInfo := range manager.acctInfo {
 			if acctInfo.acctKeyPriv != nil {
 				acctInfo.acctKeyPriv.Zero()
 			}
 			acctInfo.acctKeyPriv = nil
+
+			// loadAccountInfo warms the last external/internal addresses while
+			// unlocked, so those managed-address instances may also hold
+			// cleartext private key bytes outside the LRU cache.
+			wipeAddressSecret(acctInfo.lastExternalAddr)
+			wipeAddressSecret(acctInfo.lastInternalAddr)
 		}
 
 		// Remove clear text private keys and scripts from all address
 		// entries.
-		for _, ma := range manager.addresses() {
-			switch addr := ma.(type) {
-			case *managedAddress:
-				addr.lock()
-			case *scriptAddress:
-				addr.lock()
-			}
-		}
+		manager.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			wipeAddressSecret(cachedAddr.addr)
+
+			return true
+		})
+
+		manager.mtx.Unlock()
 	}
 
 	// Remove clear text private master and crypto keys from memory.
@@ -608,7 +615,7 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		scope:       scope,
 		addrSchema:  addrSchema,
 		rootManager: m,
-		addrs:       make(map[addrKey]ManagedAddress),
+		addrs:       newAddrCache(defaultAddrCacheSize),
 		acctInfo:    make(map[uint32]*accountInfo),
 		privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 			defaultPrivKeyCacheSize,
@@ -1132,17 +1139,17 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 
 	// Clear and remove all of the encrypted acount private keys.
 	for _, manager := range m.scopedManagers {
+		manager.mtx.Lock()
+
 		for _, acctInfo := range manager.acctInfo {
 			zero.Bytes(acctInfo.acctKeyEncrypted)
 			acctInfo.acctKeyEncrypted = nil
 		}
-	}
 
-	// Clear and remove encrypted private keys and encrypted scripts from
-	// all address entries.
-	for _, manager := range m.scopedManagers {
-		for _, ma := range manager.addrs {
-			switch addr := ma.(type) {
+		// Clear and remove encrypted private keys and encrypted scripts from
+		// all address entries.
+		manager.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			switch addr := cachedAddr.addr.(type) {
 			case *managedAddress:
 				zero.Bytes(addr.privKeyEncrypted)
 				addr.privKeyEncrypted = nil
@@ -1150,7 +1157,10 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 				zero.Bytes(addr.scriptEncrypted)
 				addr.scriptEncrypted = nil
 			}
-		}
+
+			return true
+		})
+		manager.mtx.Unlock()
 	}
 
 	// Clear and remove encrypted private and script crypto keys.
@@ -1667,7 +1677,7 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 		scopedManagers[scope] = &ScopedKeyManager{
 			scope:      scope,
 			addrSchema: *scopeSchema,
-			addrs:      make(map[addrKey]ManagedAddress),
+			addrs:      newAddrCache(defaultAddrCacheSize),
 			acctInfo:   make(map[uint32]*accountInfo),
 			privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 				defaultPrivKeyCacheSize,
