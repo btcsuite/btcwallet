@@ -300,12 +300,15 @@ func TestDecorateInputSegWitV0(t *testing.T) {
 
 	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
 	// derivation and public key information.
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		keyScope, derivationPath, true,
-	)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	).Once()
 
 	// Arrange: Create a UTXO with the P2WKH script and an empty PSBT input.
 	utxo := &wire.TxOut{
@@ -377,11 +380,15 @@ func TestDecorateInputTaproot(t *testing.T) {
 	// derivation and public key information. AddrType is not strictly
 	// checked for Taproot inputs in decorateInput, so no mock is needed
 	// for it.
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("Address").Return(taprootAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.TaprootPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		keyScope, derivationPath, true,
-	)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
+	).Once()
 
 	// Arrange: Create a UTXO with the Taproot script and an empty PSBT
 	// input.
@@ -500,6 +507,10 @@ func TestDecorateInputErrNotPubKey(t *testing.T) {
 	).Return(mocks.addr, nil)
 
 	mocks.addr.On("Address").Return(p2wkhAddr)
+	mocks.addr.On("AddrType").Return(waddrmgr.Script)
+	mocks.addr.On("Imported").Return(false)
+	mocks.addr.On("Internal").Return(false)
+	mocks.addr.On("Compressed").Return(false)
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -542,8 +553,15 @@ func TestDecorateInputErrImported(t *testing.T) {
 		"Address", mock.Anything, mock.Anything,
 	).Return(mocks.pubKeyAddr, nil)
 
-	mocks.pubKeyAddr.On("Imported").Return(true)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(true).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
+	).Once()
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -586,11 +604,15 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 		"Address", mock.Anything, mock.Anything,
 	).Return(mocks.pubKeyAddr, nil)
 
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
+	).Once()
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -604,6 +626,60 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 
 	// Assert: Verify the error.
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
+}
+
+// TestDecorateInputNestedWitnessUsesRedeemScript verifies that nested witness
+// PSBT decoration stores the inner witness program in the PSBT redeem script
+// field.
+func TestDecorateInputNestedWitnessUsesRedeemScript(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a nested witness UTXO and matching managed address
+	// metadata.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	witnessProgram, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_0).
+		AddData(btcutil.Hash160(pubKey.SerializeCompressed())).
+		Script()
+	require.NoError(t, err)
+
+	nestedAddr, err := btcutil.NewAddressScriptHash(
+		witnessProgram, &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(nestedAddr)
+	require.NoError(t, err)
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.addrStore.On(
+		"Address", mock.Anything, mock.Anything,
+	).Return(mocks.pubKeyAddr, nil)
+
+	mocks.pubKeyAddr.On("Address").Return(nestedAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(
+		waddrmgr.NestedWitnessPubKey,
+	).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{}, true,
+	).Once()
+
+	pInput := &psbt.PInput{}
+	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
+
+	// Act: Decorate the nested witness input.
+	err = w.decorateInput(t.Context(), pInput, wire.NewMsgTx(1), utxo)
+	require.NoError(t, err)
+
+	// Assert: The PSBT redeem script stores the inner witness program.
+	require.Equal(t, witnessProgram, pInput.RedeemScript)
 }
 
 // TestDecorateInputsSuccess tests that DecorateInputs correctly decorates
@@ -707,12 +783,24 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	).Return(mocks.pubKeyAddr, nil)
 
 	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	).Once()
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	).Once()
 
 	// Act: Call DecorateInputs with skipUnknown=true.
 	_, err = w.DecorateInputs(t.Context(), packet, true)
@@ -1165,14 +1253,15 @@ func TestAddChangeOutputInfoSuccess(t *testing.T) {
 		}),
 	).Return(mocks.pubKeyAddr, nil)
 
-	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-	// Removed Imported() as addChangeOutputInfo does not call it.
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	)
+	).Once()
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1264,6 +1353,10 @@ func TestAddChangeOutputInfoErrNotPubKey(t *testing.T) {
 		"Address", mock.Anything, mock.Anything,
 	).Return(mocks.addr, nil)
 	mocks.addr.On("Address").Return(p2wkhAddr)
+	mocks.addr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	mocks.addr.On("Imported").Return(false)
+	mocks.addr.On("Internal").Return(false)
+	mocks.addr.On("Compressed").Return(true)
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1308,14 +1401,15 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 		"Address", mock.Anything, mock.Anything,
 	).Return(mocks.pubKeyAddr, nil)
 
-	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-	// PubKey is not called because DerivationInfo returns false.
-	// DerivationInfo returns false (unknown/imported).
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	)
+	).Once()
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1411,13 +1505,15 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 			}),
 		).Return(mocks.pubKeyAddr, nil)
 
-		mocks.pubKeyAddr.On("Imported").Return(false)
+		mocks.pubKeyAddr.On("Address").Return(addrIn).Once()
+		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+		mocks.pubKeyAddr.On("Imported").Return(false).Once()
+		mocks.pubKeyAddr.On("Internal").Return(false).Once()
+		mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+		mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 		mocks.pubKeyAddr.On("DerivationInfo").Return(
-			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{},
-			true,
-		)
-		mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+		).Once()
 
 		// Mock Address lookup for Output (Fail)
 		mocks.addrStore.On(
@@ -1502,14 +1598,26 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	mocks.addrStore.On("Address", mock.Anything, mock.Anything).
 		Return(mocks.pubKeyAddr, nil)
 
-	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	// Arrange: Mock ManagedPubKeyAddress methods for both input decoration and
+	// change output info.
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Maybe()
+	).Once()
+	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	).Once()
 
 	// Act: Call populatePsbtPacket.
 	updatedPacket, changeIdx, err := w.populatePsbtPacket(
@@ -1674,16 +1782,30 @@ func TestFundPsbtWorkflow(t *testing.T) {
 	).Return([]waddrmgr.ManagedAddress{mockManagedAddr}, nil).Once()
 
 	// --- Mock pubKeyAddr (and ManagedAddress) ---
-	// 6. Mock `mockManagedAddr.Address` to return the change address:
-	mockManagedAddr.On("Address").Return(changeAddr)
+	// 6. The generated change address is read directly while assembling the
+	// transaction.
+	mockManagedAddr.On("Address").Return(changeAddr).Once()
 
-	// 9. Mock `ManagedPubKeyAddress` methods for `decorateInput`:
-	mocks.pubKeyAddr.On("Imported").Return(false)
+	// 9. Mock the metadata reads needed by both input decoration and change
+	// output info.
+	mocks.pubKeyAddr.On("Address").Return(changeAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	)
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey)
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
+	).Once()
+	mocks.pubKeyAddr.On("Address").Return(changeAddr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	mocks.pubKeyAddr.On("Imported").Return(false).Once()
+	mocks.pubKeyAddr.On("Internal").Return(false).Once()
+	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	mocks.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+	).Once()
 
 	// Act: Execute the FundPsbt workflow with the configured intent.
 	fundedPacket, changeIndex, err := w.FundPsbt(t.Context(), intent)
@@ -3403,9 +3525,20 @@ func TestFinalizeInput(t *testing.T) {
 		// Arrange: Mock dependencies.
 		mocks.addrStore.On(
 			"Address", mock.Anything, mock.Anything,
-		).Return(mocks.pubKeyAddr, nil)
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-		mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
+		).Return(mocks.pubKeyAddr, nil).Twice()
+		mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
+		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+		mocks.pubKeyAddr.On("Imported").Return(false).Once()
+		mocks.pubKeyAddr.On("Internal").Return(false).Once()
+		mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+		mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+		mocks.pubKeyAddr.On("DerivationInfo").Return(
+			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
+		).Once()
+		expectDerivedSignerPrivKey(
+			t, mocks, waddrmgr.KeyScopeBIP0084,
+			waddrmgr.DerivationPath{}, privKey,
+		)
 
 		sigHashes := txscript.NewTxSigHashes(
 			tx, txscript.NewCannedPrevOutputFetcher(
@@ -3532,6 +3665,11 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			keyScope := waddrmgr.KeyScopeBIP0084
+			if tc.addrType == waddrmgr.TaprootPubKey {
+				keyScope = waddrmgr.KeyScopeBIP0086
+			}
+
 			// Arrange: Create PSBT.
 			tx := wire.NewMsgTx(2)
 			tx.AddTxIn(&wire.TxIn{})
@@ -3553,18 +3691,24 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 				mock.MatchedBy(func(a btcutil.Address) bool {
 					return a.String() == tc.addr.String()
 				}),
-			).Return(mocks.pubKeyAddr, nil)
-
-			// Arrange: Mock ManagedPubKeyAddress.
-			// Note: Address() and PubKey() are not called for
-			// P2WKH/Taproot signing paths in
-			// ComputeUnlockingScript.
-			mocks.pubKeyAddr.On("AddrType").Return(tc.addrType)
+			).Return(mocks.pubKeyAddr, nil).Twice()
+			mocks.pubKeyAddr.On("Address").Return(tc.addr).Once()
+			mocks.pubKeyAddr.On("AddrType").Return(tc.addrType).Once()
+			mocks.pubKeyAddr.On("Imported").Return(false).Once()
+			mocks.pubKeyAddr.On("Internal").Return(false).Once()
+			mocks.pubKeyAddr.On("Compressed").Return(true).Once()
+			mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+			mocks.pubKeyAddr.On("DerivationInfo").Return(
+				keyScope, waddrmgr.DerivationPath{}, true,
+			).Once()
 
 			// Create a copy of the private key to avoid data races
 			// when parallel tests call Zero() on it.
 			privKeyCopy := *privKey
-			mocks.pubKeyAddr.On("PrivKey").Return(&privKeyCopy, nil)
+			expectDerivedSignerPrivKey(
+				t, mocks, keyScope, waddrmgr.DerivationPath{},
+				&privKeyCopy,
+			)
 
 			// Act: Call FinalizePsbt.
 			err = w.FinalizePsbt(t.Context(), packet)
@@ -3906,9 +4050,9 @@ func TestMergePsbtOutputs(t *testing.T) {
 	})
 }
 
-// TestAddInputInfoSegWitV0 tests the legacy helper for adding SegWit v0 input
-// info.
-func TestAddInputInfoSegWitV0(t *testing.T) {
+// TestAddInputInfoSegWitV0Common tests the shared helper for adding SegWit v0
+// input info.
+func TestAddInputInfoSegWitV0Common(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup input parameters (prevTx, utxo, derivation).
@@ -3916,15 +4060,12 @@ func TestAddInputInfoSegWitV0(t *testing.T) {
 	prevTx := wire.NewMsgTx(1)
 	utxo := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
 	derivation := &psbt.Bip32Derivation{PubKey: []byte{2}}
-	witnessProgram := []byte{3}
-
-	// Mock address type.
-	mockAddr := &mockManagedAddress{}
-	mockAddr.On("AddrType").Return(waddrmgr.NestedWitnessPubKey)
+	redeemScript := []byte{3}
 
 	// Act: Call the helper.
-	addInputInfoSegWitV0(in, prevTx, utxo, derivation, mockAddr,
-		witnessProgram)
+	addInputInfoSegWitV0Common(
+		in, prevTx, utxo, derivation, true, redeemScript,
+	)
 
 	// Assert: Verify fields are populated correctly.
 	require.Equal(t, prevTx, in.NonWitnessUtxo)
@@ -3932,7 +4073,7 @@ func TestAddInputInfoSegWitV0(t *testing.T) {
 	require.Equal(t, utxo.PkScript, in.WitnessUtxo.PkScript)
 	require.Equal(t, txscript.SigHashAll, in.SighashType)
 	require.Equal(t, derivation, in.Bip32Derivation[0])
-	require.Equal(t, witnessProgram, in.RedeemScript)
+	require.Equal(t, redeemScript, in.RedeemScript)
 }
 
 // TestAddInputInfoSegWitV1 tests the legacy helper for adding SegWit v1 input

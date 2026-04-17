@@ -874,6 +874,32 @@ func (w *Wallet) DecorateInputsDeprecated(packet *psbt.Packet, failOnUnknown boo
 	return nil
 }
 
+// addInputInfoSegWitV0 is a deprecated compatibility wrapper for legacy PSBT
+// callers that still pass a managed pubkey address directly.
+func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx,
+	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
+	addr waddrmgr.ManagedPubKeyAddress, redeemScript []byte) {
+
+	addInputInfoSegWitV0Common(
+		in, prevTx, utxo, derivationInfo,
+		addr.AddrType().SpendType() == waddrmgr.SpendTypeNestedWitnessKey,
+		redeemScript,
+	)
+}
+
+// createOutputInfo is a deprecated compatibility wrapper for legacy PSBT
+// callers that still pass a managed pubkey address directly.
+func createOutputInfo(txOut *wire.TxOut,
+	addr waddrmgr.ManagedPubKeyAddress) (*psbt.POutput, error) {
+
+	addressInfo, err := addressInfoFromManagedAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return createOutputInfoFromAddressInfo(txOut, addressInfo)
+}
+
 // FinalizePsbtDeprecated expects a partial transaction with all inputs and outputs fully
 // declared and tries to sign all inputs that belong to the wallet. Our wallet
 // must be the last signer of the transaction. That means, if there are any
