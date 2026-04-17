@@ -682,16 +682,15 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// We'll ensure that the change address is a public key address.
-	managedPubKeyAddr, ok := changeScriptInfo.Addr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
+	if changeScriptInfo.PubKey == nil {
 		return ErrChangeAddressNotManagedPubKey
 	}
 
 	// With the managed address, we can now create the PSBT output
 	// information.
-	changeOutputInfo, err := createOutputInfo(
+	changeOutputInfo, err := createOutputInfoFromAddressInfo(
 		authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
-		managedPubKeyAddr,
+		changeScriptInfo.AddressInfo,
 	)
 	if err != nil {
 		return err
@@ -2255,30 +2254,42 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}}
 }
 
-// createOutputInfo creates the BIP32 derivation info for an output from our
-// internal wallet.
+// createOutputInfo creates the BIP32 derivation info for an output from a
+// managed wallet pubkey address.
 func createOutputInfo(txOut *wire.TxOut,
 	addr waddrmgr.ManagedPubKeyAddress) (*psbt.POutput, error) {
+
+	addressInfo, err := addressInfoFromManagedAddress(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return createOutputInfoFromAddressInfo(txOut, addressInfo)
+}
+
+// createOutputInfoFromAddressInfo creates the BIP32 derivation info for an
+// output from wallet-owned address metadata.
+func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
+	addr AddressInfo) (*psbt.POutput, error) {
 
 	// We don't know the derivation path for imported keys. Those shouldn't
 	// be selected as change outputs in the first place, but just to make
 	// sure we don't run into an issue, we return early for imported keys.
-	keyScope, derivationPath, isKnown := addr.DerivationInfo()
-	if !isKnown {
+	if addr.Derivation == nil || addr.PubKey == nil {
 		return nil, fmt.Errorf("error adding output info to PSBT: %w",
 			ErrImportedAddrNoDerivation)
 	}
 
 	// Include the derivation path for this output.
 	derivation := &psbt.Bip32Derivation{
-		PubKey:               addr.PubKey().SerializeCompressed(),
-		MasterKeyFingerprint: derivationPath.MasterKeyFingerprint,
+		PubKey:               addr.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: addr.Derivation.MasterKeyFingerprint,
 		Bip32Path: []uint32{
-			keyScope.Purpose + hdkeychain.HardenedKeyStart,
-			keyScope.Coin + hdkeychain.HardenedKeyStart,
-			derivationPath.Account,
-			derivationPath.Branch,
-			derivationPath.Index,
+			addr.Derivation.KeyScope.Purpose + hdkeychain.HardenedKeyStart,
+			addr.Derivation.KeyScope.Coin + hdkeychain.HardenedKeyStart,
+			addr.Derivation.Account,
+			addr.Derivation.Branch,
+			addr.Derivation.Index,
 		},
 	}
 	out := &psbt.POutput{

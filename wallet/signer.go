@@ -796,11 +796,11 @@ func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 // and script assembly for a given set of parameters and a private key.
 func signAndAssembleScript(params *UnlockingScriptParams,
 	privKey *btcec.PrivateKey,
-	scriptInfo *Script) (*UnlockingScript, error) {
+	scriptInfo *OutputScriptInfo) (*UnlockingScript, error) {
 
 	// Dispatch to the correct signing logic based on the address type of
 	// the output.
-	switch scriptInfo.Addr.AddrType() {
+	switch scriptInfo.AddrType {
 	// For Taproot key-path spends, we produce a Schnorr signature.
 	case waddrmgr.TaprootPubKey:
 		witness, err := txscript.TaprootWitnessSignature(
@@ -827,9 +827,20 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 			return nil, fmt.Errorf("witness sig error: %w", err)
 		}
 
+		var sigScript []byte
+		if len(scriptInfo.RedeemScript) > 0 {
+			builder := txscript.NewScriptBuilder()
+			builder.AddData(scriptInfo.RedeemScript)
+
+			sigScript, err = builder.Script()
+			if err != nil {
+				return nil, fmt.Errorf("build sig script: %w", err)
+			}
+		}
+
 		return &UnlockingScript{
 			Witness:   witness,
-			SigScript: scriptInfo.RedeemScript,
+			SigScript: sigScript,
 		}, nil
 
 	// For legacy P2PKH outputs, we'll generate a signature script.
@@ -850,11 +861,11 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
 		waddrmgr.TaprootScript:
 		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			scriptInfo.Addr.AddrType())
+			scriptInfo.AddrType)
 
 	default:
 		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			scriptInfo.Addr.AddrType())
+			scriptInfo.AddrType)
 	}
 }
 
