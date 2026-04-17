@@ -7,6 +7,7 @@ package waddrmgr
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -36,6 +37,10 @@ var (
 	// invalid.
 	ErrInvalidSignature = fmt.Errorf("private key sig doesn't validate " +
 		"against pubkey")
+
+	// ErrUnknownSigningMethod is returned when an address type reports a
+	// signing method the current validation path does not understand.
+	ErrUnknownSigningMethod = errors.New("unknown signing method")
 )
 
 // AddressType represents the various address types waddrmgr is currently able
@@ -499,21 +504,20 @@ func (a *managedAddress) Validate(msg [32]byte, priv *btcec.PrivateKey) error {
 	// make sure we can generate a signature that verifies under the target
 	// public key.
 	//
-	// TODO(roasbeef): potentially run _all_ checks then see which one
-	// fails?
 	var sig signature
 
 	addrPrivKey, _ := btcec.PrivKeyFromBytes(a.privKeyCT)
 
-	switch a.addrType {
-	// For the "legacy" addr types, we'll generate an ECDSA signature to
-	// verify against.
-	case NestedWitnessPubKey, PubKeyHash, WitnessPubKey:
+	signingMethod, err := a.addrType.SigningMethod()
+	if err != nil {
+		return err
+	}
+
+	switch signingMethod {
+	case SigningMethodLegacy, SigningMethodWitnessV0:
 		sig = ecdsa.Sign(addrPrivKey, msg[:])
 
-	// For the newer taproot addr type, we'll generate a schnorr signature
-	// to verify against.
-	case TaprootPubKey:
+	case SigningMethodTaprootKeySpend:
 		sig, err = schnorr.Sign(addrPrivKey, msg[:])
 		if err != nil {
 			return fmt.Errorf("unable to generate validate "+
@@ -521,8 +525,8 @@ func (a *managedAddress) Validate(msg [32]byte, priv *btcec.PrivateKey) error {
 		}
 
 	default:
-		return fmt.Errorf("unable to validate addr, unknown type: %v",
-			a.addrType)
+		return fmt.Errorf("%w: %v", ErrUnknownSigningMethod,
+			signingMethod)
 	}
 
 	if !sig.Verify(msg[:], basePubKey) {
