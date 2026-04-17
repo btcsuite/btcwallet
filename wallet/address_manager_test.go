@@ -495,7 +495,7 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 	expectedPath := []uint32{
 		scope.Purpose + hdkeychain.HardenedKeyStart,
 		scope.Coin + hdkeychain.HardenedKeyStart,
-		path.Account,
+		path.Account + hdkeychain.HardenedKeyStart,
 		path.Branch,
 		path.Index,
 	}
@@ -561,7 +561,7 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 	expectedPath := []uint32{
 		scope.Purpose + hdkeychain.HardenedKeyStart,
 		scope.Coin + hdkeychain.HardenedKeyStart,
-		path.Account,
+		path.Account + hdkeychain.HardenedKeyStart,
 		path.Branch,
 		path.Index,
 	}
