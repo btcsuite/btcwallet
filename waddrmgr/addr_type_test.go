@@ -1,9 +1,8 @@
 package waddrmgr
 
 import (
-	"testing"
-
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
 // TestAddressTypeLookups verifies the supported address-type lookup paths.
@@ -189,4 +188,46 @@ func TestRawPubKeyAddressType(t *testing.T) {
 
 	_, err = RawPubKey.WitnessVersion()
 	require.ErrorIs(t, err, ErrUnsupportedAddressType)
+}
+
+// TestSupportedSigningAddressType verifies signing metadata for the supported
+// pubkey address types.
+func TestSupportedSigningAddressType(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		addrType      AddressType
+		signingMethod SigningMethod
+	}{
+		{
+			name:          "pubkey hash",
+			addrType:      PubKeyHash,
+			signingMethod: SigningMethodLegacy,
+		},
+		{
+			name:          "nested witness pubkey",
+			addrType:      NestedWitnessPubKey,
+			signingMethod: SigningMethodWitnessV0,
+		},
+		{
+			name:          "witness pubkey",
+			addrType:      WitnessPubKey,
+			signingMethod: SigningMethodWitnessV0,
+		},
+		{
+			name:          "taproot pubkey",
+			addrType:      TaprootPubKey,
+			signingMethod: SigningMethodTaprootKeySpend,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			signingMethod, err := testCase.addrType.SigningMethod()
+			require.NoError(t, err)
+			require.Equal(t, testCase.signingMethod, signingMethod)
+		})
+	}
 }
