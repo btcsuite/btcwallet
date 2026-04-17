@@ -112,6 +112,24 @@ const (
 	DerivationSchemeBIP86
 )
 
+// SigningMethod identifies the wallet signing flow currently supported for an
+// address type.
+type SigningMethod uint8
+
+const (
+	// SigningMethodLegacy indicates legacy ECDSA signing against a non-witness
+	// pkScript, for example PubKeyHash.
+	SigningMethodLegacy SigningMethod = iota
+
+	// SigningMethodWitnessV0 indicates SegWit v0 ECDSA signing, for example
+	// WitnessPubKey or NestedWitnessPubKey.
+	SigningMethodWitnessV0
+
+	// SigningMethodTaprootKeySpend indicates Taproot key-path Schnorr signing,
+	// for example TaprootPubKey.
+	SigningMethodTaprootKeySpend
+)
+
 // AddressTypeForScope returns the default address type used by the given key
 // scope.
 func AddressTypeForScope(scope KeyScope) (AddressType, error) {
@@ -286,5 +304,24 @@ func (a AddressType) WitnessVersion() (byte, error) {
 
 	default:
 		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType, a)
+	}
+}
+
+// SigningMethod returns the wallet signing method for the address type.
+func (a AddressType) SigningMethod() (SigningMethod, error) {
+	switch a {
+	case PubKeyHash:
+		return SigningMethodLegacy, nil
+
+	case NestedWitnessPubKey, WitnessPubKey:
+		return SigningMethodWitnessV0, nil
+
+	case TaprootPubKey:
+		return SigningMethodTaprootKeySpend, nil
+
+	case Script, RawPubKey, WitnessScript, TaprootScript:
+		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType, a)
+	default:
+		return 0, fmt.Errorf("%w: %v", ErrUnknownAddressType, a)
 	}
 }
