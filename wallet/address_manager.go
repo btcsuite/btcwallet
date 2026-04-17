@@ -125,22 +125,11 @@ type OutputScriptInfo struct {
 	// program, for example `OP_0 <20-byte-key-hash>`.
 	WitnessProgram []byte
 
-	// RedeemScript is the P2SH redeem script that must be pushed into sigScript
-	// when the output is wrapped in P2SH. This is only set for nested witness
-	// spends, where it is a single push of the inner witness program. Native
-	// witness spends, such as P2WPKH and P2TR, leave this nil.
-	RedeemScript []byte
-}
-
-// Script represents the script information required to spend a UTXO.
-type Script struct {
-	// Addr is the managed address of the UTXO.
-	Addr waddrmgr.ManagedAddress
-
-	// WitnessProgram is the witness program of the UTXO.
-	WitnessProgram []byte
-
-	// RedeemScript is the redeem script of the UTXO.
+	// RedeemScript is the redeem script committed to by the outer P2SH output.
+	// For nested P2WPKH-in-P2SH spends, this is the inner witness program, for
+	// example `OP_0 <20-byte-key-hash>`. Native witness spends, such as P2WPKH
+	// and P2TR, leave this nil. The final scriptSig wrapper for nested witness
+	// spends can be rebuilt from this script when assembling the input.
 	RedeemScript []byte
 }
 
@@ -187,9 +176,10 @@ type AddressManager interface {
 	ImportTaprootScript(ctx context.Context,
 		tapscript waddrmgr.Tapscript) (AddressInfo, error)
 
-	// ScriptForOutput returns the address, witness program, and redeem
-	// script for a given UTXO.
-	ScriptForOutput(ctx context.Context, output wire.TxOut) (Script, error)
+	// ScriptForOutput returns the wallet metadata and spending scripts for a
+	// given UTXO.
+	ScriptForOutput(ctx context.Context, output wire.TxOut) (
+		OutputScriptInfo, error)
 
 	// GetDerivationInfo returns the BIP-32 derivation path for a given
 	// address.
@@ -760,56 +750,8 @@ func (w *Wallet) ImportTaprootScript(_ context.Context,
 	return addressInfoFromManagedAddress(addr)
 }
 
-// buildScriptsForAddressInfo constructs the witness and redeem scripts for a
-// wallet-owned address metadata record and its corresponding pkScript.
-func buildScriptsForAddressInfo(addressInfo AddressInfo, pkScript []byte,
-	chainParams *chaincfg.Params) ([]byte, []byte, error) {
-
-	if addressInfo.PubKey == nil {
-		return nil, nil, fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
-			addressInfo.Addr)
-	}
-
-	var (
-		witnessProgram []byte
-		redeemScript   []byte
-	)
-
-	switch {
-	case addressInfo.AddrType == waddrmgr.NestedWitnessPubKey:
-		pubKeyHash := address.Hash160(
-			addressInfo.PubKey.SerializeCompressed(),
-		)
-
-		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-			pubKeyHash, chainParams,
-		)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		bldr := txscript.NewScriptBuilder()
-		bldr.AddData(witnessProgram)
-
-		redeemScript, err = bldr.Script()
-		if err != nil {
-			return nil, nil, err
-		}
-
-	default:
-		witnessProgram = pkScript
-	}
-
-	return witnessProgram, redeemScript, nil
-}
-
-// ScriptForOutput returns the address, witness program, and redeem script
-// for a given UTXO.
+// ScriptForOutput returns the address metadata and spending scripts for a given
+// UTXO.
 //
 // This method is essential for constructing the necessary scripts to spend a
 // transaction output. It provides the components required to build the
@@ -826,10 +768,10 @@ func buildScriptsForAddressInfo(addressInfo AddressInfo, pkScript []byte,
 //  2. Verify that the address is a public key address that the wallet can
 //     sign for (e.g., P2WKH, NP2WKH, P2TR).
 //  3. Based on the address type, construct the appropriate scripts:
-//     - For nested P2WKH (NP2WKH), it creates a redeem script
-//     (`sigScript`) that contains the P2WKH witness program.
-//     - For native SegWit outputs (P2WKH, P2TR), the `witnessProgram` is
-//     the output's `pkScript`, and the `sigScript` is nil.
+//     - For nested P2WKH (NP2WKH), it returns the inner witness program as the
+//     redeem script.
+//     - For native SegWit outputs (P2WKH, P2TR), the `witnessProgram` is the
+//     output's `pkScript`, while the redeem script is nil.
 //
 // Database Actions:
 //   - This method performs a read-only database access to fetch address
@@ -840,53 +782,78 @@ func buildScriptsForAddressInfo(addressInfo AddressInfo, pkScript []byte,
 //     is typically fast (O(log N) or O(1) with indexing). The script
 //     generation is a constant-time operation.
 func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
-	Script, error) {
+	OutputScriptInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
-		return Script{}, err
+		return OutputScriptInfo{}, err
 	}
 
 	// First, we'll extract the address from the output's pkScript.
 	addr := extractAddrFromPKScript(output.PkScript, w.cfg.ChainParams)
 	if addr == nil {
-		return Script{}, fmt.Errorf("%w: from pkscript %x",
+		return OutputScriptInfo{}, fmt.Errorf("%w: from pkscript %x",
 			ErrUnableToExtractAddress, output.PkScript)
 	}
 
-	// We'll then use the address to look up the managed address from the
-	// database.
-	var managedAddr waddrmgr.ManagedAddress
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
-
-		return err
-	})
+	addressInfo, err := w.GetAddressInfo(ctx, addr)
 	if err != nil {
-		return Script{}, fmt.Errorf("unable to get address info "+
+		return OutputScriptInfo{}, fmt.Errorf("unable to get address info "+
 			"for %s: %w", addr.String(), err)
 	}
 
-	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return Script{}, fmt.Errorf("%w: addr %s",
-			ErrNotPubKeyAddress, managedAddr.Address())
+	if addressInfo.PubKey == nil {
+		return OutputScriptInfo{}, fmt.Errorf("%w: addr %s",
+			ErrNotPubKeyAddress, addressInfo.Addr)
 	}
 
-	witnessProgram, redeemScript, err := buildScriptsForManagedAddress(
-		pubKeyAddr, output.PkScript, w.cfg.ChainParams,
-	)
-	if err != nil {
-		return Script{}, err
+	witnessProgram := output.PkScript
+
+	var redeemScript []byte
+	if addressInfo.AddrType == waddrmgr.NestedWitnessPubKey {
+		redeemScript, err = nestedWitnessProgramFromPubKey(
+			addressInfo.PubKey, w.cfg.ChainParams,
+		)
+		if err != nil {
+			return OutputScriptInfo{}, err
+		}
+
+		// For nested P2WPKH-in-P2SH, the redeem script committed by the outer
+		// P2SH output is the same inner witness program used for signing.
+		witnessProgram = redeemScript
+	} else if addressInfo.AddrType != waddrmgr.PubKeyHash &&
+		addressInfo.AddrType != waddrmgr.WitnessPubKey &&
+		addressInfo.AddrType != waddrmgr.TaprootPubKey {
+
+		return OutputScriptInfo{}, fmt.Errorf("%w: %v",
+			ErrUnsupportedAddressType, addressInfo.AddrType)
 	}
 
-	return Script{
-		Addr:           managedAddr,
+	return OutputScriptInfo{
+		AddressInfo:    addressInfo,
 		WitnessProgram: witnessProgram,
 		RedeemScript:   redeemScript,
 	}, nil
+}
+
+// nestedWitnessProgramFromPubKey builds the inner witness program used by a
+// nested P2WPKH-in-P2SH output from one compressed public key.
+func nestedWitnessProgramFromPubKey(pubKey *btcec.PublicKey,
+	chainParams *chaincfg.Params) ([]byte, error) {
+
+	witnessAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), chainParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new witness pubkey hash: %w", err)
+	}
+
+	witnessProgram, err := txscript.PayToAddrScript(witnessAddr)
+	if err != nil {
+		return nil, fmt.Errorf("pay to witness address: %w", err)
+	}
+
+	return witnessProgram, nil
 }
 
 // buildScriptsForManagedAddress constructs the witness and redeem scripts for a
@@ -894,49 +861,22 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 func buildScriptsForManagedAddress(pubKeyAddr waddrmgr.ManagedPubKeyAddress,
 	pkScript []byte, chainParams *chaincfg.Params) ([]byte, []byte, error) {
 
-	var (
-		witnessProgram []byte
-		redeemScript   []byte
-	)
+	addressInfo, err := addressInfoFromManagedAddress(pubKeyAddr)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	switch {
-	// If we're spending p2wkh output nested within a p2sh output, then
-	// we'll need to attach a sigScript in addition to witness data.
-	case pubKeyAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
-		pubKey := pubKeyAddr.PubKey()
-		pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
-
-		// Next, we'll generate a valid sigScript that will allow us to
-		// spend the p2sh output. The sigScript will contain only a
-		// single push of the p2wkh witness program corresponding to
-		// the matching public key of this address.
-		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-			pubKeyHash, chainParams,
+	witnessProgram := pkScript
+	var redeemScript []byte
+	if addressInfo.AddrType == waddrmgr.NestedWitnessPubKey {
+		redeemScript, err = nestedWitnessProgramFromPubKey(
+			addressInfo.PubKey, chainParams,
 		)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		witnessProgram, err = txscript.PayToAddrScript(p2wkhAddr)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		bldr := txscript.NewScriptBuilder()
-		bldr.AddData(witnessProgram)
-
-		redeemScript, err = bldr.Script()
-		if err != nil {
-			return nil, nil, err
-		}
-
-	// Otherwise, this is a regular p2wkh or p2tr output, so we include the
-	// witness program itself as the subscript to generate the proper
-	// sighash digest. As part of the new sighash digest algorithm, the
-	// p2wkh witness program will be expanded into a regular p2kh
-	// script.
-	default:
-		witnessProgram = pkScript
+		witnessProgram = redeemScript
 	}
 
 	return witnessProgram, redeemScript, nil
@@ -952,28 +892,50 @@ func (w *Wallet) GetDerivationInfo(ctx context.Context,
 	}
 
 	// We'll use the address to look up the derivation path.
-	var managedAddr waddrmgr.ManagedAddress
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
-
-		return err
-	})
+	addressInfo, err := w.GetAddressInfo(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 
-	// We only care about pubkey addresses, as they are the only
-	// ones with derivation paths.
-	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, fmt.Errorf("%w: addr=%v not found",
-			ErrDerivationPathNotFound, addr)
+	return derivationForAddressInfo(addressInfo)
+}
+
+// derivationForAddressInfo constructs a PSBT Bip32Derivation struct from a
+// wallet-owned address metadata record.
+func derivationForAddressInfo(addressInfo AddressInfo) (
+	*psbt.Bip32Derivation, error) {
+
+	// Imported addresses don't have derivation paths.
+	if addressInfo.Imported {
+		return nil, fmt.Errorf("%w: addr=%v is imported",
+			ErrDerivationPathNotFound, addressInfo.Addr)
 	}
 
-	return derivationForManagedAddress(pubKeyAddr)
+	// Only public key addresses carry derivation metadata.
+	if addressInfo.PubKey == nil {
+		return nil, fmt.Errorf("%w: addr=%v not found",
+			ErrDerivationPathNotFound, addressInfo.Addr)
+	}
+
+	// Rebuild the BIP-32 path from the wallet-owned derivation metadata.
+	if addressInfo.Derivation == nil {
+		return nil, fmt.Errorf("%w: derivation info not found for %v",
+			ErrDerivationPathNotFound, addressInfo.Addr)
+	}
+
+	keyScope := addressInfo.Derivation.KeyScope
+
+	return &psbt.Bip32Derivation{
+		PubKey:               addressInfo.PubKey.SerializeCompressed(),
+		MasterKeyFingerprint: addressInfo.Derivation.MasterKeyFingerprint,
+		Bip32Path: []uint32{
+			keyScope.Purpose + hdkeychain.HardenedKeyStart,
+			keyScope.Coin + hdkeychain.HardenedKeyStart,
+			addressInfo.Derivation.Account + hdkeychain.HardenedKeyStart,
+			addressInfo.Derivation.Branch,
+			addressInfo.Derivation.Index,
+		},
+	}, nil
 }
 
 // derivationForManagedAddress constructs a PSBT Bip32Derivation struct from a
@@ -981,33 +943,10 @@ func (w *Wallet) GetDerivationInfo(ctx context.Context,
 func derivationForManagedAddress(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 	*psbt.Bip32Derivation, error) {
 
-	// Imported addresses don't have derivation paths.
-	if pubKeyAddr.Imported() {
-		return nil, fmt.Errorf("%w: addr=%v is imported",
-			ErrDerivationPathNotFound, pubKeyAddr.Address())
+	addressInfo, err := addressInfoFromManagedAddress(pubKeyAddr)
+	if err != nil {
+		return nil, err
 	}
 
-	// Get the derivation info.
-	keyScope, derivPath, ok := pubKeyAddr.DerivationInfo()
-	if !ok {
-		return nil, fmt.Errorf("%w: derivation info not found for %v",
-			ErrDerivationPathNotFound, pubKeyAddr.Address())
-	}
-
-	// Get the public key.
-	pubKey := pubKeyAddr.PubKey()
-
-	derivationInfo := &psbt.Bip32Derivation{
-		PubKey:               pubKey.SerializeCompressed(),
-		MasterKeyFingerprint: derivPath.MasterKeyFingerprint,
-		Bip32Path: []uint32{
-			keyScope.Purpose + hdkeychain.HardenedKeyStart,
-			keyScope.Coin + hdkeychain.HardenedKeyStart,
-			derivPath.Account,
-			derivPath.Branch,
-			derivPath.Index,
-		},
-	}
-
-	return derivationInfo, nil
+	return derivationForAddressInfo(addressInfo)
 }
