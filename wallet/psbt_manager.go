@@ -20,7 +20,6 @@ import (
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -421,43 +420,16 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	tx *wire.MsgTx, utxo *wire.TxOut) error {
 
-	// We'll start by extracting the address from the UTXO's pkScript.
-	// This will be used to look up the managed address from the
-	// database.
-	addr := extractAddrFromPKScript(utxo.PkScript, w.cfg.ChainParams)
-	if addr == nil {
-		return fmt.Errorf("%w: from pkscript %x",
-			ErrUnableToExtractAddress, utxo.PkScript)
-	}
-
-	var (
-		managedAddr waddrmgr.ManagedAddress
-		err         error
-	)
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		managedAddr, err = w.addrStore.Address(addrmgrNs, addr)
-
-		return err
-	})
+	// Reuse the same wallet lookup and script-construction path as the signer,
+	// so PSBT decoration and spending metadata stay in sync.
+	scriptInfo, err := w.ScriptForOutput(ctx, *utxo)
 	if err != nil {
-		return fmt.Errorf("unable to get address info for %s: %w",
-			addr.String(), err)
+		return err
 	}
 
-	// We'll ensure that the managed address is a public key address, as we can
-	// only decorate inputs for which we have the private key.
-	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
-			managedAddr.Address())
-	}
-
-	// With the managed address, we can now get the derivation information for the
-	// address.
-	derivation, err := derivationForManagedAddress(pubKeyAddr)
+	// With the managed address, we can now get the derivation information
+	// for the address.
+	derivation, err := derivationForAddressInfo(scriptInfo.AddressInfo)
 	if err != nil {
 		return err
 	}
@@ -472,18 +444,12 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 
 	// For SegWit v0 inputs, we'll use the SegWit v0 helper.
 	default:
-		// We'll need to build the redeem script for the input.
-		_, redeemScript, err := buildScriptsForManagedAddress(
-			pubKeyAddr, utxo.PkScript, w.cfg.ChainParams,
-		)
-		if err != nil {
-			return err
-		}
-
-		// With the redeem script, we can now populate the PSBT
-		// input.
-		addInputInfoSegWitV0(
-			pInput, tx, utxo, derivation, managedAddr, redeemScript,
+		// With the redeem script, we can now populate the PSBT input.
+		addInputInfoSegWitV0Common(
+			pInput, tx, utxo, derivation,
+			scriptInfo.AddrType.SpendType() ==
+				waddrmgr.SpendTypeNestedWitnessKey,
+			scriptInfo.RedeemScript,
 		)
 	}
 
@@ -672,7 +638,6 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 // for a change output to a PSBT packet.
 func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) error {
-
 	// First, we'll get the script information for the change output.
 	changeScriptInfo, err := w.ScriptForOutput(
 		ctx, *authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
@@ -1385,40 +1350,15 @@ func createTaprootSpendDetails(pInput *psbt.PInput,
 // Returns `ErrUnknownAddressType` if the address type is not supported.
 // Returns `errAlreadySigned` if a valid signature for the derived key already
 // exists.
+//
+// NOTE: Taproot key-path spends must be routed through the taproot-specific
+// signing path before reaching this helper. Grouping `TaprootPubKey` with other
+// unsupported families here used to hide that misrouting.
 func createBip32SpendDetails(pInput *psbt.PInput, utxo *wire.TxOut,
 	addrType waddrmgr.AddressType,
 	derivation *psbt.Bip32Derivation) (SpendDetails, error) {
 
-	// Determine the script to use for signing (subScript).
-	var subScript []byte
-	switch {
-	case len(pInput.RedeemScript) > 0:
-		subScript = pInput.RedeemScript
-
-	case len(pInput.WitnessScript) > 0:
-		subScript = pInput.WitnessScript
-
-	default:
-		subScript = utxo.PkScript
-	}
-
-	var details SpendDetails
-	switch addrType {
-	case waddrmgr.WitnessPubKey, waddrmgr.NestedWitnessPubKey:
-		details = SegwitV0SpendDetails{WitnessScript: subScript}
-
-	case waddrmgr.PubKeyHash:
-		details = LegacySpendDetails{RedeemScript: subScript}
-
-	case waddrmgr.Script, waddrmgr.RawPubKey,
-		waddrmgr.WitnessScript, waddrmgr.TaprootPubKey,
-		waddrmgr.TaprootScript:
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
-	default:
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
-			addrType)
-	}
+	subScript := bip32SubScript(pInput, utxo)
 
 	// Check if we have already signed this input.
 	for _, sig := range pInput.PartialSigs {
@@ -1427,7 +1367,41 @@ func createBip32SpendDetails(pInput *psbt.PInput, utxo *wire.TxOut,
 		}
 	}
 
-	return details, nil
+	signingMethod, err := addrType.SigningMethod()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+			addrType)
+	}
+
+	switch signingMethod {
+	case waddrmgr.SigningMethodWitnessV0:
+		return SegwitV0SpendDetails{WitnessScript: subScript}, nil
+
+	case waddrmgr.SigningMethodLegacy:
+		return LegacySpendDetails{RedeemScript: subScript}, nil
+
+	case waddrmgr.SigningMethodTaprootKeySpend:
+		return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+			addrType)
+	}
+
+	return nil, fmt.Errorf("%w: %v", ErrUnknownAddressType,
+		addrType)
+}
+
+// bip32SubScript returns the subscript that should be used for bip32-based
+// signing decisions.
+func bip32SubScript(pInput *psbt.PInput, utxo *wire.TxOut) []byte {
+	switch {
+	case len(pInput.RedeemScript) > 0:
+		return pInput.RedeemScript
+
+	case len(pInput.WitnessScript) > 0:
+		return pInput.WitnessScript
+
+	default:
+		return utxo.PkScript
+	}
 }
 
 // signTaprootPsbtInput attempts to sign a single Taproot input of a PSBT.
@@ -2196,12 +2170,10 @@ func mergeOutputScripts(dest, src *psbt.POutput) error {
 	return nil
 }
 
-// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a
-// SegWit v0 PSBT input (p2wkh, np2wkh) from the given wallet
-// information.
-func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
-	derivationInfo *psbt.Bip32Derivation, addr waddrmgr.ManagedAddress,
-	witnessProgram []byte) {
+// addInputInfoSegWitV0Common adds the common PSBT fields for SegWit v0 inputs.
+func addInputInfoSegWitV0Common(in *psbt.PInput, prevTx *wire.MsgTx,
+	utxo *wire.TxOut, derivationInfo *psbt.Bip32Derivation,
+	isNestedWitness bool, redeemScript []byte) {
 
 	// As a fix for CVE-2020-14199 we have to always include the full
 	// non-witness UTXO in the PSBT for segwit v0.
@@ -2223,8 +2195,8 @@ func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
 	// For nested P2WKH we need to add the redeem script to the input,
 	// otherwise an offline wallet won't be able to sign for it. For normal
 	// P2WKH this will be nil.
-	if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
-		in.RedeemScript = witnessProgram
+	if isNestedWitness {
+		in.RedeemScript = redeemScript
 	}
 }
 
@@ -2254,19 +2226,6 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}}
 }
 
-// createOutputInfo creates the BIP32 derivation info for an output from a
-// managed wallet pubkey address.
-func createOutputInfo(txOut *wire.TxOut,
-	addr waddrmgr.ManagedPubKeyAddress) (*psbt.POutput, error) {
-
-	addressInfo, err := addressInfoFromManagedAddress(addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return createOutputInfoFromAddressInfo(txOut, addressInfo)
-}
-
 // createOutputInfoFromAddressInfo creates the BIP32 derivation info for an
 // output from wallet-owned address metadata.
 func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
@@ -2287,7 +2246,7 @@ func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
 		Bip32Path: []uint32{
 			addr.Derivation.KeyScope.Purpose + hdkeychain.HardenedKeyStart,
 			addr.Derivation.KeyScope.Coin + hdkeychain.HardenedKeyStart,
-			addr.Derivation.Account,
+			addr.Derivation.Account + hdkeychain.HardenedKeyStart,
 			addr.Derivation.Branch,
 			addr.Derivation.Index,
 		},

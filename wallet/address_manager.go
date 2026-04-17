@@ -856,32 +856,6 @@ func nestedWitnessProgramFromPubKey(pubKey *btcec.PublicKey,
 	return witnessProgram, nil
 }
 
-// buildScriptsForManagedAddress constructs the witness and redeem scripts for a
-// given managed public key address and its corresponding pkScript.
-func buildScriptsForManagedAddress(pubKeyAddr waddrmgr.ManagedPubKeyAddress,
-	pkScript []byte, chainParams *chaincfg.Params) ([]byte, []byte, error) {
-
-	addressInfo, err := addressInfoFromManagedAddress(pubKeyAddr)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	witnessProgram := pkScript
-	var redeemScript []byte
-	if addressInfo.AddrType == waddrmgr.NestedWitnessPubKey {
-		redeemScript, err = nestedWitnessProgramFromPubKey(
-			addressInfo.PubKey, chainParams,
-		)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		witnessProgram = redeemScript
-	}
-
-	return witnessProgram, redeemScript, nil
-}
-
 // GetDerivationInfo returns the BIP-32 derivation path for a given address.
 func (w *Wallet) GetDerivationInfo(ctx context.Context,
 	addr address.Address) (*psbt.Bip32Derivation, error) {
@@ -936,17 +910,4 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 			addressInfo.Derivation.Index,
 		},
 	}, nil
-}
-
-// derivationForManagedAddress constructs a PSBT Bip32Derivation struct from a
-// managed public key address.
-func derivationForManagedAddress(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
-	*psbt.Bip32Derivation, error) {
-
-	addressInfo, err := addressInfoFromManagedAddress(pubKeyAddr)
-	if err != nil {
-		return nil, err
-	}
-
-	return derivationForAddressInfo(addressInfo)
 }
