@@ -838,7 +838,8 @@ func TestImportTaprootScript(t *testing.T) {
 func TestScriptForOutput(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
+	// Arrange: Create a started wallet, one witness output, and matching
+	// managed address metadata.
 	w, deps := createStartedWalletWithMocks(t)
 
 	// Create a new p2wkh address and output.
@@ -865,15 +866,75 @@ func TestScriptForOutput(t *testing.T) {
 		PkScript: pkScript,
 	}
 
-	// Get the script for the output.
+	_, pubKey := deterministicPrivKey(t)
+
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
 	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	deps.pubKeyAddr.On("Imported").Return(false).Once()
+	deps.pubKeyAddr.On("Internal").Return(false).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
+	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	deps.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, false,
+	).Once()
 
+	// Act: Build the spending metadata for the witness output.
 	script, err := w.ScriptForOutput(t.Context(), output)
 	require.NoError(t, err)
 
-	// Check that the script is correct.
+	// Assert: The output metadata matches the native witness spend shape.
+	require.Equal(t, addr, script.Addr)
+	require.Equal(t, waddrmgr.WitnessPubKey, script.AddrType)
 	require.Equal(t, pkScript, script.WitnessProgram)
 	require.Nil(t, script.RedeemScript)
+}
+
+// TestScriptForOutputNestedWitness tests that ScriptForOutput carries the
+// redeem script needed for nested witness outputs.
+func TestScriptForOutputNestedWitness(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a started wallet, a nested witness output, and matching
+	// managed address metadata.
+	w, deps := createStartedWalletWithMocks(t)
+	_, pubKey := deterministicPrivKey(t)
+	witnessProgram, err := txscript.NewScriptBuilder().
+		AddOp(txscript.OP_0).
+		AddData(btcutil.Hash160(pubKey.SerializeCompressed())).
+		Script()
+	require.NoError(t, err)
+
+	addr, err := btcutil.NewAddressScriptHash(witnessProgram, w.cfg.ChainParams)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.addrStore.On("Address", mock.Anything, addr).
+		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
+	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.NestedWitnessPubKey).Once()
+	deps.pubKeyAddr.On("Imported").Return(false).Once()
+	deps.pubKeyAddr.On("Internal").Return(false).Once()
+	deps.pubKeyAddr.On("Compressed").Return(true).Once()
+	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	deps.pubKeyAddr.On("DerivationInfo").Return(
+		waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{}, false,
+	).Once()
+
+	// Act: Build the spending metadata for the nested witness output.
+	scriptInfo, err := w.ScriptForOutput(t.Context(), wire.TxOut{
+		Value:    1000,
+		PkScript: pkScript,
+	})
+	require.NoError(t, err)
+
+	// Assert: The output metadata carries the inner witness program and redeem
+	// script required for nested witness spends.
+	require.Equal(t, addr, scriptInfo.Addr)
+	require.Equal(t, waddrmgr.NestedWitnessPubKey,
+		scriptInfo.AddrType)
+	require.Equal(t, witnessProgram, scriptInfo.WitnessProgram)
+	require.Equal(t, witnessProgram, scriptInfo.RedeemScript)
 }
