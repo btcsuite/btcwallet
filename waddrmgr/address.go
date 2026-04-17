@@ -16,7 +16,6 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -542,75 +541,16 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	derivationPath DerivationPath, pubKey *btcec.PublicKey, compressed bool,
 	addrType AddressType) (*managedAddress, error) {
 
-	// Create a pay-to-pubkey-hash address from the public key.
-	var pubKeyHash []byte
-	if compressed {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeCompressed())
-	} else {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeUncompressed())
+	pubKeyBytes := pubKey.SerializeCompressed()
+	if !compressed {
+		pubKeyBytes = pubKey.SerializeUncompressed()
 	}
 
-	var address btcutil.Address
-	var err error
-
-	switch addrType {
-
-	case NestedWitnessPubKey:
-		// For this address type we'll generate an address which is
-		// backwards compatible to Bitcoin nodes running 0.6.0 onwards, but
-		// allows us to take advantage of segwit's scripting improvements,
-		// and malleability fixes.
-
-		// First, we'll generate a normal p2wkh address from the pubkey hash.
-		witAddr, err := btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Next we'll generate the witness program which can be used as a
-		// pkScript to pay to this generated address.
-		witnessProgram, err := txscript.PayToAddrScript(witAddr)
-		if err != nil {
-			return nil, err
-		}
-
-		// Finally, we'll use the witness program itself as the pre-image
-		// to a p2sh address. In order to spend, we first use the
-		// witnessProgram as the sigScript, then present the proper
-		// <sig, pubkey> pair as the witness.
-		address, err = btcutil.NewAddressScriptHash(
-			witnessProgram, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case PubKeyHash:
-		address, err = btcutil.NewAddressPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case WitnessPubKey:
-		address, err = btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case TaprootPubKey:
-		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
-		address, err = btcutil.NewAddressTaproot(
-			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
+	address, err := addrType.AddrFromPubKeyBytes(
+		pubKeyBytes, m.rootManager.chainParams,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &managedAddress{

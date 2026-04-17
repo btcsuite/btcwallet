@@ -2310,45 +2310,21 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	serializedPubKey, encryptedPrivKey []byte, addrType AddressType,
 	bs *BlockStamp) error {
 
-	// Compute the addressID for our key based on its address type.
-	var addressID []byte
-	switch addrType {
-	case PubKeyHash, WitnessPubKey:
-		addressID = btcutil.Hash160(serializedPubKey)
-
-	case NestedWitnessPubKey:
-		pubKeyHash := btcutil.Hash160(serializedPubKey)
-		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
-			pubKeyHash, s.rootManager.chainParams,
-		)
-		if err != nil {
-			return err
-		}
-		witnessScript, err := txscript.PayToAddrScript(p2wkhAddr)
-		if err != nil {
-			return err
-		}
-		addressID = btcutil.Hash160(witnessScript)
-
-	case TaprootPubKey:
-		internalPubKey, err := btcec.ParsePubKey(serializedPubKey)
-		if err != nil {
-			return err
-		}
-		taprootPubKey := txscript.ComputeTaprootKeyNoScript(
-			internalPubKey,
-		)
-		addressID = schnorr.SerializePubKey(taprootPubKey)
-
-	default:
-		return fmt.Errorf("unsupported address type %v", addrType)
+	address, err := addrType.AddrFromPubKeyBytes(
+		serializedPubKey, s.rootManager.chainParams,
+	)
+	if err != nil {
+		return fmt.Errorf("compute imported address id: %w", err)
 	}
 
+	scriptAddress := address.ScriptAddress()
+
 	// Prevent duplicates.
-	alreadyExists := s.existsAddress(ns, addressID)
+	alreadyExists := s.existsAddress(ns, scriptAddress)
 	if alreadyExists {
 		str := fmt.Sprintf("address for public key %x already exists",
 			serializedPubKey)
+
 		return managerError(ErrDuplicateAddress, str, nil)
 	}
 
@@ -2359,6 +2335,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	if err != nil {
 		str := fmt.Sprintf("failed to encrypt public key for %x",
 			serializedPubKey)
+
 		return managerError(ErrCrypto, str, err)
 	}
 
@@ -2372,7 +2349,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 	// Save the new imported address to the db and update start block (if
 	// needed) in a single transaction.
 	err = putImportedAddress(
-		ns, &s.scope, addressID, ImportedAddrAccount, ssNone,
+		ns, &s.scope, scriptAddress, ImportedAddrAccount, ssNone,
 		encryptedPubKey, encryptedPrivKey,
 	)
 	if err != nil {

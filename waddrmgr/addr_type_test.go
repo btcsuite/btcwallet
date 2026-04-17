@@ -1,9 +1,17 @@
 package waddrmgr
 
 import (
-	"github.com/stretchr/testify/require"
 	"testing"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/stretchr/testify/require"
 )
+
+var testChainParams = chaincfg.RegressionNetParams
 
 // TestAddressTypeLookups verifies the supported address-type lookup paths.
 func TestAddressTypeLookups(t *testing.T) {
@@ -26,11 +34,17 @@ func TestAddressTypeLookups(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, TaprootPubKey, addrTypeByPurpose)
 
+	_, err = AddressType(255).AddrFromPubKeyBytes(nil, &testChainParams)
+	require.ErrorIs(t, err, ErrUnknownAddressType)
+
 	_, err = AddressTypeForScope(KeyScope{Purpose: 1017, Coin: 0})
 	require.ErrorIs(t, err, ErrUnknownAddressType)
 
 	_, err = AddressTypeForPurpose(1017)
 	require.ErrorIs(t, err, ErrUnknownAddressType)
+
+	_, err = Script.AddrFromPubKeyBytes(nil, &testChainParams)
+	require.ErrorIs(t, err, ErrUnsupportedAddressType)
 }
 
 // TestPubKeyAddressTypeMetadata verifies the common metadata for pubkey address
@@ -228,6 +242,78 @@ func TestSupportedSigningAddressType(t *testing.T) {
 			signingMethod, err := testCase.addrType.SigningMethod()
 			require.NoError(t, err)
 			require.Equal(t, testCase.signingMethod, signingMethod)
+		})
+	}
+}
+
+// TestUnsupportedSigningAddressType verifies unsupported address types report
+// no wallet signing path.
+func TestUnsupportedSigningAddressType(t *testing.T) {
+	t.Parallel()
+
+	_, err := WitnessScript.SigningMethod()
+	require.ErrorIs(t, err, ErrUnsupportedAddressType)
+
+	_, err = AddressType(255).SigningMethod()
+	require.ErrorIs(t, err, ErrUnknownAddressType)
+}
+
+// TestAddrFromPubKeyBytes verifies address reconstruction from the wallet's
+// stored pubkey bytes for supported pubkey address types.
+func TestAddrFromPubKeyBytes(t *testing.T) {
+	t.Parallel()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	serializedPubKey := privKey.PubKey().SerializeCompressed()
+
+	testCases := []struct {
+		name     string
+		addrType AddressType
+		want     []byte
+	}{
+		{
+			name:     "pubkey hash",
+			addrType: PubKeyHash,
+			want:     btcutil.Hash160(serializedPubKey),
+		},
+		{
+			name:     "nested witness pubkey",
+			addrType: NestedWitnessPubKey,
+			want: func() []byte {
+				witnessProgram, err := nestedWitnessProgramFromPubKeyBytes(
+					serializedPubKey, &testChainParams,
+				)
+				require.NoError(t, err)
+
+				return btcutil.Hash160(witnessProgram)
+			}(),
+		},
+		{
+			name:     "witness pubkey",
+			addrType: WitnessPubKey,
+			want:     btcutil.Hash160(serializedPubKey),
+		},
+		{
+			name:     "taproot pubkey",
+			addrType: TaprootPubKey,
+			want: schnorr.SerializePubKey(
+				txscript.ComputeTaprootKeyNoScript(privKey.PubKey()),
+			),
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			address, err := testCase.addrType.AddrFromPubKeyBytes(
+				serializedPubKey, &testChainParams,
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, testCase.want, address.ScriptAddress())
 		})
 	}
 }
