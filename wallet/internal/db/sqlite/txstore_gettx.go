@@ -18,24 +18,36 @@ import (
 func (s *Store) GetTx(ctx context.Context,
 	query db.GetTxQuery) (*db.TxInfo, error) {
 
-	row, err := s.queries.GetTransactionByHash(
-		ctx, sqlc.GetTransactionByHashParams{
-			WalletID: int64(query.WalletID),
-			TxHash:   query.Txid[:],
-		},
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("tx %s: %w", query.Txid, db.ErrTxNotFound)
+	var info *db.TxInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		row, err := q.GetTransactionByHash(
+			ctx, sqlc.GetTransactionByHashParams{
+				WalletID: int64(query.WalletID),
+				TxHash:   query.Txid[:],
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("tx %s: %w",
+					query.Txid, db.ErrTxNotFound)
+			}
+
+			return fmt.Errorf("get tx: %w", err)
 		}
 
-		return nil, fmt.Errorf("get tx: %w", err)
+		info, err = txInfoFromRow(
+			row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
+			row.BlockHash, row.BlockTimestamp, row.TxStatus, row.TxLabel,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return txInfoFromRow(
-		row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
-		row.BlockHash, row.BlockTimestamp, row.TxStatus, row.TxLabel,
-	)
+	return info, nil
 }
 
 // txInfoFromRow converts one normalized sqlite query row into the public

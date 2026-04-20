@@ -19,19 +19,32 @@ var _ db.AddressStore = (*Store)(nil)
 func (s *Store) GetAddress(ctx context.Context,
 	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
-	getByScript := func(ctx context.Context,
-		q db.GetAddressQuery) (*db.AddressInfo, error) {
+	var info *db.AddressInfo
 
-		return db.GetAddress(
-			ctx, s.queries.GetAddressByScriptPubKey,
-			sqlc.GetAddressByScriptPubKeyParams{
-				WalletID:     int64(q.WalletID),
-				ScriptPubKey: q.ScriptPubKey,
-			}, addressRowToInfo,
-		)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		getByScript := func(ctx context.Context,
+			query db.GetAddressQuery) (*db.AddressInfo, error) {
+
+			return db.GetAddress(
+				ctx, q.GetAddressByScriptPubKey,
+				sqlc.GetAddressByScriptPubKeyParams{
+					WalletID:     int64(query.WalletID),
+					ScriptPubKey: query.ScriptPubKey,
+				}, addressRowToInfo,
+			)
+		}
+
+		var err error
+
+		info, err = db.GetAddressByQuery(ctx, query, getByScript)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return db.GetAddressByQuery(ctx, query, getByScript)
+	return info, nil
 }
 
 // ListAddresses returns a page of addresses matching the given query.
@@ -42,7 +55,15 @@ func (s *Store) ListAddresses(ctx context.Context,
 		return page.Result[db.AddressInfo, uint32]{}, db.ErrInvalidPageLimit
 	}
 
-	items, err := listAddressesByAccount(ctx, s.queries, query)
+	var items []db.AddressInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		items, err = listAddressesByAccount(ctx, q, query)
+
+		return err
+	})
 	if err != nil {
 		return page.Result[db.AddressInfo, uint32]{}, err
 	}
@@ -70,10 +91,23 @@ func (s *Store) IterAddresses(ctx context.Context,
 func (s *Store) GetAddressSecret(ctx context.Context,
 	addressID uint32) (*db.AddressSecret, error) {
 
-	return db.GetAddressSecret(
-		ctx, s.queries.GetAddressSecret, addressID,
-		addressSecretRowToSecret,
-	)
+	var secret *db.AddressSecret
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		secret, err = db.GetAddressSecret(
+			ctx, q.GetAddressSecret, addressID,
+			addressSecretRowToSecret,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return secret, nil
 }
 
 // NewDerivedAddress creates a new address for a given account and key
