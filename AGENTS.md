@@ -103,6 +103,8 @@ This file is for coding agents working in `btcwallet`.
 - Break functions into logical stanzas separated by blank lines.
 - Add comments where intent is not obvious; explain why, not the mechanics.
 - Every function should have a purpose comment; comments must start with the function name.
+- Every struct field should have a comment, whether exported or private.
+- Put struct field comments on the line above the field, not trailing inline.
 - Exported functions need caller-oriented comments, not just maintainer notes.
 - Wrap long function calls one argument per line with `)` on its own line.
 - If a function declaration spans multiple lines, start the body after a blank line.
