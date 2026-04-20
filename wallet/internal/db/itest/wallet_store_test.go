@@ -79,16 +79,29 @@ func TestCreateWallet_DuplicateName(t *testing.T) {
 	_, err := store.CreateWallet(t.Context(), params)
 	require.NoError(t, err)
 
+	before := store.StatsSnapshot()
+
 	// Attempt to create second wallet with same name.
 	_, err = store.CreateWallet(t.Context(), params)
 	require.Error(t, err, "expected error creating duplicate wallet")
+	requireConstraintSQLError(t, err)
 
-	// We still do not normalize this error across database backends,
-	// and each engine returns its own message. Because of that,
-	// we only check for the shared parts of the message here.
-	require.ErrorContains(t, err, "wallets")
-	require.ErrorContains(t, err, "name")
-	require.ErrorContains(t, err, "constraint")
+	after := store.StatsSnapshot()
+	require.Equal(t, before.Unhealthy, after.Unhealthy)
+	require.Equal(t, before.RetryAttempts, after.RetryAttempts)
+	require.Equal(t, before.RetrySuccesses, after.RetrySuccesses)
+	require.Equal(t, before.RetryExhausted, after.RetryExhausted)
+	require.Equal(t, before.AmbiguousTxCommits, after.AmbiguousTxCommits)
+	require.Equal(t, before.Errors.Backend, after.Errors.Backend)
+	require.Equal(t, before.Errors.TotalErrs+1, after.Errors.TotalErrs)
+	require.Equal(
+		t,
+		before.Errors.PermanentErrs+1,
+		after.Errors.PermanentErrs,
+	)
+	require.Equal(t, before.Errors.Constraint+1, after.Errors.Constraint)
+	require.Equal(t, before.Errors.TransientErrs, after.Errors.TransientErrs)
+	require.Equal(t, before.Errors.FatalErrs, after.Errors.FatalErrs)
 }
 
 // TestCreateWallet_Variants tests different wallet types.
@@ -156,10 +169,14 @@ func TestGetWallet_NotFound(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	before := store.StatsSnapshot()
 
 	_, err := store.GetWallet(t.Context(), "non-existent-wallet")
 	require.Error(t, err)
 	require.ErrorIs(t, err, db.ErrWalletNotFound)
+
+	after := store.StatsSnapshot()
+	require.Equal(t, before, after)
 }
 
 // TestListWallets verifies that ListWallets correctly returns wallets and
@@ -204,9 +221,13 @@ func TestListWalletsZeroLimit(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	before := store.StatsSnapshot()
 
 	_, err := store.ListWallets(t.Context(), db.ListWalletsQuery{})
 	require.ErrorIs(t, err, db.ErrInvalidPageLimit)
+
+	after := store.StatsSnapshot()
+	require.Equal(t, before, after)
 }
 
 // TestListWalletsPagination verifies that ListWallets paginates correctly and
@@ -763,6 +784,7 @@ func TestUpdateWallet_NotFound(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	before := store.StatsSnapshot()
 
 	updateParams := db.UpdateWalletParams{
 		WalletID: 99999, // Non-existent ID.
@@ -771,6 +793,9 @@ func TestUpdateWallet_NotFound(t *testing.T) {
 	err := store.UpdateWallet(t.Context(), updateParams)
 	require.Error(t, err)
 	require.ErrorIs(t, err, db.ErrWalletNotFound)
+
+	after := store.StatsSnapshot()
+	require.Equal(t, before, after)
 }
 
 // TestGetEncryptedHDSeed verifies retrieving the encrypted HD seed.
