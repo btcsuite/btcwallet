@@ -1,13 +1,17 @@
 package pg
 
 import (
+	"errors"
 	"io"
 	"testing"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+var errTestDup = errors.New("dup")
 
 // codeClassificationTestCase defines one SQLSTATE mapping expectation.
 type codeClassificationTestCase struct {
@@ -115,4 +119,44 @@ func TestMapErr(t *testing.T) {
 	require.Equal(t, dberr.BackendPostgres, err.Backend)
 	require.Equal(t, dberr.ReasonReadOnly, err.Reason)
 	require.Equal(t, dberr.ClassFatal, err.Class())
+}
+
+// TestClassifyError verifies that PostgreSQL classification preserves domain
+// errors while still returning shared SQL wrappers for backend failures.
+func TestClassifyError(t *testing.T) {
+	t.Parallel()
+
+	store := &Store{}
+
+	t.Run("domain error", func(t *testing.T) {
+		t.Parallel()
+
+		err := db.ErrWalletNotFound
+		require.Same(t, err, store.ClassifyError(err))
+	})
+
+	t.Run("existing sql error", func(t *testing.T) {
+		t.Parallel()
+
+		err := dberr.NewSQLError(
+			dberr.BackendPostgres,
+			dberr.ReasonConstraint,
+			codeUniqueViolation,
+			errTestDup,
+		)
+		require.Same(t, err, store.ClassifyError(err))
+	})
+
+	t.Run("backend error", func(t *testing.T) {
+		t.Parallel()
+
+		classifiedErr := store.ClassifyError(&pgconn.PgError{
+			Code:    codeUniqueViolation,
+			Message: "duplicate key",
+		})
+
+		var sqlErr *dberr.SQLError
+		require.ErrorAs(t, classifiedErr, &sqlErr)
+		require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
+	})
 }

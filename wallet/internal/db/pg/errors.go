@@ -1,4 +1,3 @@
-// Package pg contains PostgreSQL-specific SQL helpers.
 package pg
 
 import (
