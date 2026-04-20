@@ -2236,6 +2236,77 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 	return s.toImportedPublicManagedAddress(pubKey, true)
 }
 
+// importPublicKey imports a public key into the address manager and updates the
+// wallet's start block if necessary. An error is returned if the public key
+// already exists.
+func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
+	serializedPubKey, encryptedPrivKey []byte, addrType AddressType,
+	bs *BlockStamp) error {
+
+	address, err := addrType.AddrFromPubKeyBytes(
+		serializedPubKey, s.rootManager.chainParams,
+	)
+	if err != nil {
+		return fmt.Errorf("compute imported address id: %w", err)
+	}
+
+	scriptAddress := address.ScriptAddress()
+
+	// Prevent duplicates.
+	alreadyExists := s.existsAddress(ns, scriptAddress)
+	if alreadyExists {
+		str := fmt.Sprintf("address for public key %x already exists",
+			serializedPubKey)
+
+		return managerError(ErrDuplicateAddress, str, nil)
+	}
+
+	// Encrypt public key.
+	encryptedPubKey, err := s.rootManager.cryptoKeyPub.Encrypt(
+		serializedPubKey,
+	)
+	if err != nil {
+		str := fmt.Sprintf("failed to encrypt public key for %x",
+			serializedPubKey)
+
+		return managerError(ErrCrypto, str, err)
+	}
+
+	// The start block needs to be updated when the newly imported address
+	// is before the current one.
+	s.rootManager.mtx.Lock()
+	updateStartBlock := bs != nil &&
+		bs.Height < s.rootManager.syncState.startBlock.Height
+	s.rootManager.mtx.Unlock()
+
+	// Save the new imported address to the db and update start block (if
+	// needed) in a single transaction.
+	err = putImportedAddress(
+		ns, &s.scope, scriptAddress, ImportedAddrAccount, ssNone,
+		encryptedPubKey, encryptedPrivKey,
+	)
+	if err != nil {
+		return err
+	}
+
+	if updateStartBlock {
+		err := putStartBlock(ns, bs)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Now that the database has been updated, update the start block in
+	// memory too if needed.
+	if updateStartBlock {
+		s.rootManager.mtx.Lock()
+		s.rootManager.syncState.startBlock = *bs
+		s.rootManager.mtx.Unlock()
+	}
+
+	return nil
+}
+
 // DeriveAddr derives a single address and its corresponding pkScript for the
 // given account, branch, and index. This method relies on the in-memory
 // account state and extended public keys, avoiding database access.
@@ -2310,77 +2381,6 @@ func (s *ScopedKeyManager) DeriveAddrs(account uint32, branch uint32,
 	}
 
 	return addrs, scripts, nil
-}
-
-// importPublicKey imports a public key into the address manager and updates the
-// wallet's start block if necessary. An error is returned if the public key
-// already exists.
-func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
-	serializedPubKey, encryptedPrivKey []byte, addrType AddressType,
-	bs *BlockStamp) error {
-
-	address, err := addrType.AddrFromPubKeyBytes(
-		serializedPubKey, s.rootManager.chainParams,
-	)
-	if err != nil {
-		return fmt.Errorf("compute imported address id: %w", err)
-	}
-
-	scriptAddress := address.ScriptAddress()
-
-	// Prevent duplicates.
-	alreadyExists := s.existsAddress(ns, scriptAddress)
-	if alreadyExists {
-		str := fmt.Sprintf("address for public key %x already exists",
-			serializedPubKey)
-
-		return managerError(ErrDuplicateAddress, str, nil)
-	}
-
-	// Encrypt public key.
-	encryptedPubKey, err := s.rootManager.cryptoKeyPub.Encrypt(
-		serializedPubKey,
-	)
-	if err != nil {
-		str := fmt.Sprintf("failed to encrypt public key for %x",
-			serializedPubKey)
-
-		return managerError(ErrCrypto, str, err)
-	}
-
-	// The start block needs to be updated when the newly imported address
-	// is before the current one.
-	s.rootManager.mtx.Lock()
-	updateStartBlock := bs != nil &&
-		bs.Height < s.rootManager.syncState.startBlock.Height
-	s.rootManager.mtx.Unlock()
-
-	// Save the new imported address to the db and update start block (if
-	// needed) in a single transaction.
-	err = putImportedAddress(
-		ns, &s.scope, scriptAddress, ImportedAddrAccount, ssNone,
-		encryptedPubKey, encryptedPrivKey,
-	)
-	if err != nil {
-		return err
-	}
-
-	if updateStartBlock {
-		err := putStartBlock(ns, bs)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Now that the database has been updated, update the start block in
-	// memory too if needed.
-	if updateStartBlock {
-		s.rootManager.mtx.Lock()
-		s.rootManager.syncState.startBlock = *bs
-		s.rootManager.mtx.Unlock()
-	}
-
-	return nil
 }
 
 // toImportedPrivateManagedAddress converts an imported private key to an
