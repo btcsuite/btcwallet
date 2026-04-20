@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	_ "modernc.org/sqlite" // Import sqlite driver for sqlite database/sql support.
@@ -13,8 +14,14 @@ import (
 
 // Store is the SQLite implementation of the WalletStore interface.
 type Store struct {
-	db      *sql.DB
+	// db is the shared SQLite connection pool.
+	db *sql.DB
+
+	// queries executes SQLite statements on db.
 	queries *sqlc.Queries
+
+	// runtimeStats tracks shared runtime counters and unhealthy state.
+	runtimeStats dbruntime.Stats
 }
 
 // NewStore creates a new SQLite-based WalletStore. It handles the full

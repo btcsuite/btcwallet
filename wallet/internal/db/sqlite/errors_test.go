@@ -2,13 +2,17 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/stretchr/testify/require"
 	sqlite3 "modernc.org/sqlite/lib"
 )
+
+var errTestDup = errors.New("dup")
 
 // TestMapErrConstraint verifies that SQLite constraint violations are mapped to
 // permanent constraint failures.
@@ -86,4 +90,64 @@ func TestHelpers(t *testing.T) {
 		reasonByCode[sqlite3.SQLITE_NOTFOUND])
 	require.Equal(t, sqlite3.SQLITE_CONSTRAINT,
 		primaryCode(sqlite3.SQLITE_CONSTRAINT_UNIQUE))
+}
+
+// TestClassifyError verifies that SQLite classification preserves domain errors
+// while still returning shared SQL wrappers for backend failures.
+func TestClassifyError(t *testing.T) {
+	t.Parallel()
+
+	store := &Store{}
+
+	t.Run("domain error", func(t *testing.T) {
+		t.Parallel()
+
+		err := db.ErrWalletNotFound
+		require.Same(t, err, store.ClassifyError(err))
+	})
+
+	t.Run("existing sql error", func(t *testing.T) {
+		t.Parallel()
+
+		err := dberr.NewSQLError(
+			dberr.BackendSQLite,
+			dberr.ReasonConstraint,
+			"19",
+			errTestDup,
+		)
+		require.Same(t, err, store.ClassifyError(err))
+	})
+
+	t.Run("backend error", func(t *testing.T) {
+		t.Parallel()
+
+		dbPath := filepath.Join(t.TempDir(), "wallet.db")
+		dbConn, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, dbConn.Close())
+		})
+
+		ctx := t.Context()
+		_, err = dbConn.ExecContext(
+			ctx, `CREATE TABLE demo (id INTEGER PRIMARY KEY, val TEXT UNIQUE)`,
+		)
+		require.NoError(t, err)
+
+		_, err = dbConn.ExecContext(
+			ctx, `INSERT INTO demo (val) VALUES ('dup')`,
+		)
+		require.NoError(t, err)
+
+		_, err = dbConn.ExecContext(
+			ctx, `INSERT INTO demo (val) VALUES ('dup')`,
+		)
+		require.Error(t, err)
+
+		classifiedErr := store.ClassifyError(err)
+
+		var sqlErr *dberr.SQLError
+		require.ErrorAs(t, classifiedErr, &sqlErr)
+		require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
+	})
 }
