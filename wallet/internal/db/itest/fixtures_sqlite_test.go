@@ -5,15 +5,35 @@ package itest
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
-	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
+	sqlc "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
+
+// testBackend returns the SQL backend expected by SQLite itests.
+func testBackend() dberr.Backend {
+	return dberr.BackendSQLite
+}
+
+// requireConstraintSQLError verifies that a real SQLite constraint failure
+// reaches callers as the shared SQL error wrapper.
+func requireConstraintSQLError(t *testing.T, err error) {
+	t.Helper()
+
+	var sqlErr *dberr.SQLError
+	require.ErrorAs(t, err, &sqlErr)
+	require.Equal(t, testBackend(), sqlErr.Backend)
+	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
+	require.Equal(t, dberr.ClassPermanent, sqlErr.Class())
+	require.True(t, errors.Is(err, sqlErr))
+}
 
 // CreateBlockFixture inserts a test block into the database and returns it.
 func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
