@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightninglabs/neutrino"
@@ -41,6 +42,12 @@ type mockStore struct {
 // A compile-time assertion to ensure that mockStore implements the db.Store
 // interface.
 var _ db.Store = (*mockStore)(nil)
+
+// StatsSnapshot returns an empty runtime snapshot for tests that use the mock
+// kvdb store.
+func (m *mockStore) StatsSnapshot() dbruntime.StatsSnapshot {
+	return dbruntime.StatsSnapshot{}
+}
 
 // GetUtxo implements the db.UTXOStore interface.
 func (m *mockStore) GetUtxo(ctx context.Context,
