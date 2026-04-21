@@ -82,16 +82,3 @@ func (s *Store) Close() error {
 
 	return nil
 }
-
-// ExecuteTx executes a function within a database transaction. The function
-// receives a transactional query executor and should perform all database
-// operations using it. The transaction will be automatically committed on
-// success or rolled back on error.
-func (s *Store) ExecuteTx(ctx context.Context,
-	fn func(*sqlc.Queries) error) error {
-
-	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
-		qtx := s.queries.WithTx(tx)
-		return fn(qtx)
-	})
-}
