@@ -260,8 +260,8 @@ type AddressStore interface {
 	// GetAddressSecret retrieves the encrypted secret material for a given
 	// address. Returns the AddressSecret containing encrypted private key
 	// and scripts, or an error if the secret does not exist.
-	GetAddressSecret(ctx context.Context, addressID uint32) (*AddressSecret,
-		error)
+	GetAddressSecret(ctx context.Context,
+		query GetAddressSecretQuery) (*AddressSecret, error)
 
 	// ListAddressTypes returns all supported address types along with their
 	// readable descriptions, wrapped in AddressTypeInfo values.

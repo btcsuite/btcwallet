@@ -62,17 +62,18 @@ func AccountKeyFromImportedParams(
 // information using the provided getter function and converts it to an
 // AddressSecret with error handling.
 func GetAddressSecret[Row any](ctx context.Context,
-	getter func(context.Context, int64) (Row, error), addressID uint32,
+	getter func(context.Context, int64, int64) (Row, error),
+	query GetAddressSecretQuery,
 	toSecret func(Row) (*AddressSecret, error)) (*AddressSecret, error) {
 
-	row, err := getter(ctx, int64(addressID))
+	row, err := getter(ctx, int64(query.WalletID), int64(query.AddressID))
 	if err == nil {
 		return toSecret(row)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("address secret for address %d: %w",
-			addressID, ErrAddressNotFound)
+		return nil, fmt.Errorf("address secret for wallet %d address %d: %w",
+			query.WalletID, query.AddressID, ErrAddressNotFound)
 	}
 
 	return nil, fmt.Errorf("get address secret: %w", err)
