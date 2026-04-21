@@ -18,11 +18,28 @@ import (
 func (s *Store) ListTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
-	if query.UnminedOnly {
-		return s.listTxnsWithoutBlock(ctx, query.WalletID)
+	var txns []db.TxInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		if query.UnminedOnly {
+			var err error
+
+			txns, err = s.listTxnsWithoutBlock(ctx, q, query.WalletID)
+
+			return err
+		}
+
+		var err error
+
+		txns, err = s.listConfirmedTxns(ctx, q, query)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return s.listConfirmedTxns(ctx, query)
+	return txns, nil
 }
 
 // listTxnsWithoutBlock loads every transaction row that currently has no
@@ -30,9 +47,9 @@ func (s *Store) ListTxns(ctx context.Context,
 // retained invalid history that rollback or invalidation flows left without a
 // confirming block.
 func (s *Store) listTxnsWithoutBlock(ctx context.Context,
-	walletID uint32) ([]db.TxInfo, error) {
+	q *sqlc.Queries, walletID uint32) ([]db.TxInfo, error) {
 
-	rows, err := s.queries.ListTransactionsWithoutBlock(ctx, int64(walletID))
+	rows, err := q.ListTransactionsWithoutBlock(ctx, int64(walletID))
 	if err != nil {
 		return nil, fmt.Errorf("list txns without block: %w", err)
 	}
@@ -56,7 +73,7 @@ func (s *Store) listTxnsWithoutBlock(ctx context.Context,
 // listConfirmedTxns loads the confirmed height-range view used by ListTxns
 // when callers query mined history.
 func (s *Store) listConfirmedTxns(ctx context.Context,
-	query db.ListTxnsQuery) ([]db.TxInfo, error) {
+	q *sqlc.Queries, query db.ListTxnsQuery) ([]db.TxInfo, error) {
 
 	startHeight, err := db.Uint32ToInt32(query.StartHeight)
 	if err != nil {
@@ -68,7 +85,7 @@ func (s *Store) listConfirmedTxns(ctx context.Context,
 		return nil, fmt.Errorf("convert end height: %w", err)
 	}
 
-	rows, err := s.queries.ListTransactionsByHeightRange(
+	rows, err := q.ListTransactionsByHeightRange(
 		ctx, sqlc.ListTransactionsByHeightRangeParams{
 			WalletID:    int64(query.WalletID),
 			StartHeight: startHeight,
