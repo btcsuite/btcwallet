@@ -17,11 +17,24 @@ var _ db.AccountStore = (*Store)(nil)
 func (s *Store) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
-	getQueries := accountGetQueries{q: s.queries}
+	var account *db.AccountInfo
 
-	return db.GetAccountByQuery(
-		ctx, query, getQueries.byNumber, getQueries.byName,
-	)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		getQueries := accountGetQueries{q: q}
+
+		var err error
+
+		account, err = db.GetAccountByQuery(
+			ctx, query, getQueries.byNumber, getQueries.byName,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return account, nil
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
@@ -29,11 +42,25 @@ func (s *Store) GetAccount(ctx context.Context,
 func (s *Store) ListAccounts(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	listQueries := accountListQueries{q: s.queries}
+	var accounts []db.AccountInfo
 
-	return db.ListAccountsByQuery(
-		ctx, query, listQueries.byScope, listQueries.byName, listQueries.all,
-	)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		listQueries := accountListQueries{q: q}
+
+		var err error
+
+		accounts, err = db.ListAccountsByQuery(
+			ctx, query, listQueries.byScope, listQueries.byName,
+			listQueries.all,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return accounts, nil
 }
 
 // RenameAccount changes the name of an account. The account can be identified
@@ -41,11 +68,13 @@ func (s *Store) ListAccounts(ctx context.Context,
 func (s *Store) RenameAccount(ctx context.Context,
 	params db.RenameAccountParams) error {
 
-	renameQueries := accountRenameQueries{q: s.queries}
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		renameQueries := accountRenameQueries{q: qtx}
 
-	return db.RenameAccountByQuery(
-		ctx, params, renameQueries.byNumber, renameQueries.byName,
-	)
+		return db.RenameAccountByQuery(
+			ctx, params, renameQueries.byNumber, renameQueries.byName,
+		)
+	})
 }
 
 // CreateDerivedAccount creates a new derived account with the given name and
@@ -61,7 +90,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 	var info *db.AccountInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -99,7 +128,9 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 		accNumber, err := db.Int64ToUint32(row.AccountNumber.Int64)
 		if err != nil {
-			return fmt.Errorf("%w: %w", db.ErrMaxAccountNumberReached, err)
+			return fmt.Errorf("%w: %w",
+				db.ErrMaxAccountNumberReached, err,
+			)
 		}
 
 		info = db.BuildAccountInfo(
@@ -125,7 +156,7 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 
 	var props *db.AccountProperties
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		var err error
 
 		props, err = db.CreateImportedAccount(

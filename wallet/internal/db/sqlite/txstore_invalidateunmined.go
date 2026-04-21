@@ -16,7 +16,7 @@ import (
 func (s *Store) InvalidateUnminedTx(ctx context.Context,
 	params db.InvalidateUnminedTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.InvalidateUnminedTxWithOps(
 			ctx, params, invalidateUnminedTxOps{qtx: qtx},
 		)

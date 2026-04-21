@@ -21,7 +21,7 @@ func (s *Store) LeaseOutput(ctx context.Context,
 
 	var lease *db.LeasedOutput
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		acquiredLease, err := db.LeaseOutputWithOps(
 			ctx, params, &leaseOutputOps{qtx: qtx},
 		)

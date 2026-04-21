@@ -23,7 +23,7 @@ func (s *Store) CreateWallet(ctx context.Context,
 
 	var info *db.WalletInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		walletParams := sqlc.CreateWalletParams{
 			WalletName:              params.Name,
 			IsImported:              params.IsImported,
@@ -117,30 +117,41 @@ func (s *Store) CreateWallet(ctx context.Context,
 func (s *Store) GetWallet(ctx context.Context,
 	name string) (*db.WalletInfo, error) {
 
-	row, err := s.queries.GetWalletByName(ctx, name)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("wallet %q: %w", name,
-				db.ErrWalletNotFound)
+	var info *db.WalletInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		row, err := q.GetWalletByName(ctx, name)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("wallet %q: %w", name,
+					db.ErrWalletNotFound)
+			}
+
+			return fmt.Errorf("get wallet: %w", err)
 		}
 
-		return nil, fmt.Errorf("get wallet: %w", err)
+		info, err = buildWalletInfo(walletRowParams{
+			id:                     row.ID,
+			name:                   row.WalletName,
+			isImported:             row.IsImported,
+			managerVersion:         row.ManagerVersion,
+			isWatchOnly:            row.IsWatchOnly,
+			syncedHeight:           row.SyncedHeight,
+			syncedBlockHash:        row.SyncedBlockHash,
+			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
+			birthdayHeight:         row.BirthdayHeight,
+			birthdayTimestamp:      row.BirthdayTimestamp,
+			birthdayBlockHash:      row.BirthdayBlockHash,
+			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+		})
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return buildWalletInfo(walletRowParams{
-		id:                     row.ID,
-		name:                   row.WalletName,
-		isImported:             row.IsImported,
-		managerVersion:         row.ManagerVersion,
-		isWatchOnly:            row.IsWatchOnly,
-		syncedHeight:           row.SyncedHeight,
-		syncedBlockHash:        row.SyncedBlockHash,
-		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-		birthdayHeight:         row.BirthdayHeight,
-		birthdayTimestamp:      row.BirthdayTimestamp,
-		birthdayBlockHash:      row.BirthdayBlockHash,
-		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-	})
+	return info, nil
 }
 
 // ListWallets returns a page of wallets matching the given query.
@@ -151,23 +162,29 @@ func (s *Store) ListWallets(ctx context.Context,
 		return page.Result[db.WalletInfo, uint32]{}, db.ErrInvalidPageLimit
 	}
 
-	rows, err := s.queries.ListWallets(
-		ctx, listWalletsParams(query.Page),
-	)
-	if err != nil {
-		return page.Result[db.WalletInfo, uint32]{},
-			fmt.Errorf("list wallets page: %w", err)
-	}
+	var items []db.WalletInfo
 
-	items := make([]db.WalletInfo, len(rows))
-	for i, row := range rows {
-		item, errMap := listWalletRowToInfo(row)
-		if errMap != nil {
-			return page.Result[db.WalletInfo, uint32]{},
-				fmt.Errorf("list wallets page: map row: %w", errMap)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		rows, err := q.ListWallets(ctx, listWalletsParams(query.Page))
+		if err != nil {
+			return fmt.Errorf("list wallets page: %w", err)
 		}
 
-		items[i] = *item
+		items = make([]db.WalletInfo, len(rows))
+		for i, row := range rows {
+			item, errMap := listWalletRowToInfo(row)
+			if errMap != nil {
+				return fmt.Errorf("list wallets page: map row: %w",
+					errMap)
+			}
+
+			items[i] = *item
+		}
+
+		return nil
+	})
+	if err != nil {
+		return page.Result[db.WalletInfo, uint32]{}, err
 	}
 
 	result := page.BuildResult(
@@ -196,7 +213,7 @@ func (s *Store) IterWallets(ctx context.Context,
 func (s *Store) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
 			err := ensureBlockExists(
@@ -241,23 +258,34 @@ func (s *Store) UpdateWallet(ctx context.Context,
 func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 	walletID uint32) ([]byte, error) {
 
-	secrets, err := s.queries.GetWalletSecrets(ctx, int64(walletID))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("secrets for wallet %d: %w",
-				walletID, db.ErrWalletNotFound)
+	var encrypted []byte
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		secrets, err := q.GetWalletSecrets(ctx, int64(walletID))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("secrets for wallet %d: %w",
+					walletID, db.ErrWalletNotFound)
+			}
+
+			return fmt.Errorf("get wallet secrets: %w", err)
 		}
 
-		return nil, fmt.Errorf("get wallet secrets: %w", err)
+		if len(secrets.EncryptedMasterHdPrivKey) == 0 {
+			return fmt.Errorf(
+				"encrypted master privkey for wallet %d: %w", walletID,
+				db.ErrSecretNotFound)
+		}
+
+		encrypted = secrets.EncryptedMasterHdPrivKey
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	if len(secrets.EncryptedMasterHdPrivKey) == 0 {
-		return nil, fmt.Errorf(
-			"encrypted master privkey for wallet %d: %w", walletID,
-			db.ErrSecretNotFound)
-	}
-
-	return secrets.EncryptedMasterHdPrivKey, nil
+	return encrypted, nil
 }
 
 // UpdateWalletSecrets updates the secrets for the wallet.
@@ -272,17 +300,19 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 		WalletID:                 int64(params.WalletID),
 	}
 
-	rowsAffected, err := s.queries.UpdateWalletSecrets(ctx, secretsParams)
-	if err != nil {
-		return fmt.Errorf("update wallet secrets: %w", err)
-	}
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		rowsAffected, err := qtx.UpdateWalletSecrets(ctx, secretsParams)
+		if err != nil {
+			return fmt.Errorf("update wallet secrets: %w", err)
+		}
 
-	if rowsAffected == 0 {
-		return fmt.Errorf("wallet secrets for wallet %d: %w",
-			params.WalletID, db.ErrWalletNotFound)
-	}
+		if rowsAffected == 0 {
+			return fmt.Errorf("wallet secrets for wallet %d: %w",
+				params.WalletID, db.ErrWalletNotFound)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // walletRowParams holds the parameters needed to build a

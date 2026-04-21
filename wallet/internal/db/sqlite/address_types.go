@@ -28,9 +28,22 @@ func addressTypeRowToInfo(row sqlc.AddressType) (db.AddressTypeInfo,
 func (s *Store) ListAddressTypes(ctx context.Context) (
 	[]db.AddressTypeInfo, error) {
 
-	return db.ListAddressTypes(
-		ctx, s.queries.ListAddressTypes, addressTypeRowToInfo,
-	)
+	var infos []db.AddressTypeInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		infos, err = db.ListAddressTypes(
+			ctx, q.ListAddressTypes, addressTypeRowToInfo,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return infos, nil
 }
 
 // GetAddressType returns the AddressTypeInfo associated with the given address
@@ -38,8 +51,21 @@ func (s *Store) ListAddressTypes(ctx context.Context) (
 func (s *Store) GetAddressType(ctx context.Context,
 	id db.AddressType) (db.AddressTypeInfo, error) {
 
-	return db.GetAddressTypeByID(
-		ctx, s.queries.GetAddressTypeByID, int64(id), id,
-		addressTypeRowToInfo,
-	)
+	var info db.AddressTypeInfo
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		info, err = db.GetAddressTypeByID(
+			ctx, q.GetAddressTypeByID, int64(id), id,
+			addressTypeRowToInfo,
+		)
+
+		return err
+	})
+	if err != nil {
+		return db.AddressTypeInfo{}, err
+	}
+
+	return info, nil
 }

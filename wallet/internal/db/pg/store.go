@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
@@ -14,8 +15,14 @@ import (
 // Store is the PostgreSQL implementation of the
 // WalletStore interface.
 type Store struct {
-	db      *sql.DB
+	// db is the shared PostgreSQL connection pool.
+	db *sql.DB
+
+	// queries executes PostgreSQL statements on db.
 	queries *sqlc.Queries
+
+	// runtimeStats tracks shared runtime counters and unhealthy state.
+	runtimeStats dbruntime.Stats
 }
 
 // NewStore creates a new PostgreSQL-based WalletStore. It handles
@@ -74,17 +81,4 @@ func (s *Store) Close() error {
 	}
 
 	return nil
-}
-
-// ExecuteTx executes a function within a database transaction. The function
-// receives a transactional query executor and should perform all database
-// operations using it. The transaction will be automatically committed on
-// success or rolled back on error.
-func (s *Store) ExecuteTx(ctx context.Context,
-	fn func(*sqlc.Queries) error) error {
-
-	return db.ExecInTx(ctx, s.db, func(tx *sql.Tx) error {
-		qtx := s.queries.WithTx(tx)
-		return fn(qtx)
-	})
 }
