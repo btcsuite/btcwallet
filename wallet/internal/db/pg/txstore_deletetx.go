@@ -21,7 +21,7 @@ import (
 func (s *Store) DeleteTx(ctx context.Context,
 	params db.DeleteTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.DeleteTxWithOps(ctx, params, deleteTxOps{qtx: qtx})
 	})
 }
