@@ -23,7 +23,7 @@ func (s *Store) CreateWallet(ctx context.Context,
 
 	var info *db.WalletInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		walletParams := sqlc.CreateWalletParams{
 			WalletName:              params.Name,
 			IsImported:              params.IsImported,
@@ -196,7 +196,7 @@ func (s *Store) IterWallets(ctx context.Context,
 func (s *Store) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		// Insert blocks if needed.
 		if params.SyncedTo != nil {
 			err := ensureBlockExists(
@@ -272,17 +272,19 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 		WalletID:                 int64(params.WalletID),
 	}
 
-	rowsAffected, err := s.queries.UpdateWalletSecrets(ctx, secretsParams)
-	if err != nil {
-		return fmt.Errorf("update wallet secrets: %w", err)
-	}
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		rowsAffected, err := qtx.UpdateWalletSecrets(ctx, secretsParams)
+		if err != nil {
+			return fmt.Errorf("update wallet secrets: %w", err)
+		}
 
-	if rowsAffected == 0 {
-		return fmt.Errorf("wallet secrets for wallet %d: %w",
-			params.WalletID, db.ErrWalletNotFound)
-	}
+		if rowsAffected == 0 {
+			return fmt.Errorf("wallet secrets for wallet %d: %w",
+				params.WalletID, db.ErrWalletNotFound)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // walletRowParams holds the parameters needed to build a
