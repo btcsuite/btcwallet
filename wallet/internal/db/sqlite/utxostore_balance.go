@@ -16,20 +16,33 @@ func (s *Store) Balance(ctx context.Context,
 
 	nowUTC := time.Now().UTC()
 
-	balance, err := s.queries.Balance(ctx, sqlc.BalanceParams{
-		NowUtc:           nowUTC,
-		WalletID:         int64(params.WalletID),
-		AccountNumber:    db.NullableUint32ToSQLInt64(params.Account),
-		MinConfirms:      db.NullableInt32ToSQLInt64(params.MinConfs),
-		MaxConfirms:      db.NullableInt32ToSQLInt64(params.MaxConfs),
-		CoinbaseMaturity: db.NullableInt32ToSQLInt64(params.CoinbaseMaturity),
+	var result db.BalanceResult
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		balance, err := q.Balance(ctx, sqlc.BalanceParams{
+			NowUtc:        nowUTC,
+			WalletID:      int64(params.WalletID),
+			AccountNumber: db.NullableUint32ToSQLInt64(params.Account),
+			MinConfirms:   db.NullableInt32ToSQLInt64(params.MinConfs),
+			MaxConfirms:   db.NullableInt32ToSQLInt64(params.MaxConfs),
+			CoinbaseMaturity: db.NullableInt32ToSQLInt64(
+				params.CoinbaseMaturity,
+			),
+		})
+		if err != nil {
+			return fmt.Errorf("balance: %w", err)
+		}
+
+		result = db.BalanceResult{
+			Total:  btcutil.Amount(balance.TotalBalance),
+			Locked: btcutil.Amount(balance.LockedBalance),
+		}
+
+		return nil
 	})
 	if err != nil {
-		return db.BalanceResult{}, fmt.Errorf("balance: %w", err)
+		return db.BalanceResult{}, err
 	}
 
-	return db.BalanceResult{
-		Total:  btcutil.Amount(balance.TotalBalance),
-		Locked: btcutil.Amount(balance.LockedBalance),
-	}, nil
+	return result, nil
 }
