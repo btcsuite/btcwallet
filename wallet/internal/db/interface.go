@@ -6,6 +6,7 @@ import (
 	"iter"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 )
 
 var (
@@ -127,10 +128,13 @@ var (
 // TODO(yy): Break down wallet managers into independent components.
 //
 // TODO(yy): Remove the linter ignore once Store grows beyond UTXOStore.
-//
-//nolint:iface // Transitional alias until Store grows beyond UTXOStore.
 type Store interface {
 	UTXOStore
+
+	// StatsSnapshot returns the current runtime counters tracked by the
+	// backend.
+	// Backends without SQL classification support may return an empty snapshot.
+	StatsSnapshot() dbruntime.StatsSnapshot
 }
 
 // WalletStore defines the methods for wallet-level operations.
@@ -363,8 +367,6 @@ type TxStore interface {
 }
 
 // UTXOStore defines the database actions for managing the UTXO set.
-//
-//nolint:iface // Store is a transitional wrapper over UTXOStore.
 type UTXOStore interface {
 	// GetUtxo retrieves a single unspent transaction output (UTXO) by its
 	// outpoint. It returns a UtxoInfo struct containing the UTXO's details
