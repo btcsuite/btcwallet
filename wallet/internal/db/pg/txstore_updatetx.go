@@ -20,7 +20,7 @@ import (
 func (s *Store) UpdateTx(ctx context.Context,
 	params db.UpdateTxParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.UpdateTxWithOps(ctx, params, &updateTxOps{qtx: qtx})
 	})
 }

@@ -108,7 +108,7 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 	}
 
 	return db.NewDerivedAddressWithTx(
-		ctx, params, s.ExecuteTx, adapters, deriveFn,
+		ctx, params, s.execWrite, adapters, deriveFn,
 	)
 }
 
@@ -134,7 +134,7 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 		RowCreatedAt:  importedAddressRowCreatedAt,
 	}
 
-	return db.NewImportedAddressWithTx(ctx, params, s.ExecuteTx, adapters)
+	return db.NewImportedAddressWithTx(ctx, params, s.execWrite, adapters)
 }
 
 // getAccountFromKey returns a helper to look up accounts by key.
