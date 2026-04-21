@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -159,6 +160,104 @@ type readConfig struct {
 
 	// timer waits for one retry delay.
 	timer func(time.Duration) *time.Timer
+}
+
+// StatsSnapshot is a read-only copy of the shared runtime counters.
+type StatsSnapshot struct {
+	// Unhealthy reports whether fatal SQL failures poisoned the store.
+	Unhealthy bool
+
+	// RetryAttempts counts read retry attempts.
+	RetryAttempts uint64
+
+	// RetrySuccesses counts reads that later succeeded after retry.
+	RetrySuccesses uint64
+
+	// RetryExhausted counts read retries that exhausted their budget.
+	RetryExhausted uint64
+
+	// AmbiguousTxCommits counts commit failures with unknown outcome.
+	AmbiguousTxCommits uint64
+
+	// Errors snapshots the classified SQL error counters.
+	Errors dberr.StatsSnapshot
+}
+
+// Stats stores low-overhead atomic counters for shared runtime behavior.
+type Stats struct {
+	// unhealthy reports whether fatal SQL failures poisoned the store.
+	unhealthy atomic.Bool
+
+	// errStats aggregates classified SQL error counts.
+	errStats dberr.Stats
+
+	// retryAttempts counts read retry attempts.
+	retryAttempts atomic.Uint64
+
+	// retrySuccesses counts reads that later succeeded after retry.
+	retrySuccesses atomic.Uint64
+
+	// retryExhausted counts read retries that exhausted their budget.
+	retryExhausted atomic.Uint64
+
+	// ambiguousTxCommits counts commit failures with unknown outcome.
+	ambiguousTxCommits atomic.Uint64
+}
+
+// CheckHealthy reports whether fatal SQL failures already poisoned the store.
+func (s *Stats) CheckHealthy() error {
+	if s.unhealthy.Load() {
+		return ErrStoreUnhealthy
+	}
+
+	return nil
+}
+
+// RecordError updates the shared SQL error counters and unhealthy state.
+func (s *Stats) RecordError(err error) {
+	s.errStats.Record(err)
+
+	var sqlErr *dberr.SQLError
+	if !errors.As(err, &sqlErr) {
+		return
+	}
+
+	if sqlErr.Class() == dberr.ClassFatal {
+		s.unhealthy.Store(true)
+	}
+}
+
+// RecordRetryAttempt records one read retry attempt.
+func (s *Stats) RecordRetryAttempt() {
+	s.retryAttempts.Add(1)
+}
+
+// RecordRetrySuccess records one successful read retry outcome.
+func (s *Stats) RecordRetrySuccess() {
+	s.retrySuccesses.Add(1)
+}
+
+// RecordRetryExhausted records one read retry sequence that exhausted its
+// budget.
+func (s *Stats) RecordRetryExhausted() {
+	s.retryExhausted.Add(1)
+}
+
+// RecordAmbiguousTxCommit records one commit failure with unknown outcome.
+func (s *Stats) RecordAmbiguousTxCommit() {
+	s.ambiguousTxCommits.Add(1)
+}
+
+// Snapshot returns a read-only copy of the runtime counters.
+func (s *Stats) Snapshot(backend dberr.Backend) StatsSnapshot {
+	return StatsSnapshot{
+		Unhealthy:          s.unhealthy.Load(),
+		RetryAttempts:      s.retryAttempts.Load(),
+		RetrySuccesses:     s.retrySuccesses.Load(),
+		RetryExhausted:     s.retryExhausted.Load(),
+		AmbiguousTxCommits: s.ambiguousTxCommits.Load(),
+		Errors:             s.errStats.Snapshot(backend),
+	}
 }
 
 // Read executes a read-only SQL callback with transient retry handling.
