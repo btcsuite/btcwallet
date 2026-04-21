@@ -2,6 +2,7 @@ package kvdb
 
 import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -25,4 +26,9 @@ func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore) *Store {
 		db:      dbConn,
 		txStore: txStore,
 	}
+}
+
+// StatsSnapshot returns an empty runtime snapshot for the kvdb backend.
+func (s *Store) StatsSnapshot() dbruntime.StatsSnapshot {
+	return dbruntime.StatsSnapshot{}
 }
