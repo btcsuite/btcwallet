@@ -68,10 +68,21 @@ func (s *Store) IterAddresses(ctx context.Context,
 
 // GetAddressSecret retrieves the encrypted secret information for an address.
 func (s *Store) GetAddressSecret(ctx context.Context,
-	addressID uint32) (*db.AddressSecret, error) {
+	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
+
+	getSecret := func(ctx context.Context, walletID int64,
+		addressID int64) (sqlc.GetAddressSecretRow, error) {
+
+		return s.queries.GetAddressSecret(
+			ctx, sqlc.GetAddressSecretParams{
+				WalletID: walletID,
+				ID:       addressID,
+			},
+		)
+	}
 
 	return db.GetAddressSecret(
-		ctx, s.queries.GetAddressSecret, addressID, addressSecretRowToSecret,
+		ctx, getSecret, query, addressSecretRowToSecret,
 	)
 }
 

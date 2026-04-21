@@ -39,7 +39,7 @@ SELECT
     s.encrypted_script
 FROM addresses AS a
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
-WHERE a.id = $1;
+WHERE a.wallet_id = $1 AND a.id = $2;
 
 -- name: CreateDerivedAddress :one
 -- Creates a derived address with the given index and derived data.
