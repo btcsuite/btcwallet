@@ -41,11 +41,13 @@ func (s *Store) ListAccounts(ctx context.Context,
 func (s *Store) RenameAccount(ctx context.Context,
 	params db.RenameAccountParams) error {
 
-	renameQueries := accountRenameQueries{q: s.queries}
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		renameQueries := accountRenameQueries{q: qtx}
 
-	return db.RenameAccountByQuery(
-		ctx, params, renameQueries.byNumber, renameQueries.byName,
-	)
+		return db.RenameAccountByQuery(
+			ctx, params, renameQueries.byNumber, renameQueries.byName,
+		)
+	})
 }
 
 // CreateDerivedAccount creates a new derived account with the given name and
@@ -61,7 +63,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 	var info *db.AccountInfo
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -99,7 +101,9 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 		accNumber, err := db.Int64ToUint32(row.AccountNumber.Int64)
 		if err != nil {
-			return fmt.Errorf("%w: %w", db.ErrMaxAccountNumberReached, err)
+			return fmt.Errorf("%w: %w",
+				db.ErrMaxAccountNumberReached, err,
+			)
 		}
 
 		info = db.BuildAccountInfo(
@@ -125,7 +129,7 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 
 	var props *db.AccountProperties
 
-	err := s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		var err error
 
 		props, err = db.CreateImportedAccount(

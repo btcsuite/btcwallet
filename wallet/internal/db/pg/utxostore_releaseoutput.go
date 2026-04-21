@@ -19,7 +19,7 @@ import (
 func (s *Store) ReleaseOutput(ctx context.Context,
 	params db.ReleaseOutputParams) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.ReleaseOutputWithOps(
 			ctx, params, &releaseOutputOps{qtx: qtx},
 		)
