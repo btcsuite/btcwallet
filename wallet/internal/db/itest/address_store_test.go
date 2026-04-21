@@ -251,16 +251,21 @@ func TestNewImportedAddress(t *testing.T) {
 				t, queries, params.ScriptPubKey, walletID,
 			)
 
-			secret, err := GetAddressSecret(t, queries, addressID)
-			require.NoError(t, err)
+			secret, err := store.GetAddressSecret(
+				t.Context(), db.GetAddressSecretQuery{
+					WalletID:  walletID,
+					AddressID: uint32(addressID),
+				},
+			)
+
 			if tc.providePrivateKey {
+				require.NoError(t, err)
 				require.Equal(
 					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
 				)
 				require.Empty(t, secret.EncryptedScript)
 			} else {
-				require.Empty(t, secret.EncryptedPrivKey)
-				require.Empty(t, secret.EncryptedScript)
+				require.ErrorIs(t, err, db.ErrSecretNotFound)
 			}
 		})
 	}
@@ -364,16 +369,31 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 				t, queries, params.ScriptPubKey, walletID,
 			)
 
-			secret, err := GetAddressSecret(t, queries, addressID)
-			require.NoError(t, err)
-
+			secret, err := store.GetAddressSecret(
+				t.Context(), db.GetAddressSecretQuery{
+					WalletID:  walletID,
+					AddressID: uint32(addressID),
+				},
+			)
 			require.Equal(t, tc.encryptedScript, secret.EncryptedScript)
 
 			if tc.hasPrivateKey {
+				require.NoError(t, err)
 				require.Equal(
 					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
 				)
+
+				return
 			}
+
+			if tc.hasScript {
+				require.NoError(t, err)
+				require.Equal(t, params.EncryptedScript, secret.EncryptedScript)
+
+				return
+			}
+
+			require.ErrorAs(t, err, &db.ErrSecretNotFound)
 		})
 	}
 }
@@ -725,7 +745,12 @@ func TestGetAddressSecret(t *testing.T) {
 			require.NoError(t, errNewAddr)
 
 			if tc.shouldHaveSecret {
-				secret, err := store.GetAddressSecret(t.Context(), info.ID)
+				secret, err := store.GetAddressSecret(
+					t.Context(), db.GetAddressSecretQuery{
+						WalletID:  walletID,
+						AddressID: info.ID,
+					},
+				)
 				require.NoError(t, err)
 				require.NotNil(t, secret)
 				require.Equal(t, info.ID, secret.AddressID)
@@ -734,15 +759,52 @@ func TestGetAddressSecret(t *testing.T) {
 				)
 				require.Empty(t, secret.EncryptedScript)
 			} else {
-				_, err := store.GetAddressSecret(t.Context(), info.ID)
+				_, err := store.GetAddressSecret(
+					t.Context(), db.GetAddressSecretQuery{
+						WalletID:  walletID,
+						AddressID: info.ID,
+					},
+				)
 				require.ErrorIs(t, err, db.ErrSecretNotFound)
 			}
 		})
 	}
 
+	t.Run("cross-wallet address denied", func(t *testing.T) {
+		otherWalletID := newWallet(t, store, "wallet-secrets-other")
+		CreateImportedAccount(
+			t, store, otherWalletID, db.KeyScopeBIP0044, "imported",
+		)
+
+		params := db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0044,
+			AddressType:         db.PubKeyHash,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		}
+
+		info, err := store.NewImportedAddress(t.Context(), params)
+		require.NoError(t, err)
+
+		_, err = store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:  otherWalletID,
+				AddressID: info.ID,
+			},
+		)
+		require.ErrorIs(t, err, db.ErrAddressNotFound)
+	})
+
 	// Test non-existent address ID.
 	t.Run("non-existent address", func(t *testing.T) {
-		_, err := store.GetAddressSecret(t.Context(), 999999)
+		_, err := store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:  walletID,
+				AddressID: 999999,
+			},
+		)
 		require.ErrorIs(t, err, db.ErrAddressNotFound)
 	})
 }
@@ -1125,7 +1187,12 @@ func TestGetAddressSecret_DerivedAddress(t *testing.T) {
 
 	// Attempt to get secret for derived address.
 	// Derived addresses have no row in address_secrets table.
-	_, err = store.GetAddressSecret(t.Context(), addrInfo.ID)
+	_, err = store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:  walletID,
+			AddressID: addrInfo.ID,
+		},
+	)
 
 	// Expect ErrSecretNotFound (not ErrAddressNotFound) because the
 	// LEFT JOIN returns a row with NULL encrypted_priv_key.

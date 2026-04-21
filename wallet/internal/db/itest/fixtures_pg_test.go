@@ -199,13 +199,6 @@ func getAddressID(t *testing.T, queries *sqlc.Queries, scriptPubKey []byte,
 	return addr.ID
 }
 
-func GetAddressSecret(t *testing.T, queries *sqlc.Queries,
-	addressID int64) (sqlc.GetAddressSecretRow, error) {
-	t.Helper()
-
-	return queries.GetAddressSecret(t.Context(), addressID)
-}
-
 // MustDeleteAddress deletes an address by ID for test scenarios.
 func MustDeleteAddress(t *testing.T, dbConn *sql.DB, addressID uint32) {
 	t.Helper()

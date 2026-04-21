@@ -156,7 +156,7 @@ type Querier interface {
 	// - Address exists with secret: returns full row
 	// - Address exists without secret (watch-only/derived): returns row with NULL secret fields
 	// - Address does not exist: returns no rows (sql.ErrNoRows)
-	GetAddressSecret(ctx context.Context, id int64) (GetAddressSecretRow, error)
+	GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
 	// Atomically gets the next external address index and increments the counter.
