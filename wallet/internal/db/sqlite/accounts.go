@@ -17,11 +17,24 @@ var _ db.AccountStore = (*Store)(nil)
 func (s *Store) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
-	getQueries := accountGetQueries{q: s.queries}
+	var account *db.AccountInfo
 
-	return db.GetAccountByQuery(
-		ctx, query, getQueries.byNumber, getQueries.byName,
-	)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		getQueries := accountGetQueries{q: q}
+
+		var err error
+
+		account, err = db.GetAccountByQuery(
+			ctx, query, getQueries.byNumber, getQueries.byName,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return account, nil
 }
 
 // ListAccounts returns a slice of AccountInfo for all accounts, optionally
@@ -29,11 +42,25 @@ func (s *Store) GetAccount(ctx context.Context,
 func (s *Store) ListAccounts(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	listQueries := accountListQueries{q: s.queries}
+	var accounts []db.AccountInfo
 
-	return db.ListAccountsByQuery(
-		ctx, query, listQueries.byScope, listQueries.byName, listQueries.all,
-	)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		listQueries := accountListQueries{q: q}
+
+		var err error
+
+		accounts, err = db.ListAccountsByQuery(
+			ctx, query, listQueries.byScope, listQueries.byName,
+			listQueries.all,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return accounts, nil
 }
 
 // RenameAccount changes the name of an account. The account can be identified
