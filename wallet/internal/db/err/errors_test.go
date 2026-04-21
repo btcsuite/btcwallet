@@ -14,8 +14,7 @@ import (
 
 var errConstraint = errors.New("constraint")
 
-// noOpMapper is a test helper that leaves backend-specific classification to
-// later Normalize fallbacks.
+// noOpMapper is a test helper that disables backend-specific classification.
 func noOpMapper(error) *SQLError {
 	return nil
 }
@@ -206,9 +205,13 @@ func TestNormalize(t *testing.T) {
 	require.Equal(t, ClassTransient, sqlErr.Class())
 	require.Equal(t, ReasonUnavailable, sqlErr.Reason)
 
-	err = Normalize(BackendSQLite, func(in error) *SQLError {
-		return NewSQLError(BackendSQLite, ReasonUnknown, "", in)
-	}, errConstraint)
+	err = Normalize(
+		BackendSQLite,
+		func(in error) *SQLError {
+			return NewSQLError(BackendSQLite, ReasonUnknown, "", in)
+		},
+		errConstraint,
+	)
 	sqlErr = extractSQLError(err)
 	require.NotNil(t, sqlErr)
 	require.Equal(t, ClassPermanent, sqlErr.Class())
@@ -225,7 +228,12 @@ func TestNormalize(t *testing.T) {
 	require.Equal(t, Backend(""), extractSQLError(err).Backend)
 
 	require.Same(t, errConstraint,
-		Normalize(Backend(""), noOpMapper, errConstraint))
+		Normalize(BackendPostgres, noOpMapper, errConstraint))
+
+	require.Same(t, errConstraint,
+		func() error {
+			return Normalize(Backend(""), noOpMapper, errConstraint)
+		}())
 }
 
 // temporaryNetError is a test helper that exposes only the legacy Temporary

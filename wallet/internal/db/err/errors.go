@@ -335,9 +335,7 @@ func (e *SQLError) Unwrap() error {
 //     errors into SQLError values.
 //  5. Generic connection and transport failures are classified as
 //     ReasonUnavailable.
-//  6. If the backend is known and no earlier rule matches, err is wrapped as
-//     ReasonUnknown.
-//  7. If the backend is unknown, err is returned unchanged.
+//  6. Otherwise err is returned unchanged.
 //
 // Normalize is intentionally side-effect free. Callers own follow-up actions
 // such as stats recording or unhealthy-store transitions.
@@ -378,15 +376,7 @@ func Normalize(backend Backend, mapper func(error) *SQLError, err error) error {
 		return transportErr
 	}
 
-	// Unknown backends are left untouched so callers do not accidentally invent
-	// a backend identity the error never had.
-	if !backend.Valid() {
-		return err
-	}
-
-	// Keep backend identity even when the exact backend code is not recognized
-	// so logs and stats retain useful diagnosis data.
-	return NewSQLError(backend, ReasonUnknown, "", err)
+	return err
 }
 
 // extractSQLError extracts the shared SQL error wrapper from err, if present.
