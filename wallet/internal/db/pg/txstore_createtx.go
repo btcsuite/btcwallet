@@ -15,12 +15,12 @@ import (
 // CreateTx atomically records a wallet-scoped transaction row, its
 // wallet-owned credits, and any spend edges created by its inputs.
 //
-// The full write runs inside ExecuteTx so the transaction row, created UTXOs,
-// spent-parent markers, and any required invalidation are either committed
-// together or not at all. Received timestamps are normalized to UTC before
-// Insert. When the wallet already stores the same unmined transaction hash,
-// CreateTx may promote that existing row to confirmed state instead of
-// inserting a duplicate.
+// The full write runs inside the shared write helper so the transaction row,
+// created UTXOs, spent-parent markers, and any required invalidation are
+// either committed together or not at all. Received timestamps are normalized
+// to UTC before Insert. When the wallet already stores the same unmined
+// transaction hash, CreateTx may promote that existing row to confirmed state
+// instead of inserting a duplicate.
 func (s *Store) CreateTx(ctx context.Context,
 	params db.CreateTxParams) error {
 
@@ -29,7 +29,7 @@ func (s *Store) CreateTx(ctx context.Context,
 		return err
 	}
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.CreateTxWithOps(ctx, req, &createTxOps{
 			invalidateUnminedTxOps: invalidateUnminedTxOps{
 				qtx: qtx,
