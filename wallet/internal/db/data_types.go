@@ -705,6 +705,20 @@ type GetAddressQuery struct {
 	ScriptPubKey []byte
 }
 
+// GetAddressSecretQuery contains the parameters for querying an address
+// secret. The query is wallet-scoped: it retrieves the encrypted secret
+// material for a specific address within a wallet.
+type GetAddressSecretQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// AddressID is the ID of the address whose secret should be fetched.
+	AddressID uint32
+}
+
 // ListAddressesQuery contains the parameters for listing addresses.
 type ListAddressesQuery struct {
 	// WalletID is the ID of the wallet to query.
