@@ -16,7 +16,7 @@ import (
 func (s *Store) RollbackToBlock(ctx context.Context,
 	height uint32) error {
 
-	return s.ExecuteTx(ctx, func(qtx *sqlc.Queries) error {
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		return db.RollbackToBlockWithOps(ctx, height,
 			rollbackToBlockOps{qtx: qtx})
 	})
