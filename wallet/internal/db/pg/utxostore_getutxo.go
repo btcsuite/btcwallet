@@ -23,26 +23,37 @@ func (s *Store) GetUtxo(ctx context.Context,
 		return nil, fmt.Errorf("convert output index: %w", err)
 	}
 
-	row, err := s.queries.GetUtxoByOutpoint(
-		ctx, sqlc.GetUtxoByOutpointParams{
-			WalletID:    int64(query.WalletID),
-			TxHash:      query.OutPoint.Hash[:],
-			OutputIndex: outputIndex,
-		},
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("utxo %s: %w", query.OutPoint,
-				db.ErrUtxoNotFound)
+	var utxo *db.UtxoInfo
+
+	err = s.execRead(ctx, func(q *sqlc.Queries) error {
+		row, err := q.GetUtxoByOutpoint(
+			ctx, sqlc.GetUtxoByOutpointParams{
+				WalletID:    int64(query.WalletID),
+				TxHash:      query.OutPoint.Hash[:],
+				OutputIndex: outputIndex,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("utxo %s: %w", query.OutPoint,
+					db.ErrUtxoNotFound)
+			}
+
+			return fmt.Errorf("get utxo: %w", err)
 		}
 
-		return nil, fmt.Errorf("get utxo: %w", err)
+		utxo, err = utxoInfoFromRow(
+			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
+			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return utxoInfoFromRow(
-		row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
-		row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
-	)
+	return utxo, nil
 }
 
 // utxoInfoFromRow converts one normalized postgres query row into the public

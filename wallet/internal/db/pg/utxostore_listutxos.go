@@ -15,22 +15,31 @@ import (
 func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
-	rows, err := s.queries.ListUtxos(ctx, buildListUtxosParams(query))
-	if err != nil {
-		return nil, fmt.Errorf("list utxos: %w", err)
-	}
+	var utxos []db.UtxoInfo
 
-	utxos := make([]db.UtxoInfo, len(rows))
-	for i, row := range rows {
-		utxo, err := utxoInfoFromRow(
-			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
-			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
-		)
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		rows, err := q.ListUtxos(ctx, buildListUtxosParams(query))
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("list utxos: %w", err)
 		}
 
-		utxos[i] = *utxo
+		utxos = make([]db.UtxoInfo, len(rows))
+		for i, row := range rows {
+			utxo, err := utxoInfoFromRow(
+				row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
+				row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
+			)
+			if err != nil {
+				return err
+			}
+
+			utxos[i] = *utxo
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return utxos, nil

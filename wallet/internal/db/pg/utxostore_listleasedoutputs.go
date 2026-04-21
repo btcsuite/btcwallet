@@ -15,31 +15,40 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 
 	nowUTC := time.Now().UTC()
 
-	rows, err := s.queries.ListActiveUtxoLeases(
-		ctx, sqlc.ListActiveUtxoLeasesParams{
-			WalletID: int64(walletID),
-			NowUtc:   nowUTC,
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list active utxo leases: %w", err)
-	}
+	var leases []db.LeasedOutput
 
-	leases := make([]db.LeasedOutput, len(rows))
-	for i, row := range rows {
-		outputIndex, err := db.Int64ToUint32(int64(row.OutputIndex))
-		if err != nil {
-			return nil, fmt.Errorf("lease output index: %w", err)
-		}
-
-		lease, err := db.BuildLeasedOutput(
-			row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		rows, err := q.ListActiveUtxoLeases(
+			ctx, sqlc.ListActiveUtxoLeasesParams{
+				WalletID: int64(walletID),
+				NowUtc:   nowUTC,
+			},
 		)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("list active utxo leases: %w", err)
 		}
 
-		leases[i] = *lease
+		leases = make([]db.LeasedOutput, len(rows))
+		for i, row := range rows {
+			outputIndex, err := db.Int64ToUint32(int64(row.OutputIndex))
+			if err != nil {
+				return fmt.Errorf("lease output index: %w", err)
+			}
+
+			lease, err := db.BuildLeasedOutput(
+				row.TxHash, outputIndex, row.LockID, row.ExpiresAt,
+			)
+			if err != nil {
+				return err
+			}
+
+			leases[i] = *lease
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return leases, nil
