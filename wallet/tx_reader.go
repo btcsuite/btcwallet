@@ -232,40 +232,6 @@ func (w *Wallet) ListTxns(_ context.Context, startHeight,
 	return details, nil
 }
 
-// fetchTxDetails fetches the tx details for the given tx hash
-// from the wallet's tx store.
-func (w *Wallet) fetchTxDetails(txHash *chainhash.Hash) (
-	*wtxmgr.TxDetails, error) {
-
-	var txDetails *wtxmgr.TxDetails
-
-	err := walletdb.View(w.cfg.DB, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-
-		var err error
-
-		txDetails, err = w.txStore.TxDetails(txmgrNs, txHash)
-		if err != nil {
-			return fmt.Errorf("failed to fetch tx details: %w", err)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to view wallet db: %w", err)
-	}
-
-	// TxDetails will return nil when the tx is not found.
-	//
-	// TODO(yy): We should instead return an error when the tx cannot be
-	// found in the db.
-	if txDetails == nil {
-		return nil, ErrTxNotFound
-	}
-
-	return txDetails, nil
-}
-
 // buildTxDetail builds a TxDetail from the given wtxmgr.TxDetails.
 func (w *Wallet) buildTxDetail(txDetails *wtxmgr.TxDetails,
 	currentHeight int32) *TxDetail {
