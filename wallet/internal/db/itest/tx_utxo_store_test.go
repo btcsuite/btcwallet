@@ -1061,6 +1061,178 @@ func TestListTxnsReturnsConfirmedTxsByHeightRange(t *testing.T) {
 	require.Equal(t, uint32(211), infos[0].Block.Height)
 }
 
+// TestListTxnsUsesConfirmationOrder verifies that confirmed reads do not use
+// row IDs as the same-block ordering tie-breaker.
+//
+// Scenario:
+//   - One wallet sees a transaction as unmined before another transaction that
+//     appears earlier in the same block.
+//
+// Setup:
+//   - Insert the later block transaction as unmined first.
+//   - Insert the earlier block transaction directly as confirmed.
+//   - Confirm the older unmined row in the same block.
+//
+// Action:
+//   - Query summary and detail transactions for that exact block height.
+//
+// Assertions:
+//   - Both SQL reader paths return the direct confirmed transaction before the
+//     older row that was confirmed later.
+func TestListTxnsUsesConfirmationOrder(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Give laterBlockTx the smaller row ID, which used to make it sort
+	// before earlierBlockTx after both rows were attached to the same block.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-txns-confirm-order")
+	queries := store.Queries()
+	const blockHeight = 222
+	block := CreateBlockFixture(t, queries, blockHeight)
+
+	laterBlockTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 17000, PkScript: []byte{0x51}}},
+	)
+	earlierBlockTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 18000, PkScript: []byte{0x52}}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       laterBlockTx,
+		Received: time.Unix(1710000980, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       earlierBlockTx,
+		Received: time.Unix(1710000990, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       laterBlockTx,
+		Received: time.Unix(1710001000, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	// Act: Read the same confirmed block through summary and detail APIs.
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletID,
+		StartHeight: blockHeight,
+		EndHeight:   blockHeight,
+	})
+	require.NoError(t, err)
+
+	details, err := store.ListTxDetails(t.Context(), db.ListTxDetailsQuery{
+		WalletID:    walletID,
+		StartHeight: blockHeight,
+		EndHeight:   blockHeight,
+	})
+	require.NoError(t, err)
+
+	// Assert: The later-confirmed old row stays after the direct confirmed row.
+	wantOrder := []chainhash.Hash{
+		earlierBlockTx.TxHash(),
+		laterBlockTx.TxHash(),
+	}
+	require.Equal(t, wantOrder, txHashes(infos))
+	require.Equal(t, wantOrder, txDetailHashes(details))
+}
+
+// TestGetTxDetailFindsOwnedInputAfterSpendEdgeCleared verifies that detail
+// reads reconstruct historical debits after invalidation clears spent_by_tx_id.
+//
+// Scenario:
+//   - One wallet-owned parent output is spent by an unmined child transaction.
+//   - The child is invalidated, clearing the mutable spend edge while retaining
+//     the child transaction row as failed history.
+//
+// Setup:
+//   - Insert one wallet-owned parent credit and one child that spends it.
+//   - Invalidate the child transaction.
+//
+// Action:
+//   - Query the failed child through GetTxDetail.
+//
+// Assertions:
+//   - The parent output is spendable again, proving the spend edge was cleared.
+//   - The child detail still reports the wallet-owned input from its raw tx.
+func TestGetTxDetailFindsOwnedInputAfterSpendEdgeCleared(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a wallet-owned parent credit and a child that spends it.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-detail-cleared-spend-edge")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710001010, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	spentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	childTx := newRegularTx(
+		[]wire.OutPoint{spentOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x51}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710001020, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	err = store.InvalidateUnminedTx(t.Context(), db.InvalidateUnminedTxParams{
+		WalletID: walletID,
+		Txid:     childTx.TxHash(),
+	})
+	require.NoError(t, err)
+
+	// Act: Read the failed child detail after its spend edge has been cleared.
+	detail, err := store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		WalletID: walletID,
+		Txid:     childTx.TxHash(),
+	})
+	require.NoError(t, err)
+
+	parentUtxo, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: spentOutPoint,
+	})
+	require.NoError(t, err)
+
+	// Assert: The current UTXO set is restored, but historical child details
+	// still report the wallet-owned debit from the serialized child transaction.
+	require.Equal(t, btcutil.Amount(5000), parentUtxo.Amount)
+	require.Equal(t, db.TxStatusFailed, detail.Status)
+	require.Len(t, detail.OwnedInputs, 1)
+	require.Equal(t, uint32(0), detail.OwnedInputs[0].Index)
+	require.Equal(t, btcutil.Amount(5000), detail.OwnedInputs[0].Amount)
+}
+
 // TestDeleteTxRemovesLeafUnminedTx verifies that DeleteTx removes a leaf
 // unmined row and restores any parent spend markers it introduced.
 //
@@ -1987,4 +2159,24 @@ func newRegularTx(inputs []wire.OutPoint, outputs []*wire.TxOut) *wire.MsgTx {
 // randomOutPoint returns one fixture outpoint backed by a random hash.
 func randomOutPoint() wire.OutPoint {
 	return wire.OutPoint{Hash: RandomHash(), Index: 0}
+}
+
+// txHashes returns transaction hashes in result order.
+func txHashes(infos []db.TxInfo) []chainhash.Hash {
+	hashes := make([]chainhash.Hash, 0, len(infos))
+	for _, info := range infos {
+		hashes = append(hashes, info.Hash)
+	}
+
+	return hashes
+}
+
+// txDetailHashes returns transaction-detail hashes in result order.
+func txDetailHashes(infos []db.TxDetailInfo) []chainhash.Hash {
+	hashes := make([]chainhash.Hash, 0, len(infos))
+	for _, info := range infos {
+		hashes = append(hashes, info.Hash)
+	}
+
+	return hashes
 }
