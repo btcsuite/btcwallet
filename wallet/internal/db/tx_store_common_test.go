@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -36,6 +37,341 @@ func TestSerializeDeserializeMsgTx(t *testing.T) {
 
 	// Assert: The decoded transaction serializes back to the same bytes.
 	require.Equal(t, rawTx, got.Bytes())
+}
+
+// TestReverseTxInfosByBlockPreservesBlockLocalOrder verifies that reversing a
+// summary range reverses block groups without reversing transactions inside the
+// same block.
+func TestReverseTxInfosByBlockPreservesBlockLocalOrder(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build confirmed summaries ordered by ascending block height and
+	// block-local transaction order.
+	infos := []TxInfo{
+		{Hash: chainhash.Hash{1}, Block: testBlock(1)},
+		{Hash: chainhash.Hash{2}, Block: testBlock(1)},
+		{Hash: chainhash.Hash{3}, Block: testBlock(2)},
+		{Hash: chainhash.Hash{4}, Block: testBlock(3)},
+		{Hash: chainhash.Hash{5}, Block: testBlock(3)},
+	}
+
+	// Act: Reverse the summaries by block group.
+	ReverseTxInfosByBlock(infos)
+
+	// Assert: Block order is reversed, while each block's local tx order is
+	// preserved.
+	require.Equal(t, chainhash.Hash{4}, infos[0].Hash)
+	require.Equal(t, chainhash.Hash{5}, infos[1].Hash)
+	require.Equal(t, chainhash.Hash{3}, infos[2].Hash)
+	require.Equal(t, chainhash.Hash{1}, infos[3].Hash)
+	require.Equal(t, chainhash.Hash{2}, infos[4].Hash)
+}
+
+// TestReverseTxDetailBasesByBlockPreservesBlockLocalOrder verifies that
+// reversing detail base rows preserves transaction order inside each block.
+func TestReverseTxDetailBasesByBlockPreservesBlockLocalOrder(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build confirmed detail bases ordered by ascending block
+	// height and block-local transaction order.
+	bases := []TxDetailBase{
+		{ID: 1, Block: testBlock(1)},
+		{ID: 2, Block: testBlock(1)},
+		{ID: 3, Block: testBlock(2)},
+		{ID: 4, Block: testBlock(3)},
+		{ID: 5, Block: testBlock(3)},
+	}
+
+	// Act: Reverse the base rows by block group.
+	ReverseTxDetailBasesByBlock(bases)
+
+	// Assert: Block order is reversed, while each block's local tx order is
+	// preserved.
+	require.Equal(t, int64(4), bases[0].ID)
+	require.Equal(t, int64(5), bases[1].ID)
+	require.Equal(t, int64(3), bases[2].ID)
+	require.Equal(t, int64(1), bases[3].ID)
+	require.Equal(t, int64(2), bases[4].ID)
+}
+
+// TestGetTxDetailWithOpsSuccess verifies that the shared GetTxDetail workflow
+// loads the base row first, then the owned edges, before rebuilding the final
+// detail shape.
+func TestGetTxDetailWithOpsSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one detail query, one normalized base row,
+	// and one mock ops adapter that records the shared call order.
+	tx := testRegularMsgTxWithSeed(11)
+	base := testTxDetailBase(t, 41, tx, testBlock(144), TxStatusPublished,
+		"detail-label")
+	query := GetTxDetailQuery{WalletID: 7, Txid: tx.TxHash()}
+	wantInputOutpoints := []TxInputOutpoint{testInputOutpoint(41, tx)}
+
+	var callOrder []string
+
+	baseHash := query.Txid
+	ops := &mockGetTxDetailOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadBase", mock.Anything, query).Return(base, nil).Run(
+		func(mock.Arguments) {
+			callOrder = append(callOrder, "base")
+		},
+	).Once()
+
+	ops.On("LoadOwnedOutputs", mock.Anything, uint32(7), []int64{41}).Return(
+		map[int64][]TxOwnedOutput{41: {{Index: 1, Amount: 12}}}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "outputs")
+	}).Once()
+
+	ops.On(
+		"LoadOwnedInputs", mock.Anything, uint32(7), wantInputOutpoints,
+	).Return(
+		map[int64][]TxOwnedInput{41: {{Index: 0, Amount: 21}}}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "inputs")
+	}).Once()
+
+	// Act: Run the shared detail workflow.
+	detail, err := GetTxDetailWithOps(context.Background(), query, ops)
+
+	// Assert: The helper preserves the staged ordering and rebuilds the final
+	// detail shape from the normalized base row plus owned edges.
+	require.NoError(t, err)
+	require.Equal(t, []string{"base", "outputs", "inputs"}, callOrder)
+	require.Equal(t, baseHash, detail.Hash)
+	require.Equal(t, "detail-label", detail.Label)
+	require.Equal(t, time.UTC, detail.Received.Location())
+	require.NotNil(t, detail.MsgTx)
+	require.Len(t, detail.OwnedInputs, 1)
+	require.Len(t, detail.OwnedOutputs, 1)
+	require.NotNil(t, detail.Block)
+	require.Equal(t, uint32(144), detail.Block.Height)
+}
+
+// TestGetTxDetailWithOpsLoadOutputsError verifies that the shared GetTxDetail
+// helper stops after an owned-output load failure and wraps that error with the
+// workflow stage context.
+func TestGetTxDetailWithOpsLoadOutputsError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Return one valid base row and one owned-output load failure.
+	tx := testRegularMsgTxWithSeed(12)
+	query := GetTxDetailQuery{WalletID: 8, Txid: tx.TxHash()}
+	base := testTxDetailBase(t, 55, tx, nil, TxStatusPending, "")
+	ops := &mockGetTxDetailOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadBase", mock.Anything, query).Return(base, nil).Once()
+	ops.On("LoadOwnedOutputs", mock.Anything, uint32(8), []int64{55}).Return(
+		nil, errCreateTxTest,
+	).Once()
+
+	// Act: Run the shared detail workflow.
+	_, err := GetTxDetailWithOps(context.Background(), query, ops)
+
+	// Assert: The helper reports the stage-local error and does not
+	// continue on to the later input load.
+	require.ErrorIs(t, err, errCreateTxTest)
+	require.ErrorContains(t, err, "load tx detail outputs")
+}
+
+// TestListTxDetailsWithOpsUnminedFirst verifies that the shared ListTxDetails
+// workflow prepends unmined rows when the wallet tx-reader range starts at the
+// unmined leg.
+func TestListTxDetailsWithOpsUnminedFirst(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one unmined row, one confirmed row, and one
+	// mock ops adapter that records both call order and the final
+	// tx-id batch.
+	unminedTx := testRegularMsgTxWithSeed(21)
+	confirmedTx := testRegularMsgTxWithSeed(22)
+	query := ListTxDetailsQuery{WalletID: 9, StartHeight: -1, EndHeight: 100}
+	wantInputOutpoints := []TxInputOutpoint{
+		testInputOutpoint(71, unminedTx),
+		testInputOutpoint(72, confirmedTx),
+	}
+
+	var (
+		callOrder  []string
+		batchedIDs []int64
+	)
+
+	ops := &mockListTxDetailsOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("ListUnmined", mock.Anything, uint32(9)).Return(
+		[]TxDetailBase{
+			testTxDetailBase(t, 71, unminedTx, nil, TxStatusPending, "u"),
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "unmined")
+	}).Once()
+
+	ops.On("ListConfirmed", mock.Anything, uint32(9), int32(100),
+		int32(math.MaxInt32), true).Return(
+		[]TxDetailBase{
+			testTxDetailBase(
+				t, 72, confirmedTx, testBlock(100), TxStatusPublished, "c",
+			),
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "confirmed")
+	}).Once()
+
+	ops.On(
+		"LoadOwnedOutputs", mock.Anything, uint32(9), []int64{71, 72},
+	).Return(
+		map[int64][]TxOwnedOutput{
+			71: {{Index: 0, Amount: 7}},
+			72: {{Index: 0, Amount: 8}},
+		}, nil,
+	).Run(func(args mock.Arguments) {
+		callOrder = append(callOrder, "outputs")
+		ids, ok := args.Get(2).([]int64)
+		require.True(t, ok)
+		batchedIDs = append([]int64(nil), ids...)
+	}).Once()
+
+	ops.On(
+		"LoadOwnedInputs", mock.Anything, uint32(9), wantInputOutpoints,
+	).Return(
+		map[int64][]TxOwnedInput{
+			71: {{Index: 0, Amount: 3}},
+			72: {{Index: 0, Amount: 4}},
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "inputs")
+	}).Once()
+
+	// Act: Run the shared list-detail workflow.
+	details, err := ListTxDetailsWithOps(context.Background(), query, ops)
+
+	// Assert: The helper preserves the unmined-first ordering and batches owned
+	// edge loads using that final tx-id order.
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"unmined", "confirmed", "outputs", "inputs"}, callOrder,
+	)
+	require.Equal(t, []int64{71, 72}, batchedIDs)
+	require.Len(t, details, 2)
+	require.Equal(t, unminedTx.TxHash(), details[0].Hash)
+	require.Equal(t, confirmedTx.TxHash(), details[1].Hash)
+	require.Nil(t, details[0].Block)
+	require.NotNil(t, details[1].Block)
+}
+
+// TestListTxDetailsWithOpsUnminedLast verifies that the shared ListTxDetails
+// workflow appends unmined rows when the wallet tx-reader range ends at the
+// unmined leg.
+func TestListTxDetailsWithOpsUnminedLast(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one confirmed row, one unmined row, and one mock adapter
+	// that records the workflow ordering.
+	confirmedTx := testRegularMsgTxWithSeed(31)
+	unminedTx := testRegularMsgTxWithSeed(32)
+	query := ListTxDetailsQuery{WalletID: 10, StartHeight: 5, EndHeight: -1}
+	wantInputOutpoints := []TxInputOutpoint{
+		testInputOutpoint(81, confirmedTx),
+		testInputOutpoint(82, unminedTx),
+	}
+
+	var callOrder []string
+
+	ops := &mockListTxDetailsOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("ListConfirmed", mock.Anything, uint32(10), int32(5),
+		int32(math.MaxInt32), false).Return(
+		[]TxDetailBase{
+			testTxDetailBase(
+				t, 81, confirmedTx, testBlock(5), TxStatusPublished, "c",
+			),
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "confirmed")
+	}).Once()
+
+	ops.On("ListUnmined", mock.Anything, uint32(10)).Return(
+		[]TxDetailBase{
+			testTxDetailBase(t, 82, unminedTx, nil, TxStatusPending, "u"),
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "unmined")
+	}).Once()
+
+	ops.On(
+		"LoadOwnedOutputs", mock.Anything, uint32(10), []int64{81, 82},
+	).Return(
+		map[int64][]TxOwnedOutput{
+			81: {{Index: 0, Amount: 5}},
+			82: {{Index: 0, Amount: 6}},
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "outputs")
+	}).Once()
+
+	ops.On(
+		"LoadOwnedInputs", mock.Anything, uint32(10), wantInputOutpoints,
+	).Return(
+		map[int64][]TxOwnedInput{
+			81: {{Index: 0, Amount: 2}},
+			82: {{Index: 0, Amount: 1}},
+		}, nil,
+	).Run(func(mock.Arguments) {
+		callOrder = append(callOrder, "inputs")
+	}).Once()
+
+	// Act: Run the shared list-detail workflow.
+	details, err := ListTxDetailsWithOps(context.Background(), query, ops)
+
+	// Assert: The helper keeps the confirmed rows first and appends the unmined
+	// rows before loading owned edges.
+	require.NoError(t, err)
+	require.Equal(t,
+		[]string{"confirmed", "unmined", "outputs", "inputs"}, callOrder,
+	)
+	require.Len(t, details, 2)
+	require.Equal(t, confirmedTx.TxHash(), details[0].Hash)
+	require.Equal(t, unminedTx.TxHash(), details[1].Hash)
+}
+
+// TestListTxDetailsWithOpsEmptyResult verifies that the shared ListTxDetails
+// workflow returns a non-nil empty result when no rows match the range.
+func TestListTxDetailsWithOpsEmptyResult(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build one confirmed-only query whose backend range returns no
+	// matching base rows.
+	query := ListTxDetailsQuery{WalletID: 11, StartHeight: 50, EndHeight: 50}
+	ops := &mockListTxDetailsOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("ListConfirmed", mock.Anything, uint32(11), int32(50), int32(50),
+		false).Return([]TxDetailBase{}, nil).Once()
+
+	// Act: Run the shared list-detail workflow.
+	details, err := ListTxDetailsWithOps(context.Background(), query, ops)
+
+	// Assert: Empty results are represented as an allocated empty slice, and
+	// the helper does not attempt owned-edge loads for an empty base set.
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	require.Empty(t, details)
 }
 
 // TestSerializeMsgTxNil verifies that serializeMsgTx rejects a missing
@@ -547,6 +883,56 @@ func testCoinbaseMsgTx() *wire.MsgTx {
 	return tx
 }
 
+// testRegularMsgTxWithSeed builds one deterministic non-coinbase transaction
+// fixture whose hash differs across seed values.
+func testRegularMsgTxWithSeed(seed byte) *wire.MsgTx {
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{seed}},
+	})
+	tx.AddTxOut(&wire.TxOut{Value: int64(seed) + 1, PkScript: []byte{0x51}})
+
+	return tx
+}
+
+// testTxDetailBase builds one normalized tx-detail base fixture for the shared
+// detail workflow tests.
+func testTxDetailBase(t *testing.T, id int64, tx *wire.MsgTx, block *Block,
+	status TxStatus, label string) TxDetailBase {
+
+	t.Helper()
+
+	rawTx, err := serializeMsgTx(tx)
+	require.NoError(t, err)
+
+	hash := tx.TxHash()
+
+	return TxDetailBase{
+		ID:       id,
+		Hash:     append([]byte(nil), hash[:]...),
+		RawTx:    rawTx,
+		Received: time.Unix(id, 0).In(time.FixedZone("X", 3600)),
+		Block:    block,
+		Status:   int64(status),
+		Label:    label,
+	}
+}
+
+// testInputOutpoint builds the expected previous-outpoint fixture for a test
+// transaction input.
+func testInputOutpoint(txID int64, tx *wire.MsgTx) TxInputOutpoint {
+	const inputIndex uint32 = 0
+
+	txIn := tx.TxIn[inputIndex]
+
+	return TxInputOutpoint{
+		TxID:            txID,
+		InputIndex:      inputIndex,
+		PrevTxHash:      txIn.PreviousOutPoint.Hash,
+		PrevOutputIndex: txIn.PreviousOutPoint.Index,
+	}
+}
+
 // mockCreateTxOps is a mock implementation of CreateTxOps.
 type mockCreateTxOps struct {
 	mock.Mock
@@ -714,6 +1100,139 @@ func (m *mockCreateTxOps) MarkInputsSpent(ctx context.Context,
 	args := m.Called(ctx, req, txID)
 
 	return args.Error(0)
+}
+
+// mockGetTxDetailOps is a mock implementation of GetTxDetailOps.
+type mockGetTxDetailOps struct {
+	mock.Mock
+}
+
+var _ GetTxDetailOps = (*mockGetTxDetailOps)(nil)
+
+// LoadBase implements GetTxDetailOps.
+func (m *mockGetTxDetailOps) LoadBase(ctx context.Context,
+	query GetTxDetailQuery) (TxDetailBase, error) {
+
+	args := m.Called(ctx, query)
+
+	base, ok := args.Get(0).(TxDetailBase)
+	if !ok {
+		return TxDetailBase{}, mockTypeError("LoadBase result")
+	}
+
+	return base, args.Error(1)
+}
+
+// LoadOwnedOutputs implements GetTxDetailOps.
+func (m *mockGetTxDetailOps) LoadOwnedOutputs(ctx context.Context,
+	walletID uint32, txIDs []int64) (map[int64][]TxOwnedOutput, error) {
+
+	args := m.Called(ctx, walletID, txIDs)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	outputs, ok := args.Get(0).(map[int64][]TxOwnedOutput)
+	if !ok {
+		return nil, mockTypeError("LoadOwnedOutputs result")
+	}
+
+	return outputs, args.Error(1)
+}
+
+// LoadOwnedInputs implements GetTxDetailOps.
+func (m *mockGetTxDetailOps) LoadOwnedInputs(ctx context.Context,
+	walletID uint32, inputOutpoints []TxInputOutpoint) (
+	map[int64][]TxOwnedInput, error) {
+
+	args := m.Called(ctx, walletID, inputOutpoints)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	inputs, ok := args.Get(0).(map[int64][]TxOwnedInput)
+	if !ok {
+		return nil, mockTypeError("LoadOwnedInputs result")
+	}
+
+	return inputs, args.Error(1)
+}
+
+// mockListTxDetailsOps is a mock implementation of ListTxDetailsOps.
+type mockListTxDetailsOps struct {
+	mock.Mock
+}
+
+var _ ListTxDetailsOps = (*mockListTxDetailsOps)(nil)
+
+// ListUnmined implements ListTxDetailsOps.
+func (m *mockListTxDetailsOps) ListUnmined(ctx context.Context,
+	walletID uint32) ([]TxDetailBase, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	bases, ok := args.Get(0).([]TxDetailBase)
+	if !ok {
+		return nil, mockTypeError("ListUnmined result")
+	}
+
+	return bases, args.Error(1)
+}
+
+// ListConfirmed implements ListTxDetailsOps.
+func (m *mockListTxDetailsOps) ListConfirmed(ctx context.Context,
+	walletID uint32, startHeight, endHeight int32,
+	reverse bool) ([]TxDetailBase, error) {
+
+	args := m.Called(ctx, walletID, startHeight, endHeight, reverse)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	bases, ok := args.Get(0).([]TxDetailBase)
+	if !ok {
+		return nil, mockTypeError("ListConfirmed result")
+	}
+
+	return bases, args.Error(1)
+}
+
+// LoadOwnedOutputs implements ListTxDetailsOps.
+func (m *mockListTxDetailsOps) LoadOwnedOutputs(ctx context.Context,
+	walletID uint32, txIDs []int64) (map[int64][]TxOwnedOutput, error) {
+
+	args := m.Called(ctx, walletID, txIDs)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	outputs, ok := args.Get(0).(map[int64][]TxOwnedOutput)
+	if !ok {
+		return nil, mockTypeError("LoadOwnedOutputs result")
+	}
+
+	return outputs, args.Error(1)
+}
+
+// LoadOwnedInputs implements ListTxDetailsOps.
+func (m *mockListTxDetailsOps) LoadOwnedInputs(ctx context.Context,
+	walletID uint32, inputOutpoints []TxInputOutpoint) (
+	map[int64][]TxOwnedInput, error) {
+
+	args := m.Called(ctx, walletID, inputOutpoints)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	inputs, ok := args.Get(0).(map[int64][]TxOwnedInput)
+	if !ok {
+		return nil, mockTypeError("LoadOwnedInputs result")
+	}
+
+	return inputs, args.Error(1)
 }
 
 // mockUpdateTxOps is a mock implementation of UpdateTxOps.
