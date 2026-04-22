@@ -1109,6 +1109,65 @@ func TestNewDerivedAddress(t *testing.T) {
 	}
 }
 
+// TestNewDerivedAddressDerivationGuards verifies that NewDerivedAddress returns
+// errors instead of panicking when the derivation callback is nil or returns
+// nil derived data.
+func TestNewDerivedAddressDerivationGuards(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-derived-guards")
+	accountName := "derived-guard-test"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	params := db.NewDerivedAddressParams{
+		WalletID:    walletID,
+		Scope:       db.KeyScopeBIP0084,
+		AccountName: accountName,
+		Change:      false,
+	}
+
+	t.Run("nil derive callback", func(t *testing.T) {
+		var (
+			info *db.AddressInfo
+			err  error
+		)
+
+		require.NotPanics(
+			t, func() {
+				info, err = store.NewDerivedAddress(t.Context(), params, nil)
+			},
+		)
+
+		require.Nil(t, info)
+		require.Error(t, err)
+	})
+
+	t.Run("nil derived data", func(t *testing.T) {
+		deriveFn := func(ctx context.Context, accountID uint32, branch uint32,
+			index uint32) (*db.DerivedAddressData, error) {
+
+			return nil, nil
+		}
+
+		var (
+			info *db.AddressInfo
+			err  error
+		)
+
+		require.NotPanics(
+			t, func() {
+				info, err = store.NewDerivedAddress(
+					t.Context(), params, deriveFn,
+				)
+			},
+		)
+
+		require.Nil(t, info)
+		require.Error(t, err)
+	})
+}
+
 // TestNewImportedAddress_NonExistentImportedAccount verifies that calling
 // NewImportedAddress when the implicit "imported" account doesn't exist
 // returns db.ErrAccountNotFound. This validates that the implicit account
