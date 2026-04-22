@@ -27,6 +27,11 @@ CREATE TABLE transactions (
     -- unconfirmed.
     block_height INTEGER REFERENCES blocks (block_height) ON DELETE SET NULL,
 
+    -- Monotonic token assigned when a row becomes confirmed. Confirmed range
+    -- reads use it as the block-local tie-breaker so rows first seen as
+    -- unmined do not sort ahead of earlier transactions in the same block.
+    confirmed_order INTEGER,
+
     -- Validity state (soft deletion).
     --
     -- Store the status code inline instead of via a lookup table because this
@@ -85,6 +90,13 @@ CREATE TABLE transactions (
         block_height IS NULL OR tx_status = 1
     ),
 
+    -- The confirmation-order token is meaningful only while a transaction has
+    -- a confirming block.
+    CONSTRAINT check_confirmed_order_matches_block CHECK (
+        (block_height IS NULL AND confirmed_order IS NULL)
+        OR (block_height IS NOT NULL AND confirmed_order IS NOT NULL)
+    ),
+
     -- Coinbase transactions cannot exist in the local-only pre-broadcast state
     -- because they are created by mining, not by wallet authorship.
     CONSTRAINT check_coinbase_not_pending CHECK (
@@ -118,13 +130,13 @@ WHERE block_height IS NULL;
 
 -- Optimization for "all transactions in block X" queries.
 CREATE INDEX idx_transactions_by_block
-ON transactions (wallet_id, block_height)
+ON transactions (wallet_id, block_height, confirmed_order)
 WHERE block_height IS NOT NULL;
 
 -- Optimization for rollback/disconnect paths that only know the confirmed block
 -- height and then fan out to affected wallet rows.
 CREATE INDEX idx_transactions_by_confirmed_height
-ON transactions (block_height, wallet_id, id)
+ON transactions (block_height, wallet_id, confirmed_order)
 WHERE block_height IS NOT NULL;
 
 -- Optimization for "latest transactions" queries.
@@ -165,6 +177,7 @@ BEGIN
             -- status is preserved for later rollback/invalidation handling.
             ELSE tx_status
         END,
-        block_height = NULL
+        block_height = NULL,
+        confirmed_order = NULL
     WHERE block_height = old.block_height;
 END;
