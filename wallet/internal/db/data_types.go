@@ -834,6 +834,56 @@ type TxInfo struct {
 	Label string
 }
 
+// TxOwnedInput records one wallet-owned previous output spent by a
+// transaction.
+type TxOwnedInput struct {
+	// Index is the input index within the transaction.
+	Index uint32
+
+	// Amount is the value of the wallet-owned input being spent.
+	Amount btcutil.Amount
+}
+
+// TxOwnedOutput records one wallet-owned output created by a transaction.
+type TxOwnedOutput struct {
+	// Index is the output index within the transaction.
+	Index uint32
+
+	// Amount is the value of the wallet-owned output.
+	Amount btcutil.Amount
+}
+
+// TxDetailInfo is a db-native transaction detail model tailored for wallet tx
+// history reads.
+type TxDetailInfo struct {
+	// Hash is the transaction hash.
+	Hash chainhash.Hash
+
+	// MsgTx is the decoded wire transaction when the backend already has it.
+	MsgTx *wire.MsgTx
+
+	// SerializedTx is the serialized transaction.
+	SerializedTx []byte
+
+	// Received is the timestamp when the transaction was received.
+	Received time.Time
+
+	// Block contains metadata about the block that includes the transaction.
+	Block *Block
+
+	// Status is the wallet-relative validity state of the transaction.
+	Status TxStatus
+
+	// Label is a user-defined label for the transaction.
+	Label string
+
+	// OwnedInputs are the wallet-owned inputs spent by the transaction.
+	OwnedInputs []TxOwnedInput
+
+	// OwnedOutputs are the wallet-owned outputs created by the transaction.
+	OwnedOutputs []TxOwnedOutput
+}
+
 // CreateTxParams contains the parameters for creating a new transaction record.
 type CreateTxParams struct {
 	// WalletID is the ID of the wallet to create the transaction in.
@@ -948,6 +998,29 @@ type GetTxQuery struct {
 
 	// Txid is the hash of the transaction to query.
 	Txid chainhash.Hash
+}
+
+// GetTxDetailQuery contains the parameters for querying detailed transaction
+// data for one wallet-scoped transaction.
+type GetTxDetailQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// Txid is the hash of the transaction to query.
+	Txid chainhash.Hash
+}
+
+// ListTxDetailsQuery contains the parameters for listing detailed transaction
+// data using wallet tx-reader range semantics.
+type ListTxDetailsQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// StartHeight is the starting height in wallet tx-reader semantics.
+	StartHeight int32
+
+	// EndHeight is the ending height in wallet tx-reader semantics.
+	EndHeight int32
 }
 
 // ListTxnsQuery contains the parameters for listing transactions.
