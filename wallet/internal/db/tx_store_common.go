@@ -118,6 +118,108 @@ func BuildTxInfo(hash []byte, rawTx []byte, received time.Time, block *Block,
 	}, nil
 }
 
+// TxDetailBase is the normalized transaction-row metadata the shared detail
+// read workflows need from one SQL backend.
+type TxDetailBase struct {
+	// ID is the backend row identifier for the transaction.
+	ID int64
+
+	// Hash is the serialized transaction hash bytes.
+	Hash []byte
+
+	// RawTx is the serialized wire transaction payload.
+	RawTx []byte
+
+	// Received is when the wallet observed the transaction.
+	Received time.Time
+
+	// Block is the normalized confirming block metadata, or nil when
+	// the row has no confirming block.
+	Block *Block
+
+	// Status is the stored wallet-relative transaction status code.
+	Status int64
+
+	// Label is the optional user-supplied transaction label.
+	Label string
+}
+
+// GetTxDetailOps is the small semantic adapter GetTxDetail needs from one SQL
+// backend.
+//
+// The shared GetTxDetail algorithm is intentionally ordered:
+//   - load the wallet-scoped base transaction row first
+//   - load wallet-owned outputs for that exact row ID next
+//   - load wallet-owned inputs spent by that same row ID after that
+//   - build the final TxDetailInfo from the normalized row plus those edge sets
+//
+// Each backend implements those steps with its own sqlc-generated query types,
+// nullable field shapes, and row conversion helpers while GetTxDetailWithOps
+// keeps the visible sequencing in one place.
+type GetTxDetailOps interface {
+	// LoadBase loads the normalized base transaction row for one wallet-scoped
+	// hash lookup.
+	LoadBase(ctx context.Context, query GetTxDetailQuery) (TxDetailBase, error)
+
+	// LoadOwnedOutputs loads every wallet-owned output created by
+	// the provided tx row IDs and groups them by creating tx ID.
+	LoadOwnedOutputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedOutput, error)
+
+	// LoadOwnedInputs loads every wallet-owned input spent by the
+	// provided tx row IDs and groups them by spender tx ID.
+	LoadOwnedInputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedInput, error)
+}
+
+// normalizedListTxDetailsQuery captures wallet tx-reader range semantics in one
+// simpler shape that the shared ListTxDetails workflow can execute directly.
+type normalizedListTxDetailsQuery struct {
+	confirmedStart int32
+	confirmedEnd   int32
+	reverse        bool
+	includeUnmined bool
+	unminedFirst   bool
+	hasConfirmed   bool
+}
+
+// ListTxDetailsOps is the small semantic adapter ListTxDetails needs from one
+// SQL backend.
+//
+// The shared ListTxDetails algorithm is intentionally ordered:
+//   - normalize the wallet tx-reader range semantics first
+//   - load the rows visible to the unmined leg before or after confirmed rows
+//     as required by that normalized view
+//   - collect the selected tx row IDs in the final output order next
+//   - load wallet-owned outputs for that exact ID set
+//   - load wallet-owned inputs for that same ID set
+//   - rebuild the final TxDetailInfo values in the original base-row order
+//
+// Each backend implements those stages with its own sqlc-generated query types,
+// nullable field shapes, and binding helpers while ListTxDetailsWithOps keeps
+// the shared sequencing and tx-reader semantics in one place.
+type ListTxDetailsOps interface {
+	// ListUnmined loads the rows visible to the tx-reader unmined leg. This
+	// includes current unmined rows together with any retained history
+	// rows that no longer have a confirming block.
+	ListUnmined(ctx context.Context, walletID uint32) ([]TxDetailBase, error)
+
+	// ListConfirmed loads the confirmed height-range rows for the normalized
+	// query.
+	ListConfirmed(ctx context.Context, walletID uint32, startHeight,
+		endHeight int32, reverse bool) ([]TxDetailBase, error)
+
+	// LoadOwnedOutputs loads every wallet-owned output created by
+	// the provided tx row IDs and groups them by creating tx ID.
+	LoadOwnedOutputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedOutput, error)
+
+	// LoadOwnedInputs loads every wallet-owned input spent by the
+	// provided tx row IDs and groups them by spender tx ID.
+	LoadOwnedInputs(ctx context.Context, walletID uint32,
+		txIDs []int64) (map[int64][]TxOwnedInput, error)
+}
+
 // validateCreateTxParams enforces the CreateTx invariants shared by both SQL
 // backends after serializeMsgTx has already verified that params.Tx is non-nil.
 func validateCreateTxParams(params CreateTxParams) error {
