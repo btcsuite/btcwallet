@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
@@ -144,13 +146,31 @@ type TxDetailBase struct {
 	Label string
 }
 
+// TxInputOutpoint identifies one transaction input and the previous outpoint it
+// spends.
+type TxInputOutpoint struct {
+	// TxID is the backend row ID of the spending transaction.
+	TxID int64
+
+	// InputIndex is the input position within the spending transaction.
+	InputIndex uint32
+
+	// PrevTxHash is the hash of the transaction that created the previous
+	// output.
+	PrevTxHash chainhash.Hash
+
+	// PrevOutputIndex is the output index in the previous transaction.
+	PrevOutputIndex uint32
+}
+
 // GetTxDetailOps is the small semantic adapter GetTxDetail needs from one SQL
 // backend.
 //
 // The shared GetTxDetail algorithm is intentionally ordered:
 //   - load the wallet-scoped base transaction row first
 //   - load wallet-owned outputs for that exact row ID next
-//   - load wallet-owned inputs spent by that same row ID after that
+//   - derive previous outpoints from the raw transaction and load the
+//     wallet-owned inputs referenced by those outpoints after that
 //   - build the final TxDetailInfo from the normalized row plus those edge sets
 //
 // Each backend implements those steps with its own sqlc-generated query types,
@@ -166,10 +186,47 @@ type GetTxDetailOps interface {
 	LoadOwnedOutputs(ctx context.Context, walletID uint32,
 		txIDs []int64) (map[int64][]TxOwnedOutput, error)
 
-	// LoadOwnedInputs loads every wallet-owned input spent by the
-	// provided tx row IDs and groups them by spender tx ID.
+	// LoadOwnedInputs loads every wallet-owned input referenced by the provided
+	// transaction input outpoints and groups them by spender tx ID.
 	LoadOwnedInputs(ctx context.Context, walletID uint32,
-		txIDs []int64) (map[int64][]TxOwnedInput, error)
+		inputOutpoints []TxInputOutpoint) (map[int64][]TxOwnedInput, error)
+}
+
+// GetTxDetailWithOps runs the shared GetTxDetail read workflow.
+//
+// The helper owns the ordering between the base-row load and the owned-edge
+// loads so both SQL backends expose the same detailed transaction shape and the
+// same wallet-scoped not-found behavior.
+func GetTxDetailWithOps(ctx context.Context, query GetTxDetailQuery,
+	ops GetTxDetailOps) (*TxDetailInfo, error) {
+
+	base, err := ops.LoadBase(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail base: %w", err)
+	}
+
+	txIDs := []int64{base.ID}
+
+	ownedOutputs, err := ops.LoadOwnedOutputs(ctx, query.WalletID, txIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail outputs: %w", err)
+	}
+
+	inputOutpoints, err := txInputOutpointsFromBases([]TxDetailBase{base})
+	if err != nil {
+		return nil, fmt.Errorf("build tx detail input outpoints: %w", err)
+	}
+
+	ownedInputs, err := ops.LoadOwnedInputs(
+		ctx, query.WalletID, inputOutpoints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail inputs: %w", err)
+	}
+
+	return buildTxDetailInfo(
+		base, ownedInputs[base.ID], ownedOutputs[base.ID],
+	)
 }
 
 // normalizedListTxDetailsQuery captures wallet tx-reader range semantics in one
@@ -192,7 +249,8 @@ type normalizedListTxDetailsQuery struct {
 //     as required by that normalized view
 //   - collect the selected tx row IDs in the final output order next
 //   - load wallet-owned outputs for that exact ID set
-//   - load wallet-owned inputs for that same ID set
+//   - derive previous outpoints from those raw transactions and load any
+//     wallet-owned inputs referenced by those outpoints
 //   - rebuild the final TxDetailInfo values in the original base-row order
 //
 // Each backend implements those stages with its own sqlc-generated query types,
@@ -214,10 +272,273 @@ type ListTxDetailsOps interface {
 	LoadOwnedOutputs(ctx context.Context, walletID uint32,
 		txIDs []int64) (map[int64][]TxOwnedOutput, error)
 
-	// LoadOwnedInputs loads every wallet-owned input spent by the
-	// provided tx row IDs and groups them by spender tx ID.
+	// LoadOwnedInputs loads every wallet-owned input referenced by the provided
+	// transaction input outpoints and groups them by spender tx ID.
 	LoadOwnedInputs(ctx context.Context, walletID uint32,
-		txIDs []int64) (map[int64][]TxOwnedInput, error)
+		inputOutpoints []TxInputOutpoint) (map[int64][]TxOwnedInput, error)
+}
+
+// ListTxDetailsWithOps runs the shared ListTxDetails read workflow.
+//
+// The helper owns the range normalization, row-order preservation, and owned-
+// edge loading order so both SQL backends expose identical tx-reader behavior.
+func ListTxDetailsWithOps(ctx context.Context, query ListTxDetailsQuery,
+	ops ListTxDetailsOps) ([]TxDetailInfo, error) {
+
+	normalized := normalizeListTxDetailsQuery(query)
+
+	bases, err := listTxDetailBases(ctx, query.WalletID, normalized, ops)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(bases) == 0 {
+		return []TxDetailInfo{}, nil
+	}
+
+	txIDs := make([]int64, 0, len(bases))
+	for _, base := range bases {
+		txIDs = append(txIDs, base.ID)
+	}
+
+	ownedOutputs, err := ops.LoadOwnedOutputs(ctx, query.WalletID, txIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail outputs: %w", err)
+	}
+
+	inputOutpoints, err := txInputOutpointsFromBases(bases)
+	if err != nil {
+		return nil, fmt.Errorf("build tx detail input outpoints: %w", err)
+	}
+
+	ownedInputs, err := ops.LoadOwnedInputs(
+		ctx, query.WalletID, inputOutpoints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load tx detail inputs: %w", err)
+	}
+
+	return buildTxDetailsFromBases(bases, ownedInputs, ownedOutputs)
+}
+
+// txInputOutpointsFromBases extracts every previous outpoint referenced by the
+// selected transaction rows.
+func txInputOutpointsFromBases(bases []TxDetailBase) (
+	[]TxInputOutpoint, error) {
+
+	var inputOutpoints []TxInputOutpoint
+
+	for _, base := range bases {
+		msgTx, err := deserializeMsgTx(base.RawTx)
+		if err != nil {
+			return nil, err
+		}
+
+		if blockchain.IsCoinBaseTx(msgTx) {
+			continue
+		}
+
+		for inputIndex, txIn := range msgTx.TxIn {
+			index, err := Int64ToUint32(int64(inputIndex))
+			if err != nil {
+				return nil, fmt.Errorf("input index %d: %w",
+					inputIndex, err)
+			}
+
+			inputOutpoints = append(inputOutpoints, TxInputOutpoint{
+				TxID:            base.ID,
+				InputIndex:      index,
+				PrevTxHash:      txIn.PreviousOutPoint.Hash,
+				PrevOutputIndex: txIn.PreviousOutPoint.Index,
+			})
+		}
+	}
+
+	return inputOutpoints, nil
+}
+
+// buildTxDetailInfo rebuilds one TxDetailInfo from one normalized base row and
+// its owned input and output edge sets.
+func buildTxDetailInfo(base TxDetailBase, ownedInputs []TxOwnedInput,
+	ownedOutputs []TxOwnedOutput) (*TxDetailInfo, error) {
+
+	msgTx, err := deserializeMsgTx(base.RawTx)
+	if err != nil {
+		return nil, err
+	}
+
+	txInfo, err := BuildTxInfo(
+		base.Hash, base.RawTx, base.Received, base.Block, base.Status,
+		base.Label,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TxDetailInfo{
+		Hash:         txInfo.Hash,
+		MsgTx:        msgTx,
+		SerializedTx: txInfo.SerializedTx,
+		Received:     txInfo.Received,
+		Block:        txInfo.Block,
+		Status:       txInfo.Status,
+		Label:        txInfo.Label,
+		OwnedInputs:  ownedInputs,
+		OwnedOutputs: ownedOutputs,
+	}, nil
+}
+
+// ReverseTxInfosByBlock reverses confirmed block order while preserving the
+// transaction order within each block.
+func ReverseTxInfosByBlock(infos []TxInfo) {
+	reverseByBlock(infos, func(info TxInfo) uint32 {
+		if info.Block == nil {
+			return 0
+		}
+
+		return info.Block.Height
+	})
+}
+
+// ReverseTxDetailBasesByBlock reverses confirmed block order while preserving
+// the transaction order within each block.
+func ReverseTxDetailBasesByBlock(bases []TxDetailBase) {
+	reverseByBlock(bases, func(base TxDetailBase) uint32 {
+		if base.Block == nil {
+			return 0
+		}
+
+		return base.Block.Height
+	})
+}
+
+// reverseByBlock reverses contiguous block groups while preserving the original
+// order inside each group.
+func reverseByBlock[T any](items []T, blockHeight func(T) uint32) {
+	slices.Reverse(items)
+
+	for start := 0; start < len(items); {
+		end := start + 1
+
+		height := blockHeight(items[start])
+		for end < len(items) && blockHeight(items[end]) == height {
+			end++
+		}
+
+		slices.Reverse(items[start:end])
+		start = end
+	}
+}
+
+// normalizeListTxDetailsQuery converts wallet tx-reader range semantics into
+// the internal form used by the shared ListTxDetails workflow.
+func normalizeListTxDetailsQuery(
+	query ListTxDetailsQuery,
+) normalizedListTxDetailsQuery {
+
+	switch {
+	case query.StartHeight < 0 && query.EndHeight < 0:
+		return normalizedListTxDetailsQuery{
+			includeUnmined: true,
+			unminedFirst:   true,
+		}
+
+	case query.StartHeight < 0:
+		return normalizedListTxDetailsQuery{
+			confirmedStart: query.EndHeight,
+			confirmedEnd:   math.MaxInt32,
+			reverse:        true,
+			includeUnmined: true,
+			unminedFirst:   true,
+			hasConfirmed:   true,
+		}
+
+	case query.EndHeight < 0:
+		return normalizedListTxDetailsQuery{
+			confirmedStart: query.StartHeight,
+			confirmedEnd:   math.MaxInt32,
+			includeUnmined: true,
+			hasConfirmed:   true,
+		}
+
+	default:
+		start := query.StartHeight
+		end := query.EndHeight
+
+		reverse := start > end
+		if reverse {
+			start, end = end, start
+		}
+
+		return normalizedListTxDetailsQuery{
+			confirmedStart: start,
+			confirmedEnd:   end,
+			reverse:        reverse,
+			hasConfirmed:   true,
+		}
+	}
+}
+
+// listTxDetailBases loads the normalized base rows for one ListTxDetails call
+// in the final output order required by the wallet tx reader.
+func listTxDetailBases(ctx context.Context, walletID uint32,
+	normalized normalizedListTxDetailsQuery,
+	ops ListTxDetailsOps) ([]TxDetailBase, error) {
+
+	var bases []TxDetailBase
+
+	if normalized.includeUnmined && normalized.unminedFirst {
+		unmined, err := ops.ListUnmined(ctx, walletID)
+		if err != nil {
+			return nil, fmt.Errorf("list unmined tx details: %w", err)
+		}
+
+		bases = append(bases, unmined...)
+	}
+
+	if normalized.hasConfirmed {
+		confirmed, err := ops.ListConfirmed(
+			ctx, walletID, normalized.confirmedStart, normalized.confirmedEnd,
+			normalized.reverse,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("list confirmed tx details: %w", err)
+		}
+
+		bases = append(bases, confirmed...)
+	}
+
+	if normalized.includeUnmined && !normalized.unminedFirst {
+		unmined, err := ops.ListUnmined(ctx, walletID)
+		if err != nil {
+			return nil, fmt.Errorf("list unmined tx details: %w", err)
+		}
+
+		bases = append(bases, unmined...)
+	}
+
+	return bases, nil
+}
+
+// buildTxDetailsFromBases rebuilds the final detail rows in base-row order
+// after the owned input and output edges have been grouped by tx id.
+func buildTxDetailsFromBases(bases []TxDetailBase,
+	ownedInputs map[int64][]TxOwnedInput,
+	ownedOutputs map[int64][]TxOwnedOutput) ([]TxDetailInfo, error) {
+
+	details := make([]TxDetailInfo, 0, len(bases))
+	for _, base := range bases {
+		detail, err := buildTxDetailInfo(
+			base, ownedInputs[base.ID], ownedOutputs[base.ID],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		details = append(details, *detail)
+	}
+
+	return details, nil
 }
 
 // validateCreateTxParams enforces the CreateTx invariants shared by both SQL
