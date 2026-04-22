@@ -1,6 +1,10 @@
 -- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 
+-- Monotonic sequence used to preserve the order in which wallet transactions
+-- enter confirmed block history, independent of their original row IDs.
+CREATE SEQUENCE transactions_confirmed_order_seq;
+
 -- Transactions table stores wallet-scoped blockchain transactions and their
 -- wallet-relative validity/confirmation state.
 CREATE TABLE transactions (
@@ -35,6 +39,11 @@ CREATE TABLE transactions (
     -- ON DELETE SET NULL: If a block is reorged, the transaction becomes
     -- unconfirmed.
     block_height INTEGER REFERENCES blocks (block_height) ON DELETE SET NULL,
+
+    -- Monotonic token assigned when a row becomes confirmed. Confirmed range
+    -- reads use it as the block-local tie-breaker so rows first seen as
+    -- unmined do not sort ahead of earlier transactions in the same block.
+    confirmed_order BIGINT,
 
     -- Validity state (soft deletion).
     --
@@ -88,6 +97,13 @@ CREATE TABLE transactions (
         block_height IS NULL OR tx_status = 1
     ),
 
+    -- The confirmation-order token is meaningful only while a transaction has
+    -- a confirming block.
+    CONSTRAINT check_confirmed_order_matches_block CHECK (
+        (block_height IS NULL AND confirmed_order IS NULL)
+        OR (block_height IS NOT NULL AND confirmed_order IS NOT NULL)
+    ),
+
     -- Coinbase transactions cannot exist in the local-only pre-broadcast state
     -- because they are created by mining, not by wallet authorship.
     CONSTRAINT check_coinbase_not_pending CHECK (
@@ -102,6 +118,9 @@ CREATE TABLE transactions (
         OR (block_height IS NULL AND tx_status = 4)
     )
 );
+
+ALTER SEQUENCE transactions_confirmed_order_seq OWNED BY
+transactions.confirmed_order;
 
 -- Optimization for unmined pending/published transaction lookups.
 CREATE INDEX idx_transactions_unconfirmed
@@ -121,13 +140,13 @@ WHERE block_height IS NULL;
 
 -- Optimization for "all transactions in block X" queries.
 CREATE INDEX idx_transactions_by_block
-ON transactions (wallet_id, block_height)
+ON transactions (wallet_id, block_height, confirmed_order)
 WHERE block_height IS NOT NULL;
 
 -- Optimization for rollback/disconnect paths that only know the confirmed block
 -- height and then fan out to affected wallet rows.
 CREATE INDEX idx_transactions_by_confirmed_height
-ON transactions (block_height, wallet_id, id)
+ON transactions (block_height, wallet_id, confirmed_order)
 WHERE block_height IS NOT NULL;
 
 -- Optimization for "latest transactions" queries.
@@ -151,10 +170,16 @@ CREATE FUNCTION set_coinbase_orphaned_on_disconnect() RETURNS TRIGGER AS $$
 BEGIN
     -- Detect the disconnect transition caused by the FK action on block delete.
     IF NEW.block_height IS NULL AND OLD.block_height IS NOT NULL
-        AND NEW.is_coinbase THEN
-        -- Only coinbase rows need rewriting here. Ordinary transactions may
-        -- become unconfirmed while keeping their existing non-orphaned status.
-        NEW.tx_status := 4;
+        THEN
+        -- The confirmation-order token belongs to the disconnected block edge.
+        NEW.confirmed_order := NULL;
+
+        IF NEW.is_coinbase THEN
+            -- Only coinbase rows need status rewriting here. Ordinary
+            -- transactions may become unconfirmed while keeping their existing
+            -- non-orphaned status.
+            NEW.tx_status := 4;
+        END IF;
     END IF;
 
     RETURN NEW;

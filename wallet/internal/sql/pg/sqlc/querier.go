@@ -335,6 +335,30 @@ type Querier interface {
 	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
+	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
+	// may be spent by selected transaction inputs.
+	//
+	// How:
+	// - Resolves previous transaction hashes to this wallet's tracked UTXO rows.
+	// - Rejoins addresses -> accounts -> key_scopes so debit reconstruction does
+	//   not depend only on transaction wallet scope.
+	// - Does not read `spent_by_tx_id` because invalidation and rollback can clear
+	//   that mutable edge while the historical spending transaction still exists.
+	// Performance:
+	// - Uses one batched transaction-hash lookup, then the UTXO tx-id index for the
+	//   previous transactions' wallet-owned outputs.
+	ListOwnedInputPrevOutputsByTxHashes(ctx context.Context, arg ListOwnedInputPrevOutputsByTxHashesParams) ([]ListOwnedInputPrevOutputsByTxHashesRow, error)
+	// ListOwnedOutputsByTxIDs lists wallet-owned outputs created by the selected
+	// transaction rows.
+	//
+	// How:
+	// - Reads directly from utxos by `tx_id` after the caller has already selected
+	//   the wallet-scoped transaction rows.
+	// - Returns only the output indexes and amounts needed by the tx detail read
+	//   model.
+	// Performance:
+	// - Uses the provided tx-id array to bound the scan to the selected rows.
+	ListOwnedOutputsByTxIDs(ctx context.Context, arg ListOwnedOutputsByTxIDsParams) ([]ListOwnedOutputsByTxIDsRow, error)
 	// Lists victim txids for a given replacement txid.
 	//
 	// How:
@@ -406,7 +430,8 @@ type Querier interface {
 	// - INNER JOINs blocks on the natural `block_height` key to hydrate block hash
 	//   and timestamp for confirmed rows.
 	// Performance:
-	// - The `(wallet_id, block_height)` index bounds the scan before the single-row
+	// - The `(wallet_id, block_height, confirmed_order)` index bounds the scan and
+	//   preserves wallet-observed order within each block before the single-row
 	//   block join.
 	ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error)
 	// Lists every wallet transaction row that currently has no confirming block.
