@@ -80,15 +80,16 @@ type KeyScopeSecret struct {
 }
 
 type Transaction struct {
-	WalletID     int64
-	ID           int64
-	TxHash       []byte
-	RawTx        []byte
-	BlockHeight  sql.NullInt64
-	TxStatus     int64
-	ReceivedTime time.Time
-	IsCoinbase   bool
-	TxLabel      string
+	WalletID       int64
+	ID             int64
+	TxHash         []byte
+	RawTx          []byte
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	TxStatus       int64
+	ReceivedTime   time.Time
+	IsCoinbase     bool
+	TxLabel        string
 }
 
 type TxReplacement struct {
