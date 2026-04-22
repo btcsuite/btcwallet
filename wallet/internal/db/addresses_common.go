@@ -14,6 +14,16 @@ import (
 const DefaultImportedAccountName = "imported"
 
 var (
+	// errNilAddressDerivationFunc is returned when derived address creation is
+	// called without a derivation callback.
+	errNilAddressDerivationFunc = errors.New(
+		"address derivation callback is nil",
+	)
+
+	// errNilDerivedAddressData is returned when the derivation callback reports
+	// success but does not return any derived address data.
+	errNilDerivedAddressData = errors.New("derived address data is nil")
+
 	// errInvalidOriginID is returned when an origin ID from the database is
 	// outside the valid range [DerivedAccount, ImportedAccount]. In practice,
 	// this should never happen, but it's possible if the database is modified
@@ -529,8 +539,7 @@ func derivedAddressInput(ctx context.Context,
 
 	indexValue, err := getIdx(ctx, accountID)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf(
-			"get next address index: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("get next address index: %w", err)
 	}
 
 	if indexValue > math.MaxUint32 {
@@ -539,20 +548,22 @@ func derivedAddressInput(ctx context.Context,
 
 	index, err := Int64ToUint32(indexValue)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf(
-			"address index: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("address index: %w", err)
 	}
 
 	acctID, err := Int64ToUint32(accountID)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf(
-			"account ID: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("account ID: %w", err)
 	}
 
 	derivedData, err := deriveFn(ctx, acctID, branch, index)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf(
-			"derive address: %w", err)
+		return 0, 0, 0, nil, fmt.Errorf("derive address: %w", err)
+	}
+
+	if derivedData == nil {
+		return 0, 0, 0, nil, fmt.Errorf("derive address: %w",
+			errNilDerivedAddressData)
 	}
 
 	return addrType, branch, index, derivedData.ScriptPubKey, nil
@@ -566,6 +577,11 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 	executeTx func(context.Context, func(QTX) error) error,
 	adapters DerivedAddressAdapters[QTX, AccountRow, AccountParams, AddrRow],
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
+
+	if deriveFn == nil {
+		return nil, fmt.Errorf("derive address: %w",
+			errNilAddressDerivationFunc)
+	}
 
 	var result *AddressInfo
 
