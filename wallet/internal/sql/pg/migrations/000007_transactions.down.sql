@@ -4,3 +4,4 @@
 DROP TRIGGER IF EXISTS trg_set_coinbase_orphaned_on_disconnect ON transactions;
 DROP FUNCTION IF EXISTS set_coinbase_orphaned_on_disconnect();
 DROP TABLE IF EXISTS transactions;
+DROP SEQUENCE IF EXISTS transactions_confirmed_order_seq;
