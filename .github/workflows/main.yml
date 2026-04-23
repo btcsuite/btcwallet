@@ -123,10 +123,22 @@ jobs:
     steps:
       - name: extract bitcoind from docker image
         run: |-
-          docker pull ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
-          CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }})
-          sudo docker cp $CONTAINER_ID:/opt/bitcoin-${{ env.BITCOIND_VERSION }}/bin/bitcoind /usr/local/bin/bitcoind
+          IMAGE=${{ env.BITCOIND_IMAGE }}:${{ env.BITCOIND_VERSION }}
+          docker pull $IMAGE
+
+          BIN_PATH=$(docker run --rm --entrypoint sh $IMAGE -c '
+            command -v bitcoind ||
+            find /opt /usr -type f -name bitcoind 2>/dev/null | head -n 1
+          ')
+          if [ -z "$BIN_PATH" ]; then
+            echo "could not locate bitcoind in $IMAGE" >&2
+            exit 1
+          fi
+
+          CONTAINER_ID=$(docker create $IMAGE)
+          sudo docker cp $CONTAINER_ID:$BIN_PATH /usr/local/bin/bitcoind
           docker rm $CONTAINER_ID
+          bitcoind --version
 
       - name: git checkout
         uses: actions/checkout@v5
@@ -323,20 +335,20 @@ jobs:
       # matrix covers both bitcoind v30 (latest) and v28 (older).
       - name: extract bitcoind from docker image (${{ matrix.bitcoind_version }})
         run: |-
-          docker pull ${{ env.BITCOIND_IMAGE }}:${{ matrix.bitcoind_version }}
-          CONTAINER_ID=$(docker create ${{ env.BITCOIND_IMAGE }}:${{ matrix.bitcoind_version }})
+          IMAGE=${{ env.BITCOIND_IMAGE }}:${{ matrix.bitcoind_version }}
+          docker pull $IMAGE
 
-          # Different upstream image tags use slightly different install paths.
-          # Try common variants in order until one succeeds.
-          for BIN_PATH in \
-            "/opt/bitcoin-${{ matrix.bitcoind_version }}/bin/bitcoind" \
-            "/opt/bitcoin-${{ matrix.bitcoind_version }}.0/bin/bitcoind" \
-            "/opt/bitcoin-${{ matrix.bitcoind_version }}.0.0/bin/bitcoind"; do
-            if sudo docker cp $CONTAINER_ID:${BIN_PATH} /usr/local/bin/bitcoind; then
-              break
-            fi
-          done
+          BIN_PATH=$(docker run --rm --entrypoint sh $IMAGE -c '
+            command -v bitcoind ||
+            find /opt /usr -type f -name bitcoind 2>/dev/null | head -n 1
+          ')
+          if [ -z "$BIN_PATH" ]; then
+            echo "could not locate bitcoind in $IMAGE" >&2
+            exit 1
+          fi
 
+          CONTAINER_ID=$(docker create $IMAGE)
+          sudo docker cp $CONTAINER_ID:$BIN_PATH /usr/local/bin/bitcoind
           docker rm $CONTAINER_ID
           bitcoind --version
 
