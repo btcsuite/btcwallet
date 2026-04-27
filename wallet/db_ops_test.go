@@ -1,10 +1,12 @@
 package wallet
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -88,6 +90,80 @@ func TestDBLoadWallet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, addrMgr)
 	require.NotNil(t, txMgr)
+}
+
+// TestDBDeriveAddressDataExtendsLegacyAddressStore verifies that the
+// transitional SQL derivation callback keeps waddrmgr address rows in sync so
+// signer paths can still load newly generated addresses from the legacy store.
+func TestDBDeriveAddressDataExtendsLegacyAddressStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
+
+	pubPass := []byte("public")
+	privPass := []byte("private")
+	cfg := Config{
+		DB:            dbConn,
+		PubPassphrase: pubPass,
+		ChainParams:   &chainParams,
+	}
+	seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	defer rootKey.Zero()
+
+	err = DBCreateWallet(cfg, CreateWalletParams{
+		PubPassphrase:     pubPass,
+		PrivatePassphrase: privPass,
+		Birthday:          time.Now(),
+	}, rootKey)
+	require.NoError(t, err)
+
+	addrMgr, _, err := DBLoadWallet(cfg)
+	require.NoError(t, err)
+	t.Cleanup(addrMgr.Close)
+
+	w := &Wallet{
+		addrStore: addrMgr,
+		cfg:       cfg,
+	}
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		return addrMgr.Unlock(ns, privPass)
+	})
+	require.NoError(t, err)
+
+	data, err := w.DBDeriveAddressData(
+		t.Context(), waddrmgr.KeyScopeBIP0084,
+		waddrmgr.DefaultAccountName, waddrmgr.ExternalBranch, 7,
+	)
+	require.NoError(t, err)
+
+	addr := extractAddrFromPKScript(data.ScriptPubKey, cfg.ChainParams)
+	require.NotNil(t, addr)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err := addrMgr.Address(ns, addr)
+		if err != nil {
+			return err
+		}
+
+		pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+		require.True(t, ok)
+
+		_, path, ok := pubKeyAddr.DerivationInfo()
+		require.True(t, ok)
+		require.Equal(t, uint32(7), path.Index)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // TestDBBirthdayBlock verifies that the wallet can successfully persist and

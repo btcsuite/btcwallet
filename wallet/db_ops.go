@@ -12,8 +12,10 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	db "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -121,6 +123,71 @@ func DBLoadWallet(cfg Config) (*waddrmgr.Manager, *wtxmgr.Store, error) {
 	}
 
 	return addrMgr, txMgr, nil
+}
+
+// DBDeriveAddressData derives one address script through the legacy address
+// manager using the provided scope and derivation path, and ensures the legacy
+// address row exists for signer paths that still load keys through waddrmgr.
+//
+// NOTE: This transitional helper keeps `walletdb` access out of
+// `wallet/address_manager.go` while the legacy kvdb backend still owns address
+// derivation.
+func (w *Wallet) DBDeriveAddressData(_ context.Context, scope waddrmgr.KeyScope,
+	accountName string, branch, index uint32) (*db.DerivedAddressData, error) {
+
+	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, fmt.Errorf("fetch scoped key manager: %w", err)
+	}
+
+	var derivedData *db.DerivedAddressData
+
+	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		account, err := manager.LookupAccount(ns, accountName)
+		if err != nil {
+			return fmt.Errorf("lookup account: %w", err)
+		}
+
+		path := waddrmgr.DerivationPath{
+			InternalAccount: account,
+			Account:         account + hdkeychain.HardenedKeyStart,
+			Branch:          branch,
+			Index:           index,
+		}
+
+		err = manager.ExtendAddresses(ns, account, index, branch)
+		if err != nil {
+			return fmt.Errorf("extend legacy addresses: %w", err)
+		}
+
+		managedAddr, err := manager.DeriveFromKeyPath(ns, path)
+		if err != nil {
+			return fmt.Errorf("derive from key path: %w", err)
+		}
+
+		scriptPubKey, err := txscript.PayToAddrScript(managedAddr.Address())
+		if err != nil {
+			return fmt.Errorf("pay to address script: %w", err)
+		}
+
+		derivedData = &db.DerivedAddressData{
+			ScriptPubKey: scriptPubKey,
+		}
+
+		pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+		if ok {
+			derivedData.PubKey = pubKeyAddr.PubKey().SerializeCompressed()
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("derive address data: %w", err)
+	}
+
+	return derivedData, nil
 }
 
 // DBGetBirthdayBlock retrieves the current birthday block from the database.
