@@ -35,8 +35,8 @@ CREATE UNIQUE INDEX uidx_wallets_name ON wallets (wallet_name);
 -- Wallet Secrets table to store rarely accessed, highly sensitive encrypted
 -- material with a strict one-to-one relationship with the wallets table.
 -- Separated from the main wallets table for security and access pattern isolation.
--- Watch-only wallets may have no corresponding row in this table or have all
--- private key fields with no data.
+-- Watch-only wallets may have no corresponding row in this table or may store
+-- only script-encryption material while private wallet secret fields stay NULL.
 CREATE TABLE wallet_secrets (
     -- Reference to the wallet these secrets belong to. Also serves as the
     -- primary key, enforcing one-to-one relationship.
@@ -50,7 +50,7 @@ CREATE TABLE wallet_secrets (
     encrypted_crypto_priv_key BLOB,
 
     -- Encrypted key used to encrypt/decrypt wallet data related to scripts.
-    -- NULL for watch-only wallets.
+    -- Watch-only wallets may still store this to protect imported scripts.
     encrypted_crypto_script_key BLOB,
 
     -- Encrypted HD private key of the wallet. NULL for watch-only wallets.
