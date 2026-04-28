@@ -132,14 +132,15 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		sqlc.GetAccountByWalletScopeAndNameRow,
 		db.AccountLookupKey,
 		sqlc.CreateDerivedAddressRow]{
-		GetAccount:    getAccountFromKey(s.queries),
-		AccountParams: db.AccountKeyFromParams,
-		GetAccountID:  derivedAddressGetAccountID,
-		GetExtIndex:   derivedAddressGetExtIndex,
-		GetIntIndex:   derivedAddressGetIntIndex,
-		CreateAddr:    derivedAddressCreateAddr,
-		RowID:         derivedAddressRowID,
-		RowCreatedAt:  derivedAddressRowCreatedAt,
+		GetAccount:         getAccountFromKey(s.queries),
+		AccountParams:      db.AccountKeyFromParams,
+		GetAccountID:       derivedAddressGetAccountID,
+		GetWalletWatchOnly: derivedAddressGetWalletWatchOnly,
+		GetExtIndex:        derivedAddressGetExtIndex,
+		GetIntIndex:        derivedAddressGetIntIndex,
+		CreateAddr:         derivedAddressCreateAddr,
+		RowID:              derivedAddressRowID,
+		RowCreatedAt:       derivedAddressRowCreatedAt,
 	}
 
 	return db.NewDerivedAddressWithTx(
@@ -158,15 +159,16 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 		sqlc.CreateImportedAddressParams,
 		sqlc.CreateImportedAddressRow,
 		sqlc.InsertAddressSecretParams]{
-		GetAccount:    getAccountFromKey(s.queries),
-		AccountParams: db.AccountKeyFromImportedParams,
-		GetAccountID:  importedAddressGetAccountID,
-		CreateAddr:    createImportedAddress,
-		CreateParams:  createImportedAddressParams,
-		InsertSecret:  insertAddressSecret,
-		SecretParams:  insertAddressSecretParams,
-		RowID:         importedAddressRowID,
-		RowCreatedAt:  importedAddressRowCreatedAt,
+		GetAccount:         getAccountFromKey(s.queries),
+		AccountParams:      db.AccountKeyFromImportedParams,
+		GetAccountID:       importedAddressGetAccountID,
+		GetWalletWatchOnly: importedAddressGetWalletWatchOnly,
+		CreateAddr:         createImportedAddress,
+		CreateParams:       createImportedAddressParams,
+		InsertSecret:       insertAddressSecret,
+		SecretParams:       insertAddressSecretParams,
+		RowID:              importedAddressRowID,
+		RowCreatedAt:       importedAddressRowCreatedAt,
 	}
 
 	return db.NewImportedAddressWithTx(ctx, params, s.execWrite, adapters)
@@ -189,13 +191,6 @@ func getAccountFromKey(qtx *sqlc.Queries) func(context.Context,
 			},
 		)
 	}
-}
-
-// derivedAddressGetAccountID extracts the account ID from a row.
-func derivedAddressGetAccountID(
-	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
-
-	return row.ID
 }
 
 // derivedAddressGetExtIndex returns the external index query.
@@ -257,13 +252,6 @@ func derivedAddressRowCreatedAt(
 	return row.CreatedAt
 }
 
-// importedAddressGetAccountID extracts the account ID from a row.
-func importedAddressGetAccountID(
-	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
-
-	return row.ID
-}
-
 // createImportedAddress returns the imported address insert helper.
 func createImportedAddress(qtx *sqlc.Queries) func(context.Context,
 	sqlc.CreateImportedAddressParams) (
@@ -309,9 +297,13 @@ func insertAddressSecretParams(addressID int64,
 	params db.NewImportedAddressParams) sqlc.InsertAddressSecretParams {
 
 	return sqlc.InsertAddressSecretParams{
-		AddressID:        addressID,
-		EncryptedPrivKey: params.EncryptedPrivateKey,
-		EncryptedScript:  params.EncryptedScript,
+		AddressID: addressID,
+		EncryptedPrivKey: db.NilIfEmptyBytes(
+			params.EncryptedPrivateKey,
+		),
+		EncryptedScript: db.NilIfEmptyBytes(
+			params.EncryptedScript,
+		),
 	}
 }
 
@@ -344,19 +336,20 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo,
 	base := sqlc.GetAddressByScriptPubKeyRow(row)
 
 	info, err := db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
-		ID:            base.ID,
-		AccountID:     base.AccountID,
-		TypeID:        base.TypeID,
-		OriginID:      base.OriginID,
-		HasPrivateKey: base.HasPrivateKey,
-		HasScript:     base.HasScript,
-		CreatedAt:     base.CreatedAt,
-		AddressBranch: base.AddressBranch,
-		AddressIndex:  base.AddressIndex,
-		ScriptPubKey:  base.ScriptPubKey,
-		PubKey:        base.PubKey,
-		IDToAddrType:  db.IDToAddressType[int64],
-		IDToOrigin:    db.IDToOrigin[int64],
+		ID:                base.ID,
+		AccountID:         base.AccountID,
+		TypeID:            base.TypeID,
+		OriginID:          base.OriginID,
+		WalletIsWatchOnly: base.WalletIsWatchOnly,
+		HasPrivateKey:     base.HasPrivateKey,
+		HasScript:         base.HasScript,
+		CreatedAt:         base.CreatedAt,
+		AddressBranch:     base.AddressBranch,
+		AddressIndex:      base.AddressIndex,
+		ScriptPubKey:      base.ScriptPubKey,
+		PubKey:            base.PubKey,
+		IDToAddrType:      db.IDToAddressType[int64],
+		IDToOrigin:        db.IDToOrigin[int64],
 	})
 	if err != nil {
 		return nil, err
