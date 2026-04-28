@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -91,6 +92,13 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	var info *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		walletIsWatchOnly, err := getWalletWatchOnly(
+			ctx, qtx, params.WalletID,
+		)
+		if err != nil {
+			return err
+		}
+
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -113,7 +121,6 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 				ScopeID:     scopeID,
 				AccountName: params.Name,
 				OriginID:    int16(db.DerivedAccount),
-				IsWatchOnly: false,
 			},
 		)
 		if err != nil {
@@ -134,8 +141,8 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		}
 
 		info = db.BuildAccountInfo(
-			accNumber, params.Name, db.DerivedAccount, 0, 0, 0, false,
-			row.CreatedAt, params.Scope,
+			accNumber, params.Name, db.DerivedAccount, 0, 0, 0,
+			walletIsWatchOnly, row.CreatedAt, params.Scope,
 		)
 
 		return nil
@@ -162,6 +169,8 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 		props, err = db.CreateImportedAccount(
 			ctx, params, func() (int64, error) {
 				return ensureKeyScope(ctx, qtx, params.WalletID, params.Scope)
+			}, func() (bool, error) {
+				return getWalletWatchOnly(ctx, qtx, params.WalletID)
 			}, qtx.CreateImportedAccount,
 			buildCreateImportedAccountArgs(params),
 			func(row sqlc.CreateImportedAccountRow) int64 { return row.ID },
@@ -180,15 +189,30 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 	return props, nil
 }
 
+// getWalletWatchOnly returns the current watch-only mode for the wallet.
+func getWalletWatchOnly(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32) (bool, error) {
+
+	row, err := qtx.GetWalletByID(ctx, int64(walletID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("wallet %d: %w", walletID,
+				db.ErrWalletNotFound)
+		}
+
+		return false, fmt.Errorf("get wallet: %w", err)
+	}
+
+	return row.IsWatchOnly, nil
+}
+
 // buildCreateImportedAccountArgs returns a function that builds the
 // CreateImportedAccountParams for PostgreSQL.
 func buildCreateImportedAccountArgs(
 	params db.CreateImportedAccountParams,
-) func(int64, bool) sqlc.CreateImportedAccountParams {
+) func(int64) sqlc.CreateImportedAccountParams {
 
-	return func(scopeID int64,
-		isWatchOnly bool) sqlc.CreateImportedAccountParams {
-
+	return func(scopeID int64) sqlc.CreateImportedAccountParams {
 		return sqlc.CreateImportedAccountParams{
 			ScopeID:            scopeID,
 			AccountName:        params.Name,
@@ -198,7 +222,6 @@ func buildCreateImportedAccountArgs(
 				Int64: int64(params.MasterFingerprint),
 				Valid: true,
 			},
-			IsWatchOnly: isWatchOnly,
 		}
 	}
 }
@@ -211,8 +234,10 @@ func buildCreateAccountSecretArgs(
 
 	return func(accountID int64) sqlc.CreateAccountSecretParams {
 		return sqlc.CreateAccountSecretParams{
-			AccountID:           accountID,
-			EncryptedPrivateKey: params.EncryptedPrivateKey,
+			AccountID: accountID,
+			EncryptedPrivateKey: db.NilIfEmptyBytes(
+				params.EncryptedPrivateKey,
+			),
 		}
 	}
 }

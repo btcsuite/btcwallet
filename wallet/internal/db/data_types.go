@@ -381,6 +381,11 @@ type AccountInfo struct {
 	UnconfirmedBalance btcutil.Amount
 
 	// IsWatchOnly indicates whether the account is in watch-only mode.
+	// For accounts in this SQL store, the value follows the wallet-level
+	// watch-only mode: derived accounts inherit wallet watch-only status,
+	// and imported accounts are watch-only if the wallet is watch-only.
+	// Individual imported addresses may be watch-only even in a non-watch-only
+	// wallet if they lack private key material.
 	IsWatchOnly bool
 
 	// CreatedAt is the timestamp when the account was created in the database.
@@ -445,7 +450,9 @@ type CreateImportedAccountParams struct {
 
 	// EncryptedPrivateKey is the encrypted extended private key for the
 	// account. This should be encrypted by the caller before being passed
-	// to the database layer. A nil or empty slice indicates watch-only.
+	// to the database layer. A nil or empty slice means no account private
+	// key material is stored; the account's watch-only status follows
+	// wallet-level watch-only mode.
 	EncryptedPrivateKey []byte
 }
 

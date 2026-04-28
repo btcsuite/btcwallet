@@ -100,8 +100,12 @@ type AccountTestCase struct {
 	// Origin indicates whether the account is derived or imported.
 	Origin db.AccountOrigin
 
-	// IsWatchOnly indicates whether the account has no private key.
-	// Only relevant for imported accounts.
+	// HasPrivateKey indicates whether ImportedParams should include encrypted
+	// private key material for imported accounts.
+	HasPrivateKey bool
+
+	// IsWatchOnly indicates the expected account-level watch-only flag returned
+	// by the store.
 	IsWatchOnly bool
 }
 
@@ -154,71 +158,82 @@ var DerivedAccountCases = []AccountTestCase{
 // across multiple key scopes.
 var ImportedAccountCases = []AccountTestCase{
 	{
-		Name:   "imported-bip84-main",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.ImportedAccount,
+		Name:          "imported-bip84-main",
+		Scope:         db.KeyScopeBIP0084,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: true,
 	},
 	{
-		Name:   "imported-bip84-hardware",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.ImportedAccount,
+		Name:          "imported-bip84-hardware",
+		Scope:         db.KeyScopeBIP0084,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: true,
 	},
 	{
-		Name:   "imported-bip86-main",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.ImportedAccount,
+		Name:          "imported-bip86-main",
+		Scope:         db.KeyScopeBIP0086,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: true,
 	},
 	{
-		Name:   "imported-bip86-hardware",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.ImportedAccount,
+		Name:          "imported-bip86-hardware",
+		Scope:         db.KeyScopeBIP0086,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: true,
 	},
 	{
-		Name:   "imported-bip44-legacy",
-		Scope:  db.KeyScopeBIP0044,
-		Origin: db.ImportedAccount,
+		Name:          "imported-bip44-legacy",
+		Scope:         db.KeyScopeBIP0044,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: true,
 	},
 }
 
-// WatchOnlyAccountCases contains watch-only imported account fixtures (no
-// private keys) across multiple key scopes.
-var WatchOnlyAccountCases = []AccountTestCase{
+// PublicOnlyImportedAccountCases contains imported account fixtures without
+// private keys across multiple key scopes. These fixtures exercise public-only
+// (xpub) account creation without accidentally generating private key material.
+var PublicOnlyImportedAccountCases = []AccountTestCase{
 	{
-		Name:        "watchonly-bip84-cold",
-		Scope:       db.KeyScopeBIP0084,
-		Origin:      db.ImportedAccount,
-		IsWatchOnly: true,
+		Name:          "xpub-bip84-cold",
+		Scope:         db.KeyScopeBIP0084,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: false,
+		IsWatchOnly:   true,
 	},
 	{
-		Name:        "watchonly-bip84-monitor",
-		Scope:       db.KeyScopeBIP0084,
-		Origin:      db.ImportedAccount,
-		IsWatchOnly: true,
+		Name:          "xpub-bip84-monitor",
+		Scope:         db.KeyScopeBIP0084,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: false,
+		IsWatchOnly:   true,
 	},
 	{
-		Name:        "watchonly-bip86-cold",
-		Scope:       db.KeyScopeBIP0086,
-		Origin:      db.ImportedAccount,
-		IsWatchOnly: true,
+		Name:          "xpub-bip86-cold",
+		Scope:         db.KeyScopeBIP0086,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: false,
+		IsWatchOnly:   true,
 	},
 	{
-		Name:        "watchonly-bip86-monitor",
-		Scope:       db.KeyScopeBIP0086,
-		Origin:      db.ImportedAccount,
-		IsWatchOnly: true,
+		Name:          "xpub-bip86-monitor",
+		Scope:         db.KeyScopeBIP0086,
+		Origin:        db.ImportedAccount,
+		HasPrivateKey: false,
+		IsWatchOnly:   true,
 	},
 }
 
-// AllAccountCases combines all account test cases (derived, imported, and
-// watch-only) into a single slice.
+// AllAccountCases combines all account test cases (derived, imported with
+// private keys, and public-only imported) into a single slice.
 var AllAccountCases = append(
 	append(DerivedAccountCases, ImportedAccountCases...),
-	WatchOnlyAccountCases...,
+	PublicOnlyImportedAccountCases...,
 )
 
-// AllImportedAccountCases combines imported and watch-only account cases.
+// AllImportedAccountCases combines imported account cases (with and without
+// private keys).
 var AllImportedAccountCases = append(
-	ImportedAccountCases, WatchOnlyAccountCases...,
+	ImportedAccountCases, PublicOnlyImportedAccountCases...,
 )
 
 // DerivedParams converts the test case to CreateDerivedAccountParams.
@@ -232,8 +247,8 @@ func (tc AccountTestCase) DerivedParams(
 	}
 }
 
-// ImportedParams converts the test case to CreateImportedAccountParams. If
-// IsWatchOnly is true, EncryptedPrivateKey will be nil.
+// ImportedParams converts the test case to CreateImportedAccountParams.
+// HasPrivateKey controls whether EncryptedPrivateKey is populated.
 func (tc AccountTestCase) ImportedParams(
 	walletID uint32) db.CreateImportedAccountParams {
 
@@ -245,7 +260,7 @@ func (tc AccountTestCase) ImportedParams(
 		EncryptedPublicKey: RandomBytes(32),
 	}
 
-	if !tc.IsWatchOnly {
+	if tc.HasPrivateKey {
 		params.EncryptedPrivateKey = RandomBytes(32)
 	}
 
