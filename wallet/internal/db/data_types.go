@@ -499,8 +499,12 @@ type AccountProperties struct {
 	// KeyScope is the key scope the account belongs to.
 	KeyScope KeyScope
 
-	// IsWatchOnly indicates whether the is set up as watch-only, i.e., it
-	// doesn't contain any private key information.
+	// IsWatchOnly indicates whether the account is in watch-only mode.
+	// For accounts in this SQL store, the value follows the wallet-level
+	// watch-only mode: derived accounts inherit wallet watch-only status,
+	// and imported accounts are watch-only if the wallet is watch-only.
+	// Individual imported addresses may be watch-only even in a non-watch-only
+	// wallet if they lack private key material.
 	IsWatchOnly bool
 
 	// CreatedAt is the timestamp when the account was created in the database.
@@ -623,8 +627,8 @@ type AddressInfo struct {
 	// addresses.
 	PubKey []byte
 
-	// IsWatchOnly indicates whether the wallet has the private key for this
-	// address. Convenience field.
+	// IsWatchOnly indicates whether the address belongs to a watch-only
+	// wallet or does not have private keys.
 	IsWatchOnly bool
 }
 
@@ -668,6 +672,10 @@ type NewDerivedAddressParams struct {
 // address into the wallet. All imported addresses are assigned to the
 // wallet imported account. The caller is responsible for encrypting any
 // sensitive material before populating this struct.
+//
+// Watch-only semantics: An imported address is watch-only if the parent wallet
+// is watch-only or if EncryptedPrivateKey is empty. EncryptedScript alone does
+// not make the imported address spendable.
 type NewImportedAddressParams struct {
 	// WalletID identifies the wallet that will own this address.
 	//

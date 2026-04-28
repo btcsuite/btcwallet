@@ -13,6 +13,17 @@ import (
 // addresses.
 const DefaultImportedAccountName = "imported"
 
+// importedAddressIsWatchOnly determines whether an imported address is
+// watch-only based on wallet-level watch-only mode and address-level private
+// key presence. An imported address is watch-only if the wallet is watch-only
+// or if the address does not carry encrypted private key material.
+func importedAddressIsWatchOnly(
+	walletIsWatchOnly bool, hasPrivateKey bool,
+) bool {
+
+	return walletIsWatchOnly || !hasPrivateKey
+}
+
 var (
 	// errNilAddressDerivationFunc is returned when derived address creation is
 	// called without a derivation callback.
@@ -89,9 +100,9 @@ func GetAddressSecret[Row any](ctx context.Context,
 	return nil, fmt.Errorf("get address secret: %w", err)
 }
 
-// Validate validates the required fields for creating an imported address.
-// Returns sentinel errors on failure.
-func (p NewImportedAddressParams) Validate() error {
+// ValidateBasic checks imported address creation parameters that do not depend
+// on external state.
+func (p NewImportedAddressParams) ValidateBasic() error {
 	if len(p.ScriptPubKey) == 0 {
 		return ErrMissingScriptPubKey
 	}
@@ -99,17 +110,33 @@ func (p NewImportedAddressParams) Validate() error {
 	return nil
 }
 
-// IsWatchOnly returns true if the params include neither a private key nor
-// a redeem or witness script.
-func (p NewImportedAddressParams) IsWatchOnly() bool {
-	noPrivKey := len(p.EncryptedPrivateKey) == 0
-	noScript := len(p.EncryptedScript) == 0
+// ValidateWatchOnly checks imported address creation parameters against the
+// parent wallet's watch-only state.
+func (p NewImportedAddressParams) ValidateWatchOnly(
+	walletIsWatchOnly bool,
+) error {
 
-	if noPrivKey && noScript {
-		return true
+	if walletIsWatchOnly && p.HasPrivateKey() {
+		return fmt.Errorf("watch-only wallet %d cannot import private-key-"+
+			"bearing address into account %q: %w",
+			p.WalletID, DefaultImportedAccountName, ErrWatchOnlyViolation)
 	}
 
-	return false
+	return nil
+}
+
+// HasPrivateKey returns true if the params include private key material.
+// Script material is tracked separately and does not make an imported address
+// spend-capable by itself.
+func (p NewImportedAddressParams) HasPrivateKey() bool {
+	return len(p.EncryptedPrivateKey) > 0
+}
+
+// HasSecretMaterial returns true when the imported address carries any
+// encrypted secret payload that should be persisted in address_secrets.
+// Private keys and scripts are stored independently.
+func (p NewImportedAddressParams) HasSecretMaterial() bool {
+	return len(p.EncryptedPrivateKey) > 0 || len(p.EncryptedScript) > 0
 }
 
 // IDToOrigin safely converts an integer to AccountOrigin. It returns an error
@@ -138,6 +165,9 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// OriginID is the database identifier for address origin (derived=0,
 	// imported=1).
 	OriginID OriginIDType
+
+	// WalletIsWatchOnly indicates whether the wallet is watch-only.
+	WalletIsWatchOnly bool
 
 	// HasPrivateKey indicates whether the address has an encrypted private key.
 	HasPrivateKey bool
@@ -222,13 +252,17 @@ func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
 }
 
 // newImportedAddressTx handles the shared transaction flow for creating an
-// imported address across database backends.
+// imported address across database backends. It creates the address row and
+// conditionally inserts the address_secrets row when any encrypted private key
+// or encrypted script material is present. Imported addresses are watch-only
+// when their parent wallet is watch-only or when the address itself does not
+// carry private key material.
 func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 	ctx context.Context, create func(context.Context, CreateArgs) (Row, error),
 	createArgs CreateArgs,
 	insertFn func(QTX) func(context.Context, InsertArgs) error, qtx QTX,
 	insertArgs func(int64, NewImportedAddressParams) InsertArgs,
-	params NewImportedAddressParams, accountID int64,
+	params NewImportedAddressParams, accountID int64, walletIsWatchOnly bool,
 	rowID func(Row) int64, rowCreatedAt func(Row) time.Time) (*AddressInfo,
 	error) {
 
@@ -238,7 +272,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 	}
 
 	addrID := rowID(addrRow)
-	if !params.IsWatchOnly() {
+	if params.HasSecretMaterial() {
 		err = insertFn(qtx)(ctx, insertArgs(addrID, params))
 		if err != nil {
 			return nil, fmt.Errorf("insert address secret: %w", err)
@@ -258,7 +292,9 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		Origin:       ImportedAccount,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
-		IsWatchOnly:  params.IsWatchOnly(),
+		IsWatchOnly: importedAddressIsWatchOnly(
+			walletIsWatchOnly, params.HasPrivateKey(),
+		),
 	}, nil
 }
 
@@ -314,6 +350,10 @@ func convertAddressPath(origin AccountOrigin, branch,
 
 // AddressRowToInfo converts raw database field values into an AddressInfo
 // struct. It handles type conversion and validation for each field.
+//
+// Watch-only computation: derived addresses follow wallet watch-only mode.
+// Imported addresses are watch-only when the wallet is watch-only or when the
+// imported address does not carry encrypted private key material.
 func AddressRowToInfo[TypeID, OriginIDType any](
 	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
 
@@ -334,8 +374,12 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
-	isWatchOnly := origin == ImportedAccount && !row.HasPrivateKey &&
-		!row.HasScript
+	isWatchOnly := row.WalletIsWatchOnly
+	if origin == ImportedAccount {
+		isWatchOnly = importedAddressIsWatchOnly(
+			row.WalletIsWatchOnly, row.HasPrivateKey,
+		)
+	}
 
 	return &AddressInfo{
 		ID:           id,
@@ -394,6 +438,10 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	// GetAccountID extracts the account ID from an account row.
 	GetAccountID func(AccountRow) int64
 
+	// GetWalletWatchOnly extracts the wallet watch-only state from an account
+	// row.
+	GetWalletWatchOnly func(AccountRow) bool
+
 	// GetExtIndex returns a function to get the external index.
 	GetExtIndex func(QTX) func(context.Context, int64) (int64, error)
 
@@ -425,6 +473,10 @@ type ImportedAddressAdapters[QTX any, AccountRow any,
 
 	// GetAccountID extracts the account ID from an account row.
 	GetAccountID func(AccountRow) int64
+
+	// GetWalletWatchOnly extracts the wallet-derived watch-only state from an
+	// account row.
+	GetWalletWatchOnly func(AccountRow) bool
 
 	// CreateAddr returns a function to create an address row.
 	CreateAddr func(QTX) func(context.Context, CreateArgs) (AddrRow, error)
@@ -465,6 +517,7 @@ func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
 // inputs and then createFn to create the address.
 func createDerivedAddress[T any](ctx context.Context,
 	params NewDerivedAddressParams, walletID int64, accountID int64,
+	walletIsWatchOnly bool,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
 	createFn func(context.Context, int64, int64, AddressType, uint32, uint32,
@@ -503,7 +556,7 @@ func createDerivedAddress[T any](ctx context.Context,
 		Branch:       branch,
 		Index:        index,
 		ScriptPubKey: scriptPubKey,
-		IsWatchOnly:  false,
+		IsWatchOnly:  walletIsWatchOnly,
 	}, nil
 }
 
@@ -588,8 +641,11 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 	err := executeTx(ctx, func(qtx QTX) error {
 		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
+			accountID := adapters.GetAccountID(row)
+
 			info, errAddr := createDerivedAddress(
-				ctx, params, int64(params.WalletID), adapters.GetAccountID(row),
+				ctx, params, int64(params.WalletID), accountID,
+				adapters.GetWalletWatchOnly(row),
 				adapters.GetExtIndex(qtx),
 				adapters.GetIntIndex(qtx),
 				adapters.CreateAddr(qtx),
@@ -630,7 +686,7 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
 		AddrRow, SecretParams]) (*AddressInfo, error) {
 
-	validationErr := params.Validate()
+	validationErr := params.ValidateBasic()
 	if validationErr != nil {
 		return nil, validationErr
 	}
@@ -640,13 +696,20 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	err := executeTx(ctx, func(qtx QTX) error {
 		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
+			walletIsWatchOnly := adapters.GetWalletWatchOnly(row)
+
+			errWatchOnly := params.ValidateWatchOnly(walletIsWatchOnly)
+			if errWatchOnly != nil {
+				return errWatchOnly
+			}
+
 			acctID := adapters.GetAccountID(row)
 
 			info, errAddr := newImportedAddressTx(
 				ctx, adapters.CreateAddr(qtx),
 				adapters.CreateParams(int64(params.WalletID), acctID, params),
 				adapters.InsertSecret, qtx,
-				adapters.SecretParams, params, acctID,
+				adapters.SecretParams, params, acctID, walletIsWatchOnly,
 				adapters.RowID,
 				adapters.RowCreatedAt)
 			if errAddr != nil {

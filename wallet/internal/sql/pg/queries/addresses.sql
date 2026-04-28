@@ -1,5 +1,6 @@
 -- name: InsertAddressSecret :exec
--- Inserts address secret information (private key, script) for imported addresses.
+-- Inserts address secret information (private key and/or script) for imported
+-- addresses.
 -- Not used for derived addresses (their keys are derived from account key).
 INSERT INTO address_secrets (
     address_id,
@@ -22,16 +23,18 @@ SELECT
     a.created_at,
     acc.origin_id,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    w.is_watch_only AS wallet_is_watch_only
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = $1 AND a.wallet_id = $2;
 
 -- name: GetAddressSecret :one
 -- Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
 -- - Address exists with secret: returns full row
--- - Address exists without secret (watch-only/derived): returns row with NULL secret fields
+-- - Address exists without secret row: returns row with NULL secret fields
 -- - Address does not exist: returns no rows (sql.ErrNoRows)
 SELECT
     a.id AS address_id,
@@ -87,9 +90,11 @@ SELECT
     a.created_at,
     acc.origin_id,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    w.is_watch_only AS wallet_is_watch_only
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
 INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE

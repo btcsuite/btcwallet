@@ -111,9 +111,11 @@ SELECT
     a.created_at,
     acc.origin_id,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    w.is_watch_only AS wallet_is_watch_only
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = $1 AND a.wallet_id = $2
 `
@@ -124,17 +126,18 @@ type GetAddressByScriptPubKeyParams struct {
 }
 
 type GetAddressByScriptPubKeyRow struct {
-	ID            int64
-	AccountID     int64
-	TypeID        int16
-	AddressBranch sql.NullInt16
-	AddressIndex  sql.NullInt64
-	ScriptPubKey  []byte
-	PubKey        []byte
-	CreatedAt     time.Time
-	OriginID      int16
-	HasPrivateKey bool
-	HasScript     bool
+	ID                int64
+	AccountID         int64
+	TypeID            int16
+	AddressBranch     sql.NullInt16
+	AddressIndex      sql.NullInt64
+	ScriptPubKey      []byte
+	PubKey            []byte
+	CreatedAt         time.Time
+	OriginID          int16
+	HasPrivateKey     bool
+	HasScript         bool
+	WalletIsWatchOnly bool
 }
 
 // Retrieves an address by its script pubkey and account wallet.
@@ -153,6 +156,7 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.OriginID,
 		&i.HasPrivateKey,
 		&i.HasScript,
+		&i.WalletIsWatchOnly,
 	)
 	return i, err
 }
@@ -180,7 +184,7 @@ type GetAddressSecretRow struct {
 
 // Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
 // - Address exists with secret: returns full row
-// - Address exists without secret (watch-only/derived): returns row with NULL secret fields
+// - Address exists without secret row: returns row with NULL secret fields
 // - Address does not exist: returns no rows (sql.ErrNoRows)
 func (q *Queries) GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error) {
 	row := q.queryRow(ctx, q.getAddressSecretStmt, GetAddressSecret, arg.WalletID, arg.ID)
@@ -205,7 +209,8 @@ type InsertAddressSecretParams struct {
 	EncryptedScript  []byte
 }
 
-// Inserts address secret information (private key, script) for imported addresses.
+// Inserts address secret information (private key and/or script) for imported
+// addresses.
 // Not used for derived addresses (their keys are derived from account key).
 func (q *Queries) InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error {
 	_, err := q.exec(ctx, q.insertAddressSecretStmt, InsertAddressSecret, arg.AddressID, arg.EncryptedPrivKey, arg.EncryptedScript)
@@ -224,9 +229,11 @@ SELECT
     a.created_at,
     acc.origin_id,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    w.is_watch_only AS wallet_is_watch_only
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
 INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
@@ -256,17 +263,18 @@ type ListAddressesByAccountParams struct {
 }
 
 type ListAddressesByAccountRow struct {
-	ID            int64
-	AccountID     int64
-	TypeID        int16
-	AddressBranch sql.NullInt16
-	AddressIndex  sql.NullInt64
-	ScriptPubKey  []byte
-	PubKey        []byte
-	CreatedAt     time.Time
-	OriginID      int16
-	HasPrivateKey bool
-	HasScript     bool
+	ID                int64
+	AccountID         int64
+	TypeID            int16
+	AddressBranch     sql.NullInt16
+	AddressIndex      sql.NullInt64
+	ScriptPubKey      []byte
+	PubKey            []byte
+	CreatedAt         time.Time
+	OriginID          int16
+	HasPrivateKey     bool
+	HasScript         bool
+	WalletIsWatchOnly bool
 }
 
 // Lists addresses for an account identified by wallet_id, key scope
@@ -301,6 +309,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.OriginID,
 			&i.HasPrivateKey,
 			&i.HasScript,
+			&i.WalletIsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
