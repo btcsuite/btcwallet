@@ -130,7 +130,7 @@ func flattenAddressPages(
 }
 
 // TestNewImportedAddress verifies that NewImportedAddress correctly imports
-// addresses of different types, both watch-only and spendable.
+// addresses of different types, with and without private key material.
 func TestNewImportedAddress(t *testing.T) {
 	t.Parallel()
 
@@ -170,42 +170,42 @@ func TestNewImportedAddress(t *testing.T) {
 		providePrivateKey bool
 	}{
 		{
-			name:              "P2PKH watch-only",
+			name:              "P2PKH without private key",
 			addr:              p2pkhAddr,
 			scope:             db.KeyScopeBIP0044,
 			expectedAddrType:  db.PubKeyHash,
 			providePrivateKey: false,
 		},
 		{
-			name:              "P2PKH spendable",
+			name:              "P2PKH with private key",
 			addr:              p2pkhAddr,
 			scope:             db.KeyScopeBIP0044,
 			expectedAddrType:  db.PubKeyHash,
 			providePrivateKey: true,
 		},
 		{
-			name:              "P2WPKH watch-only",
+			name:              "P2WPKH without private key",
 			addr:              p2wpkhAddr,
 			scope:             db.KeyScopeBIP0084,
 			expectedAddrType:  db.WitnessPubKey,
 			providePrivateKey: false,
 		},
 		{
-			name:              "P2WPKH spendable",
+			name:              "P2WPKH with private key",
 			addr:              p2wpkhAddr,
 			scope:             db.KeyScopeBIP0084,
 			expectedAddrType:  db.WitnessPubKey,
 			providePrivateKey: true,
 		},
 		{
-			name:              "P2TR watch-only",
+			name:              "P2TR without private key",
 			addr:              p2trAddr,
 			scope:             db.KeyScopeBIP0086,
 			expectedAddrType:  db.TaprootPubKey,
 			providePrivateKey: false,
 		},
 		{
-			name:              "P2TR spendable",
+			name:              "P2TR with private key",
 			addr:              p2trAddr,
 			scope:             db.KeyScopeBIP0086,
 			expectedAddrType:  db.TaprootPubKey,
@@ -241,7 +241,6 @@ func TestNewImportedAddress(t *testing.T) {
 			require.NotNil(t, info.PubKey)
 			require.NotNil(t, info.ScriptPubKey)
 			require.Equal(t, tc.expectedAddrType, info.AddrType)
-			require.Equal(t, !tc.providePrivateKey, info.IsWatchOnly)
 
 			// Verify account imported_key_count incremented.
 			account, err := store.GetAccount(
@@ -300,16 +299,14 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 		addressType      db.AddressType
 		encryptedScript  []byte
 		hasPrivateKey    bool
-		hasScript        bool
 		expectedAddrType db.AddressType
 	}{
 		{
-			name:             "P2SH with EncryptedScript only (watch-only)",
+			name:             "P2SH with EncryptedScript only",
 			scope:            db.KeyScopeBIP0044,
 			addressType:      db.ScriptHash,
 			encryptedScript:  redeemScript,
 			hasPrivateKey:    false,
-			hasScript:        true,
 			expectedAddrType: db.ScriptHash,
 		},
 		{
@@ -319,16 +316,14 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 			addressType:      db.ScriptHash,
 			encryptedScript:  redeemScript,
 			hasPrivateKey:    true,
-			hasScript:        true,
 			expectedAddrType: db.ScriptHash,
 		},
 		{
-			name:             "P2WSH with EncryptedScript only (watch-only)",
+			name:             "P2WSH with EncryptedScript only",
 			scope:            db.KeyScopeBIP0049Plus,
 			addressType:      db.WitnessScript,
 			encryptedScript:  witnessScript,
 			hasPrivateKey:    false,
-			hasScript:        true,
 			expectedAddrType: db.WitnessScript,
 		},
 		{
@@ -338,7 +333,6 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 			addressType:      db.WitnessScript,
 			encryptedScript:  witnessScript,
 			hasPrivateKey:    true,
-			hasScript:        true,
 			expectedAddrType: db.WitnessScript,
 		},
 	}
@@ -383,25 +377,272 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 					AddressID: uint32(addressID),
 				},
 			)
+			require.NoError(t, err)
 			require.Equal(t, tc.encryptedScript, secret.EncryptedScript)
 
 			if tc.hasPrivateKey {
-				require.NoError(t, err)
 				require.Equal(
 					t, params.EncryptedPrivateKey, secret.EncryptedPrivKey,
 				)
-
-				return
+			} else {
+				require.Empty(t, secret.EncryptedPrivKey)
 			}
+		})
+	}
+}
 
-			if tc.hasScript {
+// TestNewImportedAddressNormalizesEmptyPrivateKey verifies that empty private
+// key payloads are treated as absent for validation and persisted as NULL.
+func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-empty-private-import")
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+
+	params := db.NewImportedAddressParams{
+		WalletID:            walletID,
+		Scope:               db.KeyScopeBIP0044,
+		AddressType:         db.ScriptHash,
+		PubKey:              RandomBytes(33),
+		ScriptPubKey:        RandomBytes(32),
+		EncryptedPrivateKey: []byte{},
+		EncryptedScript:     RandomBytes(48),
+	}
+
+	info, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.True(t, info.IsWatchOnly)
+
+	secret, err := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:  walletID,
+			AddressID: info.ID,
+		},
+	)
+	require.NoError(t, err)
+	require.Nil(t, secret.EncryptedPrivKey)
+	require.Equal(t, params.EncryptedScript, secret.EncryptedScript)
+}
+
+// TestWatchOnlyHierarchyAddressRules is the canonical wallet-to-account-to-
+// address watch-only matrix for derived and imported addresses.
+func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
+	t.Parallel()
+
+	type watchOnlyAddressStore interface {
+		db.AddressStore
+		db.AccountStore
+	}
+
+	tests := []struct {
+		name            string
+		walletParams    func(string) db.CreateWalletParams
+		wantWatchOnly   bool
+		wantErr         error
+		createAddressFn func(*testing.T, watchOnlyAddressStore, uint32) (bool,
+			error)
+	}{
+		{
+			name: "standard wallet derived address is " +
+				"spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				createDerivedAccount(
+					t, store, walletID, db.KeyScopeBIP0084, "derived",
+				)
+
+				info := newDerivedAddress(
+					t, store, walletID, db.KeyScopeBIP0084, "derived", false,
+				)
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet derived address is " +
+				"watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				createDerivedAccount(
+					t, store, walletID, db.KeyScopeBIP0084, "derived",
+				)
+
+				info := newDerivedAddress(
+					t, store, walletID, db.KeyScopeBIP0084, "derived", false,
+				)
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported address with " +
+				"private key is spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				CreateImportedAccount(
+					t, store, walletID, db.KeyScopeBIP0084,
+					db.DefaultImportedAccountName,
+				)
+
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:            walletID,
+						Scope:               db.KeyScopeBIP0084,
+						AddressType:         db.WitnessPubKey,
+						PubKey:              RandomBytes(33),
+						ScriptPubKey:        RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported address without " +
+				"private key is watch-only",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: true,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				_, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:            walletID,
+						Name:                db.DefaultImportedAccountName,
+						Scope:               db.KeyScopeBIP0084,
+						EncryptedPublicKey:  RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+					},
+				)
 				require.NoError(t, err)
-				require.Equal(t, params.EncryptedScript, secret.EncryptedScript)
 
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:     walletID,
+						Scope:        db.KeyScopeBIP0084,
+						AddressType:  db.WitnessPubKey,
+						PubKey:       RandomBytes(33),
+						ScriptPubKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet script-only imported " +
+				"address is watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				_, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:           walletID,
+						Name:               db.DefaultImportedAccountName,
+						Scope:              db.KeyScopeBIP0084,
+						EncryptedPublicKey: RandomBytes(32),
+					},
+				)
+				require.NoError(t, err)
+
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:        walletID,
+						Scope:           db.KeyScopeBIP0084,
+						AddressType:     db.WitnessScript,
+						PubKey:          RandomBytes(33),
+						ScriptPubKey:    RandomBytes(32),
+						EncryptedScript: RandomBytes(48),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet imported address with " +
+				"private key is rejected",
+			walletParams: CreateWatchOnlyWalletParams,
+			wantErr:      db.ErrWatchOnlyViolation,
+			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				_, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:           walletID,
+						Name:               db.DefaultImportedAccountName,
+						Scope:              db.KeyScopeBIP0084,
+						EncryptedPublicKey: RandomBytes(32),
+					},
+				)
+				require.NoError(t, err)
+
+				info, err := store.NewImportedAddress(
+					t.Context(), db.NewImportedAddressParams{
+						WalletID:            walletID,
+						Scope:               db.KeyScopeBIP0084,
+						AddressType:         db.WitnessScript,
+						PubKey:              RandomBytes(33),
+						ScriptPubKey:        RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+						EncryptedScript:     RandomBytes(48),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewTestStore(t)
+
+			walletInfo, err := store.CreateWallet(
+				t.Context(), tc.walletParams("watch-only-address-matrix"),
+			)
+			require.NoError(t, err)
+
+			isWatchOnly, err := tc.createAddressFn(t, store, walletInfo.ID)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			if tc.wantErr != nil {
 				return
 			}
 
-			require.ErrorIs(t, err, db.ErrSecretNotFound)
+			require.Equal(t, tc.wantWatchOnly, isWatchOnly)
 		})
 	}
 }
@@ -869,6 +1110,42 @@ func TestGetAddress(t *testing.T) {
 
 				require.NotNil(t, addr.ScriptPubKey)
 				require.Equal(t, db.ImportedAccount, addr.Origin)
+				require.True(t, addr.IsWatchOnly)
+			},
+		},
+		{
+			name: "get imported address with private key",
+			setupFunc: func(t *testing.T, addrStore db.AddressStore,
+				accountStore db.AccountStore,
+				walletID uint32) db.GetAddressQuery {
+
+				t.Helper()
+				CreateImportedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
+				)
+
+				script := RandomBytes(32)
+				params := db.NewImportedAddressParams{
+					WalletID:            walletID,
+					Scope:               db.KeyScopeBIP0084,
+					AddressType:         db.WitnessPubKey,
+					PubKey:              RandomBytes(33),
+					ScriptPubKey:        script,
+					EncryptedPrivateKey: RandomBytes(32),
+				}
+				_, err := addrStore.NewImportedAddress(t.Context(), params)
+				require.NoError(t, err)
+
+				return db.GetAddressQuery{
+					WalletID:     walletID,
+					ScriptPubKey: script,
+				}
+			},
+			validate: func(t *testing.T, addr *db.AddressInfo) {
+				t.Helper()
+				require.NotNil(t, addr.ScriptPubKey)
+				require.Equal(t, db.ImportedAccount, addr.Origin)
+				require.False(t, addr.IsWatchOnly)
 			},
 		},
 		{
@@ -974,8 +1251,11 @@ func TestListAddresses(t *testing.T) {
 					require.Equal(t, uint32(0), addr.Branch)
 					require.Equal(t, db.DerivedAccount, addr.Origin)
 				}
+
+				require.False(t, addrs[0].IsWatchOnly)
 			},
 		},
+
 		{
 			name: "list addresses - empty result",
 			setupFunc: func(t *testing.T, _ db.AddressStore,
@@ -1090,6 +1370,52 @@ func TestListAddressesZeroLimit(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrInvalidPageLimit)
 }
 
+// TestListAddressesWatchOnlyWallet verifies that ListAddresses preserves the
+// watch-only flag for derived addresses from a watch-only wallet.
+func TestListAddressesWatchOnlyWallet(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), CreateWatchOnlyWalletParams("watch-only-list-wallet"),
+	)
+	require.NoError(t, err)
+
+	_, err = store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletInfo.ID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "watch-only-account",
+		},
+	)
+	require.NoError(t, err)
+
+	createDerivedAddresses(
+		t, store, walletInfo.ID, db.KeyScopeBIP0084, "watch-only-account",
+		false, 3,
+	)
+
+	pageResult, err := store.ListAddresses(
+		t.Context(), db.ListAddressesQuery{
+			WalletID:    walletInfo.ID,
+			Scope:       db.KeyScopeBIP0084,
+			AccountName: "watch-only-account",
+			Page:        newTestReq[uint32](t, 10),
+		},
+	)
+	require.NoError(t, err)
+
+	addrs := pageResult.Items
+	require.Len(t, addrs, 3)
+
+	for _, addr := range addrs {
+		require.Equal(t, db.DerivedAccount, addr.Origin)
+	}
+
+	require.True(t, addrs[0].IsWatchOnly)
+}
+
 // TestNewDerivedAddress verifies that NewDerivedAddress correctly creates
 // derived addresses with proper AddressInfo fields for both external and
 // change addresses.
@@ -1134,7 +1460,6 @@ func TestNewDerivedAddress(t *testing.T) {
 			require.Equal(t, tc.expectedBranch, info.Branch)
 			require.NotNil(t, info.ScriptPubKey)
 			require.Nil(t, info.PubKey)
-			require.False(t, info.IsWatchOnly)
 		})
 	}
 }

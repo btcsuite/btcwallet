@@ -317,6 +317,36 @@ type accountInfoRow interface {
 		sqlc.ListAccountsByWalletAndNameRow
 }
 
+// derivedAddressGetAccountID extracts the account ID from a row.
+func derivedAddressGetAccountID(
+	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
+
+	return row.ID
+}
+
+// derivedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
+// from a row.
+func derivedAddressGetWalletWatchOnly(
+	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
+
+	return row.WalletIsWatchOnly
+}
+
+// importedAddressGetAccountID extracts the account ID from a row.
+func importedAddressGetAccountID(
+	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
+
+	return row.ID
+}
+
+// importedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
+// from a row.
+func importedAddressGetWalletWatchOnly(
+	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
+
+	return row.WalletIsWatchOnly
+}
+
 // accountRowToInfo converts a PostgreSQL account row to an AccountInfo
 // struct. It uses type conversion since all accountInfoRow types have
 // identical fields.

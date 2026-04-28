@@ -151,7 +151,7 @@ type Querier interface {
 	GetAddressByScriptPubKey(ctx context.Context, arg GetAddressByScriptPubKeyParams) (GetAddressByScriptPubKeyRow, error)
 	// Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
 	// - Address exists with secret: returns full row
-	// - Address exists without secret (watch-only/derived): returns row with NULL secret fields
+	// - Address exists without secret row: returns row with NULL secret fields
 	// - Address does not exist: returns no rows (sql.ErrNoRows)
 	GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
@@ -244,7 +244,8 @@ type Querier interface {
 	// - Targets one wallet-scoped outpoint through the parent tx lookup plus the
 	//   unique `(tx_id, output_index)` key.
 	HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error)
-	// Inserts address secret information (private key, script) for imported addresses.
+	// Inserts address secret information (private key and/or script) for imported
+	// addresses.
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
