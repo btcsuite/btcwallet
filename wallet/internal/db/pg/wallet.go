@@ -21,9 +21,14 @@ var _ db.WalletStore = (*Store)(nil)
 func (s *Store) CreateWallet(ctx context.Context,
 	params db.CreateWalletParams) (*db.WalletInfo, error) {
 
+	err := params.Validate()
+	if err != nil {
+		return nil, err
+	}
+
 	var info *db.WalletInfo
 
-	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		walletParams := sqlc.CreateWalletParams{
 			WalletName:              params.Name,
 			IsImported:              params.IsImported,
@@ -40,12 +45,19 @@ func (s *Store) CreateWallet(ctx context.Context,
 		}
 
 		secretsParams := sqlc.InsertWalletSecretsParams{
-			WalletID:               id,
-			MasterPrivParams:       params.MasterKeyPrivParams,
-			EncryptedCryptoPrivKey: params.EncryptedCryptoPrivKey,
-			EncryptedCryptoScriptKey: params.
-				EncryptedCryptoScriptKey,
-			EncryptedMasterHdPrivKey: params.EncryptedMasterPrivKey,
+			WalletID: id,
+			MasterPrivParams: db.NilIfEmptyBytes(
+				params.MasterKeyPrivParams,
+			),
+			EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
+				params.EncryptedCryptoPrivKey,
+			),
+			EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
+				params.EncryptedCryptoScriptKey,
+			),
+			EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
+				params.EncryptedMasterPrivKey,
+			),
 		}
 
 		err = qtx.InsertWalletSecrets(ctx, secretsParams)
@@ -294,14 +306,37 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	params db.UpdateWalletSecretsParams) error {
 
 	secretsParams := sqlc.UpdateWalletSecretsParams{
-		MasterPrivParams:         params.MasterPrivParams,
-		EncryptedCryptoPrivKey:   params.EncryptedCryptoPrivKey,
-		EncryptedCryptoScriptKey: params.EncryptedCryptoScriptKey,
-		EncryptedMasterHdPrivKey: params.EncryptedMasterHdPrivKey,
-		WalletID:                 int64(params.WalletID),
+		MasterPrivParams: db.NilIfEmptyBytes(
+			params.MasterPrivParams,
+		),
+		EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
+			params.EncryptedCryptoPrivKey,
+		),
+		EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
+			params.EncryptedCryptoScriptKey,
+		),
+		EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
+			params.EncryptedMasterHdPrivKey,
+		),
+		WalletID: int64(params.WalletID),
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		walletRow, err := qtx.GetWalletByID(ctx, int64(params.WalletID))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("wallet %d: %w", params.WalletID,
+					db.ErrWalletNotFound)
+			}
+
+			return fmt.Errorf("get wallet: %w", err)
+		}
+
+		err = params.Validate(walletRow.IsWatchOnly)
+		if err != nil {
+			return err
+		}
+
 		rowsAffected, err := qtx.UpdateWalletSecrets(ctx, secretsParams)
 		if err != nil {
 			return fmt.Errorf("update wallet secrets: %w", err)
