@@ -61,6 +61,43 @@ CREATE TABLE wallet_secrets (
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT
 );
 
+-- Enforce the watch-only wallet secret invariant at the database boundary.
+-- Watch-only wallets may retain script-encryption material for imported
+-- scripts, but must never store private key material; keeping these columns
+-- NULL prevents an insert or update from silently turning a watch-only wallet
+-- into a spend-capable wallet.
+CREATE TRIGGER trg_assert_watch_only_wallet_secrets_insert
+BEFORE INSERT ON wallet_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only wallet private secret columns must be null')
+    WHERE (
+        SELECT w.is_watch_only
+        FROM wallets AS w
+        WHERE w.id = new.wallet_id
+    ) AND (
+        new.master_priv_params IS NOT NULL
+        OR new.encrypted_crypto_priv_key IS NOT NULL
+        OR new.encrypted_master_hd_priv_key IS NOT NULL
+    );
+END;
+
+CREATE TRIGGER trg_assert_watch_only_wallet_secrets_update
+BEFORE UPDATE ON wallet_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only wallet private secret columns must be null')
+    WHERE (
+        SELECT w.is_watch_only
+        FROM wallets AS w
+        WHERE w.id = new.wallet_id
+    ) AND (
+        new.master_priv_params IS NOT NULL
+        OR new.encrypted_crypto_priv_key IS NOT NULL
+        OR new.encrypted_master_hd_priv_key IS NOT NULL
+    );
+END;
+
 -- Wallet Sync States table to store the synchronization state of each wallet.
 -- This is kept separate from the wallets table to avoid write amplification on
 -- frequently updated sync data. Each wallet has exactly one sync state record.
