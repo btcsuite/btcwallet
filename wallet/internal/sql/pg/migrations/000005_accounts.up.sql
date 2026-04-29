@@ -128,3 +128,40 @@ CREATE TABLE account_secrets (
     -- that the account cannot be deleted if secrets still exist.
     FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT
 );
+
+-- Enforce the watch-only account secret invariant at the database boundary.
+-- Accounts in watch-only wallets must not store account-level private key
+-- material.
+--
+-- Note: Unlike address_secrets.encrypted_priv_key (which is nullable for
+-- HD-derived addresses), account_secrets.encrypted_private_key is NOT NULL.
+-- This means any row in account_secrets necessarily represents private key
+-- material, so we reject all inserts/updates for watch-only parents without
+-- needing to check column nullability first.
+CREATE FUNCTION assert_watch_only_account_secrets() RETURNS TRIGGER AS $$
+DECLARE
+    wallet_is_watch_only BOOLEAN;
+BEGIN
+    SELECT w.is_watch_only INTO wallet_is_watch_only
+    FROM accounts AS a
+    INNER JOIN wallets AS w ON w.id = a.wallet_id
+    WHERE a.id = NEW.account_id;
+
+    IF wallet_is_watch_only THEN
+        RAISE EXCEPTION 'watch-only wallet accounts cannot store account secrets'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_watch_only_account_secrets_insert
+BEFORE INSERT ON account_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_account_secrets();
+
+CREATE TRIGGER trg_assert_watch_only_account_secrets_update
+BEFORE UPDATE ON account_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_account_secrets();
