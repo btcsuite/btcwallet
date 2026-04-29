@@ -14,6 +14,7 @@ import (
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,6 +36,16 @@ func requireConstraintSQLError(t *testing.T, err error) {
 	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
 	require.Equal(t, dberr.ClassPermanent, sqlErr.Class())
 	require.ErrorIs(t, err, sqlErr)
+}
+
+// requireDriverConstraintError verifies that a direct PostgreSQL driver error is
+// a constraint violation before store-level error wrapping occurs.
+func requireDriverConstraintError(t *testing.T, err error) {
+	t.Helper()
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23514", pgErr.Code)
 }
 
 // CreateBlockFixture inserts a test block into the database and returns it.
@@ -124,6 +135,145 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	)
 
 	return err
+}
+
+// insertAccountSecretRaw inserts an account secret directly through the
+// database so tests can validate watch-only triggers on account_secrets.
+func insertAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	encryptedPrivateKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO account_secrets (
+			account_id,
+			encrypted_private_key
+		) VALUES ($1, $2)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, accountID, encryptedPrivateKey,
+	)
+
+	return err
+}
+
+// updateAccountSecretRaw updates an account secret directly through the
+// database so tests can validate watch-only triggers on account_secrets.
+func updateAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	encryptedPrivateKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE account_secrets
+		SET encrypted_private_key = $1
+		WHERE account_id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedPrivateKey, accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("expected 1 updated row, got %d", rows)
+	}
+
+	return nil
+}
+
+// deleteWalletSecretRaw deletes a wallet secret row directly through the
+// database so tests can re-exercise wallet_secrets insert triggers.
+func deleteWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32) error {
+	t.Helper()
+
+	const stmt = `
+		DELETE FROM wallet_secrets
+		WHERE wallet_id = $1`
+
+	result, err := dbConn.ExecContext(t.Context(), stmt, int64(walletID))
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("expected 1 deleted row, got %d", rows)
+	}
+
+	return nil
+}
+
+// insertWalletSecretRaw inserts a wallet secret directly through the database
+// so tests can validate watch-only triggers on wallet_secrets.
+func insertWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	masterPrivParams []byte, encryptedCryptoPrivKey []byte,
+	encryptedCryptoScriptKey []byte, encryptedMasterHDPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO wallet_secrets (
+			wallet_id,
+			master_priv_params,
+			encrypted_crypto_priv_key,
+			encrypted_crypto_script_key,
+			encrypted_master_hd_priv_key
+		) VALUES ($1, $2, $3, $4, $5)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), masterPrivParams,
+		encryptedCryptoPrivKey, encryptedCryptoScriptKey,
+		encryptedMasterHDPrivKey,
+	)
+
+	return err
+}
+
+// updateWalletSecretRaw updates a wallet secret directly through the database
+// so tests can validate watch-only triggers on wallet_secrets.
+func updateWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	masterPrivParams []byte, encryptedCryptoPrivKey []byte,
+	encryptedCryptoScriptKey []byte, encryptedMasterHDPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE wallet_secrets
+		SET master_priv_params = $1,
+			encrypted_crypto_priv_key = $2,
+			encrypted_crypto_script_key = $3,
+			encrypted_master_hd_priv_key = $4
+		WHERE wallet_id = $5`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, masterPrivParams, encryptedCryptoPrivKey,
+		encryptedCryptoScriptKey, encryptedMasterHDPrivKey, int64(walletID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("expected 1 updated row, got %d", rows)
+	}
+
+	return nil
 }
 
 // CreateAddressWithIndex creates a derived address with a specific address
@@ -291,6 +441,59 @@ func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
 	)
 
 	return err
+}
+
+// insertAddressSecretRaw inserts an address secret directly through the
+// database so tests can validate watch-only triggers on address_secrets.
+func insertAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	encryptedPrivKey []byte, encryptedScript []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO address_secrets (
+			address_id,
+			encrypted_priv_key,
+			encrypted_script
+		) VALUES ($1, $2, $3)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, addressID, encryptedPrivKey, encryptedScript,
+	)
+
+	return err
+}
+
+// updateAddressSecretRaw updates an address secret directly through the
+// database so tests can validate watch-only triggers on address_secrets.
+func updateAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	encryptedPrivKey []byte, encryptedScript []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE address_secrets
+		SET encrypted_priv_key = $1,
+			encrypted_script = $2
+		WHERE address_id = $3`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedPrivKey, encryptedScript, addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("expected 1 updated row, got %d", rows)
+	}
+
+	return nil
 }
 
 // createDerivedAddressRaw inserts a derived address directly through

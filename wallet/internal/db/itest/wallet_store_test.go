@@ -985,6 +985,137 @@ func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 	})
 }
 
+// TestWatchOnlyWalletSecretTriggers verifies that wallet_secrets rejects
+// watch-only parent wallets while still allowing inserts and updates for
+// non-watch-only parents.
+func TestWatchOnlyWalletSecretTriggers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("watch-only insert is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-wallet-secret-insert"),
+		)
+		require.NoError(t, err)
+
+		err = insertWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, RandomBytes(16), RandomBytes(32),
+			RandomBytes(32), RandomBytes(32),
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("watch-only script-only insert succeeds", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-wallet-secret-script-only"),
+		)
+		require.NoError(t, err)
+
+		err = deleteWalletSecretRaw(t, store.DB(), walletInfo.ID)
+		require.NoError(t, err)
+
+		err = insertWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, nil, nil, RandomBytes(32), nil,
+		)
+		require.NoError(t, err)
+	})
+
+	t.Run("watch-only empty-but-non-nil insert is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-wallet-secret-empty-insert"),
+		)
+		require.NoError(t, err)
+
+		err = insertWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, []byte{}, nil, RandomBytes(32), nil,
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("watch-only update is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		params := CreateWatchOnlyWalletParams("watch-only-wallet-secret-update")
+		params.EncryptedCryptoScriptKey = RandomBytes(32)
+
+		walletInfo, err := store.CreateWallet(t.Context(), params)
+		require.NoError(t, err)
+
+		seed, err := store.GetEncryptedHDSeed(t.Context(), walletInfo.ID)
+		require.Nil(t, seed)
+		require.ErrorIs(t, err, db.ErrSecretNotFound)
+
+		err = updateWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, nil, nil, RandomBytes(32), nil,
+		)
+		require.NoError(t, err)
+
+		err = updateWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, RandomBytes(16), RandomBytes(32),
+			RandomBytes(32), RandomBytes(32),
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+
+		err = updateWalletSecretRaw(
+			t, store.DB(), walletInfo.ID, []byte{}, nil, RandomBytes(32), nil,
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("non-watch-only insert and update succeed", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+
+		walletID := newWallet(t, store, "spendable-wallet-secret-trigger")
+
+		err := deleteWalletSecretRaw(t, store.DB(), walletID)
+		require.NoError(t, err)
+
+		insertedSeed := RandomBytes(32)
+		err = insertWalletSecretRaw(
+			t, store.DB(), walletID, RandomBytes(16), RandomBytes(32),
+			RandomBytes(32), insertedSeed,
+		)
+		require.NoError(t, err)
+
+		seed, err := store.GetEncryptedHDSeed(t.Context(), walletID)
+		require.NoError(t, err)
+		require.Equal(t, insertedSeed, seed)
+
+		updatedSeed := RandomBytes(32)
+		err = updateWalletSecretRaw(
+			t, store.DB(), walletID, RandomBytes(16), RandomBytes(32),
+			RandomBytes(32), updatedSeed,
+		)
+		require.NoError(t, err)
+
+		seed, err = store.GetEncryptedHDSeed(t.Context(), walletID)
+		require.NoError(t, err)
+		require.Equal(t, updatedSeed, seed)
+	})
+}
+
 // TestUpdateWalletSecrets checks that updating the wallet secrets works
 // correctly.
 func TestUpdateWalletSecrets(t *testing.T) {

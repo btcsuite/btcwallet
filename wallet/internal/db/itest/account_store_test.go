@@ -100,6 +100,107 @@ func TestCreateImportedAccountRejectsWalletScopeMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "constraint")
 }
 
+// TestWatchOnlyAccountSecretTriggers verifies that account_secrets rejects
+// watch-only parent accounts while still allowing inserts and updates for
+// non-watch-only parents.
+func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("watch-only insert is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+		queries := store.Queries()
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(), CreateWatchOnlyWalletParams("watch-only-account-insert"),
+		)
+		require.NoError(t, err)
+
+		props, err := store.CreateImportedAccount(
+			t.Context(), db.CreateImportedAccountParams{
+				WalletID:           walletInfo.ID,
+				Name:               "watch-only-imported",
+				Scope:              db.KeyScopeBIP0084,
+				EncryptedPublicKey: RandomBytes(32),
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, props.IsWatchOnly)
+
+		scopeID := GetKeyScopeID(t, queries, walletInfo.ID, db.KeyScopeBIP0084)
+		accountID := GetAccountID(t, queries, scopeID, "watch-only-imported")
+
+		err = insertAccountSecretRaw(
+			t, store.DB(), accountID, RandomBytes(32),
+		)
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("watch-only empty-but-non-nil insert is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+		queries := store.Queries()
+
+		walletInfo, err := store.CreateWallet(
+			t.Context(), CreateWatchOnlyWalletParams("watch-only-account-empty"),
+		)
+		require.NoError(t, err)
+
+		props, err := store.CreateImportedAccount(
+			t.Context(), db.CreateImportedAccountParams{
+				WalletID:           walletInfo.ID,
+				Name:               "watch-only-empty",
+				Scope:              db.KeyScopeBIP0084,
+				EncryptedPublicKey: RandomBytes(32),
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, props.IsWatchOnly)
+
+		scopeID := GetKeyScopeID(t, queries, walletInfo.ID, db.KeyScopeBIP0084)
+		accountID := GetAccountID(t, queries, scopeID, "watch-only-empty")
+
+		err = insertAccountSecretRaw(t, store.DB(), accountID, []byte{})
+		require.Error(t, err)
+		requireDriverConstraintError(t, err)
+	})
+
+	t.Run("non-watch-only insert and update succeed", func(t *testing.T) {
+		t.Parallel()
+
+		store := NewTestStore(t)
+		queries := store.Queries()
+		walletID := newWallet(t, store, "spendable-account-secret")
+
+		props, err := store.CreateImportedAccount(
+			t.Context(), db.CreateImportedAccountParams{
+				WalletID:           walletID,
+				Name:               "spendable-imported",
+				Scope:              db.KeyScopeBIP0084,
+				EncryptedPublicKey: RandomBytes(32),
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, props.IsWatchOnly)
+
+		scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+		accountID := GetAccountID(t, queries, scopeID, "spendable-imported")
+
+		err = insertAccountSecretRaw(
+			t, store.DB(), accountID, RandomBytes(32),
+		)
+		require.NoError(t, err)
+
+		err = updateAccountSecretRaw(
+			t, store.DB(), accountID, RandomBytes(32),
+		)
+		require.NoError(t, err)
+	})
+}
+
 // TestCreateDerivedAccountErrors verifies that CreateDerivedAccount returns
 // appropriate errors for invalid inputs.
 func TestCreateDerivedAccountErrors(t *testing.T) {
