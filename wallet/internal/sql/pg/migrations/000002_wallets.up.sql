@@ -61,6 +61,42 @@ CREATE TABLE wallet_secrets (
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT
 );
 
+-- Enforce the watch-only wallet secret invariant at the database boundary.
+-- Watch-only wallets may retain script-encryption material for imported
+-- scripts, but must never store private key material; keeping these columns
+-- NULL prevents an insert or update from silently turning a watch-only wallet
+-- into a spend-capable wallet.
+CREATE FUNCTION assert_watch_only_wallet_secrets() RETURNS TRIGGER AS $$
+DECLARE
+    wallet_is_watch_only BOOLEAN;
+BEGIN
+    SELECT w.is_watch_only INTO wallet_is_watch_only
+    FROM wallets AS w
+    WHERE w.id = NEW.wallet_id;
+
+    IF wallet_is_watch_only AND (
+        NEW.master_priv_params IS NOT NULL
+        OR NEW.encrypted_crypto_priv_key IS NOT NULL
+        OR NEW.encrypted_master_hd_priv_key IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'watch-only wallet private secret columns must be null'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_watch_only_wallet_secrets_insert
+BEFORE INSERT ON wallet_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_wallet_secrets();
+
+CREATE TRIGGER trg_assert_watch_only_wallet_secrets_update
+BEFORE UPDATE ON wallet_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_wallet_secrets();
+
 -- Wallet Sync States table to store the synchronization state of each wallet.
 -- This is kept separate from the wallets table to avoid write amplification on
 -- frequently updated sync data. Each wallet has exactly one sync state record.

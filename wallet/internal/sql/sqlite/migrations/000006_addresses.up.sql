@@ -102,6 +102,44 @@ CREATE TABLE address_secrets (
     FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT
 );
 
+-- Enforce the watch-only address secret invariant at the database boundary.
+-- Watch-only parent wallets may track imported scripts, but addresses
+-- beneath them must not store private keys; otherwise a watch-only parent could
+-- silently gain spend authority through an address secret row.
+CREATE TRIGGER trg_assert_watch_only_address_secrets_insert
+BEFORE INSERT ON address_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only address parents cannot store private keys')
+    WHERE
+        new.encrypted_priv_key IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM addresses AS addr
+            INNER JOIN wallets AS w ON addr.wallet_id = w.id
+            WHERE
+                addr.id = new.address_id
+                AND w.is_watch_only
+        );
+END;
+
+CREATE TRIGGER trg_assert_watch_only_address_secrets_update
+BEFORE UPDATE ON address_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only address parents cannot store private keys')
+    WHERE
+        new.encrypted_priv_key IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM addresses AS addr
+            INNER JOIN wallets AS w ON addr.wallet_id = w.id
+            WHERE
+                addr.id = new.address_id
+                AND w.is_watch_only
+        );
+END;
+
 -- Increments imported_key_count when a new imported address is inserted.
 CREATE TRIGGER trg_addresses_imported_key_count_insert
 AFTER INSERT ON addresses
