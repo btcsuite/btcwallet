@@ -104,6 +104,42 @@ CREATE TABLE address_secrets (
     FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT
 );
 
+-- Enforce the watch-only address secret invariant at the database boundary.
+-- Watch-only parent wallets may track imported scripts, but addresses
+-- beneath them must not store private keys; otherwise a watch-only parent could
+-- silently gain spend authority through an address secret row.
+CREATE FUNCTION assert_watch_only_address_secrets() RETURNS TRIGGER AS $$
+DECLARE
+    wallet_is_watch_only BOOLEAN;
+BEGIN
+    IF NEW.encrypted_priv_key IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT w.is_watch_only INTO wallet_is_watch_only
+    FROM addresses AS addr
+    INNER JOIN wallets AS w ON w.id = addr.wallet_id
+    WHERE addr.id = NEW.address_id;
+
+    IF wallet_is_watch_only THEN
+        RAISE EXCEPTION 'watch-only address parents cannot store private keys'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_watch_only_address_secrets_insert
+BEFORE INSERT ON address_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_address_secrets();
+
+CREATE TRIGGER trg_assert_watch_only_address_secrets_update
+BEFORE UPDATE ON address_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_address_secrets();
+
 -- Increments imported_key_count for imported address inserts.
 CREATE FUNCTION sync_account_imported_key_count_insert() RETURNS TRIGGER AS $$
 BEGIN
