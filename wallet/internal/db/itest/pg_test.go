@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"os"
 	"regexp"
@@ -28,6 +29,20 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+const (
+	// pgMaxIdentifierLen is the PostgreSQL maximum identifier length
+	// (NAMEDATALEN - 1).
+	pgMaxIdentifierLen = 63
+
+	// pgHashSuffixLen is the length of the deterministic hash suffix
+	// appended to truncated database names (8 hex chars from CRC32).
+	pgHashSuffixLen = 8
+
+	// pgHashSeparator is the separator between the truncated prefix and
+	// the hash suffix.
+	pgHashSeparator = "_"
 )
 
 var (
@@ -171,22 +186,51 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 	return pgContainer, errPGContainer
 }
 
-// sanitizedPgDBName converts a test name to a valid PostgreSQL database name.
-// It converts to lowercase and replaces special characters with underscores.
-func sanitizedPgDBName(t *testing.T) string {
-	t.Helper()
-
+// sanitizePgDBNameString converts a database name string to a valid PostgreSQL
+// database name. It converts to lowercase and replaces special characters with
+// underscores. If the resulting name exceeds PostgreSQL's 63-byte identifier
+// limit, it is truncated with a deterministic CRC32 hash suffix to prevent
+// collisions from long subtest names that share the same prefix.
+func sanitizePgDBNameString(dbName string) string {
 	// Convert to lowercase.
-	dbName := strings.ToLower(t.Name())
+	dbName = strings.ToLower(dbName)
 
 	// Replace slashes and other special chars with underscores.
 	reg := regexp.MustCompile(`[^a-z0-9_]`)
 	dbName = reg.ReplaceAllString(dbName, "_")
 
 	// PostgreSQL database names are limited to 63 characters.
-	if len(dbName) > 63 {
-		dbName = dbName[:63]
-		t.Logf("database name truncated to %d characters: %s", 63, dbName)
+	// If truncation is needed, append a deterministic hash suffix to prevent
+	// collisions from long subtest names with identical prefixes.
+	if len(dbName) > pgMaxIdentifierLen {
+		// Reserve space for separator and hash suffix.
+		suffixLen := len(pgHashSeparator) + pgHashSuffixLen
+		prefixLen := pgMaxIdentifierLen - suffixLen
+
+		// Compute deterministic CRC32 hash of the full sanitized name.
+		checksum := crc32.ChecksumIEEE([]byte(dbName))
+		hashSuffix := fmt.Sprintf("%08x", checksum)
+
+		// Truncate prefix and append hash suffix.
+		dbName = dbName[:prefixLen] + pgHashSeparator + hashSuffix
+	}
+
+	return dbName
+}
+
+// sanitizedPgDBName converts a test name to a valid PostgreSQL database name.
+// It converts to lowercase and replaces special characters with underscores.
+// If the resulting name exceeds PostgreSQL's 63-byte identifier limit, it is
+// truncated with a deterministic CRC32 hash suffix to prevent collisions from
+// long subtest names that share the same prefix.
+func sanitizedPgDBName(t *testing.T) string {
+	t.Helper()
+
+	dbName := sanitizePgDBNameString(t.Name())
+
+	if len(t.Name()) > pgMaxIdentifierLen {
+		t.Logf("database name truncated to %d characters with hash suffix: %s",
+			pgMaxIdentifierLen, dbName)
 	}
 
 	return dbName
