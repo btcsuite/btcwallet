@@ -191,6 +191,43 @@ func (s *Store) GetTxDetail(_ context.Context, query db.GetTxDetailQuery) (
 	return detail, nil
 }
 
+// ListTxDetails lists detailed wallet-scoped transaction views through the
+// legacy wtxmgr range path.
+func (s *Store) ListTxDetails(_ context.Context, query db.ListTxDetailsQuery) (
+	[]db.TxDetailInfo, error) {
+
+	var details []db.TxDetailInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		return s.txStore.RangeTransactions(
+			ns, query.StartHeight, query.EndHeight,
+			func(txDetails []wtxmgr.TxDetails) (bool, error) {
+				for i := range txDetails {
+					details = append(
+						details, *kvdbTxDetailInfo(&txDetails[i]),
+					)
+				}
+
+				return false, nil
+			},
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListTxDetails: %w", err)
+	}
+
+	if len(details) == 0 {
+		return []db.TxDetailInfo{}, nil
+	}
+
+	return details, nil
+}
+
 // DeleteTx is not yet implemented for kvdb.
 func (s *Store) DeleteTx(ctx context.Context, _ db.DeleteTxParams) error {
 	return notImplemented(ctx, "DeleteTx")

@@ -359,6 +359,83 @@ func TestListTxnsSummaryBoundedRange(t *testing.T) {
 	}, txHashes(infos))
 }
 
+// TestListTxDetailsCopiesMsgTx verifies that each returned detail keeps its own
+// stable MsgTx pointer even when RangeTransactions reuses the callback slice.
+func TestListTxDetailsCopiesMsgTx(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Insert two confirmed transactions in different blocks so the
+	// range callback has to cross block boundaries and can reuse its buffer.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	firstTx := &wire.MsgTx{Version: 1}
+	firstTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{40},
+	}})
+	firstTx.AddTxOut(&wire.TxOut{Value: 3_000, PkScript: []byte{0x51}})
+	firstRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		firstTx, time.Unix(1710002100, 0),
+	)
+	require.NoError(t, err)
+
+	secondTx := &wire.MsgTx{Version: 1}
+	secondTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{41},
+	}})
+	secondTx.AddTxOut(&wire.TxOut{Value: 4_000, PkScript: []byte{0x52}})
+	secondRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		secondTx, time.Unix(1710002200, 0),
+	)
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		err := txStore.InsertTx(ns, firstRec, &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: 144,
+				Hash:   chainhash.Hash{50},
+			},
+			Time: time.Unix(1710002300, 0),
+		})
+		require.NoError(t, err)
+
+		return txStore.InsertTx(ns, secondRec, &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Height: 145,
+				Hash:   chainhash.Hash{51},
+			},
+			Time: time.Unix(1710002400, 0),
+		})
+	})
+	require.NoError(t, err)
+
+	// Act: Load the detailed range through the kvdb adapter.
+	details, err := store.ListTxDetails(t.Context(), db.ListTxDetailsQuery{
+		WalletID:    0,
+		StartHeight: 144,
+		EndHeight:   145,
+	})
+
+	// Assert: Each returned detail keeps the MsgTx that matches its own hash.
+	require.NoError(t, err)
+	require.Len(t, details, 2)
+
+	msgHashByDetailHash := make(map[chainhash.Hash]chainhash.Hash, len(details))
+	for _, detail := range details {
+		require.NotNil(t, detail.MsgTx)
+		msgHashByDetailHash[detail.Hash] = detail.MsgTx.TxHash()
+	}
+
+	require.Equal(t, firstRec.Hash, msgHashByDetailHash[firstRec.Hash])
+	require.Equal(t, secondRec.Hash, msgHashByDetailHash[secondRec.Hash])
+}
+
 // insertConfirmedTx inserts one mined transaction into the legacy tx store so
 // kvdb summary reads can exercise confirmed block metadata.
 func insertConfirmedTx(t *testing.T, dbConn walletdb.DB,
