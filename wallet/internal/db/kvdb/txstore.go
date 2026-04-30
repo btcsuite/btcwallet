@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // CreateTx is not yet implemented for kvdb.
@@ -56,11 +57,37 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	return nil
 }
 
-// GetTx is not yet implemented for kvdb.
-func (s *Store) GetTx(ctx context.Context,
-	_ db.GetTxQuery) (*db.TxInfo, error) {
+// GetTx retrieves one wallet-scoped transaction snapshot through the legacy
+// wtxmgr query path.
+func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
+	*db.TxInfo, error) {
 
-	return nil, notImplemented(ctx, "GetTx")
+	var info *db.TxInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		details, err := s.txStore.TxDetails(ns, &query.Txid)
+		if err != nil {
+			return fmt.Errorf("lookup transaction details: %w", err)
+		}
+
+		if details == nil {
+			return db.ErrTxNotFound
+		}
+
+		info = kvdbTxInfo(details)
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetTx: %w", err)
+	}
+
+	return info, nil
 }
 
 // ListTxns is not yet implemented for kvdb.
@@ -106,4 +133,38 @@ func validateUpdateTxParams(params db.UpdateTxParams) (*string, error) {
 	}
 
 	return params.Label, nil
+}
+
+// kvdbTxInfo maps legacy wtxmgr detail data into the lightweight db-native
+// transaction summary model.
+func kvdbTxInfo(details *wtxmgr.TxDetails) *db.TxInfo {
+	var block *db.Block
+	if details.Block.Height >= 0 {
+		block = &db.Block{
+			Hash:      details.Block.Hash,
+			Height:    nonNegativeInt32ToUint32(details.Block.Height),
+			Timestamp: details.Block.Time,
+		}
+	}
+
+	return &db.TxInfo{
+		Hash:         details.Hash,
+		SerializedTx: append([]byte(nil), details.SerializedTx...),
+		Received:     details.Received.UTC(),
+		Block:        block,
+
+		// Legacy wtxmgr only exposes transactions it still treats as valid,
+		// and it does not persist pending/replaced/failed/orphaned state.
+		Status: db.TxStatusPublished,
+		Label:  details.Label,
+	}
+}
+
+// nonNegativeInt32ToUint32 converts a non-negative int32 to uint32.
+func nonNegativeInt32ToUint32(value int32) uint32 {
+	if value < 0 {
+		return 0
+	}
+
+	return uint32(value)
 }
