@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -26,6 +27,10 @@ var (
 	// ErrTxNotFound is returned when a transaction is not found in the
 	// store.
 	ErrTxNotFound = errors.New("tx not found")
+
+	// errNilTxDetailMsgTx is returned when a store detail row violates the
+	// TxDetailInfo contract and omits the parsed transaction.
+	errNilTxDetailMsgTx = errors.New("tx detail MsgTx is nil")
 )
 
 // TxReader provides an interface for querying tx history.
@@ -148,7 +153,7 @@ type TxDetail struct {
 // number of outputs. The lookup is dominated by a key-based B-tree lookup
 // in the database and the processing of the transaction's inputs and
 // outputs.
-func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
+func (w *Wallet) GetTx(ctx context.Context, txHash chainhash.Hash) (
 	*TxDetail, error) {
 
 	err := w.state.validateStarted()
@@ -156,15 +161,9 @@ func (w *Wallet) GetTx(_ context.Context, txHash chainhash.Hash) (
 		return nil, err
 	}
 
-	txDetails, err := w.fetchTxDetails(&txHash)
-	if err != nil {
-		return nil, err
-	}
+	currentHeight := w.SyncedTo().Height
 
-	bestBlock := w.SyncedTo()
-	currentHeight := bestBlock.Height
-
-	return w.buildTxDetail(txDetails, currentHeight), nil
+	return w.getTxDetail(ctx, txHash, currentHeight)
 }
 
 // ListTxns returns a list of all txns which are relevant to the
@@ -231,6 +230,89 @@ func (w *Wallet) ListTxns(_ context.Context, startHeight,
 	}
 
 	return details, nil
+}
+
+// getTxDetail loads one transaction through the detailed store path and builds
+// the full wallet response.
+func (w *Wallet) getTxDetail(ctx context.Context, txHash chainhash.Hash,
+	currentHeight int32) (*TxDetail, error) {
+
+	txDetails, err := w.store.GetTxDetail(ctx, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrTxNotFound) {
+			return nil, ErrTxNotFound
+		}
+
+		return nil, fmt.Errorf("get tx detail: %w", err)
+	}
+
+	return w.buildTxDetailFromStore(txDetails, currentHeight)
+}
+
+// buildTxDetailFromStore builds a wallet tx response from the db-native detail
+// shape returned by db.Store.
+func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
+	currentHeight int32) (*TxDetail, error) {
+
+	if txDetails.MsgTx == nil {
+		return nil, errNilTxDetailMsgTx
+	}
+
+	legacyDetails := txDetailInfoToLegacy(txDetails)
+
+	return w.buildTxDetail(legacyDetails, currentHeight), nil
+}
+
+// txDetailInfoToLegacy converts a db-native detail row into the legacy shape
+// still used by ListTxns until its store-backed path is wired in.
+func txDetailInfoToLegacy(details *db.TxDetailInfo) *wtxmgr.TxDetails {
+	block := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{Height: -1},
+	}
+	if details.Block != nil {
+		height, ok := safeUint32ToInt32(details.Block.Height)
+		if ok {
+			block = wtxmgr.BlockMeta{
+				Block: wtxmgr.Block{
+					Hash:   details.Block.Hash,
+					Height: height,
+				},
+				Time: details.Block.Timestamp,
+			}
+		}
+	}
+
+	debits := make([]wtxmgr.DebitRecord, 0, len(details.OwnedInputs))
+	for _, input := range details.OwnedInputs {
+		debits = append(debits, wtxmgr.DebitRecord{
+			Index:  input.Index,
+			Amount: input.Amount,
+		})
+	}
+
+	credits := make([]wtxmgr.CreditRecord, 0, len(details.OwnedOutputs))
+	for _, output := range details.OwnedOutputs {
+		credits = append(credits, wtxmgr.CreditRecord{
+			Index:  output.Index,
+			Amount: output.Amount,
+		})
+	}
+
+	return &wtxmgr.TxDetails{
+		TxRecord: wtxmgr.TxRecord{
+			MsgTx:        *details.MsgTx,
+			Hash:         details.Hash,
+			Received:     details.Received,
+			SerializedTx: details.SerializedTx,
+		},
+		Block:   block,
+		Credits: credits,
+		Debits:  debits,
+		Label:   details.Label,
+	}
 }
 
 // buildTxDetail builds a TxDetail from the given wtxmgr.TxDetails.
@@ -405,4 +487,14 @@ func safeIntToUint32(i int) (uint32, bool) {
 	}
 
 	return uint32(i), true
+}
+
+// safeUint32ToInt32 converts a uint32 to an int32, returning false if the
+// conversion would overflow.
+func safeUint32ToInt32(u uint32) (int32, bool) {
+	if u > math.MaxInt32 {
+		return 0, false
+	}
+
+	return int32(u), true
 }
