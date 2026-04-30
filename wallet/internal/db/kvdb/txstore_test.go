@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -213,6 +214,37 @@ func TestGetTxSummarySuccess(t *testing.T) {
 	require.Equal(t, db.TxStatusPublished, info.Status)
 }
 
+// TestGetTxDetailSuccess verifies that kvdb.Store adapts legacy tx details to
+// the db-native detail model.
+func TestGetTxDetailSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	funding, spend := insertSpendChain(t, dbConn, txStore)
+
+	detail, err := store.GetTxDetail(t.Context(), db.GetTxDetailQuery{
+		WalletID: 0,
+		Txid:     spend.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, spend.Hash, detail.Hash)
+	require.Nil(t, detail.Block)
+	require.Len(t, detail.OwnedInputs, 1)
+	require.Len(t, detail.OwnedOutputs, 2)
+	require.Equal(t, funding.Hash, spend.MsgTx.TxIn[0].PreviousOutPoint.Hash)
+	require.Equal(t, uint32(0), detail.OwnedInputs[0].Index)
+	require.Equal(t, btcutil.Amount(2_000), detail.OwnedInputs[0].Amount)
+	require.Equal(t, uint32(0), detail.OwnedOutputs[0].Index)
+	require.Equal(t, btcutil.Amount(900), detail.OwnedOutputs[0].Amount)
+	require.Equal(t, uint32(1), detail.OwnedOutputs[1].Index)
+	require.Equal(t, btcutil.Amount(800), detail.OwnedOutputs[1].Amount)
+}
+
 // TestGetTxSummaryNotFound verifies that kvdb.Store reports missing
 // transactions through db.ErrTxNotFound.
 func TestGetTxSummaryNotFound(t *testing.T) {
@@ -382,4 +414,55 @@ func txHashes(infos []db.TxInfo) []chainhash.Hash {
 	}
 
 	return hashes
+}
+
+// insertSpendChain inserts one funding tx and one spending tx into the legacy
+// tx store so kvdb detail reads can exercise both owned inputs and outputs.
+func insertSpendChain(t *testing.T, dbConn walletdb.DB,
+	txStore *wtxmgr.Store) (*wtxmgr.TxRecord, *wtxmgr.TxRecord) {
+
+	t.Helper()
+
+	fundingTx := &wire.MsgTx{Version: 1}
+	fundingTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{20},
+	}})
+	fundingTx.AddTxOut(&wire.TxOut{Value: 2_000, PkScript: []byte{0x51}})
+	fundingRec, err := wtxmgr.NewTxRecordFromMsgTx(fundingTx, time.Now())
+	require.NoError(t, err)
+
+	spendTx := &wire.MsgTx{Version: 1}
+	spendTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  fundingRec.Hash,
+		Index: 0,
+	}})
+	spendTx.AddTxOut(&wire.TxOut{Value: 900, PkScript: []byte{0x51}})
+	spendTx.AddTxOut(&wire.TxOut{Value: 800, PkScript: []byte{0x51}})
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		err = txStore.InsertTx(ns, fundingRec, nil)
+		require.NoError(t, err)
+
+		err = txStore.AddCredit(ns, fundingRec, nil, 0, false)
+		require.NoError(t, err)
+
+		err = txStore.InsertTx(ns, spendRec, nil)
+		require.NoError(t, err)
+
+		err = txStore.AddCredit(ns, spendRec, nil, 0, false)
+		require.NoError(t, err)
+
+		err = txStore.AddCredit(ns, spendRec, nil, 1, false)
+		require.NoError(t, err)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return fundingRec, spendRec
 }
