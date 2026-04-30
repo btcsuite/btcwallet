@@ -230,3 +230,156 @@ func TestGetTxSummaryNotFound(t *testing.T) {
 	})
 	require.ErrorIs(t, err, db.ErrTxNotFound)
 }
+
+// TestListTxnsSummaryUnminedOnlySuccess verifies that kvdb.Store can list the
+// legacy unmined set through the db-native summary API.
+func TestListTxnsSummaryUnminedOnlySuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{21},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 2_500, PkScript: []byte{0x51}})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		return txStore.InsertTx(ns, rec, nil)
+	})
+	require.NoError(t, err)
+
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    0,
+		UnminedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, rec.Hash, infos[0].Hash)
+	require.Nil(t, infos[0].Block)
+	require.Equal(t, db.TxStatusPublished, infos[0].Status)
+}
+
+// TestListTxnsSummaryConfirmedRangeSuccess verifies that kvdb.Store can adapt
+// the legacy confirmed range iterator to the db-native summary API.
+func TestListTxnsSummaryConfirmedRangeSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	rec := insertConfirmedTx(t, dbConn, txStore, 144)
+
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    0,
+		StartHeight: 144,
+		EndHeight:   144,
+	})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, rec.Hash, infos[0].Hash)
+	require.NotNil(t, infos[0].Block)
+	require.Equal(t, uint32(144), infos[0].Block.Height)
+	require.Equal(t, db.TxStatusPublished, infos[0].Status)
+}
+
+// TestListTxnsSummaryBoundedRange verifies that kvdb summary reads preserve the
+// confirmed height bounds.
+func TestListTxnsSummaryBoundedRange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Insert confirmed txns inside and after the requested height
+	// range.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	insideLow := insertConfirmedTxWithSeed(t, dbConn, txStore, 144, 1)
+	insideHigh := insertConfirmedTxWithSeed(t, dbConn, txStore, 145, 2)
+	outsideHigh := insertConfirmedTxWithSeed(t, dbConn, txStore, 146, 3)
+
+	// Act: List the bounded confirmed range.
+	infos, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    0,
+		StartHeight: 144,
+		EndHeight:   145,
+	})
+
+	// Assert: The out-of-range confirmed tx is excluded.
+	require.NoError(t, err)
+	require.NotContains(t, txHashes(infos), outsideHigh.Hash)
+	require.Equal(t, []chainhash.Hash{
+		insideLow.Hash, insideHigh.Hash,
+	}, txHashes(infos))
+}
+
+// insertConfirmedTx inserts one mined transaction into the legacy tx store so
+// kvdb summary reads can exercise confirmed block metadata.
+func insertConfirmedTx(t *testing.T, dbConn walletdb.DB,
+	txStore *wtxmgr.Store, height int32) *wtxmgr.TxRecord {
+
+	t.Helper()
+
+	return insertConfirmedTxWithSeed(t, dbConn, txStore, height, byte(height))
+}
+
+// insertConfirmedTxWithSeed inserts one mined transaction with fixture-specific
+// bytes into the legacy tx store.
+func insertConfirmedTxWithSeed(t *testing.T, dbConn walletdb.DB,
+	txStore *wtxmgr.Store, height int32, seed byte) *wtxmgr.TxRecord {
+
+	t.Helper()
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{seed},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{
+		Value:    3_000 + int64(seed),
+		PkScript: []byte{0x51, seed},
+	})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Height: height,
+			Hash:   chainhash.Hash{31, seed},
+		},
+		Time: time.Unix(1710002000, 0),
+	}
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		return txStore.InsertTx(ns, rec, block)
+	})
+	require.NoError(t, err)
+
+	return rec
+}
+
+// txHashes returns transaction hashes in result order.
+func txHashes(infos []db.TxInfo) []chainhash.Hash {
+	hashes := make([]chainhash.Hash, 0, len(infos))
+	for _, info := range infos {
+		hashes = append(hashes, info.Hash)
+	}
+
+	return hashes
+}
