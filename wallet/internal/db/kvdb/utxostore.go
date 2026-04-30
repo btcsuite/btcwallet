@@ -16,10 +16,6 @@ var (
 	// errNotImplemented is returned for unimplemented kvdb store methods.
 	errNotImplemented = errors.New("not implemented")
 
-	// errMissingTxmgrNamespace is returned when the `wtxmgr` namespace bucket
-	// cannot be found in a walletdb transaction.
-	errMissingTxmgrNamespace = errors.New("missing wtxmgr namespace")
-
 	// wtxmgrNamespaceKey is the walletdb top-level bucket key used by the
 	// transaction manager.
 	//
@@ -73,7 +69,9 @@ func (s *Store) ReleaseOutput(_ context.Context,
 	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		err := s.txStore.UnlockOutput(ns, lockID, op)
