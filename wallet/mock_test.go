@@ -148,6 +148,18 @@ func (m *mockStore) GetTx(ctx context.Context,
 	return args.Get(0).(*db.TxInfo), args.Error(1)
 }
 
+// GetTxDetail implements the db.TxStore interface.
+func (m *mockStore) GetTxDetail(ctx context.Context,
+	query db.GetTxDetailQuery) (*db.TxDetailInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.TxDetailInfo), args.Error(1)
+}
+
 // ListTxns implements the db.TxStore interface.
 func (m *mockStore) ListTxns(ctx context.Context,
 	query db.ListTxnsQuery) ([]db.TxInfo, error) {
@@ -158,6 +170,18 @@ func (m *mockStore) ListTxns(ctx context.Context,
 	}
 
 	return args.Get(0).([]db.TxInfo), args.Error(1)
+}
+
+// ListTxDetails implements the db.TxStore interface.
+func (m *mockStore) ListTxDetails(ctx context.Context,
+	query db.ListTxDetailsQuery) ([]db.TxDetailInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.TxDetailInfo), args.Error(1)
 }
 
 // DeleteTx implements the db.TxStore interface.

@@ -314,12 +314,18 @@ type TxStore interface {
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
-	// transaction is not found. Note that the `Credits` and `Debits` fields
-	// of the returned `TxInfo` are not stored directly in the transaction
-	// record; they are derived by querying the UTXO store and represent
-	// wallet-specific information about the transaction's impact on the
-	// UTXO set.
+	// transaction is not found.
 	GetTx(ctx context.Context, query GetTxQuery) (*TxInfo, error)
+
+	// GetTxDetail retrieves one detailed wallet-scoped transaction view by
+	// hash.
+	GetTxDetail(ctx context.Context, query GetTxDetailQuery) (*TxDetailInfo,
+		error)
+
+	// ListTxDetails lists detailed wallet-scoped transaction views using
+	// wallet tx-reader range semantics.
+	ListTxDetails(ctx context.Context,
+		query ListTxDetailsQuery) ([]TxDetailInfo, error)
 
 	// ListTxns returns a slice of transaction information based on the
 	// provided query parameters. It takes a context and ListTxnsQuery,
