@@ -2,12 +2,18 @@ package kvdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// errLegacyHeightOverflow reports that one db height cannot fit into the
+// signed legacy wtxmgr height domain.
+var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
 
 // CreateTx is not yet implemented for kvdb.
 func (s *Store) CreateTx(ctx context.Context, _ db.CreateTxParams) error {
@@ -90,11 +96,66 @@ func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
 	return info, nil
 }
 
-// ListTxns is not yet implemented for kvdb.
-func (s *Store) ListTxns(ctx context.Context,
-	_ db.ListTxnsQuery) ([]db.TxInfo, error) {
+// ListTxns lists wallet-scoped transaction summaries through the legacy wtxmgr
+// range query path.
+func (s *Store) ListTxns(_ context.Context, query db.ListTxnsQuery) (
+	[]db.TxInfo, error) {
 
-	return nil, notImplemented(ctx, "ListTxns")
+	var infos []db.TxInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		if query.UnminedOnly {
+			var err error
+
+			infos, err = s.listTxnsRange(ns, -1, -1, nil)
+
+			return err
+		}
+
+		begin, end, err := kvdbConfirmedTxnsRange(query)
+		if err != nil {
+			return err
+		}
+
+		infos, err = s.listTxnsRange(ns, begin, end, nil)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListTxns: %w", err)
+	}
+
+	if len(infos) == 0 {
+		return []db.TxInfo{}, nil
+	}
+
+	return infos, nil
+}
+
+// listTxnsRange appends one legacy wtxmgr range scan to the result set.
+func (s *Store) listTxnsRange(ns walletdb.ReadBucket, begin, end int32,
+	infos []db.TxInfo) ([]db.TxInfo, error) {
+
+	err := s.txStore.RangeTransactions(
+		ns, begin, end,
+		func(txDetails []wtxmgr.TxDetails) (bool, error) {
+			for i := range txDetails {
+				infos = append(infos, *kvdbTxInfo(&txDetails[i]))
+			}
+
+			return false, nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("range txns %d to %d: %w", begin, end, err)
+	}
+
+	return infos, nil
 }
 
 // DeleteTx is not yet implemented for kvdb.
@@ -158,6 +219,32 @@ func kvdbTxInfo(details *wtxmgr.TxDetails) *db.TxInfo {
 		Status: db.TxStatusPublished,
 		Label:  details.Label,
 	}
+}
+
+// kvdbConfirmedTxnsRange converts the confirmed query heights into the legacy
+// wtxmgr range arguments used by the kvdb adapter.
+func kvdbConfirmedTxnsRange(query db.ListTxnsQuery) (int32, int32, error) {
+	startHeight, err := uint32ToLegacyHeight(query.StartHeight)
+	if err != nil {
+		return 0, 0, fmt.Errorf("convert start height: %w", err)
+	}
+
+	endHeight, err := uint32ToLegacyHeight(query.EndHeight)
+	if err != nil {
+		return 0, 0, fmt.Errorf("convert end height: %w", err)
+	}
+
+	return startHeight, endHeight, nil
+}
+
+// uint32ToLegacyHeight converts a db height into the signed height domain used
+// by the legacy wtxmgr range API.
+func uint32ToLegacyHeight(height uint32) (int32, error) {
+	if height > math.MaxInt32 {
+		return 0, fmt.Errorf("%w: %d", errLegacyHeightOverflow, height)
+	}
+
+	return int32(height), nil
 }
 
 // nonNegativeInt32ToUint32 converts a non-negative int32 to uint32.
