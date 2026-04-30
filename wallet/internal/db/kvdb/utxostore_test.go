@@ -110,5 +110,5 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 		OutPoint: wire.OutPoint{Hash: [32]byte{1}, Index: 0},
 	})
 	require.Error(t, err)
-	require.ErrorIs(t, err, errMissingTxmgrNamespace)
+	require.ErrorIs(t, err, walletdb.ErrBucketNotFound)
 }
