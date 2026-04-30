@@ -37,7 +37,9 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		details, err := s.txStore.TxDetails(ns, &params.Txid)
@@ -73,7 +75,9 @@ func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		details, err := s.txStore.TxDetails(ns, &query.Txid)
@@ -106,7 +110,9 @@ func (s *Store) ListTxns(_ context.Context, query db.ListTxnsQuery) (
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		if query.UnminedOnly {
@@ -168,7 +174,9 @@ func (s *Store) GetTxDetail(_ context.Context, query db.GetTxDetailQuery) (
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		txDetails, err := s.txStore.TxDetails(ns, &query.Txid)
@@ -201,7 +209,9 @@ func (s *Store) ListTxDetails(_ context.Context, query db.ListTxDetailsQuery) (
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		if ns == nil {
-			return errMissingTxmgrNamespace
+			return fmt.Errorf(
+				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
+			)
 		}
 
 		return s.txStore.RangeTransactions(
