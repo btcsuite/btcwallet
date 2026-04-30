@@ -173,3 +173,60 @@ func TestUpdateTxLongLabelPreservesLegacyError(t *testing.T) {
 	})
 	require.ErrorIs(t, err, wtxmgr.ErrLabelTooLong)
 }
+
+// TestGetTxSummarySuccess verifies that kvdb.Store adapts legacy tx details to
+// the db-native summary model.
+func TestGetTxSummarySuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{20},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 2_000, PkScript: []byte{0x51}})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		return txStore.InsertTx(ns, rec, nil)
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     rec.Hash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, rec.Hash, info.Hash)
+	require.Equal(t, rec.SerializedTx, info.SerializedTx)
+	require.Equal(t, rec.Received.UTC().Unix(), info.Received.Unix())
+	require.Nil(t, info.Block)
+	require.Equal(t, db.TxStatusPublished, info.Status)
+}
+
+// TestGetTxSummaryNotFound verifies that kvdb.Store reports missing
+// transactions through db.ErrTxNotFound.
+func TestGetTxSummaryNotFound(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore)
+
+	_, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     chainhash.Hash{42},
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
