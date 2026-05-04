@@ -32,6 +32,18 @@ CREATE TABLE wallets (
 -- Unique index to prevent duplicate wallet names.
 CREATE UNIQUE INDEX uidx_wallets_name ON wallets (wallet_name);
 
+-- Enforce that the watch-only status chosen at wallet creation time remains
+-- immutable. This closes the database-boundary hole where a raw wallet update
+-- could silently bypass the secret-table triggers by flipping the parent
+-- wallet between watch-only and spendable after insert.
+CREATE TRIGGER trg_assert_wallet_is_watch_only_immutable
+BEFORE UPDATE OF is_watch_only ON wallets
+FOR EACH ROW
+WHEN new.is_watch_only != old.is_watch_only
+BEGIN
+    SELECT raise(ABORT, 'wallet is_watch_only cannot be changed after creation');
+END;
+
 -- Wallet Secrets table to store rarely accessed, highly sensitive encrypted
 -- material with a strict one-to-one relationship with the wallets table.
 -- Separated from the main wallets table for security and access pattern isolation.
