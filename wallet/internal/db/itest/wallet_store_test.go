@@ -1116,6 +1116,60 @@ func TestWatchOnlyWalletSecretTriggers(t *testing.T) {
 	})
 }
 
+// TestWalletWatchOnlyImmutable verifies that raw wallet updates cannot change
+// the watch-only flag after wallet creation.
+func TestWalletWatchOnlyImmutable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		walletName        string
+		params            func(string) db.CreateWalletParams
+		updatedWatchOnly  bool
+		expectedWatchOnly bool
+	}{
+		{
+			name:              "spendable wallet cannot become watch-only",
+			walletName:        "wallet-watch-only-immutable-spendable",
+			params:            CreateWalletParamsFixture,
+			updatedWatchOnly:  true,
+			expectedWatchOnly: false,
+		},
+		{
+			name:              "watch-only wallet cannot become spendable",
+			walletName:        "wallet-watch-only-immutable-watch-only",
+			params:            CreateWatchOnlyWalletParams,
+			updatedWatchOnly:  false,
+			expectedWatchOnly: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := NewTestStore(t)
+
+			created, err := store.CreateWallet(
+				t.Context(), tc.params(tc.walletName),
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedWatchOnly, created.IsWatchOnly)
+
+			err = updateWalletWatchOnlyRaw(
+				t, store.DB(), created.ID, tc.updatedWatchOnly,
+			)
+			require.Error(t, err)
+			requireDriverConstraintError(t, err)
+
+			walletInfo, err := store.GetWallet(t.Context(), tc.walletName)
+			require.NoError(t, err)
+			require.NotNil(t, walletInfo)
+			require.Equal(t, tc.expectedWatchOnly, walletInfo.IsWatchOnly)
+		})
+	}
+}
+
 // TestUpdateWalletSecrets checks that updating the wallet secrets works
 // correctly.
 func TestUpdateWalletSecrets(t *testing.T) {
