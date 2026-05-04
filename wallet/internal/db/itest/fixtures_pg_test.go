@@ -281,6 +281,37 @@ func updateWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	return nil
 }
 
+// updateWalletWatchOnlyRaw updates the watch-only flag directly through the
+// database so tests can validate its immutability trigger.
+func updateWalletWatchOnlyRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	isWatchOnly bool) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE wallets
+		SET is_watch_only = $1
+		WHERE id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, isWatchOnly, int64(walletID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
 // CreateAddressWithIndex creates a derived address with a specific address
 // index. Used to test address index overflow without creating billions of
 // addresses.
