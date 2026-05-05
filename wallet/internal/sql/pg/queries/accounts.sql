@@ -36,7 +36,7 @@ INSERT INTO accounts (
     account_number,
     account_name,
     origin_id,
-    encrypted_public_key,
+    public_key,
     master_fingerprint
 )
 SELECT
@@ -49,7 +49,7 @@ SELECT
     ) AS account_number,
     sqlc.arg('account_name') AS account_name,
     sqlc.arg('origin_id') AS origin_id,
-    sqlc.arg('encrypted_public_key') AS encrypted_public_key,
+    sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
@@ -65,7 +65,7 @@ INSERT INTO accounts (
     account_number,
     account_name,
     origin_id,
-    encrypted_public_key,
+    public_key,
     master_fingerprint
 )
 SELECT
@@ -74,7 +74,7 @@ SELECT
     NULL AS account_number,
     sqlc.arg('account_name') AS account_name,
     sqlc.arg('origin_id') AS origin_id,
-    sqlc.arg('encrypted_public_key') AS encrypted_public_key,
+    sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
@@ -203,7 +203,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.encrypted_public_key,
+    a.public_key,
     a.master_fingerprint,
     a.created_at,
     ks.purpose,

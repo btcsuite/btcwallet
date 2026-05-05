@@ -238,11 +238,11 @@ func (tc AccountTestCase) ImportedParams(
 	walletID uint32) db.CreateImportedAccountParams {
 
 	params := db.CreateImportedAccountParams{
-		WalletID:           walletID,
-		Name:               tc.Name,
-		Scope:              tc.Scope,
-		MasterFingerprint:  12345,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:          walletID,
+		Name:              tc.Name,
+		Scope:             tc.Scope,
+		MasterFingerprint: 12345,
+		PublicKey:         RandomBytes(32),
 	}
 
 	if !tc.IsWatchOnly {

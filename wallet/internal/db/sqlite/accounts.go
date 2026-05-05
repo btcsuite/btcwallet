@@ -80,7 +80,7 @@ func (s *Store) RenameAccount(ctx context.Context,
 
 // CreateDerivedAccount creates a new derived account with the given name and
 // scope. If the key scope does not exist, it is created using the address
-// schema provided by the caller.
+// schema provided by the caller with no coin public/private key material.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
 
@@ -158,10 +158,10 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
 		}, qtx.CreateKeyScope,
 		func(addrSchema db.ScopeAddrSchema) sqlc.CreateKeyScopeParams {
 			return sqlc.CreateKeyScopeParams{
-				WalletID:            int64(walletID),
-				Purpose:             int64(scope.Purpose),
-				CoinType:            int64(scope.Coin),
-				EncryptedCoinPubKey: nil,
+				WalletID:   int64(walletID),
+				Purpose:    int64(scope.Purpose),
+				CoinType:   int64(scope.Coin),
+				CoinPubKey: nil,
 				InternalTypeID: int64(
 					addrSchema.InternalAddrType,
 				),
@@ -176,8 +176,9 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
 
 // CreateImportedAccount stores an imported account identified by an extended
 // public key. If the key scope does not exist, it is created using the address
-// schema provided by the caller. Imported accounts have NULL account_number
-// since they don't follow BIP44 derivation.
+// schema provided by the caller with no coin public/private key material.
+// Imported accounts have NULL account_number since they don't follow BIP44
+// derivation.
 func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
 
@@ -241,10 +242,10 @@ func buildCreateImportedAccountArgs(
 
 	return func(scopeID int64) sqlc.CreateImportedAccountParams {
 		return sqlc.CreateImportedAccountParams{
-			ScopeID:            scopeID,
-			AccountName:        params.Name,
-			OriginID:           int64(db.ImportedAccount),
-			EncryptedPublicKey: params.EncryptedPublicKey,
+			ScopeID:     scopeID,
+			AccountName: params.Name,
+			OriginID:    int64(db.ImportedAccount),
+			PublicKey:   params.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(params.MasterFingerprint),
 				Valid: true,
@@ -280,22 +281,22 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	return db.AccountPropsRowToProps(db.AccountPropsRow[int64, int64]{
-		AccountNumber:      row.AccountNumber,
-		AccountName:        row.AccountName,
-		OriginID:           row.OriginID,
-		ExternalKeyCount:   row.ExternalKeyCount,
-		InternalKeyCount:   row.InternalKeyCount,
-		ImportedKeyCount:   row.ImportedKeyCount,
-		EncryptedPublicKey: row.EncryptedPublicKey,
-		MasterFingerprint:  row.MasterFingerprint,
-		IsWatchOnly:        row.IsWatchOnly,
-		CreatedAt:          row.CreatedAt,
-		Purpose:            row.Purpose,
-		CoinType:           row.CoinType,
-		InternalTypeID:     row.InternalTypeID,
-		ExternalTypeID:     row.ExternalTypeID,
-		IDToAddrType:       db.IDToAddressType[int64],
-		IDToOriginType:     db.IDToAccountOrigin[int64],
+		AccountNumber:     row.AccountNumber,
+		AccountName:       row.AccountName,
+		OriginID:          row.OriginID,
+		ExternalKeyCount:  row.ExternalKeyCount,
+		InternalKeyCount:  row.InternalKeyCount,
+		ImportedKeyCount:  row.ImportedKeyCount,
+		PublicKey:         row.PublicKey,
+		MasterFingerprint: row.MasterFingerprint,
+		IsWatchOnly:       row.IsWatchOnly,
+		CreatedAt:         row.CreatedAt,
+		Purpose:           row.Purpose,
+		CoinType:          row.CoinType,
+		InternalTypeID:    row.InternalTypeID,
+		ExternalTypeID:    row.ExternalTypeID,
+		IDToAddrType:      db.IDToAddressType[int64],
+		IDToOriginType:    db.IDToAccountOrigin[int64],
 	})
 }
 
