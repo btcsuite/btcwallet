@@ -16,23 +16,19 @@ INSERT INTO wallets (
     is_imported,
     manager_version,
     is_watch_only,
-    master_pub_params,
-    encrypted_crypto_pub_key,
-    encrypted_master_hd_pub_key
+    master_hd_pub_key
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5
 )
 RETURNING id
 `
 
 type CreateWalletParams struct {
-	WalletName              string
-	IsImported              bool
-	ManagerVersion          int32
-	IsWatchOnly             bool
-	MasterPubParams         []byte
-	EncryptedCryptoPubKey   []byte
-	EncryptedMasterHdPubKey []byte
+	WalletName     string
+	IsImported     bool
+	ManagerVersion int32
+	IsWatchOnly    bool
+	MasterHdPubKey []byte
 }
 
 func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error) {
@@ -41,9 +37,7 @@ func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int
 		arg.IsImported,
 		arg.ManagerVersion,
 		arg.IsWatchOnly,
-		arg.MasterPubParams,
-		arg.EncryptedCryptoPubKey,
-		arg.EncryptedMasterHdPubKey,
+		arg.MasterHdPubKey,
 	)
 	var id int64
 	err := row.Scan(&id)
