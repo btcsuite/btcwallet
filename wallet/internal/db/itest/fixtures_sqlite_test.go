@@ -128,7 +128,7 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 			account_number,
 			account_name,
 			origin_id,
-			encrypted_public_key
+			public_key
 		) VALUES (?, ?, NULL, ?, ?, ?)`
 
 	_, err := dbConn.ExecContext(

@@ -17,9 +17,8 @@ CREATE TABLE key_scopes (
     -- Indicates the coin type for the key scope. This is typically 0 for BTC.
     coin_type BIGINT NOT NULL,
 
-    -- Encrypted key used to derive public keys for this scope in imported
-    -- accounts.
-    encrypted_coin_pub_key BYTEA,
+    -- Coin public key for this scope in imported accounts.
+    coin_pub_key BYTEA,
 
     -- Reference to the address type used for internal/change addresses.
     internal_type_id SMALLINT NOT NULL,
