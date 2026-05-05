@@ -65,9 +65,9 @@ var (
 	ErrMissingScriptPubKey = errors.New("script pubkey required")
 
 	// ErrMissingAccountPublicKey is returned when an imported account is
-	// missing the encrypted public key.
+	// missing the public key.
 	ErrMissingAccountPublicKey = errors.New(
-		"imported account requires an encrypted public key",
+		"imported account requires a public key",
 	)
 
 	// ErrMissingAccountName is returned when an account is being created
@@ -189,9 +189,9 @@ type AccountStore interface {
 	// and scope.
 	//
 	// If the key scope does not exist, it will be automatically created
-	// using the address schema from ScopeAddrMap. Spendable scopes may
-	// later gain a key_scope_secrets row; watch-only scopes remain absent
-	// from that table.
+	// using the address schema from ScopeAddrMap with no coin public/private
+	// key material. Spendable scopes may later gain a key_scope_secrets row;
+	// watch-only scopes remain absent from that table.
 	CreateDerivedAccount(ctx context.Context,
 		params CreateDerivedAccountParams) (*AccountInfo, error)
 
@@ -199,9 +199,9 @@ type AccountStore interface {
 	// extended public key.
 	//
 	// If the key scope does not exist, it will be automatically created
-	// using the address schema from ScopeAddrMap. Spendable scopes may
-	// later gain a key_scope_secrets row; watch-only scopes remain absent
-	// from that table.
+	// using the address schema from ScopeAddrMap with no coin public/private
+	// key material. Spendable scopes may later gain a key_scope_secrets row;
+	// watch-only scopes remain absent from that table.
 	CreateImportedAccount(ctx context.Context,
 		params CreateImportedAccountParams) (*AccountProperties, error)
 

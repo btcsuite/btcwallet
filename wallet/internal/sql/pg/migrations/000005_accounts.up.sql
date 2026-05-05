@@ -58,8 +58,9 @@ CREATE TABLE accounts (
     -- this account.
     master_fingerprint BIGINT,
 
-    -- Encrypted public key for the account.
-    encrypted_public_key BYTEA,
+    -- Public key for the account. Stored plaintext per ADR 0009
+    -- (docs/developer/adr/0009-single-passphrase-encryption.md).
+    public_key BYTEA,
 
     -- Timestamp when the account was created. Automatically set by the database
     -- in UTC.

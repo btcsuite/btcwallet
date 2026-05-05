@@ -38,7 +38,7 @@ INSERT INTO accounts (
     account_number,
     account_name,
     origin_id,
-    encrypted_public_key,
+    public_key,
     master_fingerprint
 )
 SELECT
@@ -50,7 +50,7 @@ SELECT
     ) AS account_number,
     ?2 AS account_name,
     ?3 AS origin_id,
-    ?4 AS encrypted_public_key,
+    ?4 AS public_key,
     ?5 AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = ?1
@@ -58,11 +58,11 @@ RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
-	ScopeID            int64
-	AccountName        string
-	OriginID           int64
-	EncryptedPublicKey []byte
-	MasterFingerprint  sql.NullInt64
+	ScopeID           int64
+	AccountName       string
+	OriginID          int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 }
 
 type CreateDerivedAccountRow struct {
@@ -79,7 +79,7 @@ func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAcc
 		arg.ScopeID,
 		arg.AccountName,
 		arg.OriginID,
-		arg.EncryptedPublicKey,
+		arg.PublicKey,
 		arg.MasterFingerprint,
 	)
 	var i CreateDerivedAccountRow
@@ -140,7 +140,7 @@ INSERT INTO accounts (
     account_number,
     account_name,
     origin_id,
-    encrypted_public_key,
+    public_key,
     master_fingerprint
 )
 SELECT
@@ -149,7 +149,7 @@ SELECT
     NULL AS account_number,
     ?1 AS account_name,
     ?2 AS origin_id,
-    ?3 AS encrypted_public_key,
+    ?3 AS public_key,
     ?4 AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = ?5
@@ -157,11 +157,11 @@ RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
-	AccountName        string
-	OriginID           int64
-	EncryptedPublicKey []byte
-	MasterFingerprint  sql.NullInt64
-	ScopeID            int64
+	AccountName       string
+	OriginID          int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	ScopeID           int64
 }
 
 type CreateImportedAccountRow struct {
@@ -176,7 +176,7 @@ func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedA
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
 		arg.AccountName,
 		arg.OriginID,
-		arg.EncryptedPublicKey,
+		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
 	)
@@ -476,7 +476,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.encrypted_public_key,
+    a.public_key,
     a.master_fingerprint,
     a.created_at,
     ks.purpose,
@@ -499,20 +499,20 @@ WHERE a.id = ?
 `
 
 type GetAccountPropsByIdRow struct {
-	AccountNumber      sql.NullInt64
-	AccountName        string
-	OriginID           int64
-	EncryptedPublicKey []byte
-	MasterFingerprint  sql.NullInt64
-	CreatedAt          time.Time
-	Purpose            int64
-	CoinType           int64
-	InternalTypeID     int64
-	ExternalTypeID     int64
-	ExternalKeyCount   int64
-	InternalKeyCount   int64
-	ImportedKeyCount   int64
-	IsWatchOnly        bool
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	OriginID          int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	ImportedKeyCount  int64
+	IsWatchOnly       bool
 }
 
 // Returns full account properties by account id.
@@ -523,7 +523,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.OriginID,
-		&i.EncryptedPublicKey,
+		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.CreatedAt,
 		&i.Purpose,
