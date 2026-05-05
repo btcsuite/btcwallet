@@ -14,7 +14,7 @@ INSERT INTO key_scopes (
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 ) VALUES (
@@ -25,12 +25,12 @@ RETURNING id
 `
 
 type CreateKeyScopeParams struct {
-	WalletID            int64
-	Purpose             int64
-	CoinType            int64
-	EncryptedCoinPubKey []byte
-	InternalTypeID      int64
-	ExternalTypeID      int64
+	WalletID       int64
+	Purpose        int64
+	CoinType       int64
+	CoinPubKey     []byte
+	InternalTypeID int64
+	ExternalTypeID int64
 }
 
 // Creates a new key scope for a wallet and returns its ID.
@@ -39,7 +39,7 @@ func (q *Queries) CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) 
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
-		arg.EncryptedCoinPubKey,
+		arg.CoinPubKey,
 		arg.InternalTypeID,
 		arg.ExternalTypeID,
 	)
@@ -82,7 +82,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
@@ -98,7 +98,7 @@ func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, erro
 		&i.WalletID,
 		&i.Purpose,
 		&i.CoinType,
-		&i.EncryptedCoinPubKey,
+		&i.CoinPubKey,
 		&i.InternalTypeID,
 		&i.ExternalTypeID,
 	)
@@ -111,7 +111,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
@@ -133,7 +133,7 @@ func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeySco
 		&i.WalletID,
 		&i.Purpose,
 		&i.CoinType,
-		&i.EncryptedCoinPubKey,
+		&i.CoinPubKey,
 		&i.InternalTypeID,
 		&i.ExternalTypeID,
 	)
@@ -183,7 +183,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
@@ -206,7 +206,7 @@ func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]
 			&i.WalletID,
 			&i.Purpose,
 			&i.CoinType,
-			&i.EncryptedCoinPubKey,
+			&i.CoinPubKey,
 			&i.InternalTypeID,
 			&i.ExternalTypeID,
 		); err != nil {

@@ -4,7 +4,7 @@ INSERT INTO key_scopes (
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 ) VALUES (
@@ -30,7 +30,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
@@ -43,7 +43,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
@@ -56,7 +56,7 @@ SELECT
     wallet_id,
     purpose,
     coin_type,
-    encrypted_coin_pub_key,
+    coin_pub_key,
     internal_type_id,
     external_type_id
 FROM key_scopes
