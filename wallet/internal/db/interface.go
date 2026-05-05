@@ -65,9 +65,9 @@ var (
 	ErrMissingScriptPubKey = errors.New("script pubkey required")
 
 	// ErrMissingAccountPublicKey is returned when an imported account is
-	// missing the encrypted public key.
+	// missing the public key.
 	ErrMissingAccountPublicKey = errors.New(
-		"imported account requires an encrypted public key",
+		"imported account requires a public key",
 	)
 
 	// ErrMissingAccountName is returned when an account is being created
@@ -187,7 +187,8 @@ type AccountStore interface {
 	// and scope.
 	//
 	// If the key scope does not exist, it will be automatically created with
-	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	// NULL public/private key fields using the address schema from
+	// ScopeAddrMap.
 	CreateDerivedAccount(ctx context.Context,
 		params CreateDerivedAccountParams) (*AccountInfo, error)
 
@@ -195,7 +196,8 @@ type AccountStore interface {
 	// extended public key.
 	//
 	// If the key scope does not exist, it will be automatically created with
-	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	// NULL public/private key fields using the address schema from
+	// ScopeAddrMap.
 	CreateImportedAccount(ctx context.Context,
 		params CreateImportedAccountParams) (*AccountProperties, error)
 

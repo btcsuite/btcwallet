@@ -435,10 +435,8 @@ type CreateImportedAccountParams struct {
 	// MasterFingerprint is the fingerprint of the master key.
 	MasterFingerprint uint32
 
-	// EncryptedPublicKey is the encrypted extended public key for the
-	// account. This should be encrypted by the caller before being passed
-	// to the database layer.
-	EncryptedPublicKey []byte
+	// PublicKey is the extended public key for the account.
+	PublicKey []byte
 
 	// EncryptedPrivateKey is the encrypted extended private key for the
 	// account. This should be encrypted by the caller before being passed
@@ -476,11 +474,9 @@ type AccountProperties struct {
 	// account.
 	ImportedKeyCount uint32
 
-	// EncryptedPublicKey is the encrypted account public key. This is the
-	// encrypted form of the extended public key that can be used to derive
-	// addresses for the account. The caller must decrypt this using the
-	// appropriate crypto key to use it.
-	EncryptedPublicKey []byte
+	// PublicKey is the account public key. This is the extended public key
+	// that can be used to derive addresses for the account.
+	PublicKey []byte
 
 	// MasterKeyFingerprint represents the fingerprint of the root key
 	// corresponding to the master public key (also known as the key with

@@ -58,8 +58,8 @@ CREATE TABLE accounts (
     -- this account.
     master_fingerprint BIGINT,
 
-    -- Encrypted public key for the account.
-    encrypted_public_key BYTEA,
+    -- Public key for the account.
+    public_key BYTEA,
 
     -- Timestamp when the account was created. Automatically set by the database
     -- in UTC.

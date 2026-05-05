@@ -58,8 +58,8 @@ CREATE TABLE accounts (
     -- this account.
     master_fingerprint INTEGER,
 
-    -- Encrypted public key for the account.
-    encrypted_public_key BLOB,
+    -- Public key for the account.
+    public_key BLOB,
 
     -- Timestamp when the account was created. Automatically set by the database.
     created_at DATETIME NOT NULL DEFAULT current_timestamp,

@@ -41,7 +41,7 @@ func TestCreateAccounts(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, props)
 			requireAccountPropertiesMatches(t, props, tc)
-			require.NotEmpty(t, props.EncryptedPublicKey)
+			require.NotEmpty(t, props.PublicKey)
 		}
 	}
 }
@@ -119,10 +119,10 @@ func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
 
 		props, err := store.CreateImportedAccount(
 			t.Context(), db.CreateImportedAccountParams{
-				WalletID:           walletInfo.ID,
-				Name:               "watch-only-imported",
-				Scope:              db.KeyScopeBIP0084,
-				EncryptedPublicKey: RandomBytes(32),
+				WalletID:  walletInfo.ID,
+				Name:      "watch-only-imported",
+				Scope:     db.KeyScopeBIP0084,
+				PublicKey: RandomBytes(32),
 			},
 		)
 		require.NoError(t, err)
@@ -151,10 +151,10 @@ func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
 
 		props, err := store.CreateImportedAccount(
 			t.Context(), db.CreateImportedAccountParams{
-				WalletID:           walletInfo.ID,
-				Name:               "watch-only-empty",
-				Scope:              db.KeyScopeBIP0084,
-				EncryptedPublicKey: RandomBytes(32),
+				WalletID:  walletInfo.ID,
+				Name:      "watch-only-empty",
+				Scope:     db.KeyScopeBIP0084,
+				PublicKey: RandomBytes(32),
 			},
 		)
 		require.NoError(t, err)
@@ -177,10 +177,10 @@ func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
 
 		props, err := store.CreateImportedAccount(
 			t.Context(), db.CreateImportedAccountParams{
-				WalletID:           walletID,
-				Name:               "spendable-imported",
-				Scope:              db.KeyScopeBIP0084,
-				EncryptedPublicKey: RandomBytes(32),
+				WalletID:  walletID,
+				Name:      "spendable-imported",
+				Scope:     db.KeyScopeBIP0084,
+				PublicKey: RandomBytes(32),
 			},
 		)
 		require.NoError(t, err)
@@ -444,27 +444,27 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 		{
 			name: "missing name",
 			params: db.CreateImportedAccountParams{
-				Name:               "",
-				Scope:              db.KeyScopeBIP0084,
-				EncryptedPublicKey: RandomBytes(32),
+				Name:      "",
+				Scope:     db.KeyScopeBIP0084,
+				PublicKey: RandomBytes(32),
 			},
 			wantErr: db.ErrMissingAccountName,
 		},
 		{
 			name: "missing public key",
 			params: db.CreateImportedAccountParams{
-				Name:               "missing-pubkey",
-				Scope:              db.KeyScopeBIP0084,
-				EncryptedPublicKey: nil,
+				Name:      "missing-pubkey",
+				Scope:     db.KeyScopeBIP0084,
+				PublicKey: nil,
 			},
 			wantErr: db.ErrMissingAccountPublicKey,
 		},
 		{
 			name: "unknown scope",
 			params: db.CreateImportedAccountParams{
-				Name:               "unknown-scope",
-				Scope:              db.KeyScope{Purpose: 999, Coin: 999},
-				EncryptedPublicKey: RandomBytes(32),
+				Name:      "unknown-scope",
+				Scope:     db.KeyScope{Purpose: 999, Coin: 999},
+				PublicKey: RandomBytes(32),
 			},
 			wantErr: db.ErrUnknownKeyScope,
 		},
@@ -493,10 +493,10 @@ func TestCreateImportedAccountMissingWallet(t *testing.T) {
 	store := NewTestStore(t)
 
 	params := db.CreateImportedAccountParams{
-		WalletID:           99999,
-		Name:               "missing-wallet-imported",
-		Scope:              db.KeyScopeBIP0084,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:  99999,
+		Name:      "missing-wallet-imported",
+		Scope:     db.KeyScopeBIP0084,
+		PublicKey: RandomBytes(32),
 	}
 
 	props, err := store.CreateImportedAccount(t.Context(), params)
@@ -513,10 +513,10 @@ func TestCreateImportedAccountValidationPrecedesWalletLookup(t *testing.T) {
 
 	props, err := store.CreateImportedAccount(t.Context(),
 		db.CreateImportedAccountParams{
-			WalletID:           99999,
-			Name:               "",
-			Scope:              db.KeyScopeBIP0084,
-			EncryptedPublicKey: RandomBytes(32),
+			WalletID:  99999,
+			Name:      "",
+			Scope:     db.KeyScopeBIP0084,
+			PublicKey: RandomBytes(32),
 		},
 	)
 	require.ErrorIs(t, err, db.ErrMissingAccountName)
@@ -589,7 +589,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 						WalletID:            walletID,
 						Name:                db.DefaultImportedAccountName,
 						Scope:               db.KeyScopeBIP0084,
-						EncryptedPublicKey:  RandomBytes(32),
+						PublicKey:           RandomBytes(32),
 						EncryptedPrivateKey: RandomBytes(32),
 					},
 				)
@@ -609,10 +609,10 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
-						WalletID:           walletID,
-						Name:               db.DefaultImportedAccountName,
-						Scope:              db.KeyScopeBIP0084,
-						EncryptedPublicKey: RandomBytes(32),
+						WalletID:  walletID,
+						Name:      db.DefaultImportedAccountName,
+						Scope:     db.KeyScopeBIP0084,
+						PublicKey: RandomBytes(32),
 					},
 				)
 				if err != nil {
@@ -631,10 +631,10 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
-						WalletID:           walletID,
-						Name:               db.DefaultImportedAccountName,
-						Scope:              db.KeyScopeBIP0084,
-						EncryptedPublicKey: RandomBytes(32),
+						WalletID:  walletID,
+						Name:      db.DefaultImportedAccountName,
+						Scope:     db.KeyScopeBIP0084,
+						PublicKey: RandomBytes(32),
 					},
 				)
 				if err != nil {
@@ -656,7 +656,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 						WalletID:            walletID,
 						Name:                "hardware",
 						Scope:               db.KeyScopeBIP0084,
-						EncryptedPublicKey:  RandomBytes(32),
+						PublicKey:           RandomBytes(32),
 						EncryptedPrivateKey: RandomBytes(32),
 					},
 				)
@@ -700,10 +700,10 @@ func TestCreateImportedAccountDuplicateName(t *testing.T) {
 	walletID := newWallet(t, store, "imported-duplicate-name-wallet")
 
 	params := db.CreateImportedAccountParams{
-		WalletID:           walletID,
-		Name:               "duplicate-imported",
-		Scope:              db.KeyScopeBIP0084,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:  walletID,
+		Name:      "duplicate-imported",
+		Scope:     db.KeyScopeBIP0084,
+		PublicKey: RandomBytes(32),
 	}
 
 	_, err := store.CreateImportedAccount(t.Context(), params)
@@ -711,7 +711,7 @@ func TestCreateImportedAccountDuplicateName(t *testing.T) {
 
 	// Attempt to create second imported account with same name in same
 	// scope.
-	params.EncryptedPublicKey = RandomBytes(32)
+	params.PublicKey = RandomBytes(32)
 	_, err = store.CreateImportedAccount(t.Context(), params)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "constraint")
@@ -767,10 +767,10 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 	createDerivedAccount(t, store, walletID, scope, "derived")
 
 	_, err := store.CreateImportedAccount(t.Context(), db.CreateImportedAccountParams{
-		WalletID:           walletID,
-		Name:               db.DefaultImportedAccountName,
-		Scope:              scope,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:  walletID,
+		Name:      db.DefaultImportedAccountName,
+		Scope:     scope,
+		PublicKey: RandomBytes(32),
 	})
 	require.NoError(t, err)
 
@@ -922,10 +922,10 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 	createDerivedAccount(t, store, walletID, scope, "derived")
 
 	_, err := store.CreateImportedAccount(t.Context(), db.CreateImportedAccountParams{
-		WalletID:           walletID,
-		Name:               db.DefaultImportedAccountName,
-		Scope:              scope,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:  walletID,
+		Name:      db.DefaultImportedAccountName,
+		Scope:     scope,
+		PublicKey: RandomBytes(32),
 	})
 	require.NoError(t, err)
 
@@ -1280,10 +1280,10 @@ func CreateImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:           walletID,
-			Name:               name,
-			Scope:              scope,
-			EncryptedPublicKey: RandomBytes(32),
+			WalletID:  walletID,
+			Name:      name,
+			Scope:     scope,
+			PublicKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)

@@ -36,7 +36,7 @@ func (params *CreateImportedAccountParams) ValidateBasic() error {
 		return ErrMissingAccountName
 	}
 
-	if len(params.EncryptedPublicKey) == 0 {
+	if len(params.PublicKey) == 0 {
 		return ErrMissingAccountPublicKey
 	}
 
@@ -60,22 +60,22 @@ func (params *CreateImportedAccountParams) ValidateWatchOnly(
 // AccountPropsRow represents the raw database fields needed to construct
 // AccountProperties.
 type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
-	AccountNumber      sql.NullInt64
-	AccountName        string
-	OriginID           AccOriginId
-	ExternalKeyCount   int64
-	InternalKeyCount   int64
-	ImportedKeyCount   int64
-	EncryptedPublicKey []byte
-	MasterFingerprint  sql.NullInt64
-	IsWatchOnly        bool
-	CreatedAt          time.Time
-	Purpose            int64
-	CoinType           int64
-	InternalTypeID     AddrTypeId
-	ExternalTypeID     AddrTypeId
-	IDToAddrType       func(AddrTypeId) (AddressType, error)
-	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	OriginID          AccOriginId
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	IsWatchOnly       bool
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	InternalTypeID    AddrTypeId
+	ExternalTypeID    AddrTypeId
+	IDToAddrType      func(AddrTypeId) (AddressType, error)
+	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
 }
 
 // getKeyCounts converts external, internal, and imported key counts from
@@ -179,7 +179,7 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
 		ImportedKeyCount:     importedKeyCount,
-		EncryptedPublicKey:   row.EncryptedPublicKey,
+		PublicKey:            row.PublicKey,
 		MasterKeyFingerprint: fingerprint,
 		KeyScope: KeyScope{
 			Purpose: purposeNum,
