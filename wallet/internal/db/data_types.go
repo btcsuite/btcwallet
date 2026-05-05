@@ -271,12 +271,8 @@ type CreateWalletParams struct {
 	// EncryptedMasterPrivKey is the encrypted master HD private key.
 	EncryptedMasterPrivKey []byte
 
-	// EncryptedMasterPubKey is the encrypted master HD public key.
-	EncryptedMasterPubKey []byte
-
-	// MasterKeyPubParams are the parameters (e.g. salt, scrypt N/R/P) used
-	// to derive the master public key.
-	MasterKeyPubParams []byte
+	// MasterPubKey is the master HD public key.
+	MasterPubKey []byte
 
 	// MasterKeyPrivParams are the parameters (e.g. salt, scrypt N/R/P) used
 	// to derive the master private key.
@@ -285,10 +281,6 @@ type CreateWalletParams struct {
 	// EncryptedCryptoPrivKey is the encrypted private crypto key, used to
 	// protect private keys in the database.
 	EncryptedCryptoPrivKey []byte
-
-	// EncryptedCryptoPubKey is the encrypted public crypto key, used to
-	// protect public keys in the database.
-	EncryptedCryptoPubKey []byte
 
 	// EncryptedCryptoScriptKey is the encrypted script crypto key, used to
 	// protect scripts in the database.
