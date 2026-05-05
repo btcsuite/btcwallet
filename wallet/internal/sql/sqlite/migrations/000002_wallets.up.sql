@@ -18,15 +18,9 @@ CREATE TABLE wallets (
     -- Defines if the wallet is a watch-only wallet.
     is_watch_only BOOLEAN NOT NULL,
 
-    -- Params to derive the public master key.
-    master_pub_params BLOB NOT NULL,
-
-    -- Encrypted key used to encrypt/decrypt wallet data related to public keys.
-    encrypted_crypto_pub_key BLOB NOT NULL,
-
-    -- Encrypted HD public key of the wallet. NULL for certain wallet types
-    -- that don't store extended public keys.
-    encrypted_master_hd_pub_key BLOB
+    -- Master HD public key of the wallet. NULL for certain wallet types that
+    -- don't store extended public keys.
+    master_hd_pub_key BLOB
 );
 
 -- Unique index to prevent duplicate wallet names.
