@@ -30,13 +30,11 @@ func (s *Store) CreateWallet(ctx context.Context,
 
 	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		walletParams := sqlc.CreateWalletParams{
-			WalletName:              params.Name,
-			IsImported:              params.IsImported,
-			ManagerVersion:          params.ManagerVersion,
-			IsWatchOnly:             params.IsWatchOnly,
-			MasterPubParams:         params.MasterKeyPubParams,
-			EncryptedCryptoPubKey:   params.EncryptedCryptoPubKey,
-			EncryptedMasterHdPubKey: params.EncryptedMasterPubKey,
+			WalletName:     params.Name,
+			IsImported:     params.IsImported,
+			ManagerVersion: params.ManagerVersion,
+			IsWatchOnly:    params.IsWatchOnly,
+			MasterHdPubKey: params.MasterPubKey,
 		}
 
 		id, err := qtx.CreateWallet(ctx, walletParams)

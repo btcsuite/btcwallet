@@ -4,11 +4,9 @@ INSERT INTO wallets (
     is_imported,
     manager_version,
     is_watch_only,
-    master_pub_params,
-    encrypted_crypto_pub_key,
-    encrypted_master_hd_pub_key
+    master_hd_pub_key
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?
 )
 RETURNING id;
 

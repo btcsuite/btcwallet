@@ -19,11 +19,9 @@ func CreateWalletParamsFixture(name string) db.CreateWalletParams {
 		ManagerVersion:           1,
 		IsWatchOnly:              false,
 		EncryptedMasterPrivKey:   RandomBytes(32),
-		EncryptedMasterPubKey:    RandomBytes(32),
-		MasterKeyPubParams:       RandomBytes(16),
+		MasterPubKey:             RandomBytes(32),
 		MasterKeyPrivParams:      RandomBytes(16),
 		EncryptedCryptoPrivKey:   RandomBytes(32),
-		EncryptedCryptoPubKey:    RandomBytes(32),
 		EncryptedCryptoScriptKey: RandomBytes(32),
 	}
 }
