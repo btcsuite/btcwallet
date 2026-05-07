@@ -106,19 +106,20 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 			return err
 		}
 
-		// Acquire an advisory lock for this scope to serialize account creation
-		// and prevent race conditions when computing MAX(account_number). This
-		// MUST be a separate statement that completes before
-		// qtx.CreateDerivedAccount runs. See the LockAccountScope comments for
-		// why single-statement approaches don't work.
-		err = qtx.LockAccountScope(ctx, scopeID)
+		accountNumber, err := qtx.GetAndIncrementNextAccountNumber(
+			ctx, scopeID,
+		)
 		if err != nil {
-			return fmt.Errorf("lock account scope: %w", err)
+			return fmt.Errorf("allocate account number: %w", err)
 		}
 
 		row, err := qtx.CreateDerivedAccount(
 			ctx, sqlc.CreateDerivedAccountParams{
-				ScopeID:     scopeID,
+				ScopeID: scopeID,
+				AccountNumber: sql.NullInt64{
+					Int64: accountNumber,
+					Valid: true,
+				},
 				AccountName: params.Name,
 				OriginID:    int16(db.DerivedAccount),
 			},
@@ -298,7 +299,7 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 				),
 			}
 		},
-		func(row sqlc.KeyScope) int64 {
+		func(row sqlc.GetKeyScopeByWalletAndScopeRow) int64 {
 			return row.ID
 		}, scope,
 	)

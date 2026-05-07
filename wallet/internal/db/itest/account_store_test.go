@@ -363,6 +363,46 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountIgnoresImportedAccounts verifies that imported
+// accounts do not consume the persisted next derived-account number.
+func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "mixed-account-number-wallet")
+
+	first, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "derived-0",
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), first.AccountNumber)
+
+	props, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:  walletID,
+			Scope:     db.KeyScopeBIP0084,
+			Name:      "imported-account",
+			PublicKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), props.AccountNumber)
+
+	second, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "derived-1",
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), second.AccountNumber)
+}
+
 // TestCreateDerivedAccountConcurrent verifies that concurrent account creation
 // yields unique, sequential account numbers without errors.
 func TestCreateDerivedAccountConcurrent(t *testing.T) {
@@ -1163,16 +1203,25 @@ func TestRenameAccountErrors(t *testing.T) {
 	}
 }
 
-// TestCreateDerivedAccountMaxAccountNumber verifies that CreateDerivedAccount
-// returns ErrMaxAccountNumberReached when the account number counter exceeds
-// the maximum uint32 value.
+// TestCreateDerivedAccountMaxAccountNumber verifies that accounts can be
+// created up to the maximum account number (math.MaxUint32), but the next
+// account creation fails due to overflow.
 func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
 	walletID := newWallet(t, store, "wallet-max-account")
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "account-0")
-	setupMaxAccountNumberTest(t, store, walletID)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+
+	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,
+		"account-near-max")
+
+	// Set the counter to MaxUint32 so the next allocation gives us MaxUint32
+	UpdateKeyScopeNextAccountNumber(t, dbConn, scopeID, math.MaxUint32)
 
 	// This should succeed with account_number = MaxUint32.
 	info, err := store.CreateDerivedAccount(
