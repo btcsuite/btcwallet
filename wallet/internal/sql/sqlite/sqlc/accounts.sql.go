@@ -44,25 +44,23 @@ INSERT INTO accounts (
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
-    (
-        SELECT coalesce(max(a.account_number), -1) + 1 FROM accounts AS a
-        WHERE a.scope_id = ?1
-    ) AS account_number,
+    ?1 AS account_number,
     ?2 AS account_name,
     ?3 AS origin_id,
     ?4 AS public_key,
     ?5 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = ?1
+WHERE ks.id = ?6
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
-	ScopeID           int64
+	AccountNumber     sql.NullInt64
 	AccountName       string
 	OriginID          int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
+	ScopeID           int64
 }
 
 type CreateDerivedAccountRow struct {
@@ -71,16 +69,16 @@ type CreateDerivedAccountRow struct {
 	CreatedAt     time.Time
 }
 
-// Creates a new derived account under the given scope, computing the next
-// account number from existing accounts. SQLite's _txlock=immediate ensures
-// only one writer at a time, preventing concurrent allocation conflicts.
+// Creates a new derived account under the given scope using a separately
+// allocated account number.
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
-		arg.ScopeID,
+		arg.AccountNumber,
 		arg.AccountName,
 		arg.OriginID,
 		arg.PublicKey,
 		arg.MasterFingerprint,
+		arg.ScopeID,
 	)
 	var i CreateDerivedAccountRow
 	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)

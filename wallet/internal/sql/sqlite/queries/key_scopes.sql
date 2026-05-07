@@ -49,6 +49,15 @@ SELECT
 FROM key_scopes
 WHERE wallet_id = ? AND purpose = ? AND coin_type = ?;
 
+-- name: GetAndIncrementNextAccountNumber :one
+-- Atomically gets the next derived account number for a key scope and
+-- increments the persisted counter. Returns the current value before
+-- incrementing.
+UPDATE key_scopes
+SET next_account_number = next_account_number + 1
+WHERE id = ?
+RETURNING next_account_number - 1 AS account_number;
+
 -- name: ListKeyScopesByWallet :many
 -- Lists all key scopes for a wallet, ordered by ID.
 SELECT
