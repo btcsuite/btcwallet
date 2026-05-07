@@ -64,13 +64,14 @@ type Block struct {
 }
 
 type KeyScope struct {
-	ID             int64
-	WalletID       int64
-	Purpose        int64
-	CoinType       int64
-	CoinPubKey     []byte
-	InternalTypeID int64
-	ExternalTypeID int64
+	ID                int64
+	WalletID          int64
+	Purpose           int64
+	CoinType          int64
+	CoinPubKey        []byte
+	NextAccountNumber int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 }
 
 type KeyScopeSecret struct {

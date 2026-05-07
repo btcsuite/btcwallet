@@ -21,6 +21,9 @@ CREATE TABLE key_scopes (
     -- ADR 0009 (docs/developer/adr/0009-single-passphrase-encryption.md).
     coin_pub_key BLOB,
 
+    -- Next derived account number to allocate within this key scope.
+    next_account_number INTEGER NOT NULL DEFAULT 0,
+
     -- Reference to the address type used for internal/change addresses.
     internal_type_id INTEGER NOT NULL,
 
@@ -30,6 +33,9 @@ CREATE TABLE key_scopes (
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if key scopes still exist.
     FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
+
+    -- Derived account counter must be non-negative.
+    CHECK (next_account_number >= 0),
 
     -- Foreign key constraints to address types. Using ON DELETE RESTRICT to ensure
     -- that the address types cannot be deleted if key scopes still exist.

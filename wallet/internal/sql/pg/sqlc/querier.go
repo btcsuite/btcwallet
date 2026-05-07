@@ -66,10 +66,8 @@ type Querier interface {
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
-	// Creates a new derived account under the given scope, computing the next
-	// account number atomically. The caller MUST call LockAccountScope first
-	// to acquire the advisory lock and prevent race conditions.
-	// See LockAccountScope comments for why this is a separate statement.
+	// Creates a new derived account under the given scope using a separately
+	// allocated account number.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
 	// Test-only: Creates a derived account with a specific account number.
 	// Used for testing account number overflow without creating billions of accounts.
@@ -159,6 +157,10 @@ type Querier interface {
 	GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int16) (AddressType, error)
+	// Atomically gets the next derived account number for a key scope and
+	// increments the persisted counter. Returns the current value before
+	// incrementing.
+	GetAndIncrementNextAccountNumber(ctx context.Context, id int64) (int64, error)
 	// Atomically gets the next external address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextExternalIndex(ctx context.Context, id int64) (int64, error)
@@ -167,9 +169,9 @@ type Querier interface {
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	// Retrieves a key scope by its ID.
-	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
+	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
-	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	// Retrieves the full transaction row along with optional block metadata.
@@ -335,7 +337,7 @@ type Querier interface {
 	// returned. Returns up to page_limit rows.
 	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
-	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
 	// may be spent by selected transaction inputs.
 	//
@@ -487,30 +489,6 @@ type Querier interface {
 	// from the beginning; otherwise returns wallets with id > cursor_id. Returns up
 	// to page_limit rows.
 	ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error)
-	// Acquires a transaction-level advisory lock to serialize account creation within a scope.
-	// The lock is automatically released upon transaction commit or rollback.
-	// This MUST be called immediately before 'CreateDerivedAccount' within the same transaction.
-	//
-	// We explicitly use a two-statement pattern because single-statement CTE/Join
-	// approaches failed to prevent race conditions during concurrent account generation.
-	// The following "one-query" strategies were tested and proven unreliable:
-	//
-	// 1. CTE with CROSS/INNER JOIN: The PostgreSQL optimizer may evaluate the
-	//    MAX(account_number) subquery using a snapshot taken before the lock CTE
-	//    is fully processed, leading to duplicate account numbers.
-	//
-	// 2. CTE with OFFSET 0: Designed to force materialization, this still fails to
-	//    guarantee that the lock is held before the aggregate subquery begins its
-	//    read operation.
-	//
-	// 3. FOR UPDATE in Subqueries: Since FOR UPDATE targets existing rows, it fails
-	//    to "lock the gap" for new inserts or handle empty tables, allowing
-	//    concurrent processes to calculate identical MAX() values.
-	//
-	// Using two separate calls ensures the application pauses until
-	// LockAccountScope returns, guaranteeing that the subsequent SELECT MAX()
-	// operates inside a strictly serialized execution window for that scope.
-	LockAccountScope(ctx context.Context, dollar_1 int64) error
 	// Marks a wallet-owned UTXO as spent by a transaction.
 	//
 	// How:
