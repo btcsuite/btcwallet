@@ -84,75 +84,75 @@ func (s *Store) RenameAccount(ctx context.Context,
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
 
-	paramsErr := params.Validate()
-	if paramsErr != nil {
-		return nil, paramsErr
-	}
-
 	var info *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		walletIsWatchOnly, err := getWalletWatchOnly(
-			ctx, qtx, params.WalletID,
-		)
-		if err != nil {
-			return err
-		}
+		var err error
 
-		scopeID, err := ensureKeyScope(
-			ctx, qtx, params.WalletID, params.Scope,
-		)
-		if err != nil {
-			return err
-		}
-
-		accountNumber, err := qtx.GetAndIncrementNextAccountNumber(
-			ctx, scopeID,
-		)
-		if err != nil {
-			return fmt.Errorf("allocate account number: %w", err)
-		}
-
-		row, err := qtx.CreateDerivedAccount(
-			ctx, sqlc.CreateDerivedAccountParams{
-				ScopeID: scopeID,
-				AccountNumber: sql.NullInt64{
-					Int64: accountNumber,
-					Valid: true,
-				},
-				AccountName: params.Name,
-				OriginID:    int16(db.DerivedAccount),
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("create account: %w", err)
-		}
-
-		if !row.AccountNumber.Valid {
-			// This should never happen unless the query is modified
-			// incorrectly.
-			return db.ErrNilDBAccountNumber
-		}
-
-		accNumber, err := db.Int64ToUint32(row.AccountNumber.Int64)
-		if err != nil {
-			return fmt.Errorf("%w: %w",
-				db.ErrMaxAccountNumberReached, err,
-			)
-		}
-
-		info = db.BuildAccountInfo(
-			accNumber, params.Name, db.DerivedAccount, 0, 0, 0,
-			walletIsWatchOnly, row.CreatedAt, params.Scope,
+		info, err = db.CreateDerivedAccountWithOps(
+			ctx, params, createDerivedAccountOps{q: qtx},
 		)
 
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return info, nil
+}
+
+// createDerivedAccountOps adapts PostgreSQL sqlc queries to the shared
+// CreateDerivedAccount workflow.
+type createDerivedAccountOps struct {
+	q *sqlc.Queries
+}
+
+// WalletWatchOnly implements db.CreateDerivedAccountOps.
+func (o createDerivedAccountOps) WalletWatchOnly(ctx context.Context,
+	walletID uint32) (bool, error) {
+
+	return getWalletWatchOnly(ctx, o.q, walletID)
+}
+
+// EnsureScope implements db.CreateDerivedAccountOps.
+func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
+	walletID uint32, scope db.KeyScope) (int64, error) {
+
+	return ensureKeyScope(ctx, o.q, walletID, scope)
+}
+
+// AllocateAccountNumber implements db.CreateDerivedAccountOps.
+func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
+	scopeID int64) (int64, error) {
+
+	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
+}
+
+// CreateDerivedAccount implements db.CreateDerivedAccountOps.
+func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
+	scopeID int64, accountNumber int64,
+	name string) (db.CreateDerivedAccountRow, error) {
+
+	row, err := o.q.CreateDerivedAccount(
+		ctx, sqlc.CreateDerivedAccountParams{
+			ScopeID: scopeID,
+			AccountNumber: sql.NullInt64{
+				Int64: accountNumber,
+				Valid: true,
+			},
+			AccountName: name,
+			OriginID:    int16(db.DerivedAccount),
+		},
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, err
+	}
+
+	return db.CreateDerivedAccountRow{
+		AccountNumber: row.AccountNumber,
+		CreatedAt:     row.CreatedAt,
+	}, nil
 }
 
 // CreateImportedAccount stores an imported account identified by an extended
