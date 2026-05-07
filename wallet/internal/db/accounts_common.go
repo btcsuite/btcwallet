@@ -30,6 +30,103 @@ func (params *CreateDerivedAccountParams) Validate() error {
 	return nil
 }
 
+// CreateDerivedAccountRow contains the backend-independent fields the shared
+// CreateDerivedAccount workflow needs from the final insert row.
+type CreateDerivedAccountRow struct {
+	AccountNumber sql.NullInt64
+	CreatedAt     time.Time
+}
+
+// CreateDerivedAccountOps is the backend adapter the shared
+// CreateDerivedAccount workflow uses.
+//
+// The shared account-creation algorithm is intentionally ordered:
+//   - validate the public request before any backend step runs
+//   - load the wallet watch-only mode so the returned AccountInfo matches the
+//     stored wallet state
+//   - ensure the requested key scope exists before allocating from its counter
+//   - allocate the next derived account number for that scope
+//   - insert the derived account row with the allocated number
+//   - normalize the inserted row into the public AccountInfo result
+//
+// The adapter methods map directly to those stages so the shared helper keeps
+// the sequencing and invariants while each backend keeps its sqlc query types,
+// binding shapes, and row conversions local.
+type CreateDerivedAccountOps interface {
+	// WalletWatchOnly returns whether the target wallet currently runs in
+	// watch-only mode.
+	WalletWatchOnly(ctx context.Context, walletID uint32) (bool, error)
+
+	// EnsureScope returns the existing or newly created key-scope row ID for
+	// the wallet/scope pair.
+	EnsureScope(ctx context.Context, walletID uint32,
+		scope KeyScope) (int64, error)
+
+	// AllocateAccountNumber advances and returns the next derived account
+	// number for the provided scope row.
+	AllocateAccountNumber(ctx context.Context, scopeID int64) (int64, error)
+
+	// CreateDerivedAccount inserts the derived account row using the provided
+	// scope ID, allocated account number, and public account name.
+	CreateDerivedAccount(ctx context.Context, scopeID int64,
+		accountNumber int64, name string) (CreateDerivedAccountRow, error)
+}
+
+// CreateDerivedAccountWithOps runs the backend-independent
+// CreateDerivedAccount workflow once the caller has opened a backend-specific
+// SQL transaction.
+//
+// The helper owns the end-to-end sequencing so postgres and sqlite both:
+// validate the public request first, allocate from the same scope counter only
+// after that scope exists, preserve the same account-number overflow mapping,
+// and build the same normalized AccountInfo result from the inserted row.
+func CreateDerivedAccountWithOps(ctx context.Context,
+	params CreateDerivedAccountParams,
+	ops CreateDerivedAccountOps) (*AccountInfo, error) {
+
+	paramsErr := params.Validate()
+	if paramsErr != nil {
+		return nil, paramsErr
+	}
+
+	walletIsWatchOnly, err := ops.WalletWatchOnly(ctx, params.WalletID)
+	if err != nil {
+		return nil, fmt.Errorf("wallet watch only: %w", err)
+	}
+
+	scopeID, err := ops.EnsureScope(ctx, params.WalletID, params.Scope)
+	if err != nil {
+		return nil, fmt.Errorf("ensure scope: %w", err)
+	}
+
+	accountNumber, err := ops.AllocateAccountNumber(ctx, scopeID)
+	if err != nil {
+		return nil, fmt.Errorf("allocate account number: %w", err)
+	}
+
+	row, err := ops.CreateDerivedAccount(
+		ctx, scopeID, accountNumber, params.Name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create account: %w", err)
+	}
+
+	if !row.AccountNumber.Valid {
+		// This should never happen unless the query is modified incorrectly.
+		return nil, ErrNilDBAccountNumber
+	}
+
+	accNumber, err := Int64ToUint32(row.AccountNumber.Int64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrMaxAccountNumberReached, err)
+	}
+
+	return BuildAccountInfo(
+		accNumber, params.Name, DerivedAccount, 0, 0, 0,
+		walletIsWatchOnly, row.CreatedAt, params.Scope,
+	), nil
+}
+
 // ValidateBasic validates required fields for creating an imported account.
 func (params *CreateImportedAccountParams) ValidateBasic() error {
 	if params.Name == "" {
