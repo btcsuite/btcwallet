@@ -105,6 +105,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
 	}
+	if q.getAndIncrementNextAccountNumberStmt, err = db.PrepareContext(ctx, GetAndIncrementNextAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAndIncrementNextAccountNumber: %w", err)
+	}
 	if q.getAndIncrementNextExternalIndexStmt, err = db.PrepareContext(ctx, GetAndIncrementNextExternalIndex); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAndIncrementNextExternalIndex: %w", err)
 	}
@@ -408,6 +411,11 @@ func (q *Queries) Close() error {
 	if q.getAddressTypeByIDStmt != nil {
 		if cerr := q.getAddressTypeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressTypeByIDStmt: %w", cerr)
+		}
+	}
+	if q.getAndIncrementNextAccountNumberStmt != nil {
+		if cerr := q.getAndIncrementNextAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAndIncrementNextAccountNumberStmt: %w", cerr)
 		}
 	}
 	if q.getAndIncrementNextExternalIndexStmt != nil {
@@ -751,6 +759,7 @@ type Queries struct {
 	getAddressByScriptPubKeyStmt                *sql.Stmt
 	getAddressSecretStmt                        *sql.Stmt
 	getAddressTypeByIDStmt                      *sql.Stmt
+	getAndIncrementNextAccountNumberStmt        *sql.Stmt
 	getAndIncrementNextExternalIndexStmt        *sql.Stmt
 	getAndIncrementNextInternalIndexStmt        *sql.Stmt
 	getBlockByHeightStmt                        *sql.Stmt
@@ -839,6 +848,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAddressByScriptPubKeyStmt:                q.getAddressByScriptPubKeyStmt,
 		getAddressSecretStmt:                        q.getAddressSecretStmt,
 		getAddressTypeByIDStmt:                      q.getAddressTypeByIDStmt,
+		getAndIncrementNextAccountNumberStmt:        q.getAndIncrementNextAccountNumberStmt,
 		getAndIncrementNextExternalIndexStmt:        q.getAndIncrementNextExternalIndexStmt,
 		getAndIncrementNextInternalIndexStmt:        q.getAndIncrementNextInternalIndexStmt,
 		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
