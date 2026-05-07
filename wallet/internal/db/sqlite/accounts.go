@@ -106,9 +106,20 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 			return err
 		}
 
+		accountNumber, err := qtx.GetAndIncrementNextAccountNumber(
+			ctx, scopeID,
+		)
+		if err != nil {
+			return fmt.Errorf("allocate account number: %w", err)
+		}
+
 		row, err := qtx.CreateDerivedAccount(
 			ctx, sqlc.CreateDerivedAccountParams{
-				ScopeID:     scopeID,
+				ScopeID: scopeID,
+				AccountNumber: sql.NullInt64{
+					Int64: accountNumber,
+					Valid: true,
+				},
 				AccountName: params.Name,
 				OriginID:    int64(db.DerivedAccount),
 			},
@@ -170,7 +181,9 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
 				),
 			}
 		},
-		func(row sqlc.KeyScope) int64 { return row.ID }, scope,
+		func(row sqlc.GetKeyScopeByWalletAndScopeRow) int64 {
+			return row.ID
+		}, scope,
 	)
 }
 

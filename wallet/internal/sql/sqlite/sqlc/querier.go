@@ -66,9 +66,8 @@ type Querier interface {
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
-	// Creates a new derived account under the given scope, computing the next
-	// account number from existing accounts. SQLite's _txlock=immediate ensures
-	// only one writer at a time, preventing concurrent allocation conflicts.
+	// Creates a new derived account under the given scope using a separately
+	// allocated account number.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
 	// Test-only: Creates a derived account with a specific account number.
 	// Used for testing account number overflow without creating billions of accounts.
@@ -156,6 +155,10 @@ type Querier interface {
 	GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
+	// Atomically gets the next derived account number for a key scope and
+	// increments the persisted counter. Returns the current value before
+	// incrementing.
+	GetAndIncrementNextAccountNumber(ctx context.Context, id int64) (int64, error)
 	// Atomically gets the next external address index and increments the counter.
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextExternalIndex(ctx context.Context, id int64) (int64, error)
@@ -164,9 +167,9 @@ type Querier interface {
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
 	// Retrieves a key scope by its ID.
-	GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error)
+	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
-	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error)
+	GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error)
 	// Retrieves the secrets for a key scope.
 	GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error)
 	// Retrieves the full transaction row along with optional block metadata.
@@ -331,7 +334,7 @@ type Querier interface {
 	// returned. Returns up to page_limit rows.
 	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
-	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error)
+	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
 	// may be spent by selected transaction inputs.
 	//

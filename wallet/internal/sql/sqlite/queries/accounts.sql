@@ -1,7 +1,6 @@
 -- name: CreateDerivedAccount :one
--- Creates a new derived account under the given scope, computing the next
--- account number from existing accounts. SQLite's _txlock=immediate ensures
--- only one writer at a time, preventing concurrent allocation conflicts.
+-- Creates a new derived account under the given scope using a separately
+-- allocated account number.
 INSERT INTO accounts (
     wallet_id,
     scope_id,
@@ -14,10 +13,7 @@ INSERT INTO accounts (
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
-    (
-        SELECT coalesce(max(a.account_number), -1) + 1 FROM accounts AS a
-        WHERE a.scope_id = sqlc.arg('scope_id')
-    ) AS account_number,
+    sqlc.arg('account_number') AS account_number,
     sqlc.arg('account_name') AS account_name,
     sqlc.arg('origin_id') AS origin_id,
     sqlc.arg('public_key') AS public_key,

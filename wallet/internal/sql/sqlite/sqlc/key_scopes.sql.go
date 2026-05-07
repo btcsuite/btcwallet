@@ -76,6 +76,23 @@ func (q *Queries) DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int
 	return result.RowsAffected()
 }
 
+const GetAndIncrementNextAccountNumber = `-- name: GetAndIncrementNextAccountNumber :one
+UPDATE key_scopes
+SET next_account_number = next_account_number + 1
+WHERE id = ?
+RETURNING next_account_number - 1 AS account_number
+`
+
+// Atomically gets the next derived account number for a key scope and
+// increments the persisted counter. Returns the current value before
+// incrementing.
+func (q *Queries) GetAndIncrementNextAccountNumber(ctx context.Context, id int64) (int64, error) {
+	row := q.queryRow(ctx, q.getAndIncrementNextAccountNumberStmt, GetAndIncrementNextAccountNumber, id)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const GetKeyScopeByID = `-- name: GetKeyScopeByID :one
 SELECT
     id,
@@ -89,10 +106,20 @@ FROM key_scopes
 WHERE id = ?
 `
 
+type GetKeyScopeByIDRow struct {
+	ID             int64
+	WalletID       int64
+	Purpose        int64
+	CoinType       int64
+	CoinPubKey     []byte
+	InternalTypeID int64
+	ExternalTypeID int64
+}
+
 // Retrieves a key scope by its ID.
-func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (KeyScope, error) {
+func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error) {
 	row := q.queryRow(ctx, q.getKeyScopeByIDStmt, GetKeyScopeByID, id)
-	var i KeyScope
+	var i GetKeyScopeByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.WalletID,
@@ -124,10 +151,20 @@ type GetKeyScopeByWalletAndScopeParams struct {
 	CoinType int64
 }
 
+type GetKeyScopeByWalletAndScopeRow struct {
+	ID             int64
+	WalletID       int64
+	Purpose        int64
+	CoinType       int64
+	CoinPubKey     []byte
+	InternalTypeID int64
+	ExternalTypeID int64
+}
+
 // Retrieves a key scope by wallet ID, purpose, and coin type.
-func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (KeyScope, error) {
+func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error) {
 	row := q.queryRow(ctx, q.getKeyScopeByWalletAndScopeStmt, GetKeyScopeByWalletAndScope, arg.WalletID, arg.Purpose, arg.CoinType)
-	var i KeyScope
+	var i GetKeyScopeByWalletAndScopeRow
 	err := row.Scan(
 		&i.ID,
 		&i.WalletID,
@@ -191,16 +228,26 @@ WHERE wallet_id = ?
 ORDER BY id
 `
 
+type ListKeyScopesByWalletRow struct {
+	ID             int64
+	WalletID       int64
+	Purpose        int64
+	CoinType       int64
+	CoinPubKey     []byte
+	InternalTypeID int64
+	ExternalTypeID int64
+}
+
 // Lists all key scopes for a wallet, ordered by ID.
-func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]KeyScope, error) {
+func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error) {
 	rows, err := q.query(ctx, q.listKeyScopesByWalletStmt, ListKeyScopesByWallet, walletID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []KeyScope
+	var items []ListKeyScopesByWalletRow
 	for rows.Next() {
-		var i KeyScope
+		var i ListKeyScopesByWalletRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WalletID,
