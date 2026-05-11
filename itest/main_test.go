@@ -44,12 +44,14 @@ var (
 	)
 )
 
+// init configures rpctest to allocate unique listener ports.
 func init() {
 	// Use system-unique ports for rpctest harnesses so multiple local test runs
 	// don't collide.
 	rpctest.ListenAddressGenerator = func() (string, string) {
 		p2p := fmt.Sprintf(rpctest.ListenerFormat, port.NextAvailablePort())
 		rpc := fmt.Sprintf(rpctest.ListenerFormat, port.NextAvailablePort())
+
 		return p2p, rpc
 	}
 }
@@ -81,6 +83,7 @@ func TestBtcWallet(t *testing.T) {
 			t.Logf("failure time: %v", time.Now().Format(
 				"2006-01-02 15:04:05.000",
 			))
+
 			break
 		}
 	}
