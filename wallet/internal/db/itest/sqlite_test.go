@@ -96,24 +96,6 @@ func txIDByHash(t *testing.T, store *sqlite.Store, walletID uint32,
 	return meta.ID, true
 }
 
-// rawTxByHash returns the serialized transaction bytes for the given
-// wallet-scoped transaction hash.
-func rawTxByHash(t *testing.T, store *sqlite.Store, walletID uint32,
-	txHash chainhash.Hash) []byte {
-
-	t.Helper()
-
-	row, err := store.Queries().GetTransactionByHash(
-		t.Context(), sqlc.GetTransactionByHashParams{
-			WalletID: int64(walletID),
-			TxHash:   txHash[:],
-		},
-	)
-	require.NoError(t, err)
-
-	return row.RawTx
-}
-
 // setTxStatus rewrites one wallet-scoped transaction row to the provided
 // status using the internal status-update query.
 func setTxStatus(t *testing.T, store *sqlite.Store, walletID uint32,
