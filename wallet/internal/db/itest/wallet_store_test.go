@@ -38,7 +38,7 @@ func TestCreateWallet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 
-	require.Equal(t, info.ID, uint32(1), "first wallet ID should be 1")
+	require.Equal(t, uint32(1), info.ID, "first wallet ID should be 1")
 	require.Equal(t, params.Name, info.Name)
 	require.Equal(t, params.IsImported, info.IsImported)
 	require.Equal(t, params.ManagerVersion, info.ManagerVersion)
@@ -213,6 +213,7 @@ func TestListWallets(t *testing.T) {
 	for i, w := range pageResult.Items {
 		walletsName[i] = w.Name
 	}
+
 	require.ElementsMatch(t, names, walletsName)
 }
 
@@ -274,6 +275,7 @@ func TestListWalletsPagination(t *testing.T) {
 	for i, wallet := range paged {
 		pagedNames[i] = wallet.Name
 	}
+
 	require.Equal(t, names, pagedNames)
 }
 
@@ -283,6 +285,7 @@ func TestListWalletsExactBoundary(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+
 	names := []string{"wallet-1", "wallet-2", "wallet-3", "wallet-4"}
 	for _, name := range names {
 		_, err := store.CreateWallet(
@@ -342,6 +345,7 @@ func TestIterWallets(t *testing.T) {
 	iterWallets := make([]db.WalletInfo, 0, len(expected))
 	for wallet, err := range store.IterWallets(t.Context(), query) {
 		require.NoError(t, err)
+
 		iterWallets = append(iterWallets, wallet)
 	}
 
@@ -376,6 +380,7 @@ func TestIterWalletsPaginated(t *testing.T) {
 	iterWallets := make([]db.WalletInfo, 0, len(expected))
 	for wallet, err := range store.IterWallets(t.Context(), query) {
 		require.NoError(t, err)
+
 		iterWallets = append(iterWallets, wallet)
 	}
 
@@ -391,11 +396,13 @@ func TestListWalletsPagedFromCursor(t *testing.T) {
 	store := NewTestStore(t)
 
 	names := []string{"wallet-1", "wallet-2", "wallet-3", "wallet-4"}
+
 	created := make([]*db.WalletInfo, 0, len(names))
 	for _, name := range names {
 		params := CreateWalletParamsFixture(name)
 		wallet, err := store.CreateWallet(t.Context(), params)
 		require.NoError(t, err)
+
 		created = append(created, wallet)
 	}
 
@@ -533,6 +540,7 @@ func TestListWalletsDeterministicPagination(t *testing.T) {
 		for j, wallet := range pages[i].Items {
 			_, duplicate := seenIDs[wallet.ID]
 			require.False(t, duplicate)
+
 			seenIDs[wallet.ID] = struct{}{}
 
 			// Skip the first item on the first page; there's no prior cursor
@@ -600,6 +608,7 @@ func TestListWalletsCursorEdges(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+
 	names := []string{"wallet-1", "wallet-2", "wallet-3"}
 	for _, name := range names {
 		_, err := store.CreateWallet(
@@ -635,12 +644,14 @@ func TestListWalletsCursorEdges(t *testing.T) {
 // pages from ListWallets until Next is nil.
 func collectWalletPages(t *testing.T, store db.WalletStore,
 	query db.ListWalletsQuery) []page.Result[db.WalletInfo, uint32] {
+
 	t.Helper()
 
 	pages := make([]page.Result[db.WalletInfo, uint32], 0)
 	for {
 		pageResult, err := store.ListWallets(t.Context(), query)
 		require.NoError(t, err)
+
 		pages = append(pages, pageResult)
 
 		if pageResult.Next == nil {

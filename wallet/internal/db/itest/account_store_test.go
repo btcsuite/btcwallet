@@ -54,8 +54,12 @@ func TestCreateDerivedAccountRejectsWalletScopeMismatch(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	firstWalletID := newWallet(t, store, "wallet-raw-derived-account-mismatch-a")
-	secondWalletID := newWallet(t, store, "wallet-raw-derived-account-mismatch-b")
+	firstWalletID := newWallet(
+		t, store, "wallet-raw-derived-account-mismatch-a",
+	)
+	secondWalletID := newWallet(
+		t, store, "wallet-raw-derived-account-mismatch-b",
+	)
 	createDerivedAccount(
 		t, store, firstWalletID, db.KeyScopeBIP0084, "seed-derived-scope",
 	)
@@ -77,8 +81,12 @@ func TestCreateImportedAccountRejectsWalletScopeMismatch(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	firstWalletID := newWallet(t, store, "wallet-raw-imported-account-mismatch-a")
-	secondWalletID := newWallet(t, store, "wallet-raw-imported-account-mismatch-b")
+	firstWalletID := newWallet(
+		t, store, "wallet-raw-imported-account-mismatch-a",
+	)
+	secondWalletID := newWallet(
+		t, store, "wallet-raw-imported-account-mismatch-b",
+	)
 	CreateImportedAccount(
 		t, store, firstWalletID, db.KeyScopeBIP0084, "seed-imported-scope",
 	)
@@ -219,6 +227,7 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 	walletID := newWallet(t, store, "sequential-wallet")
 
 	scope := db.KeyScopeBIP0084
+
 	const numAccounts = 5
 
 	for i := range numAccounts {
@@ -254,6 +263,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	}
 
 	resultCh := make(chan createResult, workers)
+
 	var wg sync.WaitGroup
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -261,6 +271,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 
 	for i := range workers {
 		wg.Add(1)
+
 		go func(i int) {
 			defer wg.Done()
 
@@ -295,6 +306,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	sort.Slice(results, func(i, j int) bool {
 		return results[i] < results[j]
 	})
+
 	for i := range workers {
 		require.Equal(t, uint32(i), results[i])
 	}
@@ -410,7 +422,6 @@ func TestGetAccount(t *testing.T) {
 
 		t.Run(fmt.Sprintf("by number-%d-%s", accNumber, tc.Name),
 			func(t *testing.T) {
-
 				query := getAccountQueryByNumber(walletID, tc.Scope, accNumber)
 				info, err := store.GetAccount(t.Context(), query)
 				require.NoError(t, err)
@@ -473,6 +484,7 @@ func TestListAccounts(t *testing.T) {
 		accounts, err := store.ListAccounts(t.Context(), query)
 		require.NoError(t, err)
 		require.Len(t, accounts, len(AllAccountCases))
+
 		for _, tc := range AllAccountCases {
 			acc := findAccountInList(t, accounts, tc)
 			requireAccountMatches(t, &acc, tc)
@@ -497,6 +509,7 @@ func TestListAccounts(t *testing.T) {
 		cases := FilterAccountsByScope(scope)
 
 		require.Len(t, accounts, len(cases))
+
 		for _, tc := range cases {
 			acc := findAccountInList(t, accounts, tc)
 			requireAccountMatches(t, &acc, tc)
@@ -594,7 +607,7 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		createdNear time.Time
 	}
 
-	var accounts []createdAccount
+	accounts := make([]createdAccount, 0, 3)
 	for i := range 3 {
 		createdNear := time.Now()
 		params := db.CreateDerivedAccountParams{
@@ -604,6 +617,7 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		}
 		info, err := store.CreateDerivedAccount(t.Context(), params)
 		require.NoError(t, err)
+
 		accounts = append(accounts, createdAccount{
 			info:        *info,
 			createdNear: createdNear,
@@ -618,9 +632,11 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 			5*time.Second, "account %d CreatedAt should track creation", i)
 	}
 
-	require.False(t, accounts[0].info.CreatedAt.After(accounts[1].info.CreatedAt),
+	require.False(
+		t, accounts[0].info.CreatedAt.After(accounts[1].info.CreatedAt),
 		"account 0 should not have CreatedAt after account 1")
-	require.False(t, accounts[1].info.CreatedAt.After(accounts[2].info.CreatedAt),
+	require.False(
+		t, accounts[1].info.CreatedAt.After(accounts[2].info.CreatedAt),
 		"account 1 should not have CreatedAt after account 2")
 }
 
@@ -890,10 +906,10 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 	require.Equal(t, tc.Origin, info.Origin)
 	require.Equal(t, tc.IsWatchOnly, info.IsWatchOnly)
 
-	// Verify CreatedAt is populated and not in the future. The account may have
-	// been created several seconds earlier in the test when parallel database
-	// setup runs under the race detector, so a strict "recent" assertion here is
-	// unnecessarily flaky.
+	// Verify CreatedAt is populated and not in the future. The account may
+	// have been created several seconds earlier in the test when parallel
+	// database setup runs under the race detector, so a strict "recent"
+	// assertion here is unnecessarily flaky.
 	require.False(t, info.CreatedAt.IsZero(), "CreatedAt should be set")
 	require.False(t, info.CreatedAt.After(time.Now().Add(5*time.Second)),
 		"CreatedAt should not be in the future")
@@ -912,9 +928,9 @@ func requireAccountPropertiesMatches(t *testing.T, props *db.AccountProperties,
 	require.Equal(t, tc.Origin, props.Origin)
 	require.Equal(t, tc.IsWatchOnly, props.IsWatchOnly)
 
-	// Verify CreatedAt is populated and not in the future. Imported-account test
-	// fixtures can be created well before these assertions run under heavy CI
-	// contention, so only the forward-time invariant is stable here.
+	// Verify CreatedAt is populated and not in the future. Imported-account
+	// test fixtures can be created well before these assertions run under
+	// heavy CI contention, so only the forward-time invariant is stable here.
 	require.False(t, props.CreatedAt.IsZero(), "CreatedAt should be set")
 	require.False(t, props.CreatedAt.After(time.Now().Add(5*time.Second)),
 		"CreatedAt should not be in the future")
