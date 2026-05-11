@@ -30,6 +30,7 @@ func mockDeriveFunc() db.AddressDerivationFunc {
 		binary.BigEndian.PutUint32(scriptPubKey[0:4], accountID)
 		binary.BigEndian.PutUint32(scriptPubKey[4:8], branch)
 		binary.BigEndian.PutUint32(scriptPubKey[8:12], index)
+
 		return &db.DerivedAddressData{
 			ScriptPubKey: scriptPubKey,
 		}, nil
@@ -39,6 +40,7 @@ func mockDeriveFunc() db.AddressDerivationFunc {
 // newDerivedAddress creates and returns a derived address for testing.
 func newDerivedAddress(t *testing.T, store db.AddressStore, walletID uint32,
 	scope db.KeyScope, accountName string, change bool) *db.AddressInfo {
+
 	t.Helper()
 
 	info, err := store.NewDerivedAddress(
@@ -59,10 +61,11 @@ func newDerivedAddress(t *testing.T, store db.AddressStore, walletID uint32,
 func createDerivedAddresses(t *testing.T, store db.AddressStore,
 	walletID uint32, scope db.KeyScope, accountName string, change bool,
 	count int) []db.AddressInfo {
+
 	t.Helper()
 
 	addresses := make([]db.AddressInfo, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		info := newDerivedAddress(
 			t, store, walletID, scope, accountName, change,
 		)
@@ -75,6 +78,7 @@ func createDerivedAddresses(t *testing.T, store db.AddressStore,
 // getAccountByName retrieves an account by wallet, scope, and name for testing.
 func getAccountByName(t *testing.T, store db.AccountStore, walletID uint32,
 	scope db.KeyScope, accountName string) *db.AccountInfo {
+
 	t.Helper()
 
 	account, err := store.GetAccount(
@@ -89,12 +93,14 @@ func getAccountByName(t *testing.T, store db.AccountStore, walletID uint32,
 // all pages from ListAddresses until Next is nil.
 func collectAddressPages(t *testing.T, store db.AddressStore,
 	query db.ListAddressesQuery) []page.Result[db.AddressInfo, uint32] {
+
 	t.Helper()
 
 	pages := make([]page.Result[db.AddressInfo, uint32], 0)
 	for {
 		pageResult, err := store.ListAddresses(t.Context(), query)
 		require.NoError(t, err)
+
 		pages = append(pages, pageResult)
 
 		if pageResult.Next == nil {
@@ -138,6 +144,7 @@ func TestNewImportedAddress(t *testing.T) {
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
+
 	pubKey := privKey.PubKey()
 
 	p2pkhAddr, err := address.NewAddressPubKeyHash(
@@ -208,7 +215,6 @@ func TestNewImportedAddress(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-
 			params := db.NewImportedAddressParams{
 				WalletID:     walletID,
 				Scope:        tc.scope,
@@ -244,7 +250,7 @@ func TestNewImportedAddress(t *testing.T) {
 				),
 			)
 			require.NoError(t, err)
-			require.Greater(t, account.ImportedKeyCount, uint32(0))
+			require.Positive(t, account.ImportedKeyCount)
 
 			// Verify address_secrets row for imported addresses.
 			addressID := getAddressID(
@@ -307,7 +313,8 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 			expectedAddrType: db.ScriptHash,
 		},
 		{
-			name:             "P2SH with both EncryptedPrivateKey and EncryptedScript",
+			name: "P2SH with both EncryptedPrivateKey and " +
+				"EncryptedScript",
 			scope:            db.KeyScopeBIP0044,
 			addressType:      db.ScriptHash,
 			encryptedScript:  redeemScript,
@@ -325,7 +332,8 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 			expectedAddrType: db.WitnessScript,
 		},
 		{
-			name:             "P2WSH with both EncryptedPrivateKey and EncryptedScript",
+			name: "P2WSH with both EncryptedPrivateKey and " +
+				"EncryptedScript",
 			scope:            db.KeyScopeBIP0049Plus,
 			addressType:      db.WitnessScript,
 			encryptedScript:  witnessScript,
@@ -393,7 +401,7 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 				return
 			}
 
-			require.ErrorAs(t, err, &db.ErrSecretNotFound)
+			require.ErrorIs(t, err, db.ErrSecretNotFound)
 		})
 	}
 }
@@ -409,6 +417,7 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
 	const importedAddrCount = 5
+
 	addressIDs := make([]uint32, 0, importedAddrCount)
 
 	account := getAccountByName(
@@ -416,7 +425,7 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 	)
 	require.Zero(t, account.ImportedKeyCount)
 
-	for i := 0; i < importedAddrCount; i++ {
+	for range importedAddrCount {
 		info, err := store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
 				WalletID:     walletID,
@@ -457,6 +466,7 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
 
 	const workers = 20
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -466,10 +476,12 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	}
 
 	insertResultChan := make(chan insertResult, workers)
+
 	var wg sync.WaitGroup
 
 	for range workers {
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
 
@@ -510,8 +522,10 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	deleteErrChan := make(chan error, workers)
 	for _, addressID := range addressIDs {
 		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
+
 			deleteErrChan <- deleteAddress(ctx, dbConn, addressID)
 		}()
 	}
@@ -828,6 +842,8 @@ func TestGetAddress(t *testing.T) {
 				accountStore db.AccountStore,
 				walletID uint32) db.GetAddressQuery {
 
+				t.Helper()
+
 				CreateImportedAccount(
 					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
 				)
@@ -849,6 +865,8 @@ func TestGetAddress(t *testing.T) {
 				}
 			},
 			validate: func(t *testing.T, addr *db.AddressInfo) {
+				t.Helper()
+
 				require.NotNil(t, addr.ScriptPubKey)
 				require.Equal(t, db.ImportedAccount, addr.Origin)
 			},
@@ -892,11 +910,13 @@ func TestGetAddress(t *testing.T) {
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				require.Nil(t, addr)
+
 				return
 			}
 
 			require.NoError(t, err)
 			require.NotNil(t, addr)
+
 			if tc.validate != nil {
 				tc.validate(t, addr)
 			}
@@ -924,6 +944,8 @@ func TestListAddresses(t *testing.T) {
 				accountStore db.AccountStore,
 				walletID uint32) db.ListAddressesQuery {
 
+				t.Helper()
+
 				createDerivedAccount(
 					t, accountStore, walletID, db.KeyScopeBIP0044,
 					"test-account",
@@ -944,6 +966,8 @@ func TestListAddresses(t *testing.T) {
 			},
 			wantCount: 5,
 			validate: func(t *testing.T, addrs []db.AddressInfo) {
+				t.Helper()
+
 				require.Len(t, addrs, 5)
 				for i, addr := range addrs {
 					require.Equal(t, uint32(i), addr.Index)
@@ -957,6 +981,8 @@ func TestListAddresses(t *testing.T) {
 			setupFunc: func(t *testing.T, _ db.AddressStore,
 				accountStore db.AccountStore,
 				walletID uint32) db.ListAddressesQuery {
+
+				t.Helper()
 
 				createDerivedAccount(
 					t, accountStore, walletID, db.KeyScopeBIP0084,
@@ -977,6 +1003,8 @@ func TestListAddresses(t *testing.T) {
 			setupFunc: func(t *testing.T, addrStore db.AddressStore,
 				accountStore db.AccountStore,
 				walletID uint32) db.ListAddressesQuery {
+
+				t.Helper()
 
 				// Create accounts in different scopes.
 				createDerivedAccount(
@@ -1010,6 +1038,8 @@ func TestListAddresses(t *testing.T) {
 			},
 			wantCount: 3,
 			validate: func(t *testing.T, addrs []db.AddressInfo) {
+				t.Helper()
+
 				require.Len(t, addrs, 3)
 				for _, addr := range addrs {
 					require.Equal(t, db.DerivedAccount, addr.Origin)
@@ -1034,6 +1064,7 @@ func TestListAddresses(t *testing.T) {
 			}
 
 			require.NoError(t, err)
+
 			addrs := pageResult.Items
 			require.Len(t, addrs, tc.wantCount)
 
@@ -1101,7 +1132,6 @@ func TestNewDerivedAddress(t *testing.T) {
 			require.Equal(t, db.DerivedAccount, info.Origin)
 			require.NotZero(t, info.CreatedAt)
 			require.Equal(t, tc.expectedBranch, info.Branch)
-			require.GreaterOrEqual(t, info.Index, uint32(0))
 			require.NotNil(t, info.ScriptPubKey)
 			require.Nil(t, info.PubKey)
 			require.False(t, info.IsWatchOnly)
@@ -1147,6 +1177,7 @@ func TestNewDerivedAddressDerivationGuards(t *testing.T) {
 		deriveFn := func(ctx context.Context, accountID uint32, branch uint32,
 			index uint32) (*db.DerivedAddressData, error) {
 
+			//nolint:nilnil // Intentionally exercise nil-data success guard.
 			return nil, nil
 		}
 
@@ -1227,7 +1258,8 @@ func TestNewImportedAddressWalletAccountMismatch(t *testing.T) {
 // on a derived address returns db.ErrSecretNotFound (not ErrAddressNotFound).
 // This validates the LEFT JOIN: derived addresses exist in the addresses
 // table but have no corresponding row in address_secrets. The query returns a
-// row with NULL encrypted_priv_key, and the converter returns ErrSecretNotFound.
+// row with NULL encrypted_priv_key, and the converter returns
+// ErrSecretNotFound.
 func TestGetAddressSecret_DerivedAddress(t *testing.T) {
 	t.Parallel()
 
@@ -1241,7 +1273,9 @@ func TestGetAddressSecret_DerivedAddress(t *testing.T) {
 		Scope:       db.KeyScopeBIP0084,
 		Change:      false,
 	}
-	addrInfo, err := store.NewDerivedAddress(t.Context(), params, mockDeriveFunc())
+	addrInfo, err := store.NewDerivedAddress(
+		t.Context(), params, mockDeriveFunc(),
+	)
 	require.NoError(t, err)
 
 	// Attempt to get secret for derived address.
@@ -1272,7 +1306,7 @@ func TestNewDerivedAddressSequentialIndexes(t *testing.T) {
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
 
 	// Create 5 addresses in external branch and verify sequential indexes.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		info := newDerivedAddress(
 			t, store, walletID, db.KeyScopeBIP0084, accountName, false,
 		)
@@ -1311,12 +1345,15 @@ func TestListAddressesOrdering(t *testing.T) {
 	)
 
 	require.NoError(t, err)
+
 	addresses := pageResult.Items
 	require.Len(t, addresses, 6)
 
 	// Separate addresses by branch for verification.
-	var externalAddrs []db.AddressInfo
-	var changeAddrs []db.AddressInfo
+	var (
+		externalAddrs []db.AddressInfo
+		changeAddrs   []db.AddressInfo
+	)
 
 	for _, addr := range addresses {
 		if addr.Branch == 0 {
@@ -1328,16 +1365,16 @@ func TestListAddressesOrdering(t *testing.T) {
 
 	// Verify external addresses sorted by index.
 	for i := 1; i < len(externalAddrs); i++ {
-		require.True(
-			t, externalAddrs[i-1].Index <= externalAddrs[i].Index,
+		require.LessOrEqual(
+			t, externalAddrs[i-1].Index, externalAddrs[i].Index,
 			"external addresses not in order",
 		)
 	}
 
 	// Verify change addresses sorted by index.
 	for i := 1; i < len(changeAddrs); i++ {
-		require.True(
-			t, changeAddrs[i-1].Index <= changeAddrs[i].Index,
+		require.LessOrEqual(
+			t, changeAddrs[i-1].Index, changeAddrs[i].Index,
 			"change addresses not in order",
 		)
 	}
@@ -1397,6 +1434,7 @@ func TestListAddressesPagination(t *testing.T) {
 	paged = append(paged, page2.Items...)
 	paged = append(paged, page3.Items...)
 	require.Equal(t, accountA, paged)
+
 	for i, addr := range paged {
 		require.Equal(t, uint32(i), addr.Index)
 		require.Equal(t, uint32(0), addr.Branch)
@@ -1504,6 +1542,7 @@ func TestListAddressesDeterministicPagination(t *testing.T) {
 		for j, addr := range pages[i].Items {
 			_, duplicate := seenIDs[addr.ID]
 			require.False(t, duplicate)
+
 			seenIDs[addr.ID] = struct{}{}
 
 			// Skip the first item on the first page; there's no prior cursor
@@ -1565,6 +1604,7 @@ func TestListAddressesAccountIsolation(t *testing.T) {
 	require.Len(t, addresses, len(expected))
 	require.Equal(t, expected, addresses)
 	accountAID := expected[0].AccountID
+
 	accountBID := otherAccount[0].AccountID
 	for _, addr := range addresses {
 		require.Equal(t, accountAID, addr.AccountID)
@@ -1677,6 +1717,7 @@ func TestIterAddresses(t *testing.T) {
 	iterAddrs := make([]db.AddressInfo, 0, len(expected))
 	for addr, err := range store.IterAddresses(t.Context(), query) {
 		require.NoError(t, err)
+
 		iterAddrs = append(iterAddrs, addr)
 	}
 
@@ -1717,6 +1758,7 @@ func TestIterAddressesPaginated(t *testing.T) {
 	iterAddrs := make([]db.AddressInfo, 0, len(expected))
 	for addr, err := range store.IterAddresses(t.Context(), query) {
 		require.NoError(t, err)
+
 		iterAddrs = append(iterAddrs, addr)
 	}
 
@@ -1856,15 +1898,18 @@ func TestNewDerivedAddressConcurrent(t *testing.T) {
 	}
 
 	resultCh := make(chan deriveResult, workers)
+
 	var wg sync.WaitGroup
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
 	deriveFn := mockDeriveFunc()
 
-	for i := range workers {
+	for range workers {
 		wg.Add(1)
-		go func(i int) {
+
+		go func() {
 			defer wg.Done()
 
 			info, err := store.NewDerivedAddress(
@@ -1881,7 +1926,7 @@ func TestNewDerivedAddressConcurrent(t *testing.T) {
 			}
 
 			resultCh <- deriveResult{info: *info}
-		}(i)
+		}()
 	}
 
 	wg.Wait()
@@ -1925,10 +1970,10 @@ func TestNewDerivedAddressBranchIsolation(t *testing.T) {
 
 	// Create addresses alternating between branches:
 	// external-0, change-0, external-1, change-1, external-2, change-2.
-	var externalAddrs []db.AddressInfo
-	var changeAddrs []db.AddressInfo
+	externalAddrs := make([]db.AddressInfo, 0, 3)
+	changeAddrs := make([]db.AddressInfo, 0, 3)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		// Create external address (branch 0).
 		extInfo := newDerivedAddress(
 			t, store, walletID, db.KeyScopeBIP0084, accountName, false,
