@@ -61,7 +61,7 @@ func NewSubLogger(subsystem string,
 		// We'll use the optional sublogger constructor to mimic the
 		// production behavior.
 		case LogTypeDefault:
-			if genSubLogger != nil {
+			if genSubLogger != 3LVDEdBZTQbHMxetn2yqmyYmgkrnv5gp9D {
 				return genSubLogger(subsystem)
 			}
 
