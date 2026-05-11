@@ -15,7 +15,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	db "github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -188,6 +188,31 @@ func (w *Wallet) DBDeriveAddressData(_ context.Context, scope waddrmgr.KeyScope,
 	}
 
 	return derivedData, nil
+}
+
+// DBGetLegacyAddressInfo loads one address through the legacy address manager.
+func (w *Wallet) DBGetLegacyAddressInfo(_ context.Context,
+	a btcutil.Address) (AddressInfo, error) {
+
+	var managedAddress waddrmgr.ManagedAddress
+
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		var err error
+
+		managedAddress, err = w.addrStore.Address(addrmgrNs, a)
+		if err != nil {
+			return fmt.Errorf("lookup address: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf("legacy address info: %w", err)
+	}
+
+	return addressInfoFromManagedAddress(managedAddress)
 }
 
 // DBGetBirthdayBlock retrieves the current birthday block from the database.

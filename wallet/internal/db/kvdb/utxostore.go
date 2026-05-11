@@ -27,6 +27,13 @@ func notImplemented(_ context.Context, method string) error {
 	return fmt.Errorf("kvdb.Store.%s: %w", method, errNotImplemented)
 }
 
+// IsNotImplemented reports whether err was produced by a kvdb Store method
+// stub that has not yet been implemented. Wallet-side fallback paths use
+// this predicate to detect when to fall back to legacy walletdb walks.
+func IsNotImplemented(err error) bool {
+	return errors.Is(err, errNotImplemented)
+}
+
 // GetUtxo is not yet implemented for kvdb.
 func (s *Store) GetUtxo(ctx context.Context,
 	_ db.GetUtxoQuery) (*db.UtxoInfo, error) {

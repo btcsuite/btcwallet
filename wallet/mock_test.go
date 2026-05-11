@@ -222,6 +222,10 @@ func (m *mockStore) NewImportedAddress(ctx context.Context,
 func (m *mockStore) GetAddress(ctx context.Context,
 	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
+	if !m.hasExpectation("GetAddress") {
+		return nil, db.ErrAddressNotFound
+	}
+
 	args := m.Called(ctx, query)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -453,6 +457,19 @@ func (m *mockStore) RollbackToBlock(ctx context.Context, height uint32) error {
 	args := m.Called(ctx, height)
 
 	return args.Error(0)
+}
+
+// hasExpectation reports whether the mock has at least one configured
+// expectation for the named method. Used by stub implementations to fall
+// through to a domain default when the test did not set up the method.
+func (m *mockStore) hasExpectation(method string) bool {
+	for _, c := range m.ExpectedCalls {
+		if c.Method == method {
+			return true
+		}
+	}
+
+	return false
 }
 
 // mockTxStore is a mock implementation of the wtxmgr.TxStore interface.
