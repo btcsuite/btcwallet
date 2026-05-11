@@ -4,7 +4,6 @@ package itest
 
 import (
 	"database/sql"
-	"fmt"
 	"testing"
 	"time"
 
@@ -19,9 +18,10 @@ import (
 // surface the backend query errors exercised by the corruption tests.
 func dropTableForCorruption(t *testing.T, store interface{ DB() *sql.DB },
 	table string) {
+
 	t.Helper()
 
-	stmt := fmt.Sprintf("DROP TABLE %s", table)
+	stmt := "DROP TABLE " + table
 	if _, ok := any(store).(*pg.Store); ok {
 		stmt += " CASCADE"
 	}
@@ -265,7 +265,8 @@ func TestListTxnsRejectsCorruptedUnminedHash(t *testing.T) {
 }
 
 // TestGetTxRejectsCorruptedConfirmedBlockHeight verifies that confirmed reads
-// fail when the joined block height cannot map back into the public block model.
+// fail when the joined block height cannot map back into the public block
+// model.
 func TestGetTxRejectsCorruptedConfirmedBlockHeight(t *testing.T) {
 	t.Parallel()
 
@@ -346,7 +347,9 @@ func TestDeleteTxRejectsCorruptedLiveChild(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	corruptTransactionHash(t, store, walletID, childTx.TxHash(), []byte{1, 2, 3})
+	corruptTransactionHash(
+		t, store, walletID, childTx.TxHash(), []byte{1, 2, 3},
+	)
 
 	err = store.DeleteTx(
 		t.Context(),
@@ -359,7 +362,8 @@ func TestDeleteTxRejectsCorruptedLiveChild(t *testing.T) {
 }
 
 // TestRollbackToBlockRejectsCorruptedCoinbaseRootHash verifies that rollback
-// fails loudly when a disconnected coinbase root carries an invalid stored hash.
+// fails loudly when a disconnected coinbase root carries an invalid stored
+// hash.
 func TestRollbackToBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 	t.Parallel()
 
@@ -387,7 +391,9 @@ func TestRollbackToBlockRejectsCorruptedCoinbaseRootHash(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	corruptTransactionHash(t, store, walletID, coinbaseTx.TxHash(), []byte{1, 2, 3})
+	corruptTransactionHash(
+		t, store, walletID, coinbaseTx.TxHash(), []byte{1, 2, 3},
+	)
 
 	err = store.RollbackToBlock(t.Context(), coinbaseBlock.Height)
 	require.ErrorContains(t, err, "rollback coinbase hash")
@@ -407,7 +413,13 @@ func TestCreateTxReturnsQueryErrorWhenTransactionsTableMissing(t *testing.T) {
 		t.Context(),
 		db.CreateTxParams{
 			WalletID: walletID,
-			Tx:       newRegularTx([]wire.OutPoint{randomOutPoint()}, []*wire.TxOut{{Value: 5500, PkScript: []byte{0x51}}}),
+			Tx: newRegularTx(
+				[]wire.OutPoint{randomOutPoint()},
+				[]*wire.TxOut{{
+					Value:    5500,
+					PkScript: []byte{0x51},
+				}},
+			),
 			Received: time.Unix(1710001433, 0),
 			Status:   db.TxStatusPending,
 		},
@@ -478,7 +490,8 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 }
 
 // TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing verifies that the
-// backend rollback queries surface database errors when the block table is gone.
+// backend rollback queries surface database errors when the block table is
+// gone.
 func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	t.Parallel()
 
@@ -490,8 +503,9 @@ func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 
 	// SQLite still fails while rewinding wallet sync-state heights because
 	// wallet_sync_states keeps direct block references with ON DELETE RESTRICT.
-	// PostgreSQL drops those dependent rows with CASCADE when the blocks table is
-	// removed, so rollback gets far enough to fail on the block delete instead.
+	// PostgreSQL drops those dependent rows with CASCADE when the blocks table
+	// is removed, so rollback gets far enough to fail on the block delete
+	// instead.
 	_, ok := any(store).(*pg.Store)
 	if ok {
 		require.ErrorContains(t, err, "delete blocks at or above height")
