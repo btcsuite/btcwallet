@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"runtime"
@@ -40,7 +41,7 @@ var (
 
 	// Error returned by the container creation operation. We need to store
 	// it to return when the error already occurred during test setup.
-	pgContainerErr error
+	errPGContainer error
 
 	// Timeout for waiting for the postgres container to start. Needs to
 	// consider container image download time.
@@ -77,15 +78,19 @@ func TestMain(m *testing.M) {
 		ctx, cancel := context.WithTimeout(
 			context.Background(), pgTerminateTimeout,
 		)
-		defer cancel()
-
 		// As the tests already completed, we can stop the container
 		// immediately.
 		err := pgContainer.Terminate(
 			ctx, testcontainers.StopTimeout(0),
 		)
+
+		cancel()
+
 		if err != nil {
-			fmt.Printf("failed to terminate postgres container: %v\n", err)
+			_, _ = fmt.Fprintf(
+				os.Stderr, "failed to terminate postgres container: %v\n",
+				err,
+			)
 		}
 	}
 
@@ -121,6 +126,7 @@ func DefaultPostgresConfig() PostgresConfig {
 // The container is created once and reused across all tests for performance.
 func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 	error) {
+
 	pgContainerOnce.Do(func() {
 		cfg := DefaultPostgresConfig()
 
@@ -129,10 +135,11 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 		// trip instead of only waiting for the port to open.
 		waitForSQL := wait.ForSQL(
 			"5432/tcp", "pgx", func(host string, port nat.Port) string {
+				hostPort := net.JoinHostPort(host, port.Port())
+
 				return fmt.Sprintf(
-					"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-					cfg.Username, cfg.Password, host, port.Port(),
-					cfg.Database,
+					"postgres://%s:%s@%s/%s?sslmode=disable",
+					cfg.Username, cfg.Password, hostPort, cfg.Database,
 				)
 			},
 		).WithStartupTimeout(pgInitTimeout)
@@ -147,7 +154,7 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 		// connection source separately.
 		pgMaxConns := 2 * p * m
 
-		pgContainer, pgContainerErr = postgres.Run(ctx,
+		pgContainer, errPGContainer = postgres.Run(ctx,
 			cfg.Image,
 			postgres.WithDatabase(cfg.Database),
 			postgres.WithUsername(cfg.Username),
@@ -161,12 +168,14 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 		)
 	})
 
-	return pgContainer, pgContainerErr
+	return pgContainer, errPGContainer
 }
 
 // sanitizedPgDBName converts a test name to a valid PostgreSQL database name.
 // It converts to lowercase and replaces special characters with underscores.
 func sanitizedPgDBName(t *testing.T) string {
+	t.Helper()
+
 	// Convert to lowercase.
 	dbName := strings.ToLower(t.Name())
 
@@ -212,7 +221,7 @@ func NewTestStore(t *testing.T) *pg.Store {
 	dbName := sanitizedPgDBName(t)
 
 	// Create the test database.
-	createDBStmt := fmt.Sprintf("CREATE DATABASE %s", dbName)
+	createDBStmt := "CREATE DATABASE " + dbName
 	_, err = adminDB.ExecContext(ctx, createDBStmt)
 	require.NoError(t, err, "failed to create test database")
 
@@ -293,24 +302,6 @@ func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
 	}
 
 	return meta.ID, true
-}
-
-// rawTxByHash returns the serialized transaction bytes for the given
-// wallet-scoped transaction hash.
-func rawTxByHash(t *testing.T, store *pg.Store, walletID uint32,
-	txHash chainhash.Hash) []byte {
-
-	t.Helper()
-
-	row, err := store.Queries().GetTransactionByHash(
-		t.Context(), sqlc.GetTransactionByHashParams{
-			WalletID: int64(walletID),
-			TxHash:   txHash[:],
-		},
-	)
-	require.NoError(t, err)
-
-	return row.RawTx
 }
 
 // setTxStatus rewrites one wallet-scoped transaction row to the provided

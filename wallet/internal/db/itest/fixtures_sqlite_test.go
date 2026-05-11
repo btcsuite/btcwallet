@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var errUnexpectedDeletedRows = errors.New("unexpected deleted row count")
+
 // testBackend returns the SQL backend expected by SQLite itests.
 func testBackend() dberr.Backend {
 	return dberr.BackendSQLite
@@ -32,12 +34,13 @@ func requireConstraintSQLError(t *testing.T, err error) {
 	require.Equal(t, testBackend(), sqlErr.Backend)
 	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
 	require.Equal(t, dberr.ClassPermanent, sqlErr.Class())
-	require.True(t, errors.Is(err, sqlErr))
+	require.ErrorIs(t, err, sqlErr)
 }
 
 // CreateBlockFixture inserts a test block into the database and returns it.
 func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
 	height uint32) db.Block {
+
 	t.Helper()
 
 	block := NewBlockFixture(height)
@@ -57,15 +60,19 @@ func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
 // Used to test account number overflow without creating billions of accounts.
 func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 	scopeID int64, accountNumber uint32, name string) {
+
 	t.Helper()
 
 	_, err := queries.CreateDerivedAccountWithNumber(
 		t.Context(), sqlc.CreateDerivedAccountWithNumberParams{
-			ScopeID:       scopeID,
-			AccountNumber: sql.NullInt64{Int64: int64(accountNumber), Valid: true},
-			AccountName:   name,
-			OriginID:      int64(db.DerivedAccount),
-			IsWatchOnly:   false,
+			ScopeID: scopeID,
+			AccountNumber: sql.NullInt64{
+				Int64: int64(accountNumber),
+				Valid: true,
+			},
+			AccountName: name,
+			OriginID:    int64(db.DerivedAccount),
+			IsWatchOnly: false,
 		},
 	)
 	require.NoError(t, err)
@@ -127,6 +134,7 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 // addresses.
 func CreateAddressWithIndex(t *testing.T, queries *sqlc.Queries,
 	walletID uint32, accountID int64, branch uint32, index uint32) {
+
 	t.Helper()
 
 	_, err := queries.CreateDerivedAddress(
@@ -146,6 +154,7 @@ func CreateAddressWithIndex(t *testing.T, queries *sqlc.Queries,
 // UpdateAccountNextExternalIndex updates the account's external index counter.
 func UpdateAccountNextExternalIndex(t *testing.T, dbConn *sql.DB,
 	accountID int64, nextIndex uint32) {
+
 	t.Helper()
 
 	_, err := dbConn.ExecContext(
@@ -173,6 +182,7 @@ func UpdateAccountNextInternalIndex(t *testing.T, dbConn *sql.DB,
 // GetKeyScopeID retrieves the scope ID for a given wallet and key scope.
 func GetKeyScopeID(t *testing.T, queries *sqlc.Queries,
 	walletID uint32, scope db.KeyScope) int64 {
+
 	t.Helper()
 
 	row, err := queries.GetKeyScopeByWalletAndScope(
@@ -190,6 +200,7 @@ func GetKeyScopeID(t *testing.T, queries *sqlc.Queries,
 // GetAccountID retrieves the account ID for a given scope and account name.
 func GetAccountID(t *testing.T, queries *sqlc.Queries,
 	scopeID int64, accountName string) int64 {
+
 	t.Helper()
 
 	row, err := queries.GetAccountByScopeAndName(
@@ -204,8 +215,10 @@ func GetAccountID(t *testing.T, queries *sqlc.Queries,
 	return row.ID
 }
 
+// getAddressID retrieves an address ID by script and wallet.
 func getAddressID(t *testing.T, queries *sqlc.Queries,
 	scriptPubKey []byte, walletID uint32) int64 {
+
 	t.Helper()
 
 	addr, err := queries.GetAddressByScriptPubKey(
@@ -244,20 +257,21 @@ func deleteAddress(ctx context.Context, dbConn *sql.DB,
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 deleted row, got %d", rows)
+		return fmt.Errorf("%w: got %d", errUnexpectedDeletedRows, rows)
 	}
 
 	return nil
 }
 
+// setupMaxAccountNumberTest seeds state near the account-number limit.
 func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 	walletID uint32) {
 
 	t.Helper()
 
-	require.IsType(t, &sqlite.Store{}, store)
+	sqliteStore, ok := store.(*sqlite.Store)
+	require.True(t, ok)
 
-	sqliteStore := store.(*sqlite.Store)
 	queries := sqliteStore.Queries()
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,
@@ -287,6 +301,9 @@ func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
 func createDerivedAddressRaw(t *testing.T, queries *sqlc.Queries,
 	walletID uint32, accountID int64, branch uint32, index uint32,
 	scriptPubKey []byte) error {
+
+	t.Helper()
+
 	_, err := queries.CreateDerivedAddress(
 		t.Context(), sqlc.CreateDerivedAddressParams{
 			WalletID:     int64(walletID),
