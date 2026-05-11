@@ -104,7 +104,9 @@ func TestCreateTxRejectsDuplicateConfirmedTransaction(t *testing.T) {
 // TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow verifies that
 // re-confirming an existing unmined row still requires the confirming block to
 // exist in block history.
-func TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow(t *testing.T) {
+func TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow(
+	t *testing.T) {
+
 	t.Parallel()
 
 	store := NewTestStore(t)

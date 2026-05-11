@@ -166,7 +166,9 @@ func TestListLeasedOutputsRejectsCorruptedLockID(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	corruptActiveLeaseLockID(t, store, walletID, tx.TxHash(), 0, []byte{1, 2, 3})
+	corruptActiveLeaseLockID(
+		t, store, walletID, tx.TxHash(), 0, []byte{1, 2, 3},
+	)
 
 	_, err = store.ListLeasedOutputs(t.Context(), walletID)
 	require.ErrorContains(t, err, "lock id")
@@ -262,6 +264,7 @@ func TestGetUtxoAndLeaseRejectLargeOutputIndex(t *testing.T) {
 		require.ErrorContains(t, err, "convert output index")
 		require.ErrorContains(t, leaseErr, "convert output index")
 		require.ErrorContains(t, releaseErr, "could not cast")
+
 		return
 	}
 
