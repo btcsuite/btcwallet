@@ -21,14 +21,19 @@ import (
 // this to verify that reads reject impossible tx states.
 func corruptTransactionStatus(t *testing.T, store *pg.Store,
 	walletID uint32, txHash chainhash.Hash, status int64) {
+
 	t.Helper()
 
 	for _, stmt := range []string{
 		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS valid_status",
-		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS check_orphaned_coinbase_only",
-		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS check_confirmed_published",
-		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS check_coinbase_not_pending",
-		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS check_coinbase_confirmation_state",
+		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS " +
+			"check_orphaned_coinbase_only",
+		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS " +
+			"check_confirmed_published",
+		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS " +
+			"check_coinbase_not_pending",
+		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS " +
+			"check_coinbase_confirmation_state",
 	} {
 		_, err := store.DB().ExecContext(t.Context(), stmt)
 		require.NoError(t, err)
@@ -36,7 +41,8 @@ func corruptTransactionStatus(t *testing.T, store *pg.Store,
 
 	result, err := store.DB().ExecContext(
 		t.Context(),
-		"UPDATE transactions SET tx_status = $1 WHERE wallet_id = $2 AND tx_hash = $3",
+		"UPDATE transactions SET tx_status = $1 "+
+			"WHERE wallet_id = $2 AND tx_hash = $3",
 		status, int64(walletID), txHash[:],
 	)
 	require.NoError(t, err)
@@ -51,17 +57,20 @@ func corruptTransactionStatus(t *testing.T, store *pg.Store,
 // decoding fails with the expected error path.
 func corruptTransactionHash(t *testing.T, store *pg.Store,
 	walletID uint32, txHash chainhash.Hash, hash []byte) {
+
 	t.Helper()
 
 	_, err := store.DB().ExecContext(
 		t.Context(),
-		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_tx_hash_check",
+		"ALTER TABLE transactions DROP CONSTRAINT IF EXISTS "+
+			"transactions_tx_hash_check",
 	)
 	require.NoError(t, err)
 
 	result, err := store.DB().ExecContext(
 		t.Context(),
-		"UPDATE transactions SET tx_hash = $1 WHERE wallet_id = $2 AND tx_hash = $3",
+		"UPDATE transactions SET tx_hash = $1 "+
+			"WHERE wallet_id = $2 AND tx_hash = $3",
 		hash, int64(walletID), txHash[:],
 	)
 	require.NoError(t, err)
@@ -77,19 +86,23 @@ func corruptTransactionHash(t *testing.T, store *pg.Store,
 // confirmation metadata.
 func corruptTransactionBlockHeight(t *testing.T, store *pg.Store,
 	walletID uint32, txHash chainhash.Hash, height int64) {
+
 	t.Helper()
 
 	_, err := store.DB().ExecContext(
 		t.Context(),
-		"ALTER TABLE blocks DROP CONSTRAINT IF EXISTS blocks_block_height_check",
+		"ALTER TABLE blocks DROP CONSTRAINT IF EXISTS "+
+			"blocks_block_height_check",
 	)
 	require.NoError(t, err)
 
 	blockHash := RandomHash()
 	_, err = store.DB().ExecContext(
 		t.Context(),
-		"INSERT INTO blocks (block_height, header_hash, block_timestamp) VALUES ($1, $2, $3) "+
-			"ON CONFLICT (block_height) DO UPDATE SET header_hash = EXCLUDED.header_hash, "+
+		"INSERT INTO blocks (block_height, header_hash, block_timestamp) "+
+			"VALUES ($1, $2, $3) "+
+			"ON CONFLICT (block_height) DO UPDATE SET "+
+			"header_hash = EXCLUDED.header_hash, "+
 			"block_timestamp = EXCLUDED.block_timestamp",
 		height, blockHash[:], time.Now().Unix(),
 	)
@@ -97,7 +110,8 @@ func corruptTransactionBlockHeight(t *testing.T, store *pg.Store,
 
 	result, err := store.DB().ExecContext(
 		t.Context(),
-		"UPDATE transactions SET block_height = $1 WHERE wallet_id = $2 AND tx_hash = $3",
+		"UPDATE transactions SET block_height = $1 "+
+			"WHERE wallet_id = $2 AND tx_hash = $3",
 		height, int64(walletID), txHash[:],
 	)
 	require.NoError(t, err)
@@ -112,6 +126,7 @@ func corruptTransactionBlockHeight(t *testing.T, store *pg.Store,
 // decoding rejects the malformed persisted value.
 func corruptUtxoOutputIndex(t *testing.T, store *pg.Store,
 	walletID uint32, txHash chainhash.Hash, oldIndex uint32, newIndex int64) {
+
 	t.Helper()
 
 	_, err := store.DB().ExecContext(
@@ -123,7 +138,8 @@ func corruptUtxoOutputIndex(t *testing.T, store *pg.Store,
 	result, err := store.DB().ExecContext(
 		t.Context(),
 		"UPDATE utxos SET output_index = $1 WHERE output_index = $2 "+
-			"AND tx_id = (SELECT id FROM transactions WHERE wallet_id = $3 AND tx_hash = $4)",
+			"AND tx_id = (SELECT id FROM transactions "+
+			"WHERE wallet_id = $3 AND tx_hash = $4)",
 		newIndex, int64(oldIndex), int64(walletID), txHash[:],
 	)
 	require.NoError(t, err)
@@ -138,19 +154,23 @@ func corruptUtxoOutputIndex(t *testing.T, store *pg.Store,
 // lease reads reject malformed lock identifiers.
 func corruptActiveLeaseLockID(t *testing.T, store *pg.Store,
 	walletID uint32, txHash chainhash.Hash, outputIndex uint32, lockID []byte) {
+
 	t.Helper()
 
 	_, err := store.DB().ExecContext(
 		t.Context(),
-		"ALTER TABLE utxo_leases DROP CONSTRAINT IF EXISTS utxo_leases_lock_id_check",
+		"ALTER TABLE utxo_leases DROP CONSTRAINT IF EXISTS "+
+			"utxo_leases_lock_id_check",
 	)
 	require.NoError(t, err)
 
 	result, err := store.DB().ExecContext(
 		t.Context(),
-		"UPDATE utxo_leases SET lock_id = $1 WHERE wallet_id = $2 AND utxo_id = ("+
+		"UPDATE utxo_leases SET lock_id = $1 "+
+			"WHERE wallet_id = $2 AND utxo_id = ("+
 			"SELECT u.id FROM utxos u JOIN transactions t ON t.id = u.tx_id "+
-			"WHERE t.wallet_id = $3 AND t.tx_hash = $4 AND u.output_index = $5)",
+			"WHERE t.wallet_id = $3 AND t.tx_hash = $4 "+
+			"AND u.output_index = $5)",
 		lockID, int64(walletID), int64(walletID), txHash[:], int64(outputIndex),
 	)
 	require.NoError(t, err)
