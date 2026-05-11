@@ -26,10 +26,29 @@ XARGS := xargs -L 1
 include make/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
-# of workers if requested.
-ifneq ($(workers),)
+# of workers. Override with `workers=<n>` when needed.
+workers ?= 4
 LINT_WORKERS = --concurrency=$(workers)
-endif
+
+GOLANGCI_LINT = golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
+LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest
+LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest
+
+define lint_targets
+	@$(call print, "Linting source.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX)
+	@$(call print, "Linting integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) nolog" ./itest
+	@$(call print, "Linting SQLite DB integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) $(LOG_TAGS)" \
+		$(LINT_DB_SQLITE_PKGS)
+	@$(call print, "Linting PostgreSQL DB integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) $(LOG_TAGS) test_db_postgres" \
+		$(LINT_DB_POSTGRES_PKGS)
+endef
 
 # Detect if we're in a git worktree. Use git rev-parse --git-common-dir to get
 # the path to the main git directory for the linter's diff processor to work
@@ -181,13 +200,12 @@ lint-config-check: docker-tools
 
 #? lint: Lint source and check errors
 lint-check: lint-config-check
-	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
+	$(call lint_targets)
 
 #? lint: Lint source and fix
+lint: LINT_FIX = --fix
 lint: lint-config-check
-	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --fix --config .golangci.yml $(LINT_WORKERS)
+	$(call lint_targets)
 
 #? docker-tools: Build tools docker image
 docker-tools:
