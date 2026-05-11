@@ -1087,7 +1087,9 @@ func TestListTxnsUsesConfirmationOrder(t *testing.T) {
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-list-txns-confirm-order")
 	queries := store.Queries()
+
 	const blockHeight = 222
+
 	block := CreateBlockFixture(t, queries, blockHeight)
 
 	laterBlockTx := newRegularTx(
@@ -1225,7 +1227,8 @@ func TestGetTxDetailFindsOwnedInputAfterSpendEdgeCleared(t *testing.T) {
 	require.NoError(t, err)
 
 	// Assert: The current UTXO set is restored, but historical child details
-	// still report the wallet-owned debit from the serialized child transaction.
+	// still report the wallet-owned debit from the serialized child
+	// transaction.
 	require.Equal(t, btcutil.Amount(5000), parentUtxo.Amount)
 	require.Equal(t, db.TxStatusFailed, detail.Status)
 	require.Len(t, detail.OwnedInputs, 1)
@@ -1535,7 +1538,9 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 	require.Equal(t, db.TxStatusFailed, grandchildInfo.Status)
 	require.Nil(t, grandchildInfo.Block)
 
-	require.Empty(t, childSpendingTxIDs(t, store, walletID, coinbaseTx.TxHash()))
+	require.Empty(
+		t, childSpendingTxIDs(t, store, walletID, coinbaseTx.TxHash()),
+	)
 	require.Empty(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()))
 }
 

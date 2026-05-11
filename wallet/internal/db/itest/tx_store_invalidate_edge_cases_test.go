@@ -12,8 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInvalidateUnminedTxFailsBranch verifies that invalidating one unmined root
-// fails the whole dependent branch and restores the wallet-owned parent output.
+// TestInvalidateUnminedTxFailsBranch verifies that invalidating one unmined
+// root fails the whole dependent branch and restores the wallet-owned parent
+// output.
 func TestInvalidateUnminedTxFailsBranch(t *testing.T) {
 	t.Parallel()
 
