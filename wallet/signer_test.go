@@ -1046,21 +1046,26 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	require.ErrorContains(t, err, "privkey error")
 }
 
-// TestResolvePrivKeyFallsBackAfterCacheMiss tests that derived private key
+// TestGetPrivKeyForAddressFallsBackAfterCacheMiss tests that signer private-key
 // resolution falls back to DB-backed derivation when the account cache is cold.
-func TestResolvePrivKeyFallsBackAfterCacheMiss(t *testing.T) {
+func TestGetPrivKeyForAddressFallsBackAfterCacheMiss(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a started wallet and configure the signer key lookup path
-	// to miss the account cache before falling back to DB-backed derivation.
-	w, mocks := createStartedWalletWithMocks(t)
-	privKey, _ := deterministicPrivKey(t)
+	w, mocks := createUnlockedWalletWithMocks(t)
+	privKey, pubKey := deterministicPrivKey(t)
 	path := waddrmgr.DerivationPath{
 		InternalAccount: 0,
 		Account:         0,
 		Branch:          0,
 		Index:           1,
 	}
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	mocks.addrStore.On("Address", mock.Anything, addr).
+		Return(mocks.pubKeyAddr, nil).Once()
 
 	mocks.pubKeyAddr.On("Imported").Return(false).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
@@ -1080,11 +1085,8 @@ func TestResolvePrivKeyFallsBackAfterCacheMiss(t *testing.T) {
 		Return(mocks.pubKeyAddr, nil).Once()
 	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil).Once()
 
-	// Act: Resolve the private key for the managed pubkey address.
-	resolvedPrivKey, err := w.resolvePrivKey(mocks.pubKeyAddr)
+	resolvedPrivKey, err := w.GetPrivKeyForAddress(t.Context(), addr)
 	require.NoError(t, err)
-
-	// Assert: The fallback path returns the same private key bytes.
 	require.Equal(t, privKey.Serialize(), resolvedPrivKey.Serialize())
 }
 
@@ -1232,6 +1234,7 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 	mocks.addrStore.On("Address", mock.Anything, addr).
 		Return(mocks.pubKeyAddr, nil).Once()
 	mocks.pubKeyAddr.On("Address").Return(addr).Once()
+	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.AddressType(99)).Once()
 	mocks.pubKeyAddr.On("Imported").Return(false).Once()
 	mocks.pubKeyAddr.On("Internal").Return(false).Once()
 	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
@@ -1239,10 +1242,6 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
 	).Once()
-
-	// Mock the address type to return an unknown type (e.g. 99) so the address
-	// descriptor lookup fails before signing begins.
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.AddressType(99))
 
 	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, 10000)
 

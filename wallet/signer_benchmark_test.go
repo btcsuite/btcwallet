@@ -977,10 +977,9 @@ func BenchmarkGetPrivKeyForAddress(b *testing.B) {
 			linearGrowth,
 		)
 
-		// addressGrowth uses linearGrowth to test how address lookup
-		// performance scales. GetPrivKeyForAddress searches through
-		// the address manager to find the matching address, so
-		// performance scales with total address count.
+		// addressGrowth uses linearGrowth to test how the store-backed
+		// signer address lookup scales as the legacy address-manager
+		// compatibility path grows.
 		addressGrowth = mapRange(
 			startGrowthIteration, maxGrowthIteration,
 			linearGrowth,
