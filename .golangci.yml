@@ -169,6 +169,19 @@ linters:
         linters:
           - staticcheck
 
+      # E2E integration tests run a long-lived backend harness and execute test
+      # cases in registration order so the suite can stop on first failure.
+      - path: itest/.*_test\.go
+        linters:
+          - paralleltest
+
+      # DB integration tests often share a backend fixture across subtests, and
+      # forcing parallel subtests makes those ordering assumptions unsafe.
+      - path: wallet/internal/db/itest/.*_test\.go
+        linters:
+          - paralleltest
+          - tparallel
+
 issues:
   # Show only new issues created after git revision `REV`.
   # Default: ""
