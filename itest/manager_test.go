@@ -42,7 +42,9 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	h.Cleanup(func() {
 		// We use a background context here because h.Context() might be
 		// cancelled already.
-		require.NoError(h, w.Stop(context.Background()), "failed to stop wallet")
+		require.NoError(
+			h, w.Stop(context.Background()), "failed to stop wallet",
+		)
 	})
 
 	// Register the wallet so harness helpers can assert global invariants.
