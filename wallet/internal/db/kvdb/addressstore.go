@@ -55,16 +55,47 @@ func (s *Store) GetAddressSecret(ctx context.Context,
 	return nil, notImplemented(ctx, "GetAddressSecret")
 }
 
-// ListAddressTypes is not yet implemented for kvdb.
-func (s *Store) ListAddressTypes(ctx context.Context) (
-	[]db.AddressTypeInfo, error) {
+// ListAddressTypes returns the static set of address types supported by the
+// store contract.
+func (s *Store) ListAddressTypes(ctx context.Context) ([]db.AddressTypeInfo,
+	error) {
 
-	return nil, notImplemented(ctx, "ListAddressTypes")
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	infos := make([]db.AddressTypeInfo, len(addressTypes))
+	copy(infos, addressTypes)
+
+	return infos, nil
 }
 
-// GetAddressType is not yet implemented for kvdb.
+// GetAddressType returns the static address type metadata for the given type.
 func (s *Store) GetAddressType(ctx context.Context,
-	_ db.AddressType) (db.AddressTypeInfo, error) {
+	id db.AddressType) (db.AddressTypeInfo, error) {
 
-	return db.AddressTypeInfo{}, notImplemented(ctx, "GetAddressType")
+	err := ctx.Err()
+	if err != nil {
+		return db.AddressTypeInfo{}, err
+	}
+
+	for _, info := range addressTypes {
+		if info.Type == id {
+			return info, nil
+		}
+	}
+
+	return db.AddressTypeInfo{}, db.ErrAddressTypeNotFound
+}
+
+var addressTypes = []db.AddressTypeInfo{
+	{Type: db.RawPubKey, Description: "P2PK"},
+	{Type: db.PubKeyHash, Description: "P2PKH"},
+	{Type: db.ScriptHash, Description: "P2SH"},
+	{Type: db.NestedWitnessPubKey, Description: "P2SH-P2WPKH"},
+	{Type: db.WitnessPubKey, Description: "P2WPKH"},
+	{Type: db.WitnessScript, Description: "P2WSH"},
+	{Type: db.TaprootPubKey, Description: "P2TR"},
+	{Type: db.Anchor, Description: "P2A"},
 }
