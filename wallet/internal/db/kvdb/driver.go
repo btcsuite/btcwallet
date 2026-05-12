@@ -12,19 +12,23 @@ import (
 // NOTE: This is a partial implementation that will be expanded as the wallet
 // UTXO manager migrates to the new db interfaces.
 type Store struct {
-	db      walletdb.DB
-	txStore wtxmgr.TxStore
+	db        walletdb.DB
+	txStore   wtxmgr.TxStore
+	addrStore any
 }
 
 // A compile-time assertion to ensure that Store implements the db.Store
 // interface.
 var _ db.Store = (*Store)(nil)
 
-// NewStore creates a new kvdb-backed UTXO store.
-func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore) *Store {
+// NewStore creates a new kvdb-backed wallet store adapter.
+func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore,
+	addrStore any) *Store {
+
 	return &Store{
-		db:      dbConn,
-		txStore: txStore,
+		db:        dbConn,
+		txStore:   txStore,
+		addrStore: addrStore,
 	}
 }
 

@@ -301,7 +301,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		cfg:         cfg,
 		id:          walletID,
 		addrStore:   addrMgr,
-		store:       kvdb.NewStore(cfg.DB, txMgr),
+		store:       kvdb.NewStore(cfg.DB, txMgr, addrMgr),
 		txStore:     txMgr,
 		requestChan: make(chan any),
 		lifetimeCtx: lifetimeCtx,
