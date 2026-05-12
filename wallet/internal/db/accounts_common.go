@@ -43,6 +43,36 @@ func (params *CreateImportedAccountParams) Validate() error {
 	return nil
 }
 
+// Validate checks that exactly one account selector was set.
+func (query GetAccountQuery) Validate() error {
+	if query.Name == nil && query.AccountNumber == nil {
+		return ErrInvalidAccountQuery
+	}
+
+	if query.Name != nil && query.AccountNumber != nil {
+		return ErrInvalidAccountQuery
+	}
+
+	return nil
+}
+
+// Validate checks that the rename parameters identify exactly one account.
+func (params RenameAccountParams) Validate() error {
+	if params.NewName == "" {
+		return ErrMissingAccountName
+	}
+
+	if params.OldName == "" && params.AccountNumber == nil {
+		return ErrInvalidAccountQuery
+	}
+
+	if params.OldName != "" && params.AccountNumber != nil {
+		return ErrInvalidAccountQuery
+	}
+
+	return nil
+}
+
 // IsWatchOnly returns true if the account is watch-only.
 func (params *CreateImportedAccountParams) IsWatchOnly() bool {
 	return len(params.EncryptedPrivateKey) == 0
@@ -382,16 +412,16 @@ func GetAccountByQuery(ctx context.Context, query GetAccountQuery,
 	getByNumber GetAccountFunc, getByName GetAccountFunc) (*AccountInfo,
 	error) {
 
-	switch {
-	case query.AccountNumber != nil && query.Name == nil:
-		return getByNumber(ctx, query)
-
-	case query.Name != nil && query.AccountNumber == nil:
-		return getByName(ctx, query)
-
-	default:
-		return nil, ErrInvalidAccountQuery
+	err := query.Validate()
+	if err != nil {
+		return nil, err
 	}
+
+	if query.AccountNumber != nil {
+		return getByNumber(ctx, query)
+	}
+
+	return getByName(ctx, query)
 }
 
 // ListAccountsFunc defines a function signature for listing accounts.
@@ -428,20 +458,16 @@ type RenameAccountFunc func(context.Context, RenameAccountParams) error
 func RenameAccountByQuery(ctx context.Context, params RenameAccountParams,
 	renameByNumber RenameAccountFunc, renameByName RenameAccountFunc) error {
 
-	if params.NewName == "" {
-		return ErrMissingAccountName
+	err := params.Validate()
+	if err != nil {
+		return err
 	}
 
-	switch {
-	case params.AccountNumber != nil && params.OldName == "":
+	if params.AccountNumber != nil {
 		return renameByNumber(ctx, params)
-
-	case params.OldName != "" && params.AccountNumber == nil:
-		return renameByName(ctx, params)
-
-	default:
-		return ErrInvalidAccountQuery
 	}
+
+	return renameByName(ctx, params)
 }
 
 // GetAccount is a generic helper that retrieves an account using the provided
