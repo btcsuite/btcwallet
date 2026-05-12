@@ -21,7 +21,7 @@ func TestReleaseOutputSuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	lockID := wtxmgr.LockID{1}
 	op := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
@@ -102,7 +102,7 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 	dbConn, cleanup := newTestDB(t)
 	t.Cleanup(cleanup)
 
-	store := NewStore(dbConn, nil)
+	store := NewStore(dbConn, nil, nil)
 
 	err := store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
 		WalletID: 0,
