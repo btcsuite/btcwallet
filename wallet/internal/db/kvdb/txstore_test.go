@@ -22,7 +22,7 @@ func TestUpdateTxLabelOnlySuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -71,7 +71,7 @@ func TestUpdateTxLabelOnlyNotFound(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	label := "missing"
 	err := store.UpdateTx(t.Context(), db.UpdateTxParams{
@@ -91,7 +91,7 @@ func TestUpdateTxRejectsUnsupportedPatches(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	state := &db.UpdateTxState{Status: db.TxStatusPublished}
 	err := store.UpdateTx(t.Context(), db.UpdateTxParams{
@@ -111,7 +111,7 @@ func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -147,7 +147,7 @@ func TestUpdateTxLongLabelPreservesLegacyError(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -184,7 +184,7 @@ func TestGetTxSummarySuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -223,7 +223,7 @@ func TestGetTxDetailSuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	funding, spend := insertSpendChain(t, dbConn, txStore)
 
@@ -254,7 +254,7 @@ func TestGetTxSummaryNotFound(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	_, err := store.GetTx(t.Context(), db.GetTxQuery{
 		WalletID: 0,
@@ -272,7 +272,7 @@ func TestListTxnsSummaryUnminedOnlySuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	txMsg := &wire.MsgTx{Version: 1}
 	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
@@ -310,7 +310,7 @@ func TestListTxnsSummaryConfirmedRangeSuccess(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	rec := insertConfirmedTx(t, dbConn, txStore, 144)
 
@@ -338,7 +338,7 @@ func TestListTxnsSummaryBoundedRange(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	insideLow := insertConfirmedTxWithSeed(t, dbConn, txStore, 144, 1)
 	insideHigh := insertConfirmedTxWithSeed(t, dbConn, txStore, 145, 2)
@@ -370,7 +370,7 @@ func TestListTxDetailsCopiesMsgTx(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	txStore := newTxStore(t, dbConn)
-	store := NewStore(dbConn, txStore)
+	store := NewStore(dbConn, txStore, nil)
 
 	firstTx := &wire.MsgTx{Version: 1}
 	firstTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
