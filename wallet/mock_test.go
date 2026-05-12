@@ -9,6 +9,7 @@ package wallet
 
 import (
 	"context"
+	"iter"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -22,6 +23,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -104,6 +106,111 @@ func (m *mockStore) RenameAccount(ctx context.Context,
 	args := m.Called(ctx, params)
 
 	return args.Error(0)
+}
+
+// NewDerivedAddress implements the db.AddressStore interface.
+func (m *mockStore) NewDerivedAddress(ctx context.Context,
+	params db.NewDerivedAddressParams,
+	deriveFn db.AddressDerivationFunc) (*db.AddressInfo, error) {
+
+	args := m.Called(ctx, params, deriveFn)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AddressInfo), args.Error(1)
+}
+
+// NewImportedAddress implements the db.AddressStore interface.
+func (m *mockStore) NewImportedAddress(ctx context.Context,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AddressInfo), args.Error(1)
+}
+
+// GetAddress implements the db.AddressStore interface.
+func (m *mockStore) GetAddress(ctx context.Context,
+	query db.GetAddressQuery) (*db.AddressInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AddressInfo), args.Error(1)
+}
+
+// ListAddresses implements the db.AddressStore interface.
+func (m *mockStore) ListAddresses(ctx context.Context,
+	query db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
+
+	args := m.Called(ctx, query)
+
+	result, ok := args.Get(0).(page.Result[db.AddressInfo, uint32])
+	if !ok {
+		return page.Result[db.AddressInfo, uint32]{}, args.Error(1)
+	}
+
+	return result, args.Error(1)
+}
+
+// IterAddresses implements the db.AddressStore interface.
+func (m *mockStore) IterAddresses(ctx context.Context,
+	query db.ListAddressesQuery) iter.Seq2[db.AddressInfo, error] {
+
+	args := m.Called(ctx, query)
+
+	seq, ok := args.Get(0).(iter.Seq2[db.AddressInfo, error])
+	if ok {
+		return seq
+	}
+
+	return func(yield func(db.AddressInfo, error) bool) {
+		yield(db.AddressInfo{}, args.Error(1))
+	}
+}
+
+// GetAddressSecret implements the db.AddressStore interface.
+func (m *mockStore) GetAddressSecret(ctx context.Context,
+	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AddressSecret), args.Error(1)
+}
+
+// ListAddressTypes implements the db.AddressStore interface.
+func (m *mockStore) ListAddressTypes(ctx context.Context) (
+	[]db.AddressTypeInfo, error) {
+
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.AddressTypeInfo), args.Error(1)
+}
+
+// GetAddressType implements the db.AddressStore interface.
+func (m *mockStore) GetAddressType(ctx context.Context,
+	id db.AddressType) (db.AddressTypeInfo, error) {
+
+	args := m.Called(ctx, id)
+
+	result, ok := args.Get(0).(db.AddressTypeInfo)
+	if !ok {
+		return db.AddressTypeInfo{}, args.Error(1)
+	}
+
+	return result, args.Error(1)
 }
 
 // GetUtxo implements the db.UTXOStore interface.
