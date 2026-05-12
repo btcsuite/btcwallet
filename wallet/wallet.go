@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -338,6 +339,9 @@ type Wallet struct {
 	// txStore is the transaction manager responsible for storing and
 	// querying the wallet's transaction history and unspent outputs.
 	txStore wtxmgr.TxStore
+
+	// keyVault provides encryption and decryption for wallet key material.
+	keyVault keyvault.Vault
 
 	// store provides access to database operations used by wallet managers.
 	//
