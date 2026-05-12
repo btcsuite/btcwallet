@@ -38,13 +38,14 @@ func (s *Store) ListAddresses(ctx context.Context,
 	)
 }
 
-// IterAddresses is not yet implemented for kvdb.
+// IterAddresses returns an iterator over paginated legacy address-manager
+// results.
 func (s *Store) IterAddresses(ctx context.Context,
-	_ db.ListAddressesQuery) iter.Seq2[db.AddressInfo, error] {
+	query db.ListAddressesQuery) iter.Seq2[db.AddressInfo, error] {
 
-	return func(yield func(db.AddressInfo, error) bool) {
-		yield(db.AddressInfo{}, notImplemented(ctx, "IterAddresses"))
-	}
+	return page.Iter(
+		ctx, query, s.ListAddresses, db.NextListAddressesQuery,
+	)
 }
 
 // GetAddressSecret is not yet implemented for kvdb.
