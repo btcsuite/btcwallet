@@ -397,6 +397,37 @@ func derivedAddressGetWalletWatchOnly(
 	return row.WalletIsWatchOnly
 }
 
+// derivedAddressGetAccountAddrSchema returns the scope-default
+// address schema for the account derived from the returned row.
+// The SQL backend does not model a per-account override, so the
+// schema is fully determined by (purpose, coin_type).
+func derivedAddressGetAccountAddrSchema(
+	row sqlc.GetAccountByWalletScopeAndNameRow) (db.ScopeAddrSchema,
+	error) {
+
+	purpose, err := db.Int64ToUint32(row.Purpose)
+	if err != nil {
+		return db.ScopeAddrSchema{}, fmt.Errorf("purpose: %w", err)
+	}
+
+	coin, err := db.Int64ToUint32(row.CoinType)
+	if err != nil {
+		return db.ScopeAddrSchema{}, fmt.Errorf("coin: %w", err)
+	}
+
+	scope := db.KeyScope{Purpose: purpose, Coin: coin}
+	schema, ok := db.ScopeAddrMap[scope]
+
+	if !ok {
+		return db.ScopeAddrSchema{}, fmt.Errorf(
+			"%w: scope %d/%d",
+			db.ErrUnknownKeyScope, purpose, coin,
+		)
+	}
+
+	return schema, nil
+}
+
 // importedAddressGetAccountID extracts the account ID from a row.
 func importedAddressGetAccountID(
 	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {

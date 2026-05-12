@@ -45,19 +45,25 @@ func TestDerivedAddressInputNilDerivedData(t *testing.T) {
 		return derivedData, nil
 	}
 
-	addrType, branch, index, scriptPubKey, err := derivedAddressInput(
-		t.Context(), params, 1,
-		func(context.Context, int64) (int64, error) {
-			return 7, nil
-		},
-		func(context.Context, int64) (int64, error) {
-			return 11, nil
-		}, deriveFn,
-	)
+	addrType, branch, index, scriptPubKey, pubKey, err :=
+		derivedAddressInput(
+			t.Context(), params, 1,
+			ScopeAddrSchema{
+				ExternalAddrType: PubKeyHash,
+				InternalAddrType: PubKeyHash,
+			},
+			func(context.Context, int64) (int64, error) {
+				return 7, nil
+			},
+			func(context.Context, int64) (int64, error) {
+				return 11, nil
+			}, deriveFn,
+		)
 
 	require.Zero(t, addrType)
 	require.Zero(t, branch)
 	require.Zero(t, index)
 	require.Nil(t, scriptPubKey)
+	require.Nil(t, pubKey)
 	require.ErrorIs(t, err, errNilDerivedAddressData)
 }

@@ -242,6 +242,10 @@ type AddressDerivationFunc func(ctx context.Context, accountID uint32,
 type DerivedAddressData struct {
 	// ScriptPubKey is the script public key for the derived address.
 	ScriptPubKey []byte
+
+	// PubKey is the serialized public key for the derived address when one is
+	// available. Script-only addresses leave this empty.
+	PubKey []byte
 }
 
 // AccountDerivationFunc is invoked by the database layer after allocating a
@@ -282,6 +286,9 @@ type AddressStore interface {
 	// atomically, then calls deriveFn to derive the actual address data.
 	// Returns the complete address metadata including the derived
 	// script_pub_key.
+	//
+	// NOTE: Transitional kvdb implementations preserve legacy waddrmgr
+	// derivation semantics and may use deriveFn only for validation.
 	NewDerivedAddress(ctx context.Context, params NewDerivedAddressParams,
 		deriveFn AddressDerivationFunc) (*AddressInfo, error)
 

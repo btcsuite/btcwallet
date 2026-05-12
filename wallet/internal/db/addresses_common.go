@@ -137,6 +137,16 @@ func (p NewImportedAddressParams) HasSecretMaterial() bool {
 	return len(p.EncryptedPrivateKey) > 0 || len(p.EncryptedScript) > 0
 }
 
+// HasScript returns true if the params include script spend data.
+func (p NewImportedAddressParams) HasScript() bool {
+	return len(p.EncryptedScript) > 0
+}
+
+// IsWatchOnly returns true if the params do not include private key material.
+func (p NewImportedAddressParams) IsWatchOnly() bool {
+	return !p.HasPrivateKey()
+}
+
 // IDToOrigin safely converts an integer to AccountOrigin. It returns an error
 // if the value is outside [DerivedAccount, ImportedAccount].
 func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
@@ -290,6 +300,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		Origin:       ImportedAccount,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
+		HasScript:    params.HasScript(),
 		IsWatchOnly: importedAddressIsWatchOnly(
 			walletIsWatchOnly, params.HasPrivateKey(),
 		),
@@ -389,6 +400,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		Index:        addrIndex,
 		ScriptPubKey: row.ScriptPubKey,
 		PubKey:       row.PubKey,
+		HasScript:    row.HasScript,
 		IsWatchOnly:  isWatchOnly,
 	}, nil
 }
@@ -440,6 +452,18 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	// row.
 	GetWalletWatchOnly func(AccountRow) bool
 
+	// GetAccountAddrSchema extracts the effective address schema for the
+	// account from the looked-up row. For SQL backends the coalesce in
+	// the account-read queries already materializes the per-account
+	// override (or the scope default when no override is set), so the
+	// returned schema can be used directly by derivedAddressInput
+	// without consulting the scope default again. Backends that route
+	// through this adapter (pg, sqlite) must populate this so derived
+	// addresses for accounts with a per-account override (e.g. a
+	// BIP-0044 key imported as NestedWitnessPubKey) honor the override
+	// rather than silently using the scope-level default.
+	GetAccountAddrSchema func(AccountRow) (ScopeAddrSchema, error)
+
 	// GetExtIndex returns a function to get the external index.
 	GetExtIndex func(QTX) func(context.Context, int64) (int64, error)
 
@@ -448,7 +472,7 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 
 	// CreateAddr returns a function to create an address row.
 	CreateAddr func(QTX) func(context.Context, int64, int64, AddressType,
-		uint32, uint32, []byte) (AddrRow, error)
+		uint32, uint32, []byte, []byte) (AddrRow, error)
 
 	// RowID extracts the ID from an address row.
 	RowID func(AddrRow) int64
@@ -512,20 +536,23 @@ func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
 
 // createDerivedAddress is a generic helper that encapsulates the shared
 // derived address creation logic. It calls derivedAddressInput to prepare
-// inputs and then createFn to create the address.
+// inputs and then createFn to create the address. addrSchema is the
+// account's effective schema (per-account override when set, otherwise
+// the scope default).
 func createDerivedAddress[T any](ctx context.Context,
 	params NewDerivedAddressParams, walletID int64, accountID int64,
-	walletIsWatchOnly bool,
+	walletIsWatchOnly bool, addrSchema ScopeAddrSchema,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
 	createFn func(context.Context, int64, int64, AddressType, uint32, uint32,
-		[]byte) (T, error),
+		[]byte, []byte) (T, error),
 	rowID func(T) int64, rowCreatedAt func(T) time.Time,
 	deriveFn AddressDerivationFunc) (*AddressInfo, error) {
 
-	addrType, branch, index, scriptPubKey, err :=
+	addrType, branch, index, scriptPubKey, pubKey, err :=
 		derivedAddressInput(
-			ctx, params, accountID, getExtIndex, getIntIndex, deriveFn,
+			ctx, params, accountID, addrSchema, getExtIndex,
+			getIntIndex, deriveFn,
 		)
 	if err != nil {
 		return nil, err
@@ -533,6 +560,7 @@ func createDerivedAddress[T any](ctx context.Context,
 
 	row, err := createFn(
 		ctx, walletID, accountID, addrType, branch, index, scriptPubKey,
+		pubKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create address: %w", err)
@@ -554,24 +582,24 @@ func createDerivedAddress[T any](ctx context.Context,
 		Branch:       branch,
 		Index:        index,
 		ScriptPubKey: scriptPubKey,
+		PubKey:       pubKey,
 		IsWatchOnly:  walletIsWatchOnly,
 	}, nil
 }
 
 // derivedAddressInput encapsulates the logic to prepare inputs for address
-// derivation, including schema lookup, branch/type selection, index
-// allocation with overflow check, accountID conversion, and derivation.
+// derivation, including branch/type selection from the supplied effective
+// schema, index allocation with overflow check, accountID conversion, and
+// derivation. addrSchema is the account's effective schema and must already
+// account for any per-account override; this function does not consult the
+// scope default itself.
 func derivedAddressInput(ctx context.Context,
 	params NewDerivedAddressParams, accountID int64,
+	addrSchema ScopeAddrSchema,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
 	deriveFn AddressDerivationFunc) (AddressType, uint32, uint32,
-	[]byte, error) {
-
-	addrSchema, err := getAddrSchemaForScope(params.Scope)
-	if err != nil {
-		return 0, 0, 0, nil, err
-	}
+	[]byte, []byte, error) {
 
 	var (
 		branch   uint32
@@ -590,34 +618,36 @@ func derivedAddressInput(ctx context.Context,
 
 	indexValue, err := getIdx(ctx, accountID)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf("get next address index: %w", err)
+		return 0, 0, 0, nil, nil,
+			fmt.Errorf("get next address index: %w", err)
 	}
 
 	if indexValue > math.MaxUint32 {
-		return 0, 0, 0, nil, ErrMaxAddressIndexReached
+		return 0, 0, 0, nil, nil, ErrMaxAddressIndexReached
 	}
 
 	index, err := Int64ToUint32(indexValue)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf("address index: %w", err)
+		return 0, 0, 0, nil, nil, fmt.Errorf("address index: %w", err)
 	}
 
 	acctID, err := Int64ToUint32(accountID)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf("account ID: %w", err)
+		return 0, 0, 0, nil, nil, fmt.Errorf("account ID: %w", err)
 	}
 
 	derivedData, err := deriveFn(ctx, acctID, branch, index)
 	if err != nil {
-		return 0, 0, 0, nil, fmt.Errorf("derive address: %w", err)
+		return 0, 0, 0, nil, nil, fmt.Errorf("derive address: %w", err)
 	}
 
 	if derivedData == nil {
-		return 0, 0, 0, nil, fmt.Errorf("derive address: %w",
+		return 0, 0, 0, nil, nil, fmt.Errorf("derive address: %w",
 			errNilDerivedAddressData)
 	}
 
-	return addrType, branch, index, derivedData.ScriptPubKey, nil
+	return addrType, branch, index, derivedData.ScriptPubKey,
+		derivedData.PubKey, nil
 }
 
 // NewDerivedAddressWithTx combines transaction execution, account lookup,
@@ -641,9 +671,15 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 		if err == nil {
 			accountID := adapters.GetAccountID(row)
 
+			addrSchema, errSchema := adapters.GetAccountAddrSchema(row)
+			if errSchema != nil {
+				return fmt.Errorf("account addr schema: %w",
+					errSchema)
+			}
+
 			info, errAddr := createDerivedAddress(
 				ctx, params, int64(params.WalletID), accountID,
-				adapters.GetWalletWatchOnly(row),
+				adapters.GetWalletWatchOnly(row), addrSchema,
 				adapters.GetExtIndex(qtx),
 				adapters.GetIntIndex(qtx),
 				adapters.CreateAddr(qtx),
