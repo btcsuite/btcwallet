@@ -92,6 +92,13 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	var info *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		walletIsWatchOnly, err := getWalletWatchOnly(
+			ctx, qtx, params.WalletID,
+		)
+		if err != nil {
+			return err
+		}
+
 		scopeID, err := ensureKeyScope(
 			ctx, qtx, params.WalletID, params.Scope,
 		)
@@ -104,7 +111,6 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 				ScopeID:     scopeID,
 				AccountName: params.Name,
 				OriginID:    int64(db.DerivedAccount),
-				IsWatchOnly: false,
 			},
 		)
 		if err != nil {
@@ -125,8 +131,8 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		}
 
 		info = db.BuildAccountInfo(
-			accNumber, params.Name, db.DerivedAccount, 0, 0, 0, false,
-			row.CreatedAt, params.Scope,
+			accNumber, params.Name, db.DerivedAccount, 0, 0, 0,
+			walletIsWatchOnly, row.CreatedAt, params.Scope,
 		)
 
 		return nil
@@ -231,11 +237,9 @@ func getWalletWatchOnly(ctx context.Context, qtx *sqlc.Queries,
 // CreateImportedAccountParams for SQLite.
 func buildCreateImportedAccountArgs(
 	params db.CreateImportedAccountParams,
-) func(int64, bool) sqlc.CreateImportedAccountParams {
+) func(int64) sqlc.CreateImportedAccountParams {
 
-	return func(scopeID int64,
-		isWatchOnly bool) sqlc.CreateImportedAccountParams {
-
+	return func(scopeID int64) sqlc.CreateImportedAccountParams {
 		return sqlc.CreateImportedAccountParams{
 			ScopeID:            scopeID,
 			AccountName:        params.Name,
@@ -245,7 +249,6 @@ func buildCreateImportedAccountArgs(
 				Int64: int64(params.MasterFingerprint),
 				Valid: true,
 			},
-			IsWatchOnly: isWatchOnly,
 		}
 	}
 }
@@ -258,8 +261,10 @@ func buildCreateAccountSecretArgs(
 
 	return func(accountID int64) sqlc.CreateAccountSecretParams {
 		return sqlc.CreateAccountSecretParams{
-			AccountID:           accountID,
-			EncryptedPrivateKey: params.EncryptedPrivateKey,
+			AccountID: accountID,
+			EncryptedPrivateKey: db.NilIfEmptyBytes(
+				params.EncryptedPrivateKey,
+			),
 		}
 	}
 }
