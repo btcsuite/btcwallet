@@ -9,8 +9,7 @@ INSERT INTO accounts (
     account_name,
     origin_id,
     encrypted_public_key,
-    master_fingerprint,
-    is_watch_only
+    master_fingerprint
 )
 SELECT
     ks.wallet_id,
@@ -22,8 +21,7 @@ SELECT
     sqlc.arg('account_name') AS account_name,
     sqlc.arg('origin_id') AS origin_id,
     sqlc.arg('encrypted_public_key') AS encrypted_public_key,
-    sqlc.arg('master_fingerprint') AS master_fingerprint,
-    sqlc.arg('is_watch_only') AS is_watch_only
+    sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, account_number, created_at;
@@ -39,8 +37,7 @@ INSERT INTO accounts (
     account_name,
     origin_id,
     encrypted_public_key,
-    master_fingerprint,
-    is_watch_only
+    master_fingerprint
 )
 SELECT
     ks.wallet_id,
@@ -49,8 +46,7 @@ SELECT
     sqlc.arg('account_name') AS account_name,
     sqlc.arg('origin_id') AS origin_id,
     sqlc.arg('encrypted_public_key') AS encrypted_public_key,
-    sqlc.arg('master_fingerprint') AS master_fingerprint,
-    sqlc.arg('is_watch_only') AS is_watch_only
+    sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, created_at;
@@ -71,15 +67,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = ? AND a.account_name = ?;
 
 -- name: GetAccountByScopeAndNumber :one
@@ -89,15 +92,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = ? AND a.account_number = ?;
 
 -- name: GetAccountByWalletScopeAndName :one
@@ -107,15 +117,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
@@ -129,15 +146,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
@@ -152,7 +176,6 @@ SELECT
     a.origin_id,
     a.encrypted_public_key,
     a.master_fingerprint,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -160,9 +183,16 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.id = ?;
 
 -- name: ListAccountsByScope :many
@@ -173,15 +203,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = ?
 ORDER BY a.account_number IS NULL, a.account_number;
 
@@ -193,15 +230,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = ?
     AND ks.purpose = ?
@@ -216,15 +260,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = ? AND a.account_name = ?
 ORDER BY a.account_number IS NULL, a.account_number;
 
@@ -236,15 +287,22 @@ SELECT
     a.account_number,
     a.account_name,
     a.origin_id,
-    a.is_watch_only,
     a.created_at,
     ks.purpose,
     ks.coin_type,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count
+    a.imported_key_count,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        w.is_watch_only
+        OR (a.origin_id = 1 AND acs.account_id IS NULL)
+        AS BOOLEAN
+    ) AS is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = ?
 ORDER BY a.account_number IS NULL, a.account_number;
 
@@ -286,16 +344,14 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id,
-    is_watch_only
+    origin_id
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     sqlc.arg('account_number') AS account_number,
     sqlc.arg('account_name') AS account_name,
-    sqlc.arg('origin_id') AS origin_id,
-    sqlc.arg('is_watch_only') AS is_watch_only
+    sqlc.arg('origin_id') AS origin_id
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, account_number, created_at;

@@ -26,15 +26,15 @@ func TestCreateImportedAccountParamsValidate(t *testing.T) {
 	err := (&CreateImportedAccountParams{
 		Name:               "imported",
 		EncryptedPublicKey: []byte{1},
-	}).Validate()
+	}).ValidateBasic()
 	require.NoError(t, err)
 
 	err = (&CreateImportedAccountParams{
 		EncryptedPublicKey: []byte{1},
-	}).Validate()
+	}).ValidateBasic()
 	require.ErrorIs(t, err, ErrMissingAccountName)
 
-	err = (&CreateImportedAccountParams{Name: "imported"}).Validate()
+	err = (&CreateImportedAccountParams{Name: "imported"}).ValidateBasic()
 	require.ErrorIs(t, err, ErrMissingAccountPublicKey)
 }
 
