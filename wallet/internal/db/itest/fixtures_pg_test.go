@@ -72,7 +72,6 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 			},
 			AccountName: name,
 			OriginID:    int16(db.DerivedAccount),
-			IsWatchOnly: false,
 		},
 	)
 	require.NoError(t, err)
@@ -91,13 +90,12 @@ func createDerivedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 			scope_id,
 			account_number,
 			account_name,
-			origin_id,
-			is_watch_only
-		) VALUES ($1, $2, $3, $4, $5, $6)`
+			origin_id
+		) VALUES ($1, $2, $3, $4, $5)`
 
 	_, err := dbConn.ExecContext(
 		t.Context(), stmt, int64(walletID), scopeID, int64(accountNumber),
-		name, int16(db.DerivedAccount), false,
+		name, int16(db.DerivedAccount),
 	)
 
 	return err
@@ -117,13 +115,12 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 			account_number,
 			account_name,
 			origin_id,
-			encrypted_public_key,
-			is_watch_only
-		) VALUES ($1, $2, NULL, $3, $4, $5, $6)`
+			encrypted_public_key
+		) VALUES ($1, $2, NULL, $3, $4, $5)`
 
 	_, err := dbConn.ExecContext(
 		t.Context(), stmt, int64(walletID), scopeID, name,
-		int16(db.ImportedAccount), RandomBytes(32), true,
+		int16(db.ImportedAccount), RandomBytes(32),
 	)
 
 	return err
