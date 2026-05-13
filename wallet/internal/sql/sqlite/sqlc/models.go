@@ -16,7 +16,6 @@ type Account struct {
 	AccountNumber      sql.NullInt64
 	AccountName        string
 	OriginID           int64
-	IsWatchOnly        bool
 	MasterFingerprint  sql.NullInt64
 	EncryptedPublicKey []byte
 	CreatedAt          time.Time
