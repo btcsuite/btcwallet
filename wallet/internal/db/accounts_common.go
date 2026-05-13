@@ -43,6 +43,20 @@ func (params *CreateImportedAccountParams) Validate() error {
 	return nil
 }
 
+// ValidateWatchOnly validates watch-only invariants for creating an imported
+// account.
+func (params *CreateImportedAccountParams) ValidateWatchOnly(
+	walletIsWatchOnly bool) error {
+
+	hasPrivateKey := len(params.EncryptedPrivateKey) > 0
+	if walletIsWatchOnly && hasPrivateKey {
+		return fmt.Errorf("wallet %d cannot create account %q: %w",
+			params.WalletID, params.Name, ErrWatchOnlyViolation)
+	}
+
+	return nil
+}
+
 // Validate checks that exactly one account selector was set.
 func (query GetAccountQuery) Validate() error {
 	if query.Name == nil && query.AccountNumber == nil {
@@ -529,6 +543,7 @@ func RenameAccount[Args any](ctx context.Context,
 func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	ctx context.Context, params CreateImportedAccountParams,
 	ensureScope func() (int64, error),
+	walletWatchOnly func() (bool, error),
 	createAccount func(context.Context, CreateArgs) (CreateRow, error),
 	buildCreateArgs func(scopeID int64, isWatchOnly bool) CreateArgs,
 	rowToID func(CreateRow) int64,
@@ -542,7 +557,18 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 		return nil, err
 	}
 
-	isWatchOnly := params.IsWatchOnly()
+	walletIsWatchOnly, err := walletWatchOnly()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	hasAccountSecret := len(params.EncryptedPrivateKey) > 0
+	isWatchOnly := walletIsWatchOnly || !hasAccountSecret
 
 	scopeID, err := ensureScope()
 	if err != nil {
@@ -558,7 +584,7 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 
 	accountID := rowToID(row)
 
-	if isWatchOnly {
+	if !hasAccountSecret {
 		return getProps(accountID)
 	}
 

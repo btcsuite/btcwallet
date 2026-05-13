@@ -21,6 +21,11 @@ var (
 	// in the database.
 	ErrSecretNotFound = errors.New("secret not found")
 
+	// ErrWatchOnlyViolation is returned when an operation violates watch-only
+	// invariants. Watch-only means the wallet or address lacks private key
+	// material and cannot sign transactions.
+	ErrWatchOnlyViolation = errors.New("watch-only invariant violation")
+
 	// ErrNilDB is returned when a nil database connection pointer is
 	// provided to the wallet.
 	ErrNilDB = errors.New("wallet requires a non-nil database connection")
