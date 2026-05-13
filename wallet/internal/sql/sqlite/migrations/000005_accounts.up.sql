@@ -54,9 +54,6 @@ CREATE TABLE accounts (
     -- Reference to the origin of the account.
     origin_id INTEGER NOT NULL,
 
-    -- Defines if the account is watch-only.
-    is_watch_only BOOLEAN NOT NULL,
-
     -- Master fingerprint is the fingerprint of the master pub key that created
     -- this account.
     master_fingerprint INTEGER,
