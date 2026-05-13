@@ -52,6 +52,90 @@ func (m *mockStore) StatsSnapshot() dbruntime.StatsSnapshot {
 	return dbruntime.StatsSnapshot{}
 }
 
+// CreateWallet implements the db.WalletStore interface.
+func (m *mockStore) CreateWallet(ctx context.Context,
+	params db.CreateWalletParams) (*db.WalletInfo, error) {
+
+	args := m.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.WalletInfo), args.Error(1)
+}
+
+// GetWallet implements the db.WalletStore interface.
+func (m *mockStore) GetWallet(ctx context.Context,
+	name string) (*db.WalletInfo, error) {
+
+	args := m.Called(ctx, name)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.WalletInfo), args.Error(1)
+}
+
+// ListWallets implements the db.WalletStore interface.
+func (m *mockStore) ListWallets(ctx context.Context,
+	query db.ListWalletsQuery) (page.Result[db.WalletInfo, uint32], error) {
+
+	args := m.Called(ctx, query)
+
+	result, ok := args.Get(0).(page.Result[db.WalletInfo, uint32])
+	if !ok {
+		return page.Result[db.WalletInfo, uint32]{}, args.Error(1)
+	}
+
+	return result, args.Error(1)
+}
+
+// IterWallets implements the db.WalletStore interface.
+func (m *mockStore) IterWallets(ctx context.Context,
+	query db.ListWalletsQuery) iter.Seq2[db.WalletInfo, error] {
+
+	args := m.Called(ctx, query)
+
+	seq, ok := args.Get(0).(iter.Seq2[db.WalletInfo, error])
+	if ok {
+		return seq
+	}
+
+	return func(yield func(db.WalletInfo, error) bool) {
+		yield(db.WalletInfo{}, args.Error(1))
+	}
+}
+
+// UpdateWallet implements the db.WalletStore interface.
+func (m *mockStore) UpdateWallet(ctx context.Context,
+	params db.UpdateWalletParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
+// GetEncryptedHDSeed implements the db.WalletStore interface.
+func (m *mockStore) GetEncryptedHDSeed(ctx context.Context,
+	walletID uint32) ([]byte, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]byte), args.Error(1)
+}
+
+// UpdateWalletSecrets implements the db.WalletStore interface.
+func (m *mockStore) UpdateWalletSecrets(ctx context.Context,
+	params db.UpdateWalletSecretsParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
 // CreateDerivedAccount implements the db.AccountStore interface.
 func (m *mockStore) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
