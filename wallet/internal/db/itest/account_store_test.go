@@ -366,6 +366,44 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateImportedAccountMissingWallet verifies that CreateImportedAccount
+// returns ErrWalletNotFound when the wallet does not exist.
+func TestCreateImportedAccountMissingWallet(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	params := db.CreateImportedAccountParams{
+		WalletID:           99999,
+		Name:               "missing-wallet-imported",
+		Scope:              db.KeyScopeBIP0084,
+		EncryptedPublicKey: RandomBytes(32),
+	}
+
+	props, err := store.CreateImportedAccount(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	require.Nil(t, props)
+}
+
+// TestCreateImportedAccountValidationPrecedesWalletLookup verifies that basic
+// input validation still wins over wallet lookup failures.
+func TestCreateImportedAccountValidationPrecedesWalletLookup(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	props, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:           99999,
+			Name:               "",
+			Scope:              db.KeyScopeBIP0084,
+			EncryptedPublicKey: RandomBytes(32),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrMissingAccountName)
+	require.Nil(t, props)
+}
+
 // TestCreateImportedAccountDuplicateName verifies that creating an imported
 // account with a duplicate name in the same scope fails.
 func TestCreateImportedAccountDuplicateName(t *testing.T) {
