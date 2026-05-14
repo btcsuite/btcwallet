@@ -5,6 +5,7 @@
 package waddrmgr
 
 import (
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -66,6 +67,70 @@ func (s *ScopedKeyManager) PutDerivedAccountWithKeys(
 	err = putDefaultAccountInfo(
 		ns, &s.scope, account, pubKeyEncrypted, encryptedPrivKey,
 		0, 0, name,
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.loadAccountInfo(ns, account)
+
+	return err
+}
+
+// AllocateImportedAccountNumber advances the per-scope lastAccount counter
+// and returns the next account number for an imported (watch-only) account.
+// Imported accounts share the per-scope counter with derived accounts; this
+// entrypoint exists so the kvdb adapter can split the legacy
+// NewAccountWatchingOnly flow into pure DB steps.
+func (s *ScopedKeyManager) AllocateImportedAccountNumber(
+	ns walletdb.ReadWriteBucket) (uint32, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.advanceLastAccountLocked(ns)
+}
+
+// PutWatchOnlyAccountWithKeys persists a new imported (watch-only) account
+// row using the caller-supplied account-level extended public key. The
+// pubkey is encrypted with cryptoKeyPub before storage.
+//
+// Must run inside the same walletdb.Update transaction as
+// AllocateImportedAccountNumber.
+func (s *ScopedKeyManager) PutWatchOnlyAccountWithKeys(
+	ns walletdb.ReadWriteBucket, account uint32, name string,
+	pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrSchema *ScopeAddrSchema) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	err := ValidateAccountName(name)
+	if err != nil {
+		return err
+	}
+
+	_, lookupErr := s.lookupAccount(ns, name)
+	if lookupErr == nil {
+		return managerError(
+			ErrDuplicateAccount,
+			"account with the same name already exists", nil,
+		)
+	}
+
+	pubKeyEncrypted, err := s.rootManager.cryptoKeyPub.Encrypt(
+		[]byte(pubKey.String()),
+	)
+	if err != nil {
+		return managerError(
+			ErrCrypto, "failed to encrypt public key for account",
+			err,
+		)
+	}
+
+	err = putWatchOnlyAccountInfo(
+		ns, &s.scope, account, pubKeyEncrypted, masterKeyFingerprint,
+		0, 0, name, addrSchema,
 	)
 	if err != nil {
 		return err

@@ -1032,6 +1032,27 @@ func (m *mockAccountStore) PutDerivedAccountWithKeys(
 	return args.Error(0)
 }
 
+// AllocateImportedAccountNumber implements waddrmgr.AccountStore.
+func (m *mockAccountStore) AllocateImportedAccountNumber(
+	ns walletdb.ReadWriteBucket) (uint32, error) {
+
+	args := m.Called(ns)
+	return args.Get(0).(uint32), args.Error(1)
+}
+
+// PutWatchOnlyAccountWithKeys implements waddrmgr.AccountStore.
+func (m *mockAccountStore) PutWatchOnlyAccountWithKeys(
+	ns walletdb.ReadWriteBucket, account uint32, name string,
+	pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrSchema *waddrmgr.ScopeAddrSchema) error {
+
+	args := m.Called(
+		ns, account, name, pubKey, masterKeyFingerprint, addrSchema,
+	)
+
+	return args.Error(0)
+}
+
 // LastAccount implements the waddrmgr.AccountStore interface.
 func (m *mockAccountStore) LastAccount(ns walletdb.ReadBucket) (uint32, error) {
 	args := m.Called(ns)
