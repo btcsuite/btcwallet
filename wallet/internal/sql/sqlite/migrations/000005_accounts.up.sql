@@ -113,6 +113,17 @@ WHERE account_number IS NOT NULL;
 CREATE UNIQUE INDEX uidx_accounts_scope_account_name
 ON accounts (scope_id, account_name);
 
+-- Enforce that wallet ownership chosen at account creation time remains
+-- immutable. This closes the database-boundary hole where a raw update could
+-- reparent an existing account into another wallet after insert.
+CREATE TRIGGER trg_assert_account_wallet_id_immutable
+BEFORE UPDATE OF wallet_id ON accounts
+FOR EACH ROW
+WHEN new.wallet_id != old.wallet_id
+BEGIN
+    SELECT raise(ABORT, 'account wallet_id cannot be changed after creation');
+END;
+
 -- Account Secrets table to hold encrypted account-level secrets.
 CREATE TABLE account_secrets (
     -- Reference to the account these keys belong to. Also serves as the

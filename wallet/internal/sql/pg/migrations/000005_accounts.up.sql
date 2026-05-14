@@ -114,6 +114,25 @@ WHERE account_number IS NOT NULL;
 CREATE UNIQUE INDEX uidx_accounts_scope_account_name
 ON accounts (scope_id, account_name);
 
+-- Enforce that wallet ownership chosen at account creation time remains
+-- immutable. This closes the database-boundary hole where a raw update could
+-- reparent an existing account into another wallet after insert.
+CREATE FUNCTION assert_account_wallet_id_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.wallet_id IS DISTINCT FROM OLD.wallet_id THEN
+        RAISE EXCEPTION 'account wallet_id cannot be changed after creation'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_account_wallet_id_immutable
+BEFORE UPDATE OF wallet_id ON accounts
+FOR EACH ROW
+EXECUTE FUNCTION assert_account_wallet_id_immutable();
+
 -- Account Secrets table to hold encrypted account-level secrets.
 CREATE TABLE account_secrets (
     -- Reference to the account these keys belong to. Also serves as the
