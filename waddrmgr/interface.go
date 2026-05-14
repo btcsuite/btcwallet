@@ -251,6 +251,18 @@ type AccountStore interface {
 	// NewAccount creates a new account.
 	NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error)
 
+	// AllocateDerivedAccountNumber advances the scoped manager's
+	// lastAccount counter and returns the next derived account number.
+	AllocateDerivedAccountNumber(ns walletdb.ReadWriteBucket) (
+		uint32, error)
+
+	// PutDerivedAccountWithKeys persists a derived account row using
+	// the caller-supplied account material. Must run in the same
+	// walletdb.Update transaction as AllocateDerivedAccountNumber.
+	PutDerivedAccountWithKeys(ns walletdb.ReadWriteBucket,
+		account uint32, name string, plaintextPubKey []byte,
+		encryptedPrivKey []byte) error
+
 	// LastAccount returns the last account number.
 	LastAccount(ns walletdb.ReadBucket) (uint32, error)
 
