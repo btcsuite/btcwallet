@@ -21,11 +21,110 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// errNilAccountInfo is returned when accountInfoToProperties receives a nil
+// snapshot.
+var errNilAccountInfo = errors.New("nil account info")
+
+// errDryRunImportNotSupported is returned when callers try the simulate-and-
+// rollback dry-run on the new ImportAccount entrypoint.
+var errDryRunImportNotSupported = errors.New(
+	"ImportAccount: dry-run is not supported on the new account " +
+		"manager; use Wallet.ImportAccountDryRun (deprecated)",
+)
+
+// toDBKeyScope adapts a waddrmgr.KeyScope to the db.KeyScope contract.
+func toDBKeyScope(scope waddrmgr.KeyScope) db.KeyScope {
+	return db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+}
+
+// accountInfoToProperties converts a db.AccountInfo into the legacy
+// waddrmgr.AccountProperties shape the public wallet API still returns.
+func accountInfoToProperties(
+	info *db.AccountInfo) (*waddrmgr.AccountProperties, error) {
+
+	if info == nil {
+		return nil, errNilAccountInfo
+	}
+
+	var pubKey *hdkeychain.ExtendedKey
+	if len(info.PublicKey) > 0 {
+		parsed, err := hdkeychain.NewKeyFromString(
+			string(info.PublicKey),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("parse account pub key: %w",
+				err)
+		}
+
+		pubKey = parsed
+	}
+
+	return &waddrmgr.AccountProperties{
+		AccountNumber:        info.AccountNumber,
+		AccountName:          info.AccountName,
+		ExternalKeyCount:     info.ExternalKeyCount,
+		InternalKeyCount:     info.InternalKeyCount,
+		ImportedKeyCount:     info.ImportedKeyCount,
+		AccountPubKey:        pubKey,
+		MasterKeyFingerprint: info.MasterKeyFingerprint,
+		KeyScope: waddrmgr.KeyScope{
+			Purpose: info.KeyScope.Purpose,
+			Coin:    info.KeyScope.Coin,
+		},
+		IsWatchOnly: info.IsWatchOnly,
+	}, nil
+}
+
+// buildAccountDeriveFn pre-loads the wallet's master HD private key and
+// returns an AccountDerivationFunc closure. Watch-only wallets get a closure
+// that rejects derivation.
+func (w *Wallet) buildAccountDeriveFn(
+	ctx context.Context) (db.AccountDerivationFunc, error) {
+
+	if w.addrStore.WatchOnly() {
+		return func(_ context.Context, _ db.KeyScope, _ uint32,
+			_ bool) (*db.DerivedAccountData, error) {
+
+			return nil, errWatchOnlyAccountDerivation
+		}, nil
+	}
+
+	encrypted, err := w.store.GetEncryptedHDSeed(ctx, w.id)
+	if err != nil {
+		return nil, fmt.Errorf("load encrypted master HD priv: %w",
+			err)
+	}
+
+	plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt master HD priv: %w", err)
+	}
+
+	masterKey, err := hdkeychain.NewKeyFromString(string(plaintext))
+	zero.Bytes(plaintext)
+
+	if err != nil {
+		return nil, fmt.Errorf("parse master HD priv: %w", err)
+	}
+
+	fingerprint, err := masterKeyFingerprint(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("master key fingerprint: %w", err)
+	}
+
+	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
+}
 
 // AccountManager provides a high-level interface for managing wallet
 // accounts.
