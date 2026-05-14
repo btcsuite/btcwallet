@@ -79,8 +79,8 @@ func (s *Store) RenameAccount(ctx context.Context,
 }
 
 // CreateDerivedAccount creates a new derived account with the given name and
-// scope. If the key scope does not exist, it is created with NULL encrypted
-// keys using the address schema provided by the caller.
+// scope. If the key scope does not exist, it is created using the address
+// schema provided by the caller.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
 
@@ -155,9 +155,9 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 }
 
 // CreateImportedAccount stores an imported account identified by an extended
-// public key. If the key scope does not exist, it is created with NULL
-// encrypted keys using the address schema provided by the caller. Imported
-// accounts have NULL account_number since they don't follow BIP44 derivation.
+// public key. If the key scope does not exist, it is created using the address
+// schema provided by the caller. Imported accounts have NULL account_number
+// since they don't follow BIP44 derivation.
 func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
 
