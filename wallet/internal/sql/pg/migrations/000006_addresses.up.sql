@@ -83,6 +83,25 @@ ON addresses (wallet_id, script_pub_key);
 -- Used by ListAddressesByAccount for cursor-based pagination.
 CREATE INDEX idx_addresses_account_id ON addresses (account_id, id);
 
+-- Enforce that wallet ownership chosen at address creation time remains
+-- immutable. This closes the database-boundary hole where a raw update could
+-- reparent an existing address into another wallet after insert.
+CREATE FUNCTION assert_address_wallet_id_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.wallet_id IS DISTINCT FROM OLD.wallet_id THEN
+        RAISE EXCEPTION 'address wallet_id cannot be changed after creation'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_address_wallet_id_immutable
+BEFORE UPDATE OF wallet_id ON addresses
+FOR EACH ROW
+EXECUTE FUNCTION assert_address_wallet_id_immutable();
+
 -- Address Secrets table stores sensitive encrypted material needed to spend
 -- from an address. This table has a one-to-one relationship with addresses.
 -- Watch-only addresses may have no row in this table.

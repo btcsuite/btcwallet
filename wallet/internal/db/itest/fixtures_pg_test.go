@@ -391,6 +391,102 @@ func updateWalletWatchOnlyRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	return nil
 }
 
+// updateKeyScopeWalletIDRaw updates a key scope wallet_id directly through the
+// database so tests can validate its immutability trigger.
+func updateKeyScopeWalletIDRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	walletID uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE key_scopes
+		SET wallet_id = $1
+		WHERE id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// reparentAccountRaw updates an account wallet/scope pair directly through the
+// database so tests can validate wallet ownership immutability after insert.
+func reparentAccountRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	walletID uint32, scopeID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET wallet_id = $1,
+			scope_id = $2
+		WHERE id = $3`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID, accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// reparentAddressRaw updates an address wallet/account pair directly through
+// the database so tests can validate wallet ownership immutability after
+// insert.
+func reparentAddressRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	walletID uint32, accountID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE addresses
+		SET wallet_id = $1,
+			account_id = $2
+		WHERE id = $3`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), accountID, addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
 // CreateAddressWithIndex creates a derived address with a specific address
 // index. Used to test address index overflow without creating billions of
 // addresses.
