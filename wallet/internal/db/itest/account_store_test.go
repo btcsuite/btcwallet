@@ -143,6 +143,24 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountMissingWallet verifies that CreateDerivedAccount
+// returns ErrWalletNotFound when the wallet does not exist.
+func TestCreateDerivedAccountMissingWallet(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	params := db.CreateDerivedAccountParams{
+		WalletID: 99999,
+		Scope:    db.KeyScopeBIP0084,
+		Name:     "missing-wallet-account",
+	}
+
+	info, err := store.CreateDerivedAccount(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	require.Nil(t, info)
+}
+
 // TestCreateDerivedAccountDuplicateName verifies that creating a derived
 // account with a duplicate name in the same scope fails.
 func TestCreateDerivedAccountDuplicateName(t *testing.T) {
@@ -366,6 +384,221 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateImportedAccountMissingWallet verifies that CreateImportedAccount
+// returns ErrWalletNotFound when the wallet does not exist.
+func TestCreateImportedAccountMissingWallet(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	params := db.CreateImportedAccountParams{
+		WalletID:           99999,
+		Name:               "missing-wallet-imported",
+		Scope:              db.KeyScopeBIP0084,
+		EncryptedPublicKey: RandomBytes(32),
+	}
+
+	props, err := store.CreateImportedAccount(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	require.Nil(t, props)
+}
+
+// TestCreateImportedAccountValidationPrecedesWalletLookup verifies that basic
+// input validation still wins over wallet lookup failures.
+func TestCreateImportedAccountValidationPrecedesWalletLookup(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	props, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:           99999,
+			Name:               "",
+			Scope:              db.KeyScopeBIP0084,
+			EncryptedPublicKey: RandomBytes(32),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrMissingAccountName)
+	require.Nil(t, props)
+}
+
+// TestWatchOnlyHierarchyAccountRules is the canonical wallet-to-account
+// watch-only matrix for derived and imported accounts.
+func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		walletParams    func(string) db.CreateWalletParams
+		wantWatchOnly   bool
+		wantErr         error
+		createAccountFn func(*testing.T, db.AccountStore, uint32) (bool, error)
+	}{
+		{
+			name:          "standard wallet derived account is spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				info, err := store.CreateDerivedAccount(
+					t.Context(), db.CreateDerivedAccountParams{
+						WalletID: walletID,
+						Scope:    db.KeyScopeBIP0084,
+						Name:     "drv-std",
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name:          "watch-only wallet derived account is watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				info, err := store.CreateDerivedAccount(
+					t.Context(), db.CreateDerivedAccountParams{
+						WalletID: walletID,
+						Scope:    db.KeyScopeBIP0084,
+						Name:     "drv-wo",
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return info.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported account with " +
+				"private key is spendable",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: false,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				props, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:            walletID,
+						Name:                db.DefaultImportedAccountName,
+						Scope:               db.KeyScopeBIP0084,
+						EncryptedPublicKey:  RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return props.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "standard wallet imported account without " +
+				"private key is watch-only",
+			walletParams:  CreateWalletParamsFixture,
+			wantWatchOnly: true,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				props, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:           walletID,
+						Name:               db.DefaultImportedAccountName,
+						Scope:              db.KeyScopeBIP0084,
+						EncryptedPublicKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return props.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet imported account without " +
+				"private key is watch-only",
+			walletParams:  CreateWatchOnlyWalletParams,
+			wantWatchOnly: true,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				props, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:           walletID,
+						Name:               db.DefaultImportedAccountName,
+						Scope:              db.KeyScopeBIP0084,
+						EncryptedPublicKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return props.IsWatchOnly, nil
+			},
+		},
+		{
+			name: "watch-only wallet imported account with " +
+				"private key is rejected",
+			walletParams: CreateWatchOnlyWalletParams,
+			wantErr:      db.ErrWatchOnlyViolation,
+			createAccountFn: func(t *testing.T, store db.AccountStore,
+				walletID uint32) (bool, error) {
+
+				t.Helper()
+				props, err := store.CreateImportedAccount(
+					t.Context(), db.CreateImportedAccountParams{
+						WalletID:            walletID,
+						Name:                "hardware",
+						Scope:               db.KeyScopeBIP0084,
+						EncryptedPublicKey:  RandomBytes(32),
+						EncryptedPrivateKey: RandomBytes(32),
+					},
+				)
+				if err != nil {
+					return false, err
+				}
+
+				return props.IsWatchOnly, nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewTestStore(t)
+
+			walletInfo, err := store.CreateWallet(
+				t.Context(), tc.walletParams("watch-only-account-matrix"),
+			)
+			require.NoError(t, err)
+
+			isWatchOnly, err := tc.createAccountFn(t, store, walletInfo.ID)
+			require.ErrorIs(t, err, tc.wantErr)
+
+			if tc.wantErr != nil {
+				return
+			}
+
+			require.Equal(t, tc.wantWatchOnly, isWatchOnly)
+		})
+	}
+}
+
 // TestCreateImportedAccountDuplicateName verifies that creating an imported
 // account with a duplicate name in the same scope fails.
 func TestCreateImportedAccountDuplicateName(t *testing.T) {
@@ -429,6 +662,42 @@ func TestGetAccount(t *testing.T) {
 				requireAccountMatches(t, info, tc)
 			})
 	}
+}
+
+// TestGetAccountWatchOnlyMapping verifies that GetAccount preserves
+// representative watch-only flags on read.
+func TestGetAccountWatchOnlyMapping(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-get-watch")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "derived")
+
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:           walletID,
+			Name:               db.DefaultImportedAccountName,
+			Scope:              scope,
+			EncryptedPublicKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	derived, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "derived"),
+	)
+	require.NoError(t, err)
+	require.False(t, derived.IsWatchOnly)
+
+	imported, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, db.DefaultImportedAccountName,
+		),
+	)
+	require.NoError(t, err)
+	require.True(t, imported.IsWatchOnly)
 }
 
 // TestGetAccountNotFound verifies that GetAccount returns ErrAccountNotFound
@@ -550,6 +819,52 @@ func TestListAccounts(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, accounts)
 	})
+}
+
+// TestListAccountsWatchOnlyMapping verifies that ListAccounts preserves
+// representative watch-only flags on read.
+func TestListAccountsWatchOnlyMapping(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-watch")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "derived")
+
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:           walletID,
+			Name:               db.DefaultImportedAccountName,
+			Scope:              scope,
+			EncryptedPublicKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+
+	derived := findAccountInList(
+		t, accounts, AccountTestCase{
+			Name:  "derived",
+			Scope: scope,
+		},
+	)
+	imported := findAccountInList(
+		t, accounts, AccountTestCase{
+			Name:  db.DefaultImportedAccountName,
+			Scope: scope,
+		},
+	)
+
+	require.False(t, derived.IsWatchOnly)
+	require.True(t, imported.IsWatchOnly)
 }
 
 // TestListAccountsOrdering verifies that ListAccounts returns derived accounts
@@ -894,8 +1209,7 @@ func CreateImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 }
 
 // requireAccountMatches asserts that the provided AccountInfo matches the
-// expected AccountTestCase, including name, scope, origin, watch-only status,
-// and creation timestamp.
+// expected AccountTestCase's core identity fields and creation timestamp.
 func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 	tc AccountTestCase) {
 
@@ -904,7 +1218,6 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 	require.Equal(t, tc.Name, info.AccountName)
 	require.Equal(t, tc.Scope, info.KeyScope)
 	require.Equal(t, tc.Origin, info.Origin)
-	require.Equal(t, tc.IsWatchOnly, info.IsWatchOnly)
 
 	// Verify CreatedAt is populated and not in the future. The account may
 	// have been created several seconds earlier in the test when parallel
@@ -916,8 +1229,8 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 }
 
 // requireAccountPropertiesMatches asserts that the provided AccountProperties
-// matches the expected AccountTestCase, including name, scope, origin,
-// watch-only status, and creation timestamp.
+// matches the expected AccountTestCase's core identity fields and creation
+// timestamp.
 func requireAccountPropertiesMatches(t *testing.T, props *db.AccountProperties,
 	tc AccountTestCase) {
 
@@ -926,7 +1239,6 @@ func requireAccountPropertiesMatches(t *testing.T, props *db.AccountProperties,
 	require.Equal(t, tc.Name, props.AccountName)
 	require.Equal(t, tc.Scope, props.KeyScope)
 	require.Equal(t, tc.Origin, props.Origin)
-	require.Equal(t, tc.IsWatchOnly, props.IsWatchOnly)
 
 	// Verify CreatedAt is populated and not in the future. Imported-account
 	// test fixtures can be created well before these assertions run under

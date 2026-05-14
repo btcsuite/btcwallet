@@ -30,14 +30,28 @@ func (params *CreateDerivedAccountParams) Validate() error {
 	return nil
 }
 
-// Validate validates required fields for creating an imported account.
-func (params *CreateImportedAccountParams) Validate() error {
+// ValidateBasic validates required fields for creating an imported account.
+func (params *CreateImportedAccountParams) ValidateBasic() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
 	}
 
 	if len(params.EncryptedPublicKey) == 0 {
 		return ErrMissingAccountPublicKey
+	}
+
+	return nil
+}
+
+// ValidateWatchOnly validates watch-only invariants for creating an imported
+// account.
+func (params *CreateImportedAccountParams) ValidateWatchOnly(
+	walletIsWatchOnly bool) error {
+
+	hasPrivateKey := len(params.EncryptedPrivateKey) > 0
+	if walletIsWatchOnly && hasPrivateKey {
+		return fmt.Errorf("wallet %d cannot create account %q: %w",
+			params.WalletID, params.Name, ErrWatchOnlyViolation)
 	}
 
 	return nil
@@ -71,11 +85,6 @@ func (params RenameAccountParams) Validate() error {
 	}
 
 	return nil
-}
-
-// IsWatchOnly returns true if the account is watch-only.
-func (params *CreateImportedAccountParams) IsWatchOnly() bool {
-	return len(params.EncryptedPrivateKey) == 0
 }
 
 // AccountPropsRow represents the raw database fields needed to construct
@@ -524,32 +533,43 @@ func RenameAccount[Args any](ctx context.Context,
 
 // CreateImportedAccount is a generic helper that creates an imported account.
 // It handles ensuring the key scope exists, creating the account record,
-// optionally creating the account secret for non-watch-only accounts, and
-// fetching the full account properties from the database.
+// optionally creating the account secret when account private key material is
+// present, and fetching the full account properties from the database.
 func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	ctx context.Context, params CreateImportedAccountParams,
 	ensureScope func() (int64, error),
+	walletWatchOnly func() (bool, error),
 	createAccount func(context.Context, CreateArgs) (CreateRow, error),
-	buildCreateArgs func(scopeID int64, isWatchOnly bool) CreateArgs,
+	buildCreateArgs func(scopeID int64) CreateArgs,
 	rowToID func(CreateRow) int64,
 	createSecret func(context.Context, SecretArgs) error,
 	buildSecretArgs func(accountID int64) SecretArgs,
 	getProps func(accountID int64) (*AccountProperties, error),
 ) (*AccountProperties, error) {
 
-	err := params.Validate()
+	err := params.ValidateBasic()
 	if err != nil {
 		return nil, err
 	}
 
-	isWatchOnly := params.IsWatchOnly()
+	walletIsWatchOnly, err := walletWatchOnly()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	hasAccountSecret := len(params.EncryptedPrivateKey) > 0
 
 	scopeID, err := ensureScope()
 	if err != nil {
 		return nil, err
 	}
 
-	createArgs := buildCreateArgs(scopeID, isWatchOnly)
+	createArgs := buildCreateArgs(scopeID)
 
 	row, err := createAccount(ctx, createArgs)
 	if err != nil {
@@ -558,7 +578,7 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 
 	accountID := rowToID(row)
 
-	if isWatchOnly {
+	if !hasAccountSecret {
 		return getProps(accountID)
 	}
 
