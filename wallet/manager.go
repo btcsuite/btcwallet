@@ -297,11 +297,14 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
+	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
+
 	w := &Wallet{
 		cfg:         cfg,
 		id:          walletID,
 		addrStore:   addrMgr,
-		store:       kvdb.NewStore(cfg.DB, txMgr, addrMgr),
+		store:       store,
+		cache:       newStoreRuntimeCache(store),
 		keyVault:    addrMgr,
 		txStore:     txMgr,
 		requestChan: make(chan any),
