@@ -170,8 +170,8 @@ type InsertKeyScopeSecretsParams struct {
 	EncryptedCoinPrivKey []byte
 }
 
-// Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
-// watch-only scopes.
+// Inserts secrets for a spendable key scope. Watch-only scopes are represented
+// by an absent key_scope_secrets row.
 func (q *Queries) InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error {
 	_, err := q.exec(ctx, q.insertKeyScopeSecretsStmt, InsertKeyScopeSecrets, arg.ScopeID, arg.EncryptedCoinPrivKey)
 	return err
