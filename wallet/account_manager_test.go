@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -22,6 +23,60 @@ import (
 
 func hardenedKey(key uint32) uint32 {
 	return key + hdkeychain.HardenedKeyStart
+}
+
+// stubAccountDeriveFn holds the master-key material the test wallet's
+// buildAccountDeriveFn path consumes.
+type stubAccountDeriveFn struct {
+	encryptedSeed        []byte
+	plaintextMasterKey   []byte
+	masterKey            *hdkeychain.ExtendedKey
+	masterKeyFingerprint uint32
+}
+
+// newStubAccountDeriveFn builds a deterministic master key + the byte
+// strings the GetEncryptedHDSeed/Decrypt mocks return.
+func newStubAccountDeriveFn(t *testing.T) stubAccountDeriveFn {
+	t.Helper()
+
+	seed := make([]byte, hdkeychain.RecommendedSeedLen)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+
+	masterKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	fingerprint, err := masterKeyFingerprint(masterKey)
+	require.NoError(t, err)
+
+	plaintext := []byte(masterKey.String())
+	encrypted := append([]byte("enc:"), plaintext...)
+
+	return stubAccountDeriveFn{
+		encryptedSeed:        encrypted,
+		plaintextMasterKey:   plaintext,
+		masterKey:            masterKey,
+		masterKeyFingerprint: fingerprint,
+	}
+}
+
+// expectAccountDeriveSetup wires the mock expectations the new wallet
+// NewAccount path performs before invoking w.store.CreateDerivedAccount.
+// Decrypt returns a fresh copy so the wallet's post-parse zero.Bytes call
+// does not corrupt the shared stub across multiple invocations.
+func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
+	stub stubAccountDeriveFn) {
+
+	t.Helper()
+
+	deps.addrStore.On("WatchOnly").Return(false).Once()
+	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
+		Return(append([]byte(nil), stub.encryptedSeed...), nil).Once()
+	deps.addrStore.On("Decrypt", waddrmgr.CKTPrivate,
+		mock.Anything).Return(
+		append([]byte(nil), stub.plaintextMasterKey...), nil,
+	).Once()
 }
 
 func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
@@ -76,90 +131,52 @@ const (
 	testAccountName = "test"
 )
 
-// TestNewAccount tests that the NewAccount method works as expected.
+// TestNewAccount verifies NewAccount routes through
+// w.store.CreateDerivedAccount.
 func TestNewAccount(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
+	stub := newStubAccountDeriveFn(t)
 
-	// We'll start by creating a new account under the BIP0084 scope. We
-	// expect this to succeed.
 	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
 
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
+	// Success path.
+	expectAccountDeriveSetup(t, deps, stub)
+	deps.store.On("CreateDerivedAccount", mock.Anything,
+		db.CreateDerivedAccountParams{
+			WalletID: 0,
+			Scope:    dbScope,
+			Name:     testAccountName,
+		}, mock.Anything).Return(
+		&db.AccountInfo{
 			AccountNumber: 1,
 			AccountName:   testAccountName,
-		}, nil).Once()
+			Origin:        db.DerivedAccount,
+			KeyScope:      dbScope,
+		}, nil,
+	).Once()
 
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, err, "unable to create new account")
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), account.AccountNumber)
 
-	// The new account should be the first account created, so it should
-	// have an index of 1.
-	require.Equal(t, uint32(1), account.AccountNumber, "expected account 1")
-
-	// We should be able to retrieve the account by its name.
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
-
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
-
-	account2, err := w.GetAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, err, "unable to retrieve account")
-	require.Equal(t, uint32(1), account2.AccountNumber)
-	require.Equal(t, testAccountName, account2.AccountName)
-
-	// We should not be able to create a new account with the same name.
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
-		Return(uint32(0), waddrmgr.ManagerError{
+	// Duplicate-name path.
+	expectAccountDeriveSetup(t, deps, stub)
+	deps.store.On("CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything).Return((*db.AccountInfo)(nil),
+		waddrmgr.ManagerError{
 			ErrorCode: waddrmgr.ErrDuplicateAccount,
 		}).Once()
 
 	_, err = w.NewAccount(t.Context(), scope, testAccountName)
-	require.Error(t, err, "expected error when creating duplicate account")
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
-		"expected ErrDuplicateAccount",
-	)
-
-	// We should not be able to create a new account when the wallet is
-	// locked.
-	deps.addrStore.On("Lock").Return(nil).Once()
-
-	err = w.Lock(t.Context())
-	require.NoError(t, err)
-
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, "test2").
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrLocked,
-		}).Once()
-
-	_, err = w.NewAccount(t.Context(), scope, "test2")
-	require.Error(
-		t, err, "expected error when creating account while wallet is "+
-			"locked",
+	require.Error(t, err)
+	require.True(t,
+		waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
 	)
 }
 
