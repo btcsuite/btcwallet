@@ -2,14 +2,44 @@ package kvdb
 
 import (
 	"context"
+	"errors"
 	"iter"
 
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/btcsuite/btcwallet/walletdb"
+)
+
+// errKvdbAddrStoreTypeMismatch is returned when the caller wires kvdb.NewStore
+// with an addrStore value that does not satisfy the kvdbAddrStore narrow
+// interface.
+var errKvdbAddrStoreTypeMismatch = errors.New(
+	"kvdb: addrStore does not satisfy kvdbAddrStore",
 )
 
 // A compile-time assertion to ensure Store implements the wallet store.
 var _ db.WalletStore = (*Store)(nil)
+
+// kvdbAddrStore is the narrow waddrmgr.Manager surface kvdb depends on for
+// pure-DB reads against the legacy bucket layout. A separate interface keeps
+// kvdb decoupled from waddrmgr.AddrStore's full breadth.
+type kvdbAddrStore interface {
+	// EncryptedMasterHDPriv reads the encrypted master HD private key
+	// from the manager's main bucket.
+	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
+}
+
+// addrManager type-asserts s.addrStore into kvdbAddrStore. A nil store or a
+// wrong type indicates a caller-side wiring bug.
+func (s *Store) addrManager() (kvdbAddrStore, error) {
+	mgr, ok := s.addrStore.(kvdbAddrStore)
+	if !ok {
+		return nil, errKvdbAddrStoreTypeMismatch
+	}
+
+	return mgr, nil
+}
 
 // CreateWallet is not yet implemented for kvdb.
 func (s *Store) CreateWallet(ctx context.Context,
@@ -50,11 +80,38 @@ func (s *Store) UpdateWallet(ctx context.Context,
 	return notImplemented(ctx, "UpdateWallet")
 }
 
-// GetEncryptedHDSeed is not yet implemented for kvdb.
-func (s *Store) GetEncryptedHDSeed(ctx context.Context,
+// GetEncryptedHDSeed reads the encrypted master HD private key from the
+// legacy waddrmgr main bucket. Watch-only wallets are surfaced as
+// db.ErrSecretNotFound.
+func (s *Store) GetEncryptedHDSeed(_ context.Context,
 	_ uint32) ([]byte, error) {
 
-	return nil, notImplemented(ctx, "GetEncryptedHDSeed")
+	var encrypted []byte
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrSecretNotFound
+		}
+
+		raw, readErr := s.addrStore.EncryptedMasterHDPriv(ns)
+		if readErr != nil {
+			if waddrmgr.IsError(readErr, waddrmgr.ErrWatchingOnly) {
+				return db.ErrSecretNotFound
+			}
+
+			return readErr
+		}
+
+		encrypted = raw
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return encrypted, nil
 }
 
 // UpdateWalletSecrets is not yet implemented for kvdb.
