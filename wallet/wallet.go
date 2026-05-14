@@ -348,6 +348,12 @@ type Wallet struct {
 	// TODO(yy): Migrate UTXO-related callers behind db.UTXOStore.
 	store db.Store
 
+	// cache is the wallet-private runtime seam between wallet managers and
+	// the durable db.Store. It exposes pass-through reads and absorbs
+	// legacy walks the wallet managers used to perform inline through
+	// walletdb. Real caching lands in a later change.
+	cache runtimeCache
+
 	// NtfnServer handles the delivery of wallet-related events (e.g., new
 	// transactions, block connections) to connected clients.
 	//
