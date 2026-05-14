@@ -567,38 +567,24 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 //
 // The time complexity of this method is dominated by the database lookup for
 // the old account name.
-func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
-	oldName, newName string) error {
+func (w *Wallet) RenameAccount(ctx context.Context,
+	scope waddrmgr.KeyScope, oldName, newName string) error {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return err
-	}
-
-	// Validate the new account name to ensure it meets the required
-	// criteria.
 	err = waddrmgr.ValidateAccountName(newName)
 	if err != nil {
 		return err
 	}
 
-	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Look up the account number for the given name. This is
-		// required to perform the rename operation.
-		accNum, err := manager.LookupAccount(addrmgrNs, oldName)
-		if err != nil {
-			return err
-		}
-
-		// Perform the rename operation in the address manager.
-		return manager.RenameAccount(addrmgrNs, accNum, newName)
+	return w.store.RenameAccount(ctx, db.RenameAccountParams{
+		WalletID: w.id,
+		Scope:    toDBKeyScope(scope),
+		OldName:  oldName,
+		NewName:  newName,
 	})
 }
 
