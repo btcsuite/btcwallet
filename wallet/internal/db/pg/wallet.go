@@ -107,6 +107,7 @@ func (s *Store) CreateWallet(ctx context.Context,
 			birthdayTimestamp:      row.BirthdayTimestamp,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+			masterPubKey:           row.MasterHdPubKey,
 		})
 		if err != nil {
 			return fmt.Errorf("convert wallet row to info: %w", err)
@@ -153,6 +154,7 @@ func (s *Store) GetWallet(ctx context.Context,
 			birthdayTimestamp:      row.BirthdayTimestamp,
 			birthdayBlockHash:      row.BirthdayBlockHash,
 			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+			masterPubKey:           row.MasterHdPubKey,
 		})
 
 		return err
@@ -263,9 +265,10 @@ func (s *Store) UpdateWallet(ctx context.Context,
 }
 
 // GetEncryptedHDSeed retrieves the encrypted Hierarchical
-// Deterministic (HD) seed of the wallet. This seed is sensitive
-// information and is returned in its encrypted form. It returns the
-// encrypted seed as a byte slice or an error if the retrieval fails.
+// Deterministic (HD) seed (the encrypted master HD private key) of
+// the wallet. This seed is sensitive information and is returned in
+// its encrypted form. It returns the encrypted seed as a byte slice
+// or an error if the retrieval fails.
 func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 	walletID uint32) ([]byte, error) {
 
@@ -364,6 +367,7 @@ type walletRowParams struct {
 	birthdayTimestamp      sql.NullTime
 	birthdayBlockHash      []byte
 	birthdayBlockTimestamp sql.NullInt64
+	masterPubKey           []byte
 }
 
 // listWalletRowToInfo converts a ListWallets result row to a WalletInfo
@@ -382,6 +386,7 @@ func listWalletRowToInfo(row sqlc.ListWalletsRow) (*db.WalletInfo, error) {
 		birthdayTimestamp:      row.BirthdayTimestamp,
 		birthdayBlockHash:      row.BirthdayBlockHash,
 		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+		masterPubKey:           row.MasterHdPubKey,
 	})
 }
 
@@ -418,6 +423,7 @@ func buildWalletInfo(row walletRowParams) (*db.WalletInfo, error) {
 		IsImported:     row.isImported,
 		ManagerVersion: row.managerVersion,
 		IsWatchOnly:    row.isWatchOnly,
+		MasterPubKey:   row.masterPubKey,
 	}
 
 	if row.birthdayTimestamp.Valid {

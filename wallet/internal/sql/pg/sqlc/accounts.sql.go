@@ -479,8 +479,6 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -505,8 +503,6 @@ type GetAccountPropsByIdRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int16
-	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -526,8 +522,6 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
