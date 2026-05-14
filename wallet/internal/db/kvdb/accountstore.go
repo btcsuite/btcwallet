@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -175,11 +176,143 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 	}, nil
 }
 
-// CreateImportedAccount is not yet implemented for kvdb.
-func (s *Store) CreateImportedAccount(ctx context.Context,
-	_ db.CreateImportedAccountParams) (*db.AccountInfo, error) {
+// CreateImportedAccount persists an imported account into waddrmgr as a
+// watch-only row. kvdb does not persist an encrypted account private key
+// for imported accounts; spendable wallets that supply one get an error.
+func (s *Store) CreateImportedAccount(_ context.Context,
+	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
-	return nil, notImplemented(ctx, "CreateImportedAccount")
+	err := params.ValidateBasic()
+	if err != nil {
+		return nil, err
+	}
+
+	mgr := s.addrStore
+
+	walletIsWatchOnly := mgr.WatchOnly()
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(params.EncryptedPrivateKey) > 0 && !walletIsWatchOnly {
+		return nil, errKvdbImportedAccountWithPriv
+	}
+
+	pubKey, err := hdkeychain.NewKeyFromString(string(params.PublicKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse account public key: %w", err)
+	}
+
+	scope := waddrmgr.KeyScope{
+		Purpose: params.Scope.Purpose,
+		Coin:    params.Scope.Coin,
+	}
+
+	var info *db.AccountInfo
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrAccountNotFound
+		}
+
+		built, err := s.putImportedAccount(
+			ns, scope, params, pubKey, walletIsWatchOnly,
+		)
+		if err != nil {
+			return err
+		}
+
+		info = built
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// putImportedAccount runs the kvdb-side persistence steps for a validated
+// CreateImportedAccountParams under the caller-owned walletdb.ReadWriteTx.
+// The caller is responsible for the surrounding walletdb.Update bracket and
+// for surface-level validation (ValidateBasic / ValidateWatchOnly /
+// watch-only-with-priv rejection) and for parsing the account public key.
+func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
+	scope waddrmgr.KeyScope, params db.CreateImportedAccountParams,
+	pubKey *hdkeychain.ExtendedKey,
+	walletIsWatchOnly bool) (*db.AccountInfo, error) {
+
+	scopedMgr, err := s.scopedManagerOrCreate(ns, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	accountNumber, err := scopedMgr.AllocateImportedAccountNumber(ns)
+	if err != nil {
+		return nil, fmt.Errorf("allocate account number: %w", err)
+	}
+
+	err = scopedMgr.PutWatchOnlyAccountWithKeys(
+		ns, accountNumber, params.Name, pubKey,
+		params.MasterFingerprint, nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("put watch-only account: %w", err)
+	}
+
+	// Persist creation timestamp in the kvdb-owned side bucket
+	// inside the same walletdb transaction (see task 102). The
+	// subsequent loadAccountInfo call reads it back.
+	err = putAccountCreatedAt(
+		ns, scope, accountNumber, time.Now().UTC(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("persist created-at: %w", err)
+	}
+
+	walletMasterHDPubKey, err := readMasterHDPubKey(s.addrStore, ns)
+	if err != nil {
+		return nil, err
+	}
+
+	return loadAccountInfo(
+		ns, scopedMgr, accountNumber, walletIsWatchOnly,
+		walletMasterHDPubKey,
+	)
+}
+
+// scopedManagerOrCreate returns the scoped key manager for the given scope,
+// falling back to creating it on the fly (mirroring the legacy ImportAccount
+// flow) when waddrmgr reports ErrScopeNotFound.
+func (s *Store) scopedManagerOrCreate(ns walletdb.ReadWriteBucket,
+	scope waddrmgr.KeyScope) (waddrmgr.AccountStore, error) {
+
+	scopedMgr, err := s.addrStore.FetchScopedKeyManager(scope)
+	if err == nil {
+		return scopedMgr, nil
+	}
+
+	if !waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		return nil, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	defaultSchema, ok := waddrmgr.ScopeAddrMap[scope]
+	if !ok {
+		return nil, fmt.Errorf("%w %s", errKvdbNoDefaultSchema, scope)
+	}
+
+	scopedMgr, err = s.addrStore.NewScopedKeyManager(
+		ns, scope, defaultSchema,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new scoped key manager: %w", err)
+	}
+
+	return scopedMgr, nil
 }
 
 // GetAccount returns the account identified by the given query within the
@@ -387,7 +520,6 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		CreatedAt:            createdAt,
 	}, nil
 }
-
 
 // readMasterHDPubKey fetches the wallet's master HD public key bytes,
 // translating waddrmgr.ErrNoExist into a nil result so callers can pass
@@ -643,7 +775,6 @@ type accountBalancePair struct {
 	confirmed   btcutil.Amount
 	unconfirmed btcutil.Amount
 }
-
 
 // fetchAccountBalances walks the wallet's unspent outputs once and
 // returns confirmed/unconfirmed totals keyed by (scope, account).

@@ -2,7 +2,6 @@ package kvdb
 
 import (
 	"context"
-	"errors"
 	"iter"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -11,46 +10,8 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// errKvdbAddrStoreTypeMismatch is returned when the caller wires kvdb.NewStore
-// with an addrStore value that does not satisfy the kvdbAddrStore narrow
-// interface.
-var errKvdbAddrStoreTypeMismatch = errors.New(
-	"kvdb: addrStore does not satisfy kvdbAddrStore",
-)
-
 // A compile-time assertion to ensure Store implements the wallet store.
 var _ db.WalletStore = (*Store)(nil)
-
-// kvdbAddrStore is the narrow waddrmgr.Manager surface kvdb depends on for
-// pure-DB reads against the legacy bucket layout. A separate interface keeps
-// kvdb decoupled from waddrmgr.AddrStore's full breadth.
-type kvdbAddrStore interface {
-	// EncryptedMasterHDPriv reads the encrypted master HD private key
-	// from the manager's main bucket.
-	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
-
-	// FetchScopedKeyManager returns the scoped key manager for the
-	// given scope, or an error if it does not exist.
-	FetchScopedKeyManager(scope waddrmgr.KeyScope) (
-		waddrmgr.AccountStore, error)
-
-	// ActiveScopedKeyManagers returns every active scoped key manager.
-	ActiveScopedKeyManagers() []waddrmgr.AccountStore
-
-	// WatchOnly returns whether the wallet itself is watch-only.
-	WatchOnly() bool
-}
-
-// addrManager type-asserts s.addrStore into kvdbAddrStore. A nil store or a
-// wrong type indicates a caller-side wiring bug.
-func (s *Store) addrManager() (kvdbAddrStore, error) {
-	mgr, ok := s.addrStore.(kvdbAddrStore)
-	if !ok {
-		return nil, errKvdbAddrStoreTypeMismatch
-	}
-
-	return mgr, nil
-}
 
 // CreateWallet is not yet implemented for kvdb.
 func (s *Store) CreateWallet(ctx context.Context,
