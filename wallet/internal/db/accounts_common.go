@@ -185,7 +185,7 @@ func (params RenameAccountParams) Validate() error {
 }
 
 // AccountPropsRow represents the raw database fields needed to construct
-// AccountProperties.
+// AccountInfo.
 type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
@@ -228,31 +228,12 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	return externalKeyCount, internalKeyCount, importedKeyCount, nil
 }
 
-// getAddrTypes extracts the internal and external address types from the row
-// and handles errors.
-func getAddrTypes[AddrTypeId, AccOriginId any](
-	row AccountPropsRow[AddrTypeId, AccOriginId]) (AddressType, AddressType,
-	error) {
-
-	internalType, err := row.IDToAddrType(row.InternalTypeID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("internal type: %w", err)
-	}
-
-	externalType, err := row.IDToAddrType(row.ExternalTypeID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("external type: %w", err)
-	}
-
-	return internalType, externalType, nil
-}
-
-// AccountPropsRowToProps converts a database row containing full account
-// properties into an AccountProperties struct. The idToAddrType function is
+// AccountPropsRowToInfo converts a database row containing full account
+// properties into an AccountInfo struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
 // values.
-func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
-	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountProperties, error) {
+func AccountPropsRowToInfo[AddrTypeId, AccOriginId any](
+	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountInfo, error) {
 
 	var accountNum uint32
 	if row.AccountNumber.Valid {
@@ -279,11 +260,6 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
-	internalType, externalType, err := getAddrTypes(row)
-	if err != nil {
-		return nil, err
-	}
-
 	var fingerprint uint32
 	if row.MasterFingerprint.Valid {
 		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
@@ -299,7 +275,7 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, err
 	}
 
-	return &AccountProperties{
+	return &AccountInfo{
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
 		Origin:               origin,
@@ -314,10 +290,6 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		},
 		IsWatchOnly: row.IsWatchOnly,
 		CreatedAt:   row.CreatedAt,
-		AddrSchema: &ScopeAddrSchema{
-			InternalAddrType: internalType,
-			ExternalAddrType: externalType,
-		},
 	}, nil
 }
 
@@ -641,8 +613,8 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	rowToID func(CreateRow) int64,
 	createSecret func(context.Context, SecretArgs) error,
 	buildSecretArgs func(accountID int64) SecretArgs,
-	getProps func(accountID int64) (*AccountProperties, error),
-) (*AccountProperties, error) {
+	getProps func(accountID int64) (*AccountInfo, error),
+) (*AccountInfo, error) {
 
 	err := params.ValidateBasic()
 	if err != nil {

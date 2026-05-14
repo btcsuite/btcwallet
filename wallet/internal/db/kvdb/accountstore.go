@@ -15,7 +15,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 
 // CreateImportedAccount is not yet implemented for kvdb.
 func (s *Store) CreateImportedAccount(ctx context.Context,
-	_ db.CreateImportedAccountParams) (*db.AccountProperties, error) {
+	_ db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
 	return nil, notImplemented(ctx, "CreateImportedAccount")
 }

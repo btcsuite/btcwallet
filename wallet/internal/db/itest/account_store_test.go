@@ -1435,10 +1435,10 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 		"CreatedAt should not be in the future")
 }
 
-// requireAccountPropertiesMatches asserts that the provided AccountProperties
+// requireAccountPropertiesMatches asserts that the provided AccountInfo
 // matches the expected AccountTestCase's core identity fields and creation
 // timestamp.
-func requireAccountPropertiesMatches(t *testing.T, props *db.AccountProperties,
+func requireAccountPropertiesMatches(t *testing.T, props *db.AccountInfo,
 	tc AccountTestCase) {
 
 	t.Helper()

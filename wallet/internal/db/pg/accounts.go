@@ -161,9 +161,9 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 // Imported accounts have NULL account_number since they don't follow BIP44
 // derivation.
 func (s *Store) CreateImportedAccount(ctx context.Context,
-	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
+	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
-	var props *db.AccountProperties
+	var props *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		var err error
@@ -177,7 +177,7 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 			buildCreateImportedAccountArgs(params),
 			func(row sqlc.CreateImportedAccountRow) int64 { return row.ID },
 			qtx.CreateAccountSecret, buildCreateAccountSecretArgs(params),
-			func(accountID int64) (*db.AccountProperties, error) {
+			func(accountID int64) (*db.AccountInfo, error) {
 				return getAccountProps(ctx, qtx, accountID)
 			},
 		)
@@ -245,16 +245,16 @@ func buildCreateAccountSecretArgs(
 }
 
 // getAccountProps fetches full account properties from the database and
-// converts the row to AccountProperties.
+// converts the row to AccountInfo.
 func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
-	accountID int64) (*db.AccountProperties, error) {
+	accountID int64) (*db.AccountInfo, error) {
 
 	row, err := qtx.GetAccountPropsById(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("get account props: %w", err)
 	}
 
-	return db.AccountPropsRowToProps(db.AccountPropsRow[int16, int16]{
+	return db.AccountPropsRowToInfo(db.AccountPropsRow[int16, int16]{
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,
 		OriginID:          row.OriginID,
@@ -267,9 +267,6 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 		CreatedAt:         row.CreatedAt,
 		Purpose:           row.Purpose,
 		CoinType:          row.CoinType,
-		InternalTypeID:    row.InternalTypeID,
-		ExternalTypeID:    row.ExternalTypeID,
-		IDToAddrType:      db.IDToAddressType[int16],
 		IDToOriginType:    db.IDToAccountOrigin[int16],
 	})
 }
