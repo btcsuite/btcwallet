@@ -39,8 +39,8 @@ func requireConstraintSQLError(t *testing.T, err error) {
 	require.ErrorIs(t, err, sqlErr)
 }
 
-// requireDriverConstraintError verifies that a direct PostgreSQL driver
-// error is a constraint violation before store-level error wrapping occurs.
+// requireDriverConstraintError verifies that a direct PostgreSQL driver error
+// indicates a constraint violation before store-level error wrapping occurs.
 func requireDriverConstraintError(t *testing.T, err error) {
 	t.Helper()
 
