@@ -173,9 +173,10 @@ type WalletStore interface {
 	UpdateWallet(ctx context.Context, params UpdateWalletParams) error
 
 	// GetEncryptedHDSeed retrieves the encrypted Hierarchical
-	// Deterministic (HD) seed of the wallet. This seed is sensitive
-	// information and is returned in its encrypted form. It returns the
-	// encrypted seed as a byte slice or an error if the retrieval fails.
+	// Deterministic (HD) seed (the encrypted master HD private key) of
+	// the wallet. This seed is sensitive information and is returned in
+	// its encrypted form. It returns the encrypted seed as a byte slice
+	// or an error if the retrieval fails.
 	GetEncryptedHDSeed(ctx context.Context, walletID uint32) ([]byte, error)
 
 	// UpdateWalletSecrets updates the secrets for the wallet.

@@ -51,6 +51,7 @@ SELECT
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
+    w.master_hd_pub_key,
     s.synced_height,
     s.birthday_height,
     s.birthday_timestamp,
@@ -72,6 +73,7 @@ type GetWalletByIDRow struct {
 	IsImported             bool
 	ManagerVersion         int32
 	IsWatchOnly            bool
+	MasterHdPubKey         []byte
 	SyncedHeight           sql.NullInt32
 	BirthdayHeight         sql.NullInt32
 	BirthdayTimestamp      sql.NullTime
@@ -91,6 +93,7 @@ func (q *Queries) GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow
 		&i.IsImported,
 		&i.ManagerVersion,
 		&i.IsWatchOnly,
+		&i.MasterHdPubKey,
 		&i.SyncedHeight,
 		&i.BirthdayHeight,
 		&i.BirthdayTimestamp,
@@ -110,6 +113,7 @@ SELECT
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
+    w.master_hd_pub_key,
     s.synced_height,
     s.birthday_height,
     s.birthday_timestamp,
@@ -131,6 +135,7 @@ type GetWalletByNameRow struct {
 	IsImported             bool
 	ManagerVersion         int32
 	IsWatchOnly            bool
+	MasterHdPubKey         []byte
 	SyncedHeight           sql.NullInt32
 	BirthdayHeight         sql.NullInt32
 	BirthdayTimestamp      sql.NullTime
@@ -150,6 +155,7 @@ func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (GetWa
 		&i.IsImported,
 		&i.ManagerVersion,
 		&i.IsWatchOnly,
+		&i.MasterHdPubKey,
 		&i.SyncedHeight,
 		&i.BirthdayHeight,
 		&i.BirthdayTimestamp,
@@ -253,6 +259,7 @@ SELECT
     w.is_imported,
     w.manager_version,
     w.is_watch_only,
+    w.master_hd_pub_key,
     s.synced_height,
     s.birthday_height,
     s.birthday_timestamp,
@@ -284,6 +291,7 @@ type ListWalletsRow struct {
 	IsImported             bool
 	ManagerVersion         int32
 	IsWatchOnly            bool
+	MasterHdPubKey         []byte
 	SyncedHeight           sql.NullInt32
 	BirthdayHeight         sql.NullInt32
 	BirthdayTimestamp      sql.NullTime
@@ -312,6 +320,7 @@ func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]Lis
 			&i.IsImported,
 			&i.ManagerVersion,
 			&i.IsWatchOnly,
+			&i.MasterHdPubKey,
 			&i.SyncedHeight,
 			&i.BirthdayHeight,
 			&i.BirthdayTimestamp,
