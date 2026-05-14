@@ -384,11 +384,41 @@ type AccountInfo struct {
 	// KeyScope is the key scope the account belongs to. This determines the
 	// derivation path and the default address schema.
 	KeyScope KeyScope
+
+	// PublicKey is the account-level extended public key in plaintext.
+	// It is set for both derived and imported accounts where the wallet
+	// knows the account public material.
+	PublicKey []byte
+
+	// MasterKeyFingerprint is the fingerprint of the root master key
+	// (BIP32 m/) corresponding to this account's public key. Used by
+	// some hardware wallets for proper identification and signing.
+	MasterKeyFingerprint uint32
 }
 
-// ScopeAddrSchema is the address schema of a particular KeyScope. This will be
-// persisted within the database, and will be consulted when deriving any keys
-// for a particular scope to know how to encode the public keys as addresses.
+// ScopeAddrSchema is the address schema of a particular KeyScope. It is
+// persisted on the key_scopes row and consulted when deriving any keys
+// for a particular scope to know how to encode the public keys as
+// addresses.
+//
+// Asymmetric schemas (ExternalAddrType != InternalAddrType) are *not*
+// BIP-spec compliant — every standardized derivation BIP (44, 49, 84,
+// 86) assigns a single address type to both branches. The asymmetry
+// exists in btcwallet only for KeyScopeBIP0049Plus, which deliberately
+// derives change as P2WPKH (cheaper to spend) while keeping the BIP-49
+// nested-SegWit external addresses. Self-derived BIP-0049Plus accounts
+// always use that schema.
+//
+// waddrmgr also supports a per-account override that flips a
+// BIP-0049Plus account back to the strict BIP-49 nested-everywhere
+// schema (KeyScopeBIP0049AddrSchema) so the wallet can faithfully scan
+// a strict-BIP-49 xpub imported from an external wallet (Trezor,
+// Ledger, etc.). The SQL backends in this package do not model that
+// override; every account exposes its scope's default schema, so a
+// strict-BIP-49 watch-only import scans at btcwallet's Plus default
+// (internal=P2WPKH) and misses the source wallet's internal change
+// UTXOs (which live at P2SH-P2WPKH) until the scanner is taught to
+// derive both branch variants — a follow-up to this stack.
 type ScopeAddrSchema struct {
 	// ExternalAddrType is the address type for all keys within branch 0.
 	ExternalAddrType AddressType
@@ -441,61 +471,6 @@ type CreateImportedAccountParams struct {
 	// to the database layer. A nil or empty slice means no account private
 	// key material is stored; the imported account will be watch-only.
 	EncryptedPrivateKey []byte
-}
-
-// AccountProperties contains properties associated with each account, such as
-// the account name, number, and the number of derived and imported keys.
-type AccountProperties struct {
-	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not follow BIP44 derivation and therefore do not
-	// have a meaningful account index. For those accounts, this field is
-	// set to 0 and must not be used when Origin is ImportedAccount.
-	AccountNumber uint32
-
-	// AccountName is the user-identifying name of the account.
-	AccountName string
-
-	// Origin indicates whether the account was derived from the wallet's
-	// HD seed or imported from an external source.
-	Origin AccountOrigin
-
-	// ExternalKeyCount is the number of internal keys that have been
-	// derived for the account.
-	ExternalKeyCount uint32
-
-	// InternalKeyCount is the number of internal keys that have been
-	// derived for the account.
-	InternalKeyCount uint32
-
-	// ImportedKeyCount is the number of imported keys found within the
-	// account.
-	ImportedKeyCount uint32
-
-	// PublicKey is the account public key. This is the extended public key
-	// that can be used to derive addresses for the account.
-	PublicKey []byte
-
-	// MasterKeyFingerprint represents the fingerprint of the root key
-	// corresponding to the master public key (also known as the key with
-	// derivation path m/). This may be required by some hardware wallets
-	// for proper identification and signing.
-	MasterKeyFingerprint uint32
-
-	// KeyScope is the key scope the account belongs to.
-	KeyScope KeyScope
-
-	// IsWatchOnly indicates whether the account is in watch-only mode.
-	// Derived accounts inherit the wallet's watch-only status. Imported
-	// accounts are watch-only if the wallet is watch-only OR if the imported
-	// account has no private key material (account_secret is NULL).
-	IsWatchOnly bool
-
-	// CreatedAt is the timestamp when the account was created in the database.
-	CreatedAt time.Time
-
-	// AddrSchema, if non-nil, specifies an address schema override for
-	// address generation only applicable to the account.
-	AddrSchema *ScopeAddrSchema
 }
 
 // GetAccountQuery contains the parameters for querying a single account. The

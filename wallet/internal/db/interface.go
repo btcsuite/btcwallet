@@ -195,15 +195,17 @@ type AccountStore interface {
 	CreateDerivedAccount(ctx context.Context,
 		params CreateDerivedAccountParams) (*AccountInfo, error)
 
-	// CreateImportedAccount stores an imported account identified by an
-	// extended public key.
+	// CreateImportedAccount stores an imported account identified by
+	// an extended public key. Returns the persisted account as an
+	// AccountInfo populated with the durable fields the wallet
+	// expects (PublicKey, MasterKeyFingerprint, etc.).
 	//
 	// If the key scope does not exist, it will be automatically created
 	// using the address schema from ScopeAddrMap with no coin public/private
 	// key material. Spendable scopes may later gain a key_scope_secrets row;
 	// watch-only scopes remain absent from that table.
 	CreateImportedAccount(ctx context.Context,
-		params CreateImportedAccountParams) (*AccountProperties, error)
+		params CreateImportedAccountParams) (*AccountInfo, error)
 
 	// GetAccount retrieves information about a specific account,
 	// identified by its name or account number within a given key scope.
