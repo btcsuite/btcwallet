@@ -188,16 +188,20 @@ type AccountStore interface {
 	// CreateDerivedAccount creates a new derived account with the given name
 	// and scope.
 	//
-	// If the key scope does not exist, it will be automatically created with
-	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	// If the key scope does not exist, it will be automatically created
+	// using the address schema from ScopeAddrMap. Spendable scopes may
+	// later gain a key_scope_secrets row; watch-only scopes remain absent
+	// from that table.
 	CreateDerivedAccount(ctx context.Context,
 		params CreateDerivedAccountParams) (*AccountInfo, error)
 
 	// CreateImportedAccount stores an imported account identified by an
 	// extended public key.
 	//
-	// If the key scope does not exist, it will be automatically created with
-	// NULL encrypted keys using the address schema from ScopeAddrMap.
+	// If the key scope does not exist, it will be automatically created
+	// using the address schema from ScopeAddrMap. Spendable scopes may
+	// later gain a key_scope_secrets row; watch-only scopes remain absent
+	// from that table.
 	CreateImportedAccount(ctx context.Context,
 		params CreateImportedAccountParams) (*AccountProperties, error)
 

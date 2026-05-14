@@ -14,8 +14,8 @@ ON CONFLICT (wallet_id, purpose, coin_type) DO NOTHING
 RETURNING id;
 
 -- name: InsertKeyScopeSecrets :exec
--- Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
--- watch-only scopes.
+-- Inserts secrets for a spendable key scope. Watch-only scopes are represented
+-- by an absent key_scope_secrets row.
 INSERT INTO key_scope_secrets (
     scope_id,
     encrypted_coin_priv_key
