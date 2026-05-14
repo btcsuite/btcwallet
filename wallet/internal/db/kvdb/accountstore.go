@@ -278,11 +278,147 @@ func translateAccountErr(err error, notFound error) error {
 	return fmt.Errorf("waddrmgr: %w", err)
 }
 
-// ListAccounts is not yet implemented for kvdb.
-func (s *Store) ListAccounts(ctx context.Context,
-	_ db.ListAccountsQuery) ([]db.AccountInfo, error) {
+// ListAccounts returns the accounts matching the given query. When
+// query.Scope is nil, every active scoped key manager is walked.
+func (s *Store) ListAccounts(_ context.Context,
+	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	return nil, notImplemented(ctx, "ListAccounts")
+	mgr := s.addrStore
+
+	var (
+		accounts        []db.AccountInfo
+		internalNumbers []uint32
+	)
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return nil
+		}
+
+		scopedMgrs, err := selectScopedManagers(mgr, query.Scope)
+		if err != nil {
+			return err
+		}
+
+		walletMasterHDPubKey, err := readMasterHDPubKey(mgr, ns)
+		if err != nil {
+			return err
+		}
+
+		walletWatchOnly := mgr.WatchOnly()
+		for _, scopedMgr := range scopedMgrs {
+			err := collectScopedAccounts(
+				ns, scopedMgr, query, walletWatchOnly,
+				walletMasterHDPubKey,
+				&accounts, &internalNumbers,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		return s.maybeAttachListBalances(
+			ns, tx, query, accounts, internalNumbers,
+		)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return accounts, nil
+}
+
+// collectScopedAccounts walks the accounts under scopedMgr and appends
+// matching entries to accounts. The reserved "imported addresses" pseudo-
+// account and entries that fail the optional Name filter are skipped.
+func collectScopedAccounts(ns walletdb.ReadBucket,
+	scopedMgr waddrmgr.AccountStore, query db.ListAccountsQuery,
+	walletWatchOnly bool, walletMasterHDPubKey []byte,
+	accounts *[]db.AccountInfo,
+	internalNumbers *[]uint32) error {
+
+	return scopedMgr.ForEachAccount(ns, func(account uint32) error {
+		if account == waddrmgr.ImportedAddrAccount {
+			return nil
+		}
+
+		info, err := loadAccountInfo(
+			ns, scopedMgr, account, walletWatchOnly,
+			walletMasterHDPubKey,
+		)
+		if err != nil {
+			return err
+		}
+
+		if query.Name != nil && *query.Name != info.AccountName {
+			return nil
+		}
+
+		*accounts = append(*accounts, *info)
+		// Keep the waddrmgr internal account number aligned by
+		// index with `accounts`. attachAccountBalances keys
+		// balance lookups by the internal number because the
+		// AccountInfo contract masks imported numbers to 0
+		// (data_types.go), but waddrmgr's balance walker still
+		// indexes by the internal number.
+		*internalNumbers = append(*internalNumbers, account)
+
+		return nil
+	})
+}
+
+// maybeAttachListBalances populates ConfirmedBalance / UnconfirmedBalance on
+// every entry in accounts unless query.SkipBalance is set or no accounts
+// were collected.
+func (s *Store) maybeAttachListBalances(ns walletdb.ReadBucket,
+	tx walletdb.ReadTx, query db.ListAccountsQuery,
+	accounts []db.AccountInfo, internalNumbers []uint32) error {
+
+	if query.SkipBalance || len(accounts) == 0 {
+		return nil
+	}
+
+	txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+
+	var scopeFilter *waddrmgr.KeyScope
+	if query.Scope != nil {
+		scopeFilter = &waddrmgr.KeyScope{
+			Purpose: query.Scope.Purpose,
+			Coin:    query.Scope.Coin,
+		}
+	}
+
+	balances, err := s.fetchAccountBalances(ns, txmgrNs, scopeFilter)
+	if err != nil {
+		return err
+	}
+
+	attachAccountBalances(accounts, internalNumbers, balances)
+
+	return nil
+}
+
+// selectScopedManagers narrows the set of scoped managers to walk based on
+// an optional scope filter from the public query.
+func selectScopedManagers(mgr waddrmgr.AddrStore, filter *db.KeyScope) (
+	[]waddrmgr.AccountStore, error) {
+
+	if filter == nil {
+		return mgr.ActiveScopedKeyManagers(), nil
+	}
+
+	scope := waddrmgr.KeyScope{
+		Purpose: filter.Purpose,
+		Coin:    filter.Coin,
+	}
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	return []waddrmgr.AccountStore{scopedMgr}, nil
 }
 
 // RenameAccount is not yet implemented for kvdb.
@@ -405,16 +541,26 @@ func (s *Store) walkAccountUTXOs(addrmgrNs,
 // totals back into the AccountInfo slice. Accounts that produced no
 // unspent outputs retain their zero balance.
 func attachAccountBalances(accounts []db.AccountInfo,
+	internalNumbers []uint32,
 	balances map[accountBalanceKey]accountBalancePair) {
 
 	for i := range accounts {
 		info := &accounts[i]
+		// Key by the waddrmgr internal account number, NOT
+		// info.AccountNumber. loadAccountInfo masks imported
+		// AccountNumber to 0 at the contract boundary; if we
+		// keyed by info.AccountNumber the balance lookup for
+		// imported rows would collide with derived account 0
+		// (silently zeroing or mis-attributing imported
+		// balances). The internal number is preserved by
+		// collectScopedAccounts in a parallel slice for exactly
+		// this purpose.
 		key := accountBalanceKey{
 			scope: waddrmgr.KeyScope{
 				Purpose: info.KeyScope.Purpose,
 				Coin:    info.KeyScope.Coin,
 			},
-			account: info.AccountNumber,
+			account: internalNumbers[i],
 		}
 
 		pair := balances[key]

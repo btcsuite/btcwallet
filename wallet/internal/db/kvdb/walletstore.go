@@ -34,6 +34,9 @@ type kvdbAddrStore interface {
 	FetchScopedKeyManager(scope waddrmgr.KeyScope) (
 		waddrmgr.AccountStore, error)
 
+	// ActiveScopedKeyManagers returns every active scoped key manager.
+	ActiveScopedKeyManagers() []waddrmgr.AccountStore
+
 	// WatchOnly returns whether the wallet itself is watch-only.
 	WatchOnly() bool
 }
