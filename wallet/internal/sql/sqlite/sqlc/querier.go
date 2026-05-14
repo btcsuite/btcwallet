@@ -249,8 +249,8 @@ type Querier interface {
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
-	// Inserts secrets for a key scope. encrypted_coin_priv_key may be NULL for
-	// watch-only scopes.
+	// Inserts secrets for a spendable key scope. Watch-only scopes are represented
+	// by an absent key_scope_secrets row.
 	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
 	// Inserts a wallet-scoped transaction row and returns its database ID.
 	//
