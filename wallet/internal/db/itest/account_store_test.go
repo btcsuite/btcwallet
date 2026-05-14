@@ -113,7 +113,8 @@ func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
 		queries := store.Queries()
 
 		walletInfo, err := store.CreateWallet(
-			t.Context(), CreateWatchOnlyWalletParams("watch-only-account-insert"),
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-account-insert"),
 		)
 		require.NoError(t, err)
 
@@ -138,14 +139,18 @@ func TestWatchOnlyAccountSecretTriggers(t *testing.T) {
 		requireDriverConstraintError(t, err)
 	})
 
-	t.Run("watch-only empty-but-non-nil insert is rejected", func(t *testing.T) {
+	t.Run("watch-only empty-but-non-nil insert is rejected", func(
+		t *testing.T,
+	) {
+
 		t.Parallel()
 
 		store := NewTestStore(t)
 		queries := store.Queries()
 
 		walletInfo, err := store.CreateWallet(
-			t.Context(), CreateWatchOnlyWalletParams("watch-only-account-empty"),
+			t.Context(),
+			CreateWatchOnlyWalletParams("watch-only-account-empty"),
 		)
 		require.NoError(t, err)
 
@@ -582,6 +587,8 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
+				t.Helper()
+
 				info, err := store.CreateDerivedAccount(
 					t.Context(), db.CreateDerivedAccountParams{
 						WalletID: walletID,
@@ -603,6 +610,8 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
+				t.Helper()
+
 				info, err := store.CreateDerivedAccount(
 					t.Context(), db.CreateDerivedAccountParams{
 						WalletID: walletID,
@@ -618,11 +627,13 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			},
 		},
 		{
-			name:          "standard wallet imported account with private key is spendable",
+			name:          "standard wallet imported account with private key is spendable", //nolint:lll
 			walletParams:  CreateWalletParamsFixture,
 			wantWatchOnly: false,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
+
+				t.Helper()
 
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
@@ -641,12 +652,14 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			},
 		},
 		{
-			name:          "standard wallet imported account without private key is watch-only",
+			name:          "standard wallet imported account without private key is watch-only", //nolint:lll
 			walletParams:  CreateWalletParamsFixture,
 			wantWatchOnly: true,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
+				t.Helper()
+
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
 						WalletID:  walletID,
@@ -663,12 +676,14 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			},
 		},
 		{
-			name:          "watch-only wallet imported account without private key is watch-only",
+			name:          "watch-only wallet imported account without private key is watch-only", //nolint:lll
 			walletParams:  CreateWatchOnlyWalletParams,
 			wantWatchOnly: true,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
+				t.Helper()
+
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
 						WalletID:  walletID,
@@ -685,11 +700,13 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			},
 		},
 		{
-			name:         "watch-only wallet imported account with private key is rejected",
+			name:         "watch-only wallet imported account with private key is rejected", //nolint:lll
 			walletParams: CreateWatchOnlyWalletParams,
 			wantErr:      db.ErrWatchOnlyViolation,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
+
+				t.Helper()
 
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
@@ -806,12 +823,13 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 
 	createDerivedAccount(t, store, walletID, scope, "derived")
 
-	_, err := store.CreateImportedAccount(t.Context(), db.CreateImportedAccountParams{
-		WalletID:  walletID,
-		Name:      db.DefaultImportedAccountName,
-		Scope:     scope,
-		PublicKey: RandomBytes(32),
-	})
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:  walletID,
+			Name:      db.DefaultImportedAccountName,
+			Scope:     scope,
+			PublicKey: RandomBytes(32),
+		})
 	require.NoError(t, err)
 
 	derived, err := store.GetAccount(
@@ -961,12 +979,13 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 
 	createDerivedAccount(t, store, walletID, scope, "derived")
 
-	_, err := store.CreateImportedAccount(t.Context(), db.CreateImportedAccountParams{
-		WalletID:  walletID,
-		Name:      db.DefaultImportedAccountName,
-		Scope:     scope,
-		PublicKey: RandomBytes(32),
-	})
+	_, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:  walletID,
+			Name:      db.DefaultImportedAccountName,
+			Scope:     scope,
+			PublicKey: RandomBytes(32),
+		})
 	require.NoError(t, err)
 
 	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{

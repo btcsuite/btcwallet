@@ -3,7 +3,6 @@
 package itest
 
 import (
-	"errors"
 	"math"
 	"testing"
 	"time"
@@ -843,7 +842,7 @@ func TestGetEncryptedHDSeed_WatchOnly(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrSecretNotFound)
 }
 
-// TestWatchOnlyWalletRejectsWalletSecrets verifies that watch-only wallets allow
+// TestWatchOnlyWalletRejectsWalletSecrets verifies that watch-only wallets
 // script-encryption material while still rejecting private wallet secrets.
 func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 	t.Parallel()
@@ -860,25 +859,26 @@ func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 		require.True(t, info.IsWatchOnly)
 	})
 
-	t.Run("create with empty-but-non-nil private secrets succeeds", func(t *testing.T) {
-		t.Parallel()
+	t.Run("create with empty-but-non-nil private secrets succeeds",
+		func(t *testing.T) {
+			t.Parallel()
 
-		store := NewTestStore(t)
+			store := NewTestStore(t)
 
-		params := CreateWatchOnlyWalletParams("watch-only-create-empty")
-		params.MasterKeyPrivParams = []byte{}
-		params.EncryptedCryptoPrivKey = []byte{}
-		params.EncryptedMasterPrivKey = []byte{}
+			params := CreateWatchOnlyWalletParams("watch-only-create-empty")
+			params.MasterKeyPrivParams = []byte{}
+			params.EncryptedCryptoPrivKey = []byte{}
+			params.EncryptedMasterPrivKey = []byte{}
 
-		info, err := store.CreateWallet(t.Context(), params)
-		require.NoError(t, err)
-		require.NotNil(t, info)
-		require.True(t, info.IsWatchOnly)
+			info, err := store.CreateWallet(t.Context(), params)
+			require.NoError(t, err)
+			require.NotNil(t, info)
+			require.True(t, info.IsWatchOnly)
 
-		seed, err := store.GetEncryptedHDSeed(t.Context(), info.ID)
-		require.Nil(t, seed)
-		require.ErrorIs(t, err, db.ErrSecretNotFound)
-	})
+			seed, err := store.GetEncryptedHDSeed(t.Context(), info.ID)
+			require.Nil(t, seed)
+			require.ErrorIs(t, err, db.ErrSecretNotFound)
+		})
 
 	t.Run("create with script key only succeeds", func(t *testing.T) {
 		t.Parallel()
@@ -908,7 +908,7 @@ func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 
 		_, err := store.CreateWallet(t.Context(), params)
 		require.Error(t, err)
-		require.True(t, errors.Is(err, db.ErrWatchOnlyViolation))
+		require.ErrorIs(t, err, db.ErrWatchOnlyViolation)
 	})
 
 	t.Run("update with script key only succeeds", func(t *testing.T) {
@@ -935,31 +935,32 @@ func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 		require.ErrorIs(t, err, db.ErrSecretNotFound)
 	})
 
-	t.Run("update with empty-but-non-nil private secrets succeeds", func(t *testing.T) {
-		t.Parallel()
+	t.Run("update with empty-but-non-nil private secrets succeeds",
+		func(t *testing.T) {
+			t.Parallel()
 
-		store := NewTestStore(t)
+			store := NewTestStore(t)
 
-		created, err := store.CreateWallet(
-			t.Context(),
-			CreateWatchOnlyWalletParams("watch-only-update-empty"),
-		)
-		require.NoError(t, err)
+			created, err := store.CreateWallet(
+				t.Context(),
+				CreateWatchOnlyWalletParams("watch-only-update-empty"),
+			)
+			require.NoError(t, err)
 
-		err = store.UpdateWalletSecrets(
-			t.Context(), db.UpdateWalletSecretsParams{
-				WalletID:                 created.ID,
-				MasterPrivParams:         []byte{},
-				EncryptedCryptoPrivKey:   []byte{},
-				EncryptedMasterHdPrivKey: []byte{},
-			},
-		)
-		require.NoError(t, err)
+			err = store.UpdateWalletSecrets(
+				t.Context(), db.UpdateWalletSecretsParams{
+					WalletID:                 created.ID,
+					MasterPrivParams:         []byte{},
+					EncryptedCryptoPrivKey:   []byte{},
+					EncryptedMasterHdPrivKey: []byte{},
+				},
+			)
+			require.NoError(t, err)
 
-		seed, err := store.GetEncryptedHDSeed(t.Context(), created.ID)
-		require.Nil(t, seed)
-		require.ErrorIs(t, err, db.ErrSecretNotFound)
-	})
+			seed, err := store.GetEncryptedHDSeed(t.Context(), created.ID)
+			require.Nil(t, seed)
+			require.ErrorIs(t, err, db.ErrSecretNotFound)
+		})
 
 	t.Run("update with private secrets is rejected", func(t *testing.T) {
 		t.Parallel()
@@ -981,7 +982,7 @@ func TestWatchOnlyWalletRejectsWalletSecrets(t *testing.T) {
 			},
 		)
 		require.Error(t, err)
-		require.True(t, errors.Is(err, db.ErrWatchOnlyViolation))
+		require.ErrorIs(t, err, db.ErrWatchOnlyViolation)
 	})
 }
 
@@ -1030,23 +1031,27 @@ func TestWatchOnlyWalletSecretTriggers(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("watch-only empty-but-non-nil insert is rejected", func(t *testing.T) {
-		t.Parallel()
+	t.Run("watch-only empty-but-non-nil insert is rejected",
+		func(t *testing.T) {
+			t.Parallel()
 
-		store := NewTestStore(t)
+			store := NewTestStore(t)
 
-		walletInfo, err := store.CreateWallet(
-			t.Context(),
-			CreateWatchOnlyWalletParams("watch-only-wallet-secret-empty-insert"),
-		)
-		require.NoError(t, err)
+			walletInfo, err := store.CreateWallet(
+				t.Context(),
+				CreateWatchOnlyWalletParams(
+					"watch-only-wallet-secret-empty-insert",
+				),
+			)
+			require.NoError(t, err)
 
-		err = insertWalletSecretRaw(
-			t, store.DB(), walletInfo.ID, []byte{}, nil, RandomBytes(32), nil,
-		)
-		require.Error(t, err)
-		requireDriverConstraintError(t, err)
-	})
+			err = insertWalletSecretRaw(
+				t, store.DB(), walletInfo.ID,
+				[]byte{}, nil, RandomBytes(32), nil,
+			)
+			require.Error(t, err)
+			requireDriverConstraintError(t, err)
+		})
 
 	t.Run("watch-only update is rejected", func(t *testing.T) {
 		t.Parallel()

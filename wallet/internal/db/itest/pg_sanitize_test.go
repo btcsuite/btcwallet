@@ -35,12 +35,12 @@ func TestSanitizedPgDBNameSanitization(t *testing.T) {
 func TestSanitizedPgDBNameMaxLength(t *testing.T) {
 	t.Parallel()
 
-	nameAtLimit := "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0"
-	require.Equal(t, 63, len(nameAtLimit))
+	nameAtLimit := "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0" //nolint:lll
+	require.Len(t, nameAtLimit, 63)
 
 	result := sanitizePgDBNameString(nameAtLimit)
 	require.Equal(t, nameAtLimit, result)
-	require.Equal(t, 63, len(result))
+	require.Len(t, result, 63)
 }
 
 // TestSanitizedPgDBNameTruncationWithHash verifies truncation adds hash
@@ -48,16 +48,16 @@ func TestSanitizedPgDBNameMaxLength(t *testing.T) {
 func TestSanitizedPgDBNameTruncationWithHash(t *testing.T) {
 	t.Parallel()
 
-	longName := "TestVeryLongNameThatExceedsPostgreSQLIdentifierLimitOfSixtyThreeBytes"
+	longName := "TestVeryLongNameThatExceedsPostgreSQLIdentifierLimitOfSixtyThreeBytes" //nolint:lll
 	require.Greater(t, len(longName), 63)
 
 	result := sanitizePgDBNameString(longName)
 
-	require.Equal(t, 63, len(result))
-	require.True(t, strings.Contains(result, "_"))
+	require.Len(t, result, 63)
+	require.Contains(t, result, "_")
 
 	suffix := result[len(result)-9:]
-	require.Equal(t, 9, len(suffix))
+	require.Len(t, suffix, 9)
 	require.Equal(t, byte('_'), suffix[0])
 
 	for _, ch := range suffix[1:] {
@@ -84,6 +84,6 @@ func TestSanitizedPgDBNameCollisionAvoidance(t *testing.T) {
 	result2 := sanitizePgDBNameString(name2)
 
 	require.NotEqual(t, result1, result2)
-	require.Equal(t, 63, len(result1))
-	require.Equal(t, 63, len(result2))
+	require.Len(t, result1, 63)
+	require.Len(t, result2, 63)
 }

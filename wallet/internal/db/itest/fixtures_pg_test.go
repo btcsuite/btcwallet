@@ -16,6 +16,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var (
+	// errExpectOneUpdatedRow is returned by helpers that expect a SQL
+	// UPDATE/INSERT to affect exactly one row.
+	errExpectOneUpdatedRow = errors.New("expected 1 updated row")
+
+	// errExpectOneDeletedRow is returned by helpers that expect a SQL
+	// DELETE to remove exactly one row.
+	errExpectOneDeletedRow = errors.New("expected 1 deleted row")
+)
+
 var errUnexpectedDeletedRows = errors.New("unexpected deleted row count")
 
 // testBackend returns the SQL backend expected by PostgreSQL itests.
@@ -180,7 +190,7 @@ func updateAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 updated row, got %d", rows)
+		return fmt.Errorf("%w, got %d", errExpectOneUpdatedRow, rows)
 	}
 
 	return nil
@@ -206,7 +216,7 @@ func deleteWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32) error 
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 deleted row, got %d", rows)
+		return fmt.Errorf("%w, got %d", errExpectOneDeletedRow, rows)
 	}
 
 	return nil
@@ -268,7 +278,7 @@ func updateWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 updated row, got %d", rows)
+		return fmt.Errorf("%w, got %d", errExpectOneUpdatedRow, rows)
 	}
 
 	return nil
@@ -299,7 +309,7 @@ func updateWalletWatchOnlyRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 updated row, got %d", rows)
+		return fmt.Errorf("%w, got %d", errExpectOneUpdatedRow, rows)
 	}
 
 	return nil
@@ -519,7 +529,7 @@ func updateAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
 	}
 
 	if rows != 1 {
-		return fmt.Errorf("expected 1 updated row, got %d", rows)
+		return fmt.Errorf("%w, got %d", errExpectOneUpdatedRow, rows)
 	}
 
 	return nil
