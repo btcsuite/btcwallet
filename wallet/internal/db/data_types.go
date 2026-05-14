@@ -226,6 +226,11 @@ type WalletInfo struct {
 	// SyncedTo represents the wallet's current synchronization state with
 	// the blockchain.
 	SyncedTo *Block
+
+	// MasterPubKey is the plaintext master HD public key of the wallet.
+	// Watch-only wallets are unlocked through this key. May be nil for
+	// wallets that do not persist a master HD public key.
+	MasterPubKey []byte
 }
 
 // Block defines a block's hash, height, and timestamp. This is used to
