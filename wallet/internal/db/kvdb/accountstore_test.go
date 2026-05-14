@@ -1,6 +1,7 @@
 package kvdb
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -166,6 +167,26 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, info.AccountName)
 	require.Equal(t, db.ImportedAccount, info.Origin)
 	require.Equal(t, uint32(0), info.AccountNumber)
+}
+
+// TestListAccountsByNameIncludesImportedPseudoAccount verifies the
+// name-filtered list path also returns the legacy imported address
+// pseudo-account.
+func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	name := waddrmgr.ImportedAddrAccountName
+	infos, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Name: &name,
+	})
+	require.NoError(t, err)
+	require.Len(t, infos, 1)
+	require.Equal(t, waddrmgr.ImportedAddrAccountName, infos[0].AccountName)
+	require.Equal(t, db.ImportedAccount, infos[0].Origin)
+	require.Equal(t, uint32(0), infos[0].AccountNumber)
 }
 
 // newCreditedFixture builds an account store backed by a spendable wallet
@@ -336,4 +357,178 @@ func TestGetAccountSkipBalanceZeros(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, info.ConfirmedBalance)
 	require.Zero(t, info.UnconfirmedBalance)
+}
+
+// TestListAccountsScopeFilter verifies that ListAccounts narrows to the
+// requested scope.
+func TestListAccountsScopeFilter(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+	createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0086, "stash",
+	)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Scope: &scope,
+	})
+	require.NoError(t, err)
+
+	// The default account ("default") plus savingsAccountName.
+	require.GreaterOrEqual(t, len(accounts), 2)
+
+	names := make(map[string]bool, len(accounts))
+	for _, a := range accounts {
+		names[a.AccountName] = true
+		require.Equal(t, scope, a.KeyScope)
+	}
+
+	require.True(t, names[savingsAccountName])
+	require.False(t, names["stash"], "stash should be filtered out")
+}
+
+// TestListAccountsNameFilter verifies that ListAccounts narrows by name.
+func TestListAccountsNameFilter(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+
+	name := savingsAccountName
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Name: &name,
+	})
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+	require.Equal(t, savingsAccountName, accounts[0].AccountName)
+}
+
+// TestListAccountsSortedByAccountNumber verifies ListAccounts returns account
+// snapshots in numeric order, not little-endian bucket-key order.
+func TestListAccountsSortedByAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	// Account 256 sorts before account 1 if the raw little-endian bucket
+	// keys are returned directly.
+	for i := uint32(1); i <= 256; i++ {
+		createDerivedAccount(
+			t, store.db, mgr, waddrmgr.KeyScopeBIP0084,
+			fmt.Sprintf("account-%03d", i),
+		)
+	}
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Scope:       &scope,
+		SkipBalance: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, accounts, 257)
+
+	for i, account := range accounts {
+		require.Equal(t, uint32(i), account.AccountNumber)
+	}
+}
+
+// TestListAccountsPopulatesBalance verifies that ListAccounts
+// attaches confirmed balances to each account from the same scope.
+func TestListAccountsPopulatesBalance(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	account := createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+
+	const utxoAmount = btcutil.Amount(70_000)
+	creditNextAccountAddress(
+		t, store.db, mgr, txStore,
+		waddrmgr.KeyScopeBIP0084, account, utxoAmount,
+	)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Scope: &scope,
+	})
+	require.NoError(t, err)
+
+	var found bool
+	for _, a := range accounts {
+		if a.AccountNumber != account {
+			continue
+		}
+
+		found = true
+
+		require.Equal(t, utxoAmount, a.ConfirmedBalance)
+		require.Zero(t, a.UnconfirmedBalance)
+	}
+
+	require.True(t, found, "savings account missing from list")
+}
+
+// TestListAccountsSkipBalanceZeros verifies that SkipBalance=true
+// on ListAccounts leaves every account's balance fields at zero even
+// when unspent outputs exist.
+func TestListAccountsSkipBalanceZeros(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	account := createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+
+	creditNextAccountAddress(
+		t, store.db, mgr, txStore,
+		waddrmgr.KeyScopeBIP0084, account, 70_000,
+	)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Scope:       &scope,
+		SkipBalance: true,
+	})
+	require.NoError(t, err)
+
+	for _, a := range accounts {
+		require.Zerof(
+			t, a.ConfirmedBalance,
+			"account %q should have zero confirmed balance",
+			a.AccountName,
+		)
+		require.Zerof(
+			t, a.UnconfirmedBalance,
+			"account %q should have zero unconfirmed balance",
+			a.AccountName,
+		)
+	}
 }
