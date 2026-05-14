@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -26,7 +27,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // errNilAccountInfo is returned when accountInfoToProperties receives a nil
@@ -597,7 +597,7 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 //
 // The time complexity of this method is O(U*logA), where U is the number of
 // UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) Balance(_ context.Context, conf uint32,
+func (w *Wallet) Balance(ctx context.Context, conf uint32,
 	scope waddrmgr.KeyScope, name string) (btcutil.Amount, error) {
 
 	err := w.state.validateStarted()
@@ -605,81 +605,33 @@ func (w *Wallet) Balance(_ context.Context, conf uint32,
 		return 0, err
 	}
 
-	var balance btcutil.Amount
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-		// Look up the account number for the given name and scope.
-		manager, err := w.addrStore.FetchScopedKeyManager(scope)
-		if err != nil {
-			return err
-		}
-
-		accNum, err := manager.LookupAccount(addrmgrNs, name)
-		if err != nil {
-			return err
-		}
-
-		// Iterate through all unspent outputs and sum the balances for
-		// the addresses that belong to the target account.
-		syncBlock := w.addrStore.SyncedTo()
-
-		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
-		if err != nil {
-			return err
-		}
-
-		for _, utxo := range utxos {
-			// Skip any UTXOs that have not yet reached the required
-			// number of confirmations.
-			if !hasMinConfs(conf, utxo.Height, syncBlock.Height) {
-				continue
-			}
-
-			balance += w.balanceForUTXO(
-				addrmgrNs, scope, accNum, utxo,
-			)
-		}
-
-		return nil
+	info, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    toDBKeyScope(scope),
+		Name:     &name,
 	})
 	if err != nil {
 		return 0, err
 	}
 
-	return balance, nil
-}
-
-// balanceForUTXO is a helper function for Balance that calculates the balance
-// of a single UTXO if it belongs to the target account.
-func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
-	scope waddrmgr.KeyScope, accNum uint32,
-	utxo wtxmgr.Credit) btcutil.Amount {
-
-	// Extract the address from the UTXO's public key script.
-	addr := extractAddrFromPKScript(
-		utxo.PkScript, w.cfg.ChainParams,
-	)
-	if addr == nil {
-		return 0
+	if conf > math.MaxInt32 {
+		return 0, nil
 	}
 
-	// Look up the account that owns the address.
-	addrScope, addrAcc, err := w.addrStore.AddrAccount(addrmgrNs, addr)
+	minConfs := int32(conf)
+	dbScope := toDBKeyScope(scope)
+
+	result, err := w.store.Balance(ctx, db.BalanceParams{
+		WalletID: w.id,
+		Scope:    &dbScope,
+		Account:  &info.AccountNumber,
+		MinConfs: &minConfs,
+	})
 	if err != nil {
-		// Ignore addresses that are not found in the wallet.
-		return 0
+		return 0, err
 	}
 
-	// If the address belongs to the target account, add the UTXO's value
-	// to the total balance.
-	if addrScope.Scope() == scope && addrAcc == accNum {
-		return utxo.Amount
-	}
-
-	return 0
+	return result.Total, nil
 }
 
 // ImportAccount imports an account from an extended public or private key. The
