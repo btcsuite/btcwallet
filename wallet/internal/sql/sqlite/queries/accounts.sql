@@ -175,8 +175,6 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
