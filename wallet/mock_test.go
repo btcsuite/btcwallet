@@ -150,14 +150,14 @@ func (m *mockStore) CreateDerivedAccount(ctx context.Context,
 
 // CreateImportedAccount implements the db.AccountStore interface.
 func (m *mockStore) CreateImportedAccount(ctx context.Context,
-	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
+	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
 	args := m.Called(ctx, params)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 
-	return args.Get(0).(*db.AccountProperties), args.Error(1)
+	return args.Get(0).(*db.AccountInfo), args.Error(1)
 }
 
 // GetAccount implements the db.AccountStore interface.
