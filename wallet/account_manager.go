@@ -501,7 +501,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 //
 // The time complexity of this method is O(U*logA), where U is the number of
 // UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
+func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	name string) (*AccountResult, error) {
 
 	err := w.state.validateStarted()
@@ -509,57 +509,37 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return nil, err
-	}
-
-	var account *AccountResult
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Look up the account number for the given name and scope. This
-		// is a fast, indexed lookup.
-		accNum, err := manager.LookupAccount(addrmgrNs, name)
-		if err != nil {
-			return err
-		}
-
-		// Retrieve the static properties for the account.
-		props, err := manager.AccountProperties(addrmgrNs, accNum)
-		if err != nil {
-			return err
-		}
-
-		account = &AccountResult{
-			AccountProperties: *props,
-		}
-
-		// Calculate the balance for this specific account by fetching
-		// the UTXOs that belong to it.
-		scopedBalances, err := w.fetchAccountBalances(
-			tx, withScope(scope),
-		)
-		if err != nil {
-			return err
-		}
-
-		// Assign the balance to the account result. If the account has
-		// no UTXOs, the balance will be zero.
-		if balances, ok := scopedBalances[scope]; ok {
-			if balance, ok := balances[accNum]; ok {
-				account.TotalBalance = balance
-			}
-		}
-
-		return nil
+	info, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    toDBKeyScope(scope),
+		Name:     &name,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return account, nil
+	props, err := accountInfoToProperties(info)
+	if err != nil {
+		return nil, err
+	}
+
+	minConfs := int32(0)
+	dbScope := toDBKeyScope(scope)
+
+	result, err := w.store.Balance(ctx, db.BalanceParams{
+		WalletID: w.id,
+		Scope:    &dbScope,
+		Account:  &info.AccountNumber,
+		MinConfs: &minConfs,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &AccountResult{
+		AccountProperties: *props,
+		TotalBalance:      result.Total,
+	}, nil
 }
 
 // RenameAccount renames an existing account. The new name must be unique within

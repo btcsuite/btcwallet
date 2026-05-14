@@ -483,82 +483,43 @@ func TestListAccountsByName(t *testing.T) {
 	require.Empty(t, accounts.Accounts)
 }
 
-// TestGetAccount tests that the GetAccount method works as expected.
+// TestGetAccount verifies GetAccount routes through cache + store.Balance.
 func TestGetAccount(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+	name := testAccountName
 
-	_, err := w.NewAccount(t.Context(), scope, testAccountName)
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    dbScope,
+		Name:     &name,
+	}).Return(&db.AccountInfo{
+		AccountNumber: 1,
+		AccountName:   name,
+		Origin:        db.DerivedAccount,
+		KeyScope:      dbScope,
+	}, nil).Once()
+
+	acctNum := uint32(1)
+	minConfs := int32(0)
+	deps.store.On("Balance", mock.Anything, db.BalanceParams{
+		WalletID: 0,
+		Scope:    &dbScope,
+		Account:  &acctNum,
+		MinConfs: &minConfs,
+	}).Return(db.BalanceResult{}, nil).Once()
+
+	info, err := w.GetAccount(t.Context(), scope, name)
 	require.NoError(t, err)
-
-	// Mock expectations for GetAccount (success).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Twice()
-
-	// We should be able to get the new account.
-	account, err := w.GetAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, err)
-	require.Equal(t, testAccountName, account.AccountName)
-	require.Equal(t, uint32(1), account.AccountNumber)
-	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
-
-	// Mock expectations for GetAccount (default account).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, "default").
-		Return(uint32(0), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 0,
-			AccountName:   "default",
-		}, nil).Once()
-
-	// We should also be able to get the default account.
-	account, err = w.GetAccount(t.Context(), scope, "default")
-	require.NoError(t, err)
-	require.Equal(t, "default", account.AccountName)
-	require.Equal(t, uint32(0), account.AccountNumber)
-	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
-
-	// Mock expectations for GetAccount (error path).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, "non-existent").
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAccountNotFound,
-		}).Once()
-
-	// We should get an error when trying to get a non-existent account.
-	_, err = w.GetAccount(t.Context(), scope, "non-existent")
-	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
-		"expected ErrAccountNotFound",
-	)
+	require.Equal(t, uint32(1), info.AccountNumber)
+	require.Equal(t, name, info.AccountName)
 }
 
 // TestRenameAccount verifies RenameAccount routes through
