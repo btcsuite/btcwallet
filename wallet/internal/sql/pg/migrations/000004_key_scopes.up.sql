@@ -61,3 +61,34 @@ CREATE TABLE key_scope_secrets (
     -- that the key scope cannot be deleted if secrets still exist.
     FOREIGN KEY (scope_id) REFERENCES key_scopes (id) ON DELETE RESTRICT
 );
+
+-- Enforce the watch-only key-scope secret invariant at the database boundary.
+-- Watch-only wallets may keep a scope row for public derivation metadata, but
+-- the matching key_scope_secrets row must not carry coin private key material.
+CREATE FUNCTION assert_watch_only_key_scope_secrets() RETURNS TRIGGER AS $$
+DECLARE
+    wallet_is_watch_only BOOLEAN;
+BEGIN
+    SELECT w.is_watch_only INTO wallet_is_watch_only
+    FROM key_scopes AS ks
+    INNER JOIN wallets AS w ON w.id = ks.wallet_id
+    WHERE ks.id = NEW.scope_id;
+
+    IF wallet_is_watch_only THEN
+        RAISE EXCEPTION 'watch-only key scopes cannot store coin private keys'
+            USING ERRCODE = '23514'; -- check_violation
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_assert_watch_only_key_scope_secrets_insert
+BEFORE INSERT ON key_scope_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_key_scope_secrets();
+
+CREATE TRIGGER trg_assert_watch_only_key_scope_secrets_update
+BEFORE UPDATE ON key_scope_secrets
+FOR EACH ROW
+EXECUTE FUNCTION assert_watch_only_key_scope_secrets();
