@@ -100,6 +100,54 @@ func TestCreateImportedAccountRejectsWalletScopeMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "constraint")
 }
 
+// TestAccountWalletIDImmutable verifies that raw account reparenting updates
+// cannot change wallet ownership after insert.
+func TestAccountWalletIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+
+	sourceWalletID := newWallet(t, store, "account-wallet-immutable-source")
+	targetWalletID := newWallet(t, store, "account-wallet-immutable-target")
+
+	CreateImportedAccount(
+		t, store, sourceWalletID, db.KeyScopeBIP0084, "source-imported",
+	)
+	createDerivedAccount(
+		t, store, targetWalletID, db.KeyScopeBIP0084, "target-derived",
+	)
+
+	sourceScopeID := GetKeyScopeID(
+		t, queries, sourceWalletID, db.KeyScopeBIP0084,
+	)
+	targetScopeID := GetKeyScopeID(
+		t, queries, targetWalletID, db.KeyScopeBIP0084,
+	)
+	sourceAccountID := GetAccountID(
+		t, queries, sourceScopeID, "source-imported",
+	)
+
+	err := reparentAccountRaw(
+		t, store.DB(), sourceAccountID, targetWalletID, targetScopeID,
+	)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	accountInfo, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			sourceWalletID, db.KeyScopeBIP0084, "source-imported",
+		),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, accountInfo)
+	require.Equal(t, "source-imported", accountInfo.AccountName)
+	require.Equal(
+		t, sourceAccountID,
+		GetAccountID(t, queries, sourceScopeID, "source-imported"),
+	)
+}
+
 // TestWatchOnlyAccountSecretTriggers verifies that account_secrets rejects
 // watch-only parent accounts while still allowing inserts and updates for
 // non-watch-only parents.
