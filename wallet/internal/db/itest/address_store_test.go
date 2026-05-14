@@ -1121,6 +1121,61 @@ func TestCreateDerivedAddressRejectsWalletAccountMismatch(t *testing.T) {
 	require.ErrorContains(t, err, "constraint")
 }
 
+// TestAddressWalletIDImmutable verifies that raw address reparenting updates
+// cannot change wallet ownership after insert.
+func TestAddressWalletIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	sourceWalletID := newWallet(t, store, "address-wallet-immutable-source")
+	targetWalletID := newWallet(t, store, "address-wallet-immutable-target")
+
+	CreateImportedAccount(
+		t, store, sourceWalletID, db.KeyScopeBIP0084,
+		db.DefaultImportedAccountName,
+	)
+	CreateImportedAccount(
+		t, store, targetWalletID, db.KeyScopeBIP0084,
+		db.DefaultImportedAccountName,
+	)
+
+	scriptPubKey := RandomBytes(32)
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     sourceWalletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	targetScopeID := GetKeyScopeID(
+		t, queries, targetWalletID, db.KeyScopeBIP0084,
+	)
+	targetAccountID := GetAccountID(
+		t, queries, targetScopeID, db.DefaultImportedAccountName,
+	)
+
+	err = reparentAddressRaw(
+		t, store.DB(), int64(info.ID), targetWalletID, targetAccountID,
+	)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	addressInfo, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     sourceWalletID,
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, addressInfo)
+	require.Equal(t, info.ID, addressInfo.ID)
+}
+
 // TestGetAddressSecret verifies that GetAddressSecret correctly retrieves
 // address secrets for watch-only imported addresses and returns an error for
 // spendable addresses or non-existent address IDs.

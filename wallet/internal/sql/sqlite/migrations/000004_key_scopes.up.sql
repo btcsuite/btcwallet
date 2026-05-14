@@ -44,6 +44,17 @@ ON key_scopes (wallet_id, purpose, coin_type);
 -- Unique index to support composite foreign keys scoped by wallet ownership.
 CREATE UNIQUE INDEX uidx_key_scopes_wallet_id_id ON key_scopes (wallet_id, id);
 
+-- Enforce that wallet ownership chosen at key-scope creation time remains
+-- immutable. This closes the database-boundary hole where a raw update could
+-- reparent an existing scope into another wallet after insert.
+CREATE TRIGGER trg_assert_key_scope_wallet_id_immutable
+BEFORE UPDATE OF wallet_id ON key_scopes
+FOR EACH ROW
+WHEN new.wallet_id != old.wallet_id
+BEGIN
+    SELECT raise(ABORT, 'key scope wallet_id cannot be changed after creation');
+END;
+
 -- Key Scope Secrets table to hold encrypted coin-type secrets for spendable
 -- scopes.
 -- Separated from the main key_scopes table for security and access pattern
