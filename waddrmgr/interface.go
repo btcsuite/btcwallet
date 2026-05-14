@@ -262,6 +262,22 @@ type AccountStore interface {
 		account uint32, name string, plaintextPubKey []byte,
 		encryptedPrivKey []byte) error
 
+	// AllocateImportedAccountNumber advances the scoped manager's
+	// lastAccount counter and returns the next account number for an
+	// imported (watch-only) account.
+	AllocateImportedAccountNumber(ns walletdb.ReadWriteBucket) (
+		uint32, error)
+
+	// PutWatchOnlyAccountWithKeys persists an imported (watch-only)
+	// account row using the supplied extended public key. Must run in
+	// the same walletdb.Update transaction as
+	// AllocateImportedAccountNumber.
+	PutWatchOnlyAccountWithKeys(ns walletdb.ReadWriteBucket,
+		account uint32, name string,
+		pubKey *hdkeychain.ExtendedKey,
+		masterKeyFingerprint uint32,
+		addrSchema *ScopeAddrSchema) error
+
 	// LastAccount returns the last account number.
 	LastAccount(ns walletdb.ReadBucket) (uint32, error)
 
