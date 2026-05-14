@@ -163,11 +163,11 @@ func GetPostgresContainer(ctx context.Context) (*postgres.PostgresContainer,
 		m := db.DefaultMaxConnections
 
 		// pgMaxConns is the Postgres max_connections budget for the
-		// test container. We budget 2x the steady-state pool size to
+		// test container. We budget 3x the steady-state pool size to
 		// absorb connection lifecycle overlap during parallel test
 		// teardown and startup without trying to model each transient
 		// connection source separately.
-		pgMaxConns := 2 * p * m
+		pgMaxConns := 3 * p * m
 
 		pgContainer, errPGContainer = postgres.Run(ctx,
 			cfg.Image,
