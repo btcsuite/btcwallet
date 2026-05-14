@@ -93,3 +93,29 @@ func TestWatchOnlyKeyScopeSecretTriggers(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// TestKeyScopeWalletIDImmutable verifies that raw scope updates cannot change
+// wallet ownership after insert.
+func TestKeyScopeWalletIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+
+	sourceWalletID := newWallet(t, store, "scope-wallet-immutable-source")
+	createDerivedAccount(
+		t, store, sourceWalletID, db.KeyScopeBIP0084, "scope-wallet-source",
+	)
+
+	scopeID := GetKeyScopeID(t, queries, sourceWalletID, db.KeyScopeBIP0084)
+	targetWalletID := newWallet(t, store, "scope-wallet-immutable-target")
+
+	err := updateKeyScopeWalletIDRaw(t, store.DB(), scopeID, targetWalletID)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	require.Equal(
+		t, scopeID,
+		GetKeyScopeID(t, queries, sourceWalletID, db.KeyScopeBIP0084),
+	)
+}
