@@ -2,8 +2,10 @@ package kvdb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
@@ -12,19 +14,165 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// errKvdbNoDefaultSchema is returned when a scope import targets a key
-// scope that has no default address schema registered in
-// waddrmgr.ScopeAddrMap.
-var errKvdbNoDefaultSchema = errors.New(
-	"kvdb: no default schema for scope",
+var (
+	// errKvdbScopedMgrUninitialized is returned by the
+	// CreateDerivedAccount ops adapter when an EnsureScope step has
+	// not yet cached the scoped manager.
+	errKvdbScopedMgrUninitialized = errors.New(
+		"kvdb: scoped manager not initialized",
+	)
+
+	// errKvdbImportedAccountWithPriv is returned by CreateImportedAccount
+	// when a spendable wallet tries to import an account with private
+	// key material; waddrmgr's accountWatchOnly row has no priv-key
+	// column.
+	errKvdbImportedAccountWithPriv = errors.New(
+		"kvdb: imported accounts with private key material are not " +
+			"supported on waddrmgr-backed wallets",
+	)
+
+	// errKvdbNoDefaultSchema is returned when a scope import targets a
+	// key scope that has no default address schema registered in
+	// waddrmgr.ScopeAddrMap.
+	errKvdbNoDefaultSchema = errors.New(
+		"kvdb: no default schema for scope",
+	)
 )
 
-// CreateDerivedAccount is not yet implemented for kvdb.
+// CreateDerivedAccount runs the shared CreateDerivedAccountWithOps workflow
+// on top of waddrmgr's bucket layout via the createDerivedAccountOps
+// adapter.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
-	_ db.CreateDerivedAccountParams,
-	_ db.AccountDerivationFunc) (*db.AccountInfo, error) {
+	params db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
-	return nil, notImplemented(ctx, "CreateDerivedAccount")
+	mgr := s.addrStore
+
+	var info *db.AccountInfo
+
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrAccountNotFound
+		}
+
+		ops := &createDerivedAccountOps{mgr: mgr, ns: ns}
+
+		built, err := db.CreateDerivedAccountWithOps(
+			ctx, params, ops, deriveFn,
+		)
+		if err != nil {
+			return err
+		}
+
+		info = built
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// createDerivedAccountOps adapts the shared workflow to waddrmgr. The
+// same walletdb tx (via ns) covers every step so allocation and
+// persistence roll back together on failure.
+type createDerivedAccountOps struct {
+	mgr       waddrmgr.AddrStore
+	ns        walletdb.ReadWriteBucket
+	scope     waddrmgr.KeyScope
+	scopedMgr waddrmgr.AccountStore
+}
+
+// WalletWatchOnly implements db.CreateDerivedAccountOps.
+func (o *createDerivedAccountOps) WalletWatchOnly(
+	_ context.Context, _ uint32) (bool, error) {
+
+	return o.mgr.WatchOnly(), nil
+}
+
+// EnsureScope implements db.CreateDerivedAccountOps. waddrmgr scopes are
+// pre-registered; the call only fetches and caches the scoped manager.
+func (o *createDerivedAccountOps) EnsureScope(_ context.Context,
+	_ uint32, scope db.KeyScope) (int64, error) {
+
+	waddrScope := waddrmgr.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+
+	scopedMgr, err := o.mgr.FetchScopedKeyManager(waddrScope)
+	if err != nil {
+		return 0, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	o.scope = waddrScope
+	o.scopedMgr = scopedMgr
+
+	return 0, nil
+}
+
+// AllocateAccountNumber implements db.CreateDerivedAccountOps.
+func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
+	_ int64) (int64, error) {
+
+	if o.scopedMgr == nil {
+		return 0, errKvdbScopedMgrUninitialized
+	}
+
+	account, err := o.scopedMgr.AllocateDerivedAccountNumber(o.ns)
+	if err != nil {
+		return 0, fmt.Errorf("allocate account number: %w", err)
+	}
+
+	return int64(account), nil
+}
+
+// CreateDerivedAccount implements db.CreateDerivedAccountOps. The plaintext
+// public key is encrypted via waddrmgr cryptoKeyPub inside
+// PutDerivedAccountWithKeys.
+func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
+	_ int64, accountNumber int64, name string,
+	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
+
+	if o.scopedMgr == nil {
+		return db.CreateDerivedAccountRow{}, errKvdbScopedMgrUninitialized
+	}
+
+	err := o.scopedMgr.PutDerivedAccountWithKeys(
+		o.ns, uint32(accountNumber), name, //nolint:gosec
+		derived.PublicKey, derived.EncryptedPrivateKey,
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"put derived account: %w", err,
+		)
+	}
+
+	// Persist creation timestamp in the kvdb-owned side bucket
+	// inside the same walletdb transaction (see task 102). Returning
+	// the same value to the caller keeps create and subsequent reads
+	// consistent.
+	now := time.Now().UTC()
+	scope := o.scopedMgr.Scope()
+	err = putAccountCreatedAt(
+		o.ns, scope, uint32(accountNumber), now, //nolint:gosec
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"persist created-at: %w", err,
+		)
+	}
+
+	return db.CreateDerivedAccountRow{
+		AccountNumber: sql.NullInt64{
+			Int64: accountNumber,
+			Valid: true,
+		},
+		CreatedAt: now,
+	}, nil
 }
 
 // CreateImportedAccount is not yet implemented for kvdb.
