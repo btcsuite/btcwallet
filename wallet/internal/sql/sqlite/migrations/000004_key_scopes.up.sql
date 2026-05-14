@@ -44,18 +44,18 @@ ON key_scopes (wallet_id, purpose, coin_type);
 -- Unique index to support composite foreign keys scoped by wallet ownership.
 CREATE UNIQUE INDEX uidx_key_scopes_wallet_id_id ON key_scopes (wallet_id, id);
 
--- Key Scope Secrets table to hold encrypted coin-type secrets for each scope.
--- Separated from the main key_scopes table for security and access pattern isolation.
--- Watch-only scopes may have no corresponding row in this table or have NULL
--- encrypted_coin_priv_key.
+-- Key Scope Secrets table to hold encrypted coin-type secrets for spendable
+-- scopes.
+-- Separated from the main key_scopes table for security and access pattern
+-- isolation. Watch-only scopes are represented by having no row in this table.
 CREATE TABLE key_scope_secrets (
     -- Reference to the key scope these keys belong to. Also serves as the
     -- primary key, enforcing one-to-one relationship.
     scope_id INTEGER PRIMARY KEY,
 
     -- Encrypted key used to derive private keys for this scope.
-    -- NULL for watch-only key scopes.
-    encrypted_coin_priv_key BLOB,
+    -- NOT NULL enforces that only spendable scopes have a row in this table.
+    encrypted_coin_priv_key BLOB NOT NULL,
 
     -- Foreign key constraint to key_scopes. Using ON DELETE RESTRICT to ensure
     -- that the key scope cannot be deleted if secrets still exist.
