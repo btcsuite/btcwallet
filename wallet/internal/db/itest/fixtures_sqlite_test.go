@@ -194,6 +194,85 @@ func updateAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
 	return nil
 }
 
+// deleteKeyScopeSecretRaw deletes a key-scope secret row directly through the
+// database so tests can verify or reset absent-row state.
+func deleteKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB,
+	scopeID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		DELETE FROM key_scope_secrets
+		WHERE scope_id = ?`
+
+	result, err := dbConn.ExecContext(t.Context(), stmt, scopeID)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows > 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedDeletedRows, rows)
+	}
+
+	return nil
+}
+
+// insertKeyScopeSecretRaw inserts a key-scope secret directly through the
+// database so tests can validate watch-only triggers on key_scope_secrets.
+func insertKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	encryptedCoinPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO key_scope_secrets (
+			scope_id,
+			encrypted_coin_priv_key
+		) VALUES (?, ?)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, scopeID, encryptedCoinPrivKey,
+	)
+
+	return err
+}
+
+// updateKeyScopeSecretRaw updates a key-scope secret directly through the
+// database so tests can validate watch-only triggers on key_scope_secrets.
+func updateKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	encryptedCoinPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE key_scope_secrets
+		SET encrypted_coin_priv_key = ?
+		WHERE scope_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedCoinPrivKey, scopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
 // deleteWalletSecretRaw deletes a wallet secret row directly through the
 // database so tests can re-exercise wallet_secrets insert triggers.
 func deleteWalletSecretRaw(t *testing.T, dbConn *sql.DB,
