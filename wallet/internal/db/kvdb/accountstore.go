@@ -158,6 +158,7 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 	// consistent.
 	now := time.Now().UTC()
 	scope := o.scopedMgr.Scope()
+
 	err = putAccountCreatedAt(
 		o.ns, scope, uint32(accountNumber), now, //nolint:gosec
 	)
@@ -317,6 +318,10 @@ func (s *Store) scopedManagerOrCreate(ns walletdb.ReadWriteBucket,
 
 // GetAccount returns the account identified by the given query within the
 // requested scope.
+//
+// path-mapping with origin classification; refactor blocked by task 105.
+//
+//nolint:cyclop // bridges waddrmgr's split account-by-number / account-by-name
 func (s *Store) GetAccount(_ context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
@@ -424,6 +429,11 @@ func resolveAccountNumber(ns walletdb.ReadBucket,
 
 // loadAccountInfo materializes a db.AccountInfo from waddrmgr's
 // AccountProperties + IsWatchOnlyAccount classifier.
+//
+// and created-at metadata from independent waddrmgr sources; refactor
+// blocked by task 105.
+//
+//nolint:cyclop // resolves origin, watch-only, fingerprint, key counts,
 func loadAccountInfo(ns walletdb.ReadBucket,
 	scopedMgr waddrmgr.AccountStore, accountNumber uint32,
 	walletWatchOnly bool,
@@ -476,8 +486,8 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	if origin == db.DerivedAccount {
 		if len(walletMasterHDPubKey) == 0 {
 			return nil, fmt.Errorf(
-				"derive master fingerprint for account "+
-					"%d: missing master HD pubkey",
+				"%w: account %d",
+				errMissingWalletMasterHDPubKey,
 				accountNumber,
 			)
 		}
@@ -541,6 +551,13 @@ func readMasterHDPubKey(mgr waddrmgr.AddrStore,
 
 	return nil, fmt.Errorf("read master HD pubkey: %w", err)
 }
+
+// errMissingWalletMasterHDPubKey is returned when a derived account
+// requires the wallet's master HD pubkey to derive its master-key
+// fingerprint but the legacy adapter exposes no pubkey for the wallet.
+var errMissingWalletMasterHDPubKey = errors.New(
+	"missing wallet master HD pubkey for derived account fingerprint",
+)
 
 // translateAccountErr maps waddrmgr account/scope not-found errors to their
 // public db.* equivalents.
