@@ -138,11 +138,9 @@ func testWalletParams(name string) db.CreateWalletParams {
 		Name:                     name,
 		ManagerVersion:           1,
 		EncryptedMasterPrivKey:   []byte{1},
-		EncryptedMasterPubKey:    []byte{2},
-		MasterKeyPubParams:       []byte{3},
+		MasterPubKey:             []byte{2},
 		MasterKeyPrivParams:      []byte{4},
 		EncryptedCryptoPrivKey:   []byte{5},
-		EncryptedCryptoPubKey:    []byte{6},
 		EncryptedCryptoScriptKey: []byte{7},
 	}
 }
