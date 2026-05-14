@@ -28,6 +28,14 @@ type kvdbAddrStore interface {
 	// EncryptedMasterHDPriv reads the encrypted master HD private key
 	// from the manager's main bucket.
 	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
+
+	// FetchScopedKeyManager returns the scoped key manager for the
+	// given scope, or an error if it does not exist.
+	FetchScopedKeyManager(scope waddrmgr.KeyScope) (
+		waddrmgr.AccountStore, error)
+
+	// WatchOnly returns whether the wallet itself is watch-only.
+	WatchOnly() bool
 }
 
 // addrManager type-asserts s.addrStore into kvdbAddrStore. A nil store or a
