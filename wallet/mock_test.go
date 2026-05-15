@@ -894,8 +894,55 @@ func (m *mockAddrStore) ChainParams() *chaincfg.Params {
 }
 
 // Close cleanly shuts down the manager.
+
+func (m *mockAddrStore) EncryptedMasterHDPriv(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	args := m.Called(ns)
+	if raw, ok := args.Get(0).([]byte); ok {
+		return raw, args.Error(1)
+	}
+
+	return nil, args.Error(1)
+}
+
+func (m *mockAddrStore) MasterHDPubKey(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	args := m.Called(ns)
+	if raw, ok := args.Get(0).([]byte); ok {
+		return raw, args.Error(1)
+	}
+
+	return nil, args.Error(1)
+}
+
 func (m *mockAddrStore) Close() {
 	m.Called()
+}
+
+// Encrypt implements keyvault.Vault.
+func (m *mockAddrStore) Encrypt(keyType waddrmgr.CryptoKeyType,
+	plaintext []byte) ([]byte, error) {
+
+	args := m.Called(keyType, plaintext)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]byte), args.Error(1)
+}
+
+// Decrypt implements keyvault.Vault.
+func (m *mockAddrStore) Decrypt(keyType waddrmgr.CryptoKeyType,
+	ciphertext []byte) ([]byte, error) {
+
+	args := m.Called(keyType, ciphertext)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]byte), args.Error(1)
 }
 
 // mockAccountStore is a mock implementation of the waddrmgr.AccountStore
@@ -1224,6 +1271,18 @@ func (m *mockAccountStore) ImportScript(
 
 	args := m.Called(ns, script, bs)
 	return args.Get(0).(waddrmgr.ManagedScriptAddress), args.Error(1)
+}
+
+func (m *mockAccountStore) ImportWitnessScript(ns walletdb.ReadWriteBucket,
+	script []byte, bs *waddrmgr.BlockStamp, witnessVersion byte,
+	isSecretScript bool) (waddrmgr.ManagedScriptAddress, error) {
+
+	args := m.Called(ns, script, bs, witnessVersion, isSecretScript)
+	if v := args.Get(0); v != nil {
+		return v.(waddrmgr.ManagedScriptAddress), args.Error(1)
+	}
+
+	return nil, args.Error(1)
 }
 
 // mockManagedAddress is a mock implementation of the waddrmgr.ManagedAddress

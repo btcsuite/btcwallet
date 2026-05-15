@@ -183,6 +183,37 @@ type AddrStore interface {
 
 	// Close cleanly shuts down the manager.
 	Close()
+
+	// EncryptedMasterHDPriv reads the encrypted master HD private key
+	// from the manager's main bucket. Returns ErrWatchingOnly when no
+	// encrypted master HD private key is persisted.
+	//
+	// This method exposes legacy bucket-level access for the
+	// transitional kvdb adapter. It will be removed when the kvdb
+	// adapter is retired.
+	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
+
+	// MasterHDPubKey returns the decrypted master HD public key bytes
+	// from the manager's main bucket. The result is the base58-encoded
+	// extended-key form produced by hdkeychain.ExtendedKey.String()
+	// (e.g. "xpub..."). Returns ErrNoExist when no master HD public
+	// key is persisted (shell / watch-only wallets).
+	//
+	// Used by the kvdb account-store adapter to re-derive the BIP32
+	// master-key fingerprint for derived accounts at read time, since
+	// waddrmgr's derived-account row layout does not persist the
+	// fingerprint and the AccountInfo contract requires it (see
+	// task 103 / ADR 0012).
+	MasterHDPubKey(ns walletdb.ReadBucket) ([]byte, error)
+
+	// Decrypt decrypts the supplied ciphertext with the address
+	// manager crypto key identified by keyType. Returns an error if
+	// the manager is locked or the ciphertext is malformed.
+	//
+	// This method exposes legacy crypto-key access for the transitional
+	// kvdb adapter. The replacement is the wallet's keyVault path. The
+	// method will be removed when the kvdb adapter is retired.
+	Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error)
 }
 
 // AccountStore is an interface that describes a scoped key manager.
@@ -351,4 +382,15 @@ type AccountStore interface {
 	// and index.
 	DeriveAddr(account uint32, branch uint32, index uint32) (
 		btcutil.Address, []byte, error)
+	// ImportWitnessScript imports a user-provided native witness
+	// script under this scoped manager and returns a managed
+	// address that wraps the script. The script is encrypted with
+	// the manager's CryptoKeyScript when isSecretScript is true.
+	//
+	// This method exposes scoped-manager script import for the
+	// transitional kvdb adapter. It will be removed when the kvdb
+	// adapter is retired.
+	ImportWitnessScript(ns walletdb.ReadWriteBucket, script []byte,
+		bs *BlockStamp, witnessVersion byte,
+		isSecretScript bool) (ManagedScriptAddress, error)
 }
