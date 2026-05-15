@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
@@ -284,21 +285,23 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 		return nil, fmt.Errorf("get account props: %w", err)
 	}
 
-	return db.AccountPropsRowToInfo(db.AccountPropsRow[int16, int16]{
-		AccountNumber:     row.AccountNumber,
-		AccountName:       row.AccountName,
-		OriginID:          row.OriginID,
-		ExternalKeyCount:  row.ExternalKeyCount,
-		InternalKeyCount:  row.InternalKeyCount,
-		ImportedKeyCount:  row.ImportedKeyCount,
-		PublicKey:         row.PublicKey,
-		MasterFingerprint: row.MasterFingerprint,
-		IsWatchOnly:       row.IsWatchOnly,
-		CreatedAt:         row.CreatedAt,
-		Purpose:           row.Purpose,
-		CoinType:          row.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int16],
-	})
+	return db.AccountPropsRowToInfo(
+		db.AccountPropsRow[int16, int16]{
+			AccountNumber:     row.AccountNumber,
+			AccountName:       row.AccountName,
+			OriginID:          row.OriginID,
+			ExternalKeyCount:  row.ExternalKeyCount,
+			InternalKeyCount:  row.InternalKeyCount,
+			ImportedKeyCount:  row.ImportedKeyCount,
+			PublicKey:         row.PublicKey,
+			MasterFingerprint: row.MasterFingerprint,
+			IsWatchOnly:       row.IsWatchOnly,
+			CreatedAt:         row.CreatedAt,
+			Purpose:           row.Purpose,
+			CoinType:          row.CoinType,
+			IDToOriginType:    db.IDToAccountOrigin[int16],
+		},
+	)
 }
 
 // ensureKeyScope retrieves an existing key scope or creates it if missing for
@@ -384,21 +387,23 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
-	return db.AccountRowToInfo(db.AccountInfoRow[int16]{
-		AccountNumber:     base.AccountNumber,
-		AccountName:       base.AccountName,
-		OriginID:          base.OriginID,
-		ExternalKeyCount:  base.ExternalKeyCount,
-		InternalKeyCount:  base.InternalKeyCount,
-		ImportedKeyCount:  base.ImportedKeyCount,
-		PublicKey:         base.PublicKey,
-		MasterFingerprint: base.MasterFingerprint,
-		IsWatchOnly:       base.IsWatchOnly,
-		CreatedAt:         base.CreatedAt,
-		Purpose:           base.Purpose,
-		CoinType:          base.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int16],
-	})
+	return db.AccountRowToInfo(
+		db.AccountInfoRow[int16]{
+			AccountNumber:     base.AccountNumber,
+			AccountName:       base.AccountName,
+			OriginID:          base.OriginID,
+			ExternalKeyCount:  base.ExternalKeyCount,
+			InternalKeyCount:  base.InternalKeyCount,
+			ImportedKeyCount:  base.ImportedKeyCount,
+			PublicKey:         base.PublicKey,
+			MasterFingerprint: base.MasterFingerprint,
+			IsWatchOnly:       base.IsWatchOnly,
+			CreatedAt:         base.CreatedAt,
+			Purpose:           base.Purpose,
+			CoinType:          base.CoinType,
+			IDToOriginType:    db.IDToAccountOrigin[int16],
+		},
+	)
 }
 
 // accountListQueries groups PostgreSQL account listing query methods.
@@ -448,34 +453,102 @@ type accountGetQueries struct {
 	q *sqlc.Queries
 }
 
-// byNumber retrieves an account by wallet ID, scope, and account number.
+// byNumber retrieves an account by wallet ID, scope, and account number,
+// then attaches its balance via AccountBalance unless query.SkipBalance
+// is set.
 func (p accountGetQueries) byNumber(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
-	return db.GetAccount(
-		ctx, p.q.GetAccountByWalletScopeAndNumber,
-		sqlc.GetAccountByWalletScopeAndNumberParams{
+	row, err := p.q.GetAccountByWalletScopeAndNumber(
+		ctx, sqlc.GetAccountByWalletScopeAndNumberParams{
 			WalletID:      int64(query.WalletID),
 			Purpose:       int64(query.Scope.Purpose),
 			CoinType:      int64(query.Scope.Coin),
 			AccountNumber: db.NullableUint32ToSQLInt64(query.AccountNumber),
-		}, query, accountRowToInfo,
+		},
 	)
+	if err != nil {
+		return nil, mapGetAccountErr(err, query)
+	}
+
+	info, err := accountRowToInfo(row)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.attachBalance(ctx, query, info, row.ID)
 }
 
-// byName retrieves an account by wallet ID, scope, and account name.
+// byName retrieves an account by wallet ID, scope, and account name, then
+// attaches its balance via AccountBalance unless query.SkipBalance is set.
 func (p accountGetQueries) byName(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
-	return db.GetAccount(
-		ctx, p.q.GetAccountByWalletScopeAndName,
-		sqlc.GetAccountByWalletScopeAndNameParams{
+	row, err := p.q.GetAccountByWalletScopeAndName(
+		ctx, sqlc.GetAccountByWalletScopeAndNameParams{
 			WalletID:    int64(query.WalletID),
 			Purpose:     int64(query.Scope.Purpose),
 			CoinType:    int64(query.Scope.Coin),
 			AccountName: *query.Name,
-		}, query, accountRowToInfo,
+		},
 	)
+	if err != nil {
+		return nil, mapGetAccountErr(err, query)
+	}
+
+	info, err := accountRowToInfo(row)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.attachBalance(ctx, query, info, row.ID)
+}
+
+// attachBalance fills ConfirmedBalance and UnconfirmedBalance on info via
+// the dedicated AccountBalance query, unless the caller opted out via
+// query.SkipBalance. The query runs inside the caller's read transaction.
+func (p accountGetQueries) attachBalance(ctx context.Context,
+	query db.GetAccountQuery, info *db.AccountInfo,
+	accountID int64) (*db.AccountInfo, error) {
+
+	if query.SkipBalance {
+		return info, nil
+	}
+
+	bal, err := p.q.AccountBalance(
+		ctx, sqlc.AccountBalanceParams{
+			WalletID:  int64(query.WalletID),
+			AccountID: accountID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("account balance: %w", err)
+	}
+
+	info.ConfirmedBalance = btcutil.Amount(bal.ConfirmedBalance)
+	info.UnconfirmedBalance = btcutil.Amount(bal.UnconfirmedBalance)
+
+	return info, nil
+}
+
+// mapGetAccountErr returns the typed ErrAccountNotFound when err is
+// sql.ErrNoRows, falling back to a wrapped form otherwise. The caller
+// names the queried account in the error using whichever selector
+// (Name or AccountNumber) was set.
+func mapGetAccountErr(err error, query db.GetAccountQuery) error {
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("get account: %w", err)
+	}
+
+	if query.Name != nil {
+		return fmt.Errorf("account %q in scope %d/%d: %w", *query.Name,
+			query.Scope.Purpose, query.Scope.Coin,
+			db.ErrAccountNotFound)
+	}
+
+	return fmt.Errorf("account %d in scope %d/%d: %w",
+		*query.AccountNumber, query.Scope.Purpose, query.Scope.Coin,
+		db.ErrAccountNotFound)
 }
 
 // accountRenameQueries groups PostgreSQL account rename query methods.

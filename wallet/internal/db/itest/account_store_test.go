@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
@@ -535,9 +537,11 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	require.Len(t, results, workers)
 
 	// Verify all numbers are unique and sequential.
-	sort.Slice(results, func(i, j int) bool {
-		return results[i] < results[j]
-	})
+	sort.Slice(
+		results, func(i, j int) bool {
+			return results[i] < results[j]
+		},
+	)
 
 	for i := range workers {
 		require.Equal(t, uint32(i), results[i])
@@ -856,14 +860,16 @@ func TestGetAccount(t *testing.T) {
 	for _, tc := range AllAccountCases {
 		accNumber := uint32(0)
 
-		t.Run("by name-"+tc.Name, func(t *testing.T) {
-			query := getAccountQueryByName(walletID, tc.Scope, tc.Name)
-			info, err := store.GetAccount(t.Context(), query)
-			require.NoError(t, err)
-			require.NotNil(t, info)
-			requireAccountMatches(t, info, tc)
-			accNumber = info.AccountNumber
-		})
+		t.Run(
+			"by name-"+tc.Name, func(t *testing.T) {
+				query := getAccountQueryByName(walletID, tc.Scope, tc.Name)
+				info, err := store.GetAccount(t.Context(), query)
+				require.NoError(t, err)
+				require.NotNil(t, info)
+				requireAccountMatches(t, info, tc)
+				accNumber = info.AccountNumber
+			},
+		)
 
 		if tc.Origin == db.ImportedAccount {
 			continue
@@ -876,7 +882,8 @@ func TestGetAccount(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, info)
 				requireAccountMatches(t, info, tc)
-			})
+			},
+		)
 	}
 }
 
@@ -990,6 +997,150 @@ func TestListAccountsReturnsPublicKey(t *testing.T) {
 	for _, acc := range accounts {
 		require.NotEmpty(t, acc.PublicKey, acc.AccountName)
 	}
+}
+
+// TestGetAccountPopulatesBalance verifies that GetAccount returns the
+// confirmed and unconfirmed UTXO totals on the AccountInfo, sourced from
+// the dedicated AccountBalance query that the adapter dispatches
+// alongside the account row fetch.
+func TestGetAccountPopulatesBalance(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-get-balance")
+	scope := db.KeyScopeBIP0084
+
+	queries := store.Queries()
+	syncBlock := CreateBlockFixture(t, queries, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, 100)
+
+	err := store.UpdateWallet(
+		t.Context(), db.UpdateWalletParams{
+			WalletID: walletID,
+			SyncedTo: &syncBlock,
+		},
+	)
+	require.NoError(t, err)
+
+	createDerivedAccount(t, store, walletID, scope, "funded")
+	createDerivedAccount(t, store, walletID, scope, "empty")
+
+	addr := newDerivedAddress(t, store, walletID, scope, "funded", false)
+
+	confirmedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 24000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       confirmedTx,
+			Received: time.Unix(1710000000, 0),
+			Block:    &confirmedBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	unconfirmedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 26000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       unconfirmedTx,
+			Received: time.Unix(1710000100, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	funded, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "funded"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(24000), funded.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(26000), funded.UnconfirmedBalance)
+
+	byNumber, err := store.GetAccount(
+		t.Context(),
+		getAccountQueryByNumber(walletID, scope, funded.AccountNumber),
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(24000), byNumber.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(26000), byNumber.UnconfirmedBalance)
+
+	empty, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "empty"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(0), empty.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(0), empty.UnconfirmedBalance)
+}
+
+// TestGetAccountSkipBalanceZerosFields verifies that GetAccount with
+// SkipBalance=true skips the dedicated AccountBalance dispatch on both
+// the by-name and by-number selectors and leaves the balance fields at
+// zero even when UTXOs exist on the account.
+func TestGetAccountSkipBalanceZerosFields(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-get-balance-skip")
+	scope := db.KeyScopeBIP0084
+
+	queries := store.Queries()
+	syncBlock := CreateBlockFixture(t, queries, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, 100)
+
+	err := store.UpdateWallet(
+		t.Context(), db.UpdateWalletParams{
+			WalletID: walletID,
+			SyncedTo: &syncBlock,
+		},
+	)
+	require.NoError(t, err)
+
+	createDerivedAccount(t, store, walletID, scope, "funded")
+
+	addr := newDerivedAddress(t, store, walletID, scope, "funded", false)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 24000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000200, 0),
+			Block:    &confirmedBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	byNameQuery := getAccountQueryByName(walletID, scope, "funded")
+	byNameQuery.SkipBalance = true
+
+	infoByName, err := store.GetAccount(t.Context(), byNameQuery)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(0), infoByName.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(0), infoByName.UnconfirmedBalance)
+
+	byNumberQuery := getAccountQueryByNumber(
+		walletID, scope, infoByName.AccountNumber,
+	)
+	byNumberQuery.SkipBalance = true
+
+	infoByNumber, err := store.GetAccount(t.Context(), byNumberQuery)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(0), infoByNumber.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(0), infoByNumber.UnconfirmedBalance)
 }
 
 // TestGetAccountNotFound verifies that GetAccount returns ErrAccountNotFound
@@ -1227,10 +1378,12 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		accounts = append(accounts, createdAccount{
-			info:        *info,
-			createdNear: createdNear,
-		})
+		accounts = append(
+			accounts, createdAccount{
+				info:        *info,
+				createdNear: createdNear,
+			},
+		)
 	}
 
 	// Verify all accounts have CreatedAt populated.
@@ -1268,12 +1421,14 @@ func TestRenameAccount(t *testing.T) {
 		oldName := "original-name-1"
 		newName := "renamed-by-name"
 
-		err := store.RenameAccount(t.Context(), db.RenameAccountParams{
-			WalletID: walletID,
-			Scope:    scope,
-			OldName:  oldName,
-			NewName:  newName,
-		})
+		err := store.RenameAccount(
+			t.Context(), db.RenameAccountParams{
+				WalletID: walletID,
+				Scope:    scope,
+				OldName:  oldName,
+				NewName:  newName,
+			},
+		)
 		require.NoError(t, err)
 
 		// Verify the rename worked.
@@ -1294,12 +1449,14 @@ func TestRenameAccount(t *testing.T) {
 		accNum := uint32(0)
 		newName := "renamed-by-number"
 
-		err := store.RenameAccount(t.Context(), db.RenameAccountParams{
-			WalletID:      walletID,
-			Scope:         scope,
-			AccountNumber: &accNum,
-			NewName:       newName,
-		})
+		err := store.RenameAccount(
+			t.Context(), db.RenameAccountParams{
+				WalletID:      walletID,
+				Scope:         scope,
+				AccountNumber: &accNum,
+				NewName:       newName,
+			},
+		)
 		require.NoError(t, err)
 
 		// Verify the rename worked.
@@ -1565,9 +1722,11 @@ func findAccountInList(t *testing.T, accounts []db.AccountInfo,
 
 	t.Helper()
 
-	i := slices.IndexFunc(accounts, func(acc db.AccountInfo) bool {
-		return acc.AccountName == tc.Name && acc.KeyScope == tc.Scope
-	})
+	i := slices.IndexFunc(
+		accounts, func(acc db.AccountInfo) bool {
+			return acc.AccountName == tc.Name && acc.KeyScope == tc.Scope
+		},
+	)
 	require.GreaterOrEqual(t, i, 0, "expected account %s in list", tc.Name)
 
 	return accounts[i]

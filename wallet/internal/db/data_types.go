@@ -512,6 +512,19 @@ type GetAccountQuery struct {
 	// AccountNumber is the number of the account to query. If nil, the
 	// query will be performed using the Name.
 	AccountNumber *uint32
+
+	// SkipBalance, when true, skips the dedicated AccountBalance query
+	// that the adapter normally runs alongside the account read. The
+	// returned AccountInfo reports ConfirmedBalance and UnconfirmedBalance
+	// as zero. Default (false) issues the balance query inside the same
+	// read transaction as the account fetch and populates both fields.
+	// Set this only when balance is unnecessary (e.g. identity-only
+	// lookups, autocomplete UIs, schema audits) to avoid the UTXO scan.
+	//
+	// For filtered or locked-aware balance reads (min/max confirmations,
+	// coinbase maturity, locked-output exclusion) use Store.Balance with
+	// BalanceParams instead.
+	SkipBalance bool
 }
 
 // ListAccountsQuery holds the set of options for a ListAccounts query.
