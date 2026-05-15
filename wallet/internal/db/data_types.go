@@ -4,6 +4,7 @@
 package db
 
 import (
+	"errors"
 	"math"
 	"time"
 
@@ -1172,7 +1173,17 @@ type BalanceParams struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Account optionally restricts the balance to one BIP44 account number.
+	// Scope optionally restricts the balance to a single key scope. When
+	// Account is also set, Scope is required to disambiguate cross-scope
+	// account-number reuse: legacy wallets allocate account numbers per
+	// scope, so the same account number (e.g. 0) can appear under
+	// BIP-0049 and BIP-0084 simultaneously, and balance reads filtered by
+	// account number alone overcount across scopes.
+	Scope *KeyScope
+
+	// Account optionally restricts the balance to one BIP44 account
+	// number. When Account is set, callers should also set Scope so the
+	// filter is uniquely scoped (see Scope above).
 	Account *uint32
 
 	// MinConfs optionally requires each counted output to have at least
@@ -1187,6 +1198,25 @@ type BalanceParams struct {
 	// least this many confirmations before they count toward the returned
 	// balance result. Non-coinbase outputs ignore this filter.
 	CoinbaseMaturity *int32
+}
+
+// ErrBalanceParamsAccountWithoutScope is returned by BalanceParams.Validate
+// when Account is set but Scope is not. Account numbers are allocated
+// per-scope on legacy wallets, so a balance read filtered by account number
+// without a scope filter would silently overcount across scopes.
+var ErrBalanceParamsAccountWithoutScope = errors.New(
+	"balance: Account requires Scope to disambiguate per-scope " +
+		"account-number reuse",
+)
+
+// Validate returns ErrBalanceParamsAccountWithoutScope when Account is set
+// without Scope. All other parameter combinations are accepted.
+func (p BalanceParams) Validate() error {
+	if p.Account != nil && p.Scope == nil {
+		return ErrBalanceParamsAccountWithoutScope
+	}
+
+	return nil
 }
 
 // LockID represents a unique context-specific ID assigned to an output lock.
