@@ -796,6 +796,7 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		IsWatchOnly: managedAddressIsWatchOnly(
 			walletIsWatchOnly, managedAddr,
 		),
+		IsUsed: managedAddr.Used(ns),
 	}, nil
 }
 
