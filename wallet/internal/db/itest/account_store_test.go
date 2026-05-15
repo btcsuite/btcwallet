@@ -1143,6 +1143,215 @@ func TestGetAccountSkipBalanceZerosFields(t *testing.T) {
 	require.Equal(t, btcutil.Amount(0), infoByNumber.UnconfirmedBalance)
 }
 
+// TestListAccountsPopulatesBalance verifies that ListAccounts returns
+// confirmed/unconfirmed totals on every returned AccountInfo, sourced
+// from the AccountBalances batch query dispatched alongside the row
+// fetch.
+func TestListAccountsPopulatesBalance(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-balance")
+	scope := db.KeyScopeBIP0084
+
+	queries := store.Queries()
+	syncBlock := CreateBlockFixture(t, queries, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, 100)
+
+	err := store.UpdateWallet(
+		t.Context(), db.UpdateWalletParams{
+			WalletID: walletID,
+			SyncedTo: &syncBlock,
+		},
+	)
+	require.NoError(t, err)
+
+	createDerivedAccount(t, store, walletID, scope, "first")
+	createDerivedAccount(t, store, walletID, scope, "second")
+	createDerivedAccount(t, store, walletID, scope, "empty")
+
+	firstAddr := newDerivedAddress(t, store, walletID, scope, "first", false)
+	secondAddr := newDerivedAddress(
+		t, store, walletID, scope, "second", false,
+	)
+
+	firstTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 12000, PkScript: firstAddr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       firstTx,
+			Received: time.Unix(1710000200, 0),
+			Block:    &confirmedBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	secondTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: secondAddr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       secondTx,
+			Received: time.Unix(1710000300, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	verify := func(t *testing.T,
+		accounts []db.AccountInfo, label string) {
+
+		t.Helper()
+
+		byName := make(map[string]db.AccountInfo, len(accounts))
+		for _, acc := range accounts {
+			byName[acc.AccountName] = acc
+		}
+
+		require.Contains(t, byName, "first", label)
+		require.Equal(t, btcutil.Amount(12000),
+			byName["first"].ConfirmedBalance, label+": first")
+		require.Equal(t, btcutil.Amount(0),
+			byName["first"].UnconfirmedBalance, label+": first")
+
+		require.Contains(t, byName, "second", label)
+		require.Equal(t, btcutil.Amount(0),
+			byName["second"].ConfirmedBalance, label+": second")
+		require.Equal(t, btcutil.Amount(7000),
+			byName["second"].UnconfirmedBalance, label+": second")
+
+		require.Contains(t, byName, "empty", label)
+		require.Equal(t, btcutil.Amount(0),
+			byName["empty"].ConfirmedBalance, label+": empty")
+		require.Equal(t, btcutil.Amount(0),
+			byName["empty"].UnconfirmedBalance, label+": empty")
+	}
+
+	byScope, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+	verify(t, byScope, "by scope")
+
+	all, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+		},
+	)
+	require.NoError(t, err)
+	verify(t, all, "all")
+}
+
+// TestListAccountsSkipBalanceZerosFields verifies that ListAccounts with
+// SkipBalance=true skips the AccountBalances dispatch on each of the
+// three list selectors (scope-filtered, name-filtered, unfiltered) and
+// returns zero balance fields even when UTXOs exist.
+func TestListAccountsSkipBalanceZerosFields(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-list-skip-balance")
+	scope := db.KeyScopeBIP0084
+
+	queries := store.Queries()
+	syncBlock := CreateBlockFixture(t, queries, 200)
+	confirmedBlock := CreateBlockFixture(t, queries, 100)
+
+	err := store.UpdateWallet(
+		t.Context(), db.UpdateWalletParams{
+			WalletID: walletID,
+			SyncedTo: &syncBlock,
+		},
+	)
+	require.NoError(t, err)
+
+	createDerivedAccount(t, store, walletID, scope, "funded")
+
+	addr := newDerivedAddress(t, store, walletID, scope, "funded", false)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000400, 0),
+			Block:    &confirmedBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	verify := func(t *testing.T,
+		accounts []db.AccountInfo, label string) {
+
+		t.Helper()
+
+		require.NotEmpty(t, accounts, label)
+
+		found := false
+		for _, acc := range accounts {
+			if acc.AccountName == "funded" {
+				found = true
+			}
+
+			require.Equal(t, btcutil.Amount(0),
+				acc.ConfirmedBalance,
+				label+": "+acc.AccountName)
+			require.Equal(t, btcutil.Amount(0),
+				acc.UnconfirmedBalance,
+				label+": "+acc.AccountName)
+		}
+
+		require.True(t, found,
+			label+": funded account missing from result")
+	}
+
+	byScope, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID:    walletID,
+			Scope:       &scope,
+			SkipBalance: true,
+		},
+	)
+	require.NoError(t, err)
+	verify(t, byScope, "by scope")
+
+	name := "funded"
+	byName, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID:    walletID,
+			Name:        &name,
+			SkipBalance: true,
+		},
+	)
+	require.NoError(t, err)
+	verify(t, byName, "by name")
+
+	all, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID:    walletID,
+			SkipBalance: true,
+		},
+	)
+	require.NoError(t, err)
+	verify(t, all, "all")
+}
+
 // TestGetAccountNotFound verifies that GetAccount returns ErrAccountNotFound
 // when querying a non-existent account.
 func TestGetAccountNotFound(t *testing.T) {
