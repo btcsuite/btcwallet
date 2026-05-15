@@ -5,7 +5,6 @@ package itest
 import (
 	"context"
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -29,7 +28,9 @@ func TestCreateAccounts(t *testing.T) {
 
 		for _, tc := range DerivedAccountCases {
 			params := tc.DerivedParams(walletID)
-			info, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+			info, err := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
 			require.NoError(t, err)
 			require.NotNil(t, info)
 			requireAccountMatches(t, info, tc)
@@ -294,7 +295,9 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 			walletID := newWallet(t, store, tc.name+"-wallet")
 			tc.params.WalletID = walletID
 
-			info, err := store.CreateDerivedAccount(t.Context(), tc.params, NoopAccountDerivationFunc())
+			info, err := store.CreateDerivedAccount(
+				t.Context(), tc.params, SpendableDeriveFn(),
+			)
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, info)
 		})
@@ -314,7 +317,9 @@ func TestCreateDerivedAccountMissingWallet(t *testing.T) {
 		Name:     "missing-wallet-account",
 	}
 
-	info, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+	info, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
 	require.ErrorIs(t, err, db.ErrWalletNotFound)
 	require.Nil(t, info)
 }
@@ -334,13 +339,17 @@ func TestCreateDerivedAccountDuplicateName(t *testing.T) {
 		Name:     "duplicate-account",
 	}
 
-	_, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+	_, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
 	require.NoError(t, err)
 
 	before := store.StatsSnapshot()
 
 	// Attempt to create second account with same name in same scope.
-	_, err = store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+	_, err = store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
 	require.Error(t, err)
 	requireConstraintSQLError(t, err)
 
@@ -386,7 +395,9 @@ func TestCreateDerivedAccountSameNameDifferentScopes(t *testing.T) {
 			Name:     accountName,
 		}
 
-		info, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+		info, err := store.CreateDerivedAccount(
+			t.Context(), params, SpendableDeriveFn(),
+		)
 		require.NoError(t, err)
 		require.Equal(t, accountName, info.AccountName)
 		require.Equal(t, scope, info.KeyScope)
@@ -413,7 +424,9 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 			Name:     "account-" + strconv.Itoa(i),
 		}
 
-		info, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+		info, err := store.CreateDerivedAccount(
+			t.Context(), params, SpendableDeriveFn(),
+		)
 		require.NoError(t, err)
 		require.Equal(t, uint32(i), info.AccountNumber,
 			"account %d should have number %d", i, i)
@@ -433,7 +446,8 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 			WalletID: walletID,
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "derived-0",
-		}, NoopAccountDerivationFunc(),
+		},
+		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), first.AccountNumber)
@@ -454,7 +468,8 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 			WalletID: walletID,
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "derived-1",
-		}, NoopAccountDerivationFunc(),
+		},
+		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), second.AccountNumber)
@@ -496,7 +511,8 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 					WalletID: walletID,
 					Scope:    scope,
 					Name:     "acct-concurrent-" + strconv.Itoa(i),
-				}, NoopAccountDerivationFunc(),
+				},
+				SpendableDeriveFn(),
 			)
 			if err != nil {
 				resultCh <- createResult{err: err}
@@ -645,7 +661,8 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 						WalletID: walletID,
 						Scope:    db.KeyScopeBIP0084,
 						Name:     "drv-std",
-					}, NoopAccountDerivationFunc(),
+					},
+					SpendableDeriveFn(),
 				)
 				if err != nil {
 					return false, err
@@ -667,7 +684,8 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 						WalletID: walletID,
 						Scope:    db.KeyScopeBIP0084,
 						Name:     "drv-wo",
-					}, NoopAccountDerivationFunc(),
+					},
+					SpendableDeriveFn(),
 				)
 				if err != nil {
 					return false, err
@@ -1128,7 +1146,9 @@ func TestAccountCreatedAtTimestamp(t *testing.T) {
 			Scope:    scope,
 			Name:     fmt.Sprintf("account-%d", i),
 		}
-		info, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+		info, err := store.CreateDerivedAccount(
+			t.Context(), params, SpendableDeriveFn(),
+		)
 		require.NoError(t, err)
 
 		accounts = append(accounts, createdAccount{
@@ -1281,8 +1301,8 @@ func TestRenameAccountErrors(t *testing.T) {
 }
 
 // TestCreateDerivedAccountMaxAccountNumber verifies that accounts can be
-// created up to the maximum account number (math.MaxUint32), but the next
-// account creation fails due to overflow.
+// created up to the wallet-compatible maximum account number, but the next
+// account creation fails.
 func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 	t.Parallel()
 
@@ -1294,31 +1314,34 @@ func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 
-	CreateAccountWithNumber(t, queries, scopeID, math.MaxUint32-1,
+	CreateAccountWithNumber(t, queries, scopeID, db.MaxAccountNumber-1,
 		"account-near-max")
 
-	// Set the counter to MaxUint32 so the next allocation gives us MaxUint32
-	UpdateKeyScopeNextAccountNumber(t, dbConn, scopeID, math.MaxUint32)
+	// Set the counter to MaxAccountNumber so the next allocation gives us
+	// the highest account number that the wallet can derive safely.
+	UpdateKeyScopeNextAccountNumber(t, dbConn, scopeID, db.MaxAccountNumber)
 
-	// This should succeed with account_number = MaxUint32.
+	// This should succeed with account_number = MaxAccountNumber.
 	info, err := store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
 			WalletID: walletID,
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "account-max",
-		}, NoopAccountDerivationFunc(),
+		},
+		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint32(math.MaxUint32), info.AccountNumber)
+	require.Equal(t, db.MaxAccountNumber, info.AccountNumber)
 
-	// This should fail; the next allocation would be MaxUint32 + 1, which
-	// overflows uint32.
+	// This should fail; the next allocation would collide with the legacy
+	// imported-account child reserved above MaxAccountNumber.
 	_, err = store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
 			WalletID: walletID,
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "account-overflow",
-		}, NoopAccountDerivationFunc(),
+		},
+		SpendableDeriveFn(),
 	)
 	require.ErrorIs(t, err, db.ErrMaxAccountNumberReached)
 }
@@ -1344,7 +1367,9 @@ func createAllAccounts(t *testing.T, store db.AccountStore, walletID uint32) {
 		switch tc.Origin {
 		case db.DerivedAccount:
 			params := tc.DerivedParams(walletID)
-			_, err := store.CreateDerivedAccount(t.Context(), params, NoopAccountDerivationFunc())
+			_, err := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
 			require.NoError(t, err)
 
 		case db.ImportedAccount:
@@ -1391,7 +1416,8 @@ func createDerivedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 			WalletID: walletID,
 			Scope:    scope,
 			Name:     name,
-		}, NoopAccountDerivationFunc(),
+		},
+		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
 }

@@ -199,13 +199,16 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 		"AllocateAccountNumber", mock.Anything, int64(11),
 	).Return(int64(12), nil).Once()
 	createCall := ops.On(
-		"CreateDerivedAccount", mock.Anything, int64(11), int64(12), "savings",
+		"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
+		"savings", mock.Anything,
 	).Return(expectedRow, nil).Once()
 
 	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
 
 	ctx := t.Context()
-	info, err := CreateDerivedAccountWithOps(ctx, params, ops)
+	info, err := CreateDerivedAccountWithOps(
+		ctx, params, ops, testValidWatchOnlyDeriveFn(),
+	)
 
 	require.NoError(t, err)
 	require.Equal(t, uint32(12), info.AccountNumber)
@@ -228,7 +231,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidParams(t *testing.T) {
 
 	// Pass empty params (missing Name). No backend methods should be called.
 	info, err := CreateDerivedAccountWithOps(
-		t.Context(), CreateDerivedAccountParams{}, ops,
+		t.Context(), CreateDerivedAccountParams{}, ops, testValidDeriveFn(),
 	)
 
 	require.Nil(t, info)
@@ -265,6 +268,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 	).Once()
 	ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
+		mock.Anything,
 	).Return(
 		CreateDerivedAccountRow{
 			CreatedAt: time.Unix(456, 0),
@@ -273,6 +277,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 
 	info, err := CreateDerivedAccountWithOps(
 		t.Context(), testCreateDerivedAccountParams(), ops,
+		testValidDeriveFn(),
 	)
 
 	require.Nil(t, info)
@@ -301,26 +306,16 @@ func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(^uint32(0))+1, nil,
 	).Once()
-	ops.On(
-		"CreateDerivedAccount", mock.Anything, int64(8), int64(^uint32(0))+1,
-		"savings",
-	).Return(
-		CreateDerivedAccountRow{
-			AccountNumber: sql.NullInt64{
-				Int64: int64(^uint32(0)) + 1,
-				Valid: true,
-			},
-			CreatedAt: time.Unix(789, 0),
-		}, nil,
-	).Once()
 
 	info, err := CreateDerivedAccountWithOps(
 		t.Context(), testCreateDerivedAccountParams(), ops,
+		testValidDeriveFn(),
 	)
 
 	require.Nil(t, info)
 	require.ErrorIs(t, err, ErrMaxAccountNumberReached)
-	require.ErrorContains(t, err, "casting overflow")
+	require.ErrorContains(t, err, "exceeds max")
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
 }
 
 // TestCreateDerivedAccountWithOpsWrapsStageErrors verifies that the shared
@@ -402,7 +397,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 					int64(9), nil,
 				).Once()
 				ops.On("CreateDerivedAccount", mock.Anything, int64(8),
-					int64(9), "savings",
+					int64(9), "savings", mock.Anything,
 				).Return(
 					CreateDerivedAccountRow{}, errTestBoom,
 				).Once()
@@ -425,6 +420,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 
 			info, err := CreateDerivedAccountWithOps(
 				t.Context(), testCreateDerivedAccountParams(), ops,
+				testValidDeriveFn(),
 			)
 
 			require.Nil(t, info)
@@ -436,6 +432,267 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce verifies that the shared
+// helper invokes the derivation callback exactly once after allocating the
+// account number, with the wallet's watch-only mode and the allocated account
+// number, and forwards the returned material to CreateDerivedAccount.
+func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
+	t.Parallel()
+
+	derived := newSpendableDerivedAccountData()
+	rec := &deriveFnRecorder{returnData: derived}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+	ops.On(
+		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
+		derived,
+	).Return(
+		CreateDerivedAccountRow{
+			AccountNumber: sql.NullInt64{Int64: 9, Valid: true},
+			CreatedAt:     time.Unix(101, 0),
+		}, nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.Len(t, rec.calls, 1)
+	require.Equal(t, uint32(9), rec.calls[0].accountNumber)
+	require.False(t, rec.calls[0].walletIsWatchOnly)
+}
+
+// TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError verifies that the
+// allocation is unwound when the derivation callback returns an error: the
+// backend's CreateDerivedAccount step must NOT run, so the caller's outer
+// transaction can roll back the allocation by aborting the surrounding tx.
+func TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError(t *testing.T) {
+	t.Parallel()
+
+	rec := &deriveFnRecorder{returnErr: errTestBoom}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, errTestBoom)
+	require.EqualError(t, err, "derive account: boom")
+	require.Len(t, rec.calls, 1)
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
+}
+
+// TestCreateDerivedAccountWithOpsNilDeriveFn verifies the contract rejects a
+// nil derivation callback up front before any backend stage runs.
+func TestCreateDerivedAccountWithOpsNilDeriveFn(t *testing.T) {
+	t.Parallel()
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, nil,
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, errNilAccountDerivationFunc)
+	ops.AssertNotCalled(t, "WalletWatchOnly")
+	ops.AssertNotCalled(t, "EnsureScope")
+	ops.AssertNotCalled(t, "AllocateAccountNumber")
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
+}
+
+// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedData verifies the
+// per-field validation rules that protect against malformed callbacks.
+// Validation runs after AllocateAccountNumber but before CreateDerivedAccount,
+// so the backend's CreateDerivedAccount step must NOT run.
+func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
+	t.Parallel()
+
+	rec := &deriveFnRecorder{returnData: nil}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, ErrNilDerivedAccountData)
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
+}
+
+// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey
+// verifies that derived data without a public key is rejected before the
+// backend's CreateDerivedAccount step runs.
+func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey(
+	t *testing.T) {
+
+	t.Parallel()
+
+	rec := &deriveFnRecorder{returnData: &DerivedAccountData{
+		EncryptedPrivateKey: []byte{0x1},
+	}}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, errMissingDerivedPublicKey)
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
+}
+
+// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey
+// verifies that spendable-wallet derivations missing a private key are
+// rejected.
+func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey(
+	t *testing.T) {
+
+	t.Parallel()
+
+	rec := &deriveFnRecorder{returnData: &DerivedAccountData{
+		PublicKey: []byte{0x02, 0xab},
+	}}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, errMissingDerivedPrivateKey)
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
+}
+
+// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv
+// verifies that watch-only wallets cannot persist an encrypted private key.
+func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv(
+	t *testing.T) {
+
+	t.Parallel()
+
+	rec := &deriveFnRecorder{returnData: &DerivedAccountData{
+		PublicKey:           []byte{0x02, 0xab},
+		EncryptedPrivateKey: []byte{0x1},
+	}}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		true, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), testCreateDerivedAccountParams(), ops, rec.fn(),
+	)
+
+	require.Nil(t, info)
+	require.ErrorIs(t, err, errWatchOnlyDerivedPrivateKey)
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
 }
 
 // testCreateDerivedAccountParams returns one valid derived-account request for
@@ -503,10 +760,10 @@ func (m *mockCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 
 // CreateDerivedAccount implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64, name string) (CreateDerivedAccountRow,
-	error) {
+	scopeID int64, accountNumber int64, name string,
+	derived *DerivedAccountData) (CreateDerivedAccountRow, error) {
 
-	args := m.Called(ctx, scopeID, accountNumber, name)
+	args := m.Called(ctx, scopeID, accountNumber, name, derived)
 
 	row, ok := args.Get(0).(CreateDerivedAccountRow)
 	if !ok {
@@ -516,4 +773,72 @@ func (m *mockCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	}
 
 	return row, args.Error(1)
+}
+
+// deriveFnRecorder captures the AccountDerivationFunc invocations performed by
+// CreateDerivedAccountWithOps so tests can assert call ordering and arguments.
+type deriveFnRecorder struct {
+	calls      []deriveFnCall
+	returnData *DerivedAccountData
+	returnErr  error
+}
+
+type deriveFnCall struct {
+	scope             KeyScope
+	accountNumber     uint32
+	walletIsWatchOnly bool
+}
+
+// fn returns the AccountDerivationFunc closure that records each invocation.
+func (r *deriveFnRecorder) fn() AccountDerivationFunc {
+	return func(_ context.Context, scope KeyScope, accountNumber uint32,
+		walletIsWatchOnly bool) (*DerivedAccountData, error) {
+
+		r.calls = append(r.calls, deriveFnCall{
+			scope:             scope,
+			accountNumber:     accountNumber,
+			walletIsWatchOnly: walletIsWatchOnly,
+		})
+
+		if r.returnErr != nil {
+			return nil, r.returnErr
+		}
+
+		return r.returnData, nil
+	}
+}
+
+// newSpendableDerivedAccountData returns a minimal valid DerivedAccountData
+// for spendable-wallet tests.
+func newSpendableDerivedAccountData() *DerivedAccountData {
+	return &DerivedAccountData{
+		PublicKey:            []byte{0x02, 0xab},
+		EncryptedPrivateKey:  []byte{0xde, 0xad},
+		MasterKeyFingerprint: 0x1234,
+	}
+}
+
+// newWatchOnlyDerivedAccountData returns a minimal valid DerivedAccountData
+// for watch-only-wallet tests.
+func newWatchOnlyDerivedAccountData() *DerivedAccountData {
+	return &DerivedAccountData{
+		PublicKey:            []byte{0x02, 0xab},
+		MasterKeyFingerprint: 0x1234,
+	}
+}
+
+// testValidDeriveFn returns an AccountDerivationFunc that succeeds with valid
+// spendable data — used by tests that exercise non-derivation failure paths.
+func testValidDeriveFn() AccountDerivationFunc {
+	return (&deriveFnRecorder{
+		returnData: newSpendableDerivedAccountData(),
+	}).fn()
+}
+
+// testValidWatchOnlyDeriveFn returns an AccountDerivationFunc that succeeds
+// with valid watch-only data — used by watch-only wallet tests.
+func testValidWatchOnlyDeriveFn() AccountDerivationFunc {
+	return (&deriveFnRecorder{
+		returnData: newWatchOnlyDerivedAccountData(),
+	}).fn()
 }
