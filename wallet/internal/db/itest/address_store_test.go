@@ -1609,7 +1609,7 @@ func TestListAddressesWatchOnlyWallet(t *testing.T) {
 			WalletID: walletInfo.ID,
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "watch-only-account",
-		},
+		}, NoopAccountDerivationFunc(),
 	)
 	require.NoError(t, err)
 

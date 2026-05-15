@@ -137,9 +137,10 @@ func (m *mockStore) UpdateWalletSecrets(ctx context.Context,
 
 // CreateDerivedAccount implements the db.AccountStore interface.
 func (m *mockStore) CreateDerivedAccount(ctx context.Context,
-	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
+	params db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
-	args := m.Called(ctx, params)
+	args := m.Called(ctx, params, deriveFn)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
