@@ -395,17 +395,19 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int64]{
-		AccountNumber:    base.AccountNumber,
-		AccountName:      base.AccountName,
-		OriginID:         base.OriginID,
-		ExternalKeyCount: base.ExternalKeyCount,
-		InternalKeyCount: base.InternalKeyCount,
-		ImportedKeyCount: base.ImportedKeyCount,
-		IsWatchOnly:      base.IsWatchOnly,
-		CreatedAt:        base.CreatedAt,
-		Purpose:          base.Purpose,
-		CoinType:         base.CoinType,
-		IDToOriginType:   db.IDToAccountOrigin[int64],
+		AccountNumber:     base.AccountNumber,
+		AccountName:       base.AccountName,
+		OriginID:          base.OriginID,
+		ExternalKeyCount:  base.ExternalKeyCount,
+		InternalKeyCount:  base.InternalKeyCount,
+		ImportedKeyCount:  base.ImportedKeyCount,
+		PublicKey:         base.PublicKey,
+		MasterFingerprint: base.MasterFingerprint,
+		IsWatchOnly:       base.IsWatchOnly,
+		CreatedAt:         base.CreatedAt,
+		Purpose:           base.Purpose,
+		CoinType:          base.CoinType,
+		IDToOriginType:    db.IDToAccountOrigin[int64],
 	})
 }
 

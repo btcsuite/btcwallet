@@ -916,6 +916,82 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 	require.True(t, imported.IsWatchOnly)
 }
 
+// TestGetAccountReturnsPublicKeyAndFingerprint verifies that derived and
+// imported accounts re-read through GetAccount carry the public key and
+// master fingerprint that were persisted at creation. Regression test
+// for the pre-fix gap where AccountRowToInfo passed `nil, 0` for both
+// fields on the lightweight read path.
+func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-pubkey-roundtrip")
+	scope := db.KeyScopeBIP0084
+
+	derived, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    scope,
+			Name:     "derived",
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, derived.PublicKey)
+	require.NotZero(t, derived.MasterKeyFingerprint)
+
+	derivedRead, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "derived"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, derived.PublicKey, derivedRead.PublicKey)
+	require.Equal(t,
+		derived.MasterKeyFingerprint, derivedRead.MasterKeyFingerprint,
+	)
+
+	importedPubKey := RandomBytes(32)
+	_, err = store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:  walletID,
+			Name:      "imported",
+			Scope:     scope,
+			PublicKey: importedPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	importedRead, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "imported"),
+	)
+	require.NoError(t, err)
+	require.Equal(t, importedPubKey, importedRead.PublicKey)
+}
+
+// TestListAccountsReturnsPublicKey verifies that the bulk read path
+// also surfaces the persisted PublicKey on every returned account.
+func TestListAccountsReturnsPublicKey(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-pubkey-list")
+	scope := db.KeyScopeBIP0084
+
+	createDerivedAccount(t, store, walletID, scope, "first")
+	createDerivedAccount(t, store, walletID, scope, "second")
+
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, accounts)
+
+	for _, acc := range accounts {
+		require.NotEmpty(t, acc.PublicKey, acc.AccountName)
+	}
+}
+
 // TestGetAccountNotFound verifies that GetAccount returns ErrAccountNotFound
 // when querying a non-existent account.
 func TestGetAccountNotFound(t *testing.T) {
