@@ -17,6 +17,12 @@ type Querier interface {
 	// height; unconfirmed covers unmined and above-synced-tip outputs.
 	// Spent outputs (`u.spent_by_tx_id IS NOT NULL`) are excluded.
 	AccountBalance(ctx context.Context, arg AccountBalanceParams) (AccountBalanceRow, error)
+	// AccountBalancesByIDs returns the confirmed/unconfirmed balance for each
+	// account in account_ids that has funded UTXOs, grouped by account_id. Accounts with no
+	// spendable outputs do not appear in the result; the Go caller defaults
+	// missing entries to zero. The confirmation predicate matches
+	// AccountBalance.
+	AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error)
 	// Acquires or renews a lease for an outpoint and returns the resulting
 	// expiration time.
 	//
