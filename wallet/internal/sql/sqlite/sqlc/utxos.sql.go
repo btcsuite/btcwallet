@@ -45,35 +45,19 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND (
         cast(?3 AS INTEGER) IS NULL
-        OR acc.account_number = cast(?3 AS INTEGER)
+        OR ks.purpose = cast(?3 AS INTEGER)
     )
     AND (
         cast(?4 AS INTEGER) IS NULL
-        OR cast(?4 AS INTEGER) = 0
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) >= cast(?4 AS INTEGER)
+        OR ks.coin_type = cast(?4 AS INTEGER)
     )
     AND (
         cast(?5 AS INTEGER) IS NULL
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) <= cast(?5 AS INTEGER)
+        OR acc.account_number = cast(?5 AS INTEGER)
     )
     AND (
         cast(?6 AS INTEGER) IS NULL
         OR cast(?6 AS INTEGER) = 0
-        OR NOT t.is_coinbase
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -83,11 +67,37 @@ WHERE
             END
         ) >= cast(?6 AS INTEGER)
     )
+    AND (
+        cast(?7 AS INTEGER) IS NULL
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) <= cast(?7 AS INTEGER)
+    )
+    AND (
+        cast(?8 AS INTEGER) IS NULL
+        OR cast(?8 AS INTEGER) = 0
+        OR NOT t.is_coinbase
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) >= cast(?8 AS INTEGER)
+    )
 `
 
 type BalanceParams struct {
 	NowUtc           time.Time
 	WalletID         int64
+	Purpose          sql.NullInt64
+	CoinType         sql.NullInt64
 	AccountNumber    sql.NullInt64
 	MinConfirms      sql.NullInt64
 	MaxConfirms      sql.NullInt64
@@ -124,6 +134,8 @@ func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, e
 	row := q.queryRow(ctx, q.balanceStmt, Balance,
 		arg.NowUtc,
 		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
 		arg.AccountNumber,
 		arg.MinConfirms,
 		arg.MaxConfirms,
@@ -523,22 +535,19 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND (
         cast(?2 AS INTEGER) IS NULL
-        OR acc.account_number = cast(?2 AS INTEGER)
+        OR ks.purpose = cast(?2 AS INTEGER)
     )
     AND (
         cast(?3 AS INTEGER) IS NULL
-        OR cast(?3 AS INTEGER) = 0
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) >= cast(?3 AS INTEGER)
+        OR ks.coin_type = cast(?3 AS INTEGER)
     )
     AND (
         cast(?4 AS INTEGER) IS NULL
+        OR acc.account_number = cast(?4 AS INTEGER)
+    )
+    AND (
+        cast(?5 AS INTEGER) IS NULL
+        OR cast(?5 AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -546,13 +555,26 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= cast(?4 AS INTEGER)
+        ) >= cast(?5 AS INTEGER)
+    )
+    AND (
+        cast(?6 AS INTEGER) IS NULL
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) <= cast(?6 AS INTEGER)
     )
 ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
 	WalletID      int64
+	Purpose       sql.NullInt64
+	CoinType      sql.NullInt64
 	AccountNumber sql.NullInt64
 	MinConfirms   sql.NullInt64
 	MaxConfirms   sql.NullInt64
@@ -592,6 +614,8 @@ type ListUtxosRow struct {
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
 	rows, err := q.query(ctx, q.listUtxosStmt, ListUtxos,
 		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
 		arg.AccountNumber,
 		arg.MinConfirms,
 		arg.MaxConfirms,
