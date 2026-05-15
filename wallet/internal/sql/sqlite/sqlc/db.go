@@ -24,6 +24,9 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.accountBalanceStmt, err = db.PrepareContext(ctx, AccountBalance); err != nil {
+		return nil, fmt.Errorf("error preparing query AccountBalance: %w", err)
+	}
 	if q.acquireUtxoLeaseStmt, err = db.PrepareContext(ctx, AcquireUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireUtxoLease: %w", err)
 	}
@@ -278,6 +281,11 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.accountBalanceStmt != nil {
+		if cerr := q.accountBalanceStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing accountBalanceStmt: %w", cerr)
+		}
+	}
 	if q.acquireUtxoLeaseStmt != nil {
 		if cerr := q.acquireUtxoLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing acquireUtxoLeaseStmt: %w", cerr)
@@ -732,6 +740,7 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 type Queries struct {
 	db                                          DBTX
 	tx                                          *sql.Tx
+	accountBalanceStmt                          *sql.Stmt
 	acquireUtxoLeaseStmt                        *sql.Stmt
 	balanceStmt                                 *sql.Stmt
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
@@ -821,6 +830,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
 		db:                                          tx,
 		tx:                                          tx,
+		accountBalanceStmt:                          q.accountBalanceStmt,
 		acquireUtxoLeaseStmt:                        q.acquireUtxoLeaseStmt,
 		balanceStmt:                                 q.balanceStmt,
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,

@@ -381,3 +381,40 @@ UPDATE accounts
 SET next_internal_index = next_internal_index + 1
 WHERE id = $1
 RETURNING (next_internal_index - 1)::BIGINT AS address_index;
+
+-- name: AccountBalance :one
+-- AccountBalance returns the confirmed/unconfirmed balance for one
+-- account, summed from the wallet's UTXO set at read time. Confirmed
+-- means the funding tx is in a block at or below the wallet's synced
+-- height; unconfirmed covers unmined and above-synced-tip outputs.
+-- Spent outputs (`u.spent_by_tx_id IS NOT NULL`) are excluded.
+SELECT
+    coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NOT NULL
+                AND s.synced_height IS NOT NULL
+                AND t.block_height <= s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0)::BIGINT AS confirmed_balance,
+    coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NULL
+                OR s.synced_height IS NULL
+                OR t.block_height > s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0)::BIGINT AS unconfirmed_balance
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+INNER JOIN addresses AS addr ON u.address_id = addr.id
+LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
+WHERE
+    addr.wallet_id = $1
+    AND addr.account_id = $2
+    AND u.spent_by_tx_id IS NULL
+    AND t.tx_status IN (0, 1);
