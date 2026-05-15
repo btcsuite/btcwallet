@@ -186,15 +186,18 @@ type WalletStore interface {
 
 // AccountStore defines the database actions for managing accounts.
 type AccountStore interface {
-	// CreateDerivedAccount creates a new derived account with the given name
-	// and scope.
+	// CreateDerivedAccount creates a new derived account with the given
+	// name and scope. After allocating the account number, the store
+	// invokes deriveFn to obtain the wallet-derived account material
+	// and persists it with the row.
 	//
 	// If the key scope does not exist, it will be automatically created
 	// using the address schema from ScopeAddrMap with no coin public/private
 	// key material. Spendable scopes may later gain a key_scope_secrets row;
 	// watch-only scopes remain absent from that table.
 	CreateDerivedAccount(ctx context.Context,
-		params CreateDerivedAccountParams) (*AccountInfo, error)
+		params CreateDerivedAccountParams,
+		deriveFn AccountDerivationFunc) (*AccountInfo, error)
 
 	// CreateImportedAccount stores an imported account identified by
 	// an extended public key. Returns the persisted account as an
@@ -441,4 +444,34 @@ type UTXOStore interface {
 	// reason about lease state without issuing a second balance query.
 	Balance(ctx context.Context, params BalanceParams) (
 		BalanceResult, error)
+}
+
+// AccountDerivationFunc is invoked by the database layer after allocating a
+// derived account number to obtain the wallet-derived account material. The
+// db layer does not perform crypto.
+//
+// The callback runs with the wallet watch-only mode the workflow loaded via
+// ops.WalletWatchOnly. It MUST NOT call db.Store methods or open a walletdb
+// transaction: the store is already inside a write tx and nested access can
+// deadlock (SQLite) or break tx semantics.
+type AccountDerivationFunc func(ctx context.Context, scope KeyScope,
+	accountNumber uint32, walletIsWatchOnly bool) (*DerivedAccountData, error)
+
+// DerivedAccountData carries the wallet-derived account material persisted
+// alongside an allocated derived account number.
+//
+// Validation rules enforced by CreateDerivedAccountWithOps:
+//   - PublicKey must be non-empty.
+//   - EncryptedPrivateKey may be nil only if walletIsWatchOnly is true.
+type DerivedAccountData struct {
+	// PublicKey is the plaintext account-level extended public key.
+	PublicKey []byte
+
+	// EncryptedPrivateKey is the encrypted account-level extended private
+	// key. Nil only when the wallet is watch-only.
+	EncryptedPrivateKey []byte
+
+	// MasterKeyFingerprint is the fingerprint of the root master key
+	// (BIP32 m/) corresponding to PublicKey.
+	MasterKeyFingerprint uint32
 }

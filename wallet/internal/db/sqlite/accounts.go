@@ -78,11 +78,15 @@ func (s *Store) RenameAccount(ctx context.Context,
 	})
 }
 
-// CreateDerivedAccount creates a new derived account with the given name and
-// scope. If the key scope does not exist, it is created using the address
-// schema provided by the caller with no coin public/private key material.
+// CreateDerivedAccount creates a new derived account with the given name
+// and scope. The wallet-supplied deriveFn callback is wired through the
+// AccountStore interface; the shared workflow consumes it in a follow-up
+// commit. If the key scope does not exist, it is created using the
+// address schema provided by the caller with no coin public/private key
+// material.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
-	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
+	params db.CreateDerivedAccountParams,
+	_ db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
 	var info *db.AccountInfo
 
