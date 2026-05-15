@@ -18,7 +18,8 @@ CREATE TABLE addresses (
     -- Reference to the account this address belongs to.
     account_id BIGINT NOT NULL,
 
-    -- Script pubkey that locks funds on-chain (stored in plaintext).
+    -- Script pubkey that locks funds on-chain (stored in plaintext per ADR 0009:
+    -- docs/developer/adr/0009-single-passphrase-encryption.md).
     script_pub_key BYTEA NOT NULL,
 
     -- Reference to the address type (e.g., P2PKH, P2WPKH, P2TR). Determines
@@ -35,7 +36,8 @@ CREATE TABLE addresses (
     -- branch). NULL for imported addresses.
     address_index BIGINT,
 
-    -- Public key for imported addresses (stored in plaintext). NULL for
+    -- Public key for imported addresses (stored in plaintext per ADR 0009:
+    -- docs/developer/adr/0009-single-passphrase-encryption.md). NULL for
     -- HD-derived addresses since their public keys are derived from the
     -- account key.
     pub_key BYTEA,
