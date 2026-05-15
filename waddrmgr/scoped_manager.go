@@ -2824,6 +2824,28 @@ func (s *ScopedKeyManager) IsWatchOnlyAccount(ns walletdb.ReadBucket,
 	return acctInfo.acctKeyPriv == nil, nil
 }
 
+// IsImportedAccount reports whether the persisted account row is a
+// watch-only (imported) row, independent of wallet lock state. Unlike
+// IsWatchOnlyAccount, the result is derived from the on-disk account
+// type, so derived accounts in a locked wallet are not misclassified.
+func (s *ScopedKeyManager) IsImportedAccount(ns walletdb.ReadBucket,
+	account uint32) (bool, error) {
+
+	if account == ImportedAddrAccount {
+		return true, nil
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	acctInfo, err := s.loadAccountInfo(ns, account)
+	if err != nil {
+		return false, err
+	}
+
+	return acctInfo.acctType == accountWatchOnly, nil
+}
+
 // cloneKeyWithVersion clones an extended key to use the version corresponding
 // to the manager's key scope. This should only be used for non-watch-only
 // accounts as they are stored within the database using the legacy BIP-0044
