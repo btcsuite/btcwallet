@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/btcsuite/btcd/btcutil/v2"
 )
 
 var (
@@ -249,6 +251,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		accNumber, params.Name, DerivedAccount, 0, 0, 0,
 		walletIsWatchOnly, row.CreatedAt, params.Scope,
 		derived.PublicKey, derived.MasterKeyFingerprint,
+		0, 0,
 	), nil
 }
 
@@ -473,16 +476,17 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 	return addrSchema, nil
 }
 
-// BuildAccountInfo creates an AccountInfo with the provided values and zeroed
-// balances while we do not yet support balance tracking.
-//
-// TODO(stingelin): Add balance tracking support after transaction management is
-// implemented.
+// BuildAccountInfo creates an AccountInfo with the provided values.
+// confirmedBalance and unconfirmedBalance are populated verbatim from
+// the caller; create paths pass zero (a fresh account has no UTXOs)
+// while the read paths feed real values from the dedicated
+// AccountBalance / AccountBalances queries.
 func BuildAccountInfo(accountNum uint32, accountName string,
 	origin AccountOrigin, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
 	scope KeyScope, publicKey []byte,
-	masterKeyFingerprint uint32) *AccountInfo {
+	masterKeyFingerprint uint32,
+	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
 
 	return &AccountInfo{
 		AccountNumber:        accountNum,
@@ -491,8 +495,8 @@ func BuildAccountInfo(accountNum uint32, accountName string,
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
 		ImportedKeyCount:     importedKeyCount,
-		ConfirmedBalance:     0,
-		UnconfirmedBalance:   0,
+		ConfirmedBalance:     confirmedBalance,
+		UnconfirmedBalance:   unconfirmedBalance,
 		IsWatchOnly:          isWatchOnly,
 		CreatedAt:            createdAt,
 		KeyScope:             scope,
@@ -514,19 +518,21 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId any] struct {
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          AccOriginId
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	IsWatchOnly       bool
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
+	AccountNumber      sql.NullInt64
+	AccountName        string
+	OriginID           AccOriginId
+	ExternalKeyCount   int64
+	InternalKeyCount   int64
+	ImportedKeyCount   int64
+	PublicKey          []byte
+	MasterFingerprint  sql.NullInt64
+	IsWatchOnly        bool
+	CreatedAt          time.Time
+	Purpose            int64
+	CoinType           int64
+	ConfirmedBalance   int64
+	UnconfirmedBalance int64
+	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -579,6 +585,8 @@ func AccountRowToInfo[AccOriginId any](
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
 		row.PublicKey, fingerprint,
+		btcutil.Amount(row.ConfirmedBalance),
+		btcutil.Amount(row.UnconfirmedBalance),
 	), nil
 }
 
