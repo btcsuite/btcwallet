@@ -184,6 +184,16 @@ type AddrStore interface {
 
 	// Close cleanly shuts down the manager.
 	Close()
+
+	// EncryptedMasterHDPriv reads the encrypted master HD private key
+	// from the manager's main bucket. Returns ErrWatchingOnly when no
+	// encrypted master HD private key is persisted.
+	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
+
+	// Decrypt decrypts the supplied ciphertext with the address
+	// manager crypto key identified by keyType. Returns an error if
+	// the manager is locked or the ciphertext is malformed.
+	Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error)
 }
 
 // AccountStore is an interface that describes a scoped key manager.
@@ -317,6 +327,13 @@ type AccountStore interface {
 	// IsWatchOnlyAccount determines if the account is watch-only.
 	IsWatchOnlyAccount(ns walletdb.ReadBucket, account uint32) (bool, error)
 
+	// IsImportedAccount reports whether the persisted account row is
+	// a watch-only (imported) row. Unlike IsWatchOnlyAccount this is
+	// independent of wallet lock state: a derived account in a
+	// locked wallet returns false here.
+	IsImportedAccount(ns walletdb.ReadBucket, account uint32) (
+		bool, error)
+
 	// NewAccountWatchingOnly creates a new watch-only account.
 	NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
 		pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
@@ -352,4 +369,12 @@ type AccountStore interface {
 	// and index.
 	DeriveAddr(account uint32, branch uint32, index uint32) (
 		address.Address, []byte, error)
+
+	// ImportWitnessScript imports a user-provided native witness
+	// script under this scoped manager and returns a managed
+	// address that wraps the script. The script is encrypted with
+	// the manager's CryptoKeyScript when isSecretScript is true.
+	ImportWitnessScript(ns walletdb.ReadWriteBucket, script []byte,
+		bs *BlockStamp, witnessVersion byte,
+		isSecretScript bool) (ManagedScriptAddress, error)
 }
