@@ -69,6 +69,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -94,6 +96,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -119,6 +123,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -148,6 +154,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -203,6 +211,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -230,6 +240,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -260,6 +272,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -287,6 +301,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
