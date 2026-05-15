@@ -514,17 +514,19 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId any] struct {
-	AccountNumber    sql.NullInt64
-	AccountName      string
-	OriginID         AccOriginId
-	ExternalKeyCount int64
-	InternalKeyCount int64
-	ImportedKeyCount int64
-	IsWatchOnly      bool
-	CreatedAt        time.Time
-	Purpose          int64
-	CoinType         int64
-	IDToOriginType   func(AccOriginId) (AccountOrigin, error)
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	OriginID          AccOriginId
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	IsWatchOnly       bool
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -564,11 +566,19 @@ func AccountRowToInfo[AccOriginId any](
 		return nil, err
 	}
 
+	var fingerprint uint32
+	if row.MasterFingerprint.Valid {
+		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("master fingerprint: %w", err)
+		}
+	}
+
 	return BuildAccountInfo(
 		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
-		nil, 0,
+		row.PublicKey, fingerprint,
 	), nil
 }
 
