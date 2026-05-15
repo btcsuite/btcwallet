@@ -11,6 +11,12 @@ import (
 )
 
 type Querier interface {
+	// AccountBalance returns the confirmed/unconfirmed balance for one
+	// account, summed from the wallet's UTXO set at read time. Confirmed
+	// means the funding tx is in a block at or below the wallet's synced
+	// height; unconfirmed covers unmined and above-synced-tip outputs.
+	// Spent outputs (`u.spent_by_tx_id IS NOT NULL`) are excluded.
+	AccountBalance(ctx context.Context, arg AccountBalanceParams) (AccountBalanceRow, error)
 	// Acquires or renews a lease for an outpoint and returns the resulting
 	// expiration time.
 	//
