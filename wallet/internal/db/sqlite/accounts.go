@@ -78,15 +78,16 @@ func (s *Store) RenameAccount(ctx context.Context,
 	})
 }
 
-// CreateDerivedAccount creates a new derived account with the given name
-// and scope. The wallet-supplied deriveFn callback is wired through the
-// AccountStore interface; the shared workflow consumes it in a follow-up
-// commit. If the key scope does not exist, it is created using the
-// address schema provided by the caller with no coin public/private key
-// material.
+// CreateDerivedAccount creates a new derived account with the given name and
+// scope. After allocating the account number, the wallet-supplied deriveFn
+// callback returns the account material (extended public key, encrypted
+// private key, master-key fingerprint, optional address schema) which is
+// persisted together with the row. If the key scope does not exist, it is
+// created with NULL public/private key fields using the address schema
+// provided by the caller.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
-	_ db.AccountDerivationFunc) (*db.AccountInfo, error) {
+	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
 	var info *db.AccountInfo
 
@@ -94,7 +95,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		var err error
 
 		info, err = db.CreateDerivedAccountWithOps(
-			ctx, params, createDerivedAccountOps{q: qtx},
+			ctx, params, createDerivedAccountOps{q: qtx}, deriveFn,
 		)
 
 		return err
@@ -133,10 +134,17 @@ func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
 }
 
-// CreateDerivedAccount implements db.CreateDerivedAccountOps.
+// CreateDerivedAccount implements db.CreateDerivedAccountOps. The shared
+// CreateDerivedAccountWithOps workflow validates derived before invoking
+// this method, so derived must be non-nil; defensively reject anyway in
+// case a future caller skips that validation.
 func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64,
-	name string) (db.CreateDerivedAccountRow, error) {
+	scopeID int64, accountNumber int64, name string,
+	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
+
+	if derived == nil {
+		return db.CreateDerivedAccountRow{}, db.ErrNilDerivedAccountData
+	}
 
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
@@ -147,10 +155,29 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 			},
 			AccountName: name,
 			OriginID:    int64(db.DerivedAccount),
+			PublicKey:   derived.PublicKey,
+			MasterFingerprint: sql.NullInt64{
+				Int64: int64(derived.MasterKeyFingerprint),
+				Valid: true,
+			},
 		},
 	)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, err
+	}
+
+	if len(derived.EncryptedPrivateKey) > 0 {
+		err = o.q.CreateAccountSecret(
+			ctx, sqlc.CreateAccountSecretParams{
+				AccountID:           row.ID,
+				EncryptedPrivateKey: derived.EncryptedPrivateKey,
+			},
+		)
+		if err != nil {
+			return db.CreateDerivedAccountRow{}, fmt.Errorf(
+				"create account secret: %w", err,
+			)
+		}
 	}
 
 	return db.CreateDerivedAccountRow{

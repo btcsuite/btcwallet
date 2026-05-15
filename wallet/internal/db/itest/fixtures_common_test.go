@@ -233,6 +233,26 @@ func (tc AccountTestCase) DerivedParams(
 	}
 }
 
+// SpendableDeriveFn returns a fake AccountDerivationFunc that synthesizes a
+// minimal DerivedAccountData for spendable-wallet test cases. It mirrors what
+// the wallet manager will pass in production: a public key, encrypted private
+// key, and a deterministic master-key fingerprint.
+func SpendableDeriveFn() db.AccountDerivationFunc {
+	return func(_ context.Context, _ db.KeyScope, _ uint32,
+		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
+
+		data := &db.DerivedAccountData{
+			PublicKey:            RandomBytes(33),
+			MasterKeyFingerprint: 0xC0DEC0DE,
+		}
+		if !walletIsWatchOnly {
+			data.EncryptedPrivateKey = RandomBytes(48)
+		}
+
+		return data, nil
+	}
+}
+
 // ImportedParams converts the test case to CreateImportedAccountParams.
 // IsWatchOnly controls whether EncryptedPrivateKey is populated.
 func (tc AccountTestCase) ImportedParams(
@@ -265,18 +285,4 @@ func FilterAccountsByScope(scope db.KeyScope) []AccountTestCase {
 	}
 
 	return filtered
-}
-
-// NoopAccountDerivationFunc is a placeholder AccountDerivationFunc fixture
-// used by tests that exercise CreateDerivedAccount before the derivation
-// callback contract is wired through to the workflow. The callback is
-// accepted by the AccountStore interface but is not yet invoked by the
-// shared workflow, so this no-op shape suffices for outer-contract
-// coverage.
-func NoopAccountDerivationFunc() db.AccountDerivationFunc {
-	return func(_ context.Context, _ db.KeyScope, _ uint32,
-		_ bool) (*db.DerivedAccountData, error) {
-
-		return &db.DerivedAccountData{}, nil
-	}
 }
