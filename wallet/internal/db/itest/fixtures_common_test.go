@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"time"
@@ -264,4 +265,18 @@ func FilterAccountsByScope(scope db.KeyScope) []AccountTestCase {
 	}
 
 	return filtered
+}
+
+// NoopAccountDerivationFunc is a placeholder AccountDerivationFunc fixture
+// used by tests that exercise CreateDerivedAccount before the derivation
+// callback contract is wired through to the workflow. The callback is
+// accepted by the AccountStore interface but is not yet invoked by the
+// shared workflow, so this no-op shape suffices for outer-contract
+// coverage.
+func NoopAccountDerivationFunc() db.AccountDerivationFunc {
+	return func(_ context.Context, _ db.KeyScope, _ uint32,
+		_ bool) (*db.DerivedAccountData, error) {
+
+		return &db.DerivedAccountData{}, nil
+	}
 }
