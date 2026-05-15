@@ -40,35 +40,19 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND (
         $3::BIGINT IS NULL
-        OR acc.account_number = $3::BIGINT
+        OR ks.purpose = $3::BIGINT
     )
     AND (
-        $4::INTEGER IS NULL
-        OR $4::INTEGER = 0
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) >= $4::INTEGER
+        $4::BIGINT IS NULL
+        OR ks.coin_type = $4::BIGINT
     )
     AND (
-        $5::INTEGER IS NULL
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) <= $5::INTEGER
+        $5::BIGINT IS NULL
+        OR acc.account_number = $5::BIGINT
     )
     AND (
         $6::INTEGER IS NULL
         OR $6::INTEGER = 0
-        OR NOT t.is_coinbase
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -78,11 +62,37 @@ WHERE
             END
         ) >= $6::INTEGER
     )
+    AND (
+        $7::INTEGER IS NULL
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) <= $7::INTEGER
+    )
+    AND (
+        $8::INTEGER IS NULL
+        OR $8::INTEGER = 0
+        OR NOT t.is_coinbase
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) >= $8::INTEGER
+    )
 `
 
 type BalanceParams struct {
 	NowUtc           time.Time
 	WalletID         int64
+	Purpose          sql.NullInt64
+	CoinType         sql.NullInt64
 	AccountNumber    sql.NullInt64
 	MinConfirms      sql.NullInt32
 	MaxConfirms      sql.NullInt32
@@ -119,6 +129,8 @@ func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, e
 	row := q.queryRow(ctx, q.balanceStmt, Balance,
 		arg.NowUtc,
 		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
 		arg.AccountNumber,
 		arg.MinConfirms,
 		arg.MaxConfirms,
@@ -518,11 +530,19 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND (
         $2::BIGINT IS NULL
-        OR acc.account_number = $2::BIGINT
+        OR ks.purpose = $2::BIGINT
     )
     AND (
-        $3::INTEGER IS NULL
-        OR $3::INTEGER = 0
+        $3::BIGINT IS NULL
+        OR ks.coin_type = $3::BIGINT
+    )
+    AND (
+        $4::BIGINT IS NULL
+        OR acc.account_number = $4::BIGINT
+    )
+    AND (
+        $5::INTEGER IS NULL
+        OR $5::INTEGER = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -530,10 +550,10 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= $3::INTEGER
+        ) >= $5::INTEGER
     )
     AND (
-        $4::INTEGER IS NULL
+        $6::INTEGER IS NULL
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -541,13 +561,15 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= $4::INTEGER
+        ) <= $6::INTEGER
     )
 ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
 	WalletID      int64
+	Purpose       sql.NullInt64
+	CoinType      sql.NullInt64
 	AccountNumber sql.NullInt64
 	MinConfirms   sql.NullInt32
 	MaxConfirms   sql.NullInt32
@@ -587,6 +609,8 @@ type ListUtxosRow struct {
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
 	rows, err := q.query(ctx, q.listUtxosStmt, ListUtxos,
 		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
 		arg.AccountNumber,
 		arg.MinConfirms,
 		arg.MaxConfirms,

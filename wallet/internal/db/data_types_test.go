@@ -31,3 +31,70 @@ func TestTxStatusString(t *testing.T) {
 		})
 	}
 }
+
+// TestBalanceParamsValidate verifies that BalanceParams.Validate rejects
+// the Account-without-Scope combination with
+// ErrBalanceParamsAccountWithoutScope and accepts every other reasonable
+// param shape.
+func TestBalanceParamsValidate(t *testing.T) {
+	t.Parallel()
+
+	var (
+		zeroAccount uint32
+		zeroConfs   int32
+	)
+
+	scope := KeyScopeBIP0084
+
+	tests := []struct {
+		name    string
+		params  BalanceParams
+		wantErr error
+	}{
+		{
+			name:   "zero value",
+			params: BalanceParams{},
+		},
+		{
+			name: "scope only",
+			params: BalanceParams{
+				WalletID: 1,
+				Scope:    &scope,
+			},
+		},
+		{
+			name: "account with scope",
+			params: BalanceParams{
+				WalletID: 1,
+				Scope:    &scope,
+				Account:  &zeroAccount,
+			},
+		},
+		{
+			name: "account without scope",
+			params: BalanceParams{
+				WalletID: 1,
+				Account:  &zeroAccount,
+			},
+			wantErr: ErrBalanceParamsAccountWithoutScope,
+		},
+		{
+			name: "account without scope but with confs",
+			params: BalanceParams{
+				WalletID: 1,
+				Account:  &zeroAccount,
+				MinConfs: &zeroConfs,
+			},
+			wantErr: ErrBalanceParamsAccountWithoutScope,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.params.Validate()
+			require.ErrorIs(t, err, test.wantErr)
+		})
+	}
+}
