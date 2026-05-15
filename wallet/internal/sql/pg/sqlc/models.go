@@ -10,18 +10,18 @@ import (
 )
 
 type Account struct {
-	ID                 int64
-	WalletID           int64
-	ScopeID            int64
-	AccountNumber      sql.NullInt64
-	AccountName        string
-	OriginID           int16
-	MasterFingerprint  sql.NullInt64
-	EncryptedPublicKey []byte
-	CreatedAt          time.Time
-	NextExternalIndex  int64
-	NextInternalIndex  int64
-	ImportedKeyCount   int64
+	ID                int64
+	WalletID          int64
+	ScopeID           int64
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	OriginID          int16
+	MasterFingerprint sql.NullInt64
+	PublicKey         []byte
+	CreatedAt         time.Time
+	NextExternalIndex int64
+	NextInternalIndex int64
+	ImportedKeyCount  int64
 }
 
 type AccountOrigin struct {
@@ -64,13 +64,13 @@ type Block struct {
 }
 
 type KeyScope struct {
-	ID                  int64
-	WalletID            int64
-	Purpose             int64
-	CoinType            int64
-	EncryptedCoinPubKey []byte
-	InternalTypeID      int16
-	ExternalTypeID      int16
+	ID             int64
+	WalletID       int64
+	Purpose        int64
+	CoinType       int64
+	CoinPubKey     []byte
+	InternalTypeID int16
+	ExternalTypeID int16
 }
 
 type KeyScopeSecret struct {
@@ -117,14 +117,12 @@ type UtxoLease struct {
 }
 
 type Wallet struct {
-	ID                      int64
-	WalletName              string
-	IsImported              bool
-	ManagerVersion          int32
-	IsWatchOnly             bool
-	MasterPubParams         []byte
-	EncryptedCryptoPubKey   []byte
-	EncryptedMasterHdPubKey []byte
+	ID             int64
+	WalletName     string
+	IsImported     bool
+	ManagerVersion int32
+	IsWatchOnly    bool
+	MasterHdPubKey []byte
 }
 
 type WalletSecret struct {

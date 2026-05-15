@@ -19,11 +19,9 @@ func CreateWalletParamsFixture(name string) db.CreateWalletParams {
 		ManagerVersion:           1,
 		IsWatchOnly:              false,
 		EncryptedMasterPrivKey:   RandomBytes(32),
-		EncryptedMasterPubKey:    RandomBytes(32),
-		MasterKeyPubParams:       RandomBytes(16),
+		MasterPubKey:             RandomBytes(32),
 		MasterKeyPrivParams:      RandomBytes(16),
 		EncryptedCryptoPrivKey:   RandomBytes(32),
-		EncryptedCryptoPubKey:    RandomBytes(32),
 		EncryptedCryptoScriptKey: RandomBytes(32),
 	}
 }
@@ -240,11 +238,11 @@ func (tc AccountTestCase) ImportedParams(
 	walletID uint32) db.CreateImportedAccountParams {
 
 	params := db.CreateImportedAccountParams{
-		WalletID:           walletID,
-		Name:               tc.Name,
-		Scope:              tc.Scope,
-		MasterFingerprint:  12345,
-		EncryptedPublicKey: RandomBytes(32),
+		WalletID:          walletID,
+		Name:              tc.Name,
+		Scope:             tc.Scope,
+		MasterFingerprint: 12345,
+		PublicKey:         RandomBytes(32),
 	}
 
 	if !tc.IsWatchOnly {

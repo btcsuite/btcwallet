@@ -271,12 +271,8 @@ type CreateWalletParams struct {
 	// EncryptedMasterPrivKey is the encrypted master HD private key.
 	EncryptedMasterPrivKey []byte
 
-	// EncryptedMasterPubKey is the encrypted master HD public key.
-	EncryptedMasterPubKey []byte
-
-	// MasterKeyPubParams are the parameters (e.g. salt, scrypt N/R/P) used
-	// to derive the master public key.
-	MasterKeyPubParams []byte
+	// MasterPubKey is the master HD public key.
+	MasterPubKey []byte
 
 	// MasterKeyPrivParams are the parameters (e.g. salt, scrypt N/R/P) used
 	// to derive the master private key.
@@ -285,10 +281,6 @@ type CreateWalletParams struct {
 	// EncryptedCryptoPrivKey is the encrypted private crypto key, used to
 	// protect private keys in the database.
 	EncryptedCryptoPrivKey []byte
-
-	// EncryptedCryptoPubKey is the encrypted public crypto key, used to
-	// protect public keys in the database.
-	EncryptedCryptoPubKey []byte
 
 	// EncryptedCryptoScriptKey is the encrypted script crypto key, used to
 	// protect scripts in the database.
@@ -441,10 +433,8 @@ type CreateImportedAccountParams struct {
 	// MasterFingerprint is the fingerprint of the master key.
 	MasterFingerprint uint32
 
-	// EncryptedPublicKey is the encrypted extended public key for the
-	// account. This should be encrypted by the caller before being passed
-	// to the database layer.
-	EncryptedPublicKey []byte
+	// PublicKey is the extended public key for the account.
+	PublicKey []byte
 
 	// EncryptedPrivateKey is the encrypted extended private key for the
 	// account. This should be encrypted by the caller before being passed
@@ -481,11 +471,9 @@ type AccountProperties struct {
 	// account.
 	ImportedKeyCount uint32
 
-	// EncryptedPublicKey is the encrypted account public key. This is the
-	// encrypted form of the extended public key that can be used to derive
-	// addresses for the account. The caller must decrypt this using the
-	// appropriate crypto key to use it.
-	EncryptedPublicKey []byte
+	// PublicKey is the account public key. This is the extended public key
+	// that can be used to derive addresses for the account.
+	PublicKey []byte
 
 	// MasterKeyFingerprint represents the fingerprint of the root key
 	// corresponding to the master public key (also known as the key with
