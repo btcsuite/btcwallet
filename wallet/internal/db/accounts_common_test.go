@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -157,13 +158,7 @@ func TestRenameAccountParamsValidate(t *testing.T) {
 			t.Parallel()
 
 			err := test.params.Validate()
-			if test.wantErr != nil {
-				require.ErrorIs(t, err, test.wantErr)
-
-				return
-			}
-
-			require.NoError(t, err)
+			require.ErrorIs(t, err, test.wantErr)
 		})
 	}
 }
@@ -182,34 +177,37 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 		Name: "savings",
 	}
 	createdAt := time.Unix(123, 0)
-	ops := newValidCreateDerivedAccountOps()
-	ops.walletWatchOnly = true
-	ops.ensureScopeID = 11
-	ops.accountNumber = 12
-	ops.row = CreateDerivedAccountRow{
+	expectedRow := CreateDerivedAccountRow{
 		AccountNumber: sql.NullInt64{Int64: 12, Valid: true},
 		CreatedAt:     createdAt,
 	}
+
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	// Verify call order: WalletWatchOnly -> EnsureScope ->
+	// AllocateAccountNumber -> CreateDerivedAccount.
+	walletCall := ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		true, nil,
+	).Once()
+	ensureScopeCall := ops.On(
+		"EnsureScope", mock.Anything, uint32(7), params.Scope,
+	).Return(int64(11), nil).Once()
+	allocateCall := ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(11),
+	).Return(int64(12), nil).Once()
+	createCall := ops.On(
+		"CreateDerivedAccount", mock.Anything, int64(11), int64(12), "savings",
+	).Return(expectedRow, nil).Once()
+
+	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
 
 	ctx := t.Context()
 	info, err := CreateDerivedAccountWithOps(ctx, params, ops)
 
 	require.NoError(t, err)
-	require.Equal(
-		t, []string{
-			"WalletWatchOnly",
-			"EnsureScope",
-			"AllocateAccountNumber",
-			"CreateDerivedAccount",
-		}, ops.calls,
-	)
-	require.Equal(t, params.WalletID, ops.walletID)
-	require.Equal(t, params.WalletID, ops.ensureWalletID)
-	require.Equal(t, params.Scope, ops.ensureScope)
-	require.Equal(t, int64(11), ops.allocateScopeID)
-	require.Equal(t, int64(11), ops.createScopeID)
-	require.Equal(t, int64(12), ops.createAccountNumber)
-	require.Equal(t, params.Name, ops.createName)
 	require.Equal(t, uint32(12), info.AccountNumber)
 	require.Equal(t, params.Name, info.AccountName)
 	require.Equal(t, DerivedAccount, info.Origin)
@@ -223,28 +221,55 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 func TestCreateDerivedAccountWithOpsRejectsInvalidParams(t *testing.T) {
 	t.Parallel()
 
-	ops := newValidCreateDerivedAccountOps()
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
 
+	// Pass empty params (missing Name). No backend methods should be called.
 	info, err := CreateDerivedAccountWithOps(
 		t.Context(), CreateDerivedAccountParams{}, ops,
 	)
 
 	require.Nil(t, info)
 	require.ErrorIs(t, err, ErrMissingAccountName)
-	require.Empty(t, ops.calls)
+
+	// Explicitly assert zero calls for each backend method.
+	ops.AssertNotCalled(t, "WalletWatchOnly")
+	ops.AssertNotCalled(t, "EnsureScope")
+	ops.AssertNotCalled(t, "AllocateAccountNumber")
+	ops.AssertNotCalled(t, "CreateDerivedAccount")
 }
 
-// TestCreateDerivedAccountWithOpsMissingAccountNumber verifies that the shared
-// helper rejects a backend row with a nil account number.
-func TestCreateDerivedAccountWithOpsMissingAccountNumber(t *testing.T) {
+// TestCreateDerivedAccountWithOpsNilAccountNumber verifies that the shared
+// helper rejects a nil account number returned from the backend.
+func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 	t.Parallel()
 
-	ops := newValidCreateDerivedAccountOps()
-	ops.ensureScopeID = 8
-	ops.accountNumber = 9
-	ops.row = CreateDerivedAccountRow{
-		CreatedAt: time.Unix(456, 0),
-	}
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
+		},
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(9), nil,
+	).Once()
+	ops.On(
+		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
+	).Return(
+		CreateDerivedAccountRow{
+			CreatedAt: time.Unix(456, 0),
+		}, nil,
+	).Once()
 
 	info, err := CreateDerivedAccountWithOps(
 		t.Context(), testCreateDerivedAccountParams(), ops,
@@ -259,16 +284,35 @@ func TestCreateDerivedAccountWithOpsMissingAccountNumber(t *testing.T) {
 func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 	t.Parallel()
 
-	ops := newValidCreateDerivedAccountOps()
-	ops.ensureScopeID = 8
-	ops.accountNumber = int64(^uint32(0)) + 1
-	ops.row = CreateDerivedAccountRow{
-		AccountNumber: sql.NullInt64{
-			Int64: int64(^uint32(0)) + 1,
-			Valid: true,
+	ops := &mockCreateDerivedAccountOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+		false, nil,
+	).Once()
+	ops.On(
+		"EnsureScope", mock.Anything, uint32(7), KeyScope{
+			Purpose: 49,
+			Coin:    0,
 		},
-		CreatedAt: time.Unix(789, 0),
-	}
+	).Return(int64(8), nil).Once()
+	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+		int64(^uint32(0))+1, nil,
+	).Once()
+	ops.On(
+		"CreateDerivedAccount", mock.Anything, int64(8), int64(^uint32(0))+1,
+		"savings",
+	).Return(
+		CreateDerivedAccountRow{
+			AccountNumber: sql.NullInt64{
+				Int64: int64(^uint32(0)) + 1,
+				Valid: true,
+			},
+			CreatedAt: time.Unix(789, 0),
+		}, nil,
+	).Once()
 
 	info, err := CreateDerivedAccountWithOps(
 		t.Context(), testCreateDerivedAccountParams(), ops,
@@ -287,66 +331,86 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 
 	tests := []struct {
 		name            string
-		setupOps        func() *stubCreateDerivedAccountOps
+		setupOps        func() *mockCreateDerivedAccountOps
 		wantErr         error
 		wantWrappedText string
-		wantCalls       []string
 	}{
 		{
 			name: "wallet watch only",
-			setupOps: func() *stubCreateDerivedAccountOps {
-				ops := newValidCreateDerivedAccountOps()
-				ops.walletErr = errTestWallet
+			setupOps: func() *mockCreateDerivedAccountOps {
+				ops := &mockCreateDerivedAccountOps{}
+				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+					false, errTestWallet,
+				).Once()
+
 				return ops
 			},
-			wantErr:   errTestWallet,
-			wantCalls: []string{"WalletWatchOnly"},
+			wantErr: errTestWallet,
 		},
 		{
 			name: "ensure scope",
-			setupOps: func() *stubCreateDerivedAccountOps {
-				ops := newValidCreateDerivedAccountOps()
-				ops.ensureScopeErr = errTestScope
+			setupOps: func() *mockCreateDerivedAccountOps {
+				ops := &mockCreateDerivedAccountOps{}
+				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+					false, nil,
+				).Once()
+				ops.On(
+					"EnsureScope", mock.Anything, uint32(7), KeyScope{
+						Purpose: 49,
+						Coin:    0,
+					},
+				).Return(int64(0), errTestScope).Once()
+
 				return ops
 			},
-			wantErr:   errTestScope,
-			wantCalls: []string{"WalletWatchOnly", "EnsureScope"},
+			wantErr: errTestScope,
 		},
 		{
 			name: "allocate account number",
-			setupOps: func() *stubCreateDerivedAccountOps {
-				ops := newValidCreateDerivedAccountOps()
-				ops.ensureScopeID = 8
-				ops.allocateErr = errTestBoom
+			setupOps: func() *mockCreateDerivedAccountOps {
+				ops := &mockCreateDerivedAccountOps{}
+				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+					false, nil,
+				).Once()
+				ops.On(
+					"EnsureScope", mock.Anything, uint32(7), KeyScope{
+						Purpose: 49,
+						Coin:    0,
+					},
+				).Return(int64(8), nil).Once()
+				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+					int64(0), errTestBoom,
+				).Once()
 
 				return ops
 			},
 			wantErr:         errTestBoom,
 			wantWrappedText: "allocate account number: boom",
-			wantCalls: []string{
-				"WalletWatchOnly",
-				"EnsureScope",
-				"AllocateAccountNumber",
-			},
 		},
 		{
 			name: "create account",
-			setupOps: func() *stubCreateDerivedAccountOps {
-				ops := newValidCreateDerivedAccountOps()
-				ops.ensureScopeID = 8
-				ops.accountNumber = 9
-				ops.createErr = errTestBoom
+			setupOps: func() *mockCreateDerivedAccountOps {
+				ops := &mockCreateDerivedAccountOps{}
+				ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
+					false, nil,
+				).Once()
+				ops.On("EnsureScope", mock.Anything, uint32(7), KeyScope{
+					Purpose: 49,
+					Coin:    0,
+				}).Return(int64(8), nil).Once()
+				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+					int64(9), nil,
+				).Once()
+				ops.On("CreateDerivedAccount", mock.Anything, int64(8),
+					int64(9), "savings",
+				).Return(
+					CreateDerivedAccountRow{}, errTestBoom,
+				).Once()
 
 				return ops
 			},
 			wantErr:         errTestBoom,
 			wantWrappedText: "create account: boom",
-			wantCalls: []string{
-				"WalletWatchOnly",
-				"EnsureScope",
-				"AllocateAccountNumber",
-				"CreateDerivedAccount",
-			},
 		},
 	}
 
@@ -355,6 +419,9 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			t.Parallel()
 
 			ops := tc.setupOps()
+			t.Cleanup(func() {
+				ops.AssertExpectations(t)
+			})
 
 			info, err := CreateDerivedAccountWithOps(
 				t.Context(), testCreateDerivedAccountParams(), ops,
@@ -367,8 +434,6 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 			if tc.wantWrappedText != "" {
 				require.EqualError(t, err, tc.wantWrappedText)
 			}
-
-			require.Equal(t, tc.wantCalls, ops.calls)
 		})
 	}
 }
@@ -386,89 +451,69 @@ func testCreateDerivedAccountParams() CreateDerivedAccountParams {
 	}
 }
 
-// newValidCreateDerivedAccountOps returns a stub adapter with valid defaults
-// for all backend stages so each test only overrides the fields relevant to
-// that case.
-func newValidCreateDerivedAccountOps() *stubCreateDerivedAccountOps {
-	return &stubCreateDerivedAccountOps{
-		walletWatchOnly: false,
-		ensureScopeID:   1,
-		accountNumber:   1,
-		row: CreateDerivedAccountRow{
-			AccountNumber: sql.NullInt64{Int64: 1, Valid: true},
-			CreatedAt:     time.Unix(1, 0),
-		},
-	}
+// mockCreateDerivedAccountOps is a mock implementation of
+// CreateDerivedAccountOps.
+type mockCreateDerivedAccountOps struct {
+	mock.Mock
 }
 
-// stubCreateDerivedAccountOps is a deterministic test adapter for the shared
-// CreateDerivedAccount helper.
-type stubCreateDerivedAccountOps struct {
-	walletWatchOnly bool
-	walletErr       error
-	ensureScopeID   int64
-	ensureScopeErr  error
-	accountNumber   int64
-	allocateErr     error
-	row             CreateDerivedAccountRow
-	createErr       error
-
-	calls               []string
-	walletID            uint32
-	ensureWalletID      uint32
-	ensureScope         KeyScope
-	allocateScopeID     int64
-	createScopeID       int64
-	createAccountNumber int64
-	createName          string
-}
-
-var _ CreateDerivedAccountOps = (*stubCreateDerivedAccountOps)(nil)
+var _ CreateDerivedAccountOps = (*mockCreateDerivedAccountOps)(nil)
 
 // WalletWatchOnly implements CreateDerivedAccountOps.
-func (s *stubCreateDerivedAccountOps) WalletWatchOnly(ctx context.Context,
+func (m *mockCreateDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 	walletID uint32) (bool, error) {
 
-	s.calls = append(s.calls, "WalletWatchOnly")
-	s.walletID = walletID
+	args := m.Called(ctx, walletID)
 
-	return s.walletWatchOnly, s.walletErr
+	isWatchOnly, ok := args.Get(0).(bool)
+	if !ok {
+		return false, mockTypeError("WalletWatchOnly result")
+	}
+
+	return isWatchOnly, args.Error(1)
 }
 
 // EnsureScope implements CreateDerivedAccountOps.
-func (s *stubCreateDerivedAccountOps) EnsureScope(ctx context.Context,
+func (m *mockCreateDerivedAccountOps) EnsureScope(ctx context.Context,
 	walletID uint32, scope KeyScope) (int64, error) {
 
-	s.calls = append(s.calls, "EnsureScope")
-	s.ensureWalletID = walletID
-	s.ensureScope = scope
+	args := m.Called(ctx, walletID, scope)
 
-	return s.ensureScopeID, s.ensureScopeErr
+	scopeID, ok := args.Get(0).(int64)
+	if !ok {
+		return 0, mockTypeError("EnsureScope result")
+	}
+
+	return scopeID, args.Error(1)
 }
 
 // AllocateAccountNumber implements CreateDerivedAccountOps.
-func (s *stubCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
+func (m *mockCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 	scopeID int64) (int64, error) {
 
-	s.calls = append(s.calls, "AllocateAccountNumber")
-	s.allocateScopeID = scopeID
+	args := m.Called(ctx, scopeID)
 
-	return s.accountNumber, s.allocateErr
+	accountNum, ok := args.Get(0).(int64)
+	if !ok {
+		return 0, mockTypeError("AllocateAccountNumber result")
+	}
+
+	return accountNum, args.Error(1)
 }
 
 // CreateDerivedAccount implements CreateDerivedAccountOps.
-func (s *stubCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
+func (m *mockCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	scopeID int64, accountNumber int64, name string) (CreateDerivedAccountRow,
 	error) {
 
-	s.calls = append(s.calls, "CreateDerivedAccount")
-	s.createScopeID = scopeID
-	s.createAccountNumber = accountNumber
-	s.createName = name
+	args := m.Called(ctx, scopeID, accountNumber, name)
 
-	if s.createErr != nil {
-		return CreateDerivedAccountRow{}, s.createErr
+	row, ok := args.Get(0).(CreateDerivedAccountRow)
+	if !ok {
+		return CreateDerivedAccountRow{}, mockTypeError(
+			"CreateDerivedAccount result",
+		)
 	}
 
-	return s.row, nil
+	return row, args.Error(1)
 }
