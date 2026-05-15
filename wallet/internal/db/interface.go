@@ -244,6 +244,37 @@ type DerivedAddressData struct {
 	ScriptPubKey []byte
 }
 
+// AccountDerivationFunc is invoked by the database layer after allocating a
+// derived account number to obtain the wallet-derived account material. The
+// db layer does not perform crypto.
+//
+// The callback runs with the wallet watch-only mode the workflow loaded via
+// ops.WalletWatchOnly. It MUST NOT call db.Store methods or open a walletdb
+// transaction: the store is already inside a write tx and nested access can
+// deadlock (SQLite) or break tx semantics.
+type AccountDerivationFunc func(ctx context.Context, scope KeyScope,
+	accountNumber uint32,
+	walletIsWatchOnly bool) (*DerivedAccountData, error)
+
+// DerivedAccountData carries the wallet-derived account material persisted
+// alongside an allocated derived account number.
+//
+// Validation rules enforced by CreateDerivedAccountWithOps:
+//   - PublicKey must be non-empty.
+//   - EncryptedPrivateKey may be nil only if walletIsWatchOnly is true.
+type DerivedAccountData struct {
+	// PublicKey is the plaintext account-level extended public key.
+	PublicKey []byte
+
+	// EncryptedPrivateKey is the encrypted account-level extended private
+	// key. Nil only when the wallet is watch-only.
+	EncryptedPrivateKey []byte
+
+	// MasterKeyFingerprint is the fingerprint of the root master key
+	// (BIP32 m/) corresponding to PublicKey.
+	MasterKeyFingerprint uint32
+}
+
 // AddressStore defines the database actions for managing addresses.
 type AddressStore interface {
 	// NewDerivedAddress creates a new HD-derived address for the specified
@@ -444,34 +475,4 @@ type UTXOStore interface {
 	// reason about lease state without issuing a second balance query.
 	Balance(ctx context.Context, params BalanceParams) (
 		BalanceResult, error)
-}
-
-// AccountDerivationFunc is invoked by the database layer after allocating a
-// derived account number to obtain the wallet-derived account material. The
-// db layer does not perform crypto.
-//
-// The callback runs with the wallet watch-only mode the workflow loaded via
-// ops.WalletWatchOnly. It MUST NOT call db.Store methods or open a walletdb
-// transaction: the store is already inside a write tx and nested access can
-// deadlock (SQLite) or break tx semantics.
-type AccountDerivationFunc func(ctx context.Context, scope KeyScope,
-	accountNumber uint32, walletIsWatchOnly bool) (*DerivedAccountData, error)
-
-// DerivedAccountData carries the wallet-derived account material persisted
-// alongside an allocated derived account number.
-//
-// Validation rules enforced by CreateDerivedAccountWithOps:
-//   - PublicKey must be non-empty.
-//   - EncryptedPrivateKey may be nil only if walletIsWatchOnly is true.
-type DerivedAccountData struct {
-	// PublicKey is the plaintext account-level extended public key.
-	PublicKey []byte
-
-	// EncryptedPrivateKey is the encrypted account-level extended private
-	// key. Nil only when the wallet is watch-only.
-	EncryptedPrivateKey []byte
-
-	// MasterKeyFingerprint is the fingerprint of the root master key
-	// (BIP32 m/) corresponding to PublicKey.
-	MasterKeyFingerprint uint32
 }

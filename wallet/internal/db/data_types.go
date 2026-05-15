@@ -26,6 +26,16 @@ const (
 	//
 	// NOTE: This value must never overlap with a real block height.
 	UnminedHeight uint32 = math.MaxUint32
+
+	// MaxAccountNumber is the largest derived account number the SQL store
+	// may allocate. It matches waddrmgr.MaxAccountNum so account derivation
+	// stays within the hardened BIP44 child range while leaving the legacy
+	// imported-account child reserved.
+	//
+	// The 31 bit width mirrors waddrmgr.MaxAccountNum, which is the BIP32
+	// hardened-child cap of 2^31 - 1; the -2 leaves the topmost child
+	// number for the legacy imported-account sentinel.
+	MaxAccountNumber uint32 = (1 << 31) - 2 //nolint:mnd
 )
 
 // ============================================================================
