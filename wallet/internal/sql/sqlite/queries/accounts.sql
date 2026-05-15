@@ -418,3 +418,42 @@ WHERE
     AND addr.account_id = sqlc.arg('account_id')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1);
+
+-- name: AccountBalancesByIDs :many
+-- AccountBalancesByIDs returns the confirmed/unconfirmed balance for each
+-- account in account_ids that has funded UTXOs, grouped by account_id. Accounts with no
+-- spendable outputs do not appear in the result; the Go caller defaults
+-- missing entries to zero. The confirmation predicate matches
+-- AccountBalance.
+SELECT
+    addr.account_id,
+    cast(coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NOT NULL
+                AND s.synced_height IS NOT NULL
+                AND t.block_height <= s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0) AS INTEGER) AS confirmed_balance,
+    cast(coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NULL
+                OR s.synced_height IS NULL
+                OR t.block_height > s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0) AS INTEGER) AS unconfirmed_balance
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+INNER JOIN addresses AS addr ON u.address_id = addr.id
+LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
+WHERE
+    addr.wallet_id = sqlc.arg('wallet_id')
+    AND addr.account_id IN (sqlc.slice('account_ids'))
+    AND u.spent_by_tx_id IS NULL
+    AND t.tx_status IN (0, 1)
+GROUP BY addr.account_id;

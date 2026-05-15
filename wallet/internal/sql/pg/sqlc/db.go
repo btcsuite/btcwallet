@@ -27,6 +27,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.accountBalanceStmt, err = db.PrepareContext(ctx, AccountBalance); err != nil {
 		return nil, fmt.Errorf("error preparing query AccountBalance: %w", err)
 	}
+	if q.accountBalancesByIDsStmt, err = db.PrepareContext(ctx, AccountBalancesByIDs); err != nil {
+		return nil, fmt.Errorf("error preparing query AccountBalancesByIDs: %w", err)
+	}
 	if q.acquireUtxoLeaseStmt, err = db.PrepareContext(ctx, AcquireUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireUtxoLease: %w", err)
 	}
@@ -284,6 +287,11 @@ func (q *Queries) Close() error {
 	if q.accountBalanceStmt != nil {
 		if cerr := q.accountBalanceStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing accountBalanceStmt: %w", cerr)
+		}
+	}
+	if q.accountBalancesByIDsStmt != nil {
+		if cerr := q.accountBalancesByIDsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing accountBalancesByIDsStmt: %w", cerr)
 		}
 	}
 	if q.acquireUtxoLeaseStmt != nil {
@@ -741,6 +749,7 @@ type Queries struct {
 	db                                          DBTX
 	tx                                          *sql.Tx
 	accountBalanceStmt                          *sql.Stmt
+	accountBalancesByIDsStmt                    *sql.Stmt
 	acquireUtxoLeaseStmt                        *sql.Stmt
 	balanceStmt                                 *sql.Stmt
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
@@ -831,6 +840,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                          tx,
 		tx:                                          tx,
 		accountBalanceStmt:                          q.accountBalanceStmt,
+		accountBalancesByIDsStmt:                    q.accountBalancesByIDsStmt,
 		acquireUtxoLeaseStmt:                        q.acquireUtxoLeaseStmt,
 		balanceStmt:                                 q.balanceStmt,
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,
