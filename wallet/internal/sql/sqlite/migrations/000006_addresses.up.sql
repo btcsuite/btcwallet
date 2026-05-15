@@ -81,6 +81,17 @@ ON addresses (wallet_id, script_pub_key);
 -- Used by ListAddressesByAccount for cursor-based pagination.
 CREATE INDEX idx_addresses_account_id ON addresses (account_id, id);
 
+-- Enforce that wallet ownership chosen at address creation time remains
+-- immutable. This closes the database-boundary hole where a raw update could
+-- reparent an existing address into another wallet after insert.
+CREATE TRIGGER trg_assert_address_wallet_id_immutable
+BEFORE UPDATE OF wallet_id ON addresses
+FOR EACH ROW
+WHEN new.wallet_id != old.wallet_id
+BEGIN
+    SELECT raise(ABORT, 'address wallet_id cannot be changed after creation');
+END;
+
 -- Address Secrets table stores sensitive encrypted material needed to spend
 -- from an address. This table has a one-to-one relationship with addresses.
 -- Watch-only addresses may have no row in this table.
@@ -101,6 +112,44 @@ CREATE TABLE address_secrets (
     -- that the address cannot be deleted if secrets still exist.
     FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT
 );
+
+-- Enforce the watch-only address secret invariant at the database boundary.
+-- Watch-only parent wallets may track imported scripts, but addresses
+-- beneath them must not store private keys; otherwise a watch-only parent could
+-- silently gain spend authority through an address secret row.
+CREATE TRIGGER trg_assert_watch_only_address_secrets_insert
+BEFORE INSERT ON address_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only address parents cannot store private keys')
+    WHERE
+        new.encrypted_priv_key IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM addresses AS addr
+            INNER JOIN wallets AS w ON addr.wallet_id = w.id
+            WHERE
+                addr.id = new.address_id
+                AND w.is_watch_only
+        );
+END;
+
+CREATE TRIGGER trg_assert_watch_only_address_secrets_update
+BEFORE UPDATE ON address_secrets
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'watch-only address parents cannot store private keys')
+    WHERE
+        new.encrypted_priv_key IS NOT NULL
+        AND EXISTS (
+            SELECT 1
+            FROM addresses AS addr
+            INNER JOIN wallets AS w ON addr.wallet_id = w.id
+            WHERE
+                addr.id = new.address_id
+                AND w.is_watch_only
+        );
+END;
 
 -- Increments imported_key_count when a new imported address is inserted.
 CREATE TRIGGER trg_addresses_imported_key_count_insert

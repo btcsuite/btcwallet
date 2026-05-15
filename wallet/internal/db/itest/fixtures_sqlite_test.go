@@ -12,12 +12,17 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
-	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
+	sqlitedriver "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
-var errUnexpectedDeletedRows = errors.New("unexpected deleted row count")
+var (
+	errUnexpectedDeletedRows = errors.New("unexpected deleted row count")
+	errUnexpectedUpdatedRows = errors.New("unexpected updated row count")
+)
 
 // testBackend returns the SQL backend expected by SQLite itests.
 func testBackend() dberr.Backend {
@@ -35,6 +40,18 @@ func requireConstraintSQLError(t *testing.T, err error) {
 	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
 	require.Equal(t, dberr.ClassPermanent, sqlErr.Class())
 	require.ErrorIs(t, err, sqlErr)
+}
+
+// requireDriverConstraintError verifies that a direct SQLite driver error is a
+// constraint violation before store-level error wrapping occurs.
+func requireDriverConstraintError(t *testing.T, err error) {
+	t.Helper()
+
+	const mask = 0xff
+
+	var sqliteErr *sqlitedriver.Error
+	require.ErrorAs(t, err, &sqliteErr)
+	require.Equal(t, sqlite3.SQLITE_CONSTRAINT, sqliteErr.Code()&mask)
 }
 
 // CreateBlockFixture inserts a test block into the database and returns it.
@@ -124,6 +141,355 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 	)
 
 	return err
+}
+
+// insertAccountSecretRaw inserts an account secret directly through the
+// database so tests can validate watch-only triggers on account_secrets.
+func insertAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	encryptedPrivateKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO account_secrets (
+			account_id,
+			encrypted_private_key
+		) VALUES (?, ?)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, accountID, encryptedPrivateKey,
+	)
+
+	return err
+}
+
+// updateAccountSecretRaw updates an account secret directly through the
+// database so tests can validate watch-only triggers on account_secrets.
+func updateAccountSecretRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	encryptedPrivateKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE account_secrets
+		SET encrypted_private_key = ?
+		WHERE account_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedPrivateKey, accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// deleteKeyScopeSecretRaw deletes a key-scope secret row directly through the
+// database so tests can verify or reset absent-row state.
+func deleteKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB,
+	scopeID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		DELETE FROM key_scope_secrets
+		WHERE scope_id = ?`
+
+	result, err := dbConn.ExecContext(t.Context(), stmt, scopeID)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows > 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedDeletedRows, rows)
+	}
+
+	return nil
+}
+
+// insertKeyScopeSecretRaw inserts a key-scope secret directly through the
+// database so tests can validate watch-only triggers on key_scope_secrets.
+func insertKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	encryptedCoinPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO key_scope_secrets (
+			scope_id,
+			encrypted_coin_priv_key
+		) VALUES (?, ?)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, scopeID, encryptedCoinPrivKey,
+	)
+
+	return err
+}
+
+// updateKeyScopeSecretRaw updates a key-scope secret directly through the
+// database so tests can validate watch-only triggers on key_scope_secrets.
+func updateKeyScopeSecretRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	encryptedCoinPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE key_scope_secrets
+		SET encrypted_coin_priv_key = ?
+		WHERE scope_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedCoinPrivKey, scopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// deleteWalletSecretRaw deletes a wallet secret row directly through the
+// database so tests can re-exercise wallet_secrets insert triggers.
+func deleteWalletSecretRaw(t *testing.T, dbConn *sql.DB,
+	walletID uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		DELETE FROM wallet_secrets
+		WHERE wallet_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedDeletedRows, rows)
+	}
+
+	return nil
+}
+
+// insertWalletSecretRaw inserts a wallet secret directly through the database
+// so tests can validate watch-only triggers on wallet_secrets.
+func insertWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	masterPrivParams []byte, encryptedCryptoPrivKey []byte,
+	encryptedCryptoScriptKey []byte, encryptedMasterHDPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO wallet_secrets (
+			wallet_id,
+			master_priv_params,
+			encrypted_crypto_priv_key,
+			encrypted_crypto_script_key,
+			encrypted_master_hd_priv_key
+		) VALUES (?, ?, ?, ?, ?)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), masterPrivParams,
+		encryptedCryptoPrivKey, encryptedCryptoScriptKey,
+		encryptedMasterHDPrivKey,
+	)
+
+	return err
+}
+
+// updateWalletSecretRaw updates a wallet secret directly through the database
+// so tests can validate watch-only triggers on wallet_secrets.
+func updateWalletSecretRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	masterPrivParams []byte, encryptedCryptoPrivKey []byte,
+	encryptedCryptoScriptKey []byte, encryptedMasterHDPrivKey []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE wallet_secrets
+		SET master_priv_params = ?,
+			encrypted_crypto_priv_key = ?,
+			encrypted_crypto_script_key = ?,
+			encrypted_master_hd_priv_key = ?
+		WHERE wallet_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, masterPrivParams, encryptedCryptoPrivKey,
+		encryptedCryptoScriptKey, encryptedMasterHDPrivKey, int64(walletID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// updateWalletWatchOnlyRaw updates the watch-only flag directly through the
+// database so tests can validate its immutability trigger.
+func updateWalletWatchOnlyRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
+	isWatchOnly bool) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE wallets
+		SET is_watch_only = ?
+		WHERE id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, isWatchOnly, int64(walletID),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// updateKeyScopeWalletIDRaw updates a key scope wallet_id directly through the
+// database so tests can validate its immutability trigger.
+func updateKeyScopeWalletIDRaw(t *testing.T, dbConn *sql.DB, scopeID int64,
+	walletID uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE key_scopes
+		SET wallet_id = ?
+		WHERE id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// reparentAccountRaw updates an account wallet/scope pair directly through the
+// database so tests can validate wallet ownership immutability after insert.
+func reparentAccountRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	walletID uint32, scopeID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET wallet_id = ?,
+			scope_id = ?
+		WHERE id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID, accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// reparentAddressRaw updates an address wallet/account pair directly through
+// the database so tests can validate wallet ownership immutability after
+// insert.
+func reparentAddressRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	walletID uint32, accountID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE addresses
+		SET wallet_id = ?,
+			account_id = ?
+		WHERE id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), accountID, addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
 }
 
 // CreateAddressWithIndex creates a derived address with a specific address
@@ -266,7 +632,7 @@ func setupMaxAccountNumberTest(t *testing.T, store db.AccountStore,
 
 	t.Helper()
 
-	sqliteStore, ok := store.(*sqlite.Store)
+	sqliteStore, ok := store.(*dbsqlite.Store)
 	require.True(t, ok)
 
 	queries := sqliteStore.Queries()
@@ -291,6 +657,59 @@ func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
 	)
 
 	return err
+}
+
+// insertAddressSecretRaw inserts an address secret directly through the
+// database so tests can validate watch-only triggers on address_secrets.
+func insertAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	encryptedPrivKey []byte, encryptedScript []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO address_secrets (
+			address_id,
+			encrypted_priv_key,
+			encrypted_script
+		) VALUES (?, ?, ?)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, addressID, encryptedPrivKey, encryptedScript,
+	)
+
+	return err
+}
+
+// updateAddressSecretRaw updates an address secret directly through the
+// database so tests can validate watch-only triggers on address_secrets.
+func updateAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	encryptedPrivKey []byte, encryptedScript []byte) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE address_secrets
+		SET encrypted_priv_key = ?,
+			encrypted_script = ?
+		WHERE address_id = ?`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, encryptedPrivKey, encryptedScript, addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
 }
 
 // createDerivedAddressRaw inserts a derived address directly through the
