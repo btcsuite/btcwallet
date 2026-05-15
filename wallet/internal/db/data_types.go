@@ -542,6 +542,20 @@ type ListAccountsQuery struct {
 	// Name is an optional filter to list accounts only with a specific
 	// name.
 	Name *string
+
+	// SkipBalance, when true, skips the dedicated AccountBalances query
+	// that the adapter normally runs alongside the list fetch. Each
+	// returned AccountInfo reports ConfirmedBalance and
+	// UnconfirmedBalance as zero. Default (false) issues a single batch
+	// balance query inside the same read transaction as the list fetch
+	// and merges the per-account totals into the result by account_id.
+	// Set this only when balance is unnecessary (e.g. identity-only
+	// lookups, autocomplete UIs, schema audits) to avoid the UTXO scan.
+	//
+	// For filtered or locked-aware balance reads (min/max confirmations,
+	// coinbase maturity, locked-output exclusion) use Store.Balance with
+	// BalanceParams instead.
+	SkipBalance bool
 }
 
 // RenameAccountParams contains the parameters for renaming an account. The

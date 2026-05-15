@@ -349,6 +349,30 @@ type accountInfoRow interface {
 		sqlc.ListAccountsByWalletAndNameRow
 }
 
+// processAccountRows converts a batch of sqlc account rows into AccountInfo
+// slices and captures account IDs for the balance lookup. The getID closure
+// extracts the account ID from each row because Go generics don't allow
+// direct field access on a type-parameter constrained by a union.
+func processAccountRows[T accountInfoRow](
+	rows []T, getID func(T) int64) (
+	[]db.AccountInfo, []int64, error) {
+
+	infos := make([]db.AccountInfo, len(rows))
+	ids := make([]int64, len(rows))
+
+	for i := range rows {
+		info, err := accountRowToInfo(rows[i])
+		if err != nil {
+			return nil, nil, err
+		}
+		infos[i] = *info
+		ids[i] = getID(rows[i])
+	}
+
+	return infos, ids, nil
+}
+
+
 // derivedAddressGetAccountID extracts the account ID from a row.
 func derivedAddressGetAccountID(
 	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
@@ -411,41 +435,120 @@ type accountListQueries struct {
 	q *sqlc.Queries
 }
 
-// byScope lists accounts filtered by wallet ID and key scope.
+// byScope lists accounts filtered by wallet ID and key scope, then
+// attaches each account's balance via AccountBalancesByIDs unless
+// query.SkipBalance is set.
 func (p accountListQueries) byScope(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	return db.ListAccounts(
-		ctx, p.q.ListAccountsByWalletScope,
-		sqlc.ListAccountsByWalletScopeParams{
+	rows, err := p.q.ListAccountsByWalletScope(
+		ctx, sqlc.ListAccountsByWalletScopeParams{
 			WalletID: int64(query.WalletID),
 			Purpose:  int64(query.Scope.Purpose),
 			CoinType: int64(query.Scope.Coin),
-		}, accountRowToInfo,
+		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletScopeRow) int64 { return r.ID },
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.attachBalances(ctx, query, infos, ids)
 }
 
-// byName lists accounts filtered by wallet ID and account name.
+// byName lists accounts filtered by wallet ID and account name, then
+// attaches each account's balance via AccountBalancesByIDs unless
+// query.SkipBalance is set.
 func (p accountListQueries) byName(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	return db.ListAccounts(
-		ctx, p.q.ListAccountsByWalletAndName,
-		sqlc.ListAccountsByWalletAndNameParams{
+	rows, err := p.q.ListAccountsByWalletAndName(
+		ctx, sqlc.ListAccountsByWalletAndNameParams{
 			WalletID:    int64(query.WalletID),
 			AccountName: *query.Name,
-		}, accountRowToInfo,
+		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletAndNameRow) int64 { return r.ID },
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.attachBalances(ctx, query, infos, ids)
 }
 
-// all lists all accounts for a wallet.
+// all lists every account for a wallet, then attaches each account's
+// balance via AccountBalancesByIDs unless query.SkipBalance is set.
 func (p accountListQueries) all(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	return db.ListAccounts(
-		ctx, p.q.ListAccountsByWallet, int64(query.WalletID),
-		accountRowToInfo,
+	rows, err := p.q.ListAccountsByWallet(ctx, int64(query.WalletID))
+	if err != nil {
+		return nil, fmt.Errorf("list accounts: %w", err)
+	}
+
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletRow) int64 { return r.ID },
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.attachBalances(ctx, query, infos, ids)
+}
+
+// attachBalances issues the AccountBalancesByIDs batch query, scoped to
+// and merges each returned (account_id, confirmed, unconfirmed) tuple
+// into the matching AccountInfo entry. The dispatch is skipped when
+// query.SkipBalance is true or there are no infos to enrich, in which
+// case every entry keeps zero balance fields.
+func (p accountListQueries) attachBalances(ctx context.Context,
+	query db.ListAccountsQuery, infos []db.AccountInfo,
+	ids []int64) ([]db.AccountInfo, error) {
+
+	if query.SkipBalance || len(infos) == 0 {
+		return infos, nil
+	}
+
+	balances, err := p.q.AccountBalancesByIDs(
+		ctx, sqlc.AccountBalancesByIDsParams{
+			WalletID:   int64(query.WalletID),
+			AccountIds: ids,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("account balances: %w", err)
+	}
+
+	byID := make(map[int64]sqlc.AccountBalancesByIDsRow, len(balances))
+	for i := range balances {
+		byID[balances[i].AccountID] = balances[i]
+	}
+
+	for i, id := range ids {
+		bal, ok := byID[id]
+		if !ok {
+			continue
+		}
+
+		infos[i].ConfirmedBalance = btcutil.Amount(bal.ConfirmedBalance)
+		infos[i].UnconfirmedBalance = btcutil.Amount(
+			bal.UnconfirmedBalance,
+		)
+	}
+
+	return infos, nil
 }
 
 // accountGetQueries groups PostgreSQL account retrieval query methods.
