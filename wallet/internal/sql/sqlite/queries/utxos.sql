@@ -139,6 +139,14 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
+        cast(sqlc.narg('purpose') AS INTEGER) IS NULL
+        OR ks.purpose = cast(sqlc.narg('purpose') AS INTEGER)
+    )
+    AND (
+        cast(sqlc.narg('coin_type') AS INTEGER) IS NULL
+        OR ks.coin_type = cast(sqlc.narg('coin_type') AS INTEGER)
+    )
+    AND (
         cast(sqlc.narg('account_number') AS INTEGER) IS NULL
         OR acc.account_number = cast(sqlc.narg('account_number') AS INTEGER)
     )
@@ -219,6 +227,14 @@ WHERE
     AND ks.wallet_id = sqlc.arg('wallet_id')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
+    AND (
+        cast(sqlc.narg('purpose') AS INTEGER) IS NULL
+        OR ks.purpose = cast(sqlc.narg('purpose') AS INTEGER)
+    )
+    AND (
+        cast(sqlc.narg('coin_type') AS INTEGER) IS NULL
+        OR ks.coin_type = cast(sqlc.narg('coin_type') AS INTEGER)
+    )
     AND (
         cast(sqlc.narg('account_number') AS INTEGER) IS NULL
         OR acc.account_number = cast(sqlc.narg('account_number') AS INTEGER)

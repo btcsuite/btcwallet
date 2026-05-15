@@ -136,3 +136,18 @@ func NullInt32ToUint32(n sql.NullInt32) (uint32, error) {
 
 	return uint32(n.Int32), nil
 }
+
+// ScopeFilter unpacks an optional *KeyScope into the (purpose, coin_type)
+// SQL nullable args that scoped predicates expect. Both are NULL when
+// scope is nil so the caller's query falls back to wallet-wide
+// aggregation. SQL backends that filter rows by key scope should call
+// this once per query so the predicate shape stays identical across
+// backends.
+func ScopeFilter(scope *KeyScope) (sql.NullInt64, sql.NullInt64) {
+	if scope == nil {
+		return sql.NullInt64{}, sql.NullInt64{}
+	}
+
+	return sql.NullInt64{Int64: int64(scope.Purpose), Valid: true},
+		sql.NullInt64{Int64: int64(scope.Coin), Valid: true}
+}

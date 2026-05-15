@@ -139,6 +139,14 @@ WHERE
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
+        sqlc.narg('purpose')::BIGINT IS NULL
+        OR ks.purpose = sqlc.narg('purpose')::BIGINT
+    )
+    AND (
+        sqlc.narg('coin_type')::BIGINT IS NULL
+        OR ks.coin_type = sqlc.narg('coin_type')::BIGINT
+    )
+    AND (
         sqlc.narg('account_number')::BIGINT IS NULL
         OR acc.account_number = sqlc.narg('account_number')::BIGINT
     )
@@ -214,6 +222,14 @@ WHERE
     AND ks.wallet_id = sqlc.arg('wallet_id')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
+    AND (
+        sqlc.narg('purpose')::BIGINT IS NULL
+        OR ks.purpose = sqlc.narg('purpose')::BIGINT
+    )
+    AND (
+        sqlc.narg('coin_type')::BIGINT IS NULL
+        OR ks.coin_type = sqlc.narg('coin_type')::BIGINT
+    )
     AND (
         sqlc.narg('account_number')::BIGINT IS NULL
         OR acc.account_number = sqlc.narg('account_number')::BIGINT
