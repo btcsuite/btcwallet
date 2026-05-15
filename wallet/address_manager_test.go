@@ -274,14 +274,6 @@ func TestGetUnusedAddress(t *testing.T) {
 	require.NoError(t, err)
 
 	deps.store.On(
-		"ListTxDetails", mock.Anything,
-		db.ListTxDetailsQuery{
-			WalletID:    w.id,
-			StartHeight: 0,
-			EndHeight:   -1,
-		},
-	).Return([]db.TxDetailInfo{}, nil).Once()
-	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
@@ -299,22 +291,12 @@ func TestGetUnusedAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, firstAddr.String(), unusedAddr.String())
 
-	firstPkScript, err := txscript.PayToAddrScript(firstAddr)
-	require.NoError(t, err)
+	usedFirstAddr := derivedAddressInfoFromAddr(
+		t, firstAddr, db.WitnessPubKey, "default", scope, false,
+		0, 0, nil,
+	)
+	usedFirstAddr.IsUsed = true
 
-	deps.store.On(
-		"ListTxDetails", mock.Anything,
-		db.ListTxDetailsQuery{
-			WalletID:    w.id,
-			StartHeight: 0,
-			EndHeight:   -1,
-		},
-	).Return([]db.TxDetailInfo{{
-		MsgTx: &wire.MsgTx{TxOut: []*wire.TxOut{{
-			PkScript: firstPkScript,
-		}}},
-		OwnedOutputs: []db.TxOwnedOutput{{Index: 0}},
-	}}, nil).Once()
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
@@ -323,9 +305,7 @@ func TestGetUnusedAddress(t *testing.T) {
 			Scope:       db.KeyScope(scope),
 			Page:        req,
 		},
-	).Return(addressIter(*derivedAddressInfoFromAddr(
-		t, firstAddr, db.WitnessPubKey, "default", scope, false, 0, 0, nil,
-	))).Once()
+	).Return(addressIter(*usedFirstAddr)).Once()
 
 	nextAddrVal, _ := btcutil.NewAddressWitnessPubKeyHash(
 		[]byte{
@@ -350,14 +330,6 @@ func TestGetUnusedAddress(t *testing.T) {
 		}, w.cfg.ChainParams,
 	)
 
-	deps.store.On(
-		"ListTxDetails", mock.Anything,
-		db.ListTxDetailsQuery{
-			WalletID:    w.id,
-			StartHeight: 0,
-			EndHeight:   -1,
-		},
-	).Return([]db.TxDetailInfo{}, nil).Once()
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{

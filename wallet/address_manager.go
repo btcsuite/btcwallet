@@ -55,12 +55,6 @@ var (
 	// ErrUnableToExtractAddress is returned when an address cannot be
 	// extracted from a pkscript.
 	ErrUnableToExtractAddress = errors.New("unable to extract address")
-
-	// errOwnedOutputIndexOutOfRange is returned when store tx metadata points
-	// to an output that does not exist in the transaction.
-	errOwnedOutputIndexOutOfRange = errors.New(
-		"owned output index out of range",
-	)
 )
 
 const addressManagerPageLimit = 500
@@ -377,69 +371,6 @@ func storeAddressPubKeyCompressed(pubKey []byte) bool {
 	return len(pubKey) == btcec.PubKeyBytesLenCompressed
 }
 
-// txFromDetail returns the decoded transaction for one store tx-detail record.
-func txFromDetail(detail db.TxDetailInfo) (*wire.MsgTx, error) {
-	if detail.MsgTx != nil {
-		return detail.MsgTx, nil
-	}
-
-	var msgTx wire.MsgTx
-
-	err := msgTx.Deserialize(bytes.NewReader(detail.SerializedTx))
-	if err != nil {
-		return nil, fmt.Errorf("deserialize tx %v: %w", detail.Hash, err)
-	}
-
-	return &msgTx, nil
-}
-
-// usedAddressScripts builds the set of wallet-owned output scripts that have
-// already appeared in wallet history.
-func usedAddressScripts(details []db.TxDetailInfo) (map[string]struct{},
-	error) {
-
-	used := make(map[string]struct{})
-
-	for i := range details {
-		msgTx, err := txFromDetail(details[i])
-		if err != nil {
-			return nil, err
-		}
-
-		for j := range details[i].OwnedOutputs {
-			index := details[i].OwnedOutputs[j].Index
-			if uint64(index) >= uint64(len(msgTx.TxOut)) {
-				return nil, fmt.Errorf("tx %v owned output index "+
-					"%d: %w", details[i].Hash, index,
-					errOwnedOutputIndexOutOfRange)
-			}
-
-			used[string(msgTx.TxOut[index].PkScript)] = struct{}{}
-		}
-	}
-
-	return used, nil
-}
-
-// usedWalletAddressScripts builds the set of wallet-owned output scripts that
-// have already appeared in the wallet transaction history.
-func (w *Wallet) usedWalletAddressScripts(ctx context.Context) (
-	map[string]struct{}, error) {
-
-	txDetails, err := w.store.ListTxDetails(
-		ctx, db.ListTxDetailsQuery{
-			WalletID:    w.id,
-			StartHeight: 0,
-			EndHeight:   -1,
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return usedAddressScripts(txDetails)
-}
-
 // storeAddressBalances returns wallet address balances using the store UTXO
 // interface.
 func (w *Wallet) storeAddressBalances(ctx context.Context) (
@@ -501,7 +432,7 @@ func (w *Wallet) legacyAddressBalances() (map[string]btcutil.Amount, error) {
 // nextUnusedStoreAddress returns the unused address candidate represented by a
 // store record, if it matches the requested branch and is not already used.
 func nextUnusedStoreAddress(storeAddr db.AddressInfo,
-	usedScripts map[string]struct{}, change bool,
+	change bool,
 	chainParams *chaincfg.Params) (btcutil.Address, bool, error) {
 
 	if storeAddr.Origin != db.DerivedAccount {
@@ -512,7 +443,7 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 		return nil, false, nil
 	}
 
-	if _, ok := usedScripts[string(storeAddr.ScriptPubKey)]; ok {
+	if storeAddr.IsUsed {
 		return nil, false, nil
 	}
 
@@ -712,11 +643,6 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	usedScripts, err := w.usedWalletAddressScripts(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	addresses := w.store.IterAddresses(
 		ctx, db.ListAddressesQuery{
 			WalletID:    w.id,
@@ -731,7 +657,7 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		}
 
 		unusedAddr, ok, err := nextUnusedStoreAddress(
-			storeAddr, usedScripts, change, w.cfg.ChainParams,
+			storeAddr, change, w.cfg.ChainParams,
 		)
 		if err != nil {
 			return nil, err
@@ -1126,4 +1052,20 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 	}
 
 	return derivationInfo, nil
+}
+
+// txFromDetail returns the decoded transaction for one store tx-detail record.
+func txFromDetail(detail db.TxDetailInfo) (*wire.MsgTx, error) {
+	if detail.MsgTx != nil {
+		return detail.MsgTx, nil
+	}
+
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(detail.SerializedTx))
+	if err != nil {
+		return nil, fmt.Errorf("deserialize tx %v: %w", detail.Hash, err)
+	}
+
+	return &msgTx, nil
 }
