@@ -9,6 +9,8 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 const AccountBalance = `-- name: AccountBalance :one
@@ -64,6 +66,80 @@ func (q *Queries) AccountBalance(ctx context.Context, arg AccountBalanceParams) 
 	var i AccountBalanceRow
 	err := row.Scan(&i.ConfirmedBalance, &i.UnconfirmedBalance)
 	return i, err
+}
+
+const AccountBalancesByIDs = `-- name: AccountBalancesByIDs :many
+SELECT
+    addr.account_id,
+    coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NOT NULL
+                AND s.synced_height IS NOT NULL
+                AND t.block_height <= s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0)::BIGINT AS confirmed_balance,
+    coalesce(sum(
+        CASE
+            WHEN
+                t.block_height IS NULL
+                OR s.synced_height IS NULL
+                OR t.block_height > s.synced_height
+                THEN u.amount
+            ELSE 0
+        END
+    ), 0)::BIGINT AS unconfirmed_balance
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+INNER JOIN addresses AS addr ON u.address_id = addr.id
+LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
+WHERE
+    addr.wallet_id = $1
+    AND addr.account_id = any($2::BIGINT [])
+    AND u.spent_by_tx_id IS NULL
+    AND t.tx_status IN (0, 1)
+GROUP BY addr.account_id
+`
+
+type AccountBalancesByIDsParams struct {
+	WalletID   int64
+	AccountIds []int64
+}
+
+type AccountBalancesByIDsRow struct {
+	AccountID          int64
+	ConfirmedBalance   int64
+	UnconfirmedBalance int64
+}
+
+// AccountBalancesByIDs returns the confirmed/unconfirmed balance for each
+// account in account_ids that has funded UTXOs, grouped by account_id. Accounts with no
+// spendable outputs do not appear in the result; the Go caller defaults
+// missing entries to zero. The confirmation predicate matches
+// AccountBalance.
+func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error) {
+	rows, err := q.query(ctx, q.accountBalancesByIDsStmt, AccountBalancesByIDs, arg.WalletID, pq.Array(arg.AccountIds))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AccountBalancesByIDsRow
+	for rows.Next() {
+		var i AccountBalancesByIDsRow
+		if err := rows.Scan(&i.AccountID, &i.ConfirmedBalance, &i.UnconfirmedBalance); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const CreateAccountSecret = `-- name: CreateAccountSecret :exec
