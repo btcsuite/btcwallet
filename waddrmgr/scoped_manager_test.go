@@ -104,6 +104,40 @@ func TestNewAccountWatchingOnlyCachesAccountInfo(t *testing.T) {
 	require.Nil(t, acctInfo.addrSchema)
 }
 
+// TestIsImportedAccountAcceptsLegacyImportedAccount verifies that the legacy
+// imported-address pseudo-account does not go through account-row loading.
+func TestIsImportedAccountAcceptsLegacyImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create the manager and fetch the scoped manager.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	// Act: Classify the legacy imported-address pseudo-account.
+	var imported bool
+
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		imported, err = scopedMgr.IsImportedAccount(
+			ns, ImportedAddrAccount,
+		)
+
+		return err
+	})
+
+	// Assert: The classifier handles the pseudo-account without attempting
+	// to load account-row key material that does not exist for it.
+	require.NoError(t, err)
+	require.True(t, imported)
+}
+
 // TestScopedManagerAddressCacheBounded verifies that the scoped-manager address
 // cache stays within its configured capacity while still reloading evicted
 // addresses from disk.
