@@ -603,6 +603,22 @@ type AddressInfo struct {
 	// databases (signed 64-bit integers).
 	AccountID uint32
 
+	// AccountNumber is the BIP44 account index used for derived accounts.
+	// Imported accounts do not have a meaningful BIP44 account index, so this
+	// field is set to 0 for imported rows and must not be used when Origin is
+	// ImportedAccount.
+	AccountNumber uint32
+
+	// AccountName is the human-readable account name that owns the address.
+	AccountName string
+
+	// KeyScope identifies the wallet scope that owns the address.
+	KeyScope KeyScope
+
+	// MasterKeyFingerprint is the root fingerprint associated with the owning
+	// account. It is 0 when the database does not store one for the account.
+	MasterKeyFingerprint uint32
+
 	// AddrType is the type of address (P2PKH, P2WPKH, P2TR, etc.).
 	AddrType AddressType
 
