@@ -19,6 +19,9 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
+// A compile-time assertion to ensure Store implements the address store.
+var _ db.AddressStore = (*Store)(nil)
+
 var (
 	// errUnexpectedAddressCount is returned when legacy address derivation
 	// returns a number of addresses different from the requested count.
@@ -269,9 +272,7 @@ func resolvedAddressInfo(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
-	err = setAddressID(
-		ns, manager, account, resolver.WatchOnly(), info,
-	)
+	err = setAddressID(ns, manager, account, resolver.WatchOnly(), info)
 	if err != nil {
 		return nil, err
 	}
@@ -279,13 +280,46 @@ func resolvedAddressInfo(ns walletdb.ReadBucket,
 	return info, nil
 }
 
-// ListAddresses is not yet implemented for kvdb.
+// ListAddresses returns one page of addresses from the legacy address-manager
+// path.
 func (s *Store) ListAddresses(ctx context.Context,
-	_ db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
+	query db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
 
-	return page.Result[db.AddressInfo, uint32]{}, notImplemented(
-		ctx, "ListAddresses",
+	err := ctx.Err()
+	if err != nil {
+		return page.Result[db.AddressInfo, uint32]{}, err
+	}
+
+	if query.Page.Limit() == 0 {
+		return page.Result[db.AddressInfo, uint32]{}, db.ErrInvalidPageLimit
+	}
+
+	addrMgr := s.addrStore
+
+	manager, err := addrMgr.FetchScopedKeyManager(
+		waddrmgr.KeyScope(query.Scope),
 	)
+	if err != nil {
+		return page.Result[db.AddressInfo, uint32]{},
+			fmt.Errorf("ListAddresses: fetch scoped manager: %w", err)
+	}
+
+	items, err := listAddressItems(
+		s.db, manager, addrMgr.WatchOnly(), query,
+	)
+	if err != nil {
+		return page.Result[db.AddressInfo, uint32]{},
+			fmt.Errorf("ListAddresses: %w", err)
+	}
+
+	result := page.BuildResult(
+		query.Page, items,
+		func(item db.AddressInfo) uint32 {
+			return item.ID
+		},
+	)
+
+	return result, nil
 }
 
 // IterAddresses returns an iterator over paginated legacy address-manager
@@ -545,6 +579,42 @@ func importTaprootScriptAddress(ns walletdb.ReadWriteBucket,
 	return managedAddr, nil
 }
 
+// listAddressItems loads, filters, and paginates account addresses from one
+// legacy scoped manager.
+func listAddressItems(dbConn walletdb.DB,
+	manager waddrmgr.AccountStore, walletIsWatchOnly bool,
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	var items []db.AddressInfo
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		account, err := manager.LookupAccount(ns, query.AccountName)
+		if err != nil {
+			if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+				return db.ErrAccountNotFound
+			}
+
+			return fmt.Errorf("lookup account: %w", err)
+		}
+
+		items, err = accountAddressInfos(
+			ns, manager, account, walletIsWatchOnly,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list address items: %w", err)
+	}
+
+	return addressPageItems(items, query), nil
+}
+
 // setAddressID assigns target's synthetic ID from the current legacy
 // account view.
 func setAddressID(ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
@@ -638,6 +708,25 @@ func addressLess(a, b db.AddressInfo) bool {
 	}
 
 	return bytes.Compare(a.ScriptPubKey, b.ScriptPubKey) < 0
+}
+
+// addressPageItems applies cursor pagination to already sorted address items.
+func addressPageItems(items []db.AddressInfo,
+	query db.ListAddressesQuery) []db.AddressInfo {
+
+	start := 0
+	if query.Page.After != nil {
+		for start < len(items) && items[start].ID <= *query.Page.After {
+			start++
+		}
+	}
+
+	limit := start + int(query.Page.Limit()) + 1
+	if limit > len(items) {
+		limit = len(items)
+	}
+
+	return items[start:limit]
 }
 
 // managedAddressInfo adapts one legacy managed address into the db address view
