@@ -15,6 +15,9 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// A compile-time assertion to ensure Store implements the UTXO store.
+var _ db.UTXOStore = (*Store)(nil)
+
 var (
 	// errNotImplemented is returned for unimplemented kvdb store methods.
 	errNotImplemented = errors.New("not implemented")
@@ -193,11 +196,43 @@ func (s *Store) ReleaseOutput(_ context.Context,
 	return nil
 }
 
-// ListLeasedOutputs is not yet implemented for kvdb.
-func (s *Store) ListLeasedOutputs(ctx context.Context,
+// ListLeasedOutputs lists the currently active legacy output leases.
+func (s *Store) ListLeasedOutputs(_ context.Context,
 	_ uint32) ([]db.LeasedOutput, error) {
 
-	return nil, notImplemented(ctx, "ListLeasedOutputs")
+	var leases []db.LeasedOutput
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		locked, err := s.txStore.ListLockedOutputs(ns)
+		if err != nil {
+			return fmt.Errorf("list locked outputs: %w", err)
+		}
+
+		leases = make([]db.LeasedOutput, len(locked))
+		for i, lease := range locked {
+			leases[i] = db.LeasedOutput{
+				OutPoint:   lease.Outpoint,
+				LockID:     db.LockID(lease.LockID),
+				Expiration: lease.Expiration.UTC(),
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListLeasedOutputs: %w", err)
+	}
+
+	if len(leases) == 0 {
+		return []db.LeasedOutput{}, nil
+	}
+
+	return leases, nil
 }
 
 // Balance is not yet implemented for kvdb.
