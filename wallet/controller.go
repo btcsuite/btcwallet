@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
 const (
@@ -567,24 +568,23 @@ func (w *Wallet) mainLoop() {
 //     wallet's sync tip to this point to ensure a clean rescan range.
 //  6. Update the memory cache.
 func (w *Wallet) verifyBirthday(ctx context.Context) error {
-	// We'll start by fetching our wallet's birthday block.
-	birthdayBlock, verified, err := w.DBGetBirthdayBlock(ctx)
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
 	if err != nil {
-		var mgrErr waddrmgr.ManagerError
-		if !errors.As(err, &mgrErr) ||
-			mgrErr.ErrorCode != waddrmgr.ErrBirthdayBlockNotSet {
+		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
-			log.Errorf("Unable to sanity check wallet birthday "+
-				"block: %v", err)
-
-			return err
-		}
-		// If not set, we proceed to locate it.
+		return fmt.Errorf("get wallet birthday: %w", err)
 	}
 
 	// If the birthday block has already been verified, we initialize the
 	// cache and exit our sanity check to avoid redundant lookups.
-	if verified {
+	if walletInfo.BirthdayBlock != nil {
+		birthdayBlock, err := storeBlockToBlockStamp(
+			walletInfo.BirthdayBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("decode birthday block: %w", err)
+		}
+
 		log.Infof("Birthday block verified: height=%d, hash=%v",
 			birthdayBlock.Height, birthdayBlock.Hash)
 		w.birthdayBlock = birthdayBlock
@@ -593,27 +593,70 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 	}
 	// Otherwise, we'll attempt to locate a better one now that we have
 	// access to the chain.
-	timestamp := w.addrStore.Birthday()
+	timestamp := walletInfo.Birthday
 
 	newBirthdayBlock, err := locateBirthdayBlock(w.cfg.Chain, timestamp)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
+		return fmt.Errorf("update birthday block: %w", err)
+	}
+
+	storeBlock, err := blockStampToStoreBlock(*newBirthdayBlock)
+	if err != nil {
 		return err
 	}
 
-	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
+	err = w.store.UpdateWallet(ctx, db.UpdateWalletParams{
+		WalletID:      w.id,
+		BirthdayBlock: storeBlock,
+		SyncedTo:      storeBlock,
+	})
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("update birthday block: %w", err)
 	}
 
 	w.birthdayBlock = *newBirthdayBlock
 
 	return nil
+}
+
+// storeBlockToBlockStamp converts database block metadata into the legacy
+// block-stamp shape still used by wallet runtime state.
+func storeBlockToBlockStamp(block *db.Block) (waddrmgr.BlockStamp, error) {
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("%w: store block "+
+			"height %d exceeds max int32", db.ErrInvalidParam,
+			block.Height)
+	}
+
+	return waddrmgr.BlockStamp{
+		Height:    height,
+		Hash:      block.Hash,
+		Timestamp: block.Timestamp,
+	}, nil
+}
+
+// blockStampToStoreBlock converts legacy block-stamp metadata into the database
+// store block shape.
+func blockStampToStoreBlock(
+	block waddrmgr.BlockStamp) (*db.Block, error) {
+
+	height, err := db.Int64ToUint32(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("block height %d: %w", block.Height, err)
+	}
+
+	return &db.Block{
+		Hash:      block.Hash,
+		Height:    height,
+		Timestamp: block.Timestamp,
+	}, nil
 }
 
 // resultChan is a generic channel for returning errors to callers.

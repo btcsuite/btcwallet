@@ -114,7 +114,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Cleanup(cleanup)
 
 	mockAddrStore := &mockAddrStore{}
-	mockStore := &mockStore{}
+	mockStore := &mockStore{addrStore: mockAddrStore}
 	mockTxStore := &mockTxStore{}
 	mockSyncer := &mockChainSyncer{}
 	mockChain := &mockChain{}
