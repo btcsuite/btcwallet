@@ -7,7 +7,9 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
@@ -120,5 +122,51 @@ func TestGetWalletMissingAddrStore(t *testing.T) {
 	store := NewStore(dbConn, nil, nil)
 
 	_, err := store.GetWallet(t.Context(), "default")
+	require.ErrorIs(t, err, errMissingLegacyAddrStore)
+}
+
+// TestUpdateWalletWritesLegacyMetadata verifies that kvdb.Store writes wallet
+// metadata through the legacy address manager.
+func TestUpdateWalletWritesLegacyMetadata(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	birthday := time.Unix(123, 0).UTC()
+	birthdayBlock := &db.Block{
+		Hash:      chainhash.Hash{1},
+		Height:    0,
+		Timestamp: time.Unix(456, 0).UTC(),
+	}
+	err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID:      0,
+		Birthday:      &birthday,
+		BirthdayBlock: birthdayBlock,
+		SyncedTo:      birthdayBlock,
+	})
+	require.NoError(t, err)
+
+	info, err := store.GetWallet(t.Context(), "default")
+	require.NoError(t, err)
+	require.Equal(t, birthday, info.Birthday)
+	require.Equal(t, birthdayBlock, info.BirthdayBlock)
+	require.Equal(t, birthdayBlock, info.SyncedTo)
+}
+
+// TestUpdateWalletMissingAddrStore verifies that UpdateWallet reports a
+// helpful error when the legacy address manager is unavailable.
+func TestUpdateWalletMissingAddrStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	store := NewStore(dbConn, nil, nil)
+
+	err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{})
 	require.ErrorIs(t, err, errMissingLegacyAddrStore)
 }
