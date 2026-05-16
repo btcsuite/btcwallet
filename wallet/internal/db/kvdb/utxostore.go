@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -102,11 +103,54 @@ func (s *Store) ListUTXOs(_ context.Context,
 	return utxos, nil
 }
 
-// LeaseOutput is not yet implemented for kvdb.
-func (s *Store) LeaseOutput(ctx context.Context,
-	_ db.LeaseOutputParams) (*db.LeasedOutput, error) {
+// LeaseOutput locks one known wallet UTXO through the legacy wtxmgr lease
+// path.
+func (s *Store) LeaseOutput(_ context.Context,
+	params db.LeaseOutputParams) (*db.LeasedOutput, error) {
 
-	return nil, notImplemented(ctx, "LeaseOutput")
+	if params.Duration <= 0 {
+		return nil, fmt.Errorf(
+			"%w: lease duration must be positive", db.ErrInvalidParam,
+		)
+	}
+
+	var expiration time.Time
+
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		var err error
+
+		expiration, err = s.txStore.LockOutput(
+			ns, wtxmgr.LockID(params.ID), params.OutPoint, params.Duration,
+		)
+		if err != nil {
+			switch {
+			case errors.Is(err, wtxmgr.ErrUtxoNotFound),
+				errors.Is(err, wtxmgr.ErrUnknownOutput):
+				return db.ErrUtxoNotFound
+
+			case errors.Is(err, wtxmgr.ErrOutputAlreadyLocked):
+				return db.ErrOutputAlreadyLeased
+			}
+
+			return fmt.Errorf("lock output: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.LeaseOutput: %w", err)
+	}
+
+	return &db.LeasedOutput{
+		OutPoint:   params.OutPoint,
+		LockID:     db.LockID(params.ID),
+		Expiration: expiration.UTC(),
+	}, nil
 }
 
 // ReleaseOutput releases a previously leased output.
