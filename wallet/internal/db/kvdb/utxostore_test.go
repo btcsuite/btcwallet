@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -111,4 +112,90 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, walletdb.ErrBucketNotFound)
+}
+
+// TestGetUtxoSuccess verifies that kvdb.Store adapts one legacy credit into the
+// db-native UTXO shape.
+func TestGetUtxoSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	pkScript := []byte{0x51}
+	outPoint, received := insertKnownCredit(
+		t, dbConn, txStore, pkScript, 1500, 1,
+	)
+
+	utxo, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: 0,
+		OutPoint: outPoint,
+	})
+	require.NoError(t, err)
+	require.Equal(t, outPoint, utxo.OutPoint)
+	require.Equal(t, btcutil.Amount(1500), utxo.Amount)
+	require.Equal(t, pkScript, utxo.PkScript)
+	require.Equal(t, received.UTC().Unix(), utxo.Received.Unix())
+	require.Equal(t, uint32(1), utxo.Height)
+}
+
+// TestGetUtxoNotFound verifies that kvdb.Store maps the legacy missing-UTXO
+// error onto db.ErrUtxoNotFound.
+func TestGetUtxoNotFound(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	_, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: 0,
+		OutPoint: wire.OutPoint{Hash: [32]byte{9}, Index: 0},
+	})
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+func insertKnownCredit(t *testing.T, dbConn walletdb.DB, txStore *wtxmgr.Store,
+	pkScript []byte, value int64, height int32) (wire.OutPoint, time.Time) {
+
+	t.Helper()
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Hash: [32]byte{1}},
+	})
+	txMsg.AddTxOut(&wire.TxOut{Value: value, PkScript: pkScript})
+
+	received := time.Now().UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, received)
+	require.NoError(t, err)
+
+	var block *wtxmgr.BlockMeta
+	if height >= 0 {
+		block = &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: height},
+			Time:  received,
+		}
+	}
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		err := txStore.InsertTx(ns, rec, block)
+		require.NoError(t, err)
+
+		err = txStore.AddCredit(ns, rec, block, 0, false)
+		require.NoError(t, err)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return wire.OutPoint{Hash: rec.Hash, Index: 0}, received
 }
