@@ -40,6 +40,12 @@ var (
 	// ErrUnknownSigningMethod is returned when an address type reports a
 	// signing method the current validation path does not understand.
 	ErrUnknownSigningMethod = errors.New("unknown signing method")
+
+	// errUnsupportedManagedPubKeyAddress is returned when a public-key
+	// address implementation cannot expose encrypted private-key state.
+	errUnsupportedManagedPubKeyAddress = errors.New(
+		"unsupported managed pubkey address",
+	)
 )
 
 // AddressType represents the various address types waddrmgr is currently able
@@ -182,6 +188,19 @@ type ManagedPubKeyAddress interface {
 	// imported keys, the first value will be set to false to indicate that
 	// we don't know exactly how the key was derived.
 	DerivationInfo() (KeyScope, DerivationPath, bool)
+}
+
+// ManagedPubKeyAddressHasPrivateKey reports whether the managed public-key
+// address carries encrypted private-key material.
+func ManagedPubKeyAddressHasPrivateKey(addr ManagedPubKeyAddress) (bool,
+	error) {
+
+	managedAddr, ok := addr.(*managedAddress)
+	if !ok {
+		return false, errUnsupportedManagedPubKeyAddress
+	}
+
+	return len(managedAddr.privKeyEncrypted) > 0, nil
 }
 
 // ValidatableManagedAddress is a type of managed pubkey address that can
