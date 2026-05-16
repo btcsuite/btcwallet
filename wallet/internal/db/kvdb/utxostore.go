@@ -16,6 +16,10 @@ var (
 	// errNotImplemented is returned for unimplemented kvdb store methods.
 	errNotImplemented = errors.New("not implemented")
 
+	// errMissingTxmgrNamespace is returned when the legacy transaction manager
+	// bucket is not available in the kvdb wallet database.
+	errMissingTxmgrNamespace = errors.New("missing wtxmgr namespace")
+
 	// wtxmgrNamespaceKey is the walletdb top-level bucket key used by the
 	// transaction manager.
 	//
@@ -23,6 +27,8 @@ var (
 	wtxmgrNamespaceKey = []byte("wtxmgr")
 )
 
+// notImplemented returns a consistent error for kvdb methods that still need a
+// legacy-backed implementation.
 func notImplemented(_ context.Context, method string) error {
 	return fmt.Errorf("kvdb.Store.%s: %w", method, errNotImplemented)
 }
@@ -34,11 +40,37 @@ func IsNotImplemented(err error) bool {
 	return errors.Is(err, errNotImplemented)
 }
 
-// GetUtxo is not yet implemented for kvdb.
-func (s *Store) GetUtxo(ctx context.Context,
-	_ db.GetUtxoQuery) (*db.UtxoInfo, error) {
+// GetUtxo retrieves one current wallet-owned UTXO through the legacy wtxmgr
+// query path.
+func (s *Store) GetUtxo(_ context.Context,
+	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
-	return nil, notImplemented(ctx, "GetUtxo")
+	var utxo *db.UtxoInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		credit, err := s.txStore.GetUtxo(ns, query.OutPoint)
+		if err != nil {
+			if errors.Is(err, wtxmgr.ErrUtxoNotFound) {
+				return db.ErrUtxoNotFound
+			}
+
+			return fmt.Errorf("get utxo: %w", err)
+		}
+
+		utxo = utxoInfo(credit)
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetUtxo: %w", err)
+	}
+
+	return utxo, nil
 }
 
 // ListUTXOs is not yet implemented for kvdb.
@@ -107,4 +139,21 @@ func (s *Store) Balance(ctx context.Context,
 	_ db.BalanceParams) (db.BalanceResult, error) {
 
 	return db.BalanceResult{}, notImplemented(ctx, "Balance")
+}
+
+// utxoInfo maps one legacy wtxmgr credit into the db-native UTXO shape.
+func utxoInfo(credit *wtxmgr.Credit) *db.UtxoInfo {
+	height := db.UnminedHeight
+	if credit.Height >= 0 {
+		height = nonNegativeInt32ToUint32(credit.Height)
+	}
+
+	return &db.UtxoInfo{
+		OutPoint:     credit.OutPoint,
+		Amount:       credit.Amount,
+		PkScript:     credit.PkScript,
+		Received:     credit.Received.UTC(),
+		FromCoinBase: credit.FromCoinBase,
+		Height:       height,
+	}
 }
