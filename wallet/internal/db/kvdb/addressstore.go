@@ -8,6 +8,7 @@ import (
 	"iter"
 	"sort"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -43,6 +44,26 @@ var (
 		"kvdb: missing waddrmgr namespace",
 	)
 )
+
+// legacySyncState is the subset of the legacy root manager needed to import
+// script addresses with a block stamp.
+type legacySyncState interface {
+	SyncedTo() waddrmgr.BlockStamp
+}
+
+// legacyAddressDecryptor is implemented by legacy address managers that can
+// decrypt imported script material.
+type legacyAddressDecryptor interface {
+	Decrypt(keyType waddrmgr.CryptoKeyType, in []byte) ([]byte, error)
+}
+
+// legacyWitnessScriptImporter is implemented by legacy scoped managers that can
+// import native witness scripts.
+type legacyWitnessScriptImporter interface {
+	ImportWitnessScript(ns walletdb.ReadWriteBucket, script []byte,
+		bs *waddrmgr.BlockStamp, witnessVersion byte,
+		isSecretScript bool) (waddrmgr.ManagedScriptAddress, error)
+}
 
 // NewDerivedAddress creates one derived address through the legacy address-
 // manager path.
@@ -136,11 +157,63 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 	return info, nil
 }
 
-// NewImportedAddress is not yet implemented for kvdb.
+// NewImportedAddress imports one address through the legacy address-manager
+// path.
 func (s *Store) NewImportedAddress(ctx context.Context,
-	_ db.NewImportedAddressParams) (*db.AddressInfo, error) {
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
-	return nil, notImplemented(ctx, "NewImportedAddress")
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.ValidateBasic()
+	if err != nil {
+		return nil, fmt.Errorf("validate params: %w", err)
+	}
+
+	if params.HasPrivateKey() {
+		return nil, fmt.Errorf("NewImportedAddress: private key: %w",
+			errNotImplemented)
+	}
+
+	addrMgr := s.addrStore
+
+	manager, err := addrMgr.FetchScopedKeyManager(
+		waddrmgr.KeyScope(params.Scope),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("NewImportedAddress: fetch scoped manager: "+
+			"%w", err)
+	}
+
+	var info *db.AddressInfo
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		managedAddr, err := s.importAddress(ns, manager, params)
+		if err != nil {
+			return err
+		}
+
+		info, err = managedAddressInfo(ns, manager, managedAddr)
+		if err != nil {
+			return err
+		}
+
+		return kvdbSetAddressID(
+			ns, manager, managedAddr.InternalAccount(), info,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("NewImportedAddress: %w", err)
+	}
+
+	return info, nil
 }
 
 // GetAddress is not yet implemented for kvdb.
@@ -247,6 +320,135 @@ func nextAddress(ns walletdb.ReadWriteBucket,
 	}
 
 	return addrs[0], nil
+}
+
+// importAddress imports a public key or encrypted script through the legacy
+// scoped manager.
+func (s *Store) importAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore,
+	params db.NewImportedAddressParams) (waddrmgr.ManagedAddress, error) {
+
+	if params.HasScript() {
+		return s.importScriptAddress(ns, manager, params)
+	}
+
+	if len(params.PubKey) == 0 {
+		return nil, fmt.Errorf("kvdb imported raw script pubkey: %w",
+			errNotImplemented)
+	}
+
+	pubKey, err := btcec.ParsePubKey(params.PubKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse imported pubkey: %w", err)
+	}
+
+	managedAddr, err := manager.ImportPublicKey(ns, pubKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("import public key: %w", err)
+	}
+
+	return managedAddr, nil
+}
+
+// importScriptAddress decrypts and imports script material through the
+// legacy scoped manager.
+func (s *Store) importScriptAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore,
+	params db.NewImportedAddressParams) (waddrmgr.ManagedAddress, error) {
+
+	script, err := s.addrStore.Decrypt(
+		waddrmgr.CKTPublic, params.EncryptedScript,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt imported script: %w", err)
+	}
+
+	blockStamp := s.addrStore.SyncedTo()
+	switch params.AddressType {
+	case db.ScriptHash:
+		return importScriptHashAddress(
+			ns, manager, script, &blockStamp,
+		)
+
+	case db.WitnessScript:
+		return importWitnessScriptAddress(
+			ns, manager, script, &blockStamp,
+		)
+
+	case db.TaprootPubKey:
+		return importTaprootScriptAddress(
+			ns, manager, script, &blockStamp,
+		)
+
+	case db.RawPubKey, db.PubKeyHash, db.NestedWitnessPubKey,
+		db.WitnessPubKey, db.Anchor:
+
+		return nil, fmt.Errorf("import script address type %d: %w",
+			params.AddressType, errNotImplemented)
+
+	default:
+		return nil, fmt.Errorf("import script address type %d: %w",
+			params.AddressType, errNotImplemented)
+	}
+}
+
+// importScriptHashAddress imports legacy P2SH script material.
+func importScriptHashAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore, script []byte,
+	blockStamp *waddrmgr.BlockStamp) (waddrmgr.ManagedAddress, error) {
+
+	managedAddr, err := manager.ImportScript(ns, script, blockStamp)
+	if err != nil {
+		return nil, fmt.Errorf("import script: %w", err)
+	}
+
+	return managedAddr, nil
+}
+
+// importWitnessScriptAddress imports legacy P2WSH script material.
+func importWitnessScriptAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore, script []byte,
+	blockStamp *waddrmgr.BlockStamp) (waddrmgr.ManagedAddress, error) {
+
+	managedAddr, err := manager.ImportWitnessScript(
+		ns, script, blockStamp, 0, false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("import witness script: %w", err)
+	}
+
+	return managedAddr, nil
+}
+
+// importTaprootScriptAddress imports legacy taproot script material.
+func importTaprootScriptAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore, script []byte,
+	blockStamp *waddrmgr.BlockStamp) (waddrmgr.ManagedAddress, error) {
+
+	tapscript, err := waddrmgr.DecodeTaprootScript(script)
+	if err != nil {
+		return nil, fmt.Errorf("decode tapscript: %w", err)
+	}
+
+	managedAddr, err := manager.ImportTaprootScript(
+		ns, tapscript, blockStamp, 1, false,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("import tapscript: %w", err)
+	}
+
+	return managedAddr, nil
+}
+
+// syncedTo returns the legacy root manager's current sync point when it is
+// available.
+func syncedTo(addrStore any) waddrmgr.BlockStamp {
+	syncState, ok := addrStore.(legacySyncState)
+	if !ok {
+		return waddrmgr.BlockStamp{}
+	}
+
+	return syncState.SyncedTo()
 }
 
 // kvdbSetAddressID assigns target's synthetic ID from the current legacy
