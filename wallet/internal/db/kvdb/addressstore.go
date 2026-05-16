@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -200,11 +201,82 @@ func validateImportedAddress(params db.NewImportedAddressParams,
 	return nil
 }
 
-// GetAddress is not yet implemented for kvdb.
+// GetAddress retrieves one address through the legacy address-manager path.
 func (s *Store) GetAddress(ctx context.Context,
-	_ db.GetAddressQuery) (*db.AddressInfo, error) {
+	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
-	return nil, notImplemented(ctx, "GetAddress")
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(query.ScriptPubKey) == 0 {
+		return nil, db.ErrInvalidAddressQuery
+	}
+
+	addrMgr := s.addrStore
+
+	addr := addressFromScript(
+		query.ScriptPubKey, addrMgr.ChainParams(),
+	)
+	if addr == nil {
+		return nil, db.ErrAddressNotFound
+	}
+
+	var info *db.AddressInfo
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		info, err = resolvedAddressInfo(ns, addrMgr, addr)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetAddress: %w", err)
+	}
+
+	return info, nil
+}
+
+// resolvedAddressInfo resolves one legacy managed address and assigns its
+// synthetic address ID.
+func resolvedAddressInfo(ns walletdb.ReadBucket,
+	resolver waddrmgr.AddrStore,
+	addr btcutil.Address) (*db.AddressInfo, error) {
+
+	managedAddr, err := resolver.Address(ns, addr)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, db.ErrAddressNotFound
+		}
+
+		return nil, fmt.Errorf("lookup address: %w", err)
+	}
+
+	manager, account, err := resolver.AddrAccount(ns, addr)
+	if err != nil {
+		return nil, fmt.Errorf("lookup address account: %w", err)
+	}
+
+	info, err := managedAddressInfo(
+		ns, manager, resolver.WatchOnly(), managedAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = setAddressID(
+		ns, manager, account, resolver.WatchOnly(), info,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 // ListAddresses is not yet implemented for kvdb.
@@ -683,4 +755,23 @@ func managedAddressIsWatchOnly(walletIsWatchOnly bool,
 	}
 
 	return !hasPrivateKey, nil
+}
+
+// addressFromScript extracts the unique standard address for a script.
+func addressFromScript(pkScript []byte,
+	chainParams *chaincfg.Params) btcutil.Address {
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		pkScript, chainParams,
+	)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+
+	encoded, err := txscript.PayToAddrScript(addrs[0])
+	if err != nil || !bytes.Equal(encoded, pkScript) {
+		return nil
+	}
+
+	return addrs[0]
 }

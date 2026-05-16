@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +47,15 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	require.Equal(t, props.AccountNumber, info.AccountID)
 	require.NotEmpty(t, info.ScriptPubKey)
 	require.NotEmpty(t, info.PubKey)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, info, got)
 }
 
 // TestAddressStoreImportedPublicKeyIsWatchOnly verifies that imported public
@@ -87,6 +97,122 @@ func TestAddressStoreImportedPublicKeyIsWatchOnly(t *testing.T) {
 	require.Equal(t, pkScript, info.ScriptPubKey)
 	require.Equal(t, pubKeyBytes, info.PubKey)
 	require.True(t, info.IsWatchOnly)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: pkScript,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.IsWatchOnly)
+}
+
+// TestGetAddressBareMultisigReturnsNotFound verifies that GetAddress rejects
+// scripts that cannot be uniquely identified by their extracted address.
+func TestGetAddressBareMultisigReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	privKey1, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	privKey2, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKeyBytes := privKey1.PubKey().SerializeCompressed()
+	addr, err := btcutil.NewAddressPubKeyHash(
+		btcutil.Hash160(pubKeyBytes), addrStore.ChainParams(),
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	pubKeyAddr, err := btcutil.NewAddressPubKey(
+		pubKeyBytes, addrStore.ChainParams(),
+	)
+	require.NoError(t, err)
+
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     0,
+			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0044),
+			AddressType:  db.PubKeyHash,
+			ScriptPubKey: pkScript,
+			PubKey:       pubKeyBytes,
+		},
+	)
+	require.NoError(t, err)
+
+	otherPubKeyAddr, err := btcutil.NewAddressPubKey(
+		privKey2.PubKey().SerializeCompressed(), addrStore.ChainParams(),
+	)
+	require.NoError(t, err)
+
+	multisigScript, err := txscript.MultiSigScript(
+		[]*btcutil.AddressPubKey{pubKeyAddr, otherPubKeyAddr}, 1,
+	)
+	require.NoError(t, err)
+
+	_, err = store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     0,
+		ScriptPubKey: multisigScript,
+	})
+	require.ErrorIs(t, err, db.ErrAddressNotFound)
+}
+
+// TestAddressStoreImportedPrivateKeyIsSpendable verifies that legacy imported
+// private keys are not marked watch-only.
+func TestAddressStoreImportedPrivateKeyIsSpendable(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	unlockAddrStore(t, dbConn, addrStore)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wif, err := btcutil.NewWIF(privKey, addrStore.ChainParams(), false)
+	require.NoError(t, err)
+
+	manager, err := addrStore.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	var pkScript []byte
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		managedAddr, err := manager.ImportPrivateKey(ns, wif, nil)
+		if err != nil {
+			return err
+		}
+
+		pkScript, err = txscript.PayToAddrScript(managedAddr.Address())
+
+		return err
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: pkScript,
+		},
+	)
+	require.NoError(t, err)
+	require.False(t, got.IsWatchOnly)
+	require.Len(t, got.PubKey, len(privKey.PubKey().SerializeUncompressed()))
 }
 
 // TestAddressStoreImportedPublicKeyRejectsMismatch verifies that kvdb rejects
@@ -213,6 +339,16 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 	require.Equal(t, db.TaprootPubKey, info.AddrType)
 	require.True(t, info.HasScript)
 	require.Equal(t, pkScript, info.ScriptPubKey)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: pkScript,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.HasScript)
+	require.Equal(t, db.TaprootPubKey, got.AddrType)
 }
 
 // TestManagedAddressIsWatchOnlyUnsupportedPubKey verifies that unsupported
@@ -293,6 +429,20 @@ func (m *unsupportedManagedPubKeyAddress) DerivationInfo() (waddrmgr.KeyScope,
 	path, _ := args.Get(1).(waddrmgr.DerivationPath)
 
 	return scope, path, args.Bool(2)
+}
+
+// unlockAddrStore unlocks the legacy address manager for private-key imports.
+func unlockAddrStore(t *testing.T, dbConn walletdb.DB,
+	addrStore *waddrmgr.Manager) {
+
+	t.Helper()
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return addrStore.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
 }
 
 // testTaprootScript returns a tapscript and its P2TR output script.
