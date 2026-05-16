@@ -461,11 +461,37 @@ func (s *Store) DeleteTx(ctx context.Context, _ db.DeleteTxParams) error {
 	return notImplemented(ctx, "DeleteTx")
 }
 
-// InvalidateUnminedTx is not yet implemented for kvdb.
-func (s *Store) InvalidateUnminedTx(ctx context.Context,
-	_ db.InvalidateUnminedTxParams) error {
+// InvalidateUnminedTx invalidates an unmined tx through the legacy wtxmgr path.
+func (s *Store) InvalidateUnminedTx(_ context.Context,
+	params db.InvalidateUnminedTxParams) error {
 
-	return notImplemented(ctx, "InvalidateUnminedTx")
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		details, err := s.txStore.TxDetails(ns, &params.Txid)
+		if err != nil {
+			return fmt.Errorf("lookup transaction details: %w", err)
+		}
+
+		if details == nil {
+			return db.ErrTxNotFound
+		}
+
+		if details.Block.Height >= 0 {
+			return fmt.Errorf("tx %s is confirmed: %w", params.Txid,
+				db.ErrInvalidateTx)
+		}
+
+		return s.txStore.RemoveUnminedTx(ns, &details.TxRecord)
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.InvalidateUnminedTx: %w", err)
+	}
+
+	return nil
 }
 
 // RollbackToBlock is not yet implemented for kvdb.

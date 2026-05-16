@@ -304,6 +304,75 @@ func TestCreateTxCreditNilFallback(t *testing.T) {
 	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
 }
 
+// TestInvalidateUnminedTxSuccess verifies that kvdb.Store removes one unmined
+// transaction through the legacy transaction store.
+func TestInvalidateUnminedTxSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{62},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 9_000, PkScript: []byte{0x51}})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		return txStore.InsertTx(ns, rec, nil)
+	})
+	require.NoError(t, err)
+
+	err = store.InvalidateUnminedTx(
+		t.Context(), db.InvalidateUnminedTxParams{
+			WalletID: 0,
+			Txid:     rec.Hash,
+		},
+	)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &rec.Hash)
+		require.NoError(t, err)
+		require.Nil(t, details)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestInvalidateUnminedTxRejectsConfirmed verifies that confirmed transactions
+// cannot be invalidated through the unmined-only kvdb path.
+func TestInvalidateUnminedTxRejectsConfirmed(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	rec := insertConfirmedTx(t, dbConn, txStore, 144)
+
+	err := store.InvalidateUnminedTx(
+		t.Context(), db.InvalidateUnminedTxParams{
+			WalletID: 0,
+			Txid:     rec.Hash,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrInvalidateTx)
+}
+
 // TestUpdateTxLabelOnlySuccess verifies that kvdb.Store can apply a label-only
 // UpdateTx patch through the legacy label path.
 func TestUpdateTxLabelOnlySuccess(t *testing.T) {
