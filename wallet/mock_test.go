@@ -39,6 +39,12 @@ import (
 // exercising a real database backend.
 type mockStore struct {
 	mock.Mock
+
+	// addrStore optionally backs the GetWallet/UpdateWallet methods
+	// so the kvdb adapter pattern can be exercised end-to-end without
+	// programming a Called expectation for every field. When nil the
+	// methods fall back to mock.Called.
+	addrStore waddrmgr.AddrStore
 }
 
 // A compile-time assertion to ensure that mockStore implements the db.Store
