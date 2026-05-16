@@ -183,6 +183,17 @@ type ManagedPubKeyAddress interface {
 	DerivationInfo() (KeyScope, DerivationPath, bool)
 }
 
+// ManagedPubKeyAddressHasPrivateKey reports whether the managed public-key
+// address carries encrypted private-key material.
+func ManagedPubKeyAddressHasPrivateKey(addr ManagedPubKeyAddress) bool {
+	managedAddr, ok := addr.(*managedAddress)
+	if !ok {
+		return false
+	}
+
+	return len(managedAddr.privKeyEncrypted) > 0
+}
+
 // ValidatableManagedAddress is a type of managed pubkey address that can
 // perform external validation to catch unintended mutations between the
 // derivation process and the ultimate address being created. This may help to
