@@ -161,6 +161,33 @@ func TestGetUtxoNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }
 
+// TestLeaseOutputSuccess verifies that kvdb.Store adapts one legacy lease write
+// into the db-native leased-output view.
+func TestLeaseOutputSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	outPoint, _ := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	lease, err := store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: 0,
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Hour,
+	})
+	require.NoError(t, err)
+	require.Equal(t, outPoint, lease.OutPoint)
+	require.Equal(t, db.LockID{1}, lease.LockID)
+	require.True(t, lease.Expiration.After(time.Now().UTC()))
+}
+
 // TestListUTXOsFiltersByAccountAndConfirms verifies that kvdb.Store applies the
 // legacy address/account and confirmation filters before returning db-native
 // UTXO rows.
