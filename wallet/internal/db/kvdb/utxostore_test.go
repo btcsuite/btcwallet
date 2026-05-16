@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -158,6 +159,50 @@ func TestGetUtxoNotFound(t *testing.T) {
 		OutPoint: wire.OutPoint{Hash: [32]byte{9}, Index: 0},
 	})
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestListUTXOsFiltersByAccountAndConfirms verifies that kvdb.Store applies the
+// legacy address/account and confirmation filters before returning db-native
+// UTXO rows.
+func TestListUTXOsFiltersByAccountAndConfirms(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	defaultAddr, defaultScript := newTestAddressScript(t)
+	testAddr, testScript := newTestAddressScript(t)
+
+	addrStore := &testLegacyAddrStore{
+		chainParams:   &chaincfg.RegressionNetParams,
+		currentHeight: 5,
+		accountByAddr: map[string]uint32{
+			defaultAddr.String(): 0,
+			testAddr.String():    1,
+		},
+	}
+
+	store := NewStore(dbConn, txStore, addrStore)
+
+	_, _ = insertKnownCredit(t, dbConn, txStore, defaultScript, 4000, 4)
+	_, _ = insertKnownCredit(t, dbConn, txStore, testScript, 5000, 5)
+	_, _ = insertKnownCredit(t, dbConn, txStore, testScript, 6000, -1)
+
+	account := uint32(1)
+	minConfs := int32(1)
+
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: 0,
+		Account:  &account,
+		MinConfs: &minConfs,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, btcutil.Amount(5000), utxos[0].Amount)
+	require.Equal(t, testScript, utxos[0].PkScript)
 }
 
 func insertKnownCredit(t *testing.T, dbConn walletdb.DB, txStore *wtxmgr.Store,
