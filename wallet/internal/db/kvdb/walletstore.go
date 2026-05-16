@@ -2,7 +2,10 @@ package kvdb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
+	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -13,6 +16,14 @@ import (
 // A compile-time assertion to ensure Store implements the wallet store.
 var _ db.WalletStore = (*Store)(nil)
 
+// legacyWalletMetadataStore is the legacy address-manager subset needed for
+// wallet metadata operations.
+type legacyWalletMetadataStore interface {
+	Birthday() time.Time
+	BirthdayBlock(ns walletdb.ReadBucket) (waddrmgr.BlockStamp, bool, error)
+	SyncedTo() waddrmgr.BlockStamp
+}
+
 // CreateWallet is not yet implemented for kvdb.
 func (s *Store) CreateWallet(ctx context.Context,
 	_ db.CreateWalletParams) (*db.WalletInfo, error) {
@@ -20,11 +31,61 @@ func (s *Store) CreateWallet(ctx context.Context,
 	return nil, notImplemented(ctx, "CreateWallet")
 }
 
-// GetWallet is not yet implemented for kvdb.
-func (s *Store) GetWallet(ctx context.Context,
-	_ string) (*db.WalletInfo, error) {
+// GetWallet reads wallet runtime metadata from the legacy address manager.
+func (s *Store) GetWallet(_ context.Context,
+	name string) (*db.WalletInfo, error) {
 
-	return nil, notImplemented(ctx, "GetWallet")
+	addrStore, err := s.walletMetadataStore("GetWallet")
+	if err != nil {
+		return nil, err
+	}
+
+	var birthdayBlock *db.Block
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		block, verified, err := addrStore.BirthdayBlock(ns)
+		if err != nil {
+			if waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
+				return nil
+			}
+
+			return fmt.Errorf("get birthday block: %w", err)
+		}
+
+		if !verified {
+			return nil
+		}
+
+		birthdayBlock, err = kvdbBlockFromBlockStamp(block)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
+	}
+
+	syncedTo, err := kvdbOptionalBlockFromBlockStamp(addrStore.SyncedTo())
+	if errors.Is(err, db.ErrBlockNotFound) {
+		syncedTo = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
+	}
+
+	return &db.WalletInfo{
+		ID:            0,
+		Name:          name,
+		Birthday:      addrStore.Birthday().UTC(),
+		BirthdayBlock: birthdayBlock,
+		SyncedTo:      syncedTo,
+	}, nil
 }
 
 // ListWallets is not yet implemented for kvdb.
@@ -41,7 +102,7 @@ func (s *Store) IterWallets(ctx context.Context,
 	_ db.ListWalletsQuery) iter.Seq2[db.WalletInfo, error] {
 
 	return func(yield func(db.WalletInfo, error) bool) {
-		yield(db.WalletInfo{}, notImplemented(ctx, "IterWallets"))
+		_ = yield(db.WalletInfo{}, notImplemented(ctx, "IterWallets"))
 	}
 }
 
@@ -91,4 +152,52 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	_ db.UpdateWalletSecretsParams) error {
 
 	return notImplemented(ctx, "UpdateWalletSecrets")
+}
+
+// walletMetadataStore returns the legacy address manager used for wallet
+// metadata operations.
+func (s *Store) walletMetadataStore(method string) (legacyWalletMetadataStore,
+	error) {
+
+	if s.addrStore == nil {
+		return nil, fmt.Errorf(
+			"kvdb.Store.%s: %w", method, errMissingLegacyAddrStore,
+		)
+	}
+
+	addrStore, ok := s.addrStore.(legacyWalletMetadataStore)
+	if !ok {
+		return nil, fmt.Errorf(
+			"kvdb.Store.%s: %w", method, errMissingLegacyAddrStore,
+		)
+	}
+
+	return addrStore, nil
+}
+
+// kvdbBlockFromBlockStamp converts a non-negative legacy block stamp into the
+// store block shape.
+func kvdbBlockFromBlockStamp(block waddrmgr.BlockStamp) (*db.Block, error) {
+	height, err := db.Int64ToUint32(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("block height %d: %w", block.Height, err)
+	}
+
+	return &db.Block{
+		Hash:      block.Hash,
+		Height:    height,
+		Timestamp: block.Timestamp.UTC(),
+	}, nil
+}
+
+// kvdbOptionalBlockFromBlockStamp converts a legacy block stamp into the store
+// block shape, treating negative heights as missing metadata.
+func kvdbOptionalBlockFromBlockStamp(
+	block waddrmgr.BlockStamp) (*db.Block, error) {
+
+	if block.Height < 0 {
+		return nil, db.ErrBlockNotFound
+	}
+
+	return kvdbBlockFromBlockStamp(block)
 }
