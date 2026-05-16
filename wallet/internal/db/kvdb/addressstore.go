@@ -9,6 +9,8 @@ import (
 	"sort"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -44,6 +46,16 @@ var (
 		"kvdb: missing waddrmgr namespace",
 	)
 )
+
+// legacyAddressResolver is the subset of the legacy root manager needed for
+// script-based address lookup.
+type legacyAddressResolver interface {
+	Address(ns walletdb.ReadBucket,
+		addr btcutil.Address) (waddrmgr.ManagedAddress, error)
+	AddrAccount(ns walletdb.ReadBucket,
+		addr btcutil.Address) (waddrmgr.AccountStore, uint32, error)
+	ChainParams() *chaincfg.Params
+}
 
 // legacySyncState is the subset of the legacy root manager needed to import
 // script addresses with a block stamp.
@@ -149,7 +161,7 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
-	err = kvdbSetAddressID(ns, manager, account, info)
+	err = setAddressID(ns, manager, account, info)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +217,7 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 			return err
 		}
 
-		return kvdbSetAddressID(
+		return setAddressID(
 			ns, manager, managedAddr.InternalAccount(), info,
 		)
 	})
@@ -216,11 +228,78 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 	return info, nil
 }
 
-// GetAddress is not yet implemented for kvdb.
+// GetAddress retrieves one address through the legacy address-manager path.
 func (s *Store) GetAddress(ctx context.Context,
-	_ db.GetAddressQuery) (*db.AddressInfo, error) {
+	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
-	return nil, notImplemented(ctx, "GetAddress")
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(query.ScriptPubKey) == 0 {
+		return nil, db.ErrInvalidAddressQuery
+	}
+
+	addrMgr := s.addrStore
+
+	addr := addressFromScript(
+		query.ScriptPubKey, addrMgr.ChainParams(),
+	)
+	if addr == nil {
+		return nil, db.ErrAddressNotFound
+	}
+
+	var info *db.AddressInfo
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		info, err = resolvedAddressInfo(ns, addrMgr, addr)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetAddress: %w", err)
+	}
+
+	return info, nil
+}
+
+// resolvedAddressInfo resolves one legacy managed address and assigns its
+// synthetic address ID.
+func resolvedAddressInfo(ns walletdb.ReadBucket,
+	resolver waddrmgr.AddrStore,
+	addr btcutil.Address) (*db.AddressInfo, error) {
+
+	managedAddr, err := resolver.Address(ns, addr)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, db.ErrAddressNotFound
+		}
+
+		return nil, fmt.Errorf("lookup address: %w", err)
+	}
+
+	manager, account, err := resolver.AddrAccount(ns, addr)
+	if err != nil {
+		return nil, fmt.Errorf("lookup address account: %w", err)
+	}
+
+	info, err := managedAddressInfo(ns, manager, managedAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	err = setAddressID(ns, manager, account, info)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 // ListAddresses is not yet implemented for kvdb.
@@ -451,9 +530,9 @@ func syncedTo(addrStore any) waddrmgr.BlockStamp {
 	return syncState.SyncedTo()
 }
 
-// kvdbSetAddressID assigns target's synthetic ID from the current legacy
-// account view.
-func kvdbSetAddressID(ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
+// setAddressID assigns target's synthetic ID from the current legacy account
+// view.
+func setAddressID(ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
 	account uint32, target *db.AddressInfo) error {
 
 	items, err := accountAddressInfos(ns, manager, account)
@@ -664,7 +743,16 @@ func managedAddressPubKey(
 func managedAddressIsWatchOnly(
 	managedAddr waddrmgr.ManagedAddress) bool {
 
-	return managedAddr.Imported()
+	if !managedAddr.Imported() {
+		return false
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return true
+	}
+
+	return !waddrmgr.ManagedPubKeyAddressHasPrivateKey(pubKeyAddr)
 }
 
 // storeAddressType maps legacy address types to the store enum.
@@ -697,4 +785,18 @@ func storeAddressType(addrType waddrmgr.AddressType) (db.AddressType,
 		return 0, fmt.Errorf("legacy address type %d: %w", addrType,
 			errUnknownLegacyAddressType)
 	}
+}
+
+// addressFromScript extracts the first standard address from a script.
+func addressFromScript(pkScript []byte,
+	chainParams *chaincfg.Params) btcutil.Address {
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		pkScript, chainParams,
+	)
+	if err != nil || len(addrs) == 0 {
+		return nil
+	}
+
+	return addrs[0]
 }
