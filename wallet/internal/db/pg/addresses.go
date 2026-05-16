@@ -25,12 +25,19 @@ func (s *Store) GetAddress(ctx context.Context,
 		getByScript := func(ctx context.Context,
 			query db.GetAddressQuery) (*db.AddressInfo, error) {
 
+			toInfo := func(
+				row sqlc.GetAddressByScriptPubKeyRow) (*db.AddressInfo,
+				error) {
+
+				return addressRowToInfo(ctx, q, row)
+			}
+
 			return db.GetAddress(
 				ctx, q.GetAddressByScriptPubKey,
 				sqlc.GetAddressByScriptPubKeyParams{
 					ScriptPubKey: query.ScriptPubKey,
 					WalletID:     int64(query.WalletID),
-				}, addressRowToInfo,
+				}, toInfo,
 			)
 		}
 
@@ -143,9 +150,19 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		RowCreatedAt:         derivedAddressRowCreatedAt,
 	}
 
-	return db.NewDerivedAddressWithTx(
+	info, err := db.NewDerivedAddressWithTx(
 		ctx, params, s.execWrite, adapters, deriveFn,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.addAddressAccountProperties(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 // NewImportedAddress imports a new address, script, or private key.
@@ -171,9 +188,38 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 		RowCreatedAt:       importedAddressRowCreatedAt,
 	}
 
-	return db.NewImportedAddressWithTx(
+	info, err := db.NewImportedAddressWithTx(
 		ctx, params, s.execWrite, adapters,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.addAddressAccountProperties(ctx, info)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// addAddressAccountProperties copies account metadata onto address create
+// results so create/get/list expose the same logical AddressInfo shape.
+func (s *Store) addAddressAccountProperties(ctx context.Context,
+	info *db.AddressInfo) error {
+
+	return s.execRead(ctx, func(q *sqlc.Queries) error {
+		row, err := q.GetAccountPropsById(ctx, int64(info.AccountID))
+		if err != nil {
+			return fmt.Errorf("get address account metadata: %w", err)
+		}
+
+		return db.ApplyAddressAccountMetadata(
+			info, row.AccountNumber, row.AccountName,
+			row.MasterFingerprint, row.WalletMasterHdPubKey,
+			row.Purpose, row.CoinType,
+		)
+	})
 }
 
 // getAccountFromKey returns a helper to look up accounts by key.
@@ -336,15 +382,22 @@ type addressInfoRow interface {
 
 // addressRowToInfo converts a PostgreSQL address row to an AddressInfo
 // struct.
-func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
+func addressRowToInfo[T addressInfoRow](ctx context.Context, q *sqlc.Queries,
+	row T) (*db.AddressInfo, error) {
 
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlc.GetAddressByScriptPubKeyRow(row)
 
+	accountProps, err := getAccountProps(ctx, q, base.AccountID)
+	if err != nil {
+		return nil, fmt.Errorf("get address account props: %w", err)
+	}
+
 	info, err := db.AddressRowToInfo(db.AddressInfoRow[int16, int16]{
 		ID:                base.ID,
 		AccountID:         base.AccountID,
+		AccountProps:      accountProps,
 		TypeID:            base.TypeID,
 		OriginID:          base.OriginID,
 		WalletIsWatchOnly: base.WalletIsWatchOnly,
@@ -382,7 +435,9 @@ func listAddressesByAccount(ctx context.Context, q *sqlc.Queries,
 
 	items := make([]db.AddressInfo, len(rows))
 	for i, row := range rows {
-		item, err := addressRowToInfo(row)
+		// TODO(yy): Avoid fetching account properties for every row once the
+		// address query joins account metadata or returns a page-level account.
+		item, err := addressRowToInfo(ctx, q, row)
 		if err != nil {
 			return nil,
 				fmt.Errorf("list addresses by account: map address row: %w",

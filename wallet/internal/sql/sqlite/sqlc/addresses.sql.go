@@ -110,6 +110,8 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint AS account_master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
@@ -126,18 +128,20 @@ type GetAddressByScriptPubKeyParams struct {
 }
 
 type GetAddressByScriptPubKeyRow struct {
-	ID                int64
-	AccountID         int64
-	TypeID            int64
-	AddressBranch     sql.NullInt64
-	AddressIndex      sql.NullInt64
-	ScriptPubKey      []byte
-	PubKey            []byte
-	CreatedAt         time.Time
-	OriginID          int64
-	WalletIsWatchOnly bool
-	HasPrivateKey     bool
-	HasScript         bool
+	ID                       int64
+	AccountID                int64
+	TypeID                   int64
+	AddressBranch            sql.NullInt64
+	AddressIndex             sql.NullInt64
+	ScriptPubKey             []byte
+	PubKey                   []byte
+	CreatedAt                time.Time
+	OriginID                 int64
+	AccountMasterFingerprint sql.NullInt64
+	WalletMasterHdPubKey     []byte
+	WalletIsWatchOnly        bool
+	HasPrivateKey            bool
+	HasScript                bool
 }
 
 // Retrieves an address by its script pubkey and account wallet.
@@ -154,6 +158,8 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.PubKey,
 		&i.CreatedAt,
 		&i.OriginID,
+		&i.AccountMasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.WalletIsWatchOnly,
 		&i.HasPrivateKey,
 		&i.HasScript,
@@ -228,6 +234,8 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint AS account_master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
@@ -263,18 +271,20 @@ type ListAddressesByAccountParams struct {
 }
 
 type ListAddressesByAccountRow struct {
-	ID                int64
-	AccountID         int64
-	TypeID            int64
-	AddressBranch     sql.NullInt64
-	AddressIndex      sql.NullInt64
-	ScriptPubKey      []byte
-	PubKey            []byte
-	CreatedAt         time.Time
-	OriginID          int64
-	WalletIsWatchOnly bool
-	HasPrivateKey     bool
-	HasScript         bool
+	ID                       int64
+	AccountID                int64
+	TypeID                   int64
+	AddressBranch            sql.NullInt64
+	AddressIndex             sql.NullInt64
+	ScriptPubKey             []byte
+	PubKey                   []byte
+	CreatedAt                time.Time
+	OriginID                 int64
+	AccountMasterFingerprint sql.NullInt64
+	WalletMasterHdPubKey     []byte
+	WalletIsWatchOnly        bool
+	HasPrivateKey            bool
+	HasScript                bool
 }
 
 // Lists addresses for an account identified by wallet_id, key scope
@@ -307,6 +317,8 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.PubKey,
 			&i.CreatedAt,
 			&i.OriginID,
+			&i.AccountMasterFingerprint,
+			&i.WalletMasterHdPubKey,
 			&i.WalletIsWatchOnly,
 			&i.HasPrivateKey,
 			&i.HasScript,

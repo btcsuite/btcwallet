@@ -22,6 +22,8 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint AS account_master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
@@ -89,6 +91,8 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint AS account_master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script

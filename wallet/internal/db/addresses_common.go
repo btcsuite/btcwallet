@@ -348,16 +348,37 @@ func convertAddressAccountMetadata[TypeID, OriginIDType any](
 }
 
 // ApplyAddressAccountMetadata converts and copies raw account metadata onto an
-// address info returned by a create path.
+// address info returned by a create path. walletMasterHDPubKey is the
+// wallet's master HD extended public key bytes (from wallets.master_hd_pub_key);
+// it is used to derive the master fingerprint for derived accounts (NULL
+// master_fingerprint column) per ADR 0012. May be nil for shell wallets
+// or imported-only result sets.
 func ApplyAddressAccountMetadata(info *AddressInfo,
 	accountNumber sql.NullInt64, accountName string,
-	masterFingerprint sql.NullInt64, purpose, coinType int64) error {
+	masterFingerprint sql.NullInt64, walletMasterHDPubKey []byte,
+	purpose, coinType int64) error {
 
 	acctNum, fingerprint, keyScope, err := convertAccountMetadata(
 		accountNumber, masterFingerprint, purpose, coinType,
 	)
 	if err != nil {
 		return err
+	}
+
+	// SSOT: derived accounts have NULL master_fingerprint; derive at
+	// read time from the wallet's master HD pubkey via the shared
+	// helper (see ADR 0012). Imported accounts pass through the stored
+	// per-row fingerprint that convertAccountMetadata already extracted.
+	if !masterFingerprint.Valid && len(walletMasterHDPubKey) > 0 {
+		derivedFingerprint, err := MasterKeyFingerprintFromExtKeyBytes(
+			walletMasterHDPubKey,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"derive master fingerprint: %w", err,
+			)
+		}
+		fingerprint = derivedFingerprint
 	}
 
 	info.AccountNumber = acctNum
