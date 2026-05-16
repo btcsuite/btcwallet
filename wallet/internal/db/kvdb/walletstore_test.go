@@ -89,3 +89,36 @@ func TestKvdbGetEncryptedHDSeed(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, encrypted)
 }
+
+// TestGetWalletReadsLegacyMetadata verifies that kvdb.Store adapts legacy
+// wallet metadata into the db-native wallet view.
+func TestGetWalletReadsLegacyMetadata(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	info, err := store.GetWallet(t.Context(), "default")
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), info.ID)
+	require.Equal(t, "default", info.Name)
+	require.Equal(t, addrStore.Birthday().UTC(), info.Birthday)
+	require.Nil(t, info.BirthdayBlock)
+}
+
+// TestGetWalletMissingAddrStore verifies that GetWallet reports a helpful
+// error when the legacy address manager is unavailable.
+func TestGetWalletMissingAddrStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	store := NewStore(dbConn, nil, nil)
+
+	_, err := store.GetWallet(t.Context(), "default")
+	require.ErrorIs(t, err, errMissingLegacyAddrStore)
+}
