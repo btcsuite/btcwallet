@@ -2,6 +2,8 @@ package kvdb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -13,6 +15,10 @@ import (
 // A compile-time assertion to ensure Store implements the wallet store.
 var _ db.WalletStore = (*Store)(nil)
 
+// errMissingAddrStore is returned when a legacy address-manager backed store
+// operation has no address manager wired.
+var errMissingAddrStore = errors.New("missing legacy addr store")
+
 // CreateWallet is not yet implemented for kvdb.
 func (s *Store) CreateWallet(ctx context.Context,
 	_ db.CreateWalletParams) (*db.WalletInfo, error) {
@@ -20,11 +26,63 @@ func (s *Store) CreateWallet(ctx context.Context,
 	return nil, notImplemented(ctx, "CreateWallet")
 }
 
-// GetWallet is not yet implemented for kvdb.
-func (s *Store) GetWallet(ctx context.Context,
-	_ string) (*db.WalletInfo, error) {
+// GetWallet reads wallet runtime metadata from the legacy address manager.
+func (s *Store) GetWallet(_ context.Context,
+	name string) (*db.WalletInfo, error) {
 
-	return nil, notImplemented(ctx, "GetWallet")
+	if s.addrStore == nil {
+		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w",
+			errMissingAddrStore)
+	}
+
+	addrStore := s.addrStore
+
+	var birthdayBlock *db.Block
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		block, verified, err := addrStore.BirthdayBlock(ns)
+		if err != nil {
+			if waddrmgr.IsError(err, waddrmgr.ErrBirthdayBlockNotSet) {
+				return nil
+			}
+
+			return fmt.Errorf("get birthday block: %w", err)
+		}
+
+		if !verified {
+			return nil
+		}
+
+		birthdayBlock, err = db.BlockFromBlockStamp(block)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
+	}
+
+	syncedTo, err := db.OptionalBlockFromBlockStamp(addrStore.SyncedTo())
+	if errors.Is(err, db.ErrBlockNotFound) {
+		syncedTo = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
+	}
+
+	return &db.WalletInfo{
+		ID:            0,
+		Name:          name,
+		Birthday:      addrStore.Birthday().UTC(),
+		BirthdayBlock: birthdayBlock,
+		SyncedTo:      syncedTo,
+	}, nil
 }
 
 // ListWallets is not yet implemented for kvdb.
@@ -41,7 +99,7 @@ func (s *Store) IterWallets(ctx context.Context,
 	_ db.ListWalletsQuery) iter.Seq2[db.WalletInfo, error] {
 
 	return func(yield func(db.WalletInfo, error) bool) {
-		yield(db.WalletInfo{}, notImplemented(ctx, "IterWallets"))
+		_ = yield(db.WalletInfo{}, notImplemented(ctx, "IterWallets"))
 	}
 }
 
@@ -99,3 +157,5 @@ func (s *Store) UpdateWalletSecrets(ctx context.Context,
 
 	return notImplemented(ctx, "UpdateWalletSecrets")
 }
+
+
