@@ -73,12 +73,48 @@ func (m *mockStore) CreateWallet(ctx context.Context,
 func (m *mockStore) GetWallet(ctx context.Context,
 	name string) (*db.WalletInfo, error) {
 
-	args := m.Called(ctx, name)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if m.hasExpectation("GetWallet") || m.addrStore == nil {
+		args := m.Called(ctx, name)
+		if args.Get(0) == nil {
+			return nil, args.Error(1)
+		}
+
+		return args.Get(0).(*db.WalletInfo), args.Error(1)
 	}
 
-	return args.Get(0).(*db.WalletInfo), args.Error(1)
+	var birthdayBlock *db.Block
+
+	block, verified, err := m.addrStore.BirthdayBlock(nil)
+	if err != nil && !waddrmgr.IsError(
+		err, waddrmgr.ErrBirthdayBlockNotSet,
+	) {
+
+		return nil, err
+	}
+
+	if err == nil && verified {
+		height, err := db.Int64ToUint32(int64(block.Height))
+		if err != nil {
+			return nil, err
+		}
+
+		birthdayBlock = &db.Block{
+			Hash:      block.Hash,
+			Height:    height,
+			Timestamp: block.Timestamp,
+		}
+	}
+
+	info := &db.WalletInfo{
+		Name:          name,
+		BirthdayBlock: birthdayBlock,
+	}
+
+	if birthdayBlock == nil {
+		info.Birthday = m.addrStore.Birthday()
+	}
+
+	return info, nil
 }
 
 // ListWallets implements the db.WalletStore interface.
@@ -115,9 +151,45 @@ func (m *mockStore) IterWallets(ctx context.Context,
 func (m *mockStore) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {
 
-	args := m.Called(ctx, params)
+	if m.hasExpectation("UpdateWallet") || m.addrStore == nil {
+		args := m.Called(ctx, params)
+		return args.Error(0)
+	}
 
-	return args.Error(0)
+	if params.BirthdayBlock != nil {
+		height, err := db.Uint32ToInt32(params.BirthdayBlock.Height)
+		if err != nil {
+			return err
+		}
+
+		block := waddrmgr.BlockStamp{
+			Height:    height,
+			Hash:      params.BirthdayBlock.Hash,
+			Timestamp: params.BirthdayBlock.Timestamp,
+		}
+
+		err = m.addrStore.SetBirthdayBlock(nil, block, true)
+		if err != nil {
+			return err
+		}
+	}
+
+	if params.SyncedTo != nil {
+		height, err := db.Uint32ToInt32(params.SyncedTo.Height)
+		if err != nil {
+			return err
+		}
+
+		block := waddrmgr.BlockStamp{
+			Height:    height,
+			Hash:      params.SyncedTo.Hash,
+			Timestamp: params.SyncedTo.Timestamp,
+		}
+
+		return m.addrStore.SetSyncedTo(nil, &block)
+	}
+
+	return nil
 }
 
 // GetEncryptedHDSeed implements the db.WalletStore interface.
@@ -137,7 +209,6 @@ func (m *mockStore) UpdateWalletSecrets(ctx context.Context,
 	params db.UpdateWalletSecretsParams) error {
 
 	args := m.Called(ctx, params)
-
 	return args.Error(0)
 }
 
