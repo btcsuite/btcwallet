@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
@@ -69,6 +70,130 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, info, got)
+
+	pageReq, err := page.NewRequest[uint32](10)
+	require.NoError(t, err)
+	result, err := store.ListAddresses(
+		t.Context(), db.ListAddressesQuery{
+			WalletID:    0,
+			AccountName: "addr",
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Page:        pageReq,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	require.Equal(t, *info, result.Items[0])
+}
+
+// TestAddressStoreNewDerivedAddressWatchOnlyWallet verifies that derived
+// address metadata inherits wallet-level watch-only mode.
+func TestAddressStoreNewDerivedAddressWatchOnlyWallet(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+	createLegacyAccount(
+		t, dbConn, addrStore, waddrmgr.KeyScopeBIP0084, "watch",
+	)
+	convertAddrStoreToWatchOnly(t, dbConn, addrStore)
+	deriveFn := testAddressDerivationFunc(
+		t, dbConn, addrStore, waddrmgr.KeyScopeBIP0084, "watch",
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    0,
+			AccountName: "watch",
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		}, deriveFn,
+	)
+	require.NoError(t, err)
+	require.True(t, info.IsWatchOnly)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.IsWatchOnly)
+
+	pageReq, err := page.NewRequest[uint32](10)
+	require.NoError(t, err)
+	result, err := store.ListAddresses(
+		t.Context(), db.ListAddressesQuery{
+			WalletID:    0,
+			AccountName: "watch",
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Page:        pageReq,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	require.True(t, result.Items[0].IsWatchOnly)
+}
+
+// TestAddressStoreListAddressesPagination verifies that kvdb pagination uses
+// collision-free synthetic IDs and does not skip or repeat addresses.
+func TestAddressStoreListAddressesPagination(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+	createLegacyAccount(
+		t, dbConn, addrStore, waddrmgr.KeyScopeBIP0084, "page",
+	)
+	deriveFn := testAddressDerivationFunc(
+		t, dbConn, addrStore, waddrmgr.KeyScopeBIP0084, "page",
+	)
+
+	for range 5 {
+		_, err := store.NewDerivedAddress(
+			t.Context(), db.NewDerivedAddressParams{
+				WalletID:    0,
+				AccountName: "page",
+				Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			}, deriveFn,
+		)
+		require.NoError(t, err)
+	}
+
+	pageReq, err := page.NewRequest[uint32](2)
+	require.NoError(t, err)
+
+	query := db.ListAddressesQuery{
+		WalletID:    0,
+		AccountName: "page",
+		Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		Page:        pageReq,
+	}
+
+	var addresses []db.AddressInfo
+	for {
+		result, err := store.ListAddresses(t.Context(), query)
+		require.NoError(t, err)
+
+		addresses = append(addresses, result.Items...)
+		if result.Next == nil {
+			break
+		}
+
+		query.Page.After = result.Next
+	}
+
+	require.Len(t, addresses, 5)
+
+	for i := range addresses {
+		require.Equal(t, uint32(i+1), addresses[i].ID)
+	}
 }
 
 // TestAddressStoreImportedPublicKeyIsWatchOnly verifies that imported public
@@ -288,6 +413,21 @@ func unlockAddrStore(t *testing.T, dbConn walletdb.DB,
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 
 		return addrStore.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+}
+
+// convertAddrStoreToWatchOnly converts the legacy address manager to
+// wallet-level watch-only mode for metadata adapter tests.
+func convertAddrStoreToWatchOnly(t *testing.T, dbConn walletdb.DB,
+	addrStore *waddrmgr.Manager) {
+
+	t.Helper()
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		return addrStore.ConvertToWatchingOnly(ns)
 	})
 	require.NoError(t, err)
 }
