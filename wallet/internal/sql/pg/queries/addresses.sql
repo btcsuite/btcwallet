@@ -26,7 +26,12 @@ SELECT
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -95,7 +100,12 @@ SELECT
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id

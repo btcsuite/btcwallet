@@ -1,6 +1,13 @@
 -- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 
+-- This table intentionally does NOT include a `used` column.
+-- An address's used-ness is derived from the utxos table
+-- (EXISTS(SELECT 1 FROM utxos WHERE address_id = ?)). The derivation
+-- is monotonic because utxo rows are preserved through reorgs via
+-- tx_status soft-delete (see ADR 0006) and ON DELETE RESTRICT. See
+-- ADR 0011 for the full design rationale.
+--
 -- Addresses table stores all addresses under each account. Addresses can be
 -- either HD-derived (following BIP32/BIP44 derivation paths) or imported from
 -- external sources (e.g., watch-only addresses, hardware wallet addresses).

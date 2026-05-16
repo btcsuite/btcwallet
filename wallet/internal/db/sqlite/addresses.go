@@ -405,6 +405,7 @@ func addressRowToInfo[T addressInfoRow](ctx context.Context, q *sqlc.Queries,
 		AddressIndex:      base.AddressIndex,
 		ScriptPubKey:      base.ScriptPubKey,
 		PubKey:            base.PubKey,
+		IsUsed:            base.IsUsed == 1,
 		IDToAddrType:      db.IDToAddressType[int64],
 		IDToOrigin:        db.IDToOrigin[int64],
 	})

@@ -25,6 +25,11 @@ SELECT
     acc.master_fingerprint AS account_master_fingerprint,
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
@@ -94,6 +99,11 @@ SELECT
     acc.master_fingerprint AS account_master_fingerprint,
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a

@@ -652,6 +652,18 @@ type AddressInfo struct {
 	// IsWatchOnly indicates whether the address belongs to a watch-only
 	// wallet or does not have private keys.
 	IsWatchOnly bool
+
+	// IsUsed reports whether the address has ever been associated with
+	// an on-chain transaction the wallet has observed. The flag is
+	// monotonic from the wallet's perspective and preserves privacy by
+	// keeping the address out of unused-address scans even after a
+	// reorg.
+	//
+	// Backends populate this field from different sources (see
+	// ADR 0011): SQL backends derive it from the utxos table at read
+	// time; the kvdb backend reads waddrmgr's legacy sticky `Used`
+	// bit.
+	IsUsed bool
 }
 
 // AddressSecret contains sensitive encrypted material for an address.

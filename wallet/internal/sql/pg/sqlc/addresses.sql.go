@@ -114,7 +114,12 @@ SELECT
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -142,6 +147,7 @@ type GetAddressByScriptPubKeyRow struct {
 	WalletIsWatchOnly        bool
 	HasPrivateKey            bool
 	HasScript                bool
+	IsUsed                   bool
 }
 
 // Retrieves an address by its script pubkey and account wallet.
@@ -163,6 +169,7 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.WalletIsWatchOnly,
 		&i.HasPrivateKey,
 		&i.HasScript,
+		&i.IsUsed,
 	)
 	return i, err
 }
@@ -238,7 +245,12 @@ SELECT
     w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
-    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -285,6 +297,7 @@ type ListAddressesByAccountRow struct {
 	WalletIsWatchOnly        bool
 	HasPrivateKey            bool
 	HasScript                bool
+	IsUsed                   bool
 }
 
 // Lists addresses for an account identified by wallet_id, key scope
@@ -322,6 +335,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.WalletIsWatchOnly,
 			&i.HasPrivateKey,
 			&i.HasScript,
+			&i.IsUsed,
 		); err != nil {
 			return nil, err
 		}

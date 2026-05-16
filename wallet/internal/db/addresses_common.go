@@ -220,6 +220,12 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// PubKey is the public key. Zero value for derived addresses.
 	PubKey []byte
 
+	// IsUsed is the monotonic on-chain-usage flag persisted with the
+	// address row. The address store keeps this in sync with the legacy
+	// MarkUsed semantics so unused-address scans never re-derive a key
+	// that briefly appeared in a confirmed transaction.
+	IsUsed bool
+
 	// IDToAddrType converts TypeID to AddressType with validation.
 	IDToAddrType func(TypeID) (AddressType, error)
 
@@ -542,6 +548,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		PubKey:               row.PubKey,
 		HasScript:            row.HasScript,
 		IsWatchOnly:          isWatchOnly,
+		IsUsed:               row.IsUsed,
 	}, nil
 }
 
