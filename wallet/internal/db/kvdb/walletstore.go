@@ -21,6 +21,10 @@ var _ db.WalletStore = (*Store)(nil)
 type legacyWalletMetadataStore interface {
 	Birthday() time.Time
 	BirthdayBlock(ns walletdb.ReadBucket) (waddrmgr.BlockStamp, bool, error)
+	SetBirthday(ns walletdb.ReadWriteBucket, birthday time.Time) error
+	SetBirthdayBlock(ns walletdb.ReadWriteBucket,
+		block waddrmgr.BlockStamp, verified bool) error
+	SetSyncedTo(ns walletdb.ReadWriteBucket, bs *waddrmgr.BlockStamp) error
 	SyncedTo() waddrmgr.BlockStamp
 }
 
@@ -106,11 +110,62 @@ func (s *Store) IterWallets(ctx context.Context,
 	}
 }
 
-// UpdateWallet is not yet implemented for kvdb.
-func (s *Store) UpdateWallet(ctx context.Context,
-	_ db.UpdateWalletParams) error {
+// UpdateWallet writes wallet runtime metadata through the legacy address
+// manager.
+//
+//nolint:cyclop
+func (s *Store) UpdateWallet(_ context.Context,
+	params db.UpdateWalletParams) error {
 
-	return notImplemented(ctx, "UpdateWallet")
+	addrStore, err := s.walletMetadataStore("UpdateWallet")
+	if err != nil {
+		return err
+	}
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		if params.Birthday != nil {
+			err := addrStore.SetBirthday(ns, params.Birthday.UTC())
+			if err != nil {
+				return fmt.Errorf("set birthday: %w", err)
+			}
+		}
+
+		if params.BirthdayBlock != nil {
+			block, err := kvdbBlockToBlockStamp(params.BirthdayBlock)
+			if err != nil {
+				return err
+			}
+
+			err = addrStore.SetBirthdayBlock(ns, block, true)
+			if err != nil {
+				return fmt.Errorf("set birthday block: %w", err)
+			}
+		}
+
+		if params.SyncedTo != nil {
+			block, err := kvdbBlockToBlockStamp(params.SyncedTo)
+			if err != nil {
+				return err
+			}
+
+			err = addrStore.SetSyncedTo(ns, &block)
+			if err != nil {
+				return fmt.Errorf("set synced to: %w", err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.UpdateWallet: %w", err)
+	}
+
+	return nil
 }
 
 // GetEncryptedHDSeed reads the encrypted master HD private key from the
@@ -200,4 +255,21 @@ func kvdbOptionalBlockFromBlockStamp(
 	}
 
 	return kvdbBlockFromBlockStamp(block)
+}
+
+// kvdbBlockToBlockStamp converts store block metadata into the legacy block
+// stamp shape.
+func kvdbBlockToBlockStamp(block *db.Block) (waddrmgr.BlockStamp, error) {
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("%w: store block "+
+			"height %d exceeds max int32", db.ErrInvalidParam,
+			block.Height)
+	}
+
+	return waddrmgr.BlockStamp{
+		Height:    height,
+		Hash:      block.Hash,
+		Timestamp: block.Timestamp,
+	}, nil
 }
