@@ -182,7 +182,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		// a new change address into the database.
 		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 			_, changeSource, err := w.addrMgrWithChangeSource(
-				dbtx, opts.changeKeyScope, account,
+				dbtx, opts.changeKeyScope, account, nil,
 			)
 			if err != nil {
 				return err
