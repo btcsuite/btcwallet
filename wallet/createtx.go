@@ -440,9 +440,6 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-	// If a custom change address is provided, build a static change source
-	// from it. The address manager bucket is still returned because callers
-	// need it for IsWatchOnlyAccount checks and signing.
 	if changeAddr != nil {
 		pkScript, err := txscript.PayToAddrScript(changeAddr)
 		if err != nil {
