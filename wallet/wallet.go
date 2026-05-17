@@ -1214,6 +1214,7 @@ type (
 		resp                  chan createTxResponse
 		selectUtxos           []wire.OutPoint
 		allowUtxo             func(wtxmgr.Credit) bool
+		changeAddr            btcutil.Address
 	}
 	createTxResponse struct {
 		tx  *txauthor.AuthoredTx
@@ -1256,6 +1257,7 @@ out:
 				txr.changeKeyScope, txr.account, txr.minconf,
 				txr.feeSatPerKB, txr.coinSelectionStrategy,
 				txr.dryRun, txr.selectUtxos, txr.allowUtxo,
+				txr.changeAddr,
 			)
 
 			release()
@@ -1274,6 +1276,7 @@ type txCreateOptions struct {
 	changeKeyScope *waddrmgr.KeyScope
 	selectUtxos    []wire.OutPoint
 	allowUtxo      func(wtxmgr.Credit) bool
+	changeAddr     btcutil.Address
 }
 
 // TxCreateOption is a set of optional arguments to modify the tx creation
@@ -1310,6 +1313,15 @@ func WithCustomSelectUtxos(utxos []wire.OutPoint) TxCreateOption {
 func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
 	return func(opts *txCreateOptions) {
 		opts.allowUtxo = allowUtxo
+	}
+}
+
+// WithChangeAddress can be used to specify a custom address for the change
+// output. If unspecified, a change address is derived from the wallet's HD
+// tree using the configured change key scope.
+func WithChangeAddress(addr btcutil.Address) TxCreateOption {
+	return func(opts *txCreateOptions) {
+		opts.changeAddr = addr
 	}
 }
 
@@ -1358,6 +1370,7 @@ func (w *Wallet) CreateSimpleTx(coinSelectKeyScope *waddrmgr.KeyScope,
 		resp:                  make(chan createTxResponse),
 		selectUtxos:           opts.selectUtxos,
 		allowUtxo:             opts.allowUtxo,
+		changeAddr:            opts.changeAddr,
 	}
 	w.createTxRequests <- req
 	resp := <-req.resp
@@ -3524,12 +3537,12 @@ func (w *Wallet) TotalReceivedForAddr(addr btcutil.Address, minConf int32) (btcu
 // returns the transaction upon success.
 func (w *Wallet) SendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
-	coinSelectionStrategy CoinSelectionStrategy, label string) (*wire.MsgTx,
-	error) {
+	coinSelectionStrategy CoinSelectionStrategy, label string,
+	optFuncs ...TxCreateOption) (*wire.MsgTx, error) {
 
 	return w.sendOutputs(
 		outputs, keyScope, account, minconf, satPerKb,
-		coinSelectionStrategy, label,
+		coinSelectionStrategy, label, nil, optFuncs...,
 	)
 }
 
@@ -3539,10 +3552,11 @@ func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,
 	keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy, label string,
-	selectedUtxos []wire.OutPoint) (*wire.MsgTx, error) {
+	selectedUtxos []wire.OutPoint,
+	optFuncs ...TxCreateOption) (*wire.MsgTx, error) {
 
 	return w.sendOutputs(outputs, keyScope, account, minconf, satPerKb,
-		coinSelectionStrategy, label, selectedUtxos...)
+		coinSelectionStrategy, label, selectedUtxos, optFuncs...)
 }
 
 // sendOutputs creates and sends payment transactions. It returns the
@@ -3550,7 +3564,8 @@ func (w *Wallet) SendOutputsWithInput(outputs []*wire.TxOut,
 func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 	account uint32, minconf int32, satPerKb btcutil.Amount,
 	coinSelectionStrategy CoinSelectionStrategy, label string,
-	selectedUtxos ...wire.OutPoint) (*wire.MsgTx, error) {
+	selectedUtxos []wire.OutPoint, optFuncs ...TxCreateOption) (*wire.MsgTx,
+	error) {
 
 	// Ensure the outputs to be created adhere to the network's consensus
 	// rules.
@@ -3563,15 +3578,18 @@ func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 		}
 	}
 
+	allOpts := append(
+		[]TxCreateOption{WithCustomSelectUtxos(selectedUtxos)},
+		optFuncs...,
+	)
+
 	// Create the transaction and broadcast it to the network. The
 	// transaction will be added to the database in order to ensure that we
 	// continue to re-broadcast the transaction upon restarts until it has
 	// been confirmed.
 	createdTx, err := w.CreateSimpleTx(
 		keyScope, account, outputs, minconf, satPerKb,
-		coinSelectionStrategy, false, WithCustomSelectUtxos(
-			selectedUtxos,
-		),
+		coinSelectionStrategy, false, allOpts...,
 	)
 	if err != nil {
 		return nil, err
