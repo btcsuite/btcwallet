@@ -71,6 +71,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -98,6 +99,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -125,6 +127,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -156,6 +159,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -180,6 +184,7 @@ SELECT
     a.origin_id,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -213,6 +218,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -242,6 +248,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -274,6 +281,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -303,6 +311,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE

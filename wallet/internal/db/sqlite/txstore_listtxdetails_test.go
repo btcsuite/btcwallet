@@ -12,6 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testMasterHDPubKey is a fixed, valid serialized BIP32 extended public
+// key used as the wallets.master_hd_pub_key fixture. After PR #1232 the
+// SQL read path parses this field with hdkeychain.NewKeyFromString to
+// derive the BIP32 master-key fingerprint at read time, so the value
+// must be a real base58-encoded extended key — random bytes surface
+// as parse errors when the fixture wallet has any derived accounts.
+const testMasterHDPubKey = "xpub661MyMwAqRbcFkPHucMnrGNzDwb6teAX1RbKQmqtEF8kK3Z7LZ59qafCjB9eCRLiTVG3uxBxgKvRgbubRhqSKXnGGb1aoaqLrpMBDrVxga8" //nolint:lll
+
 // TestListTxDetailsReturnsRowsWithoutBlock verifies that the detail
 // path returns the same no-confirming-block history as the summary
 // path, including retained failed rows.
@@ -138,7 +146,7 @@ func testWalletParams(name string) db.CreateWalletParams {
 		Name:                     name,
 		ManagerVersion:           1,
 		EncryptedMasterPrivKey:   []byte{1},
-		MasterPubKey:             []byte{2},
+		MasterPubKey:             []byte(testMasterHDPubKey),
 		MasterKeyPrivParams:      []byte{3},
 		EncryptedCryptoPrivKey:   []byte{4},
 		EncryptedCryptoScriptKey: []byte{5},

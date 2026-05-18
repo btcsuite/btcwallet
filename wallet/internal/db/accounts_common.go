@@ -3,14 +3,23 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 )
 
 var (
+	// errMissingWalletMasterHDPubKey is returned when a derived account
+	// requires the wallet's master HD pubkey to derive its master-key
+	// fingerprint but the source row carries no such pubkey.
+	errMissingWalletMasterHDPubKey = errors.New(
+		"missing wallet master HD pubkey for derived account fingerprint",
+	)
+
 	// ErrNilDBAccountNumber is returned when the database returns a nil account
 	// number. In practice, this should never happen, but it's possible if the
 	// database is modified incorrectly or the query is incorrect.
@@ -315,22 +324,23 @@ func (params RenameAccountParams) Validate() error {
 // AccountPropsRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          AccOriginId
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	IsWatchOnly       bool
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	InternalTypeID    AddrTypeId
-	ExternalTypeID    AddrTypeId
-	IDToAddrType      func(AddrTypeId) (AddressType, error)
-	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             AccOriginId
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHDPubKey []byte
+	IsWatchOnly          bool
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	InternalTypeID       AddrTypeId
+	ExternalTypeID       AddrTypeId
+	IDToAddrType         func(AddrTypeId) (AddressType, error)
+	IDToOriginType       func(AccOriginId) (AccountOrigin, error)
 }
 
 // validateAccountNumber converts a database account number to uint32 while
@@ -367,6 +377,79 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	return externalKeyCount, internalKeyCount, importedKeyCount, nil
 }
 
+// resolveMasterFingerprint returns the BIP32 master-key fingerprint for a
+// row by inspecting its origin: imported rows carry the fingerprint per-row
+// in master_fingerprint; derived rows derive it from the wallet's master HD
+// pubkey at read time. Wraps and propagates errors rather than silently
+// returning zero (a zero fingerprint would break PSBT generation).
+func resolveMasterFingerprint(masterFingerprint sql.NullInt64,
+	walletMasterHDPubKey []byte, origin AccountOrigin,
+	accountName string) (uint32, error) {
+
+	if masterFingerprint.Valid {
+		fingerprint, err := Int64ToUint32(masterFingerprint.Int64)
+		if err != nil {
+			return 0, fmt.Errorf("master fingerprint: %w", err)
+		}
+
+		return fingerprint, nil
+	}
+
+	if origin != DerivedAccount {
+		return 0, nil
+	}
+
+	if len(walletMasterHDPubKey) == 0 {
+		return 0, fmt.Errorf(
+			"%w: account %q", errMissingWalletMasterHDPubKey,
+			accountName,
+		)
+	}
+
+	fingerprint, err := MasterKeyFingerprintFromExtKeyBytes(
+		walletMasterHDPubKey,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("derive master fingerprint: %w", err)
+	}
+
+	return fingerprint, nil
+}
+
+// MasterKeyFingerprintFromExtKeyBytes computes the BIP32 master-key
+// fingerprint from the wallet's serialized master HD extended-public-key
+// bytes — the base58-encoded form produced by
+// hdkeychain.ExtendedKey.String() (e.g. "xpub...", "tpub..."). This is
+// the shape that waddrmgr persists for kvdb wallets and that SQL stores
+// plaintext in wallets.master_hd_pub_key per ADR 0009.
+//
+// Wallet-side code (wallet/account_derive.go:masterKeyFingerprint)
+// computes the same value from an already-parsed *hdkeychain.ExtendedKey;
+// the wallet package imports this package, so it cannot reuse this helper
+// from there without a circular dependency.
+//
+// Returns an error if the input is not a base58-encoded extended key.
+func MasterKeyFingerprintFromExtKeyBytes(masterHDPubKey []byte) (uint32,
+	error) {
+
+	extKey, err := hdkeychain.NewKeyFromString(string(masterHDPubKey))
+	if err != nil {
+		return 0, fmt.Errorf("parse master HD pubkey: %w", err)
+	}
+
+	ecPub, err := extKey.ECPubKey()
+	if err != nil {
+		return 0, fmt.Errorf("master ecpub: %w", err)
+	}
+
+	hash := btcutil.Hash160(ecPub.SerializeCompressed())
+
+	// Big-endian per BIP32 convention. PSBT and hardware wallets expect
+	// this byte order; wallet/account_derive.go:masterKeyFingerprint
+	// uses the same encoding.
+	return binary.BigEndian.Uint32(hash[:4]), nil
+}
+
 // AccountPropsRowToInfo converts a database row containing full account
 // properties into an AccountInfo struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
@@ -399,12 +482,19 @@ func AccountPropsRowToInfo[AddrTypeId, AccOriginId any](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
-	var fingerprint uint32
-	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("master fingerprint: %w", err)
-		}
+	// Resolve the BIP32 master-key fingerprint per origin. Imported
+	// accounts carry their parent xpub fingerprint in the
+	// master_fingerprint column; derived accounts inherit the wallet's
+	// master fingerprint from wallets.master_hd_pub_key at read time
+	// via the shared MasterKeyFingerprintFromExtKeyBytes helper.
+	// Returning 0 here for derived rows would silently break PSBT, so
+	// wrap and propagate any error from the helper instead.
+	fingerprint, err := resolveMasterFingerprint(
+		row.MasterFingerprint, row.WalletMasterHDPubKey, origin,
+		row.AccountName,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
@@ -518,21 +608,22 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId any] struct {
-	AccountNumber      sql.NullInt64
-	AccountName        string
-	OriginID           AccOriginId
-	ExternalKeyCount   int64
-	InternalKeyCount   int64
-	ImportedKeyCount   int64
-	PublicKey          []byte
-	MasterFingerprint  sql.NullInt64
-	IsWatchOnly        bool
-	CreatedAt          time.Time
-	Purpose            int64
-	CoinType           int64
-	ConfirmedBalance   int64
-	UnconfirmedBalance int64
-	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             AccOriginId
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHDPubKey []byte
+	IsWatchOnly          bool
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ConfirmedBalance     int64
+	UnconfirmedBalance   int64
+	IDToOriginType       func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -572,12 +663,19 @@ func AccountRowToInfo[AccOriginId any](
 		return nil, err
 	}
 
-	var fingerprint uint32
-	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("master fingerprint: %w", err)
-		}
+	// Resolve the BIP32 master-key fingerprint per origin. Imported
+	// accounts carry their parent xpub fingerprint in the
+	// master_fingerprint column; derived accounts inherit the wallet's
+	// master fingerprint from wallets.master_hd_pub_key at read time
+	// via the shared MasterKeyFingerprintFromExtKeyBytes helper.
+	// Returning 0 here for derived rows would silently break PSBT, so
+	// wrap and propagate any error from the helper instead.
+	fingerprint, err := resolveMasterFingerprint(
+		row.MasterFingerprint, row.WalletMasterHDPubKey, origin,
+		row.AccountName,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return BuildAccountInfo(
