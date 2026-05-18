@@ -338,6 +338,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -357,20 +358,21 @@ type GetAccountByScopeAndNameParams struct {
 }
 
 type GetAccountByScopeAndNameRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Returns a single account by scope id and account name.
@@ -390,6 +392,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -410,6 +413,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -429,20 +433,21 @@ type GetAccountByScopeAndNumberParams struct {
 }
 
 type GetAccountByScopeAndNumberRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Returns a single account by scope id and account number.
@@ -462,6 +467,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -482,6 +488,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -507,20 +514,21 @@ type GetAccountByWalletScopeAndNameParams struct {
 }
 
 type GetAccountByWalletScopeAndNameRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Returns a single account by wallet id, scope tuple, and account name.
@@ -545,6 +553,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -565,6 +574,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -590,20 +600,21 @@ type GetAccountByWalletScopeAndNumberParams struct {
 }
 
 type GetAccountByWalletScopeAndNumberRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Returns a single account by wallet id, scope tuple, and account number.
@@ -628,6 +639,7 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -641,6 +653,7 @@ SELECT
     a.origin_id,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -660,18 +673,19 @@ WHERE a.id = ?
 `
 
 type GetAccountPropsByIdRow struct {
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	IsWatchOnly       bool
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	IsWatchOnly          bool
 }
 
 // Returns full account properties by account id.
@@ -684,6 +698,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.OriginID,
 		&i.PublicKey,
 		&i.MasterFingerprint,
+		&i.WalletMasterHdPubKey,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -741,6 +756,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -756,20 +772,21 @@ ORDER BY a.account_number IS NULL, a.account_number
 `
 
 type ListAccountsByScopeRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Lists all accounts in a scope, ordered by account number. Imported accounts
@@ -796,6 +813,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
+			&i.WalletMasterHdPubKey,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -826,6 +844,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -841,20 +860,21 @@ ORDER BY a.account_number IS NULL, a.account_number
 `
 
 type ListAccountsByWalletRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Lists all accounts for a wallet, ordered by account number. Imported
@@ -881,6 +901,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
+			&i.WalletMasterHdPubKey,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -911,6 +932,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -931,20 +953,21 @@ type ListAccountsByWalletAndNameParams struct {
 }
 
 type ListAccountsByWalletAndNameRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Lists all accounts for a wallet filtered by account name, ordered by account
@@ -971,6 +994,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
+			&i.WalletMasterHdPubKey,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -1001,6 +1025,7 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
+    w.master_hd_pub_key AS wallet_master_hd_pub_key,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
         w.is_watch_only
@@ -1025,20 +1050,21 @@ type ListAccountsByWalletScopeParams struct {
 }
 
 type ListAccountsByWalletScopeRow struct {
-	ID                int64
-	AccountNumber     sql.NullInt64
-	AccountName       string
-	OriginID          int64
-	CreatedAt         time.Time
-	Purpose           int64
-	CoinType          int64
-	ExternalKeyCount  int64
-	InternalKeyCount  int64
-	ImportedKeyCount  int64
-	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	WalletIsWatchOnly bool
-	IsWatchOnly       bool
+	ID                   int64
+	AccountNumber        sql.NullInt64
+	AccountName          string
+	OriginID             int64
+	CreatedAt            time.Time
+	Purpose              int64
+	CoinType             int64
+	ExternalKeyCount     int64
+	InternalKeyCount     int64
+	ImportedKeyCount     int64
+	PublicKey            []byte
+	MasterFingerprint    sql.NullInt64
+	WalletMasterHdPubKey []byte
+	WalletIsWatchOnly    bool
+	IsWatchOnly          bool
 }
 
 // Lists all accounts for a wallet and scope tuple, ordered by account number.
@@ -1065,6 +1091,7 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
+			&i.WalletMasterHdPubKey,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {

@@ -157,10 +157,12 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 			AccountName: name,
 			OriginID:    int64(db.DerivedAccount),
 			PublicKey:   derived.PublicKey,
-			MasterFingerprint: sql.NullInt64{
-				Int64: int64(derived.MasterKeyFingerprint),
-				Valid: true,
-			},
+			// Derived accounts inherit their fingerprint from the
+			// wallet's master HD pubkey at read time. Schema CHECK
+			// requires NULL here for derived rows; see the column
+			// comment on accounts.master_fingerprint in migration
+			// 000005_accounts.up.sql.
+			MasterFingerprint: sql.NullInt64{Valid: false},
 		},
 	)
 	if err != nil {
@@ -326,19 +328,20 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	return db.AccountPropsRowToInfo(db.AccountPropsRow[int64, int64]{
-		AccountNumber:     row.AccountNumber,
-		AccountName:       row.AccountName,
-		OriginID:          row.OriginID,
-		ExternalKeyCount:  row.ExternalKeyCount,
-		InternalKeyCount:  row.InternalKeyCount,
-		ImportedKeyCount:  row.ImportedKeyCount,
-		PublicKey:         row.PublicKey,
-		MasterFingerprint: row.MasterFingerprint,
-		IsWatchOnly:       row.IsWatchOnly,
-		CreatedAt:         row.CreatedAt,
-		Purpose:           row.Purpose,
-		CoinType:          row.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int64],
+		AccountNumber:        row.AccountNumber,
+		AccountName:          row.AccountName,
+		OriginID:             row.OriginID,
+		ExternalKeyCount:     row.ExternalKeyCount,
+		InternalKeyCount:     row.InternalKeyCount,
+		ImportedKeyCount:     row.ImportedKeyCount,
+		PublicKey:            row.PublicKey,
+		MasterFingerprint:    row.MasterFingerprint,
+		WalletMasterHDPubKey: row.WalletMasterHdPubKey,
+		IsWatchOnly:          row.IsWatchOnly,
+		CreatedAt:            row.CreatedAt,
+		Purpose:              row.Purpose,
+		CoinType:             row.CoinType,
+		IDToOriginType:       db.IDToAccountOrigin[int64],
 	})
 }
 
@@ -371,13 +374,13 @@ func processAccountRows[T accountInfoRow](
 		if err != nil {
 			return nil, nil, err
 		}
+
 		infos[i] = *info
 		ids[i] = getID(rows[i])
 	}
 
 	return infos, ids, nil
 }
-
 
 // derivedAddressGetAccountID extracts the account ID from a row.
 func derivedAddressGetAccountID(
@@ -420,19 +423,20 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int64]{
-		AccountNumber:     base.AccountNumber,
-		AccountName:       base.AccountName,
-		OriginID:          base.OriginID,
-		ExternalKeyCount:  base.ExternalKeyCount,
-		InternalKeyCount:  base.InternalKeyCount,
-		ImportedKeyCount:  base.ImportedKeyCount,
-		PublicKey:         base.PublicKey,
-		MasterFingerprint: base.MasterFingerprint,
-		IsWatchOnly:       base.IsWatchOnly,
-		CreatedAt:         base.CreatedAt,
-		Purpose:           base.Purpose,
-		CoinType:          base.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int64],
+		AccountNumber:        base.AccountNumber,
+		AccountName:          base.AccountName,
+		OriginID:             base.OriginID,
+		ExternalKeyCount:     base.ExternalKeyCount,
+		InternalKeyCount:     base.InternalKeyCount,
+		ImportedKeyCount:     base.ImportedKeyCount,
+		PublicKey:            base.PublicKey,
+		MasterFingerprint:    base.MasterFingerprint,
+		WalletMasterHDPubKey: base.WalletMasterHdPubKey,
+		IsWatchOnly:          base.IsWatchOnly,
+		CreatedAt:            base.CreatedAt,
+		Purpose:              base.Purpose,
+		CoinType:             base.CoinType,
+		IDToOriginType:       db.IDToAccountOrigin[int64],
 	})
 }
 
