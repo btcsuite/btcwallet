@@ -195,6 +195,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -224,6 +226,8 @@ type GetAccountByScopeAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -243,6 +247,8 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
+		&i.PublicKey,
+		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -261,6 +267,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -290,6 +298,8 @@ type GetAccountByScopeAndNumberRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -309,6 +319,8 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
+		&i.PublicKey,
+		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -327,6 +339,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -362,6 +376,8 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -386,6 +402,8 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
+		&i.PublicKey,
+		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -404,6 +422,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -439,6 +459,8 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -463,6 +485,8 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
+		&i.PublicKey,
+		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsWatchOnly,
 	)
@@ -479,8 +503,6 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
-    ks.internal_type_id,
-    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -505,8 +527,6 @@ type GetAccountPropsByIdRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
-	InternalTypeID    int16
-	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -526,8 +546,6 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
-		&i.InternalTypeID,
-		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -580,6 +598,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -605,6 +625,8 @@ type ListAccountsByScopeRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -631,6 +653,8 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
+			&i.PublicKey,
+			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -659,6 +683,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -684,6 +710,8 @@ type ListAccountsByWalletRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -710,6 +738,8 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
+			&i.PublicKey,
+			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -738,6 +768,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -768,6 +800,8 @@ type ListAccountsByWalletAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -794,6 +828,8 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
+			&i.PublicKey,
+			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {
@@ -822,6 +858,8 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
+    a.public_key,
+    a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     CASE
         WHEN w.is_watch_only THEN TRUE
@@ -856,6 +894,8 @@ type ListAccountsByWalletScopeRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsWatchOnly       bool
 }
@@ -882,6 +922,8 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
+			&i.PublicKey,
+			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsWatchOnly,
 		); err != nil {

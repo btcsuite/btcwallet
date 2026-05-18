@@ -8,14 +8,15 @@ import (
 
 // CreateDerivedAccount is not yet implemented for kvdb.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
-	_ db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
+	_ db.CreateDerivedAccountParams,
+	_ db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
 	return nil, notImplemented(ctx, "CreateDerivedAccount")
 }
 
 // CreateImportedAccount is not yet implemented for kvdb.
 func (s *Store) CreateImportedAccount(ctx context.Context,
-	_ db.CreateImportedAccountParams) (*db.AccountProperties, error) {
+	_ db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
 	return nil, notImplemented(ctx, "CreateImportedAccount")
 }

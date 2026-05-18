@@ -1610,6 +1610,7 @@ func TestListAddressesWatchOnlyWallet(t *testing.T) {
 			Scope:    db.KeyScopeBIP0084,
 			Name:     "watch-only-account",
 		},
+		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
 

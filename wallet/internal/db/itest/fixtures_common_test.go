@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"time"
@@ -229,6 +230,26 @@ func (tc AccountTestCase) DerivedParams(
 		WalletID: walletID,
 		Scope:    tc.Scope,
 		Name:     tc.Name,
+	}
+}
+
+// SpendableDeriveFn returns a fake AccountDerivationFunc that synthesizes a
+// minimal DerivedAccountData for spendable-wallet test cases. It mirrors what
+// the wallet manager will pass in production: a public key, encrypted private
+// key, and a deterministic master-key fingerprint.
+func SpendableDeriveFn() db.AccountDerivationFunc {
+	return func(_ context.Context, _ db.KeyScope, _ uint32,
+		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
+
+		data := &db.DerivedAccountData{
+			PublicKey:            RandomBytes(33),
+			MasterKeyFingerprint: 0xC0DEC0DE,
+		}
+		if !walletIsWatchOnly {
+			data.EncryptedPrivateKey = RandomBytes(48)
+		}
+
+		return data, nil
 	}
 }
 

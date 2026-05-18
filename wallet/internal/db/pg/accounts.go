@@ -79,10 +79,15 @@ func (s *Store) RenameAccount(ctx context.Context,
 }
 
 // CreateDerivedAccount creates a new derived account with the given name and
-// scope. If the key scope does not exist, it is created using the address
-// schema provided by the caller with no coin public/private key material.
+// scope. After allocating the account number, the wallet-supplied deriveFn
+// callback returns the account material (extended public key, encrypted
+// private key, master-key fingerprint, optional address schema) which is
+// persisted together with the row. If the key scope does not exist, it is
+// created with NULL public/private key fields using the address schema
+// provided by the caller.
 func (s *Store) CreateDerivedAccount(ctx context.Context,
-	params db.CreateDerivedAccountParams) (*db.AccountInfo, error) {
+	params db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
 	var info *db.AccountInfo
 
@@ -90,7 +95,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		var err error
 
 		info, err = db.CreateDerivedAccountWithOps(
-			ctx, params, createDerivedAccountOps{q: qtx},
+			ctx, params, createDerivedAccountOps{q: qtx}, deriveFn,
 		)
 
 		return err
@@ -129,10 +134,17 @@ func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
 }
 
-// CreateDerivedAccount implements db.CreateDerivedAccountOps.
+// CreateDerivedAccount implements db.CreateDerivedAccountOps. The shared
+// CreateDerivedAccountWithOps workflow validates derived before invoking
+// this method, so derived must be non-nil; defensively reject anyway in
+// case a future caller skips that validation.
 func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64,
-	name string) (db.CreateDerivedAccountRow, error) {
+	scopeID int64, accountNumber int64, name string,
+	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
+
+	if derived == nil {
+		return db.CreateDerivedAccountRow{}, db.ErrNilDerivedAccountData
+	}
 
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
@@ -143,10 +155,28 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 			},
 			AccountName: name,
 			OriginID:    int16(db.DerivedAccount),
+			PublicKey:   derived.PublicKey,
+			MasterFingerprint: sql.NullInt64{
+				Int64: int64(derived.MasterKeyFingerprint),
+				Valid: true,
+			},
 		},
 	)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, err
+	}
+
+	if len(derived.EncryptedPrivateKey) > 0 {
+		err = o.q.CreateAccountSecret(
+			ctx, sqlc.CreateAccountSecretParams{
+				AccountID:           row.ID,
+				EncryptedPrivateKey: derived.EncryptedPrivateKey,
+			},
+		)
+		if err != nil {
+			return db.CreateDerivedAccountRow{},
+				fmt.Errorf("create account secret: %w", err)
+		}
 	}
 
 	return db.CreateDerivedAccountRow{
@@ -161,9 +191,9 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 // Imported accounts have NULL account_number since they don't follow BIP44
 // derivation.
 func (s *Store) CreateImportedAccount(ctx context.Context,
-	params db.CreateImportedAccountParams) (*db.AccountProperties, error) {
+	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
-	var props *db.AccountProperties
+	var props *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		var err error
@@ -177,7 +207,7 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 			buildCreateImportedAccountArgs(params),
 			func(row sqlc.CreateImportedAccountRow) int64 { return row.ID },
 			qtx.CreateAccountSecret, buildCreateAccountSecretArgs(params),
-			func(accountID int64) (*db.AccountProperties, error) {
+			func(accountID int64) (*db.AccountInfo, error) {
 				return getAccountProps(ctx, qtx, accountID)
 			},
 		)
@@ -245,16 +275,16 @@ func buildCreateAccountSecretArgs(
 }
 
 // getAccountProps fetches full account properties from the database and
-// converts the row to AccountProperties.
+// converts the row to AccountInfo.
 func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
-	accountID int64) (*db.AccountProperties, error) {
+	accountID int64) (*db.AccountInfo, error) {
 
 	row, err := qtx.GetAccountPropsById(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("get account props: %w", err)
 	}
 
-	return db.AccountPropsRowToProps(db.AccountPropsRow[int16, int16]{
+	return db.AccountPropsRowToInfo(db.AccountPropsRow[int16, int16]{
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,
 		OriginID:          row.OriginID,
@@ -267,9 +297,6 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 		CreatedAt:         row.CreatedAt,
 		Purpose:           row.Purpose,
 		CoinType:          row.CoinType,
-		InternalTypeID:    row.InternalTypeID,
-		ExternalTypeID:    row.ExternalTypeID,
-		IDToAddrType:      db.IDToAddressType[int16],
 		IDToOriginType:    db.IDToAccountOrigin[int16],
 	})
 }
@@ -358,17 +385,19 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int16]{
-		AccountNumber:    base.AccountNumber,
-		AccountName:      base.AccountName,
-		OriginID:         base.OriginID,
-		ExternalKeyCount: base.ExternalKeyCount,
-		InternalKeyCount: base.InternalKeyCount,
-		ImportedKeyCount: base.ImportedKeyCount,
-		IsWatchOnly:      base.IsWatchOnly,
-		CreatedAt:        base.CreatedAt,
-		Purpose:          base.Purpose,
-		CoinType:         base.CoinType,
-		IDToOriginType:   db.IDToAccountOrigin[int16],
+		AccountNumber:     base.AccountNumber,
+		AccountName:       base.AccountName,
+		OriginID:          base.OriginID,
+		ExternalKeyCount:  base.ExternalKeyCount,
+		InternalKeyCount:  base.InternalKeyCount,
+		ImportedKeyCount:  base.ImportedKeyCount,
+		PublicKey:         base.PublicKey,
+		MasterFingerprint: base.MasterFingerprint,
+		IsWatchOnly:       base.IsWatchOnly,
+		CreatedAt:         base.CreatedAt,
+		Purpose:           base.Purpose,
+		CoinType:          base.CoinType,
+		IDToOriginType:    db.IDToAccountOrigin[int16],
 	})
 }
 

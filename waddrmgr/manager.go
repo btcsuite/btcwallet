@@ -136,6 +136,10 @@ var FastScryptOptions = ScryptOptions{
 	P: 1,
 }
 
+// NamespaceKey is the top-level walletdb bucket key the wallet allocates for
+// the address manager's storage.
+var NamespaceKey = []byte("waddrmgr")
+
 // addrKey is used to uniquely identify an address even when those addresses
 // would end up being the same bitcoin address (as is the case for
 // pay-to-pubkey and pay-to-pubkey-hash style of addresses).
@@ -932,6 +936,52 @@ func (m *Manager) ChainParams() *chaincfg.Params {
 	// after the manager instance is created.
 
 	return m.chainParams
+}
+
+// EncryptedMasterHDPriv returns the encrypted master HD private key bytes
+// from the manager's main bucket. Returns ErrWatchingOnly when no encrypted
+// master HD private key is persisted.
+func (m *Manager) EncryptedMasterHDPriv(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	priv, _ := fetchMasterHDKeys(ns)
+	if priv == nil {
+		return nil, managerError(
+			ErrWatchingOnly,
+			"encrypted master HD private key not found", nil,
+		)
+	}
+
+	return priv, nil
+}
+
+// MasterHDPubKey returns the decrypted master HD public key bytes from the
+// manager's main bucket. Returns ErrNoExist when not persisted.
+func (m *Manager) MasterHDPubKey(
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	_, pubEnc := fetchMasterHDKeys(ns)
+	if pubEnc == nil {
+		return nil, managerError(
+			ErrNoExist, "master HD public key not found", nil,
+		)
+	}
+
+	m.mtx.RLock()
+	defer m.mtx.RUnlock()
+
+	// The new SQL backends persist the master HD public key in plaintext,
+	// but the legacy kvdb (waddrmgr) bucket layout still stores it
+	// encrypted under cryptoKeyPub, so the decrypt step is required here
+	// for kvdb-backed wallets.
+	plain, err := m.cryptoKeyPub.Decrypt(pubEnc)
+	if err != nil {
+		return nil, managerError(
+			ErrCrypto, "decrypt master HD public key", err,
+		)
+	}
+
+	return plain, nil
 }
 
 // ChangePassphrase changes either the public or private passphrase to the

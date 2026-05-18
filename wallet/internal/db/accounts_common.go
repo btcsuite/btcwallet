@@ -19,6 +19,36 @@ var (
 	// this should never happen, but it's possible if the database is modified
 	// incorrectly or the query is incorrect.
 	errInvalidAccountOrigin = errors.New("invalid account origin")
+
+	// errNilAccountDerivationFunc is returned when derived account creation
+	// is called without a derivation callback.
+	errNilAccountDerivationFunc = errors.New(
+		"account derivation callback is nil",
+	)
+
+	// ErrNilDerivedAccountData is returned when the derivation callback
+	// reports success but does not return any derived account material.
+	ErrNilDerivedAccountData = errors.New("derived account data is nil")
+
+	// errMissingDerivedPublicKey is returned when the derivation callback
+	// returns data with an empty public key. Every derived account must
+	// have a public key.
+	errMissingDerivedPublicKey = errors.New(
+		"derived account public key is empty",
+	)
+
+	// errWatchOnlyDerivedPrivateKey is returned when the derivation
+	// callback returns an encrypted private key for a watch-only wallet,
+	// which must hold no spending material.
+	errWatchOnlyDerivedPrivateKey = errors.New(
+		"watch-only wallet must not return encrypted account private key",
+	)
+
+	// errMissingDerivedPrivateKey is returned when the derivation callback
+	// omits the encrypted private key for a spendable wallet.
+	errMissingDerivedPrivateKey = errors.New(
+		"spendable wallet must return encrypted account private key",
+	)
 )
 
 // Validate validates required fields for creating a derived account.
@@ -67,9 +97,87 @@ type CreateDerivedAccountOps interface {
 	AllocateAccountNumber(ctx context.Context, scopeID int64) (int64, error)
 
 	// CreateDerivedAccount inserts the derived account row using the provided
-	// scope ID, allocated account number, and public account name.
+	// scope ID, allocated account number, public account name, and the
+	// wallet-derived account material returned by the workflow's
+	// AccountDerivationFunc.
 	CreateDerivedAccount(ctx context.Context, scopeID int64,
-		accountNumber int64, name string) (CreateDerivedAccountRow, error)
+		accountNumber int64, name string,
+		derived *DerivedAccountData) (CreateDerivedAccountRow, error)
+}
+
+// validateDerivedAccountData enforces the field rules documented on
+// DerivedAccountData. Called by CreateDerivedAccountWithOps after the
+// derivation callback returns.
+func validateDerivedAccountData(data *DerivedAccountData,
+	walletIsWatchOnly bool) error {
+
+	if data == nil {
+		return ErrNilDerivedAccountData
+	}
+
+	if len(data.PublicKey) == 0 {
+		return errMissingDerivedPublicKey
+	}
+
+	// The private-key invariant is wallet-mode dependent: a watch-only
+	// wallet must never store spending material, and a spendable wallet
+	// must always carry an encrypted account-level private key so future
+	// child derivations can sign.
+	hasPrivKey := len(data.EncryptedPrivateKey) > 0
+	switch {
+	case walletIsWatchOnly && hasPrivKey:
+		return errWatchOnlyDerivedPrivateKey
+
+	case !walletIsWatchOnly && !hasPrivKey:
+		return errMissingDerivedPrivateKey
+	}
+
+	return nil
+}
+
+// deriveAndValidate invokes the wallet-supplied derivation callback with
+// the freshly allocated account number and validates the returned
+// material against the wallet's watch-only mode. It returns the same
+// "derive account: ..." wrap on both the callback and validation errors
+// so callers see a single error shape regardless of which step failed.
+func deriveAndValidate(ctx context.Context, scope KeyScope, accNum uint32,
+	walletIsWatchOnly bool,
+	deriveFn AccountDerivationFunc) (*DerivedAccountData, error) {
+
+	derived, err := deriveFn(ctx, scope, accNum, walletIsWatchOnly)
+	if err != nil {
+		return nil, fmt.Errorf("derive account: %w", err)
+	}
+
+	err = validateDerivedAccountData(derived, walletIsWatchOnly)
+	if err != nil {
+		return nil, fmt.Errorf("derive account: %w", err)
+	}
+
+	return derived, nil
+}
+
+// allocateAndPreviewAccountNumber bridges the per-scope allocator and the
+// uint32 preview that the derivation callback expects. It is split out
+// of CreateDerivedAccountWithOps so the main workflow body stays under
+// the cyclop budget and the "allocate then preview" pair is described
+// in one place.
+func allocateAndPreviewAccountNumber(ctx context.Context,
+	ops CreateDerivedAccountOps, scopeID int64) (int64, uint32, error) {
+
+	allocated, err := ops.AllocateAccountNumber(ctx, scopeID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("allocate account number: %w", err)
+	}
+
+	accNumPreview, err := validateAccountNumber(allocated)
+	if err != nil {
+		return 0, 0, fmt.Errorf(
+			"%w: %w", ErrMaxAccountNumberReached, err,
+		)
+	}
+
+	return allocated, accNumPreview, nil
 }
 
 // CreateDerivedAccountWithOps runs the backend-independent
@@ -78,11 +186,18 @@ type CreateDerivedAccountOps interface {
 //
 // The helper owns the end-to-end sequencing so postgres and sqlite both:
 // validate the public request first, allocate from the same scope counter only
-// after that scope exists, preserve the same account-number overflow mapping,
-// and build the same normalized AccountInfo result from the inserted row.
+// after that scope exists, invoke the wallet-supplied derivation callback to
+// build the per-account material, preserve the same account-number overflow
+// mapping, and build the same normalized AccountInfo result from the inserted
+// row.
 func CreateDerivedAccountWithOps(ctx context.Context,
 	params CreateDerivedAccountParams,
-	ops CreateDerivedAccountOps) (*AccountInfo, error) {
+	ops CreateDerivedAccountOps,
+	deriveFn AccountDerivationFunc) (*AccountInfo, error) {
+
+	if deriveFn == nil {
+		return nil, errNilAccountDerivationFunc
+	}
 
 	paramsErr := params.Validate()
 	if paramsErr != nil {
@@ -99,13 +214,22 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, fmt.Errorf("ensure scope: %w", err)
 	}
 
-	accountNumber, err := ops.AllocateAccountNumber(ctx, scopeID)
+	allocated, accNumPreview, err := allocateAndPreviewAccountNumber(
+		ctx, ops, scopeID,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("allocate account number: %w", err)
+		return nil, err
+	}
+
+	derived, err := deriveAndValidate(
+		ctx, params.Scope, accNumPreview, walletIsWatchOnly, deriveFn,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	row, err := ops.CreateDerivedAccount(
-		ctx, scopeID, accountNumber, params.Name,
+		ctx, scopeID, allocated, params.Name, derived,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create account: %w", err)
@@ -124,6 +248,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 	return BuildAccountInfo(
 		accNumber, params.Name, DerivedAccount, 0, 0, 0,
 		walletIsWatchOnly, row.CreatedAt, params.Scope,
+		derived.PublicKey, derived.MasterKeyFingerprint,
 	), nil
 }
 
@@ -185,7 +310,7 @@ func (params RenameAccountParams) Validate() error {
 }
 
 // AccountPropsRow represents the raw database fields needed to construct
-// AccountProperties.
+// AccountInfo.
 type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
@@ -203,6 +328,17 @@ type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
 	ExternalTypeID    AddrTypeId
 	IDToAddrType      func(AddrTypeId) (AddressType, error)
 	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
+}
+
+// validateAccountNumber converts a database account number to uint32 while
+// enforcing the wallet-compatible derived account ceiling.
+func validateAccountNumber(accountNumber int64) (uint32, error) {
+	if accountNumber > int64(MaxAccountNumber) {
+		return 0, fmt.Errorf("%w: account number %d exceeds max %d",
+			ErrMaxAccountNumberReached, accountNumber, MaxAccountNumber)
+	}
+
+	return Int64ToUint32(accountNumber)
 }
 
 // getKeyCounts converts external, internal, and imported key counts from
@@ -228,37 +364,18 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	return externalKeyCount, internalKeyCount, importedKeyCount, nil
 }
 
-// getAddrTypes extracts the internal and external address types from the row
-// and handles errors.
-func getAddrTypes[AddrTypeId, AccOriginId any](
-	row AccountPropsRow[AddrTypeId, AccOriginId]) (AddressType, AddressType,
-	error) {
-
-	internalType, err := row.IDToAddrType(row.InternalTypeID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("internal type: %w", err)
-	}
-
-	externalType, err := row.IDToAddrType(row.ExternalTypeID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("external type: %w", err)
-	}
-
-	return internalType, externalType, nil
-}
-
-// AccountPropsRowToProps converts a database row containing full account
-// properties into an AccountProperties struct. The idToAddrType function is
+// AccountPropsRowToInfo converts a database row containing full account
+// properties into an AccountInfo struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
 // values.
-func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
-	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountProperties, error) {
+func AccountPropsRowToInfo[AddrTypeId, AccOriginId any](
+	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountInfo, error) {
 
 	var accountNum uint32
 	if row.AccountNumber.Valid {
 		var err error
 
-		accountNum, err = Int64ToUint32(row.AccountNumber.Int64)
+		accountNum, err = validateAccountNumber(row.AccountNumber.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("account number: %w", err)
 		}
@@ -279,11 +396,6 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
-	internalType, externalType, err := getAddrTypes(row)
-	if err != nil {
-		return nil, err
-	}
-
 	var fingerprint uint32
 	if row.MasterFingerprint.Valid {
 		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
@@ -299,7 +411,7 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		return nil, err
 	}
 
-	return &AccountProperties{
+	return &AccountInfo{
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
 		Origin:               origin,
@@ -314,10 +426,6 @@ func AccountPropsRowToProps[AddrTypeId, AccOriginId any](
 		},
 		IsWatchOnly: row.IsWatchOnly,
 		CreatedAt:   row.CreatedAt,
-		AddrSchema: &ScopeAddrSchema{
-			InternalAddrType: internalType,
-			ExternalAddrType: externalType,
-		},
 	}, nil
 }
 
@@ -373,20 +481,23 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 func BuildAccountInfo(accountNum uint32, accountName string,
 	origin AccountOrigin, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
-	scope KeyScope) *AccountInfo {
+	scope KeyScope, publicKey []byte,
+	masterKeyFingerprint uint32) *AccountInfo {
 
 	return &AccountInfo{
-		AccountNumber:      accountNum,
-		AccountName:        accountName,
-		Origin:             origin,
-		ExternalKeyCount:   externalKeyCount,
-		InternalKeyCount:   internalKeyCount,
-		ImportedKeyCount:   importedKeyCount,
-		ConfirmedBalance:   0,
-		UnconfirmedBalance: 0,
-		IsWatchOnly:        isWatchOnly,
-		CreatedAt:          createdAt,
-		KeyScope:           scope,
+		AccountNumber:        accountNum,
+		AccountName:          accountName,
+		Origin:               origin,
+		ExternalKeyCount:     externalKeyCount,
+		InternalKeyCount:     internalKeyCount,
+		ImportedKeyCount:     importedKeyCount,
+		ConfirmedBalance:     0,
+		UnconfirmedBalance:   0,
+		IsWatchOnly:          isWatchOnly,
+		CreatedAt:            createdAt,
+		KeyScope:             scope,
+		PublicKey:            publicKey,
+		MasterKeyFingerprint: masterKeyFingerprint,
 	}
 }
 
@@ -403,17 +514,19 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId any] struct {
-	AccountNumber    sql.NullInt64
-	AccountName      string
-	OriginID         AccOriginId
-	ExternalKeyCount int64
-	InternalKeyCount int64
-	ImportedKeyCount int64
-	IsWatchOnly      bool
-	CreatedAt        time.Time
-	Purpose          int64
-	CoinType         int64
-	IDToOriginType   func(AccOriginId) (AccountOrigin, error)
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	OriginID          AccOriginId
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	ImportedKeyCount  int64
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	IsWatchOnly       bool
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -425,7 +538,7 @@ func AccountRowToInfo[AccOriginId any](
 	if row.AccountNumber.Valid {
 		var err error
 
-		accountNum, err = Int64ToUint32(row.AccountNumber.Int64)
+		accountNum, err = validateAccountNumber(row.AccountNumber.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("account number: %w", err)
 		}
@@ -453,10 +566,19 @@ func AccountRowToInfo[AccOriginId any](
 		return nil, err
 	}
 
+	var fingerprint uint32
+	if row.MasterFingerprint.Valid {
+		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("master fingerprint: %w", err)
+		}
+	}
+
 	return BuildAccountInfo(
 		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
+		row.PublicKey, fingerprint,
 	), nil
 }
 
@@ -641,8 +763,8 @@ func CreateImportedAccount[CreateArgs any, CreateRow any, SecretArgs any](
 	rowToID func(CreateRow) int64,
 	createSecret func(context.Context, SecretArgs) error,
 	buildSecretArgs func(accountID int64) SecretArgs,
-	getProps func(accountID int64) (*AccountProperties, error),
-) (*AccountProperties, error) {
+	getProps func(accountID int64) (*AccountInfo, error),
+) (*AccountInfo, error) {
 
 	err := params.ValidateBasic()
 	if err != nil {

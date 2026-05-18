@@ -141,7 +141,7 @@ linters:
       # The split backend packages intentionally forward many calls into the
       # shared db helpers. Keep wrapcheck enabled elsewhere while the package
       # split settles.
-      - path: wallet/internal/db/(pg|sqlite)/.*\.go
+      - path: wallet/internal/db/(pg|sqlite|kvdb)/.*\.go
         linters:
           - wrapcheck
 
