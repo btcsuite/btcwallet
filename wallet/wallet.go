@@ -411,6 +411,15 @@ type Wallet struct {
 	// birthdayBlock is the block from which the wallet started scanning.
 	// It is loaded on startup and cached to avoid database lookups.
 	birthdayBlock waddrmgr.BlockStamp
+
+	// masterFingerprint is the cached BIP32 master-key fingerprint for
+	// this wallet, computed from the wallet's master HD pubkey at
+	// Manager.Load time. The value is the canonical source for derived-
+	// account fingerprints exposed via AccountProperties — the db
+	// layer's per-row value for derived rows is ignored in favor of
+	// this cache. Shell / watch-only wallets that lack a stored master
+	// HD pubkey leave this at zero, matching their existing behavior.
+	masterFingerprint uint32
 }
 
 // ID returns the runtime wallet identifier for the wallet.
