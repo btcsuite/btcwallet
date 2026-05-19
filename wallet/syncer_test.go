@@ -2673,6 +2673,33 @@ func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestSyncedBlockHashesRoutesStore verifies rollback reads consult the runtime
+// store when it is available.
+func TestSyncedBlockHashesRoutesStore(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil)
+	s.store = store
+	s.walletID = 88
+
+	blocks := []db.Block{{Hash: chainhash.Hash{88}, Height: 100}, {
+		Hash:   chainhash.Hash{89},
+		Height: 101,
+	}}
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 100,
+		EndHeight:   101,
+	}).Return(blocks, nil).Once()
+
+	hashes, err := s.syncedBlockHashes(t.Context(), 100, 101)
+	require.NoError(t, err)
+	require.Len(t, hashes, 2)
+	require.Equal(t, blocks[0].Hash, *hashes[0])
+	require.Equal(t, blocks[1].Hash, *hashes[1])
+	store.AssertExpectations(t)
+}
+
 // TestHandleChainUpdate_SpecialNotifs verifies RescanProgress and
 // RescanFinished.
 func TestHandleChainUpdate_SpecialNotifs(t *testing.T) {
