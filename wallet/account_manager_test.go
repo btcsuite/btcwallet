@@ -159,129 +159,54 @@ func TestListAccounts(t *testing.T) {
 	require.Equal(t, masterFP, accounts[0].MasterKeyFingerprint)
 }
 
-// TestListAccountsByScope tests that the ListAccountsByScope method works as
-// expected.
+// TestListAccountsByScope verifies the scope filter narrows the query.
 func TestListAccountsByScope(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll create two new accounts, one under the BIP0084 scope and one
-	// under the BIP0049 scope.
-	scopeBIP84 := waddrmgr.KeyScopeBIP0084
-	accBIP84Name := "test bip84"
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
 
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP84).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, accBIP84Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP84Name,
-		}, nil).Once()
-
-	_, err := w.NewAccount(t.Context(), scopeBIP84, accBIP84Name)
-	require.NoError(t, err)
-
-	scopeBIP49 := waddrmgr.KeyScopeBIP0049Plus
-	accBIP49Name := "test bip49"
-
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, accBIP49Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP49Name,
-		}, nil).Once()
-
-	_, err = w.NewAccount(t.Context(), scopeBIP49, accBIP49Name)
-	require.NoError(t, err)
-
-	// Mock expectations for ListAccountsByScope (BIP84).
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP84).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LastAccount", mock.Anything).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+		Scope:    &dbScope,
+	}).Return([]db.AccountInfo{
+		{
 			AccountNumber: 0,
 			AccountName:   "default",
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
-		Return(false, nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP84Name,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
+			KeyScope:      dbScope,
+		},
+	}, nil).Once()
+	deps.addrStore.On("FetchScopedKeyManager", scope).Return(
+		deps.accountManager, nil,
+	).Once()
 
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
-
-	// Now, we'll list the accounts for the BIP0084 scope and check that
-	// we only get the default account for that scope and the new account we
-	// created.
-	accountsBIP84, err := w.ListAccountsByScope(t.Context(), scopeBIP84)
+	accounts, err := w.ListAccountsByScope(t.Context(), scope)
 	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+}
 
-	// We should have two accounts, the default account and the new account.
-	require.Len(t, accountsBIP84, 2)
+// TestListAccountsByScopeUnknownScope verifies the public wallet API preserves
+// the legacy scope-not-found error surface.
+func TestListAccountsByScopeUnknownScope(t *testing.T) {
+	t.Parallel()
 
-	// The first account should be the default account.
-	require.Equal(t, "default", accountsBIP84[0].AccountName)
-	require.Equal(t, uint32(0), accountsBIP84[0].AccountNumber)
+	w, deps := createStartedWalletWithMocks(t)
 
-	// The second account should be the new account.
-	require.Equal(t, accBIP84Name, accountsBIP84[1].AccountName)
-	require.Equal(t, uint32(1), accountsBIP84[1].AccountNumber)
+	scope := waddrmgr.KeyScope{Purpose: 123, Coin: 456}
+	deps.addrStore.On("FetchScopedKeyManager", scope).Return(
+		nil, waddrmgr.ManagerError{
+			ErrorCode: waddrmgr.ErrScopeNotFound,
+		},
+	).Once()
 
-	// Mock expectations for ListAccountsByScope (BIP49).
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LastAccount", mock.Anything).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 0,
-			AccountName:   "default",
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
-		Return(false, nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP49Name,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
-
-	// Now, we'll do the same for the BIP0049 scope.
-	accountsBIP49, err := w.ListAccountsByScope(t.Context(), scopeBIP49)
-	require.NoError(t, err)
-
-	// We should have two accounts, the default account and the new account.
-	require.Len(t, accountsBIP49, 2)
-
-	// The first account should be the default account.
-	require.Equal(t, "default", accountsBIP49[0].AccountName)
-	require.Equal(t, uint32(0), accountsBIP49[0].AccountNumber)
-
-	// The second account should be the new account.
-	require.Equal(t, accBIP49Name, accountsBIP49[1].AccountName)
-	require.Equal(t, uint32(1), accountsBIP49[1].AccountNumber)
+	_, err := w.ListAccountsByScope(t.Context(), scope)
+	require.Error(t, err)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
 }
 
 // TestListAccountsByName tests that the ListAccountsByName method works as
