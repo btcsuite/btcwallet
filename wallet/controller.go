@@ -273,7 +273,8 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 // performRuntimeSetup executes the synchronous initialization tasks required
 // before the wallet's main loops can start. This includes sanity checking the
-// birthday block, loading accounts into memory, and cleaning up expired locks.
+// birthday block, fail-fast verifying that the wallet's accounts can be read
+// from the store, and cleaning up expired locks.
 func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
@@ -285,15 +286,26 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return err
 	}
 
-	// Ensure all accounts are loaded into memory so we can efficiently
-	// access them during the scan loop without database lookups.
-	err = w.DBGetAllAccounts(startCtx)
+	// Fail fast on store connectivity by reading the wallet's accounts
+	// before entering the main loop. The result is intentionally discarded:
+	// the read itself surfaces a broken or unreachable store as a startup
+	// error rather than a mid-scan failure.
+	_, err = w.cache.ListAccounts(
+		startCtx, db.ListAccountsQuery{
+			WalletID: w.id,
+		},
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	// Cleanup any expired output locks.
-	return w.DBDeleteExpiredLockedOutputs(startCtx)
+	err = w.store.DeleteExpiredLeases(startCtx, w.id)
+	if err != nil {
+		return fmt.Errorf("delete expired leases: %w", err)
+	}
+
+	return nil
 }
 
 // Stop signals all wallet background processes to shutdown and blocks until

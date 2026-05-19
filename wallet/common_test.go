@@ -214,24 +214,14 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 		Maybe()
 	deps.addrStore.On("WatchOnly").Return(false).Maybe()
 
-	// Mock account loading.
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).
+	// Mock account loading through the store (runtime startup).
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).
 		Once()
 
-	deps.accountManager.On("LastAccount", mock.Anything).
-		Return(uint32(0), nil).
-		Once()
-
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 0,
-			AccountName:   "default",
-		}, nil).
-		Once()
-
-	// Mock expired lock deletion.
-	deps.txStore.On("DeleteExpiredLockedOutputs", mock.Anything).
+	// Mock expired-lease cleanup (runtime startup).
+	deps.store.On("DeleteExpiredLeases", mock.Anything, mock.Anything).
 		Return(nil).
 		Once()
 
