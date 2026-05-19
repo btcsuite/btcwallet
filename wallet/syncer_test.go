@@ -3518,41 +3518,41 @@ func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestAdvanceChainSyncUsesLegacySyncedToWithStore verifies regular chain sync
-// keeps reading the legacy sync tip while scanBatch still writes through the
-// legacy walletdb path, even when a runtime store is configured.
-func TestAdvanceChainSyncUsesLegacySyncedToWithStore(t *testing.T) {
+// TestAdvanceChainSyncUsesStoreSyncedTo verifies Store-backed synchronization
+// reads the current sync tip from the Store instead of the legacy address
+// manager once scan batches are also committed through the Store.
+func TestAdvanceChainSyncUsesStoreSyncedTo(t *testing.T) {
 	t.Parallel()
 
 	const (
 		walletID   uint32 = 78
-		walletName        = "legacy-sync-tip"
+		walletName        = "store-sync-tip"
 	)
 
 	store := &walletmock.Store{}
-	addrStore := &bwmock.AddrStore{}
 	chain := &bwmock.Chain{}
-	syncedTo := waddrmgr.BlockStamp{
+	syncedTo := &db.Block{
 		Hash:      chainhash.Hash{78},
 		Height:    144,
 		Timestamp: time.Unix(1710003900, 0),
 	}
 
 	s := newSyncer(
-		Config{Name: walletName, Chain: chain}, addrStore, nil, nil,
+		Config{Name: walletName, Chain: chain}, nil, nil, nil,
 		syncerStoreConfig{store: store, walletID: walletID},
 	)
 
 	chain.On("GetBestBlock").Return(
-		&syncedTo.Hash, syncedTo.Height, nil,
+		&syncedTo.Hash, int32(syncedTo.Height), nil,
 	).Once()
-	addrStore.On("SyncedTo").Return(syncedTo).Once()
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
 
 	syncFinished, err := s.advanceChainSync(t.Context())
 	require.NoError(t, err)
 	require.True(t, syncFinished)
 	chain.AssertExpectations(t)
-	addrStore.AssertExpectations(t)
 	store.AssertExpectations(t)
 }
 
@@ -4627,6 +4627,48 @@ func TestAdvanceChainSync_GetBestBlockError(t *testing.T) {
 	require.ErrorIs(t, err, errBestBlock)
 }
 
+// TestAdvanceChainSyncStoreSyncedTip verifies that store-backed advancement
+// reads the synced tip from the Store rather than the legacy addrStore. A nil
+// addrStore is passed so any accidental addrStore.SyncedTo() call would panic.
+func TestAdvanceChainSyncStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer whose Store reports a synced tip at
+	// the chain's best height.
+	const walletID uint32 = 21
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Chain: mockChain, Name: "store-sync"}, nil, nil,
+		&mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	mockChain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(100), nil,
+	).Once()
+	store.On("GetWallet", mock.Anything, "store-sync").Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Hash:   chainhash.Hash{0x01},
+				Height: 100,
+			},
+		}, nil,
+	).Once()
+
+	// Act: advance the chain sync.
+	finished, err := s.advanceChainSync(t.Context())
+
+	// Assert: the store tip matched the chain tip, so we are synced and
+	// the addrStore was never consulted.
+	require.NoError(t, err)
+	require.True(t, finished)
+	require.Equal(t, syncStateSynced, s.syncState())
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
 // TestDispatchScanStrategy_AutoDefaultThreshold verifies threshold=0 branch.
 func TestDispatchScanStrategy_AutoDefaultThreshold(t *testing.T) {
 	t.Parallel()
@@ -4708,4 +4750,195 @@ func TestAdvanceChainSync_LargeGap(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, finished)
 	require.Equal(t, uint32(syncStateSyncing), s.state.Load())
+}
+
+// TestCheckRollbackStoreSyncedTip verifies that checkRollback reads the synced
+// tip from the Store rather than the legacy addrStore. The Store reports a
+// current tip while the legacy addrStore is nil, so any read of the legacy tip
+// would panic; checkRollback must still scan from the Store tip and detect the
+// reorg. This guards a Store-backed backend that does not mirror its tip into
+// the legacy manager, where a stale legacy height could skip a needed rollback.
+func TestCheckRollbackStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer whose Store reports a current tip at
+	// height 100. The legacy addrStore is nil so any SyncedTo() read panics.
+	const walletID uint32 = 31
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Chain: mockChain, Name: "rollback-store"}, nil, nil,
+		&mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	// syncedTip reads the current tip (height 100) from the Store.
+	store.On("GetWallet", mock.Anything, "rollback-store").Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Hash:   chainhash.Hash{0x01},
+				Height: 100,
+			},
+		}, nil,
+	).Once()
+
+	// Local hashes for heights 91..100 come from the Store, ascending.
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{
+			Hash:   chainhash.Hash{byte(i)},
+			Height: i,
+		})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   100,
+	}).Return(localBlocks, nil).Once()
+
+	// Remote hashes fork at height 95: 91..95 match, 96..100 differ.
+	remoteHashes := make([]chainhash.Hash, 10)
+	for i := range 10 {
+		h := 91 + i
+		if h > 95 {
+			remoteHashes[i] = chainhash.Hash{0xff}
+		} else {
+			remoteHashes[i] = chainhash.Hash{byte(h)}
+		}
+	}
+
+	mockChain.On(
+		"GetBlockHashes", int64(91), int64(100),
+	).Return(remoteHashes, nil).Once()
+
+	forkHash := chainhash.Hash{byte(95)}
+	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
+	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
+
+	// The rollback is written atomically through the Store to the fork
+	// height plus one (96). RollbackToBlock derives the new sync tip from
+	// the stored fork-point block, so the caller only supplies the rollback
+	// boundary.
+	store.On(
+		"RollbackToBlock", mock.Anything, uint32(96),
+	).Return(nil).Once()
+
+	// Act: run the rollback check.
+	err := s.checkRollback(t.Context())
+
+	// Assert: the reorg was detected from the Store tip and rolled back
+	// without ever consulting the legacy addrStore.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
+// TestScanWithRewindStoreSyncedTip verifies that scanWithRewind decides whether
+// to rewind using the Store tip rather than the legacy addrStore. This guards a
+// Store-backed backend whose stale legacy tip could otherwise make a needed
+// full rescan wrongly conclude there is nothing to rewind.
+func TestScanWithRewindStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rewinds when start is below store tip", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a store-backed syncer whose Store tip is current at
+		// height 100 and a rescan requesting a start at height 50.
+		const walletID uint32 = 32
+
+		store := &walletmock.Store{}
+		s := newSyncer(
+			Config{Name: "rewind-store"}, nil, nil, &mockTxPublisher{},
+			syncerStoreConfig{store: store, walletID: walletID},
+		)
+
+		store.On("GetWallet", mock.Anything, "rewind-store").Return(
+			&db.WalletInfo{
+				SyncedTo: &db.Block{
+					Hash:   chainhash.Hash{0x01},
+					Height: 100,
+				},
+			}, nil,
+		).Once()
+
+		start := waddrmgr.BlockStamp{
+			Height:    50,
+			Hash:      chainhash.Hash{byte(50)},
+			Timestamp: time.Unix(50, 0).UTC(),
+		}
+
+		// Because the Store tip (100) is above the requested start (50),
+		// the manual rewind rolls this wallet's tx state and sync metadata
+		// back to the requested start block.
+		store.On(
+			"RewindWallet", mock.Anything, db.RewindWalletParams{
+				WalletID: walletID,
+				Block: db.Block{
+					Hash:      start.Hash,
+					Height:    uint32(start.Height),
+					Timestamp: start.Timestamp,
+				},
+			},
+		).Return(nil).Once()
+
+		// Act: request a rewind rescan.
+		err := s.scanWithRewind(
+			t.Context(), &scanReq{
+				typ:        scanTypeRewind,
+				startBlock: start,
+			},
+		)
+
+		// Assert: both the rewind decision and write used the Store path.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+	})
+
+	t.Run("no rewind when start is at store tip", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a store-backed syncer whose Store tip is at height 50
+		// and a rescan requesting a start at the same height.
+		const walletID uint32 = 33
+
+		store := &walletmock.Store{}
+		s := newSyncer(
+			Config{Name: "rewind-noop"}, nil, nil,
+			&mockTxPublisher{},
+			syncerStoreConfig{store: store, walletID: walletID},
+		)
+
+		store.On("GetWallet", mock.Anything, "rewind-noop").Return(
+			&db.WalletInfo{
+				SyncedTo: &db.Block{
+					Hash:   chainhash.Hash{0x01},
+					Height: 50,
+				},
+			}, nil,
+		).Once()
+
+		start := waddrmgr.BlockStamp{
+			Height: 50,
+			Hash:   chainhash.Hash{byte(50)},
+		}
+
+		// Act: request a rewind rescan whose start is not below the
+		// Store tip.
+		err := s.scanWithRewind(
+			t.Context(), &scanReq{
+				typ:        scanTypeRewind,
+				startBlock: start,
+			},
+		)
+
+		// Assert: the decision came from the Store tip, so no rewind write was
+		// issued and the legacy addrStore was never read.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+		store.AssertNotCalled(
+			t, "RollbackToBlock", mock.Anything, mock.Anything,
+		)
+	})
 }
