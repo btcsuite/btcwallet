@@ -35,6 +35,27 @@ var (
 	errAddrNotFound = errors.New("addr not found")
 )
 
+// testStoreTxDetail builds a store transaction detail for a parent tx.
+func testStoreTxDetail(txHash chainhash.Hash,
+	txOuts ...*wire.TxOut) *db.TxDetailInfo {
+
+	return &db.TxDetailInfo{
+		Hash:  txHash,
+		MsgTx: &wire.MsgTx{TxOut: txOuts},
+	}
+}
+
+// testStoreUtxoInfo builds a store UTXO record from an outpoint and output.
+func testStoreUtxoInfo(outPoint wire.OutPoint,
+	txOut *wire.TxOut) *db.UtxoInfo {
+
+	return &db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(txOut.Value),
+		PkScript: txOut.PkScript,
+	}
+}
+
 // TestFindCredit tests that the findCredit helper returns true if a credit
 // exists at the specified index, and false otherwise.
 func TestFindCredit(t *testing.T) {
