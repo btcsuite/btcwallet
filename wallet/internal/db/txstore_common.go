@@ -564,6 +564,11 @@ func validateCreateTxParams(params CreateTxParams) error {
 		}
 	}
 
+	if len(params.CreditCandidates) > 0 {
+		return fmt.Errorf("%w: unresolved credit candidates",
+			ErrInvalidParam)
+	}
+
 	// Coinbase transactions only enter wallet history once a block already
 	// anchors them, so CreateTx requires the caller to provide that block up
 	// front instead of storing a fake unmined intermediate row first.

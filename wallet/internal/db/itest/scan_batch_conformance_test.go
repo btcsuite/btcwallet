@@ -598,6 +598,93 @@ func TestApplyScanBatchResolvesHorizonByAccountID(t *testing.T) {
 		"failed batch must not extend the derived account")
 }
 
+// TestApplyScanBatchRejectsWrongWalletHorizonAccountID verifies that a SQL scan
+// horizon cannot target an account row owned by a different wallet. The foreign
+// account is first advanced so the old unscoped lookup would have accepted the
+// wallet-A batch as a no-op before any wallet ownership check on inserted
+// addresses could run.
+func TestApplyScanBatchRejectsWrongWalletHorizonAccountID(t *testing.T) {
+	t.Parallel()
+
+	scope := db.KeyScopeBIP0084
+	fixture := newKVDBScanFixture(t)
+	store := NewTestStoreWithDerive(t, realAddressDeriveFunc())
+
+	deriveAccount := func(_ context.Context, _ db.KeyScope, _ uint32,
+		watchOnly bool) (*db.DerivedAccountData, error) {
+
+		data := &db.DerivedAccountData{
+			PublicKey:            []byte(fixture.accountXPub),
+			MasterKeyFingerprint: 0x01020304,
+		}
+		if !watchOnly {
+			data.EncryptedPrivateKey = RandomBytes(48)
+		}
+
+		return data, nil
+	}
+
+	walletA := newWallet(t, store, "wallet-scan-wrong-owner-a")
+	walletB := newWallet(t, store, "wallet-scan-wrong-owner-b")
+
+	accountA, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletA,
+			Scope:    scope,
+			Name:     "wallet-a-account",
+		}, deriveAccount,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, accountA.AccountID)
+
+	accountB, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletB,
+			Scope:    scope,
+			Name:     "wallet-b-account",
+		}, deriveAccount,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, accountB.AccountID)
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletB,
+		Horizons: []db.ScanHorizon{{
+			AccountID:   accountB.AccountID,
+			Scope:       scope,
+			Account:     0,
+			AccountName: "wallet-b-account",
+			Branch:      0,
+			Index:       3,
+		}},
+	})
+	require.NoError(t, err)
+
+	account := getAccountByName(t, store, walletB, scope, "wallet-b-account")
+	require.Equal(t, uint32(4), account.ExternalKeyCount)
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletA,
+		Horizons: []db.ScanHorizon{{
+			AccountID:   accountB.AccountID,
+			Scope:       scope,
+			Account:     0,
+			AccountName: "wallet-b-account",
+			Branch:      0,
+			Index:       1,
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	account = getAccountByName(t, store, walletA, scope, "wallet-a-account")
+	require.Equal(t, uint32(0), account.ExternalKeyCount,
+		"wallet A must not accept wallet B's account ID")
+
+	account = getAccountByName(t, store, walletB, scope, "wallet-b-account")
+	require.Equal(t, uint32(4), account.ExternalKeyCount,
+		"failed wallet A batch must not mutate wallet B")
+}
+
 // TestApplyScanBatchSkipsInvalidChild verifies that the SQL horizon extension
 // skips an HD-invalid child index instead of failing, matching the kvdb
 // ScopedKeyManager.ExtendAddresses behaviour. kvdb cannot be coerced into an

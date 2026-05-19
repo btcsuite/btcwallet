@@ -3650,6 +3650,54 @@ func TestApplyTxBatchChildBeforeParent(t *testing.T) {
 	}))
 }
 
+// TestApplyTxBatchResolvesCreditCandidates verifies ApplyTxBatch resolves
+// notification credit candidates inside the batch write transaction before it
+// records transaction credits.
+func TestApplyTxBatchResolvesCreditCandidates(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-apply-tx-batch-candidates",
+	)
+
+	memberAddr, memberScript, multiSigScript := newMultisigScript(t)
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			Scope:           db.KeyScopeBIP0084,
+			AddressType:     db.RawPubKey,
+			PubKey:          memberAddr.ScriptAddress(),
+			ScriptPubKey:    memberScript,
+			EncryptedScript: RandomBytes(48),
+		},
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: multiSigScript}},
+	)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000190, 0),
+			Status:   db.TxStatusPending,
+			CreditCandidates: map[uint32][]address.Address{
+				0: {memberAddr},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+}
+
 // TestApplyScanBatchChildBeforeParent verifies that ApplyScanBatch records the
 // parent->child spend edge even when the child transaction is listed before the
 // in-batch parent whose output it spends.
