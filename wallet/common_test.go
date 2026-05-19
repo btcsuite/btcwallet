@@ -202,6 +202,7 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 	deps.addrStore.On("SyncedTo").
 		Return(waddrmgr.BlockStamp{Height: 1}).
 		Maybe()
+	deps.addrStore.On("WatchOnly").Return(false).Maybe()
 
 	// Mock account loading.
 	deps.addrStore.On("ActiveScopedKeyManagers").
