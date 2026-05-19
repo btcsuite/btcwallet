@@ -419,9 +419,11 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	hashes := []chainhash.Hash{{0x01}}
 
 	// Create a mock block message for testing.
+	blockTime := time.Unix(1710004500, 0)
 	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
 		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
 	))
+	msgBlock.Header.Timestamp = blockTime
 	blocks := []*wire.MsgBlock{msgBlock}
 	mockChain.On(
 		"GetBlocks", hashes,
@@ -436,6 +438,7 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, int32(10), results[0].meta.Height)
+	require.Equal(t, blockTime, results[0].meta.Time)
 }
 
 // TestScanBatchWithCFilters verifies CFilter-based scan logic.
@@ -1422,6 +1425,187 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	})
 
 	// Assert: The block transaction and sync tip were written together.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// storeScanBatchFixture contains expected values for store scan batch tests.
+type storeScanBatchFixture struct {
+	result   scanResult
+	tx       *wire.MsgTx
+	addr     address.Address
+	scope    waddrmgr.BranchScope
+	block    *wtxmgr.BlockMeta
+	received time.Time
+}
+
+// newStoreScanBatchFixture builds one scan result with a horizon and wallet
+// transaction output.
+func newStoreScanBatchFixture(t *testing.T) storeScanBatchFixture {
+	t.Helper()
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(
+		tx, time.Unix(1, 0).UTC(),
+	)
+	require.NoError(t, err)
+
+	scope := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 2,
+		Branch:  waddrmgr.InternalBranch,
+	}
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0b},
+			Height: 111,
+		},
+		Time: blockTime,
+	}
+
+	return storeScanBatchFixture{
+		result: scanResult{
+			BlockProcessResult: &BlockProcessResult{
+				FoundHorizons: map[waddrmgr.BranchScope]uint32{
+					scope: 12,
+				},
+				RelevantOutputs: TxEntries{{
+					Rec: rec,
+					Entries: []AddrEntry{{
+						Address: addr,
+						Credit: wtxmgr.CreditEntry{
+							Index: 0,
+						},
+					}},
+				}},
+			},
+			meta: block,
+		},
+		tx:       tx,
+		addr:     addr,
+		scope:    scope,
+		block:    block,
+		received: blockTime,
+	}
+}
+
+// matchStoreScanHorizon reports whether a scan horizon matches the fixture's
+// branch scope at the expected discovered index.
+func matchStoreScanHorizon(horizon db.ScanHorizon,
+	fixture storeScanBatchFixture) bool {
+
+	return horizon.Scope == db.KeyScope(fixture.scope.Scope) &&
+		horizon.Account == fixture.scope.Account &&
+		horizon.Branch == fixture.scope.Branch &&
+		horizon.Index == 12
+}
+
+// matchStoreScanSyncedBlocks reports whether the batch's synced blocks match
+// the expectation implied by wantSynced: exactly one fixture block when
+// syncing, or none otherwise.
+func matchStoreScanSyncedBlocks(params db.ScanBatchParams, wantSynced bool,
+	fixture storeScanBatchFixture) bool {
+
+	if !wantSynced {
+		return len(params.SyncedBlocks) == 0
+	}
+
+	return len(params.SyncedBlocks) == 1 &&
+		matchStoreScanBlock(&params.SyncedBlocks[0], fixture)
+}
+
+// matchStoreScanTx reports whether the batched scan transaction carries the
+// fixture's wallet, hash, receive time, credit, status, and confirming block.
+func matchStoreScanTx(txParams db.CreateTxParams, walletID uint32,
+	fixture storeScanBatchFixture) bool {
+
+	creditAddr, ok := txParams.Credits[0]
+	if !ok || creditAddr == nil || txParams.Tx == nil ||
+		txParams.Block == nil {
+
+		return false
+	}
+
+	if !matchStoreScanBlock(txParams.Block, fixture) {
+		return false
+	}
+
+	return txParams.WalletID == walletID &&
+		txParams.Tx.TxHash() == fixture.tx.TxHash() &&
+		txParams.Received.Equal(fixture.received) &&
+		txParams.Status == db.TxStatusPublished &&
+		creditAddr.EncodeAddress() == fixture.addr.EncodeAddress()
+}
+
+// matchStoreScanBatch matches the store scan batch produced by scan routing.
+func matchStoreScanBatch(walletID uint32, fixture storeScanBatchFixture,
+	wantSynced bool) any {
+
+	return mock.MatchedBy(func(params db.ScanBatchParams) bool {
+		if params.WalletID != walletID || len(params.Horizons) != 1 ||
+			len(params.Transactions) != 1 {
+
+			return false
+		}
+
+		if !matchStoreScanSyncedBlocks(params, wantSynced, fixture) {
+			return false
+		}
+
+		if !matchStoreScanHorizon(params.Horizons[0], fixture) {
+			return false
+		}
+
+		return matchStoreScanTx(
+			params.Transactions[0], walletID, fixture,
+		)
+	})
+}
+
+// matchStoreScanBlock reports whether a store block matches the scan fixture.
+func matchStoreScanBlock(block *db.Block,
+	fixture storeScanBatchFixture) bool {
+
+	return block.Hash == fixture.block.Hash &&
+		block.Height == uint32(fixture.block.Height) &&
+		block.Timestamp.Equal(fixture.block.Time)
+}
+
+// TestPutSyncBatchStore verifies sync scan writes use the store batch API.
+func TestPutSyncBatchStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one scan result.
+	const walletID uint32 = 11
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	fixture := newStoreScanBatchFixture(t)
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(walletID, fixture, true),
+	).Return(nil).Once()
+
+	// Act: Apply a normal sync scan batch.
+	err := s.putSyncBatch(t.Context(), []scanResult{fixture.result})
+
+	// Assert: The store saw transactions, horizons, and synced blocks.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
 }
