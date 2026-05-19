@@ -1084,6 +1084,7 @@ WHERE
             AND key_scopes.coin_type = $4
     )
     AND account_name = $5
+    AND account_number IS NOT NULL
 `
 
 type UpdateAccountNameByWalletScopeAndNameParams struct {

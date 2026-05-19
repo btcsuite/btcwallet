@@ -344,7 +344,8 @@ WHERE
             AND key_scopes.purpose = sqlc.arg('purpose')
             AND key_scopes.coin_type = sqlc.arg('coin_type')
     )
-    AND account_name = sqlc.arg(old_name);
+    AND account_name = sqlc.arg(old_name)
+    AND account_number IS NOT NULL;
 
 -- name: CreateDerivedAccountWithNumber :one
 -- Test-only: Creates a derived account with a specific account number.

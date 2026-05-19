@@ -377,114 +377,41 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
 
-// TestRenameAccount tests that the RenameAccount method works as expected.
+// TestRenameAccount verifies RenameAccount routes through
+// w.store.RenameAccount with the correct params and preserves
+// db.ErrAccountNotFound passthrough.
 func TestRenameAccount(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScope{
 		Purpose: scope.Purpose,
 		Coin:    scope.Coin,
 	}
-	oldName := "old name"
-	newName := "new name"
 
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAccount", mock.Anything, oldName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   oldName,
-		}, nil).Once()
-
-	_, err := w.NewAccount(t.Context(), scope, oldName)
-	require.NoError(t, err)
-
-	// Mock expectations for RenameAccount.
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, oldName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("RenameAccount", mock.Anything, uint32(1), newName).
-		Return(nil).Once()
-
-	// We should be able to rename the account.
-	err = w.RenameAccount(t.Context(), scope, oldName, newName)
-	require.NoError(t, err)
-
-	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+	deps.store.On("RenameAccount", mock.Anything, db.RenameAccountParams{
 		WalletID: 0,
 		Scope:    dbScope,
-		Name:     &newName,
-	}).Return(&db.AccountInfo{
-		AccountNumber: 1,
-		AccountName:   newName,
-		Origin:        db.DerivedAccount,
-		KeyScope:      dbScope,
-	}, nil).Once()
+		OldName:  testAccountName,
+		NewName:  "renamed",
+	}).Return(nil).Once()
 
-	// We should be able to get the account by its new name.
-	account, err := w.GetAccount(t.Context(), scope, newName)
+	err := w.RenameAccount(t.Context(), scope, testAccountName, "renamed")
 	require.NoError(t, err)
-	require.Equal(t, newName, account.AccountName)
 
-	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
-		WalletID: 0,
-		Scope:    dbScope,
-		Name:     &oldName,
-	}).Return((*db.AccountInfo)(nil), waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrAccountNotFound,
-	}).Once()
-
-	// We should not be able to get the account by its old name.
-	_, err = w.GetAccount(t.Context(), scope, oldName)
+	// Invalid new name path (validated locally before the store call).
+	err = w.RenameAccount(t.Context(), scope, testAccountName, "")
 	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
-		"expected ErrAccountNotFound",
-	)
 
-	// Mock expectations for RenameAccount (duplicate name).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
+	// Not-found path.
+	deps.store.On("RenameAccount", mock.Anything, mock.Anything).Return(
+		db.ErrAccountNotFound,
+	).Once()
 
-	deps.accountManager.On("LookupAccount", mock.Anything, newName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On(
-		"RenameAccount", mock.Anything, uint32(1), "default",
-	).Return(waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrDuplicateAccount,
-	}).Once()
-
-	// We should not be able to rename an account to an existing name.
-	err = w.RenameAccount(t.Context(), scope, newName, "default")
-	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
-		"expected ErrDuplicateAccount",
-	)
-
-	// Mock expectations for RenameAccount (non-existent account).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, "non-existent").
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAccountNotFound,
-		}).Once()
-
-	// We should not be able to rename a non-existent account.
-	err = w.RenameAccount(t.Context(), scope, "non-existent", "new name 2")
-	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
-		"expected ErrAccountNotFound",
-	)
+	err = w.RenameAccount(t.Context(), scope, "missing", "x")
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
 
 // TestImportAccount tests that the ImportAccount works as expected.
