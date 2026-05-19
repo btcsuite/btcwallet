@@ -766,6 +766,35 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 		}
 	}
 
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// putBlockNotifications records filtered block notifications through the store
+// when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putBlockNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutBlocks(ctx, matches, blockMeta)
+	}
+
+	if blockMeta == nil {
+		return fmt.Errorf("filtered block is missing metadata: %w",
+			db.ErrInvalidParam)
+	}
+
+	block, err := storeBlockFromBlockMeta(*blockMeta)
+	if err != nil {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, block)
+}
+
+// applyStoreTxBatch writes transaction matches through the store batch API.
+func (s *syncer) applyStoreTxBatch(ctx context.Context,
+	matches TxEntries, block *db.Block, syncedTo *db.Block) error {
+
 	transactions := make([]db.CreateTxParams, 0, len(matches))
 	for i := range matches {
 		match := matches[i]
@@ -807,10 +836,11 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 		ctx, db.TxBatchParams{
 			WalletID:     s.walletID,
 			Transactions: transactions,
+			SyncedTo:     syncedTo,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("apply tx notifications: %w", err)
+		return fmt.Errorf("apply tx batch: %w", err)
 	}
 
 	return nil
@@ -1485,7 +1515,7 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 
 	case chain.FilteredBlockConnected:
 		matches := s.prepareTxMatches(n.RelevantTxs)
-		return s.DBPutBlocks(ctx, matches, n.Block)
+		return s.putBlockNotifications(ctx, matches, n.Block)
 	}
 
 	return nil
