@@ -1676,6 +1676,40 @@ func TestRenameAccount(t *testing.T) {
 	})
 }
 
+// TestRenameAccountRejectsImported verifies that imported accounts cannot be
+// renamed through the account store.
+func TestRenameAccountRejectsImported(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-rename-imported")
+	scope := db.KeyScopeBIP0084
+	name := "imported-rename"
+
+	CreateImportedAccount(t, store, walletID, scope, name)
+
+	err := store.RenameAccount(t.Context(), db.RenameAccountParams{
+		WalletID: walletID,
+		Scope:    scope,
+		OldName:  name,
+		NewName:  "renamed-imported",
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	info, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, name),
+	)
+	require.NoError(t, err)
+	require.Equal(t, name, info.AccountName)
+
+	_, err = store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, "renamed-imported",
+		),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
 // TestRenameAccountErrors verifies that RenameAccount returns appropriate
 // errors for invalid inputs and missing accounts.
 func TestRenameAccountErrors(t *testing.T) {

@@ -308,42 +308,38 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 
 // RenameAccount renames an existing account. The new name must be unique within
 // the same key scope. The reserved "imported" account cannot be renamed.
-//
-// The time complexity of this method is dominated by the database lookup for
-// the old account name.
-func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
-	oldName, newName string) error {
+func (w *Wallet) RenameAccount(ctx context.Context,
+	scope waddrmgr.KeyScope, oldName, newName string) error {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return err
-	}
-
-	// Validate the new account name to ensure it meets the required
-	// criteria.
 	err = waddrmgr.ValidateAccountName(newName)
 	if err != nil {
 		return err
 	}
 
-	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Look up the account number for the given name. This is
-		// required to perform the rename operation.
-		accNum, err := manager.LookupAccount(addrmgrNs, oldName)
-		if err != nil {
-			return err
+	err = w.store.RenameAccount(ctx, db.RenameAccountParams{
+		WalletID: w.id,
+		Scope:    db.KeyScope(scope),
+		OldName:  oldName,
+		NewName:  newName,
+	})
+	if err != nil {
+		// Preserve waddrmgr.ManagerError semantics so callers using
+		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
+		// underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return mErr
 		}
 
-		// Perform the rename operation in the address manager.
-		return manager.RenameAccount(addrmgrNs, accNum, newName)
-	})
+		return err
+	}
+
+	return nil
 }
 
 // ImportAccount imports an account from an extended public or private key. The
