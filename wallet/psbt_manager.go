@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -386,7 +387,7 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 		// the UTXO. The `fetchAndValidateUtxo` function will return an
 		// `ErrNotMine` error if the UTXO is not found or not owned by
 		// the wallet.
-		tx, utxo, err := w.fetchAndValidateUtxo(txIn)
+		tx, utxo, err := w.fetchAndValidateUtxo(ctx, txIn)
 		if err != nil {
 			// If the error is `ErrNotMine` and `skipUnknown` is
 			// true, we'll simply continue to the next input, as we
@@ -456,35 +457,43 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 	return nil
 }
 
-// fetchAndValidateUtxo fetches the transaction details for a given input,
-// validates that the wallet owns the UTXO, and ensures it is not locked.
+// fetchAndValidateUtxo fetches the wallet-owned UTXO and transaction details
+// for a given input, and ensures the UTXO is not locked.
 //
 // This function serves as a crucial pre-check before decorating a PSBT input.
 // It performs three key validation steps:
-//  1. Transaction Lookup: It first attempts to fetch the full transaction
-//     details from the wallet's transaction store using the input's previous
-//     outpoint. If the transaction is not found, it returns an `ErrNotMine`
-//     error.
-//  2. Ownership Verification: If the transaction is found, it verifies that the
-//     specific output index is a credit to the wallet. This ensures that the
-//     wallet actually owns the UTXO. If this check fails, it also returns
-//     `ErrNotMine`.
-//  3. Lock Status Check: After confirming ownership, it checks if the UTXO has
-//     been locked. If the UTXO is locked, it returns an `ErrUtxoLocked`
-//     error.
+//  1. UTXO Lookup: It first attempts to fetch the wallet-owned UTXO using the
+//     input's previous outpoint. If the UTXO is not found, it returns an
+//     `ErrNotMine` error.
+//  2. Transaction Lookup: It fetches the full parent transaction details needed
+//     for SegWit v0 PSBT non-witness UTXO data.
+//  3. Lock Status Check: It checks the legacy credit lock state until PSBT
+//     lock checks are routed through the Store lease set.
 //
 // Only if all these checks pass, the function returns the full parent
 // transaction (`*wire.MsgTx`) and the specific unspent transaction output
 // (`*wire.TxOut`).
-func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
+func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 	*wire.MsgTx, *wire.TxOut, error) {
 
-	// First, we'll attempt to fetch the transaction details from our
-	// transaction store.
-	txDetail, err := w.fetchTxDetails(&txIn.PreviousOutPoint.Hash)
+	outPoint := txIn.PreviousOutPoint
+
+	_, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint,
+	})
+	if errors.Is(err, db.ErrUtxoNotFound) {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine, outPoint)
+	}
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch utxo: %w", err)
+	}
+
+	// Next, fetch the transaction details from the legacy transaction store.
+	txDetail, err := w.fetchTxDetails(&outPoint.Hash)
 	if errors.Is(err, ErrTxNotFound) {
-		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
-			txIn.PreviousOutPoint)
+		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine, outPoint)
 	}
 
 	if err != nil {
@@ -492,26 +501,20 @@ func (w *Wallet) fetchAndValidateUtxo(txIn *wire.TxIn) (
 			err)
 	}
 
-	// With the transaction details retrieved, we'll make an additional
-	// check to ensure we actually have control of this output.
-	cred := findCredit(txDetail, txIn.PreviousOutPoint.Index)
-	if cred == nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine,
-			txIn.PreviousOutPoint)
-	}
+	// Use legacy credit metadata only for the transitional locked-output check.
+	cred := findCredit(txDetail, outPoint.Index)
 
 	// Now that we've confirmed we know about the UTXO, we'll check if it
 	// is locked.
-	if cred.Locked {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked,
-			txIn.PreviousOutPoint)
+	if cred != nil && cred.Locked {
+		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked, outPoint)
 	}
 
 	// Now that we've confirmed we know about the UTXO, we'll proceed to
 	// gather the rest of the information required to decorate the PSBT
 	// input.
 	tx := &txDetail.MsgTx
-	utxo := tx.TxOut[txIn.PreviousOutPoint.Index]
+	utxo := tx.TxOut[outPoint.Index]
 
 	return tx, utxo, nil
 }
