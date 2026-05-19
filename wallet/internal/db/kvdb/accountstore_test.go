@@ -189,6 +189,80 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, uint32(0), infos[0].AccountNumber)
 }
 
+// TestRenameAccountByName verifies that RenameAccount renames by old
+// name and that GetAccount with the new name returns the same row.
+func TestRenameAccountByName(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	accountNumber := createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+
+	err := store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		OldName: savingsAccountName,
+		NewName: "renamed",
+	})
+	require.NoError(t, err)
+
+	newName := "renamed"
+	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &newName,
+	})
+	require.NoError(t, err)
+	require.Equal(t, accountNumber, info.AccountNumber)
+}
+
+// TestRenameAccountByNumber verifies the AccountNumber-keyed rename branch.
+func TestRenameAccountByNumber(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	accountNumber := createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, savingsAccountName,
+	)
+
+	err := store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		AccountNumber: &accountNumber,
+		NewName:       "renamed-by-number",
+	})
+	require.NoError(t, err)
+}
+
+// TestRenameAccountNotFound verifies the not-found translation.
+func TestRenameAccountNotFound(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	err := store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		OldName: "nonexistent",
+		NewName: "anything",
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
 // newCreditedFixture builds an account store backed by a spendable wallet
 // with a wired-up wtxmgr txStore and returns a helper that credits a
 // confirmed UTXO at the next external address of a derived account.
