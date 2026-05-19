@@ -325,8 +325,6 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 // It checks if the wallet's synced tip is still on the main chain, and if not,
 // rewinds the wallet state to the common ancestor.
 func (s *syncer) checkRollback(ctx context.Context) error {
-	var err error
-
 	// batchSize is the number of blocks to fetch from the chain backend in
 	// a single batch when checking for a rollback. A value of 10 is chosen
 	// as a conservative default that covers the vast majority of reorg
@@ -334,6 +332,8 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	// requests lightweight.
 	const batchSize = 10
 
+	// Read the synced tip through syncedTo so a Store-backed backend uses the
+	// Store's tip rather than the legacy addrStore tip.
 	syncedTo, err := s.syncedTo(ctx)
 	if err != nil {
 		return err
@@ -546,8 +546,10 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 	return hashes, nil
 }
 
-// syncedTo returns the wallet's current sync tip from the active runtime
-// backend.
+// syncedTo returns the wallet's current synced-to block. In store-backed mode
+// it reads the tip from the Store so callers do not depend on the legacy
+// addrStore tip being kept in lockstep by ApplyScanBatch; otherwise it falls
+// back to the legacy addrStore.
 func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
 	if s.store == nil {
 		return s.addrStore.SyncedTo(), nil
@@ -560,7 +562,7 @@ func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
 	}
 
 	if walletInfo.SyncedTo == nil {
-		return waddrmgr.BlockStamp{}, nil
+		return waddrmgr.BlockStamp{Height: -1}, nil
 	}
 
 	syncedTo, err := db.BlockStampFromBlock(walletInfo.SyncedTo)
@@ -1555,10 +1557,14 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 			err)
 	}
 
-	// Determine our current sync state from the same backend scanBatch writes
-	// below. Store-backed scan commits are introduced in a later stack commit;
-	// until then, regular chain sync must continue reading the legacy tip.
-	syncedTo := s.addrStore.SyncedTo()
+	// Determine our current sync state. In store-backed mode this reads
+	// the synced tip from the Store rather than the legacy addrStore, so
+	// the next batch's start height no longer depends on ApplyScanBatch
+	// having mirrored the tip back into the legacy addrStore.
+	syncedTo, err := s.syncedTo(ctx)
+	if err != nil {
+		return false, err
+	}
 
 	// If the wallet is caught up to the best known tip, log this and
 	// return.
