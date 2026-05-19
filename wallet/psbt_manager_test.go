@@ -25,7 +25,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -54,67 +53,6 @@ func testStoreUtxoInfo(outPoint wire.OutPoint,
 		OutPoint: outPoint,
 		Amount:   btcutil.Amount(txOut.Value),
 		PkScript: txOut.PkScript,
-	}
-}
-
-// TestFindCredit tests that the findCredit helper returns true if a credit
-// exists at the specified index, and false otherwise.
-func TestFindCredit(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create TxDetails with credits at indices 0 and 2.
-	txDetails := &wtxmgr.TxDetails{
-		Credits: []wtxmgr.CreditRecord{
-			{Index: 0},
-			{Index: 2},
-		},
-	}
-
-	// Arrange: Define test cases to check for credits at various indices.
-	testCases := []struct {
-		name          string
-		index         uint32
-		expectedFound bool
-	}{
-		{
-			name:          "credit exists at index 0",
-			index:         0,
-			expectedFound: true,
-		},
-		{
-			name:          "credit exists at index 2",
-			index:         2,
-			expectedFound: true,
-		},
-		{
-			name:          "credit does not exist at index 1",
-			index:         1,
-			expectedFound: false,
-		},
-		{
-			name:          "credit does not exist at index 3",
-			index:         3,
-			expectedFound: false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			// Act: Call findCredit with the configured TxDetails
-			// and index.
-			cred := findCredit(txDetails, tc.index)
-
-			// Assert: Verify that the returned credit record
-			// matches the expected outcome.
-			if tc.expectedFound {
-				require.NotNil(t, cred)
-				require.Equal(t, tc.index, cred.Index)
-			} else {
-				require.Nil(t, cred)
-			}
-		})
 	}
 }
 
