@@ -14,6 +14,8 @@ import (
 // Ensure Store satisfies the AccountStore interface.
 var _ db.AccountStore = (*Store)(nil)
 
+var errDryRunRollback = errors.New("sqlite imported account dry run rollback")
+
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
 func (s *Store) GetAccount(ctx context.Context,
@@ -125,7 +127,7 @@ func (o createDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
 	walletID uint32, scope db.KeyScope) (int64, error) {
 
-	return ensureKeyScope(ctx, o.q, walletID, scope)
+	return ensureKeyScope(ctx, o.q, walletID, scope, nil)
 }
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
@@ -190,7 +192,8 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 // ensureKeyScope retrieves an existing key scope or creates it if missing
 // for SQLite. It returns the scope ID once available.
 func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
-	walletID uint32, scope db.KeyScope) (int64, error) {
+	walletID uint32, scope db.KeyScope,
+	addrSchema *db.ScopeAddrSchema) (int64, error) {
 
 	return db.EnsureKeyScope(
 		ctx, qtx.GetKeyScopeByWalletAndScope,
@@ -215,7 +218,7 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries,
 		},
 		func(row sqlc.GetKeyScopeByWalletAndScopeRow) int64 {
 			return row.ID
-		}, scope,
+		}, scope, addrSchema,
 	)
 }
 
@@ -237,6 +240,7 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 			func() (int64, error) {
 				return ensureKeyScope(
 					ctx, qtx, params.WalletID, params.Scope,
+					params.AddrSchema,
 				)
 			},
 			func() (bool, error) {
@@ -252,10 +256,26 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 				return getAccountProps(ctx, qtx, accountID)
 			},
 		)
+		if err != nil {
+			return err
+		}
 
-		return err
+		if params.DryRun {
+			// TODO: Reuse the SQL address-derivation helpers to match
+			// kvdb/legacy dry-run by deriving sample external and
+			// internal addresses before rolling this tx back. Account
+			// import needs a derivation callback before it can call
+			// those helpers.
+			return errDryRunRollback
+		}
+
+		return nil
 	})
 	if err != nil {
+		if params.DryRun && errors.Is(err, errDryRunRollback) {
+			return props, nil
+		}
+
 		return nil, err
 	}
 
