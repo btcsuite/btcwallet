@@ -9,12 +9,39 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestPerformRuntimeSetupRoutesStoreStartup verifies that startup setup uses
+// the runtime store paths for account loading and lease cleanup.
+func TestPerformRuntimeSetupRoutesStoreStartup(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createTestWalletWithMocks(t)
+	w.id = 51
+	birthdayBlock := &db.Block{
+		Hash:      chainhash.Hash{51},
+		Height:    100,
+		Timestamp: time.Unix(1710003700, 0),
+	}
+	accountNumber0 := uint32(0)
+
+	deps.store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
+		Name:          "",
+		BirthdayBlock: birthdayBlock,
+	}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: w.id,
+	}).Return([]db.AccountInfo{{AccountNumber: &accountNumber0}}, nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything, w.id).Return(nil).
+		Once()
+
+	err := w.performRuntimeSetup(t.Context())
+	require.NoError(t, err)
+}
 
 // TestHandleUnlockReq verifies that the handleUnlockReq method correctly
 // processes an unlock request by invoking the address manager's Unlock method
@@ -255,15 +282,14 @@ func TestControllerStart(t *testing.T) {
 
 	// 2. Mock DBGetAllAccounts: Expect a call to load active account
 	//    managers.
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
 
-	// 3. Mock deleteExpiredLockedOutputs: Expect a call to cleanup expired
-	//    locks in the transaction store.
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	// 3. Mock deleteExpiredLeases: Expect a call to cleanup expired
+	//    leases through the store.
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 
 	// 4. Mock syncer.run: Expect the syncer to be started.
 	deps.syncer.On(
@@ -537,12 +563,11 @@ func TestControllerStop(t *testing.T) {
 	// Setup mocks for the startup sequence.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 
 	// Mock syncer.run to simulate a long-running process that exits when
 	// the context is cancelled.
@@ -584,12 +609,11 @@ func TestControllerLock(t *testing.T) {
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -625,12 +649,11 @@ func TestControllerUnlock(t *testing.T) {
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -666,12 +689,11 @@ func TestControllerChangePassphrase(t *testing.T) {
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -791,28 +813,22 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 
 	// Arrange: Setup a wallet with existing accounts in the address store.
 	w, deps := createTestWalletWithMocks(t)
+	accountNumber0 := uint32(0)
+	accountNumber1 := uint32(1)
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
 	).Once()
 
-	scopedMgr := &bwmock.AccountStore{}
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo{
+			{AccountNumber: &accountNumber0},
+			{AccountNumber: &accountNumber1},
+		}, nil).Once()
 
-	scopedMgr.On("LastAccount", mock.Anything).Return(uint32(1), nil).Once()
-	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Maybe()
-	scopedMgr.On(
-		"AccountProperties", mock.Anything, uint32(0),
-	).Return(&waddrmgr.AccountProperties{AccountNumber: 0}, nil).Once()
-	scopedMgr.On(
-		"AccountProperties", mock.Anything, uint32(1),
-	).Return(&waddrmgr.AccountProperties{AccountNumber: 1}, nil).Once()
-
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	// Act: Start the wallet.
@@ -1185,12 +1201,11 @@ func TestControllerInfo(t *testing.T) {
 		&db.WalletInfo{
 			BirthdayBlock: &db.Block{Height: 100},
 		}, nil).Once()
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	// Mock the chain backend to return a specific name.
@@ -1339,14 +1354,9 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 		"GetWallet", mock.Anything, mock.Anything,
 	).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 
-	mockScopedMgr := &bwmock.AccountStore{}
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore{mockScopedMgr}).Once()
-
-	mockScopedMgr.On(
-		"LastAccount", mock.Anything,
-	).Return(uint32(0), errDBMock).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
 	err := w.Start(t.Context())
@@ -1389,12 +1399,11 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 		}),
 	).Return(nil).Once()
 
-	deps.addrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore(nil)).Once()
-	deps.txStore.On(
-		"DeleteExpiredLockedOutputs", mock.Anything,
-	).Return(nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
 	// Act: Start the wallet.
@@ -1455,11 +1464,13 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
-	deps.addrStore.On("ActiveScopedKeyManagers").Return(
-		[]waddrmgr.AccountStore(nil)).Once()
 
-	deps.txStore.On("DeleteExpiredLockedOutputs", mock.Anything).Return(
-		errDBMock).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).Return(
+		[]db.AccountInfo(nil), nil).Once()
+
+	deps.store.On("DeleteExpiredLeases", mock.Anything, mock.Anything).
+		Return(errDBMock).Once()
 
 	// Act: Attempt to start.
 	err := w.Start(t.Context())
