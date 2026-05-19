@@ -14,16 +14,20 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
+// hardenedKey returns the hardened child index for the given key index.
 func hardenedKey(key uint32) uint32 {
 	return key + hdkeychain.HardenedKeyStart
 }
 
+// deriveAcctPubKey derives the account extended public key for the scope and
+// path from the test root key.
 func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
 	scope waddrmgr.KeyScope, paths ...uint32) *hdkeychain.ExtendedKey {
 
@@ -76,6 +80,45 @@ const (
 	testAccountName = "test"
 )
 
+// TestPropertiesToAccountInfoLockedDerivedNotMisclassified verifies that a
+// locked derived account is not classified as an imported account.
+func TestPropertiesToAccountInfoLockedDerivedNotMisclassified(t *testing.T) {
+	t.Parallel()
+
+	const masterFingerprint uint32 = 0xDEADBEEF
+
+	info := propertiesToAccountInfo(&waddrmgr.AccountProperties{
+		AccountNumber: 7,
+		AccountName:   "locked derived",
+		IsWatchOnly:   true,
+	}, 123, false, false, masterFingerprint)
+
+	require.Equal(t, uint32(7), info.AccountNumber)
+	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsWatchOnly)
+	require.Equal(t, masterFingerprint, info.MasterKeyFingerprint)
+}
+
+// TestPropertiesToAccountInfoImportedClassifiedAndMasked verifies that an
+// imported account keeps imported-only account-info semantics.
+func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
+	t.Parallel()
+
+	const importedFingerprint uint32 = 12345
+
+	info := propertiesToAccountInfo(&waddrmgr.AccountProperties{
+		AccountNumber:        7,
+		AccountName:          "imported",
+		IsWatchOnly:          true,
+		MasterKeyFingerprint: importedFingerprint,
+	}, 123, true, false, 0xDEADBEEF)
+
+	require.Equal(t, uint32(0), info.AccountNumber)
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsWatchOnly)
+	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
+}
+
 // TestNewAccount tests that the NewAccount method works as expected.
 func TestNewAccount(t *testing.T) {
 	t.Parallel()
@@ -119,6 +162,8 @@ func TestNewAccount(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   testAccountName,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	account2, err := w.GetAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err, "unable to retrieve account")
@@ -498,6 +543,8 @@ func TestGetAccount(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   testAccountName,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Twice()
@@ -507,7 +554,7 @@ func TestGetAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, account.AccountName)
 	require.Equal(t, uint32(1), account.AccountNumber)
-	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
+	require.Equal(t, btcutil.Amount(0), account.ConfirmedBalance)
 
 	// Mock expectations for GetAccount (default account).
 	deps.addrStore.On("FetchScopedKeyManager", scope).
@@ -519,13 +566,15 @@ func TestGetAccount(t *testing.T) {
 			AccountNumber: 0,
 			AccountName:   "default",
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
+		Return(false, nil).Once()
 
 	// We should also be able to get the default account.
 	account, err = w.GetAccount(t.Context(), scope, "default")
 	require.NoError(t, err)
 	require.Equal(t, "default", account.AccountName)
 	require.Equal(t, uint32(0), account.AccountNumber)
-	require.Equal(t, btcutil.Amount(0), account.TotalBalance)
+	require.Equal(t, btcutil.Amount(0), account.ConfirmedBalance)
 
 	// Mock expectations for GetAccount (error path).
 	deps.addrStore.On("FetchScopedKeyManager", scope).
@@ -591,6 +640,8 @@ func TestRenameAccount(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   newName,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Once()
@@ -702,6 +753,8 @@ func TestImportAccount(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   testAccountName,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(true, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Once()
@@ -1101,6 +1154,7 @@ func TestFetchAccountBalances(t *testing.T) {
 	}
 }
 
+// mustPayToAddr returns the pay-to-address script for the address.
 func mustPayToAddr(addr btcutil.Address) []byte {
 	script, _ := txscript.PayToAddrScript(addr)
 	return script

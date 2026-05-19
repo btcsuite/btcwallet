@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -1009,7 +1010,7 @@ func listAccountsByNameDeprecated(w *Wallet,
 // contract as GetAccount by calling Accounts API across all active key scopes
 // and filtering by account name.
 func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string) (*AccountResult, error) {
+	accountName string) (*db.AccountInfo, error) {
 
 	result, err := w.Accounts(scope)
 	if err != nil {
@@ -1018,11 +1019,24 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 
 	for _, account := range result.Accounts {
 		if account.AccountName == accountName {
-			return &account, nil
+			info := accountResultToInfo(w, account)
+
+			return &info, nil
 		}
 	}
 
 	return nil, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
+}
+
+// accountResultToInfo converts the deprecated account result shape into the
+// account-info shape used by the replacement read APIs.
+func accountResultToInfo(w *Wallet, account AccountResult) db.AccountInfo {
+	isImported := account.AccountNumber == waddrmgr.ImportedAddrAccount
+
+	return propertiesToAccountInfo(
+		&account.AccountProperties, account.TotalBalance, isImported,
+		w.addrStore.WatchOnly(), w.masterFingerprint,
+	)
 }
 
 // listAddressesDeprecated wraps the deprecated AccountAddresses and

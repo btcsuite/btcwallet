@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -77,10 +78,10 @@ type AccountManager interface {
 	ListAccountsByName(ctx context.Context, name string) (
 		*AccountsResult, error)
 
-	// GetAccount returns the properties for a specific account, looked up
+	// GetAccount returns the snapshot for a specific account, looked up
 	// by its key scope and unique name within that scope.
 	GetAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*AccountResult, error)
+		*db.AccountInfo, error)
 
 	// RenameAccount renames an existing account. To uniquely identify the
 	// account, the key scope must be provided. The new name must be unique
@@ -138,6 +139,63 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 	})
 
 	return props, err
+}
+
+// propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total
+// balance into the canonical db.AccountInfo shape the public wallet
+// API now exposes. The legacy waddrmgr path does not separate
+// confirmed/unconfirmed balances, so the supplied total is reported
+// on ConfirmedBalance; UnconfirmedBalance stays zero. For derived accounts,
+// wallet-level watch-only and master-fingerprint state takes precedence over
+// lock-state-dependent waddrmgr account properties.
+func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
+	total btcutil.Amount, isImported bool, walletWatchOnly bool,
+	masterFingerprint uint32) db.AccountInfo {
+
+	var pubKey []byte
+	if props.AccountPubKey != nil {
+		pubKey = []byte(props.AccountPubKey.String())
+	}
+
+	origin := db.DerivedAccount
+	if isImported {
+		origin = db.ImportedAccount
+	}
+
+	// db.AccountInfo masks AccountNumber to 0 for imported accounts
+	// (see data_types.go godoc): the waddrmgr per-scope counter is
+	// not part of the contract for imported rows. Internal callers
+	// that need the real number look it up via waddrmgr separately.
+	accountNumber := props.AccountNumber
+	if origin == db.ImportedAccount {
+		accountNumber = 0
+	}
+
+	isWatchOnly := walletWatchOnly
+
+	fingerprint := props.MasterKeyFingerprint
+	if masterFingerprint != 0 {
+		fingerprint = masterFingerprint
+	}
+
+	if isImported {
+		isWatchOnly = walletWatchOnly || props.IsWatchOnly
+		fingerprint = props.MasterKeyFingerprint
+	}
+
+	return db.AccountInfo{
+		AccountNumber:        accountNumber,
+		AccountName:          props.AccountName,
+		Origin:               origin,
+		ExternalKeyCount:     props.ExternalKeyCount,
+		InternalKeyCount:     props.InternalKeyCount,
+		ImportedKeyCount:     props.ImportedKeyCount,
+		IsWatchOnly:          isWatchOnly,
+		KeyScope:             db.KeyScope(props.KeyScope),
+		PublicKey:            pubKey,
+		MasterKeyFingerprint: fingerprint,
+		ConfirmedBalance:     total,
+	}
 }
 
 // ListAccounts returns a list of all accounts for the wallet, including those
@@ -325,7 +383,6 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 
 				return err
 			}
-
 			// Retrieve the account's properties.
 			props, err := scopeMgr.AccountProperties(
 				addrmgrNs, accNum,
@@ -372,7 +429,7 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 // The time complexity of this method is O(U*logA), where U is the number of
 // UTXOs and logA is the cost of an account lookup.
 func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
-	name string) (*AccountResult, error) {
+	name string) (*db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -384,7 +441,11 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	var account *AccountResult
+	var (
+		props      *waddrmgr.AccountProperties
+		balance    btcutil.Amount
+		isImported bool
+	)
 
 	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
@@ -395,15 +456,16 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		if err != nil {
 			return err
 		}
-
-		// Retrieve the static properties for the account.
-		props, err := manager.AccountProperties(addrmgrNs, accNum)
-		if err != nil {
-			return err
+		if accNum == waddrmgr.ImportedAddrAccount {
+			return waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrAccountNotFound,
+			}
 		}
 
-		account = &AccountResult{
-			AccountProperties: *props,
+		// Retrieve the static properties for the account.
+		props, err = manager.AccountProperties(addrmgrNs, accNum)
+		if err != nil {
+			return err
 		}
 
 		// Calculate the balance for this specific account by fetching
@@ -418,9 +480,12 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		// Assign the balance to the account result. If the account has
 		// no UTXOs, the balance will be zero.
 		if balances, ok := scopedBalances[scope]; ok {
-			if balance, ok := balances[accNum]; ok {
-				account.TotalBalance = balance
-			}
+			balance = balances[accNum]
+		}
+
+		isImported, err = manager.IsImportedAccount(addrmgrNs, accNum)
+		if err != nil {
+			return err
 		}
 
 		return nil
@@ -429,7 +494,12 @@ func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	return account, nil
+	info := propertiesToAccountInfo(
+		props, balance, isImported, w.addrStore.WatchOnly(),
+		w.masterFingerprint,
+	)
+
+	return &info, nil
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
@@ -886,8 +956,6 @@ func listAccountsWithBalances(scopeMgr waddrmgr.AccountStore,
 	addrmgrNs walletdb.ReadBucket,
 	accountBalances map[uint32]btcutil.Amount) ([]AccountResult, error) {
 
-	var accounts []AccountResult
-
 	lastAccount, err := scopeMgr.LastAccount(addrmgrNs)
 	if err != nil {
 		// If the scope has no accounts, we can just return an empty
@@ -898,6 +966,8 @@ func listAccountsWithBalances(scopeMgr waddrmgr.AccountStore,
 
 		return nil, err
 	}
+
+	var accounts []AccountResult
 
 	// Iterate through all accounts from 0 to the last known account
 	// number for this scope.
