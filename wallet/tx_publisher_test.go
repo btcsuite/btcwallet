@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -13,12 +14,14 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -33,6 +36,71 @@ var (
 )
 
 const testTxLabel = "test-tx"
+
+// matchCreateTxParams returns a matcher for Store CreateTx parameters.
+func matchCreateTxParams(walletID uint32, tx *wire.MsgTx, label string,
+	credits map[uint32]address.Address) any {
+
+	return mock.MatchedBy(func(params db.CreateTxParams) bool {
+		return params.WalletID == walletID &&
+			params.Tx == tx &&
+			!params.Received.IsZero() &&
+			params.Block == nil &&
+			params.Status == db.TxStatusPublished &&
+			params.Label == label &&
+			addressCreditsEqual(params.Credits, credits)
+	})
+}
+
+// addressCreditsEqual reports whether two credit maps contain the same encoded
+// addresses for the same output indexes.
+func addressCreditsEqual(a, b map[uint32]address.Address) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for index, addr := range a {
+		otherAddr, ok := b[index]
+		if !ok {
+			return false
+		}
+
+		if addr.EncodeAddress() != otherAddr.EncodeAddress() {
+			return false
+		}
+	}
+
+	return true
+}
+
+// matchUpdateTxLabelParams returns a matcher for Store label updates.
+func matchUpdateTxLabelParams(walletID uint32, txid chainhash.Hash,
+	label string) any {
+
+	return mock.MatchedBy(func(params db.UpdateTxParams) bool {
+		return params.WalletID == walletID &&
+			params.Txid == txid &&
+			params.Label != nil &&
+			*params.Label == label &&
+			params.State == nil
+	})
+}
+
+// matchGetAddressQuery returns a matcher for Store address lookups.
+func matchGetAddressQuery(walletID uint32, scriptPubKey []byte) any {
+	return mock.MatchedBy(func(query db.GetAddressQuery) bool {
+		return query.WalletID == walletID &&
+			bytes.Equal(query.ScriptPubKey, scriptPubKey)
+	})
+}
+
+// matchInvalidateUnminedTxParams returns a matcher for Store invalidation
+// requests.
+func matchInvalidateUnminedTxParams(walletID uint32, txid chainhash.Hash) any {
+	return mock.MatchedBy(func(params db.InvalidateUnminedTxParams) bool {
+		return params.WalletID == walletID && params.Txid == txid
+	})
+}
 
 // TestCheckMempoolAcceptance tests the CheckMempoolAcceptance method.
 func TestCheckMempoolAcceptance(t *testing.T) {
