@@ -72,13 +72,15 @@ func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
 	).Once()
 }
 
-// hardenedKey returns the hardened child index for the given key index.
+// hardenedKey converts a plain BIP32 child index to its hardened
+// counterpart by adding hdkeychain.HardenedKeyStart.
 func hardenedKey(key uint32) uint32 {
 	return key + hdkeychain.HardenedKeyStart
 }
 
-// deriveAcctPubKey derives the account extended public key for the scope and
-// path from the test root key.
+// deriveAcctPubKey walks the supplied hardened BIP32 path under root
+// using the scope's Purpose+Coin prefix, then returns the public
+// (Neuter'd) extended key of the resulting account.
 func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
 	scope waddrmgr.KeyScope, paths ...uint32) *hdkeychain.ExtendedKey {
 
@@ -170,8 +172,8 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
 }
 
-// TestListAccounts tests that ListAccounts returns the cache-backed
-// snapshot of all accounts for the wallet.
+// TestListAccounts verifies ListAccounts pairs cache.ListAccounts with
+// cache.AccountBalances.
 func TestListAccounts(t *testing.T) {
 	t.Parallel()
 
@@ -385,11 +387,8 @@ func TestGetAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), info.AccountNumber)
 	require.Equal(t, name, info.AccountName)
-	require.Equal(
-		t,
-		btcutil.Amount(123),
-		info.ConfirmedBalance+info.UnconfirmedBalance,
-	)
+	require.Equal(t, btcutil.Amount(100), info.ConfirmedBalance)
+	require.Equal(t, btcutil.Amount(23), info.UnconfirmedBalance)
 	require.Equal(t, masterFP, info.MasterKeyFingerprint)
 }
 
@@ -429,8 +428,8 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
 
-// TestNewAccount verifies NewAccount routes through w.store.CreateDerivedAccount
-// after the buildAccountDeriveFn closure resolves the encrypted master key.
+// TestNewAccount verifies NewAccount routes through
+// w.store.CreateDerivedAccount.
 func TestNewAccount(t *testing.T) {
 	t.Parallel()
 
@@ -515,127 +514,163 @@ func TestRenameAccount(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
 
-// TestImportAccount tests that the ImportAccount works as expected.
+// TestImportAccount verifies the normal import path routes through
+// Store.CreateImportedAccount.
 func TestImportAccount(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll start by creating a new account under the BIP0084 scope.
-	scope := waddrmgr.KeyScopeBIP0084
+	acctPubKey, masterFP := importAccountTestKey(t, 84)
+
 	addrType := waddrmgr.WitnessPubKey
-	masterPriv := "tprv8ZgxMBicQKsPeWwrFuNjEGTTDSY4mRLwd2KDJAPGa1AY" +
-		"quw38bZqNMSuB3V1Va3hqJBo9Pt8Sx7kBQer5cNMrb8SYquoWPt9" +
-		"Y3BZdhdtUcw"
-	root, err := hdkeychain.NewKeyFromString(masterPriv)
-	require.NoError(t, err)
-	acctPubKey := deriveAcctPubKey(t, root, scope, hardenedKey(0))
-
-	// Mock expectations for ImportAccount.
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccountWatchingOnly", mock.Anything,
-		testAccountName, acctPubKey, root.ParentFingerprint(),
-		mock.Anything).Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
-
-	// We should be able to import the account.
-	props, err := w.ImportAccount(
-		t.Context(), testAccountName, acctPubKey,
-		root.ParentFingerprint(), addrType, false,
-	)
-	require.NoError(t, err)
-	require.Equal(t, testAccountName, props.AccountName)
-
+	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScope{
 		Purpose: scope.Purpose,
 		Coin:    scope.Coin,
 	}
-	name := testAccountName
-	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
-		WalletID: 0,
-		Scope:    dbScope,
-		Name:     &name,
-	}).Return(&db.AccountInfo{
+
+	deps.store.On("CreateImportedAccount", mock.Anything,
+		db.CreateImportedAccountParams{
+			WalletID:          0,
+			Name:              testAccountName,
+			Scope:             dbScope,
+			MasterFingerprint: masterFP,
+			PublicKey:         []byte(acctPubKey.String()),
+		}).Return(&db.AccountInfo{
 		AccountNumber: 1,
 		AccountName:   testAccountName,
 		Origin:        db.ImportedAccount,
 		IsWatchOnly:   true,
 		KeyScope:      dbScope,
+		PublicKey:     []byte(acctPubKey.String()),
 	}, nil).Once()
 
-	// We should be able to get the account by its name.
-	_, err = w.GetAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, err)
-
-	// Mock expectations for duplicate ImportAccount.
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAccountWatchingOnly", mock.Anything,
-		testAccountName, acctPubKey, root.ParentFingerprint(),
-		mock.Anything).Return(uint32(0), waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrDuplicateAccount,
-	}).Once()
-
-	// We should not be able to import an account with the same name.
-	_, err = w.ImportAccount(
+	props, err := w.ImportAccount(
 		t.Context(), testAccountName, acctPubKey,
-		root.ParentFingerprint(), addrType, false,
+		masterFP, addrType, false,
 	)
-	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
-		"expected ErrDuplicateAccount",
+	require.NoError(t, err)
+	require.Equal(t, testAccountName, props.AccountName)
+}
+
+// TestImportAccountDryRun verifies that dry-run imports still route through
+// Store.CreateImportedAccount with the DryRun contract flag set.
+func TestImportAccountDryRun(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+	addrType := waddrmgr.WitnessPubKey
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+
+	deps.store.On("CreateImportedAccount", mock.Anything,
+		db.CreateImportedAccountParams{
+			WalletID:          0,
+			Name:              testAccountName,
+			Scope:             dbScope,
+			MasterFingerprint: masterFP,
+			PublicKey:         []byte(acctPubKey.String()),
+			DryRun:            true,
+		}).Return(&db.AccountInfo{
+		AccountName: testAccountName,
+		Origin:      db.ImportedAccount,
+		IsWatchOnly: true,
+		KeyScope:    dbScope,
+		PublicKey:   []byte(acctPubKey.String()),
+	}, nil).Once()
+
+	props, err := w.ImportAccount(
+		t.Context(), testAccountName, acctPubKey,
+		masterFP, addrType, true,
 	)
+	require.NoError(t, err)
+	require.Equal(t, testAccountName, props.AccountName)
+}
 
-	// Mock expectations for dry-run.
-	dryRunName := "dry run"
+// TestImportAccountAddrSchema verifies that strict BIP-49 imports pass their
+// per-account address-schema override through to the store.
+func TestImportAccountAddrSchema(t *testing.T) {
+	t.Parallel()
 
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
+	w, deps := createStartedWalletWithMocks(t)
 
-	deps.accountManager.On("NewAccountWatchingOnly", mock.Anything,
-		dryRunName, acctPubKey, root.ParentFingerprint(),
-		mock.Anything).Return(uint32(2), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(2)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 2,
-			AccountName:   dryRunName,
-		}, nil).Twice()
-	deps.accountManager.On("InvalidateAccountCache", uint32(2)).Return().Once()
-	deps.accountManager.On("NextExternalAddresses", mock.Anything, uint32(2),
-		uint32(1)).Return([]waddrmgr.ManagedAddress(nil), nil).Once()
-	deps.accountManager.On("NextInternalAddresses", mock.Anything, uint32(2),
-		uint32(1)).Return([]waddrmgr.ManagedAddress(nil), nil).Once()
+	acctPubKey, masterFP := importAccountTestKey(t, 49)
 
-	// We should be able to do a dry run of the import.
-	_, err = w.ImportAccount(
-		t.Context(), dryRunName, acctPubKey,
-		root.ParentFingerprint(), addrType, true,
+	addrType := waddrmgr.NestedWitnessPubKey
+	scope := waddrmgr.KeyScopeBIP0049Plus
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+	addrSchema := db.ScopeAddrSchema{
+		ExternalAddrType: db.NestedWitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+
+	deps.store.On("CreateImportedAccount", mock.Anything,
+		db.CreateImportedAccountParams{
+			WalletID:          0,
+			Name:              testAccountName,
+			Scope:             dbScope,
+			MasterFingerprint: masterFP,
+			PublicKey:         []byte(acctPubKey.String()),
+			AddrSchema:        &addrSchema,
+		}).Return(&db.AccountInfo{
+		AccountName: testAccountName,
+		Origin:      db.ImportedAccount,
+		IsWatchOnly: true,
+		KeyScope:    dbScope,
+		PublicKey:   []byte(acctPubKey.String()),
+	}, nil).Once()
+
+	props, err := w.ImportAccount(
+		t.Context(), testAccountName, acctPubKey,
+		masterFP, addrType, false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, testAccountName, props.AccountName)
+}
+
+// importAccountTestKey derives an account-level public key for import routing
+// tests using the requested BIP purpose.
+func importAccountTestKey(t *testing.T,
+	purposeNum uint32) (*hdkeychain.ExtendedKey, uint32) {
+
+	t.Helper()
+
+	root, err := hdkeychain.NewMaster(
+		[]byte{
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		},
+		&chainParams,
 	)
 	require.NoError(t, err)
 
-	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
-		WalletID: 0,
-		Scope:    dbScope,
-		Name:     &dryRunName,
-	}).Return((*db.AccountInfo)(nil), waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrAccountNotFound,
-	}).Once()
-
-	// The account should not have been imported.
-	_, err = w.GetAccount(t.Context(), scope, dryRunName)
-	require.Error(t, err)
-	require.True(
-		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
-		"expected ErrAccountNotFound",
+	purpose, err := root.DeriveNonStandard( //nolint:staticcheck
+		hardenedKey(purposeNum),
 	)
+	require.NoError(t, err)
+	cointype, err := purpose.DeriveNonStandard( //nolint:staticcheck
+		hardenedKey(1),
+	)
+	require.NoError(t, err)
+	acct, err := cointype.DeriveNonStandard( //nolint:staticcheck
+		hardenedKey(0),
+	)
+	require.NoError(t, err)
+
+	acctPubKey, err := acct.Neuter()
+	require.NoError(t, err)
+
+	return acctPubKey, root.ParentFingerprint()
 }
 
 // TestExtractAddrFromPKScript tests that the extractAddrFromPKScript
