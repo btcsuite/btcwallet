@@ -15,8 +15,6 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -208,117 +206,33 @@ func TestListAccountsByScopeUnknownScope(t *testing.T) {
 	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
 }
 
-// TestListAccountsByName tests that the ListAccountsByName method works as
-// expected.
+// TestListAccountsByName verifies the name filter narrows the query.
 func TestListAccountsByName(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll create two new accounts, one under the BIP0084 scope and one
-	// under the BIP0049 scope.
-	scopeBIP84 := waddrmgr.KeyScopeBIP0084
-	accBIP84Name := "test bip84"
+	name := testAccountName
+	dbScope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
 
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP84).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAccount", mock.Anything, accBIP84Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+		Name:     &name,
+	}).Return([]db.AccountInfo{
+		{
 			AccountNumber: 1,
-			AccountName:   accBIP84Name,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
+			AccountName:   testAccountName,
+			KeyScope:      dbScope,
+		},
+	}, nil).Once()
 
-	_, err := w.NewAccount(t.Context(), scopeBIP84, accBIP84Name)
+	accounts, err := w.ListAccountsByName(t.Context(), testAccountName)
 	require.NoError(t, err)
-
-	scopeBIP49 := waddrmgr.KeyScopeBIP0049Plus
-	accBIP49Name := "test bip49"
-
-	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAccount", mock.Anything, accBIP49Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP49Name,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
-
-	_, err = w.NewAccount(t.Context(), scopeBIP49, accBIP49Name)
-	require.NoError(t, err)
-
-	// Mock expectations for ListAccountsByName (BIP84 name).
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
-	deps.accountManager.On("Scope").Return(scopeBIP84).Maybe()
-	deps.accountManager.On("LookupAccount", mock.Anything, accBIP84Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP84Name,
-		}, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Times(3)
-
-	// Now, we'll list the accounts for the BIP0084 scope and check that
-	// we only get the default account for that scope and the new account we
-	// created.
-	accountsBIP84, err := w.ListAccountsByName(t.Context(), accBIP84Name)
-	require.NoError(t, err)
-
-	// We should have one account.
-	require.Len(t, accountsBIP84, 1)
-
-	// The first account should be the new account.
-	require.Equal(t, accBIP84Name, accountsBIP84[0].AccountName)
-	require.Equal(t, uint32(1), accountsBIP84[0].AccountNumber)
-
-	// Mock expectations for ListAccountsByName (BIP49 name).
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
-	deps.accountManager.On("Scope").Return(scopeBIP49).Maybe()
-	deps.accountManager.On("LookupAccount", mock.Anything, accBIP49Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   accBIP49Name,
-		}, nil).Once()
-
-	// Now, we'll do the same for the BIP0049 scope.
-	accountsBIP49, err := w.ListAccountsByName(t.Context(), accBIP49Name)
-	require.NoError(t, err)
-
-	// We should have one account.
-	require.Len(t, accountsBIP49, 1)
-
-	// The first account should be the new account.
-	require.Equal(t, accBIP49Name, accountsBIP49[0].AccountName)
-	require.Equal(t, uint32(1), accountsBIP49[0].AccountNumber)
-
-	// Mock expectations for non-existent account.
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
-	deps.accountManager.On("Scope").Return(scopeBIP84).Maybe()
-	deps.accountManager.On("LookupAccount", mock.Anything, "non-existent").
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAccountNotFound,
-		}).Once()
-
-	// We should get an empty result if we query for a non-existent
-	// account.
-	accounts, err := w.ListAccountsByName(t.Context(), "non-existent")
-	require.NoError(t, err)
-	require.Empty(t, accounts)
+	require.Len(t, accounts, 1)
+	require.Equal(t, testAccountName, accounts[0].AccountName)
 }
 
 // TestListAccountsByNameIncludesImportedPseudoAccount verifies that the
@@ -330,33 +244,25 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
-	importedAccount := uint32(waddrmgr.ImportedAddrAccount)
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+	name := waddrmgr.ImportedAddrAccountName
 
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
-	deps.accountManager.On("Scope").Return(scope).Maybe()
-	deps.accountManager.On(
-		"LookupAccount", mock.Anything,
-		waddrmgr.ImportedAddrAccountName,
-	).Return(importedAccount, nil).Once()
-	deps.accountManager.On(
-		"AccountProperties", mock.Anything,
-		importedAccount,
-	).Return(&waddrmgr.AccountProperties{
-		AccountNumber:    importedAccount,
-		AccountName:      waddrmgr.ImportedAddrAccountName,
-		ImportedKeyCount: 2,
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+		Name:     &name,
+	}).Return([]db.AccountInfo{
+		{
+			AccountName:      waddrmgr.ImportedAddrAccountName,
+			Origin:           db.ImportedAccount,
+			KeyScope:         dbScope,
+			ImportedKeyCount: 2,
+		},
 	}, nil).Once()
-	deps.accountManager.On(
-		"IsImportedAccount", mock.Anything,
-		importedAccount,
-	).Return(true, nil).Once()
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
 
-	accounts, err := w.ListAccountsByName(
-		t.Context(), waddrmgr.ImportedAddrAccountName,
-	)
+	accounts, err := w.ListAccountsByName(t.Context(), name)
 	require.NoError(t, err)
 	require.Len(t, accounts, 1)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName,
@@ -364,6 +270,24 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, db.ImportedAccount, accounts[0].Origin)
 	require.Equal(t, uint32(0), accounts[0].AccountNumber)
 	require.Equal(t, uint32(2), accounts[0].ImportedKeyCount)
+}
+
+// TestListAccountsByNameNoMatch verifies the store-backed API returns an empty
+// list when the account name is absent.
+func TestListAccountsByNameNoMatch(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	name := "non-existent"
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+		Name:     &name,
+	}).Return([]db.AccountInfo(nil), nil).Once()
+
+	accounts, err := w.ListAccountsByName(t.Context(), name)
+	require.NoError(t, err)
+	require.Empty(t, accounts)
 }
 
 // TestGetAccount verifies GetAccount returns the snapshot from a single
@@ -461,6 +385,10 @@ func TestRenameAccount(t *testing.T) {
 
 	// We'll create a new account under the BIP0084 scope.
 	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
 	oldName := "old name"
 	newName := "new name"
 
@@ -489,34 +417,29 @@ func TestRenameAccount(t *testing.T) {
 	err = w.RenameAccount(t.Context(), scope, oldName, newName)
 	require.NoError(t, err)
 
-	// Mock expectations for GetAccount (new name).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, newName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   newName,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    dbScope,
+		Name:     &newName,
+	}).Return(&db.AccountInfo{
+		AccountNumber: 1,
+		AccountName:   newName,
+		Origin:        db.DerivedAccount,
+		KeyScope:      dbScope,
+	}, nil).Once()
 
 	// We should be able to get the account by its new name.
 	account, err := w.GetAccount(t.Context(), scope, newName)
 	require.NoError(t, err)
 	require.Equal(t, newName, account.AccountName)
 
-	// Mock expectations for GetAccount (old name - fail).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, oldName).
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAccountNotFound,
-		}).Once()
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    dbScope,
+		Name:     &oldName,
+	}).Return((*db.AccountInfo)(nil), waddrmgr.ManagerError{
+		ErrorCode: waddrmgr.ErrAccountNotFound,
+	}).Once()
 
 	// We should not be able to get the account by its old name.
 	_, err = w.GetAccount(t.Context(), scope, oldName)
@@ -601,22 +524,22 @@ func TestImportAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
 
-	// Mock expectations for GetAccount.
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(true, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+	name := testAccountName
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    dbScope,
+		Name:     &name,
+	}).Return(&db.AccountInfo{
+		AccountNumber: 1,
+		AccountName:   testAccountName,
+		Origin:        db.ImportedAccount,
+		IsWatchOnly:   true,
+		KeyScope:      dbScope,
+	}, nil).Once()
 
 	// We should be able to get the account by its name.
 	_, err = w.GetAccount(t.Context(), scope, testAccountName)
@@ -669,13 +592,13 @@ func TestImportAccount(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Mock expectations for GetAccount (fail).
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("LookupAccount", mock.Anything, dryRunName).
-		Return(uint32(0), waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAccountNotFound,
-		}).Once()
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    dbScope,
+		Name:     &dryRunName,
+	}).Return((*db.AccountInfo)(nil), waddrmgr.ManagerError{
+		ErrorCode: waddrmgr.ErrAccountNotFound,
+	}).Once()
 
 	// The account should not have been imported.
 	_, err = w.GetAccount(t.Context(), scope, dryRunName)
@@ -785,347 +708,4 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestFetchAccountBalances tests that the fetchAccountBalances helper function
-// works as expected.
-func TestFetchAccountBalances(t *testing.T) {
-	t.Parallel()
-
-	// setupTestCase is a helper closure to set up a test case.
-	setupTestCase := func(t *testing.T) (*Wallet, *mockWalletDeps) {
-		t.Helper()
-
-		w, deps := createStartedWalletWithMocks(t)
-
-		// Create accounts.
-		deps.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084).
-			Return(deps.accountManager, nil).
-			Once()
-		deps.accountManager.On("NewAccount", mock.Anything, "acc1-bip84").
-			Return(uint32(1), nil).
-			Once()
-		deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-			Return(&waddrmgr.AccountProperties{
-				AccountNumber: 1,
-				AccountName:   "acc1-bip84",
-			}, nil).
-			Once()
-
-		_, err := w.NewAccount(
-			t.Context(), waddrmgr.KeyScopeBIP0084, "acc1-bip84",
-		)
-		require.NoError(t, err)
-
-		deps.addrStore.On(
-			"FetchScopedKeyManager", waddrmgr.KeyScopeBIP0049Plus,
-		).Return(deps.accountManager, nil).Once()
-
-		deps.accountManager.On("NewAccount", mock.Anything, "acc1-bip49").
-			Return(uint32(1), nil).
-			Once()
-		deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-			Return(&waddrmgr.AccountProperties{
-				AccountNumber: 1,
-				AccountName:   "acc1-bip49",
-			}, nil).
-			Once()
-
-		_, err = w.NewAccount(
-			t.Context(), waddrmgr.KeyScopeBIP0049Plus, "acc1-bip49",
-		)
-		require.NoError(t, err)
-
-		// Create mock addresses for balance mapping.
-		addr84def, _ := btcutil.NewAddressWitnessPubKeyHash(
-			[]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			w.cfg.ChainParams,
-		)
-		addr84acc1, _ := btcutil.NewAddressWitnessPubKeyHash(
-			[]byte{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			w.cfg.ChainParams,
-		)
-		addr49acc1, _ := btcutil.NewAddressWitnessPubKeyHash(
-			[]byte{3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-			w.cfg.ChainParams,
-		)
-
-		// Setup persistent mocks for balance calculation.
-		deps.txStore.On("UnspentOutputs", mock.Anything).Return([]wtxmgr.Credit{
-			{
-				Amount:   100,
-				PkScript: mustPayToAddr(addr84def),
-				BlockMeta: wtxmgr.BlockMeta{
-					Block: wtxmgr.Block{
-						Height: 1,
-					},
-				},
-			},
-			{
-				Amount:   200,
-				PkScript: mustPayToAddr(addr84acc1),
-				BlockMeta: wtxmgr.BlockMeta{
-					Block: wtxmgr.Block{
-						Height: 1,
-					},
-				},
-			},
-			{
-				Amount:   300,
-				PkScript: mustPayToAddr(addr49acc1),
-				BlockMeta: wtxmgr.BlockMeta{
-					Block: wtxmgr.Block{
-						Height: 1,
-					},
-				},
-			},
-		}, nil).Once()
-
-		// addr84def -> Default Account (0)
-		deps.addrStore.On("AddrAccount", mock.Anything, addr84def).
-			Return(deps.accountManager, uint32(0), nil).
-			Once()
-
-		// addr84acc1 -> Account 1 (BIP84)
-		deps.addrStore.On("AddrAccount", mock.Anything, addr84acc1).
-			Return(deps.accountManager, uint32(1), nil).
-			Once()
-
-		// addr49acc1 -> Account 1 (BIP49)
-		// We use a different mock account manager to simulate the
-		// different scope.
-		mockAccountStore49 := &mockAccountStore{}
-		mockAccountStore49.On("Scope").
-			Return(waddrmgr.KeyScopeBIP0049Plus).
-			Maybe() // Called varying times depending on filter
-
-		deps.addrStore.On("AddrAccount", mock.Anything, addr49acc1).
-			Return(mockAccountStore49, uint32(1), nil).
-			Once()
-
-		return w, deps
-	}
-
-	testCases := []struct {
-		name             string
-		setup            func(t *testing.T, w *Wallet, deps *mockWalletDeps)
-		filters          []filterOption
-		expectedBalances scopedBalances
-	}{
-		{
-			name: "no filters",
-			setup: func(t *testing.T, w *Wallet, deps *mockWalletDeps) {
-				t.Helper()
-				// Called twice: once for default, once for acc1.
-				deps.accountManager.On("Scope").
-					Return(waddrmgr.KeyScopeBIP0084).
-					Times(2)
-			},
-			filters: nil,
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084:     {0: 100, 1: 200},
-				waddrmgr.KeyScopeBIP0049Plus: {1: 300},
-			},
-		},
-		{
-			name: "filter by scope",
-			setup: func(t *testing.T, w *Wallet, deps *mockWalletDeps) {
-				t.Helper()
-				// Called 4 times:
-				// 1. Filter check (def) -> Match
-				// 2. Map key (def)
-				// 3. Filter check (acc1) -> Match
-				// 4. Map key (acc1)
-				deps.accountManager.On("Scope").
-					Return(waddrmgr.KeyScopeBIP0084).
-					Times(4)
-			},
-			filters: []filterOption{
-				withScope(waddrmgr.KeyScopeBIP0084),
-			},
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084: {0: 100, 1: 200},
-			},
-		},
-		{
-			name: "account with no balance",
-			setup: func(t *testing.T, w *Wallet, deps *mockWalletDeps) {
-				t.Helper()
-
-				// Expect 2 Scope calls for the existing accounts with UTXOs.
-				deps.accountManager.On("Scope").
-					Return(waddrmgr.KeyScopeBIP0084).
-					Times(2)
-
-				deps.addrStore.On(
-					"FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084,
-				).Return(deps.accountManager, nil).Once()
-				deps.accountManager.On(
-					"NewAccount", mock.Anything, "no-balance",
-				).Return(uint32(2), nil).Once()
-				deps.accountManager.On(
-					"AccountProperties", mock.Anything, uint32(2),
-				).Return(&waddrmgr.AccountProperties{
-					AccountNumber: 2,
-					AccountName:   "no-balance",
-				}, nil).Once()
-
-				_, err := w.NewAccount(
-					t.Context(),
-					waddrmgr.KeyScopeBIP0084, "no-balance",
-				)
-				require.NoError(t, err)
-			},
-			filters: nil,
-			expectedBalances: scopedBalances{
-				waddrmgr.KeyScopeBIP0084:     {0: 100, 1: 200},
-				waddrmgr.KeyScopeBIP0049Plus: {1: 300},
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			w, deps := setupTestCase(t)
-
-			if tc.setup != nil {
-				tc.setup(t, w, deps)
-			}
-
-			var balances scopedBalances
-
-			err := walletdb.View(
-				w.cfg.DB, func(tx walletdb.ReadTx) error {
-					var err error
-
-					balances, err = w.fetchAccountBalances(
-						tx, tc.filters...,
-					)
-
-					return err
-				})
-
-			require.NoError(t, err)
-			require.Equal(t, tc.expectedBalances, balances)
-		})
-	}
-}
-
-// mustPayToAddr returns the pay-to-address script for the address.
-func mustPayToAddr(addr btcutil.Address) []byte {
-	script, _ := txscript.PayToAddrScript(addr)
-	return script
-}
-
-// TestListAccountsWithBalances tests that the listAccountsWithBalances helper
-// function works as expected.
-func TestListAccountsWithBalances(t *testing.T) {
-	t.Parallel()
-
-	// Create a new test wallet.
-	w, deps := createStartedWalletWithMocks(t)
-
-	// We'll create two new accounts under the BIP0084 scope to have a
-	// predictable state.
-	scope := waddrmgr.KeyScopeBIP0084
-	acc1Name := "test account"
-
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, acc1Name).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   acc1Name,
-		}, nil).Once()
-
-	_, err := w.NewAccount(t.Context(), scope, acc1Name)
-	require.NoError(t, err)
-
-	acc2Name := "no balance account"
-
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("NewAccount", mock.Anything, acc2Name).
-		Return(uint32(2), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(2)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 2,
-			AccountName:   acc2Name,
-		}, nil).Once()
-
-	_, err = w.NewAccount(t.Context(), scope, acc2Name)
-	require.NoError(t, err)
-
-	// We'll now create a balance map for some of the accounts. We
-	// intentionally leave out the second new account to test the zero
-	// balance case.
-	balances := map[uint32]btcutil.Amount{
-		0: 100, // Default account
-		1: 200, // "test account"
-	}
-
-	// Now, we'll call listAccountsWithBalances within a read transaction
-	// and verify the results.
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Setup mock expectations for listAccountsWithBalances.
-		deps.accountManager.On("LastAccount", mock.Anything).
-			Return(uint32(2), nil).Once()
-		deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-			Return(&waddrmgr.AccountProperties{
-				AccountNumber: 0,
-				AccountName:   "default",
-			}, nil).Once()
-		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
-			Return(false, nil).Once()
-		deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-			Return(&waddrmgr.AccountProperties{
-				AccountNumber: 1,
-				AccountName:   acc1Name,
-			}, nil).Once()
-		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-			Return(false, nil).Once()
-		deps.accountManager.On("AccountProperties", mock.Anything, uint32(2)).
-			Return(&waddrmgr.AccountProperties{
-				AccountNumber: 2,
-				AccountName:   acc2Name,
-			}, nil).Once()
-		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(2)).
-			Return(false, nil).Once()
-
-		// Call the function under test.
-		results, err := listAccountsWithBalances(
-			deps.accountManager, addrmgrNs, balances, false, 0,
-		)
-		require.NoError(t, err)
-
-		// The BIP0084 scope should have three accounts: the default
-		// one and the two we just created.
-		require.Len(t, results, 3, "expected three accounts for scope")
-
-		// Check the default account's result.
-		require.Equal(t, "default", results[0].AccountName)
-		require.Equal(t, uint32(0), results[0].AccountNumber)
-		require.Equal(t, btcutil.Amount(100), results[0].ConfirmedBalance)
-
-		// Check the first new account's result.
-		require.Equal(t, acc1Name, results[1].AccountName)
-		require.Equal(t, uint32(1), results[1].AccountNumber)
-		require.Equal(t, btcutil.Amount(200), results[1].ConfirmedBalance)
-
-		// Check the second new account's result (zero balance).
-		require.Equal(t, acc2Name, results[2].AccountName)
-		require.Equal(t, uint32(2), results[2].AccountNumber)
-		require.Equal(t, btcutil.Amount(0), results[2].ConfirmedBalance)
-
-		return nil
-	})
-	require.NoError(t, err)
 }
