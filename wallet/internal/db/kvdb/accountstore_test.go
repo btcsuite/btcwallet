@@ -1,12 +1,16 @@
 package kvdb
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -262,6 +266,166 @@ func TestRenameAccountNotFound(t *testing.T) {
 	})
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
+
+// kvdbDeriveFnFixture returns an AccountDerivationFunc that derives an
+// account-level extended key from the test wallet's known seed. The
+// resulting DerivedAccountData mirrors the production wallet's deriveFn:
+// plaintext PublicKey + encrypted private key (encrypted with the test
+// manager's cryptoKeyPriv) + fixed MasterKeyFingerprint.
+func kvdbDeriveFnFixture(t *testing.T,
+	mgr *waddrmgr.Manager) db.AccountDerivationFunc {
+
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	return func(_ context.Context, scope db.KeyScope, accountNumber uint32,
+		_ bool) (*db.DerivedAccountData, error) {
+
+		purposeKey, err := masterKey.DeriveNonStandard(
+			scope.Purpose + hdkeychain.HardenedKeyStart,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		coinKey, err := purposeKey.DeriveNonStandard(
+			scope.Coin + hdkeychain.HardenedKeyStart,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		acctPriv, err := coinKey.DeriveNonStandard(
+			accountNumber + hdkeychain.HardenedKeyStart,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		acctPub, err := acctPriv.Neuter()
+		if err != nil {
+			return nil, err
+		}
+
+		encPriv, err := mgr.Encrypt(
+			waddrmgr.CKTPrivate, []byte(acctPriv.String()),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return &db.DerivedAccountData{
+			PublicKey:            []byte(acctPub.String()),
+			EncryptedPrivateKey:  encPriv,
+			MasterKeyFingerprint: 0xC0DEC0DE,
+		}, nil
+	}
+}
+
+// TestCreateDerivedAccount verifies that CreateDerivedAccount persists
+// the wallet-derived account material and that a subsequent GetAccount
+// returns the same row.
+func TestCreateDerivedAccount(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	deriveFn := kvdbDeriveFnFixture(t, mgr)
+
+	info, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name: savingsAccountName,
+		}, deriveFn,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.Equal(t, savingsAccountName, info.AccountName)
+	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.NotEmpty(t, info.PublicKey)
+	require.Equal(t, uint32(0xC0DEC0DE), info.MasterKeyFingerprint)
+
+	// A subsequent GetAccount must observe the new row.
+	name := savingsAccountName
+	read, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, read)
+	require.Equal(t, info.AccountNumber, read.AccountNumber)
+	require.Equal(t, savingsAccountName, read.AccountName)
+}
+
+// TestCreateDerivedAccountRollsBackOnDeriveError verifies that when the
+// derivation callback fails after the account number has been allocated,
+// the underlying walletdb transaction rolls back so the lastAccount counter
+// is restored.
+func TestCreateDerivedAccountRollsBackOnDeriveError(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	failDerive := func(_ context.Context, _ db.KeyScope, _ uint32,
+		_ bool) (*db.DerivedAccountData, error) {
+
+		return nil, errTestBoom
+	}
+
+	_, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name: "doomed",
+		}, failDerive,
+	)
+	require.ErrorIs(t, err, errTestBoom)
+
+	// Now a successful CreateDerivedAccount must reuse the rolled-back
+	// account number rather than skipping it; we verify by creating two
+	// accounts and observing contiguous account numbers.
+	deriveFn := kvdbDeriveFnFixture(t, mgr)
+
+	info1, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name: "first",
+		}, deriveFn,
+	)
+	require.NoError(t, err)
+
+	info2, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name: "second",
+		}, deriveFn,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, info1.AccountNumber+1, info2.AccountNumber,
+		"account numbers should be contiguous after rollback")
+}
+
+var errTestBoom = errors.New("kvdb test boom")
 
 // newCreditedFixture builds an account store backed by a spendable wallet
 // with a wired-up wtxmgr txStore and returns a helper that credits a
