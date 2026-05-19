@@ -261,8 +261,8 @@ func TestFetchAndValidateUtxoTxStoreError(t *testing.T) {
 	require.Nil(t, utxo)
 }
 
-// TestFetchAndValidateUtxoLocked verifies that legacy locked-credit state still
-// prevents PSBT decoration before leases are routed through the Store layer.
+// TestFetchAndValidateUtxoLocked verifies that the store-backed IsLocked flag
+// prevents PSBT decoration.
 func TestFetchAndValidateUtxoLocked(t *testing.T) {
 	t.Parallel()
 
@@ -271,29 +271,13 @@ func TestFetchAndValidateUtxoLocked(t *testing.T) {
 	txIn := &wire.TxIn{PreviousOutPoint: outPoint}
 	txOut := &wire.TxOut{Value: 1000}
 	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
-
-	lockedDetails := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{
-				TxOut: []*wire.TxOut{{Value: 1000}, txOut},
-			},
-		},
-		Credits: []wtxmgr.CreditRecord{
-			{Index: 0},
-			{Index: 1, Locked: true},
-		},
-	}
+	utxoInfo.IsLocked = true
 	w, mocks := createStartedWalletWithMocks(t)
 
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
 		OutPoint: outPoint,
 	}).Return(utxoInfo, nil)
-	mocks.txStore.On("TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash)
-		}),
-	).Return(lockedDetails, nil)
 
 	tx, utxo, err := w.fetchAndValidateUtxo(t.Context(), txIn)
 	require.ErrorIs(t, err, ErrUtxoLocked)
