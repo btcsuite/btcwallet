@@ -229,17 +229,8 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	return infos, nil
 }
 
-// ListAccountsByScope returns a list of all accounts for a given key scope,
-// including those with a zero balance.
-//
-// The function first fetches the balances for all accounts within the given
-// scope by iterating over the wallet's UTXO set. It then retrieves the
-// properties for each account in that scope and combines them with the
-// pre-calculated balances.
-//
-// The time complexity of this method is O(U*logA + A), where U is the number of
-// UTXOs and A is the number of accounts in the wallet.
-func (w *Wallet) ListAccountsByScope(_ context.Context,
+// ListAccountsByScope returns all accounts for the given key scope.
+func (w *Wallet) ListAccountsByScope(ctx context.Context,
 	scope waddrmgr.KeyScope) ([]db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
@@ -247,43 +238,17 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 		return nil, err
 	}
 
-	// First, we'll fetch the scoped key manager for the given scope. This
-	// manager will be used to list the accounts.
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	dbScope := db.KeyScope(scope)
+
+	_, err = w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
 	}
 
-	walletWatchOnly := w.addrStore.WatchOnly()
-
-	var accounts []db.AccountInfo
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Calculate the balances for all accounts, but only for the
-		// key scope we are interested in.
-		scopedBalances, err := w.fetchAccountBalances(
-			tx, withScope(scope),
-		)
-		if err != nil {
-			return err
-		}
-
-		// Now, retrieve the properties for each account in the scope
-		// and combine them with the balances calculated above.
-		accounts, err = listAccountsWithBalances(
-			manager, addrmgrNs, scopedBalances[scope],
-			walletWatchOnly, w.masterFingerprint,
-		)
-
-		return err
+	return w.listAccountInfos(ctx, db.ListAccountsQuery{
+		WalletID: w.id,
+		Scope:    &dbScope,
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return accounts, nil
 }
 
 // ListAccountsByName returns a list of all accounts that have a given name.
