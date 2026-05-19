@@ -1610,6 +1610,34 @@ func TestPutSyncBatchStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestPutTargetedBatchStore verifies targeted scan writes use the store batch
+// API without advancing synced blocks.
+func TestPutTargetedBatchStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one targeted scan result.
+	const walletID uint32 = 12
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	fixture := newStoreScanBatchFixture(t)
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(walletID, fixture, false),
+	).Return(nil).Once()
+
+	// Act: Apply a targeted scan batch.
+	err := s.putTargetedBatch(t.Context(), []scanResult{fixture.result})
+
+	// Assert: The store saw transactions and horizons, but no synced blocks.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
