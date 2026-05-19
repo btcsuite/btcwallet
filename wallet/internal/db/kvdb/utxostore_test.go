@@ -112,3 +112,36 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, walletdb.ErrBucketNotFound)
 }
+
+// TestBalanceRejectsAccountWithoutScope verifies that Balance enforces
+// the BalanceParams contract: an Account filter requires a Scope filter to
+// avoid cross-scope account-number collisions.
+func TestBalanceRejectsAccountWithoutScope(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	store := NewStore(dbConn, nil, nil)
+
+	acct := uint32(0)
+	_, err := store.Balance(t.Context(), db.BalanceParams{
+		Account: &acct,
+	})
+	require.ErrorIs(t, err, db.ErrBalanceParamsAccountWithoutScope)
+}
+
+// TestBalanceEmptyWallet verifies that Balance returns zero on a wallet
+// with no UTXOs and a nil tx store.
+func TestBalanceEmptyWallet(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	store := NewStore(dbConn, nil, nil)
+
+	result, err := store.Balance(t.Context(), db.BalanceParams{})
+	require.NoError(t, err)
+	require.Zero(t, result.Total)
+}
