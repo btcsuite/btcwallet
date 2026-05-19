@@ -351,7 +351,12 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		isWatchOnly:       addrMgr.WatchOnly(),
 	}
 
-	w.sync = newSyncer(cfg, w.addrStore, w.txStore, w)
+	w.sync = newSyncer(
+		cfg, w.addrStore, w.txStore, w, syncerStoreConfig{
+			store:    w.store,
+			walletID: w.id,
+		},
+	)
 	w.state = newWalletState(w.sync)
 
 	// Register the wallet.
