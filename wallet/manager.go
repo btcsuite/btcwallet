@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -295,22 +296,31 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		<-lockTimer.C
 	}
 
+	// Cache the wallet's master HD fingerprint up-front, before any
+	// context/cancel is set up so an error here doesn't leak a
+	// cancellable context.
+	masterFingerprint, err := resolveMasterFingerprint(cfg.DB, addrMgr)
+	if err != nil {
+		return nil, fmt.Errorf("cache master fingerprint: %w", err)
+	}
+
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
 	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
 
 	w := &Wallet{
-		cfg:         cfg,
-		id:          walletID,
-		addrStore:   addrMgr,
-		store:       store,
-		cache:       newStoreRuntimeCache(store),
-		keyVault:    addrMgr,
-		txStore:     txMgr,
-		requestChan: make(chan any),
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		lockTimer:   lockTimer,
+		cfg:               cfg,
+		id:                walletID,
+		addrStore:         addrMgr,
+		store:             store,
+		cache:             newStoreRuntimeCache(store),
+		keyVault:          addrMgr,
+		txStore:           txMgr,
+		requestChan:       make(chan any),
+		lifetimeCtx:       lifetimeCtx,
+		cancel:            cancel,
+		lockTimer:         lockTimer,
+		masterFingerprint: masterFingerprint,
 	}
 
 	w.sync = newSyncer(cfg, w.addrStore, w.txStore, w)
@@ -322,6 +332,74 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	m.Unlock()
 
 	return w, nil
+}
+
+// errMissingWaddrmgrNamespace is returned when the waddrmgr namespace
+// bucket is missing from the wallet database. DBLoadWallet would have
+// already failed if this were a real wallet, so encountering it here
+// indicates a wiring bug.
+var errMissingWaddrmgrNamespace = errors.New(
+	"missing waddrmgr namespace",
+)
+
+// resolveMasterFingerprint reads the persisted master HD pubkey via
+// addrMgr, parses it, and returns its BIP32 fingerprint. Shell,
+// watch-only, and pre-master-key wallets have no pubkey persisted —
+// fingerprint is zero.
+func resolveMasterFingerprint(db walletdb.DB,
+	addrMgr *waddrmgr.Manager) (uint32, error) {
+
+	var fingerprint uint32
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingWaddrmgrNamespace
+		}
+
+		masterHDPubKey, err := addrMgr.MasterHDPubKey(ns)
+		switch {
+		case err == nil:
+			// Continue to parse below.
+
+		case waddrmgr.IsError(err, waddrmgr.ErrNoExist):
+			// Shell / watch-only / pre-master-key wallets:
+			// no pubkey persisted. Leave fingerprint at zero
+			// and continue.
+			return nil
+
+		default:
+			return fmt.Errorf("read master HD pubkey: %w", err)
+		}
+
+		if len(masterHDPubKey) == 0 {
+			// Defensive: persisted-but-empty is treated the
+			// same as the ErrNoExist case above.
+			return nil
+		}
+
+		extKey, err := hdkeychain.NewKeyFromString(
+			string(masterHDPubKey),
+		)
+		if err != nil {
+			return fmt.Errorf("parse master HD pubkey: %w",
+				err)
+		}
+
+		mfp, err := masterKeyFingerprint(extKey)
+		if err != nil {
+			return fmt.Errorf("master fingerprint: %w", err)
+		}
+
+		fingerprint = mfp
+
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("read master fingerprint: %w", err)
+	}
+
+	return fingerprint, nil
 }
 
 // prepareWalletCreation validates the configuration and parameters, and derives
