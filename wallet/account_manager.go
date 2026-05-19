@@ -21,11 +21,52 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
+
+// buildAccountDeriveFn pre-loads the wallet's master HD private key and
+// returns an AccountDerivationFunc closure. Watch-only wallets get a closure
+// that rejects derivation.
+func (w *Wallet) buildAccountDeriveFn(
+	ctx context.Context) (db.AccountDerivationFunc, error) {
+
+	if w.addrStore.WatchOnly() {
+		return func(_ context.Context, _ db.KeyScope, _ uint32,
+			_ bool) (*db.DerivedAccountData, error) {
+
+			return nil, errWatchOnlyAccountDerivation
+		}, nil
+	}
+
+	encrypted, err := w.store.GetEncryptedHDSeed(ctx, w.id)
+	if err != nil {
+		return nil, fmt.Errorf("load encrypted master HD priv: %w",
+			err)
+	}
+
+	plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt master HD priv: %w", err)
+	}
+
+	masterKey, err := hdkeychain.NewKeyFromString(string(plaintext))
+	zero.Bytes(plaintext)
+
+	if err != nil {
+		return nil, fmt.Errorf("parse master HD priv: %w", err)
+	}
+
+	fingerprint, err := masterKeyFingerprint(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("master key fingerprint: %w", err)
+	}
+
+	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
+}
 
 // AccountManager provides a high-level interface for managing wallet
 // accounts.
@@ -63,7 +104,7 @@ type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
 	NewAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*waddrmgr.AccountProperties, error)
+		*db.AccountInfo, error)
 
 	// ListAccounts returns a list of all accounts managed by the wallet.
 	ListAccounts(ctx context.Context) ([]db.AccountInfo, error)
@@ -104,42 +145,44 @@ type AccountManager interface {
 // A compile time check to ensure that Wallet implements the interface.
 var _ AccountManager = (*Wallet)(nil)
 
-// NewAccount creates the next account and returns its account number. The name
-// must be unique under the kep scope. In order to support automatic seed
+// NewAccount creates the next account and returns its account info. The name
+// must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
 // accounts have no transaction history (this is a deviation from the BIP0044
 // spec, which allows no unused account gaps).
-func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
-	name string) (*waddrmgr.AccountProperties, error) {
+func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
+	name string) (*db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	deriveFn, err := w.buildAccountDeriveFn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var props *waddrmgr.AccountProperties
-
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Create a new account under the current key scope.
-		accNum, err := manager.NewAccount(addrmgrNs, name)
-		if err != nil {
-			return err
+	info, err := w.store.CreateDerivedAccount(ctx,
+		db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     name,
+		}, deriveFn,
+	)
+	if err != nil {
+		// Preserve the legacy waddrmgr.ManagerError contract so that
+		// callers using waddrmgr.IsError(err, ...) keep working after
+		// kvdb wraps the underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return nil, mErr
 		}
 
-		// Get the account's properties.
-		props, err = manager.AccountProperties(addrmgrNs, accNum)
+		return nil, err
+	}
 
-		return err
-	})
-
-	return props, err
+	return info, nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total
