@@ -267,6 +267,75 @@ func TestRenameAccountNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
 
+// TestRenameAccountRejectsImported verifies that kvdb rejects imported account
+// renames both by name and by waddrmgr's internal account number.
+func TestRenameAccountRejectsImported(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xC1}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	name := "imported-rename"
+
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              name,
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+
+	err = store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope:   scope,
+		OldName: name,
+		NewName: "renamed-imported",
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	mgrScope := waddrmgr.KeyScope(scope)
+	scopedMgr, err := store.addrStore.FetchScopedKeyManager(mgrScope)
+	require.NoError(t, err)
+
+	var internalNumber uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var err error
+
+		internalNumber, err = scopedMgr.LookupAccount(ns, name)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	err = store.RenameAccount(t.Context(), db.RenameAccountParams{
+		Scope:         scope,
+		AccountNumber: &internalNumber,
+		NewName:       "renamed-imported",
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+
+	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: scope,
+		Name:  &name,
+	})
+	require.NoError(t, err)
+	require.Equal(t, name, info.AccountName)
+}
+
 // kvdbDeriveFnFixture returns an AccountDerivationFunc that derives an
 // account-level extended key from the test wallet's known seed. The
 // resulting DerivedAccountData mirrors the production wallet's deriveFn:
@@ -426,6 +495,219 @@ func TestCreateDerivedAccountRollsBackOnDeriveError(t *testing.T) {
 }
 
 var errTestBoom = errors.New("kvdb test boom")
+
+// TestCreateImportedAccount verifies the watch-only-imported account
+// path: kvdb persists the row, GetAccount returns Origin=ImportedAccount,
+// and the AccountInfo.MasterKeyFingerprint round-trips.
+func TestCreateImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	// Build a deterministic account-level pub key for the import.
+	seed := bytes.Repeat([]byte{0xBB}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	info, err := store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name:              "imported-xpub",
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	require.Equal(t, "imported-xpub", info.AccountName)
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsWatchOnly)
+	require.Equal(t, uint32(0xDEADBEEF), info.MasterKeyFingerprint)
+}
+
+// TestCreateImportedAccountRejectsPrivateKey verifies that the kvdb
+// adapter refuses imported accounts with private key material on
+// spendable wallets, since waddrmgr's accountWatchOnly row has no
+// private-key column.
+func TestCreateImportedAccountRejectsPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xBB}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name:                "imported-spendable",
+			MasterFingerprint:   0xDEADBEEF,
+			PublicKey:           []byte(masterPub.String()),
+			EncryptedPrivateKey: []byte{0xAA, 0xBB},
+		},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not supported")
+}
+
+// TestCreateImportedAccountDryRunRollsBack verifies that DryRun validates the
+// import and derives sample addresses without persisting the imported row.
+func TestCreateImportedAccountDryRunRollsBack(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xBC}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+	name := "imported-dry-run"
+
+	info, err := store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              name,
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+			DryRun:            true,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, name, info.AccountName)
+
+	_, err = store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: scope,
+		Name:  &name,
+	})
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
+// TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope verifies a
+// dry run does not leave a missing scope registered in memory after the
+// database transaction rolls back.
+func TestCreateImportedAccountDryRunMissingScopeDoesNotRegisterScope(
+	t *testing.T) {
+
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xC2}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	scope := db.KeyScope{Purpose: 1234, Coin: 0}
+	mgrScope := waddrmgr.KeyScope(scope)
+	addrSchema := db.ScopeAddrSchema{
+		ExternalAddrType: db.WitnessPubKey,
+		InternalAddrType: db.WitnessPubKey,
+	}
+
+	_, err = store.addrStore.FetchScopedKeyManager(mgrScope)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              "dry-run-missing-scope",
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+			AddrSchema:        &addrSchema,
+			DryRun:            true,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrKeyScopeNotFound)
+
+	_, err = store.addrStore.FetchScopedKeyManager(mgrScope)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+}
+
+// TestCreateImportedAccountUsesAddrSchema verifies that kvdb forwards the
+// per-account address schema override to waddrmgr.
+func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xBD}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0049Plus.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0049Plus.Coin,
+	}
+	addrSchema := db.ScopeAddrSchema{
+		ExternalAddrType: db.NestedWitnessPubKey,
+		InternalAddrType: db.NestedWitnessPubKey,
+	}
+
+	name := "imported-schema"
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              name,
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+			AddrSchema:        &addrSchema,
+		},
+	)
+	require.NoError(t, err)
+
+	scopedMgr, err := store.addrStore.FetchScopedKeyManager(
+		waddrmgr.KeyScope(scope),
+	)
+	require.NoError(t, err)
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		accountNumber, err := scopedMgr.LookupAccount(ns, name)
+		if err != nil {
+			return err
+		}
+
+		props, err := scopedMgr.AccountProperties(
+			ns, accountNumber,
+		)
+		if err != nil {
+			return err
+		}
+
+		require.NotNil(t, props.AddrSchema)
+		require.Equal(t, waddrmgr.KeyScopeBIP0049AddrSchema,
+			*props.AddrSchema)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
 
 // newCreditedFixture builds an account store backed by a spendable wallet
 // with a wired-up wtxmgr txStore and returns a helper that credits a
@@ -769,4 +1051,88 @@ func TestListAccountsSkipBalanceZeros(t *testing.T) {
 			a.AccountName,
 		)
 	}
+}
+
+// TestCreateImportedAccountAllowsMultipleInScope verifies kvdb retains the
+// legacy watch-only account behavior: imported accounts share the normal
+// per-scope account counter, so multiple imported accounts can exist in the
+// same scope under different names.
+func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xCC}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+
+	first, err := store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              "alice-import",
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.Equal(t, "alice-import", first.AccountName)
+
+	second, err := store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             scope,
+			Name:              "bob-import",
+			MasterFingerprint: 0xFEEDFACE,
+			PublicKey:         []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	require.Equal(t, "bob-import", second.AccountName)
+
+	mgrScope := waddrmgr.KeyScope(scope)
+	scopedMgr, err := store.addrStore.FetchScopedKeyManager(mgrScope)
+	require.NoError(t, err)
+
+	var firstNumber, secondNumber uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var err error
+
+		firstNumber, err = scopedMgr.LookupAccount(
+			ns, first.AccountName,
+		)
+		if err != nil {
+			return err
+		}
+
+		secondNumber, err = scopedMgr.LookupAccount(
+			ns, second.AccountName,
+		)
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, firstNumber+1, secondNumber)
+
+	got, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: scope,
+		Name:  &second.AccountName,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "bob-import", got.AccountName)
+	require.Equal(t, uint32(0xFEEDFACE), got.MasterKeyFingerprint)
 }
