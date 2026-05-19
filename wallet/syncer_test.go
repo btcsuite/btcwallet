@@ -1069,6 +1069,100 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// matchStoreBlockFields reports whether a store block matches the wtxmgr block
+// metadata's hash, height, and timestamp.
+func matchStoreBlockFields(b *db.Block, block *wtxmgr.BlockMeta) bool {
+	return b.Hash == block.Hash &&
+		b.Height == uint32(block.Height) &&
+		b.Timestamp.Equal(block.Time)
+}
+
+// matchBlockTxBatch returns a matcher asserting a filtered block transaction is
+// written as one store batch together with the matching sync-tip update.
+func matchBlockTxBatch(walletID uint32, tx *wire.MsgTx, addr address.Address,
+	received time.Time, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo == nil {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block == nil ||
+			!matchStoreBlockFields(txParams.Block, block) {
+
+			return false
+		}
+
+		if !matchStoreBlockFields(params.SyncedTo, block) {
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received,
+			db.TxStatusPublished, "",
+		)
+	})
+}
+
+// TestProcessFilteredBlockUsesStore verifies that filtered block notifications
+// are routed through the store as one transaction batch with a sync-tip update.
+func TestProcessFilteredBlockUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block containing a
+	// wallet-owned transaction output.
+	const walletID uint32 = 9
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x09},
+			Height: 101,
+		},
+		Time: blockTime,
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchBlockTxBatch(walletID, tx, addr, received, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: The block transaction and sync tip were written together.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
