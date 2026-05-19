@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
@@ -992,6 +993,143 @@ func matchBlockTxBatch(walletID uint32, tx *wire.MsgTx, addr btcutil.Address,
 			txParams, walletID, tx, addr, received,
 		)
 	})
+}
+
+// newBareMultisigScript builds a 1-of-2 bare-multisig output script and returns
+// the two member pubkey addresses it pays to.
+func newBareMultisigScript(t *testing.T) ([]btcutil.Address, []byte) {
+	t.Helper()
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	firstAddr, err := btcutil.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	secondAddr, err := btcutil.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddInt64(1)
+	builder.AddData(firstKey.PubKey().SerializeCompressed())
+	builder.AddData(secondKey.PubKey().SerializeCompressed())
+	builder.AddInt64(2)
+	builder.AddOp(txscript.OP_CHECKMULTISIG)
+
+	script, err := builder.Script()
+	require.NoError(t, err)
+
+	return []btcutil.Address{firstAddr, secondAddr}, script
+}
+
+// matchMultisigCreditBatch returns a matcher asserting a filtered block
+// transaction is written as one store batch whose index-0 credit carries one of
+// the bare-multisig member addresses (rather than being dropped).
+func matchMultisigCreditBatch(walletID uint32, tx *wire.MsgTx,
+	members []btcutil.Address, block *wtxmgr.BlockMeta) any {
+
+	want := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		want[member.EncodeAddress()] = struct{}{}
+	}
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo == nil {
+
+			return false
+		}
+
+		return matchMultisigCreditTx(
+			params.Transactions[0], tx, block, want,
+		)
+	})
+}
+
+// matchMultisigCreditTx reports whether the batched transaction params record
+// the expected multisig transaction with a credit owned by one of the wanted
+// member addresses.
+func matchMultisigCreditTx(txParams db.CreateTxParams, tx *wire.MsgTx,
+	block *wtxmgr.BlockMeta, want map[string]struct{}) bool {
+
+	if txParams.Tx == nil ||
+		txParams.Tx.TxHash() != tx.TxHash() ||
+		txParams.Block == nil ||
+		!matchStoreBlockFields(txParams.Block, block) {
+
+		return false
+	}
+
+	credit, ok := txParams.Credits[0]
+	if !ok || credit == nil {
+		return false
+	}
+
+	_, found := want[credit.EncodeAddress()]
+
+	return found
+}
+
+// TestProcessFilteredBlockBareMultisigCredit verifies that a bare-multisig
+// output owned through a member pubkey survives the applyStoreTxBatch path.
+// PayToAddrScript(member) does not equal the multisig output script, so the
+// removed GetAddress(outputScript) lookup would have missed and dropped the
+// credit; the credit must instead be carried from the matched member address.
+func TestProcessFilteredBlockBareMultisigCredit(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block containing a
+	// bare-multisig output.
+	const walletID uint32 = 11
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	members, pkScript := newBareMultisigScript(t)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0c},
+			Height: 102,
+		},
+		Time: blockTime,
+	}
+
+	expectAddressOwned(t, store, walletID, members...)
+	store.On("ApplyTxBatch", mock.Anything,
+		matchMultisigCreditBatch(walletID, tx, members, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: The member-owned credit was written through the store batch API
+	// instead of being dropped.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
