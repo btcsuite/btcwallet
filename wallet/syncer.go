@@ -325,8 +325,6 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 // It checks if the wallet's synced tip is still on the main chain, and if not,
 // rewinds the wallet state to the common ancestor.
 func (s *syncer) checkRollback(ctx context.Context) error {
-	var err error
-
 	// batchSize is the number of blocks to fetch from the chain backend in
 	// a single batch when checking for a rollback. A value of 10 is chosen
 	// as a conservative default that covers the vast majority of reorg
@@ -334,7 +332,16 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	// requests lightweight.
 	const batchSize = 10
 
-	syncedTo := s.addrStore.SyncedTo()
+	// Read the synced tip through syncedTip so a Store-backed backend uses
+	// the Store's tip rather than the legacy addrStore tip. A backend that
+	// does not mirror ApplyScanBatch/RollbackToBlock into the legacy manager
+	// would otherwise compare the chain against a stale legacy height and
+	// could skip a rollback that is actually required.
+	syncedTo, err := s.syncedTip(ctx)
+	if err != nil {
+		return err
+	}
+
 	syncedHeight := syncedTo.Height
 
 	var (
@@ -1458,6 +1465,36 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 	}
 }
 
+// syncedTip returns the wallet's current synced-to block. In store-backed mode
+// it reads the tip from the Store so callers do not depend on the legacy
+// addrStore tip being kept in lockstep by ApplyScanBatch; otherwise it falls
+// back to the legacy addrStore.
+func (s *syncer) syncedTip(ctx context.Context) (waddrmgr.BlockStamp, error) {
+	if s.store == nil {
+		return s.addrStore.SyncedTo(), nil
+	}
+
+	info, err := s.store.GetWallet(ctx, s.cfg.Name)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("get wallet sync "+
+			"tip: %w", err)
+	}
+
+	// A nil SyncedTo means the wallet has not been synced to any block
+	// yet, which the legacy addrStore represents as a height of -1.
+	if info.SyncedTo == nil {
+		return waddrmgr.BlockStamp{Height: -1}, nil
+	}
+
+	syncedTo, err := db.BlockStampFromBlock(info.SyncedTo)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("decode wallet sync "+
+			"tip: %w", err)
+	}
+
+	return syncedTo, nil
+}
+
 // advanceChainSync checks if the wallet is behind the chain tip and processes
 // a batch of blocks if necessary. It returns (syncFinished, error) where
 // syncFinished is true if the wallet is caught up to the best known tip, and
@@ -1474,8 +1511,14 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 			err)
 	}
 
-	// Determine our current sync state.
-	syncedTo := s.addrStore.SyncedTo()
+	// Determine our current sync state. In store-backed mode this reads
+	// the synced tip from the Store rather than the legacy addrStore, so
+	// the next batch's start height no longer depends on ApplyScanBatch
+	// having mirrored the tip back into the legacy addrStore.
+	syncedTo, err := s.syncedTip(ctx)
+	if err != nil {
+		return false, err
+	}
 
 	// If the wallet is caught up to the best known tip, log this and
 	// return.
@@ -1698,7 +1741,15 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 // scanWithRewind rewinds the wallet's sync status to the requested start
 // block.
 func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
-	current := s.addrStore.SyncedTo()
+	// Read the synced tip through syncedTip so a Store-backed backend uses
+	// the Store's tip rather than the legacy addrStore tip. A backend that
+	// does not mirror ApplyScanBatch/RollbackToBlock into the legacy manager
+	// would otherwise compare against a stale legacy height and could
+	// wrongly conclude there is nothing to rewind for a full rescan.
+	current, err := s.syncedTip(ctx)
+	if err != nil {
+		return err
+	}
 
 	if req.startBlock.Height >= current.Height {
 		// Requested start is ahead of or equal to current sync.
@@ -1710,7 +1761,7 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 		current.Height, req.startBlock.Height)
 
 	// Rewind the database status.
-	err := s.rewindToBlock(ctx, req.startBlock)
+	err = s.rewindToBlock(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
 
