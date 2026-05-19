@@ -695,6 +695,7 @@ func TestAddTxToWallet(t *testing.T) {
 		unownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
 	)
 	require.NoError(t, err)
+
 	ownedScript := mustPayToAddrScript(ownedAddr)
 	unownedScript := mustPayToAddrScript(unownedAddr)
 
@@ -745,8 +746,13 @@ func TestAddTxToWallet(t *testing.T) {
 		).Return(nil).Once()
 
 		// Add the transaction to the wallet.
-		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
+		ourAddrs, recorded, err := w.addTxToWallet(
+			t.Context(), tx, label,
+		)
 		require.NoError(t, err)
+
+		// The tx was written, so recorded is true.
+		require.True(t, recorded)
 
 		// Check that the returned addresses are correct.
 		require.Len(t, ourAddrs, 1)
@@ -792,12 +798,16 @@ func TestAddTxToWallet(t *testing.T) {
 		}).Return((*db.TxDetailInfo)(nil), db.ErrTxNotFound).Once()
 
 		// Add the transaction to the wallet.
-		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
+		ourAddrs, recorded, err := w.addTxToWallet(
+			t.Context(), tx, label,
+		)
 		require.NoError(t, err)
 
-		// We expect no addresses to be returned and no calls to the
-		// transaction store.
+		// We expect no addresses to be returned, no calls to the
+		// transaction store, and recorded to be false because nothing
+		// was written.
 		require.Nil(t, ourAddrs)
+		require.False(t, recorded)
 	})
 
 	t.Run("sweep tx (owned input, no owned outputs)", func(t *testing.T) {
@@ -832,12 +842,16 @@ func TestAddTxToWallet(t *testing.T) {
 			),
 		).Return(nil).Once()
 
-		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
+		ourAddrs, recorded, err := w.addTxToWallet(
+			t.Context(), tx, label,
+		)
 		require.NoError(t, err)
 
 		// A debit-only sweep credits no wallet outputs, so no
-		// addresses are returned even though the tx was recorded.
+		// addresses are returned, yet recorded is true because the tx
+		// row was written.
 		require.Nil(t, ourAddrs)
+		require.True(t, recorded)
 	})
 }
 
@@ -903,9 +917,9 @@ func mustPayToAddrScript(addr address.Address) []byte {
 	return pkScript
 }
 
-// TestRemoveUnminedTx tests the removeUnminedTx method to ensure it correctly
-// removes a transaction from the unconfirmed store.
-func TestRemoveUnminedTx(t *testing.T) {
+// TestInvalidateUnminedTx tests the invalidateUnminedTx method to ensure it
+// correctly marks a transaction failed in the unconfirmed store.
+func TestInvalidateUnminedTx(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createStartedWalletWithMocks(t)
@@ -918,13 +932,14 @@ func TestRemoveUnminedTx(t *testing.T) {
 		}},
 	}
 
-	// Set up the mock for the transaction store.
-	mocks.txStore.On(
-		"RemoveUnminedTx", mock.Anything, mock.Anything,
+	txid := tx.TxHash()
+	mocks.store.On(
+		"InvalidateUnminedTx", mock.Anything,
+		matchInvalidateUnminedTxParams(w.id, txid),
 	).Return(nil).Once()
 
 	// Call the method under test.
-	err := w.removeUnminedTx(tx)
+	err := w.invalidateUnminedTx(t.Context(), tx)
 	require.NoError(t, err)
 }
 
@@ -1177,13 +1192,150 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	// Mock removeUnminedTx to succeed.
-	m.txStore.On("RemoveUnminedTx",
-		mock.Anything, mock.Anything,
+	m.store.On("InvalidateUnminedTx", mock.Anything,
+		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
 	).Return(nil).Once()
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.ErrorIs(t, err, errPublish)
+}
+
+// TestBroadcastSweepPublishFailsInvalidateSucceeds tests that a sweep tx (no
+// owned outputs but an owned input) is recorded, and that when publishing fails
+// the recorded tx is invalidated rather than hitting ErrTxNotFound.
+func TestBroadcastSweepPublishFailsInvalidateSucceeds(t *testing.T) {
+	t.Parallel()
+
+	label := testTxLabel
+	w, m := createStartedWalletWithMocks(t)
+
+	// Create a tx whose only output pays an address the wallet does not
+	// own, so it has no owned outputs.
+	unownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	unownedAddr, err := address.NewAddressPubKey(
+		unownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(unownedAddr)
+	require.NoError(t, err)
+
+	prevOut := wire.OutPoint{Hash: chainhash.Hash{0xaa}, Index: 0}
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{PreviousOutPoint: prevOut}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+
+	// Mock checkMempool to succeed.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	// The output is unowned.
+	m.store.On("GetAddress", mock.Anything,
+		matchGetAddressQuery(w.id, pkScript),
+	).Return(nil, db.ErrAddressNotFound).Once()
+
+	// The input spends a wallet UTXO, marking the tx as ours.
+	m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: prevOut,
+	}).Return(&db.UtxoInfo{OutPoint: prevOut}, nil).Once()
+
+	// The sweep is recorded with no credits.
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(
+			w.id, tx, label, map[uint32]address.Address{},
+		),
+	).Return(nil).Once()
+
+	// Mock publishTx to fail.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, errPublish)
+
+	// The recorded sweep can be invalidated because a row exists.
+	m.store.On("InvalidateUnminedTx", mock.Anything,
+		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
+	).Return(nil).Once()
+
+	err = w.Broadcast(t.Context(), tx, label)
+	require.ErrorIs(t, err, errPublish)
+}
+
+// TestBroadcastUnrelatedPublishFailsNoInvalidate tests that when a
+// wallet-unrelated tx (no owned outputs and no owned inputs) fails to publish,
+// Broadcast does not attempt to invalidate it and returns the original publish
+// error unchanged. Invalidating a never-recorded tx would surface
+// db.ErrTxNotFound and clobber the real broadcast error.
+func TestBroadcastUnrelatedPublishFailsNoInvalidate(t *testing.T) {
+	t.Parallel()
+
+	label := testTxLabel
+	w, m := createStartedWalletWithMocks(t)
+
+	// Create a tx whose only output pays an address the wallet does not
+	// own, so it has no owned outputs.
+	unownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	unownedAddr, err := address.NewAddressPubKey(
+		unownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(unownedAddr)
+	require.NoError(t, err)
+
+	prevOut := wire.OutPoint{Hash: chainhash.Hash{0xbb}, Index: 0}
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{PreviousOutPoint: prevOut}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+
+	// Mock checkMempool to succeed.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	// The output is unowned.
+	m.store.On("GetAddress", mock.Anything,
+		matchGetAddressQuery(w.id, pkScript),
+	).Return(nil, db.ErrAddressNotFound).Once()
+
+	// The input does not spend a wallet UTXO, so the tx is wallet-unrelated
+	// and is never recorded.
+	m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: prevOut,
+	}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
+
+	// The input's parent is not a wallet transaction either, so the output
+	// is not a wallet-owned output that is merely already spent. The tx is
+	// therefore genuinely wallet-unrelated.
+	m.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     prevOut.Hash,
+	}).Return((*db.TxDetailInfo)(nil), db.ErrTxNotFound).Once()
+
+	// Mock publishTx to fail.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, errPublish)
+
+	// We deliberately register no InvalidateUnminedTx expectation: it must
+	// not be called for a never-recorded tx.
+
+	err = w.Broadcast(t.Context(), tx, label)
+
+	// The original publish error must be preserved and not clobbered with
+	// cleanup context such as db.ErrTxNotFound.
+	require.ErrorIs(t, err, errPublish)
+	require.NotErrorIs(t, err, db.ErrTxNotFound)
+
+	// No invalidation must have been attempted for the unrecorded tx.
+	m.store.AssertNotCalled(t, "InvalidateUnminedTx", mock.Anything,
+		mock.Anything)
 }
 
 // TestBroadcastPublishFailsRemoveFails tests the Broadcast method when both
@@ -1229,9 +1381,8 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return(nil, errPublish)
 
-	// Mock removeUnminedTx to fail.
-	m.txStore.On("RemoveUnminedTx",
-		mock.Anything, mock.Anything,
+	m.store.On("InvalidateUnminedTx", mock.Anything,
+		matchInvalidateUnminedTxParams(w.id, tx.TxHash()),
 	).Return(errRemove).Once()
 
 	err = w.Broadcast(t.Context(), tx, label)
