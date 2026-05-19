@@ -1132,6 +1132,124 @@ func TestProcessFilteredBlockBareMultisigCredit(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// matchOwnedCreditOnlyBatch returns a matcher asserting a filtered block
+// transaction is written as one store batch whose Credits hold exactly the
+// single owned address at ownedIndex and omit every other output index, so a
+// third-party output sharing the same transaction is never credited.
+// matchOwnedCreditOnlyTxShape reports whether the batch carries exactly the one
+// expected wallet transaction confirmed in the expected block, ignoring its
+// credits. Pulling the transaction-shape checks out of the matcher keeps the
+// matcher's cyclomatic complexity within bounds.
+func matchOwnedCreditOnlyTxShape(params db.TxBatchParams, walletID uint32,
+	tx *wire.MsgTx, block *wtxmgr.BlockMeta) bool {
+
+	if params.WalletID != walletID ||
+		len(params.Transactions) != 1 ||
+		params.SyncedTo == nil {
+
+		return false
+	}
+
+	txParams := params.Transactions[0]
+
+	return txParams.Tx != nil &&
+		txParams.Tx.TxHash() == tx.TxHash() &&
+		txParams.Block != nil &&
+		matchStoreBlockFields(txParams.Block, block)
+}
+
+func matchOwnedCreditOnlyBatch(walletID uint32, tx *wire.MsgTx,
+	owned btcutil.Address, ownedIndex uint32, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if !matchOwnedCreditOnlyTxShape(params, walletID, tx, block) {
+			return false
+		}
+
+		// Only the wallet-owned output is credited: exactly one credit,
+		// at the owned index, carrying the owned address.
+		if len(params.Transactions[0].Credits) != 1 {
+			return false
+		}
+
+		credit, ok := params.Transactions[0].Credits[ownedIndex]
+
+		return ok && credit != nil &&
+			credit.EncodeAddress() == owned.EncodeAddress()
+	})
+}
+
+// TestProcessFilteredBlockDropsThirdPartyCredit verifies that a relevant
+// transaction carrying both a wallet-owned output and an unrelated third-party
+// output credits only the owned output. extractAddrEntries pulls every output
+// address, so without the ownership filter applyStoreTxBatch would also credit
+// the third-party output and ApplyTxBatch would fail with ErrAddressNotFound.
+func TestProcessFilteredBlockDropsThirdPartyCredit(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block whose single
+	// relevant transaction pays both a wallet-owned output (index 0) and a
+	// third-party output (index 1).
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	ownedAddr, err := btcutil.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	ownedScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	thirdPartyAddr, err := btcutil.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	thirdPartyScript, err := txscript.PayToAddrScript(thirdPartyAddr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: ownedScript})
+	tx.AddTxOut(&wire.TxOut{Value: 2000, PkScript: thirdPartyScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0d},
+			Height: 103,
+		},
+		Time: time.Unix(789, 0).UTC(),
+	}
+
+	// Only the owned address resolves; the third-party address is reported as
+	// ErrAddressNotFound and must be dropped before crediting.
+	expectAddressOwned(t, store, walletID, ownedAddr)
+	store.On("ApplyTxBatch", mock.Anything,
+		matchOwnedCreditOnlyBatch(walletID, tx, ownedAddr, 0, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: Only the wallet-owned output was credited and the batch applied
+	// successfully without an ErrAddressNotFound failure.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
 // are routed through the store as one transaction batch with a sync-tip update.
 func TestProcessFilteredBlockUsesStore(t *testing.T) {
