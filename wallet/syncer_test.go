@@ -1108,6 +1108,144 @@ func matchBlockTxBatch(walletID uint32, tx *wire.MsgTx, addr address.Address,
 	})
 }
 
+// newBareMultisigScript builds a 1-of-2 bare-multisig output script and returns
+// the two member pubkey addresses it pays to.
+func newBareMultisigScript(t *testing.T) ([]address.Address, []byte) {
+	t.Helper()
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	firstAddr, err := address.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	secondAddr, err := address.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddInt64(1)
+	builder.AddData(firstKey.PubKey().SerializeCompressed())
+	builder.AddData(secondKey.PubKey().SerializeCompressed())
+	builder.AddInt64(2)
+	builder.AddOp(txscript.OP_CHECKMULTISIG)
+
+	script, err := builder.Script()
+	require.NoError(t, err)
+
+	return []address.Address{firstAddr, secondAddr}, script
+}
+
+// matchMultisigCandidateBatch returns a matcher asserting a filtered block
+// transaction is written as one store batch whose index-0 credit candidates
+// carry one of the bare-multisig member addresses.
+func matchMultisigCandidateBatch(walletID uint32, tx *wire.MsgTx,
+	members []address.Address, block *wtxmgr.BlockMeta) any {
+
+	want := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		want[member.EncodeAddress()] = struct{}{}
+	}
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo == nil {
+
+			return false
+		}
+
+		return matchMultisigCandidateTx(
+			params.Transactions[0], tx, block, want,
+		)
+	})
+}
+
+// matchMultisigCandidateTx reports whether the batched transaction params
+// record the expected multisig transaction with one of the wanted member
+// addresses carried as a credit candidate.
+func matchMultisigCandidateTx(txParams db.CreateTxParams, tx *wire.MsgTx,
+	block *wtxmgr.BlockMeta, want map[string]struct{}) bool {
+
+	if txParams.Tx == nil ||
+		txParams.Tx.TxHash() != tx.TxHash() ||
+		txParams.Block == nil ||
+		len(txParams.Credits) != 0 ||
+		!matchStoreBlockFields(txParams.Block, block) {
+
+		return false
+	}
+
+	var found bool
+	for _, candidate := range txParams.CreditCandidates[0] {
+		if _, ok := want[candidate.EncodeAddress()]; ok {
+			found = true
+			break
+		}
+	}
+
+	return found
+}
+
+// TestProcessFilteredBlockBareMultisigCandidate verifies that a bare-multisig
+// output carries its member pubkeys through the applyStoreTxBatch path.
+// PayToAddrScript(member) does not equal the multisig output script, so the
+// removed GetAddress(outputScript) lookup would have missed the wallet-owned
+// candidate; the Store must instead receive the matched member addresses.
+func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block containing a
+	// bare-multisig output.
+	const walletID uint32 = 11
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	members, pkScript := newBareMultisigScript(t)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0c},
+			Height: 102,
+		},
+		Time: blockTime,
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchMultisigCandidateBatch(walletID, tx, members, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: The member credit candidates were written through the store batch
+	// API instead of being dropped.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
 // are routed through the store as one transaction batch with a sync-tip update.
 func TestProcessFilteredBlockUsesStore(t *testing.T) {
