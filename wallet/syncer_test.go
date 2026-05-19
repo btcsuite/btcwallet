@@ -15,6 +15,8 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -2637,6 +2639,38 @@ func TestProcessChainUpdate(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestProcessChainUpdateRoutesSyncTip verifies connected block notifications
+// update the runtime store sync tip when the store is available.
+func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil)
+	s.store = store
+	s.walletID = 77
+
+	block := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{77},
+			Height: 144,
+		},
+		Time: time.Unix(1710003800, 0),
+	}
+	store.On("UpdateWallet", mock.Anything, mock.MatchedBy(
+		func(params db.UpdateWalletParams) bool {
+			return params.WalletID == s.walletID &&
+				params.SyncedTo != nil &&
+				params.SyncedTo.Hash == block.Hash &&
+				params.SyncedTo.Height == uint32(block.Height) &&
+				params.SyncedTo.Timestamp.Equal(block.Time)
+		},
+	)).Return(nil).Once()
+
+	err := s.processChainUpdate(t.Context(), chain.BlockConnected(block))
+	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestHandleChainUpdate_SpecialNotifs verifies RescanProgress and
