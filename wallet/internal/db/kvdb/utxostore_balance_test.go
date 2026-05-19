@@ -286,12 +286,28 @@ func TestBalanceNameFilter(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	scopedMgr, err := store.addrStore.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var importedAccount uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var err error
+
+		importedAccount, err = scopedMgr.LookupAccount(ns, importedName)
+
+		return err
+	})
+	require.NoError(t, err)
+
 	creditAccountAddressAtHeight(
 		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(100),
 		balanceTestTipHeight, false,
 	)
 	creditAccountAddressAtHeight(
-		t, store.db, mgr, txStore, scope, waddrmgr.MaxAccountNum,
+		t, store.db, mgr, txStore, scope, importedAccount,
 		btcutil.Amount(300), balanceTestTipHeight, false,
 	)
 
