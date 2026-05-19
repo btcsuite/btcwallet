@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -2708,6 +2709,163 @@ func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
 	err := s.processChainUpdate(t.Context(), chain.BlockConnected(block))
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+}
+
+// TestAdvanceChainSyncUsesLegacySyncedToWithStore verifies regular chain sync
+// keeps reading the legacy sync tip while scanBatch still writes through the
+// legacy walletdb path, even when a runtime store is configured.
+func TestAdvanceChainSyncUsesLegacySyncedToWithStore(t *testing.T) {
+	t.Parallel()
+
+	const (
+		walletID   uint32 = 78
+		walletName        = "legacy-sync-tip"
+	)
+
+	store := &walletmock.Store{}
+	addrStore := &bwmock.AddrStore{}
+	chain := &bwmock.Chain{}
+	syncedTo := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{78},
+		Height:    144,
+		Timestamp: time.Unix(1710003900, 0),
+	}
+
+	s := newSyncer(
+		Config{Name: walletName, Chain: chain}, addrStore, nil, nil,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	chain.On("GetBestBlock").Return(
+		&syncedTo.Hash, syncedTo.Height, nil,
+	).Once()
+	addrStore.On("SyncedTo").Return(syncedTo).Once()
+
+	syncFinished, err := s.advanceChainSync(t.Context())
+	require.NoError(t, err)
+	require.True(t, syncFinished)
+	chain.AssertExpectations(t)
+	addrStore.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
+// TestBroadcastUnminedTxnsRoutesStore verifies rebroadcast reads active unmined
+// transactions from the runtime store and publishes the decoded transaction.
+func TestBroadcastUnminedTxnsRoutesStore(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(Config{}, nil, nil, publisher)
+	s.store = store
+	s.walletID = 66
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{66},
+	}})
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+
+	var txBytes bytes.Buffer
+
+	err := tx.Serialize(&txBytes)
+	require.NoError(t, err)
+
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID:    s.walletID,
+		UnminedOnly: true,
+	}).Return([]db.TxInfo{
+		{
+			Hash:         tx.TxHash(),
+			Status:       db.TxStatusPublished,
+			SerializedTx: txBytes.Bytes(),
+		},
+		{
+			Hash:         chainhash.Hash{67},
+			Status:       db.TxStatusPending,
+			SerializedTx: txBytes.Bytes(),
+		},
+	}, nil).Once()
+	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
+		func(got *wire.MsgTx) bool {
+			return got.TxHash() == tx.TxHash()
+		},
+	), "").Return(nil).Once()
+
+	err = s.broadcastUnminedTxns(t.Context())
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
+}
+
+// TestBroadcastUnminedTxnsStoreSortsDependencies verifies store-backed
+// rebroadcast publishes an unmined parent before its in-store child even when
+// the store query returns the child first.
+func TestBroadcastUnminedTxnsStoreSortsDependencies(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(Config{}, nil, nil, publisher)
+	s.store = store
+	s.walletID = 67
+
+	parent := wire.NewMsgTx(2)
+	parent.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{67}, Index: 0,
+	}})
+	parent.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+
+	child := wire.NewMsgTx(2)
+	child.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: parent.TxHash(), Index: 0,
+	}})
+	child.AddTxOut(&wire.TxOut{Value: 900, PkScript: []byte{0x51}})
+
+	var parentBytes bytes.Buffer
+
+	err := parent.Serialize(&parentBytes)
+	require.NoError(t, err)
+
+	var childBytes bytes.Buffer
+
+	err = child.Serialize(&childBytes)
+	require.NoError(t, err)
+
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID:    s.walletID,
+		UnminedOnly: true,
+	}).Return([]db.TxInfo{
+		{
+			Hash:         child.TxHash(),
+			Status:       db.TxStatusPublished,
+			SerializedTx: childBytes.Bytes(),
+		},
+		{
+			Hash:         parent.TxHash(),
+			Status:       db.TxStatusPublished,
+			SerializedTx: parentBytes.Bytes(),
+		},
+	}, nil).Once()
+
+	var published []chainhash.Hash
+	publisher.On(
+		"Broadcast", mock.Anything, mock.AnythingOfType("*wire.MsgTx"), "",
+	).Return(nil).Run(func(args mock.Arguments) {
+		tx, ok := args.Get(1).(*wire.MsgTx)
+		require.True(t, ok)
+
+		published = append(published, tx.TxHash())
+	}).Twice()
+
+	err = s.broadcastUnminedTxns(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []chainhash.Hash{
+		parent.TxHash(), child.TxHash(),
+	}, published)
+
+	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestSyncedBlockHashesRoutesStore verifies rollback reads consult the runtime
