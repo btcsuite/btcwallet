@@ -52,6 +52,32 @@ func newAccountCreatedAtKey(scope waddrmgr.KeyScope,
 	return k
 }
 
+// putAccountCreatedAt writes the creation timestamp for an account to
+// the side bucket. The caller must hold a walletdb.ReadWriteTx and
+// pass the waddrmgr namespace bucket; the helper creates the
+// sub-bucket on first use.
+func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
+	scope waddrmgr.KeyScope, account uint32, t time.Time) error {
+
+	bucket, err := ns.CreateBucketIfNotExists(accountCreatedAtBucketKey)
+	if err != nil {
+		return fmt.Errorf("create created-at bucket: %w", err)
+	}
+
+	key := newAccountCreatedAtKey(scope, account)
+
+	var value [createdAtValueLen]byte
+	//nolint:gosec // UnixNano() always fits in uint64 for times after 1970.
+	binary.BigEndian.PutUint64(value[:], uint64(t.UTC().UnixNano()))
+
+	err = bucket.Put(key[:], value[:])
+	if err != nil {
+		return fmt.Errorf("put created-at: %w", err)
+	}
+
+	return nil
+}
+
 // readAccountCreatedAt returns the creation timestamp for an account.
 // If no entry exists for (scope, account) the helper returns
 // time.Time{} (Go's zero value) and a nil error, meaning "unknown".
