@@ -603,12 +603,26 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 		return fmt.Errorf("locate birthday block: %w", err)
 	}
 
-	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
+	storeBlock, err := db.BlockFromBlockStamp(*newBirthdayBlock)
+	if err != nil {
+		return fmt.Errorf("block from stamp: %w", err)
+	}
+
+	// Use walletInfo.ID instead of w.cfg's cached value: Manager.Load
+	// currently initializes the in-memory id to zero, but the store row
+	// we just read carries the authoritative wallet ID.
+	err = w.store.UpdateWallet(
+		ctx, db.UpdateWalletParams{
+			WalletID:      walletInfo.ID,
+			BirthdayBlock: storeBlock,
+			SyncedTo:      storeBlock,
+		},
+	)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("update birthday block: %w", err)
 	}
 
 	w.birthdayBlock = *newBirthdayBlock

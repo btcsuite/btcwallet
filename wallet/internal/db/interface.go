@@ -168,9 +168,9 @@ type WalletStore interface {
 		query ListWalletsQuery) iter.Seq2[WalletInfo, error]
 
 	// UpdateWallet updates various properties of a wallet, such as its
-	// birthday, birthday block, or sync state. The specific fields to
-	// update are provided in the UpdateWalletParams struct. It returns an
-	// error if the update fails.
+	// birthday, birthday block, or sync state. SQL multi-wallet backends
+	// return ErrWalletNotFound when the wallet ID is unknown. The legacy kvdb
+	// backend is a single-wallet adapter and ignores WalletID.
 	UpdateWallet(ctx context.Context, params UpdateWalletParams) error
 
 	// GetEncryptedHDSeed retrieves the encrypted Hierarchical
