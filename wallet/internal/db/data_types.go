@@ -481,7 +481,7 @@ type CreateImportedAccountParams struct {
 	Name string
 
 	// Scope is the key scope for the account. The address schema for the
-	// scope will be determined by the default mapping for this scope.
+	// scope is determined by the default mapping unless AddrSchema is set.
 	Scope KeyScope
 
 	// MasterFingerprint is the fingerprint of the master key.
@@ -495,6 +495,13 @@ type CreateImportedAccountParams struct {
 	// to the database layer. A nil or empty slice means no account private
 	// key material is stored; the imported account will be watch-only.
 	EncryptedPrivateKey []byte
+
+	// DryRun simulates the import without committing any database writes.
+	DryRun bool
+
+	// AddrSchema optionally overrides the scope's default address schema for
+	// this imported account.
+	AddrSchema *ScopeAddrSchema
 }
 
 // GetAccountQuery contains the parameters for querying a single account. The

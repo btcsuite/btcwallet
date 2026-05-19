@@ -596,7 +596,7 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	ctx context.Context, getter func(context.Context, GetArgs) (Row, error),
 	getArgs GetArgs, creator func(context.Context, CreateArgs) (int64, error),
 	createArgs func(ScopeAddrSchema) CreateArgs, rowToID func(Row) int64,
-	scope KeyScope) (int64, error) {
+	scope KeyScope, schemaOverride *ScopeAddrSchema) (int64, error) {
 
 	scopeInfo, err := getter(ctx, getArgs)
 	if err == nil {
@@ -608,9 +608,16 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 		return 0, fmt.Errorf("check key scope: %w", err)
 	}
 
-	defaultAddrSchema, err := getAddrSchemaForScope(scope)
-	if err != nil {
-		return 0, err
+	var addrSchema ScopeAddrSchema
+	if schemaOverride != nil {
+		addrSchema = *schemaOverride
+	} else {
+		defaultAddrSchema, err := getAddrSchemaForScope(scope)
+		if err != nil {
+			return 0, err
+		}
+
+		addrSchema = defaultAddrSchema
 	}
 
 	// Slow path: needs to create the scope. The SQL uses
@@ -618,7 +625,7 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	// - If INSERT succeeds (no conflict): returns the new row's id.
 	// - If INSERT conflicts (scope exists): returns NO rows, causing sqlc to
 	// return sql.ErrNoRows.
-	id, err := creator(ctx, createArgs(defaultAddrSchema))
+	id, err := creator(ctx, createArgs(addrSchema))
 	if err == nil {
 		return id, nil
 	}
