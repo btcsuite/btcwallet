@@ -198,71 +198,35 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	}
 }
 
-// ListAccounts returns a list of all accounts for the wallet, including those
-// with a zero balance.
-//
-// The function calculates balances by first creating a comprehensive map of
-// balances for all accounts that currently own UTXOs. It then iterates through
-// all known accounts across all key scopes, retrieving their properties and
-// assigning the pre-calculated balance. Accounts with no UTXOs will correctly
-// be assigned a zero balance.
-//
-// The time complexity of this method is O(U*logA + A), where U is the number of
-// UTXOs and A is the number of accounts in the wallet. A potential future
-// improvement is to make the balance calculation optional.
-func (w *Wallet) ListAccounts(_ context.Context) ([]db.AccountInfo, error) {
+// ListAccounts returns every account across all key scopes with its balance.
+func (w *Wallet) ListAccounts(ctx context.Context) ([]db.AccountInfo, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	// Get all active key scope managers to iterate through all available
-	// scopes.
-	scopes := w.addrStore.ActiveScopedKeyManagers()
-	walletWatchOnly := w.addrStore.WatchOnly()
-
-	var accounts []db.AccountInfo
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// First, build a map of balances for all accounts that own at
-		// least one UTXO. This is done by iterating through the UTXO
-		// set and aggregating the values by account.
-		scopedBalances, err := w.fetchAccountBalances(tx)
-		if err != nil {
-			return err
-		}
-
-		// Now, iterate through all key scopes to assemble the final
-		// list of accounts with their properties and balances.
-		for _, scopeMgr := range scopes {
-			scope := scopeMgr.Scope()
-			accountBalances := scopedBalances[scope]
-
-			// For the current scope, retrieve the properties for
-			// each account and combine them with the
-			// pre-calculated balances.
-			scopedAccounts, err := listAccountsWithBalances(
-				scopeMgr, addrmgrNs, accountBalances,
-				walletWatchOnly, w.masterFingerprint,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Append the accounts from this scope to the final
-			// list.
-			accounts = append(accounts, scopedAccounts...)
-		}
-
-		return nil
+	return w.listAccountInfos(ctx, db.ListAccountsQuery{
+		WalletID: w.id,
 	})
+}
+
+// listAccountInfos returns cache.ListAccounts snapshots with wallet-cached
+// master fingerprints injected for derived account rows.
+func (w *Wallet) listAccountInfos(ctx context.Context,
+	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
+
+	infos, err := w.cache.ListAccounts(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	return accounts, nil
+	for i := range infos {
+		if infos[i].Origin == db.DerivedAccount {
+			infos[i].MasterKeyFingerprint = w.masterFingerprint
+		}
+	}
+
+	return infos, nil
 }
 
 // ListAccountsByScope returns a list of all accounts for a given key scope,
