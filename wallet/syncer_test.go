@@ -831,15 +831,6 @@ func TestHandleChainUpdate(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// matchGetAddressByScript returns a matcher asserting a GetAddress query
-// targets the given wallet and script.
-func matchGetAddressByScript(walletID uint32, pkScript []byte) any {
-	return mock.MatchedBy(func(query db.GetAddressQuery) bool {
-		return query.WalletID == walletID &&
-			bytes.Equal(query.ScriptPubKey, pkScript)
-	})
-}
-
 // matchRelevantTxParams reports whether the single batched transaction carries
 // the expected wallet, hash, receive time, credit address, and published
 // status. Block confirmation is validated separately by the caller.
@@ -882,6 +873,45 @@ func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
 	})
 }
 
+// expectAddressOwned registers Store.GetAddress expectations so
+// applyStoreTxBatch treats the supplied addresses as wallet-owned. Each owned
+// address is matched by its own PayToAddrScript (the script applyStoreTxBatch
+// resolves with) and resolves to a minimal AddressInfo. Any other address query
+// resolves to ErrAddressNotFound, modeling a third-party output that must be
+// dropped.
+func expectAddressOwned(t *testing.T, store *walletmock.Store, walletID uint32,
+	owned ...btcutil.Address) {
+
+	t.Helper()
+
+	ownedScripts := make(map[string]struct{}, len(owned))
+	for _, addr := range owned {
+		script, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		ownedScripts[string(script)] = struct{}{}
+
+		store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+			WalletID:     walletID,
+			ScriptPubKey: script,
+		}).Return(&db.AddressInfo{ScriptPubKey: script}, nil).Maybe()
+	}
+
+	// Every other script the syncer resolves is not wallet-owned, which the
+	// Store reports as ErrAddressNotFound.
+	store.On("GetAddress", mock.Anything, mock.MatchedBy(
+		func(query db.GetAddressQuery) bool {
+			if query.WalletID != walletID {
+				return false
+			}
+
+			_, ok := ownedScripts[string(query.ScriptPubKey)]
+
+			return !ok
+		},
+	)).Return(nil, db.ErrAddressNotFound).Maybe()
+}
+
 // TestProcessRelevantTxUsesStore verifies that relevant transaction
 // notifications are routed through the store when store wiring is available.
 func TestProcessRelevantTxUsesStore(t *testing.T) {
@@ -913,10 +943,7 @@ func TestProcessRelevantTxUsesStore(t *testing.T) {
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
 	require.NoError(t, err)
 
-	store.On("GetAddress", mock.Anything,
-		matchGetAddressByScript(walletID, pkScript),
-	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
-
+	expectAddressOwned(t, store, walletID, addr)
 	store.On("ApplyTxBatch", mock.Anything,
 		matchUnminedTxBatch(walletID, tx, addr, received),
 	).Return(nil).Once()

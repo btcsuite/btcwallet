@@ -676,6 +676,35 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 		}
 	}
 
+	return s.applyStoreTxBatch(ctx, matches, block, nil)
+}
+
+// putBlockNotifications records filtered block notifications through the store
+// when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putBlockNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutBlocks(ctx, matches, blockMeta)
+	}
+
+	if blockMeta == nil {
+		return fmt.Errorf("filtered block is missing metadata: %w",
+			db.ErrInvalidParam)
+	}
+
+	block, err := storeBlockFromBlockMeta(*blockMeta)
+	if err != nil {
+		return err
+	}
+
+	return s.applyStoreTxBatch(ctx, matches, block, block)
+}
+
+// applyStoreTxBatch writes transaction matches through the store batch API.
+func (s *syncer) applyStoreTxBatch(ctx context.Context,
+	matches TxEntries, block *db.Block, syncedTo *db.Block) error {
+
 	transactions := make([]db.CreateTxParams, 0, len(matches))
 	for i := range matches {
 		match := matches[i]
@@ -688,20 +717,21 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 					db.ErrInvalidParam)
 			}
 
-			pkScript := match.Rec.MsgTx.TxOut[index].PkScript
-			_, err := s.store.GetAddress(
-				ctx, db.GetAddressQuery{
-					WalletID:     s.walletID,
-					ScriptPubKey: pkScript,
-				},
-			)
-			if errors.Is(err, db.ErrAddressNotFound) {
-				continue
+			// extractAddrEntries pulls every address out of every
+			// output, so a relevant tx (one spending a wallet input)
+			// can also carry unrelated third-party outputs. Crediting
+			// those would make ApplyTxBatch try to record a
+			// non-wallet output and fail with ErrAddressNotFound, so
+			// keep only the wallet-owned addresses here, mirroring
+			// the legacy notification path which drops non-wallet
+			// addresses before crediting.
+			owned, err := s.addressOwned(ctx, entry.Address)
+			if err != nil {
+				return err
 			}
 
-			if err != nil {
-				return fmt.Errorf("resolve tx credit %d: %w", index,
-					err)
+			if !owned {
+				continue
 			}
 
 			credits[index] = entry.Address
@@ -721,13 +751,52 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 		ctx, db.TxBatchParams{
 			WalletID:     s.walletID,
 			Transactions: transactions,
+			SyncedTo:     syncedTo,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("apply tx notifications: %w", err)
+		return fmt.Errorf("apply tx batch: %w", err)
 	}
 
 	return nil
+}
+
+// addressOwned reports whether the wallet owns the given address by resolving
+// it against the Store by the address's OWN script (PayToAddrScript(addr)),
+// returning false for addresses the wallet does not own.
+//
+// The lookup uses the address's own script rather than the full output script
+// the address was extracted from. For a single-address output the two scripts
+// are identical, but for a bare-multisig output the wallet owns it through a
+// member pubkey whose own script never equals the multisig output script;
+// resolving by the member's own script keeps that member-owned credit (task
+// 197) while still dropping genuine third-party addresses.
+func (s *syncer) addressOwned(ctx context.Context,
+	addr btcutil.Address) (bool, error) {
+
+	ownScript, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return false, fmt.Errorf("build address script: %w", err)
+	}
+
+	_, err = s.store.GetAddress(
+		ctx, db.GetAddressQuery{
+			WalletID:     s.walletID,
+			ScriptPubKey: ownScript,
+		},
+	)
+	switch {
+	// The address is not in the Store, so it is not wallet-owned. This is
+	// the expected case for third-party outputs in an otherwise relevant
+	// transaction and is not an error.
+	case errors.Is(err, db.ErrAddressNotFound):
+		return false, nil
+
+	case err != nil:
+		return false, fmt.Errorf("resolve credit address: %w", err)
+	}
+
+	return true, nil
 }
 
 // storeBlockFromBlockMeta converts chain notification block metadata into the
@@ -1364,7 +1433,7 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 
 	case chain.FilteredBlockConnected:
 		matches := s.prepareTxMatches(n.RelevantTxs)
-		return s.DBPutBlocks(ctx, matches, n.Block)
+		return s.putBlockNotifications(ctx, matches, n.Block)
 	}
 
 	return nil
