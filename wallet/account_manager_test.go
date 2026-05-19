@@ -19,6 +19,59 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// stubAccountDeriveFn holds the master-key material the test wallet's
+// buildAccountDeriveFn path consumes.
+type stubAccountDeriveFn struct {
+	encryptedSeed        []byte
+	plaintextMasterKey   []byte
+	masterKey            *hdkeychain.ExtendedKey
+	masterKeyFingerprint uint32
+}
+
+// newStubAccountDeriveFn builds a deterministic master key + the byte
+// strings the GetEncryptedHDSeed/Decrypt mocks return.
+func newStubAccountDeriveFn(t *testing.T) stubAccountDeriveFn {
+	t.Helper()
+
+	seed := make([]byte, hdkeychain.RecommendedSeedLen)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+
+	masterKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	fingerprint, err := masterKeyFingerprint(masterKey)
+	require.NoError(t, err)
+
+	plaintext := []byte(masterKey.String())
+	encrypted := append([]byte("enc:"), plaintext...)
+
+	return stubAccountDeriveFn{
+		encryptedSeed:        encrypted,
+		plaintextMasterKey:   plaintext,
+		masterKey:            masterKey,
+		masterKeyFingerprint: fingerprint,
+	}
+}
+
+// expectAccountDeriveSetup wires the mock expectations the new wallet
+// NewAccount path performs before invoking w.store.CreateDerivedAccount.
+// Decrypt returns a fresh copy so the wallet's post-parse zero.Bytes call
+// does not corrupt the shared stub across multiple invocations.
+func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
+	stub stubAccountDeriveFn) {
+
+	t.Helper()
+
+	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
+		Return(append([]byte(nil), stub.encryptedSeed...), nil).Once()
+	deps.addrStore.On("Decrypt", waddrmgr.CKTPrivate,
+		mock.Anything).Return(
+		append([]byte(nil), stub.plaintextMasterKey...), nil,
+	).Once()
+}
+
 // hardenedKey returns the hardened child index for the given key index.
 func hardenedKey(key uint32) uint32 {
 	return key + hdkeychain.HardenedKeyStart
@@ -374,6 +427,55 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, db.ImportedAccount, account.Origin)
 	require.Equal(t, uint32(0), account.AccountNumber)
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
+}
+
+// TestNewAccount verifies NewAccount routes through w.store.CreateDerivedAccount
+// after the buildAccountDeriveFn closure resolves the encrypted master key.
+func TestNewAccount(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+	stub := newStubAccountDeriveFn(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+
+	// Success path.
+	expectAccountDeriveSetup(t, deps, stub)
+	deps.store.On("CreateDerivedAccount", mock.Anything,
+		db.CreateDerivedAccountParams{
+			WalletID: 0,
+			Scope:    dbScope,
+			Name:     testAccountName,
+		}, mock.Anything).Return(
+		&db.AccountInfo{
+			AccountNumber: 1,
+			AccountName:   testAccountName,
+			Origin:        db.DerivedAccount,
+			KeyScope:      dbScope,
+		}, nil,
+	).Once()
+
+	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), account.AccountNumber)
+
+	// Duplicate-name path.
+	expectAccountDeriveSetup(t, deps, stub)
+	deps.store.On("CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything).Return((*db.AccountInfo)(nil),
+		waddrmgr.ManagerError{
+			ErrorCode: waddrmgr.ErrDuplicateAccount,
+		}).Once()
+
+	_, err = w.NewAccount(t.Context(), scope, testAccountName)
+	require.Error(t, err)
+	require.True(t,
+		waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
+	)
 }
 
 // TestRenameAccount verifies RenameAccount routes through
