@@ -657,6 +657,79 @@ func (s *syncer) updateSyncTip(ctx context.Context,
 	return nil
 }
 
+// putTxNotifications records relevant transaction notifications through the
+// store when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putTxNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutTxns(ctx, matches, blockMeta)
+	}
+
+	var block *db.Block
+	if blockMeta != nil {
+		var err error
+
+		block, err = storeBlockFromBlockMeta(*blockMeta)
+		if err != nil {
+			return err
+		}
+	}
+
+	transactions := make([]db.CreateTxParams, 0, len(matches))
+	for i := range matches {
+		match := matches[i]
+		credits := make(map[uint32]btcutil.Address, len(match.Entries))
+
+		for _, entry := range match.Entries {
+			index := entry.Credit.Index
+			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrInvalidParam)
+			}
+
+			pkScript := match.Rec.MsgTx.TxOut[index].PkScript
+			_, err := s.store.GetAddress(
+				ctx, db.GetAddressQuery{
+					WalletID:     s.walletID,
+					ScriptPubKey: pkScript,
+				},
+			)
+			if errors.Is(err, db.ErrAddressNotFound) {
+				continue
+			}
+
+			if err != nil {
+				return fmt.Errorf("resolve tx credit %d: %w", index,
+					err)
+			}
+
+			credits[index] = entry.Address
+		}
+
+		transactions = append(transactions, db.CreateTxParams{
+			WalletID: s.walletID,
+			Tx:       &match.Rec.MsgTx,
+			Received: match.Rec.Received,
+			Block:    block,
+			Status:   db.TxStatusPublished,
+			Credits:  credits,
+		})
+	}
+
+	err := s.store.ApplyTxBatch(
+		ctx, db.TxBatchParams{
+			WalletID:     s.walletID,
+			Transactions: transactions,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("apply tx notifications: %w", err)
+	}
+
+	return nil
+}
+
 // storeBlockFromBlockMeta converts chain notification block metadata into the
 // store block shape.
 func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
@@ -1287,7 +1360,7 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	// handled atomically via FilteredBlockConnected.
 	case chain.RelevantTx:
 		matches := s.prepareTxMatches([]*wtxmgr.TxRecord{n.TxRecord})
-		return s.DBPutTxns(ctx, matches, n.Block)
+		return s.putTxNotifications(ctx, matches, n.Block)
 
 	case chain.FilteredBlockConnected:
 		matches := s.prepareTxMatches(n.RelevantTxs)

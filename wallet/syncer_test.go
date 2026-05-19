@@ -831,6 +831,104 @@ func TestHandleChainUpdate(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// matchGetAddressByScript returns a matcher asserting a GetAddress query
+// targets the given wallet and script.
+func matchGetAddressByScript(walletID uint32, pkScript []byte) any {
+	return mock.MatchedBy(func(query db.GetAddressQuery) bool {
+		return query.WalletID == walletID &&
+			bytes.Equal(query.ScriptPubKey, pkScript)
+	})
+}
+
+// matchRelevantTxParams reports whether the single batched transaction carries
+// the expected wallet, hash, receive time, credit address, and published
+// status. Block confirmation is validated separately by the caller.
+func matchRelevantTxParams(txParams db.CreateTxParams, walletID uint32,
+	tx *wire.MsgTx, addr btcutil.Address, received time.Time) bool {
+
+	creditAddr, ok := txParams.Credits[0]
+	if !ok || creditAddr == nil || txParams.Tx == nil {
+		return false
+	}
+
+	return txParams.WalletID == walletID &&
+		txParams.Tx.TxHash() == tx.TxHash() &&
+		txParams.Received.Equal(received) &&
+		txParams.Status == db.TxStatusPublished &&
+		creditAddr.EncodeAddress() == addr.EncodeAddress()
+}
+
+// matchUnminedTxBatch returns a matcher asserting an unmined relevant
+// transaction is written as a single store batch with the expected credit and
+// no confirming block.
+func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
+	addr btcutil.Address, received time.Time) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block != nil {
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received,
+		)
+	})
+}
+
+// TestProcessRelevantTxUsesStore verifies that relevant transaction
+// notifications are routed through the store when store wiring is available.
+func TestProcessRelevantTxUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a syncer with store wiring and a transaction paying to a
+	// wallet-owned address.
+	const walletID uint32 = 7
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := btcutil.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(123, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	store.On("GetAddress", mock.Anything,
+		matchGetAddressByScript(walletID, pkScript),
+	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchUnminedTxBatch(walletID, tx, addr, received),
+	).Return(nil).Once()
+
+	// Act: Process an unconfirmed relevant transaction notification.
+	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+
+	// Assert: The notification was written through the store batch API.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
