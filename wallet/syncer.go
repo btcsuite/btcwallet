@@ -799,6 +799,115 @@ func (s *syncer) addressOwned(ctx context.Context,
 	return true, nil
 }
 
+// mergeScanHorizons records the highest discovered child index per branch scope
+// into the running horizon map.
+func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
+	found map[waddrmgr.BranchScope]uint32) {
+
+	for bs, index := range found {
+		if current, ok := horizons[bs]; !ok || index > current {
+			horizons[bs] = index
+		}
+	}
+}
+
+// scanHorizonParams flattens the merged horizon map into store scan horizon
+// params.
+func scanHorizonParams(
+	horizons map[waddrmgr.BranchScope]uint32) []db.ScanHorizon {
+
+	params := make([]db.ScanHorizon, 0, len(horizons))
+	for bs, index := range horizons {
+		params = append(params, db.ScanHorizon{
+			Scope:   db.KeyScope(bs.Scope),
+			Account: bs.Account,
+			Branch:  bs.Branch,
+			Index:   index,
+		})
+	}
+
+	return params
+}
+
+// appendScanTxParams appends store transaction params for every relevant output
+// in the scan result, attaching the resolved store block. It validates that
+// each credit index is within the transaction's output range.
+func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
+	result scanResult, block *db.Block) error {
+
+	for _, match := range result.RelevantOutputs {
+		credits := make(map[uint32]btcutil.Address, len(match.Entries))
+		for _, entry := range match.Entries {
+			index := entry.Credit.Index
+			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrInvalidParam)
+			}
+
+			credits[index] = entry.Address
+		}
+
+		params.Transactions = append(
+			params.Transactions, db.CreateTxParams{
+				WalletID: s.walletID,
+				Tx:       &match.Rec.MsgTx,
+				Received: result.meta.Time,
+				Block:    block,
+				Status:   db.TxStatusPublished,
+				Credits:  credits,
+			},
+		)
+	}
+
+	return nil
+}
+
+// storeScanBatchParams converts recovery scan results into store batch params.
+func (s *syncer) storeScanBatchParams(results []scanResult,
+	includeSyncedBlocks bool) (db.ScanBatchParams, error) {
+
+	params := db.ScanBatchParams{WalletID: s.walletID}
+	horizons := make(map[waddrmgr.BranchScope]uint32)
+
+	for _, result := range results {
+		blockNeeded := includeSyncedBlocks
+		if result.BlockProcessResult != nil &&
+			len(result.RelevantOutputs) > 0 {
+
+			blockNeeded = true
+		}
+
+		var block *db.Block
+		if blockNeeded {
+			var err error
+
+			block, err = storeBlockFromScanResult(result)
+			if err != nil {
+				return db.ScanBatchParams{}, err
+			}
+		}
+
+		if includeSyncedBlocks {
+			params.SyncedBlocks = append(params.SyncedBlocks, *block)
+		}
+
+		if result.BlockProcessResult == nil {
+			continue
+		}
+
+		mergeScanHorizons(horizons, result.FoundHorizons)
+
+		err := s.appendScanTxParams(&params, result, block)
+		if err != nil {
+			return db.ScanBatchParams{}, err
+		}
+	}
+
+	params.Horizons = scanHorizonParams(horizons)
+
+	return params, nil
+}
+
 // storeBlockFromBlockMeta converts chain notification block metadata into the
 // store block shape.
 func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
@@ -812,6 +921,17 @@ func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
 		Height:    height,
 		Timestamp: block.Time,
 	}, nil
+}
+
+// storeBlockFromScanResult converts scan result block metadata into the store
+// block shape.
+func storeBlockFromScanResult(result scanResult) (*db.Block, error) {
+	if result.meta == nil {
+		return nil, fmt.Errorf("scan result is missing block metadata: %w",
+			db.ErrInvalidParam)
+	}
+
+	return storeBlockFromBlockMeta(*result.meta)
 }
 
 // scanBatchHeadersOnly performs a lightweight scan by only fetching block
