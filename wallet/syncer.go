@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -188,6 +189,12 @@ type syncer struct {
 	// txStore is the transaction manager.
 	txStore wtxmgr.TxStore
 
+	// store is the transitional database store used by migrated runtime paths.
+	store db.Store
+
+	// walletID is the database wallet identifier used by store-backed paths.
+	walletID uint32
+
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
 
@@ -202,17 +209,34 @@ type syncer struct {
 	publisher TxPublisher
 }
 
+// syncerStoreConfig contains store-backed runtime options for the syncer.
+type syncerStoreConfig struct {
+	// store is the transitional database store used by migrated runtime paths.
+	store db.Store
+
+	// walletID is the database wallet identifier used by store-backed paths.
+	walletID uint32
+}
+
 // newSyncer creates a new syncer instance.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher) *syncer {
+	txStore wtxmgr.TxStore, publisher TxPublisher,
+	storeConfigs ...syncerStoreConfig) *syncer {
 
-	return &syncer{
+	s := &syncer{
 		cfg:         cfg,
 		addrStore:   addrStore,
 		txStore:     txStore,
 		scanReqChan: make(chan *scanReq, 1),
 		publisher:   publisher,
 	}
+
+	if len(storeConfigs) > 0 {
+		s.store = storeConfigs[0].store
+		s.walletID = storeConfigs[0].walletID
+	}
+
+	return s
 }
 
 // syncState returns the current synchronization state of the wallet.
