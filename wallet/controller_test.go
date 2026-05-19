@@ -478,8 +478,8 @@ func TestControllerVerifyBirthday_PutFail(t *testing.T) {
 		&chainhash.Hash{}, nil).Maybe()
 	deps.chain.On("GetBlockHeader", mock.Anything).Return(
 		&wire.BlockHeader{}, nil).Maybe()
-	deps.addrStore.On("SetBirthdayBlock", mock.Anything, mock.Anything,
-		true).Return(errPutMock).Once()
+	deps.store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
+		errPutMock).Once()
 
 	// Act: Attempt to verify birthday.
 	err := w.verifyBirthday(t.Context())
@@ -1381,14 +1381,12 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 		"GetBlockHeader", mock.Anything,
 	).Return(header, nil).Once()
 
-	deps.addrStore.On(
-		"SetBirthdayBlock", mock.Anything,
-		mock.MatchedBy(func(bs waddrmgr.BlockStamp) bool {
-			return bs.Height == 50
-		}), true,
-	).Return(nil).Once()
-	deps.addrStore.On(
-		"SetSyncedTo", mock.Anything, mock.Anything,
+	deps.store.On(
+		"UpdateWallet", mock.Anything,
+		mock.MatchedBy(func(p db.UpdateWalletParams) bool {
+			return p.BirthdayBlock != nil &&
+				p.BirthdayBlock.Height == 50
+		}),
 	).Return(nil).Once()
 
 	deps.addrStore.On(
