@@ -879,6 +879,33 @@ func (s *syncer) txNotificationState(ctx context.Context,
 	return status, info.Label, nil
 }
 
+// putSyncBatch records recovery scan results and synced blocks through the
+// store when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putSyncBatch(ctx context.Context,
+	results []scanResult) error {
+
+	if s.store == nil {
+		return s.DBPutSyncBatch(ctx, results)
+	}
+
+	params, err := s.storeScanBatchParams(results, true)
+	if err != nil {
+		return err
+	}
+
+	// ApplyScanBatch persists the batch's synced blocks and advances the
+	// wallet's synced tip. advanceChainSync reads the next batch's start
+	// height back through s.syncedTo, which is Store-backed here, so the
+	// loop makes forward progress regardless of whether a given backend
+	// also mirrors the tip into the legacy addrStore.
+	err = s.store.ApplyScanBatch(ctx, params)
+	if err != nil {
+		return fmt.Errorf("apply sync scan batch: %w", err)
+	}
+
+	return nil
+}
+
 // mergeScanHorizons records the highest discovered child index per branch scope
 // into the running horizon map.
 func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
@@ -1117,6 +1144,7 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 
 		meta := &wtxmgr.BlockMeta{
 			Block: wtxmgr.Block{Hash: hash, Height: height},
+			Time:  block.Header.Timestamp,
 		}
 
 		// Process the block using the recovery state. This involves:
@@ -1585,7 +1613,7 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 		return fmt.Errorf("%w: scan batch empty", ErrScanBatchEmpty)
 	}
 	// Process Batch (Update). We do this in a single DB transaction.
-	return s.DBPutSyncBatch(ctx, results)
+	return s.putSyncBatch(ctx, results)
 }
 
 // handleChainUpdate processes a notification immediately.
