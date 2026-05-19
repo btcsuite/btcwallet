@@ -154,6 +154,14 @@ var (
 	// flow (skipping inputs that don't belong to this wallet) and should
 	// not be exposed to the caller.
 	errComputeRawSig = errors.New("cannot compute raw signature")
+
+	// errTxOutputIndexOutOfRange is returned when a transaction output is
+	// missing the referenced index.
+	errTxOutputIndexOutOfRange = errors.New("tx output index out of range")
+
+	// errUtxoParentMismatch is returned when a UTXO does not match its
+	// parent transaction output.
+	errUtxoParentMismatch = errors.New("utxo parent output mismatch")
 )
 
 const (
@@ -494,9 +502,11 @@ func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked, outPoint)
 	}
 
-	// Next, fetch the transaction details from the legacy transaction store.
-	txDetail, err := w.fetchTxDetails(&outPoint.Hash)
-	if errors.Is(err, ErrTxNotFound) {
+	txDetail, err := w.store.GetTxDetail(ctx, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     outPoint.Hash,
+	})
+	if errors.Is(err, db.ErrTxNotFound) {
 		return nil, nil, fmt.Errorf("%w: %v", ErrNotMine, outPoint)
 	}
 
@@ -508,10 +518,63 @@ func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 	// Now that we've confirmed we know about the UTXO, we'll proceed to
 	// gather the rest of the information required to decorate the PSBT
 	// input.
-	tx := &txDetail.MsgTx
-	utxo := tx.TxOut[outPoint.Index]
+	tx, err := txFromDetail(*txDetail)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return tx, utxo, nil
+}
+
+// txFromDetail returns the decoded transaction for one store tx-detail record.
+func txFromDetail(detail db.TxDetailInfo) (*wire.MsgTx, error) {
+	if detail.MsgTx != nil {
+		return detail.MsgTx, nil
+	}
+
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(detail.SerializedTx))
+	if err != nil {
+		return nil, fmt.Errorf("deserialize tx %v: %w", detail.Hash, err)
+	}
+
+	return &msgTx, nil
+}
+
+// validatePsbtParentOutput returns the parent transaction output for the
+// store-backed UTXO, ensuring the tx index and value match.
+//
+// The parent transaction output is canonical for PSBT decoration: it carries
+// the full on-chain script the input must be spent against (e.g. the complete
+// bare-multisig script), which can legitimately differ from the address script
+// recorded in the UTXO row. For a wallet-owned bare-multisig/member credit the
+// store keys the row against the matched member address, so comparing
+// utxoInfo.PkScript against the parent output script would wrongly reject the
+// input. Ownership is therefore established upstream by the store UTXO lookup
+// in fetchAndValidateUtxo (the wallet owns the output because the store
+// returned it), not by script equality here. Only the value is cross-checked
+// against the on-chain output.
+func validatePsbtParentOutput(outPoint wire.OutPoint,
+	utxoInfo *db.UtxoInfo, tx *wire.MsgTx) (*wire.TxOut, error) {
+
+	if uint64(outPoint.Index) >= uint64(len(tx.TxOut)) {
+		return nil, fmt.Errorf("%w: tx %v output index %d",
+			errTxOutputIndexOutOfRange, outPoint.Hash, outPoint.Index)
+	}
+
+	utxo := tx.TxOut[outPoint.Index]
+	if utxo.Value != int64(utxoInfo.Amount) {
+		return nil, fmt.Errorf("%w: %v", errUtxoParentMismatch,
+			outPoint)
+	}
+
+	return utxo, nil
 }
 
 // findCredit determines whether a transaction's details contain a credit for a
