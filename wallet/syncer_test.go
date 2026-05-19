@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -2674,6 +2675,48 @@ func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
 	err := s.processChainUpdate(t.Context(), chain.BlockConnected(block))
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+}
+
+// TestBroadcastUnminedTxnsRoutesStore verifies rebroadcast reads active unmined
+// transactions from the runtime store and publishes the decoded transaction.
+func TestBroadcastUnminedTxnsRoutesStore(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(Config{}, nil, nil, publisher)
+	s.store = store
+	s.walletID = 66
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{66},
+	}})
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+
+	var txBytes bytes.Buffer
+
+	err := tx.Serialize(&txBytes)
+	require.NoError(t, err)
+
+	store.On("ListTxns", mock.Anything, db.ListTxnsQuery{
+		WalletID:    s.walletID,
+		UnminedOnly: true,
+	}).Return([]db.TxInfo{{
+		Hash:         tx.TxHash(),
+		Status:       db.TxStatusPublished,
+		SerializedTx: txBytes.Bytes(),
+	}}, nil).Once()
+	publisher.On("Broadcast", mock.Anything, mock.MatchedBy(
+		func(got *wire.MsgTx) bool {
+			return got.TxHash() == tx.TxHash()
+		},
+	), "").Return(nil).Once()
+
+	err = s.broadcastUnminedTxns(t.Context())
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	publisher.AssertExpectations(t)
 }
 
 // TestSyncedBlockHashesRoutesStore verifies rollback reads consult the runtime

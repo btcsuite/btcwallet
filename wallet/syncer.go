@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -571,7 +572,7 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 // broadcastUnminedTxns retrieves all unmined transactions from the wallet and
 // attempts to re-broadcast them to the network.
 func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
-	txs, err := s.DBGetUnminedTxns(ctx)
+	txs, err := s.unminedTxns(ctx)
 	if err != nil {
 		log.Errorf("Unable to retrieve unconfirmed transactions to "+
 			"resend: %v", err)
@@ -588,6 +589,46 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// unminedTxns returns transactions that are still active in the wallet's
+// unmined set.
+func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
+	if s.store == nil {
+		return s.DBGetUnminedTxns(ctx)
+	}
+
+	infos, err := s.store.ListTxns(
+		ctx, db.ListTxnsQuery{
+			WalletID:    s.walletID,
+			UnminedOnly: true,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	txs := make([]*wire.MsgTx, 0, len(infos))
+	for i := range infos {
+		info := infos[i]
+		if info.Status != db.TxStatusPending &&
+			info.Status != db.TxStatusPublished {
+
+			continue
+		}
+
+		var tx wire.MsgTx
+
+		err := tx.Deserialize(bytes.NewReader(info.SerializedTx))
+		if err != nil {
+			return nil, fmt.Errorf("deserialize unmined tx %v: %w",
+				info.Hash, err)
+		}
+
+		txs = append(txs, &tx)
+	}
+
+	return txs, nil
 }
 
 // updateSyncTip records the latest synced block for store-backed runtime paths.
