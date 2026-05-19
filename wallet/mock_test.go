@@ -621,6 +621,19 @@ func (m *mockTxStore) UnspentOutputs(
 	return args.Get(0).([]wtxmgr.Credit), args.Error(1)
 }
 
+// UnspentOutputsIncludingLocked implements the wtxmgr.TxStore interface.
+func (m *mockTxStore) UnspentOutputsIncludingLocked(
+	ns walletdb.ReadBucket) ([]wtxmgr.Credit, error) {
+
+	args := m.Called(ns)
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]wtxmgr.Credit), args.Error(1)
+}
+
 // GetUtxo implements the wtxmgr.TxStore interface.
 func (m *mockTxStore) GetUtxo(ns walletdb.ReadBucket,
 	outpoint wire.OutPoint) (*wtxmgr.Credit, error) {
