@@ -24,8 +24,6 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
 )
 
@@ -126,14 +124,18 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	// First, we'll attempt to add the tx to our wallet's DB. This will
 	// allow us to track the tx's confirmation status, and also
 	// re-broadcast it upon startup. If any of the subsequent steps fail,
-	// this tx must be removed.
-	ourAddrs, err := w.addTxToWallet(ctx, tx, label)
+	// this tx is invalidated via InvalidateUnminedTx.
+	//
+	// recorded reports whether a tx row was actually written; it gates the
+	// invalidation below so a wallet-unrelated tx (never recorded) is not
+	// invalidated, which would clobber the publish error with ErrTxNotFound.
+	ourAddrs, recorded, err := w.addTxToWallet(ctx, tx, label)
 	if err != nil {
 		return err
 	}
 
 	// Now, we'll attempt to publish the tx. On successful attempt, we
-	// return immediately. On any failures, we remove it from the tx store
+	// return immediately. On any failures, we invalidate it in the tx store
 	// to prevent subsequent attempts with stale transaction data.
 	err = w.publishTx(tx, ourAddrs)
 	if err == nil {
@@ -143,17 +145,24 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	txid := tx.TxHash()
 	log.Errorf("%v: broadcast failed: %v", txid, err)
 
-	// If the tx was rejected for any other reason, then we'll remove it
+	// If we never recorded this tx (it is wallet-unrelated), there is
+	// nothing to invalidate, so we return the original publish error as-is
+	// rather than overwriting it with cleanup context.
+	if !recorded {
+		return err
+	}
+
+	// If the tx was rejected for any other reason, then we'll invalidate it
 	// from the tx store, as otherwise, we'll attempt to continually
 	// re-broadcast it, and the UTXO state of the wallet won't be accurate.
-	removeErr := w.removeUnminedTx(tx)
+	removeErr := w.invalidateUnminedTx(ctx, tx)
 	if removeErr != nil {
-		log.Warnf("Unable to remove tx %v after broadcast failed: %v",
+		log.Warnf("Unable to invalidate tx %v after broadcast failed: %v",
 			txid, removeErr)
 
 		// Return a wrapped error to give the caller full context.
 		return fmt.Errorf("broadcast failed: %w; and failed to "+
-			"remove from wallet: %v", err, removeErr)
+			"invalidate in wallet: %v", err, removeErr)
 	}
 
 	return err
@@ -264,8 +273,13 @@ type ownedAddrInfo struct {
 // transaction. This transaction contains no business logic and only performs
 // the necessary database writes, ensuring that the exclusive database lock is
 // held for the shortest possible time.
+//
+// It returns the wallet-owned output addresses and a recorded flag reporting
+// whether a tx row was actually written to the store. The flag is required
+// because a debit-only sweep records a row yet returns zero addresses, so
+// callers cannot infer recording from the address slice alone.
 func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
-	label string) ([]btcutil.Address, error) {
+	label string) ([]btcutil.Address, bool, error) {
 
 	// Stage 1: Extract potential addresses from all transaction outputs.
 	// This is a CPU-intensive operation that is performed entirely in
@@ -276,7 +290,7 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 	// by the wallet.
 	ownedAddrs, err := w.filterOwnedAddresses(ctx, txOutAddrs)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// If the transaction has no outputs relevant to us, it may still be a
@@ -285,23 +299,25 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 	if len(ownedAddrs) == 0 {
 		spendsOurs, err := w.spendsWalletOutput(ctx, tx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
 		// Neither outputs nor inputs are wallet-relevant, so we can
-		// safely exit without recording anything.
+		// safely exit without recording anything. recorded is false so
+		// the caller does not invalidate a tx that was never written.
 		if !spendsOurs {
-			return nil, nil
+			return nil, false, nil
 		}
 
 		// The tx spends a wallet output but credits none, so record it
-		// with an empty credit set.
+		// with an empty credit set. It is now tracked, so recorded is
+		// true even though no addresses are returned.
 		err = w.recordTxAndCredits(ctx, tx, label, nil)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 
-		return nil, nil
+		return nil, true, nil
 	}
 
 	// Stage 3: Prepare a definitive "write plan". This plan is created in
@@ -338,10 +354,10 @@ func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 	// fast as possible, containing no business logic.
 	err = w.recordTxAndCredits(ctx, tx, label, creditsToWrite)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return ourAddrs, nil
+	return ourAddrs, true, nil
 }
 
 // recordTxAndCredits performs a single atomic database transaction to execute a
@@ -690,26 +706,24 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []btcutil.Address) error {
 	return rpcErr
 }
 
-// removeUnminedTx removes a tx from the unconfirmed store.
-func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
+// invalidateUnminedTx marks a tx as failed in the unconfirmed store.
+func (w *Wallet) invalidateUnminedTx(ctx context.Context,
+	tx *wire.MsgTx) error {
+
 	txHash := tx.TxHash()
 
-	dbErr := walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-		if err != nil {
-			return err
-		}
-
-		return w.txStore.RemoveUnminedTx(txmgrNs, txRec)
+	dbErr := w.store.InvalidateUnminedTx(ctx, db.InvalidateUnminedTxParams{
+		WalletID: w.id,
+		Txid:     txHash,
 	})
 	if dbErr != nil {
-		log.Warnf("Unable to remove invalid tx %v: %v", txHash, dbErr)
+		log.Warnf("Unable to invalidate invalid tx %v: %v", txHash,
+			dbErr)
+
 		return dbErr
 	}
 
-	log.Infof("Removed invalid tx: %v", txHash)
+	log.Infof("Invalidated invalid tx: %v", txHash)
 
 	// The serialized tx is for logging only, don't fail on the error.
 	var txRaw bytes.Buffer
@@ -719,12 +733,12 @@ func (w *Wallet) removeUnminedTx(tx *wire.MsgTx) error {
 	// Optionally log the tx in debug when the size is manageable.
 	const maxTxSizeForLog = 1_000_000
 	if txRaw.Len() < maxTxSizeForLog {
-		log.Debugf("Removed invalid tx: %v \n hex=%x",
+		log.Debugf("Invalidated invalid tx: %v \n hex=%x",
 			newLogClosure(func() string {
 				return spew.Sdump(tx)
 			}), txRaw.Bytes())
 	} else {
-		log.Debugf("Removed invalid tx %v due to its size "+
+		log.Debugf("Invalidated invalid tx %v due to its size "+
 			"being too large", txHash)
 	}
 
