@@ -437,11 +437,65 @@ func selectScopedManagers(mgr waddrmgr.AddrStore, filter *db.KeyScope) (
 	return []waddrmgr.AccountStore{scopedMgr}, nil
 }
 
-// RenameAccount is not yet implemented for kvdb.
-func (s *Store) RenameAccount(ctx context.Context,
-	_ db.RenameAccountParams) error {
+// RenameAccount renames an existing account within a scope.
+func (s *Store) RenameAccount(_ context.Context,
+	params db.RenameAccountParams) error {
 
-	return notImplemented(ctx, "RenameAccount")
+	err := params.Validate()
+	if err != nil {
+		return err
+	}
+
+	mgr := s.addrStore
+
+	scope := waddrmgr.KeyScope{
+		Purpose: params.Scope.Purpose,
+		Coin:    params.Scope.Coin,
+	}
+
+	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrAccountNotFound
+		}
+
+		scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+		if err != nil {
+			return translateAccountErr(err, db.ErrAccountNotFound)
+		}
+
+		acctNum, err := resolveRenameAccountNumber(
+			ns, scopedMgr, params,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = scopedMgr.RenameAccount(ns, acctNum, params.NewName)
+		if err != nil {
+			return translateAccountErr(err, db.ErrAccountNotFound)
+		}
+
+		return nil
+	})
+}
+
+// resolveRenameAccountNumber turns a RenameAccountParams into the legacy
+// account number, looking up by OldName when AccountNumber is nil.
+func resolveRenameAccountNumber(ns walletdb.ReadBucket,
+	scopedMgr waddrmgr.AccountStore,
+	params db.RenameAccountParams) (uint32, error) {
+
+	if params.AccountNumber != nil {
+		return *params.AccountNumber, nil
+	}
+
+	acctNum, err := scopedMgr.LookupAccount(ns, params.OldName)
+	if err != nil {
+		return 0, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	return acctNum, nil
 }
 
 // accountBalanceKey identifies one (scope, account) bucket within the
