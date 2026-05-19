@@ -192,8 +192,8 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	// For imported accounts the per-row master_fingerprint is the
 	// parent xpub fingerprint persisted on the watch-only row. For
 	// derived accounts waddrmgr's default-account row stores 0;
-	// Wallet.GetAccount and Wallet.assembleAccountsResult fill in
-	// the cached master fingerprint after the read.
+	// Wallet.GetAccount and Wallet.listAccountInfos fill in the
+	// cached master fingerprint after the read.
 	fingerprint := props.MasterKeyFingerprint
 
 	// Imported accounts in kvdb share waddrmgr's per-scope counter
