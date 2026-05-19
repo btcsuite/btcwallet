@@ -120,85 +120,43 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
 }
 
-// TestListAccounts tests that the ListAccounts method works as expected.
+// TestListAccounts tests that ListAccounts returns the cache-backed
+// snapshot of all accounts for the wallet.
 func TestListAccounts(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// We'll start by creating a new account under the BIP0084 scope.
-	scope := waddrmgr.KeyScopeBIP0084
-	deps.addrStore.On("FetchScopedKeyManager", scope).
-		Return(deps.accountManager, nil).Once()
+	// Seed a non-zero cached master fingerprint so the derived-account
+	// override path in listAccountInfos produces an observable value on
+	// each entry.
+	const masterFP uint32 = 0xDEADBEEF
 
-	deps.accountManager.On("NewAccount", mock.Anything, testAccountName).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
+	w.masterFingerprint = masterFP
 
-	_, err := w.NewAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, err, "unable to create new account")
+	bip84 := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
 
-	// Setup expectations for ListAccounts.
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+	}).Return([]db.AccountInfo{
+		{
+			AccountNumber:        0,
+			AccountName:          "default",
+			Origin:               db.DerivedAccount,
+			KeyScope:             bip84,
+			MasterKeyFingerprint: 0,
+		},
+	}, nil).Once()
 
-	deps.accountManager.On("Scope").Return(scope).Once()
-	deps.accountManager.On("LastAccount", mock.Anything).
-		Return(uint32(1), nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 0,
-			AccountName:   "default",
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
-		Return(false, nil).Once()
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 1,
-			AccountName:   testAccountName,
-		}, nil).Once()
-	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
-		Return(false, nil).Once()
-
-	deps.txStore.On("UnspentOutputs", mock.Anything).
-		Return([]wtxmgr.Credit(nil), nil).Once()
-
-	// Now, we'll list all accounts and check that we have the default
-	// account and the new account.
 	accounts, err := w.ListAccounts(t.Context())
-	require.NoError(t, err, "unable to list accounts")
+	require.NoError(t, err)
 
-	// We should have two accounts.
-	require.Len(t, accounts, 2, "expected two accounts")
-
-	// The first account should be the default account.
-	require.Equal(
-		t, "default", accounts[0].AccountName,
-		"expected default account",
-	)
-	require.Equal(
-		t, uint32(0), accounts[0].AccountNumber,
-		"expected default account number",
-	)
-	require.Equal(
-		t, btcutil.Amount(0), accounts[0].ConfirmedBalance,
-		"expected zero balance for default account",
-	)
-
-	// The new account should also be present.
-	require.Equal(
-		t, testAccountName, accounts[1].AccountName,
-		"expected new account",
-	)
-	require.Equal(
-		t, uint32(1), accounts[1].AccountNumber,
-		"expected new account number",
-	)
+	require.Len(t, accounts, 1)
+	require.Equal(t, "default", accounts[0].AccountName)
+	require.Equal(t, masterFP, accounts[0].MasterKeyFingerprint)
 }
 
 // TestListAccountsByScope tests that the ListAccountsByScope method works as
@@ -498,6 +456,7 @@ func TestGetAccount(t *testing.T) {
 	// legacy derived rows) so the wallet-level override is what
 	// surfaces the value to the caller.
 	const masterFP uint32 = 0xDEADBEEF
+
 	w.masterFingerprint = masterFP
 
 	scope := waddrmgr.KeyScopeBIP0084
