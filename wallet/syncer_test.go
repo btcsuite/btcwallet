@@ -1246,6 +1246,131 @@ func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// matchCandidateTxShape reports whether the batch carries exactly the one
+// expected wallet transaction confirmed in the expected block, ignoring its
+// credit candidates. Pulling the transaction-shape checks out of the matcher
+// keeps the matcher's cyclomatic complexity within bounds.
+func matchCandidateTxShape(params db.TxBatchParams, walletID uint32,
+	tx *wire.MsgTx, block *wtxmgr.BlockMeta) bool {
+
+	if params.WalletID != walletID ||
+		len(params.Transactions) != 1 ||
+		params.SyncedTo == nil {
+
+		return false
+	}
+
+	txParams := params.Transactions[0]
+
+	return txParams.Tx != nil &&
+		txParams.Tx.TxHash() == tx.TxHash() &&
+		txParams.Block != nil &&
+		matchStoreBlockFields(txParams.Block, block)
+}
+
+// matchCandidateBatch returns a matcher asserting a filtered block transaction
+// is written as one store batch whose CreditCandidates carry every output
+// address candidate and whose Credits stay unresolved for the Store to fill.
+func matchCandidateBatch(walletID uint32, tx *wire.MsgTx,
+	want map[uint32]address.Address, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if !matchCandidateTxShape(params, walletID, tx, block) {
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if len(txParams.Credits) != 0 ||
+			len(txParams.CreditCandidates) != len(want) {
+
+			return false
+		}
+
+		for index, addr := range want {
+			candidates := txParams.CreditCandidates[index]
+			if len(candidates) != 1 || candidates[0] == nil {
+				return false
+			}
+
+			if candidates[0].EncodeAddress() != addr.EncodeAddress() {
+				return false
+			}
+		}
+
+		return true
+	})
+}
+
+// TestProcessFilteredBlockPassesCreditCandidates verifies that a relevant
+// transaction carrying multiple output addresses passes all candidates to the
+// Store. The Store resolves ownership inside ApplyTxBatch so syncer-side
+// filtering cannot race account/address updates.
+func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block whose single
+	// relevant transaction pays two different output addresses.
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	firstAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	firstScript, err := txscript.PayToAddrScript(firstAddr)
+	require.NoError(t, err)
+
+	secondAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	secondScript, err := txscript.PayToAddrScript(secondAddr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: firstScript})
+	tx.AddTxOut(&wire.TxOut{Value: 2000, PkScript: secondScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0d},
+			Height: 103,
+		},
+		Time: time.Unix(789, 0).UTC(),
+	}
+
+	wantCandidates := map[uint32]address.Address{
+		0: firstAddr,
+		1: secondAddr,
+	}
+	store.On("ApplyTxBatch", mock.Anything,
+		matchCandidateBatch(walletID, tx, wantCandidates, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: All output addresses were carried as candidates and left
+	// unresolved for the Store batch.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // TestProcessFilteredBlockUsesStore verifies that filtered block notifications
 // are routed through the store as one transaction batch with a sync-tip update.
 func TestProcessFilteredBlockUsesStore(t *testing.T) {
