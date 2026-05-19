@@ -465,10 +465,10 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 //  1. UTXO Lookup: It first attempts to fetch the wallet-owned UTXO using the
 //     input's previous outpoint. If the UTXO is not found, it returns an
 //     `ErrNotMine` error.
-//  2. Transaction Lookup: It fetches the full parent transaction details needed
+//  2. Lock Status Check: After confirming ownership, it checks if the UTXO has
+//     been locked. If the UTXO is locked, it returns an `ErrUtxoLocked` error.
+//  3. Transaction Lookup: It fetches the full parent transaction details needed
 //     for SegWit v0 PSBT non-witness UTXO data.
-//  3. Lock Status Check: It checks the legacy credit lock state until PSBT
-//     lock checks are routed through the Store lease set.
 //
 // Only if all these checks pass, the function returns the full parent
 // transaction (`*wire.MsgTx`) and the specific unspent transaction output
@@ -478,7 +478,7 @@ func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 
 	outPoint := txIn.PreviousOutPoint
 
-	_, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+	utxoInfo, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
 		WalletID: w.id,
 		OutPoint: outPoint,
 	})
@@ -490,6 +490,10 @@ func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 		return nil, nil, fmt.Errorf("failed to fetch utxo: %w", err)
 	}
 
+	if utxoInfo.IsLocked {
+		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked, outPoint)
+	}
+
 	// Next, fetch the transaction details from the legacy transaction store.
 	txDetail, err := w.fetchTxDetails(&outPoint.Hash)
 	if errors.Is(err, ErrTxNotFound) {
@@ -499,15 +503,6 @@ func (w *Wallet) fetchAndValidateUtxo(ctx context.Context, txIn *wire.TxIn) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch tx details: %w",
 			err)
-	}
-
-	// Use legacy credit metadata only for the transitional locked-output check.
-	cred := findCredit(txDetail, outPoint.Index)
-
-	// Now that we've confirmed we know about the UTXO, we'll check if it
-	// is locked.
-	if cred != nil && cred.Locked {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUtxoLocked, outPoint)
 	}
 
 	// Now that we've confirmed we know about the UTXO, we'll proceed to
