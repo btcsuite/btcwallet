@@ -21,7 +21,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 var (
@@ -575,20 +574,6 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 	}
 
 	return utxo, nil
-}
-
-// findCredit determines whether a transaction's details contain a credit for a
-// specific output index.
-func findCredit(txDetail *wtxmgr.TxDetails,
-	outputIndex uint32) *wtxmgr.CreditRecord {
-
-	for i := range txDetail.Credits {
-		if txDetail.Credits[i].Index == outputIndex {
-			return &txDetail.Credits[i]
-		}
-	}
-
-	return nil
 }
 
 // FundPsbt performs coin selection and funds the PSBT.
