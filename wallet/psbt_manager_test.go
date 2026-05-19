@@ -131,12 +131,7 @@ func TestFetchAndValidateUtxoSuccess(t *testing.T) {
 	txOut := &wire.TxOut{Value: 1000}
 	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
 
-	txDetails := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{TxOut: []*wire.TxOut{txOut}},
-		},
-		Credits: []wtxmgr.CreditRecord{{Index: 0}},
-	}
+	txDetail := testStoreTxDetail(txHash, txOut)
 
 	w, mocks := createStartedWalletWithMocks(t)
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
@@ -144,13 +139,10 @@ func TestFetchAndValidateUtxoSuccess(t *testing.T) {
 		OutPoint: outPoint,
 	}).Return(utxoInfo, nil)
 
-	// Mock the transaction store to return the details for our txHash.
-	mocks.txStore.On(
-		"TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash)
-		}),
-	).Return(txDetails, nil)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	}).Return(txDetail, nil)
 
 	// Act: Call fetchAndValidateUtxo with the valid input.
 	tx, utxo, err := w.fetchAndValidateUtxo(t.Context(), txIn)
@@ -205,8 +197,8 @@ func TestFetchAndValidateUtxoUtxoStoreError(t *testing.T) {
 	require.Nil(t, utxo)
 }
 
-// TestFetchAndValidateUtxoTxNotFound verifies that missing parent transactions
-// still map to ErrNotMine while parent lookup uses the legacy path.
+// TestFetchAndValidateUtxoTxNotFound verifies that missing store parent
+// transactions map to ErrNotMine.
 func TestFetchAndValidateUtxoTxNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -221,11 +213,10 @@ func TestFetchAndValidateUtxoTxNotFound(t *testing.T) {
 		WalletID: w.id,
 		OutPoint: outPoint,
 	}).Return(utxoInfo, nil)
-	mocks.txStore.On("TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash)
-		}),
-	).Return(nil, ErrTxNotFound)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	}).Return(nil, db.ErrTxNotFound)
 
 	tx, utxo, err := w.fetchAndValidateUtxo(t.Context(), txIn)
 	require.ErrorIs(t, err, ErrNotMine)
@@ -249,11 +240,10 @@ func TestFetchAndValidateUtxoTxStoreError(t *testing.T) {
 		WalletID: w.id,
 		OutPoint: outPoint,
 	}).Return(utxoInfo, nil)
-	mocks.txStore.On("TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash)
-		}),
-	).Return(nil, errDb)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	}).Return(nil, errDb)
 
 	tx, utxo, err := w.fetchAndValidateUtxo(t.Context(), txIn)
 	require.ErrorIs(t, err, errDb)
@@ -283,6 +273,93 @@ func TestFetchAndValidateUtxoLocked(t *testing.T) {
 	require.ErrorIs(t, err, ErrUtxoLocked)
 	require.Nil(t, tx)
 	require.Nil(t, utxo)
+}
+
+// TestValidatePsbtParentOutputSuccess verifies that a matching store UTXO row
+// returns the corresponding parent transaction output.
+func TestValidatePsbtParentOutputSuccess(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 0}
+	txOut := &wire.TxOut{Value: 1000, PkScript: []byte{0x51}}
+	tx := &wire.MsgTx{TxOut: []*wire.TxOut{txOut}}
+	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	require.NoError(t, err)
+	require.Equal(t, txOut, utxo)
+}
+
+// TestValidatePsbtParentOutputIndexOutOfRange verifies that a missing parent
+// output is rejected before indexing the transaction output slice.
+func TestValidatePsbtParentOutputIndexOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{3}, Index: 1}
+	txOut := &wire.TxOut{Value: 1000, PkScript: []byte{0x51}}
+	tx := &wire.MsgTx{TxOut: []*wire.TxOut{txOut}}
+	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	require.ErrorIs(t, err, errTxOutputIndexOutOfRange)
+	require.Nil(t, utxo)
+}
+
+// TestValidatePsbtParentOutputMismatch verifies that a store UTXO row whose
+// value disagrees with the parent transaction output is rejected.
+func TestValidatePsbtParentOutputMismatch(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{4}, Index: 0}
+	txOut := &wire.TxOut{Value: 1000, PkScript: []byte{0x51}}
+	tx := &wire.MsgTx{TxOut: []*wire.TxOut{txOut}}
+	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
+	utxoInfo.Amount--
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	require.ErrorIs(t, err, errUtxoParentMismatch)
+	require.Nil(t, utxo)
+}
+
+// TestValidatePsbtParentOutputMemberOwnedBareMultisig verifies that a
+// wallet-owned bare-multisig (member-owned) credit is decorated against the
+// parent transaction output even though the store UTXO row records the matched
+// member address script rather than the full multisig script. The value still
+// matches, so the parent output (carrying the canonical on-chain script) must
+// be returned instead of being rejected as a parent mismatch.
+func TestValidatePsbtParentOutputMemberOwnedBareMultisig(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{5}, Index: 0}
+
+	// The parent transaction output carries the full bare-multisig script
+	// (1-of-1 here: OP_1 <33-byte pubkey> OP_1 OP_CHECKMULTISIG).
+	multisigScript := append([]byte{
+		txscript.OP_1, txscript.OP_DATA_33,
+	}, bytes.Repeat([]byte{0x02}, 33)...)
+	multisigScript = append(
+		multisigScript, txscript.OP_1, txscript.OP_CHECKMULTISIG,
+	)
+	txOut := &wire.TxOut{Value: 1000, PkScript: multisigScript}
+	tx := &wire.MsgTx{TxOut: []*wire.TxOut{txOut}}
+
+	// The store keys the UTXO row against the matched member address
+	// script (a P2PKH script here), which differs from the parent output
+	// script above.
+	memberScript := append([]byte{
+		txscript.OP_DUP, txscript.OP_HASH160, txscript.OP_DATA_20,
+	}, bytes.Repeat([]byte{0x03}, 20)...)
+	memberScript = append(
+		memberScript, txscript.OP_EQUALVERIFY, txscript.OP_CHECKSIG,
+	)
+	utxoInfo := testStoreUtxoInfo(
+		outPoint, &wire.TxOut{Value: 1000, PkScript: memberScript},
+	)
+
+	utxo, err := validatePsbtParentOutput(outPoint, utxoInfo, tx)
+	require.NoError(t, err)
+	require.Equal(t, txOut, utxo)
+	require.Equal(t, multisigScript, utxo.PkScript)
 }
 
 // TestDecorateInputSegWitV0 tests that decorateInput correctly populates
@@ -657,86 +734,57 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	txHash0 := chainhash.Hash{0}
 	txHash1 := chainhash.Hash{1}
 	txHash2 := chainhash.Hash{2}
+	outPoint0 := wire.OutPoint{Hash: txHash0, Index: 0}
+	outPoint1 := wire.OutPoint{Hash: txHash1, Index: 0}
+	outPoint2 := wire.OutPoint{Hash: txHash2, Index: 0}
 
 	unsignedTx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{
-			{PreviousOutPoint: wire.OutPoint{
-				Hash: txHash0, Index: 0,
-			}},
-			{PreviousOutPoint: wire.OutPoint{
-				Hash: txHash1, Index: 0,
-			}},
-			{PreviousOutPoint: wire.OutPoint{
-				Hash: txHash2, Index: 0,
-			}},
+			{PreviousOutPoint: outPoint0},
+			{PreviousOutPoint: outPoint1},
+			{PreviousOutPoint: outPoint2},
 		},
 	}
 
 	packet, err := psbt.NewFromUnsignedTx(unsignedTx)
 	require.NoError(t, err)
 
-	// Arrange: Setup TxDetails for known inputs.
-	txDetails0 := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{
-				TxOut: []*wire.TxOut{{
-					Value: 1000, PkScript: p2wkhScript,
-				}},
-			},
-		},
-		Credits: []wtxmgr.CreditRecord{{Index: 0}},
-	}
-	txDetails2 := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{
-				TxOut: []*wire.TxOut{{
-					Value: 2000, PkScript: p2wkhScript,
-				}},
-			},
-		},
-		Credits: []wtxmgr.CreditRecord{{Index: 0}},
-	}
+	// Arrange: Setup parent transactions for known inputs.
+	txOut0 := &wire.TxOut{Value: 1000, PkScript: p2wkhScript}
+	txOut2 := &wire.TxOut{Value: 2000, PkScript: p2wkhScript}
+	txDetail0 := testStoreTxDetail(txHash0, txOut0)
+	txDetail2 := testStoreTxDetail(txHash2, txOut2)
+	utxoInfo0 := testStoreUtxoInfo(outPoint0, txOut0)
+	utxoInfo2 := testStoreUtxoInfo(outPoint2, txOut2)
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock store UTXO lookups for all inputs.
-	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash0, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash0, Index: 0}}, nil)
-	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash1, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash1, Index: 0}}, nil)
-	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
-		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash2, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash2, Index: 0}}, nil)
-
-	// Arrange: Mock TxDetails lookups.
+	// Arrange: Mock store lookups.
 	// Input 0 -> Found
-	mocks.txStore.On(
-		"TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash0)
-		}),
-	).Return(txDetails0, nil)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint0,
+	}).Return(utxoInfo0, nil)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash0,
+	}).Return(txDetail0, nil)
 
 	// Input 1 -> Not Found
-	mocks.txStore.On(
-		"TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash1)
-		}),
-	).Return(nil, ErrTxNotFound)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint1,
+	}).Return(nil, db.ErrUtxoNotFound)
 
 	// Input 2 -> Found
-	mocks.txStore.On(
-		"TxDetails", mock.Anything,
-		mock.MatchedBy(func(h *chainhash.Hash) bool {
-			return h.IsEqual(&txHash2)
-		}),
-	).Return(txDetails2, nil)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint2,
+	}).Return(utxoInfo2, nil)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash2,
+	}).Return(txDetail2, nil)
 
 	// Arrange: Mock Address lookup (common for both known inputs).
 	expectSignerDerivedAddressInfo(
@@ -771,12 +819,10 @@ func TestDecorateInputsErrUnknownRequired(t *testing.T) {
 	t.Parallel()
 
 	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
 	unsignedTx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{{
-			PreviousOutPoint: wire.OutPoint{
-				Hash:  txHash,
-				Index: 0,
-			},
+			PreviousOutPoint: outPoint,
 		}},
 	}
 	packet, err := psbt.NewFromUnsignedTx(unsignedTx)
@@ -784,15 +830,11 @@ func TestDecorateInputsErrUnknownRequired(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
+	// Arrange: Mock the UTXO lookup to return ErrUtxoNotFound.
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-	// Arrange: Mock TxDetails to return ErrTxNotFound.
-	mocks.txStore.On(
-		"TxDetails", mock.Anything, mock.Anything,
-	).Return(nil, ErrTxNotFound)
+		OutPoint: outPoint,
+	}).Return(nil, db.ErrUtxoNotFound)
 
 	// Act: Call DecorateInputs with skipUnknown=false.
 	_, err = w.DecorateInputs(t.Context(), packet, false)
@@ -807,12 +849,10 @@ func TestDecorateInputsErrFetchFailed(t *testing.T) {
 	t.Parallel()
 
 	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
 	unsignedTx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{{
-			PreviousOutPoint: wire.OutPoint{
-				Hash:  txHash,
-				Index: 0,
-			},
+			PreviousOutPoint: outPoint,
 		}},
 	}
 	packet, err := psbt.NewFromUnsignedTx(unsignedTx)
@@ -820,15 +860,11 @@ func TestDecorateInputsErrFetchFailed(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
+	// Arrange: Mock the UTXO lookup to return a database error.
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-	// Arrange: Mock TxDetails to return a database error.
-	mocks.txStore.On(
-		"TxDetails", mock.Anything, mock.Anything,
-	).Return(nil, errDb)
+		OutPoint: outPoint,
+	}).Return(nil, errDb)
 
 	// Act: Call DecorateInputs (skipUnknown irrelevant for other errors).
 	_, err = w.DecorateInputs(t.Context(), packet, true)
@@ -856,39 +892,30 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 	require.NoError(t, err)
 
 	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
 	unsignedTx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{{
-			PreviousOutPoint: wire.OutPoint{
-				Hash:  txHash,
-				Index: 0,
-			},
+			PreviousOutPoint: outPoint,
 		}},
 	}
 	packet, err := psbt.NewFromUnsignedTx(unsignedTx)
 	require.NoError(t, err)
 
-	txDetails := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{
-				TxOut: []*wire.TxOut{{
-					Value: 1000, PkScript: p2wkhScript,
-				}},
-			},
-		},
-		Credits: []wtxmgr.CreditRecord{{Index: 0}},
-	}
+	txOut := &wire.TxOut{Value: 1000, PkScript: p2wkhScript}
+	txDetail := testStoreTxDetail(txHash, txOut)
+	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
 
 	w, mocks := createStartedWalletWithMocks(t)
 
+	// Arrange: Mock store UTXO and parent transaction lookups.
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-	// Arrange: Mock TxDetails success.
-	mocks.txStore.On(
-		"TxDetails", mock.Anything, mock.Anything,
-	).Return(txDetails, nil)
+		OutPoint: outPoint,
+	}).Return(utxoInfo, nil)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	}).Return(txDetail, nil)
 
 	// Arrange: Mock Store.GetAddress to fail (causing decorateInput to fail).
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
@@ -1382,13 +1409,11 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 	require.NoError(t, err)
 
 	txHash := chainhash.Hash{1}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
 	authoredTx := &txauthor.AuthoredTx{
 		Tx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  txHash,
-					Index: 0,
-				},
+				PreviousOutPoint: outPoint,
 			}},
 			TxOut: []*wire.TxOut{{
 				Value:    500,
@@ -1403,15 +1428,12 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		w, mocks := createStartedWalletWithMocks(t)
 		packet := &psbt.Packet{}
 
+		// Mock store UTXO failure (DecorateInputs ->
+		// fetchAndValidateUtxo).
 		mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 			WalletID: w.id,
-			OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-		}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-		// Mock TxDetails failure (DecorateInputs ->
-		// fetchAndValidateUtxo)
-		mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
-			Return(nil, errDb)
+			OutPoint: outPoint,
+		}).Return(nil, errDb)
 
 		_, _, err := w.populatePsbtPacket(
 			t.Context(), packet, authoredTx,
@@ -1424,25 +1446,18 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		w, mocks := createStartedWalletWithMocks(t)
 		packet := &psbt.Packet{}
 
+		// Mock store UTXO and parent transaction lookups.
+		txOut := &wire.TxOut{Value: 1000, PkScript: scriptIn}
+		txDetail := testStoreTxDetail(txHash, txOut)
+		utxoInfo := testStoreUtxoInfo(outPoint, txOut)
 		mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 			WalletID: w.id,
-			OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-		}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-		// Mock TxDetails success (DecorateInputs)
-		txDetails := &wtxmgr.TxDetails{
-			TxRecord: wtxmgr.TxRecord{
-				MsgTx: wire.MsgTx{
-					TxOut: []*wire.TxOut{{
-						Value:    1000,
-						PkScript: scriptIn,
-					}},
-				},
-			},
-			Credits: []wtxmgr.CreditRecord{{Index: 0}},
-		}
-		mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
-			Return(txDetails, nil)
+			OutPoint: outPoint,
+		}).Return(utxoInfo, nil)
+		mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+			WalletID: w.id,
+			Txid:     txHash,
+		}).Return(txDetail, nil)
 
 		// Mock Address lookup for Input.
 		expectSignerDerivedAddressInfo(
@@ -1486,6 +1501,7 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	// Output 0: Change (Value 1001)
 	// Output 1: Payment (Value 1000)
 	txHash := chainhash.Hash{}
+	outPoint := wire.OutPoint{Hash: txHash, Index: 0}
 	changeOut := &wire.TxOut{
 		Value:    1001,
 		PkScript: p2wkhScript,
@@ -1498,10 +1514,7 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	authoredTx := &txauthor.AuthoredTx{
 		Tx: &wire.MsgTx{
 			TxIn: []*wire.TxIn{{
-				PreviousOutPoint: wire.OutPoint{
-					Hash:  txHash,
-					Index: 0,
-				},
+				PreviousOutPoint: outPoint,
 			}},
 			TxOut: []*wire.TxOut{changeOut, paymentOut},
 		},
@@ -1513,24 +1526,18 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
+	// Arrange: Mock store lookups for input decoration.
+	txOut := &wire.TxOut{Value: 1000, PkScript: p2wkhScript}
+	txDetail := testStoreTxDetail(txHash, txOut)
+	utxoInfo := testStoreUtxoInfo(outPoint, txOut)
 	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
 		WalletID: w.id,
-		OutPoint: wire.OutPoint{Hash: txHash, Index: 0},
-	}).Return(&db.UtxoInfo{OutPoint: wire.OutPoint{Hash: txHash, Index: 0}}, nil)
-
-	// Arrange: Mock TxDetails for input decoration.
-	txDetails := &wtxmgr.TxDetails{
-		TxRecord: wtxmgr.TxRecord{
-			MsgTx: wire.MsgTx{
-				TxOut: []*wire.TxOut{{
-					Value: 1000, PkScript: p2wkhScript,
-				}},
-			},
-		},
-		Credits: []wtxmgr.CreditRecord{{Index: 0}},
-	}
-	mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
-		Return(txDetails, nil)
+		OutPoint: outPoint,
+	}).Return(utxoInfo, nil)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	}).Return(txDetail, nil)
 
 	// Arrange: Mock Address lookup (used for both input decoration and
 	// change output info).
