@@ -524,6 +524,47 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	return nil
 }
 
+// updateSyncTip records the latest synced block for store-backed runtime paths.
+func (s *syncer) updateSyncTip(ctx context.Context,
+	block wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutSyncTip(ctx, block)
+	}
+
+	storeBlock, err := storeBlockFromBlockMeta(block)
+	if err != nil {
+		return err
+	}
+
+	err = s.store.UpdateWallet(
+		ctx, db.UpdateWalletParams{
+			WalletID: s.walletID,
+			SyncedTo: storeBlock,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update sync tip: %w", err)
+	}
+
+	return nil
+}
+
+// storeBlockFromBlockMeta converts chain notification block metadata into the
+// store block shape.
+func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
+	height, err := db.Int64ToUint32(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("block height %d: %w", block.Height, err)
+	}
+
+	return &db.Block{
+		Hash:      block.Hash,
+		Height:    height,
+		Timestamp: block.Time,
+	}, nil
+}
+
 // scanBatchHeadersOnly performs a lightweight scan by only fetching block
 // headers. This is used when the wallet has no addresses or outpoints to
 // watch, allowing it to fast-forward its sync state.
@@ -1126,7 +1167,7 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	switch n := update.(type) {
 	case chain.BlockConnected:
-		return s.DBPutSyncTip(ctx, wtxmgr.BlockMeta(n))
+		return s.updateSyncTip(ctx, wtxmgr.BlockMeta(n))
 
 	// A block was disconnected. We use checkRollback to safely verify our
 	// chain state against the backend and rewind if necessary. This
