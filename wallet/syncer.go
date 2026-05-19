@@ -906,6 +906,28 @@ func (s *syncer) putSyncBatch(ctx context.Context,
 	return nil
 }
 
+// putTargetedBatch records targeted recovery scan results through the store
+// when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putTargetedBatch(ctx context.Context,
+	results []scanResult) error {
+
+	if s.store == nil {
+		return s.DBPutTargetedBatch(ctx, results)
+	}
+
+	params, err := s.storeScanBatchParams(results, false)
+	if err != nil {
+		return err
+	}
+
+	err = s.store.ApplyScanBatch(ctx, params)
+	if err != nil {
+		return fmt.Errorf("apply targeted scan batch: %w", err)
+	}
+
+	return nil
+}
+
 // mergeScanHorizons records the highest discovered child index per branch scope
 // into the running horizon map.
 func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
@@ -1834,7 +1856,7 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 		}
 
 		// Process results (update DB).
-		err = s.DBPutTargetedBatch(ctx, results)
+		err = s.putTargetedBatch(ctx, results)
 		if err != nil {
 			return err
 		}
