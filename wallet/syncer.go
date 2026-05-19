@@ -349,7 +349,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 		startHeight := max(0, endHeight-batchSize+1)
 
 		// Fetch Local Batch (from wallet's database).
-		localHashes, err = s.DBGetSyncedBlocks(
+		localHashes, err = s.syncedBlockHashes(
 			ctx, startHeight, endHeight,
 		)
 		if err != nil {
@@ -412,6 +412,69 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// syncedBlockHashes returns the wallet's synced block hashes for the inclusive
+// height range.
+func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
+	endHeight int32) ([]*chainhash.Hash, error) {
+
+	if s.store == nil {
+		return s.DBGetSyncedBlocks(ctx, startHeight, endHeight)
+	}
+
+	start, err := db.Int64ToUint32(int64(startHeight))
+	if err != nil {
+		return nil, fmt.Errorf("start height %d: %w", startHeight, err)
+	}
+
+	end, err := db.Int64ToUint32(int64(endHeight))
+	if err != nil {
+		return nil, fmt.Errorf("end height %d: %w", endHeight, err)
+	}
+
+	blocks, err := s.store.ListSyncedBlocks(
+		ctx, db.ListSyncedBlocksQuery{
+			StartHeight: start,
+			EndHeight:   end,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list synced blocks: %w", err)
+	}
+
+	hashes := make([]*chainhash.Hash, len(blocks))
+	for i := range blocks {
+		hashes[i] = &blocks[i].Hash
+	}
+
+	return hashes, nil
+}
+
+// syncedTo returns the wallet's current sync tip from the active runtime
+// backend.
+func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
+	if s.store == nil {
+		return s.addrStore.SyncedTo(), nil
+	}
+
+	walletInfo, err := s.store.GetWallet(ctx, s.cfg.Name)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("get wallet sync tip: %w",
+			err)
+	}
+
+	if walletInfo.SyncedTo == nil {
+		return waddrmgr.BlockStamp{}, nil
+	}
+
+	syncedTo, err := db.BlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("decode wallet sync tip: %w",
+			err)
+	}
+
+	return syncedTo, nil
 }
 
 // findForkPoint compares local and remote block hashes to find the last
