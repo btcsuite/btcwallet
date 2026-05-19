@@ -2,8 +2,11 @@ package kvdb
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -12,12 +15,171 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// CreateDerivedAccount is not yet implemented for kvdb.
-func (s *Store) CreateDerivedAccount(ctx context.Context,
-	_ db.CreateDerivedAccountParams,
-	_ db.AccountDerivationFunc) (*db.AccountInfo, error) {
+var (
+	// errScopedMgrUninitialized is returned by the
+	// CreateDerivedAccount ops adapter when an EnsureScope step has
+	// not yet cached the scoped manager.
+	errScopedMgrUninitialized = errors.New(
+		"kvdb: scoped manager not initialized",
+	)
+)
 
-	return nil, notImplemented(ctx, "CreateDerivedAccount")
+// CreateDerivedAccount runs the shared CreateDerivedAccountWithOps workflow
+// on top of waddrmgr's bucket layout via the createDerivedAccountOps
+// adapter.
+func (s *Store) CreateDerivedAccount(ctx context.Context,
+	params db.CreateDerivedAccountParams,
+	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
+
+	mgr := s.addrStore
+
+	var info *db.AccountInfo
+
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrAccountNotFound
+		}
+
+		ops := &createDerivedAccountOps{mgr: mgr, ns: ns}
+
+		built, err := db.CreateDerivedAccountWithOps(
+			ctx, params, ops, deriveFn,
+		)
+		if err != nil {
+			return err
+		}
+
+		info = built
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// createDerivedAccountOps adapts the shared workflow to waddrmgr. The
+// same walletdb tx (via ns) covers every step so allocation and
+// persistence roll back together on failure.
+type createDerivedAccountOps struct {
+	mgr       waddrmgr.AddrStore
+	ns        walletdb.ReadWriteBucket
+	scope     waddrmgr.KeyScope
+	scopedMgr waddrmgr.AccountStore
+}
+
+// WalletWatchOnly implements db.CreateDerivedAccountOps.
+func (o *createDerivedAccountOps) WalletWatchOnly(
+	_ context.Context, _ uint32) (bool, error) {
+
+	return o.mgr.WatchOnly(), nil
+}
+
+// EnsureScope implements db.CreateDerivedAccountOps. waddrmgr scopes are
+// pre-registered; the call only fetches and caches the scoped manager.
+func (o *createDerivedAccountOps) EnsureScope(_ context.Context,
+	_ uint32, scope db.KeyScope) (int64, error) {
+
+	waddrScope := waddrmgr.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+
+	scopedMgr, err := o.mgr.FetchScopedKeyManager(waddrScope)
+	if err != nil {
+		return 0, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	o.scope = waddrScope
+	o.scopedMgr = scopedMgr
+
+	return 0, nil
+}
+
+// AllocateAccountNumber implements db.CreateDerivedAccountOps.
+func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
+	_ int64) (int64, error) {
+
+	if o.scopedMgr == nil {
+		return 0, errScopedMgrUninitialized
+	}
+
+	account, err := o.scopedMgr.AllocateDerivedAccountNumber(o.ns)
+	if err != nil {
+		return 0, fmt.Errorf("allocate account number: %w", err)
+	}
+
+	return int64(account), nil
+}
+
+// CreateDerivedAccount implements db.CreateDerivedAccountOps. The plaintext
+// public key is encrypted via waddrmgr cryptoKeyPub inside
+// PutDerivedAccountWithKeys.
+func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
+	_ int64, accountNumber int64, name string,
+	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
+
+	if o.scopedMgr == nil {
+		return db.CreateDerivedAccountRow{}, errScopedMgrUninitialized
+	}
+
+	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
+	err := o.scopedMgr.PutDerivedAccountWithKeys(
+		o.ns, uint32(accountNumber), name,
+		derived.PublicKey, derived.EncryptedPrivateKey,
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"put derived account: %w", err,
+		)
+	}
+
+	// Persist the creation timestamp into the kvdb-owned side
+	// bucket. Returning the same value to the caller keeps the
+	// create return and the next read in sync.
+	now := time.Now().UTC()
+	scope := o.scopedMgr.Scope()
+
+	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
+	err = putAccountCreatedAt(
+		o.ns, scope, uint32(accountNumber), now,
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"persist created-at: %w", err,
+		)
+	}
+
+	// Persist the master fingerprint into a parallel kvdb-owned
+	// side bucket. waddrmgr's default-account row has no
+	// fingerprint column, so without this the derived round-trip
+	// would read back 0 from props on every subsequent
+	// GetAccount/ListAccount; the wallet layer would then have to
+	// fill it in via the legacy override. New rows written through
+	// this path round-trip the value natively; legacy rows
+	// (created before this side bucket existed) still rely on the
+	// wallet-layer override as the canonical compatibility fallback.
+	//nolint:gosec // accountNumber is bounded by MaxAccountNumber.
+	err = putAccountMasterFingerprint(
+		o.ns, scope, uint32(accountNumber),
+		derived.MasterKeyFingerprint,
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"persist master fingerprint: %w", err,
+		)
+	}
+
+	return db.CreateDerivedAccountRow{
+		AccountNumber: sql.NullInt64{
+			Int64: accountNumber,
+			Valid: true,
+		},
+		CreatedAt: now,
+	}, nil
 }
 
 // CreateImportedAccount is not yet implemented for kvdb.
@@ -191,10 +353,21 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 
 	// For imported accounts the per-row master_fingerprint is the
 	// parent xpub fingerprint persisted on the watch-only row. For
-	// derived accounts waddrmgr's default-account row stores 0;
-	// Wallet.GetAccount and Wallet.listAccountInfos fill in the
-	// cached master fingerprint after the read.
+	// derived accounts waddrmgr's default-account row has no
+	// fingerprint column; the kvdb side bucket
+	// (accountMasterFingerprintBucketKey) holds it for new rows
+	// written through this adapter. Legacy derived rows have no
+	// side-bucket entry and props.MasterKeyFingerprint is 0; the
+	// wallet-layer override fills in the cached value at the public
+	// boundary for the legacy case.
 	fingerprint := props.MasterKeyFingerprint
+	if persisted, ok, fpErr := getAccountMasterFingerprint(
+		ns, scope, props.AccountNumber,
+	); fpErr != nil {
+		return nil, fmt.Errorf("read master fingerprint: %w", fpErr)
+	} else if ok {
+		fingerprint = persisted
+	}
 
 	// Imported accounts in kvdb share waddrmgr's per-scope counter
 	// internally, but the AccountInfo contract masks their
