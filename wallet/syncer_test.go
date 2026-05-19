@@ -2700,6 +2700,65 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestRewindToBlockRoutesStore verifies the store rewind path issues a single
+// atomic RollbackToBlock for the rollback boundary, which rewinds the wallet
+// sync tip and rolls transaction state back together, rather than two
+// independent sync-tip and rollback writes.
+func TestRewindToBlockRoutesStore(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil)
+	s.store = store
+	s.walletID = 99
+
+	fork := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{99},
+		Height:    100,
+		Timestamp: time.Unix(1710003900, 0),
+	}
+
+	store.On(
+		"RollbackToBlock", mock.Anything, uint32(101),
+	).Return(nil).Once()
+
+	err := s.rewindToBlock(t.Context(), fork)
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestRewindToBlockFallsBackToLegacy verifies that, when no runtime store is
+// configured, rewindToBlock still routes through the legacy DBPutRewind path
+// (SetSyncedTo + wtxmgr Rollback) rather than the store.
+func TestRewindToBlockFallsBackToLegacy(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	require.Nil(t, s.store)
+
+	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+
+	// DBPutRewind snapshots the live synced tip before the rollback so it
+	// can restore it on failure, so SyncedTo is consulted first. The
+	// rollback here succeeds, so the snapshot is never restored; a valid
+	// pre-rewind tip just satisfies the read.
+	preRewindTip := waddrmgr.BlockStamp{
+		Height: 200, Hash: chainhash.Hash{0x02},
+	}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
+	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
+	mocks.txStore.On("Rollback",
+		mock.Anything, int32(101),
+	).Return(nil).Once()
+
+	err := s.rewindToBlock(t.Context(), bs)
+	require.NoError(t, err)
+
+	mocks.addrStore.AssertExpectations(t)
+	mocks.txStore.AssertExpectations(t)
+}
+
 // TestHandleChainUpdate_SpecialNotifs verifies RescanProgress and
 // RescanFinished.
 func TestHandleChainUpdate_SpecialNotifs(t *testing.T) {

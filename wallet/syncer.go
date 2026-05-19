@@ -399,7 +399,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 			}
 
 			// Perform the rollback.
-			return s.DBPutRewind(ctx, waddrmgr.BlockStamp{
+			return s.rewindToBlock(ctx, waddrmgr.BlockStamp{
 				Height:    forkHeight,
 				Hash:      *forkHash,
 				Timestamp: header.Timestamp,
@@ -409,6 +409,35 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 		// Case C: No match in this batch. The fork point is deeper.
 		// Move syncedHeight back and continue loop.
 		syncedHeight = startHeight - 1
+	}
+
+	return nil
+}
+
+// rewindToBlock rewinds wallet sync and transaction state to the given fork
+// point.
+func (s *syncer) rewindToBlock(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	if s.store == nil {
+		return s.DBPutRewind(ctx, block)
+	}
+
+	rollbackBoundary := int64(block.Height) + 1
+
+	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
+	if err != nil {
+		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
+	}
+
+	// Roll transaction state back and rewind the wallet sync tip to the same
+	// fork point in one atomic store call so a failure cannot leave the sync
+	// tip rewound while transaction state still references the abandoned
+	// chain. RollbackToBlock derives the new sync tip from the stored
+	// fork-point block, so the caller only supplies the rollback boundary.
+	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	if err != nil {
+		return fmt.Errorf("rollback to block: %w", err)
 	}
 
 	return nil
@@ -1329,7 +1358,7 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 		current.Height, req.startBlock.Height)
 
 	// Rewind the database status.
-	err := s.DBPutRewind(ctx, req.startBlock)
+	err := s.rewindToBlock(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
 
