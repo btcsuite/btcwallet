@@ -1105,6 +1105,18 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 	return s.fetchCredits(ns, false, false, true)
 }
 
+// UnspentOutputsIncludingLocked returns all unspent received transaction
+// outputs, including outputs currently held by an active output lease.
+// Callers that report a wallet balance to external consumers should use
+// this entrypoint so the balance reflects the wallet's total UTXO value
+// independent of leasing state; spendable-only walks should keep using
+// UnspentOutputs.
+func (s *Store) UnspentOutputsIncludingLocked(
+	ns walletdb.ReadBucket) ([]Credit, error) {
+
+	return s.fetchCredits(ns, true, false, true)
+}
+
 // Balance returns the spendable wallet balance (total value of all unspent
 // transaction outputs) given a minimum of minConf confirmations, calculated
 // at a current chain height of curHeight.  Coinbase outputs are only included
