@@ -129,6 +129,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		addrStore:   mockAddrStore,
 		store:       mockStore,
 		txStore:     mockTxStore,
+		keyVault:    mockAddrStore,
 		sync:        mockSyncer,
 		state:       newWalletState(mockSyncer),
 		lifetimeCtx: ctx,
@@ -144,6 +145,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
+	w.cache = newStoreRuntimeCache(mockStore)
 
 	// Stop the timer immediately to avoid leaks.
 	w.lockTimer.Stop()
