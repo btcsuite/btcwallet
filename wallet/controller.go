@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
 const (
@@ -567,24 +568,23 @@ func (w *Wallet) mainLoop() {
 //     wallet's sync tip to this point to ensure a clean rescan range.
 //  6. Update the memory cache.
 func (w *Wallet) verifyBirthday(ctx context.Context) error {
-	// We'll start by fetching our wallet's birthday block.
-	birthdayBlock, verified, err := w.DBGetBirthdayBlock(ctx)
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
 	if err != nil {
-		var mgrErr waddrmgr.ManagerError
-		if !errors.As(err, &mgrErr) ||
-			mgrErr.ErrorCode != waddrmgr.ErrBirthdayBlockNotSet {
+		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
-			log.Errorf("Unable to sanity check wallet birthday "+
-				"block: %v", err)
-
-			return err
-		}
-		// If not set, we proceed to locate it.
+		return fmt.Errorf("get wallet birthday: %w", err)
 	}
 
 	// If the birthday block has already been verified, we initialize the
 	// cache and exit our sanity check to avoid redundant lookups.
-	if verified {
+	if walletInfo.BirthdayBlock != nil {
+		birthdayBlock, err := db.BlockStampFromBlock(
+			walletInfo.BirthdayBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("decode birthday block: %w", err)
+		}
+
 		log.Infof("Birthday block verified: height=%d, hash=%v",
 			birthdayBlock.Height, birthdayBlock.Hash)
 		w.birthdayBlock = birthdayBlock
@@ -593,14 +593,14 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 	}
 	// Otherwise, we'll attempt to locate a better one now that we have
 	// access to the chain.
-	timestamp := w.addrStore.Birthday()
+	timestamp := walletInfo.Birthday
 
 	newBirthdayBlock, err := locateBirthdayBlock(w.cfg.Chain, timestamp)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("locate birthday block: %w", err)
 	}
 
 	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
