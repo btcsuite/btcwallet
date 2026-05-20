@@ -1476,6 +1476,13 @@ func TestListAddresses(t *testing.T) {
 					require.Equal(t, uint32(0), addr.Branch)
 					require.Equal(t, db.DerivedAccount, addr.Origin)
 					require.False(t, addr.IsWatchOnly)
+					require.Equal(t, uint32(0), addr.AccountNumber)
+					require.Equal(t, "test-account", addr.AccountName)
+					require.Equal(t, db.KeyScopeBIP0044, addr.KeyScope)
+					require.Equal(
+						t, uint32(0xC0DEC0DE),
+						addr.MasterKeyFingerprint,
+					)
 				}
 
 				require.False(t, addrs[0].IsWatchOnly)
