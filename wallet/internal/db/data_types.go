@@ -661,6 +661,11 @@ type AddressInfo struct {
 	// addresses.
 	PubKey []byte
 
+	// HasScript indicates whether the address has encrypted script material.
+	// This is needed for address families whose output type alone is
+	// ambiguous, such as P2TR key-path versus P2TR script-path imports.
+	HasScript bool
+
 	// IsWatchOnly indicates whether the address belongs to a watch-only
 	// wallet or does not have private keys.
 	IsWatchOnly bool
