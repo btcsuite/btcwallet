@@ -11,6 +11,7 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/mock"
@@ -197,9 +198,14 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 	w, deps := createTestWalletWithMocks(t)
 	w.id = walletID
 
-	// Mock the birthday block to be present.
-	deps.addrStore.On("BirthdayBlock", mock.Anything).
-		Return(waddrmgr.BlockStamp{}, true, nil).
+	// Mock the wallet metadata read — verifyBirthday calls
+	// store.GetWallet on startup. Returning a non-nil
+	// BirthdayBlock makes verifyBirthday take the verified
+	// short-circuit branch.
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).
+		Return(&db.WalletInfo{
+			BirthdayBlock: &db.Block{},
+		}, nil).
 		Once()
 
 	// Allow SyncedTo to be called any number of times (background sync).
