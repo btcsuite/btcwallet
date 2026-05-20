@@ -934,14 +934,12 @@ func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as ListAccounts by calling Accounts API across all active key scopes
+// contract as ListAccounts by calling Accounts across all active key scopes
 // and aggregating the results.
-func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
+func listAccountsDeprecated(w *Wallet) ([]db.AccountInfo, error) {
 	var (
-		allAccounts      []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
-		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+		allAccounts   []db.AccountInfo
+		scopeManagers = w.addrStore.ActiveScopedKeyManagers()
 	)
 
 	for _, scopeMgr := range scopeManagers {
@@ -952,29 +950,24 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 			return nil, err
 		}
 
-		allAccounts = append(allAccounts, result.Accounts...)
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
+		for _, account := range result.Accounts {
+			allAccounts = append(
+				allAccounts, accountResultToInfo(w, account),
+			)
+		}
 	}
 
-	return &AccountsResult{
-		Accounts:           allAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return allAccounts, nil
 }
 
 // listAccountsByNameDeprecated wraps the deprecated Accounts API to satisfy the
 // same contract as ListAccountsByName by calling Accounts API across all active
 // key scopes, filtering by account name, and aggregating the results.
 func listAccountsByNameDeprecated(w *Wallet,
-	name string) (*AccountsResult, error) {
+	name string) ([]db.AccountInfo, error) {
 
 	var (
-		matchingAccounts []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
+		matchingAccounts []db.AccountInfo
 		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
 	)
 
@@ -990,20 +983,14 @@ func listAccountsByNameDeprecated(w *Wallet,
 		for _, account := range result.Accounts {
 			if account.AccountName == name {
 				matchingAccounts = append(
-					matchingAccounts, account,
+					matchingAccounts,
+					accountResultToInfo(w, account),
 				)
 			}
 		}
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
 	}
 
-	return &AccountsResult{
-		Accounts:           matchingAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return matchingAccounts, nil
 }
 
 // getAccountDeprecated wraps the deprecated Accounts API to satisfy the same
