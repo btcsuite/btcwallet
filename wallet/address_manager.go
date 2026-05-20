@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/btcutil/psbt"
@@ -24,6 +25,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -671,35 +673,7 @@ func (w *Wallet) ListAddresses(_ context.Context, accountName string,
 }
 
 // ImportPublicKey imports a single public key as a watch-only address.
-//
-// This method allows the wallet to track transactions related to a specific
-// public key without having access to the corresponding private key. This is
-// useful for monitoring addresses without compromising their security.
-//
-// How it works:
-// The method determines the appropriate key scope based on the provided
-// address type and then uses the corresponding scoped key manager to import
-// the public key.
-//
-// Logical Steps:
-//  1. Determine the key scope from the address type (e.g., P2WKH, NP2WKH).
-//  2. Fetch the scoped key manager for that scope.
-//  3. Initiate a database transaction.
-//  4. Within the transaction, call the underlying address manager's
-//     ImportPublicKey method to store the key.
-//  5. Commit the transaction.
-//
-// Database Actions:
-//   - This method performs a single database write transaction
-//     (`walletdb.Update`).
-//   - It stores the public key and its associated address information within
-//     the `waddrmgr` namespace.
-//
-// Time Complexity:
-//   - The operation is dominated by the database write, making its complexity
-//     roughly O(1) or O(log N) depending on the database backend's indexing
-//     strategy for keys. It is generally a fast operation.
-func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
+func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
 	err := w.state.validateStarted()
@@ -712,25 +686,34 @@ func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
 		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	storeAddrType, err := addresstype.FromWallet(addrType)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
-	var addr btcutil.Address
+	serializedPubKey := pubKey.SerializeCompressed()
 
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+	addr, err := addrType.AddrFromPubKeyBytes(
+		serializedPubKey, w.cfg.ChainParams,
+	)
+	if err != nil {
+		return fmt.Errorf("derive imported address: %w", err)
+	}
 
-		ma, err := manager.ImportPublicKey(addrmgrNs, pubKey, nil)
-		if err != nil {
-			return err
-		}
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return fmt.Errorf("pay to addr script: %w", err)
+	}
 
-		addr = ma.Address()
-
-		return nil
-	})
+	_, err = w.store.NewImportedAddress(
+		ctx, db.NewImportedAddressParams{
+			WalletID:     w.id,
+			Scope:        db.KeyScope(keyScope),
+			AddressType:  storeAddrType.Type,
+			ScriptPubKey: scriptPubKey,
+			PubKey:       serializedPubKey,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -739,33 +722,7 @@ func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
 }
 
 // ImportTaprootScript imports a taproot script for tracking and spending.
-//
-// This method allows the wallet to import a taproot script, which is
-// necessary for spending from or tracking a taproot address.
-//
-// How it works:
-// The method uses the BIP-0086 key scope to fetch the taproot-specific
-// scoped key manager. It then calls the underlying manager's
-// ImportTaprootScript method to store the script information.
-//
-// Logical Steps:
-//  1. Fetch the scoped key manager for the taproot key scope (BIP-0086).
-//  2. Initiate a database transaction.
-//  3. Within the transaction, get the wallet's current sync state to use as
-//     the "birthday" for the new script.
-//  4. Call the underlying address manager's ImportTaprootScript method.
-//  5. Commit the transaction.
-//
-// Database Actions:
-//   - This method performs a single database write transaction
-//     (`walletdb.Update`).
-//   - It stores the taproot script and its derived address information within
-//     the `waddrmgr` namespace.
-//
-// Time Complexity:
-//   - Similar to ImportPublicKey, this operation is dominated by a database
-//     write, making it a fast operation with a complexity of roughly O(1).
-func (w *Wallet) ImportTaprootScript(_ context.Context,
+func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	tapscript waddrmgr.Tapscript) (AddressInfo, error) {
 
 	err := w.state.validateStarted()
@@ -773,34 +730,76 @@ func (w *Wallet) ImportTaprootScript(_ context.Context,
 		return AddressInfo{}, err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(
-		waddrmgr.KeyScopeBIP0086,
+	taprootKey, err := tapscript.TaprootKey()
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	addr, err := btcutil.NewAddressTaproot(
+		schnorr.SerializePubKey(taprootKey), w.cfg.ChainParams,
+	)
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf("taproot address: %w", err)
+	}
+
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf("pay to addr script: %w", err)
+	}
+
+	encryptedScript, err := encryptTaprootScript(w.keyVault, &tapscript)
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	storeInfo, err := w.store.NewImportedAddress(
+		ctx, db.NewImportedAddressParams{
+			WalletID:        w.id,
+			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
+			AddressType:     db.TaprootPubKey,
+			ScriptPubKey:    scriptPubKey,
+			EncryptedScript: encryptedScript,
+		},
 	)
 	if err != nil {
 		return AddressInfo{}, err
 	}
 
-	var addr waddrmgr.ManagedAddress
+	storeInfo.HasScript = true
 
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		syncedTo := w.addrStore.SyncedTo()
-		addr, err = manager.ImportTaprootScript(
-			ns, &tapscript, &syncedTo, 1, false,
-		)
-
-		return err
-	})
+	info, err := addressInfoFromStoreAddress(storeInfo, w.cfg.ChainParams)
 	if err != nil {
 		return AddressInfo{}, err
 	}
 
-	err = w.cfg.Chain.NotifyReceived([]btcutil.Address{addr.Address()})
+	err = w.cfg.Chain.NotifyReceived([]btcutil.Address{addr})
 	if err != nil {
 		return AddressInfo{}, err
 	}
 
-	return addressInfoFromManagedAddress(addr)
+	return info, nil
+}
+
+// encryptTaprootScript encodes and encrypts taproot script data before the
+// encrypted blob is handed to the store.
+func encryptTaprootScript(vault keyvault.Vault,
+	tapscript *waddrmgr.Tapscript) ([]byte, error) {
+
+	encodedScript, err := waddrmgr.EncodeTaprootScript(tapscript)
+	if err != nil {
+		return nil, fmt.Errorf("encode tapscript: %w", err)
+	}
+
+	if vault == nil {
+		return nil, fmt.Errorf("%w: keyVault", ErrMissingParam)
+	}
+
+	encryptedScript, err := vault.Encrypt(waddrmgr.CKTPublic, encodedScript)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt tapscript: %w", err)
+	}
+
+	return encryptedScript, nil
 }
 
 // ScriptForOutput returns the address metadata and spending scripts for a given
