@@ -143,6 +143,7 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		CreateAddr:           derivedAddressCreateAddr,
 		RowID:                derivedAddressRowID,
 		RowCreatedAt:         derivedAddressRowCreatedAt,
+		ApplyAccountMetadata: applyAddressAccountMetadata,
 	}
 
 	return db.NewDerivedAddressWithTx(
@@ -161,16 +162,17 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 		sqlc.CreateImportedAddressParams,
 		sqlc.CreateImportedAddressRow,
 		sqlc.InsertAddressSecretParams]{
-		GetAccount:         getAccountFromKey(s.queries),
-		AccountParams:      db.AccountKeyFromImportedParams,
-		GetAccountID:       importedAddressGetAccountID,
-		GetWalletWatchOnly: importedAddressGetWalletWatchOnly,
-		CreateAddr:         createImportedAddress,
-		CreateParams:       createImportedAddressParams,
-		InsertSecret:       insertAddressSecret,
-		SecretParams:       insertAddressSecretParams,
-		RowID:              importedAddressRowID,
-		RowCreatedAt:       importedAddressRowCreatedAt,
+		GetAccount:           getAccountFromKey(s.queries),
+		AccountParams:        db.AccountKeyFromImportedParams,
+		GetAccountID:         importedAddressGetAccountID,
+		GetWalletWatchOnly:   importedAddressGetWalletWatchOnly,
+		CreateAddr:           createImportedAddress,
+		CreateParams:         createImportedAddressParams,
+		InsertSecret:         insertAddressSecret,
+		SecretParams:         insertAddressSecretParams,
+		RowID:                importedAddressRowID,
+		RowCreatedAt:         importedAddressRowCreatedAt,
+		ApplyAccountMetadata: applyAddressAccountMetadata,
 	}
 
 	return db.NewImportedAddressWithTx(
@@ -297,6 +299,17 @@ func importedAddressRowCreatedAt(
 	row sqlc.CreateImportedAddressRow) time.Time {
 
 	return row.CreatedAt
+}
+
+// applyAddressAccountMetadata copies account metadata from the account lookup
+// row onto an address creation result before the write transaction commits.
+func applyAddressAccountMetadata(info *db.AddressInfo,
+	row sqlc.GetAccountByWalletScopeAndNameRow) error {
+
+	return db.ApplyAddressAccountMetadata(
+		info, row.AccountNumber, row.AccountName,
+		row.MasterFingerprint, row.Purpose, row.CoinType,
+	)
 }
 
 // insertAddressSecretParams maps imported params to secret params.
