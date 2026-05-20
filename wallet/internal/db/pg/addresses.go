@@ -337,8 +337,7 @@ type addressInfoRow interface {
 		sqlc.ListAddressesByAccountRow
 }
 
-// addressRowToInfo converts a PostgreSQL address row to an AddressInfo
-// struct.
+// addressRowToInfo converts a PostgreSQL address row to an AddressInfo struct.
 func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
@@ -347,6 +346,11 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 	info, err := db.AddressRowToInfo(db.AddressInfoRow[int16, int16]{
 		ID:                base.ID,
 		AccountID:         base.AccountID,
+		AccountNumber:     base.AccountNumber,
+		AccountName:       base.AccountName,
+		MasterFingerprint: base.MasterFingerprint,
+		Purpose:           base.Purpose,
+		CoinType:          base.CoinType,
 		TypeID:            base.TypeID,
 		OriginID:          base.OriginID,
 		WalletIsWatchOnly: base.WalletIsWatchOnly,

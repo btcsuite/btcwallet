@@ -334,10 +334,8 @@ type addressInfoRow interface {
 		sqlc.ListAddressesByAccountRow
 }
 
-// addressRowToInfo converts a SQLite address row to an AddressInfo
-// struct.
-func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo,
-	error) {
+// addressRowToInfo converts a SQLite address row to an AddressInfo struct.
+func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 	// Direct conversion works only because all constraint types have
 	// identical fields. If sqlc types diverge, compilation will fail.
 	base := sqlc.GetAddressByScriptPubKeyRow(row)
@@ -345,6 +343,11 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo,
 	info, err := db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
 		ID:                base.ID,
 		AccountID:         base.AccountID,
+		AccountNumber:     base.AccountNumber,
+		AccountName:       base.AccountName,
+		MasterFingerprint: base.MasterFingerprint,
+		Purpose:           base.Purpose,
+		CoinType:          base.CoinType,
 		TypeID:            base.TypeID,
 		OriginID:          base.OriginID,
 		WalletIsWatchOnly: base.WalletIsWatchOnly,
