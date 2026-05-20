@@ -26,9 +26,11 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
-// buildAccountDeriveFn pre-loads the wallet's master HD private key and
-// returns an AccountDerivationFunc closure. Watch-only wallets get a closure
-// that rejects derivation.
+// buildAccountDeriveFn returns an AccountDerivationFunc closure. Spendable
+// wallets normally preload the master HD private key before the store opens
+// its write transaction. Neutered-root kvdb wallets are the exception: they
+// need to defer a missing-root-key error to the store callback so kvdb can
+// derive from the scoped coin-type key inside its walletdb transaction.
 func (w *Wallet) buildAccountDeriveFn(
 	ctx context.Context) (db.AccountDerivationFunc, error) {
 
@@ -41,9 +43,19 @@ func (w *Wallet) buildAccountDeriveFn(
 	}
 
 	encrypted, err := w.store.GetEncryptedHDSeed(ctx, w.id)
-	if err != nil {
-		return nil, fmt.Errorf("load encrypted master HD priv: %w",
-			err)
+	switch {
+	case err == nil:
+
+	case errors.Is(err, db.ErrSecretNotFound):
+		return func(_ context.Context, _ db.KeyScope, _ uint32,
+			_ bool) (*db.DerivedAccountData, error) {
+
+			return nil, fmt.Errorf("load encrypted master HD priv: %w",
+				err)
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("load encrypted master HD priv: %w", err)
 	}
 
 	plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
@@ -179,6 +191,10 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		}
 
 		return nil, err
+	}
+
+	if info.Origin == db.DerivedAccount {
+		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
 	return info, nil
