@@ -121,6 +121,16 @@ func NullableUint32ToSQLInt64(v *uint32) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(*v), Valid: true}
 }
 
+// NullableStringToSQLNullString converts an optional string to
+// sql.NullString.
+func NullableStringToSQLNullString(v *string) sql.NullString {
+	if v == nil {
+		return sql.NullString{}
+	}
+
+	return sql.NullString{String: *v, Valid: true}
+}
+
 // NullInt32ToUint32 safely casts a sql.NullInt32 to an uint32, returning
 // an error if the value is out of range or invalid.
 func NullInt32ToUint32(n sql.NullInt32) (uint32, error) {
