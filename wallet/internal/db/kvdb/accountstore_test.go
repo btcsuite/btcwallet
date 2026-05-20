@@ -494,6 +494,59 @@ func TestCreateDerivedAccountRollsBackOnDeriveError(t *testing.T) {
 		"account numbers should be contiguous after rollback")
 }
 
+// TestCreateDerivedAccountFallsBackToScopedKey verifies that kvdb can create
+// derived accounts after the master root private key has been neutered.
+func TestCreateDerivedAccountFallsBackToScopedKey(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	err := walletdb.Update(store.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		return mgr.NeuterRootKey(ns)
+	})
+	require.NoError(t, err)
+
+	_, err = store.GetEncryptedHDSeed(t.Context(), 0)
+	require.ErrorIs(t, err, db.ErrSecretNotFound)
+
+	missingRootDerive := func(_ context.Context, _ db.KeyScope, _ uint32,
+		_ bool) (*db.DerivedAccountData, error) {
+
+		return nil, db.ErrSecretNotFound
+	}
+
+	info, err := store.CreateDerivedAccount(t.Context(),
+		db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name: savingsAccountName,
+		}, missingRootDerive,
+	)
+	require.NoError(t, err)
+	require.Equal(t, savingsAccountName, info.AccountName)
+	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.NotEmpty(t, info.PublicKey)
+
+	parsed, err := hdkeychain.NewKeyFromString(string(info.PublicKey))
+	require.NoError(t, err)
+	require.False(t, parsed.IsPrivate())
+
+	name := savingsAccountName
+	read, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	})
+	require.NoError(t, err)
+	require.Equal(t, info.AccountNumber, read.AccountNumber)
+}
+
 var errTestBoom = errors.New("kvdb test boom")
 
 // TestCreateImportedAccount verifies the watch-only-imported account

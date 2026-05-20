@@ -6,6 +6,7 @@ package waddrmgr
 
 import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -75,6 +76,81 @@ func (s *ScopedKeyManager) PutDerivedAccountWithKeys(
 	_, err = s.loadAccountInfo(ns, account)
 
 	return err
+}
+
+// DeriveAccountKeys derives the account-level extended public key and
+// encrypted private key for an already allocated derived account number.
+// It uses the scoped coin-type private key, so it continues to work after
+// Manager.NeuterRootKey has deleted the master HD private key.
+func (s *ScopedKeyManager) DeriveAccountKeys(ns walletdb.ReadBucket,
+	account uint32) ([]byte, []byte, error) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	if s.rootManager.WatchOnly() {
+		return nil, nil, managerError(ErrWatchingOnly, errWatchingOnly, nil)
+	}
+
+	if s.rootManager.IsLocked() {
+		return nil, nil, managerError(ErrLocked, errLocked, nil)
+	}
+
+	_, coinTypePrivEnc, err := fetchCoinTypeKeys(ns, &s.scope)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serializedKeyPriv, err := s.rootManager.cryptoKeyPriv.Decrypt(
+		coinTypePrivEnc,
+	)
+	if err != nil {
+		str := "failed to decrypt cointype serialized private key"
+		return nil, nil, managerError(ErrLocked, str, err)
+	}
+
+	coinTypeKeyPriv, err := hdkeychain.NewKeyFromString(
+		string(serializedKeyPriv),
+	)
+	zero.Bytes(serializedKeyPriv)
+
+	if err != nil {
+		str := "failed to create cointype extended private key"
+		return nil, nil, managerError(ErrKeyChain, str, err)
+	}
+
+	defer coinTypeKeyPriv.Zero()
+
+	acctKeyPriv, err := deriveAccountKey(coinTypeKeyPriv, account)
+	if err != nil {
+		if IsError(err, ErrAccountNumTooHigh) {
+			return nil, nil, err
+		}
+
+		str := "failed to convert private key for account"
+
+		return nil, nil, managerError(ErrKeyChain, str, err)
+	}
+	defer acctKeyPriv.Zero()
+
+	acctKeyPub, err := acctKeyPriv.Neuter()
+	if err != nil {
+		str := "failed to convert public key for account"
+		return nil, nil, managerError(ErrKeyChain, str, err)
+	}
+
+	serializedPrivKey := []byte(acctKeyPriv.String())
+	defer zero.Bytes(serializedPrivKey)
+
+	acctPrivEnc, err := s.rootManager.cryptoKeyPriv.Encrypt(
+		serializedPrivKey,
+	)
+	if err != nil {
+		str := "failed to encrypt private key for account"
+		return nil, nil, managerError(ErrCrypto, str, err)
+	}
+
+	return []byte(acctKeyPub.String()), acctPrivEnc, nil
 }
 
 // AllocateImportedAccountNumber advances the per-scope lastAccount counter

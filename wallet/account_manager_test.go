@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 
@@ -173,8 +174,8 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
 }
 
-// TestListAccounts verifies ListAccounts pairs cache.ListAccounts with
-// cache.AccountBalances.
+// TestListAccounts verifies ListAccounts returns account snapshots with the
+// wallet-level derived-account master fingerprint applied.
 func TestListAccounts(t *testing.T) {
 	t.Parallel()
 
@@ -436,6 +437,7 @@ func TestNewAccount(t *testing.T) {
 
 	w, deps := createStartedWalletWithMocks(t)
 	stub := newStubAccountDeriveFn(t)
+	w.masterFingerprint = stub.masterKeyFingerprint
 
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScope{
@@ -462,6 +464,7 @@ func TestNewAccount(t *testing.T) {
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), account.AccountNumber)
+	require.Equal(t, stub.masterKeyFingerprint, account.MasterKeyFingerprint)
 
 	// Duplicate-name path.
 	expectAccountDeriveSetup(t, deps, stub)
@@ -476,6 +479,46 @@ func TestNewAccount(t *testing.T) {
 	require.True(t,
 		waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
 	)
+}
+
+// TestNewAccountMissingHDSeedDefersToStore verifies that neutered-root kvdb
+// wallets can let the store fall back to scoped coin-type key derivation.
+func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope{
+		Purpose: scope.Purpose,
+		Coin:    scope.Coin,
+	}
+
+	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
+		Return(nil, db.ErrSecretNotFound).Once()
+	deps.store.On("CreateDerivedAccount", mock.Anything,
+		db.CreateDerivedAccountParams{
+			WalletID: 0,
+			Scope:    dbScope,
+			Name:     testAccountName,
+		}, mock.MatchedBy(func(deriveFn db.AccountDerivationFunc) bool {
+			if deriveFn == nil {
+				return false
+			}
+
+			derived, err := deriveFn(t.Context(), dbScope, 1, false)
+
+			return derived == nil && errors.Is(err, db.ErrSecretNotFound)
+		})).Return(&db.AccountInfo{
+		AccountNumber: 1,
+		AccountName:   testAccountName,
+		Origin:        db.DerivedAccount,
+		KeyScope:      dbScope,
+	}, nil).Once()
+
+	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), account.AccountNumber)
 }
 
 // TestRenameAccount verifies RenameAccount routes through
