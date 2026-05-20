@@ -151,9 +151,10 @@ type WalletStore interface {
 	CreateWallet(ctx context.Context, params CreateWalletParams) (
 		*WalletInfo, error)
 
-	// GetWallet retrieves information about a wallet given its name. It
-	// returns a WalletInfo struct containing the wallet's properties or an
-	// error if the wallet is not found.
+	// GetWallet retrieves information about a wallet given its name. SQL
+	// multi-wallet backends return ErrWalletNotFound when the wallet name is
+	// unknown. The legacy kvdb backend is a single-wallet adapter and echoes
+	// the requested name without validating it.
 	GetWallet(ctx context.Context, name string) (*WalletInfo, error)
 
 	// ListWallets returns one page of wallets for the given query, including a
