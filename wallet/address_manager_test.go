@@ -175,13 +175,9 @@ func TestNewAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a new test wallet for each test case.
 			w, deps := createStartedWalletWithMocks(t)
 
-			// Setup mock expectations.
 			if tc.expectErr {
-				// Attempt to generate a new address with the specified
-				// parameters.
 				_, err := w.NewAddress(
 					t.Context(), tc.accountName,
 					tc.addrType, tc.change,
@@ -215,44 +211,21 @@ func TestNewAddress(t *testing.T) {
 				require.FailNow(t, "unknown address type", tc.addrType)
 			}
 
-			deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-				Return(deps.accountManager, nil).
-				Once()
-			deps.addrStore.On("Address", mock.Anything, addr).
-				Return(deps.addr, nil).
-				Once()
+			scope, err := tc.addrType.KeyScope()
+			require.NoError(t, err)
 
-			deps.accountManager.On(
-				"NewAddress", mock.Anything, tc.accountName, tc.change,
-			).Return(addr, nil).Once()
+			expectStoreNewAddress(
+				t, w, deps, tc.accountName, scope, tc.change, addr,
+			)
 
-			deps.chain.On("NotifyReceived", []address.Address{addr}).
-				Return(nil).
-				Once()
-
-			deps.addr.On("Address").Return(addr).Once()
-			deps.addr.On("AddrType").Return(tc.addrType).Once()
-			deps.addr.On("Imported").Return(false).Once()
-			deps.addr.On("Internal").Return(tc.change).Once()
-			deps.addr.On("Compressed").Return(true).Once()
-
-			// Attempt to generate a new address with the specified
-			// parameters.
-			addr, err := w.NewAddress(
+			addr, err = w.NewAddress(
 				t.Context(), tc.accountName,
 				tc.addrType, tc.change,
 			)
 			require.NoError(t, err)
 			require.NotNil(t, addr)
 
-			// Verify that the address is of the correct type.
 			require.IsType(t, tc.expectedAddrType, addr)
-
-			// Verify that the address is correctly marked as
-			// internal or external.
-			addrInfo, err := w.GetAddressInfo(t.Context(), addr)
-			require.NoError(t, err)
-			require.Equal(t, tc.change, addrInfo.Internal)
 		})
 	}
 }
@@ -262,121 +235,48 @@ func TestNewAddress(t *testing.T) {
 func TestGetUnusedAddress(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// Get a new address to start with.
-	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
+	firstAddr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
-
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(mockAddr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{mockAddr}).
-		Return(nil).Once()
-
-	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
-	)
+	scope := waddrmgr.KeyScopeBIP0084
+	req, err := addressPageRequest()
 	require.NoError(t, err)
 
-	// The first unused address should be the one we just created.
-	// GetUnusedAddress calls:
-	// - addrType.KeyScope
-	// - w.addrStore.FetchScopedKeyManager
-	// - w.findUnusedAddress (calls manager.LookupAccount and
-	//   ForEachAccountAddress)
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, "default").
-		Return(uint32(0), nil).Once()
-
-	deps.accountManager.On("ForEachAccountAddress", mock.Anything, uint32(0),
-		mock.Anything).Run(func(args mock.Arguments) {
-		f, ok := args.Get(2).(func(waddrmgr.ManagedAddress) error)
-		require.True(t, ok)
-		mockAddr1 := &mockManagedAddress{}
-		mockAddr1.On("Internal").Return(false).Once()
-		mockAddr1.On("Used", mock.Anything).Return(false).Once()
-		mockAddr1.On("Address").Return(addr).Once()
-		_ = f(mockAddr1)
-	}).Return(errStopIteration).Once()
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: "default",
+			Scope:       db.KeyScope(scope),
+			Page:        req,
+		},
+	).Return(addressIter(*derivedAddressInfoFromAddr(
+		t, firstAddr, db.WitnessPubKey, "default", scope, false, 0, 0, nil,
+	))).Once()
 
 	unusedAddr, err := w.GetUnusedAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
-	require.Equal(t, addr.String(), unusedAddr.String())
+	require.Equal(t, firstAddr.String(), unusedAddr.String())
 
-	// "Use" the address by creating a fake UTXO for it.
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
+	usedFirstAddr := derivedAddressInfoFromAddr(
+		t, firstAddr, db.WitnessPubKey, "default", scope, false,
+		0, 0, nil,
+	)
+	usedFirstAddr.IsUsed = true
 
-	// Setup expectations for using the address.
-	deps.txStore.On("InsertTx", mock.Anything, mock.Anything,
-		mock.Anything).Return(nil).Once()
-	deps.txStore.On("AddCredit", mock.Anything, mock.Anything,
-		mock.Anything, uint32(0), false).Return(nil).Once()
-	deps.addrStore.On("MarkUsed", mock.Anything, addr).Return(nil).Once()
-
-	// We need to create a realistic transaction that has at least one
-	// input.
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		// Create a new transaction and set the output to the address
-		// we want to mark as used.
-		msgTx := TstTx.MsgTx()
-		msgTx.TxOut = []*wire.TxOut{{
-			PkScript: pkScript,
-			Value:    1000,
-		}}
-
-		rec, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Now())
-		if err != nil {
-			return err
-		}
-
-		err = w.txStore.InsertTx(txmgrNs, rec, nil)
-		if err != nil {
-			return err
-		}
-
-		err = w.txStore.AddCredit(txmgrNs, rec, nil, 0, false)
-		if err != nil {
-			return err
-		}
-
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		return w.addrStore.MarkUsed(addrmgrNs, addr)
-	})
-	require.NoError(t, err)
-
-	// Get the next unused address.
-	// This time findUnusedAddress will find the first address as used, and
-	// then we mock it returning nil for any more existing addresses,
-	// triggering a NewAddress call.
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Twice()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, "default").
-		Return(uint32(0), nil).Once()
-
-	deps.accountManager.On("ForEachAccountAddress", mock.Anything, uint32(0),
-		mock.Anything).Run(func(args mock.Arguments) {
-		f, ok := args.Get(2).(func(waddrmgr.ManagedAddress) error)
-		require.True(t, ok)
-
-		// First addr is used.
-		mockAddr1 := &mockManagedAddress{}
-		mockAddr1.On("Internal").Return(false).Once()
-		mockAddr1.On("Used", mock.Anything).Return(true).Once()
-		_ = f(mockAddr1)
-	}).Return(nil).Once()
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: "default",
+			Scope:       db.KeyScope(scope),
+			Page:        req,
+		},
+	).Return(addressIter(*usedFirstAddr)).Once()
 
 	nextAddrVal, _ := address.NewAddressWitnessPubKeyHash(
 		[]byte{
@@ -384,10 +284,7 @@ func TestGetUnusedAddress(t *testing.T) {
 			11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 		}, w.cfg.ChainParams,
 	)
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(nextAddrVal, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{nextAddrVal}).
-		Return(nil).Once()
+	expectStoreNewAddress(t, w, deps, "default", scope, false, nextAddrVal)
 
 	nextAddr, err := w.GetUnusedAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
@@ -395,9 +292,8 @@ func TestGetUnusedAddress(t *testing.T) {
 	require.NoError(t, err)
 
 	// The next unused address should not be the same as the first one.
-	require.NotEqual(t, addr.String(), nextAddr.String())
+	require.NotEqual(t, firstAddr.String(), nextAddr.String())
 
-	// Now, let's test the change address.
 	changeAddrVal, _ := address.NewAddressWitnessPubKeyHash(
 		[]byte{
 			21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
@@ -405,47 +301,23 @@ func TestGetUnusedAddress(t *testing.T) {
 		}, w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", true).
-		Return(changeAddrVal, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{changeAddrVal}).
-		Return(nil).Once()
-
-	changeAddr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, true,
-	)
-	require.NoError(t, err)
-
-	// The first unused change address should be the one we just created.
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, "default").
-		Return(uint32(0), nil).Once()
-
-	deps.accountManager.On("ForEachAccountAddress", mock.Anything, uint32(0),
-		mock.Anything).Run(func(args mock.Arguments) {
-		f, ok := args.Get(2).(func(waddrmgr.ManagedAddress) error)
-		require.True(t, ok)
-
-		// First external addr (used).
-		deps.addr.On("Internal").Return(false).Once()
-		_ = f(deps.addr)
-
-		// First internal addr (unused).
-		mockAddr2 := &mockManagedAddress{}
-		mockAddr2.On("Internal").Return(true).Once()
-		mockAddr2.On("Used", mock.Anything).Return(false).Once()
-		mockAddr2.On("Address").Return(changeAddrVal).Once()
-		_ = f(mockAddr2)
-	}).Return(errStopIteration).Once()
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: "default",
+			Scope:       db.KeyScope(scope),
+			Page:        req,
+		},
+	).Return(addressIter(*derivedAddressInfoFromAddr(
+		t, changeAddrVal, db.WitnessPubKey, "default", scope, true, 0, 0, nil,
+	))).Once()
 
 	unusedChangeAddr, err := w.GetUnusedAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, true,
 	)
 	require.NoError(t, err)
-	require.Equal(t, changeAddr.String(), unusedChangeAddr.String())
+	require.Equal(t, changeAddrVal.String(), unusedChangeAddr.String())
 }
 
 // TestGetAddressInfo tests the GetAddressInfo method to ensure it returns
@@ -463,12 +335,9 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(addr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, addr,
+	)
 
 	extAddr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
@@ -499,12 +368,9 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", true).
-		Return(addr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{addr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, true, addr,
+	)
 
 	intAddr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, true,
@@ -543,12 +409,9 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(mockAddr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{mockAddr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
+	)
 
 	addr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
@@ -609,12 +472,9 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", true).
-		Return(mockAddr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{mockAddr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, true, mockAddr,
+	)
 
 	addr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, true,
@@ -729,12 +589,9 @@ func TestListAddresses(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(mockAddr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{mockAddr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
+	)
 
 	addr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
@@ -939,12 +796,9 @@ func TestScriptForOutput(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("NewAddress", mock.Anything, "default", false).
-		Return(mockAddr, nil).Once()
-	deps.chain.On("NotifyReceived", []address.Address{mockAddr}).
-		Return(nil).Once()
+	expectStoreNewAddress(
+		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
+	)
 
 	addr, err := w.NewAddress(
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
