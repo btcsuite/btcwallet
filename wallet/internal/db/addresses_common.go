@@ -220,6 +220,10 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// PubKey is the public key when the address is public-key based.
 	PubKey []byte
 
+	// IsUsed reports whether the address has a non-abandoned
+	// on-chain transaction the wallet has observed. See ADR 0011.
+	IsUsed bool
+
 	// IDToAddrType converts TypeID to AddressType with validation.
 	IDToAddrType func(TypeID) (AddressType, error)
 
@@ -521,6 +525,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		PubKey:               row.PubKey,
 		HasScript:            row.HasScript,
 		IsWatchOnly:          isWatchOnly,
+		IsUsed:               row.IsUsed,
 	}, nil
 }
 

@@ -685,6 +685,13 @@ type AddressInfo struct {
 	// IsWatchOnly indicates whether the address belongs to a watch-only
 	// wallet or does not have private keys.
 	IsWatchOnly bool
+
+	// IsUsed reports whether the address has a non-abandoned
+	// on-chain transaction the wallet has observed. Monotonic
+	// across reorgs/replaces; `DeleteTx` clears it along with
+	// the abandoned tx (see ADR 0011). SQL backends derive via
+	// EXISTS on utxos; kvdb reads waddrmgr's sticky bit.
+	IsUsed bool
 }
 
 // AddressSecret contains sensitive encrypted material for an address.
