@@ -2136,6 +2136,86 @@ func TestBalanceReturnsTotalAndLocked(t *testing.T) {
 	require.Equal(t, btcutil.Amount(24000), balance.Locked)
 }
 
+// TestBalanceNameFilterDisambiguatesMaskedImportedAccount verifies that the
+// account-name balance filter isolates rows when an imported account's public
+// AccountNumber is masked to zero.
+func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "wallet-balance-name-filter")
+
+	const (
+		derivedName  = "default"
+		importedName = "hardware"
+	)
+
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, derivedName)
+	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, importedName)
+
+	derivedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, derivedName, false,
+	)
+	importedScript := RandomBytes(22)
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	importedAccountID := GetAccountID(t, queries, scopeID, importedName)
+	err := createImportedAddressRaw(
+		t.Context(), queries, walletID, importedAccountID,
+		importedScript,
+	)
+	require.NoError(t, err)
+
+	block := CreateBlockFixture(t, queries, 280)
+	derivedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 11000, PkScript: derivedAddr.ScriptPubKey}},
+	)
+	importedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 22000, PkScript: importedScript}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       derivedTx,
+		Received: time.Unix(1710002320, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       importedTx,
+		Received: time.Unix(1710002330, 0),
+		Block:    &block,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	scope := db.KeyScopeBIP0084
+	importedBalanceName := importedName
+	balance, err := store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+		Scope:    &scope,
+		Name:     &importedBalanceName,
+	})
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(22000), balance.Total)
+
+	derivedBalanceName := derivedName
+	balance, err = store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+		Scope:    &scope,
+		Name:     &derivedBalanceName,
+	})
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(11000), balance.Total)
+}
+
 // newCoinbaseTx builds a simple coinbase fixture transaction.
 func newCoinbaseTx(pkScript []byte) *wire.MsgTx {
 	tx := wire.NewMsgTx(2)
