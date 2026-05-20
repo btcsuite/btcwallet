@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
@@ -29,97 +30,91 @@ func (s *Store) CreateWallet(ctx context.Context,
 	var info *db.WalletInfo
 
 	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		walletParams := sqlc.CreateWalletParams{
-			WalletName:     params.Name,
-			IsImported:     params.IsImported,
-			ManagerVersion: params.ManagerVersion,
-			IsWatchOnly:    params.IsWatchOnly,
-			MasterHdPubKey: params.MasterPubKey,
-		}
+		var errCreate error
 
-		id, err := qtx.CreateWallet(ctx, walletParams)
-		if err != nil {
-			return fmt.Errorf("create wallet: %w", err)
-		}
+		info, errCreate = db.CreateWalletWithOps(
+			ctx, params, createWalletOps{q: qtx},
+		)
 
-		secretsParams := sqlc.InsertWalletSecretsParams{
-			WalletID: id,
-			MasterPrivParams: db.NilIfEmptyBytes(
-				params.MasterKeyPrivParams,
-			),
-			EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
-				params.EncryptedCryptoPrivKey,
-			),
-			EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
-				params.EncryptedCryptoScriptKey,
-			),
-			EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
-				params.EncryptedMasterPrivKey,
-			),
-		}
-
-		err = qtx.InsertWalletSecrets(ctx, secretsParams)
-		if err != nil {
-			return fmt.Errorf(
-				"insert wallet secrets: %w", err,
-			)
-		}
-
-		birthdayTimestamp := sql.NullTime{}
-		if !params.Birthday.IsZero() {
-			birthdayTimestamp = sql.NullTime{
-				Time:  params.Birthday,
-				Valid: true,
-			}
-		}
-
-		syncParams := sqlc.InsertWalletSyncStateParams{
-			WalletID:          id,
-			SyncedHeight:      sql.NullInt32{},
-			BirthdayHeight:    sql.NullInt32{},
-			BirthdayTimestamp: birthdayTimestamp,
-		}
-
-		err = qtx.InsertWalletSyncState(ctx, syncParams)
-		if err != nil {
-			return fmt.Errorf(
-				"upsert wallet sync state: %w", err,
-			)
-		}
-
-		row, err := qtx.GetWalletByID(ctx, id)
-		if err != nil {
-			return fmt.Errorf(
-				"fetch created wallet: %w", err,
-			)
-		}
-
-		info, err = buildWalletInfo(walletRowParams{
-			id:                     row.ID,
-			name:                   row.WalletName,
-			isImported:             row.IsImported,
-			managerVersion:         row.ManagerVersion,
-			isWatchOnly:            row.IsWatchOnly,
-			syncedHeight:           row.SyncedHeight,
-			syncedBlockHash:        row.SyncedBlockHash,
-			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-			birthdayHeight:         row.BirthdayHeight,
-			birthdayTimestamp:      row.BirthdayTimestamp,
-			birthdayBlockHash:      row.BirthdayBlockHash,
-			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-			masterPubKey:           row.MasterHdPubKey,
-		})
-		if err != nil {
-			return fmt.Errorf("convert wallet row to info: %w", err)
-		}
-
-		return nil
+		return errCreate
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return info, nil
+}
+
+// createWalletOps adapts PostgreSQL sqlc queries to the shared CreateWallet
+// workflow.
+type createWalletOps struct {
+	q *sqlc.Queries
+}
+
+// CreateWallet implements db.CreateWalletOps.
+func (o createWalletOps) CreateWallet(ctx context.Context,
+	params db.CreateWalletParams) (int64, error) {
+
+	return o.q.CreateWallet(ctx, sqlc.CreateWalletParams{
+		WalletName:     params.Name,
+		IsImported:     params.IsImported,
+		ManagerVersion: params.ManagerVersion,
+		IsWatchOnly:    params.IsWatchOnly,
+		MasterHdPubKey: params.MasterPubKey,
+	})
+}
+
+// InsertWalletSecrets implements db.CreateWalletOps.
+func (o createWalletOps) InsertWalletSecrets(ctx context.Context,
+	walletID int64, params db.CreateWalletParams) error {
+
+	return o.q.InsertWalletSecrets(ctx, sqlc.InsertWalletSecretsParams{
+		WalletID: walletID,
+		MasterPrivParams: db.NilIfEmptyBytes(
+			params.MasterKeyPrivParams,
+		),
+		EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
+			params.EncryptedCryptoPrivKey,
+		),
+		EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
+			params.EncryptedCryptoScriptKey,
+		),
+		EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
+			params.EncryptedMasterPrivKey,
+		),
+	})
+}
+
+// InsertWalletSyncState implements db.CreateWalletOps.
+func (o createWalletOps) InsertWalletSyncState(ctx context.Context,
+	walletID int64, birthday time.Time) error {
+
+	birthdayTimestamp := sql.NullTime{}
+	if !birthday.IsZero() {
+		birthdayTimestamp = sql.NullTime{
+			Time:  birthday,
+			Valid: true,
+		}
+	}
+
+	return o.q.InsertWalletSyncState(ctx, sqlc.InsertWalletSyncStateParams{
+		WalletID:          walletID,
+		SyncedHeight:      sql.NullInt32{},
+		BirthdayHeight:    sql.NullInt32{},
+		BirthdayTimestamp: birthdayTimestamp,
+	})
+}
+
+// GetWalletByID implements db.CreateWalletOps.
+func (o createWalletOps) GetWalletByID(ctx context.Context,
+	walletID int64) (*db.WalletInfo, error) {
+
+	row, err := o.q.GetWalletByID(ctx, walletID)
+	if err != nil {
+		return nil, err
+	}
+
+	return getWalletRowToInfo(row)
 }
 
 // GetWallet retrieves information about a wallet given its name. It
@@ -132,32 +127,16 @@ func (s *Store) GetWallet(ctx context.Context,
 
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetWalletByName(ctx, name)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("wallet %q: %w", name,
-					db.ErrWalletNotFound)
-			}
-
-			return fmt.Errorf("get wallet: %w", err)
+		if err == nil {
+			info, err = getWalletRowToInfo(sqlc.GetWalletByIDRow(row))
+			return err
 		}
 
-		info, err = buildWalletInfo(walletRowParams{
-			id:                     row.ID,
-			name:                   row.WalletName,
-			isImported:             row.IsImported,
-			managerVersion:         row.ManagerVersion,
-			isWatchOnly:            row.IsWatchOnly,
-			syncedHeight:           row.SyncedHeight,
-			syncedBlockHash:        row.SyncedBlockHash,
-			syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-			birthdayHeight:         row.BirthdayHeight,
-			birthdayTimestamp:      row.BirthdayTimestamp,
-			birthdayBlockHash:      row.BirthdayBlockHash,
-			birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-			masterPubKey:           row.MasterHdPubKey,
-		})
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("wallet %q: %w", name, db.ErrWalletNotFound)
+		}
 
-		return err
+		return fmt.Errorf("get wallet: %w", err)
 	})
 	if err != nil {
 		return nil, err
@@ -186,8 +165,7 @@ func (s *Store) ListWallets(ctx context.Context,
 		for i, row := range rows {
 			item, errMap := listWalletRowToInfo(row)
 			if errMap != nil {
-				return fmt.Errorf("list wallets page: map row: %w",
-					errMap)
+				return fmt.Errorf("list wallets page: map row: %w", errMap)
 			}
 
 			items[i] = *item
@@ -226,42 +204,45 @@ func (s *Store) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		// Insert blocks if needed.
-		if params.SyncedTo != nil {
-			err := ensureBlockExists(ctx, qtx, params.SyncedTo)
-			if err != nil {
-				return fmt.Errorf("ensure synced block: %w",
-					err)
-			}
-		}
-
-		if params.BirthdayBlock != nil {
-			err := ensureBlockExists(
-				ctx, qtx, params.BirthdayBlock,
-			)
-			if err != nil {
-				return fmt.Errorf("ensure birthday block: %w",
-					err)
-			}
-		}
-
-		syncParams, err := buildUpdateSyncParams(params)
-		if err != nil {
-			return err
-		}
-
-		rowsAffected, err := qtx.UpdateWalletSyncState(ctx, syncParams)
-		if err != nil {
-			return fmt.Errorf("update wallet sync state: %w", err)
-		}
-
-		if rowsAffected == 0 {
-			return fmt.Errorf("wallet sync state for wallet %d: %w",
-				params.WalletID, db.ErrWalletNotFound)
-		}
-
-		return nil
+		return db.UpdateWalletWithOps(
+			ctx, params, updateWalletOps{q: qtx},
+		)
 	})
+}
+
+// updateWalletOps adapts PostgreSQL sqlc queries to the shared UpdateWallet
+// workflow.
+type updateWalletOps struct {
+	q *sqlc.Queries
+}
+
+// EnsureBlock implements db.UpdateWalletOps.
+func (o updateWalletOps) EnsureBlock(ctx context.Context,
+	block *db.Block) error {
+
+	return ensureBlockExists(ctx, o.q, block)
+}
+
+// UpdateWalletSyncState implements db.UpdateWalletOps.
+func (o updateWalletOps) UpdateWalletSyncState(ctx context.Context,
+	params db.UpdateWalletParams) error {
+
+	syncParams, err := buildUpdateSyncParams(params)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := o.q.UpdateWalletSyncState(ctx, syncParams)
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("wallet sync state for wallet %d: %w",
+			params.WalletID, db.ErrWalletNotFound)
+	}
+
+	return nil
 }
 
 // GetEncryptedHDSeed retrieves the encrypted Hierarchical
@@ -276,24 +257,23 @@ func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		secrets, err := q.GetWalletSecrets(ctx, int64(walletID))
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("secrets for wallet %d: %w",
-					walletID, db.ErrWalletNotFound)
+		if err == nil {
+			if len(secrets.EncryptedMasterHdPrivKey) == 0 {
+				return fmt.Errorf("encrypted master privkey for wallet %d: %w",
+					walletID, db.ErrSecretNotFound)
 			}
 
-			return fmt.Errorf("get wallet secrets: %w", err)
+			encrypted = secrets.EncryptedMasterHdPrivKey
+
+			return nil
 		}
 
-		if len(secrets.EncryptedMasterHdPrivKey) == 0 {
-			return fmt.Errorf(
-				"encrypted master privkey for wallet %d: %w", walletID,
-				db.ErrSecretNotFound)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("secrets for wallet %d: %w",
+				walletID, db.ErrWalletNotFound)
 		}
 
-		encrypted = secrets.EncryptedMasterHdPrivKey
-
-		return nil
+		return fmt.Errorf("get wallet secrets: %w", err)
 	})
 	if err != nil {
 		return nil, err
@@ -306,50 +286,67 @@ func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	params db.UpdateWalletSecretsParams) error {
 
-	secretsParams := sqlc.UpdateWalletSecretsParams{
-		MasterPrivParams: db.NilIfEmptyBytes(
-			params.MasterPrivParams,
-		),
-		EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
-			params.EncryptedCryptoPrivKey,
-		),
-		EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
-			params.EncryptedCryptoScriptKey,
-		),
-		EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
-			params.EncryptedMasterHdPrivKey,
-		),
-		WalletID: int64(params.WalletID),
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		return db.UpdateWalletSecretsWithOps(
+			ctx, params, updateWalletSecretsOps{q: qtx},
+		)
+	})
+}
+
+// updateWalletSecretsOps adapts PostgreSQL sqlc queries to the shared
+// UpdateWalletSecrets workflow.
+type updateWalletSecretsOps struct {
+	q *sqlc.Queries
+}
+
+// WalletWatchOnly implements db.UpdateWalletSecretsOps.
+func (o updateWalletSecretsOps) WalletWatchOnly(ctx context.Context,
+	walletID uint32) (bool, error) {
+
+	walletRow, err := o.q.GetWalletByID(ctx, int64(walletID))
+	if err == nil {
+		return walletRow.IsWatchOnly, nil
 	}
 
-	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		walletRow, err := qtx.GetWalletByID(ctx, int64(params.WalletID))
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("wallet %d: %w", params.WalletID,
-					db.ErrWalletNotFound)
-			}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("wallet %d: %w", walletID,
+			db.ErrWalletNotFound)
+	}
 
-			return fmt.Errorf("get wallet: %w", err)
-		}
+	return false, err
+}
 
-		err = params.Validate(walletRow.IsWatchOnly)
-		if err != nil {
-			return err
-		}
+// UpdateWalletSecrets implements db.UpdateWalletSecretsOps.
+func (o updateWalletSecretsOps) UpdateWalletSecrets(ctx context.Context,
+	params db.UpdateWalletSecretsParams) error {
 
-		rowsAffected, err := qtx.UpdateWalletSecrets(ctx, secretsParams)
-		if err != nil {
-			return fmt.Errorf("update wallet secrets: %w", err)
-		}
+	rowsAffected, err := o.q.UpdateWalletSecrets(
+		ctx, sqlc.UpdateWalletSecretsParams{
+			MasterPrivParams: db.NilIfEmptyBytes(
+				params.MasterPrivParams,
+			),
+			EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
+				params.EncryptedCryptoPrivKey,
+			),
+			EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
+				params.EncryptedCryptoScriptKey,
+			),
+			EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
+				params.EncryptedMasterHdPrivKey,
+			),
+			WalletID: int64(params.WalletID),
+		},
+	)
+	if err != nil {
+		return err
+	}
 
-		if rowsAffected == 0 {
-			return fmt.Errorf("wallet secrets for wallet %d: %w",
-				params.WalletID, db.ErrWalletNotFound)
-		}
+	if rowsAffected == 0 {
+		return fmt.Errorf("wallet secrets for wallet %d: %w",
+			params.WalletID, db.ErrWalletNotFound)
+	}
 
-		return nil
-	})
+	return nil
 }
 
 // walletRowParams holds the parameters needed to build a WalletInfo
@@ -368,6 +365,25 @@ type walletRowParams struct {
 	birthdayBlockHash      []byte
 	birthdayBlockTimestamp sql.NullInt64
 	masterPubKey           []byte
+}
+
+// getWalletRowToInfo converts a fetched wallet row to a WalletInfo.
+func getWalletRowToInfo(row sqlc.GetWalletByIDRow) (*db.WalletInfo, error) {
+	return buildWalletInfo(walletRowParams{
+		id:                     row.ID,
+		name:                   row.WalletName,
+		isImported:             row.IsImported,
+		managerVersion:         row.ManagerVersion,
+		isWatchOnly:            row.IsWatchOnly,
+		syncedHeight:           row.SyncedHeight,
+		syncedBlockHash:        row.SyncedBlockHash,
+		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
+		birthdayHeight:         row.BirthdayHeight,
+		birthdayTimestamp:      row.BirthdayTimestamp,
+		birthdayBlockHash:      row.BirthdayBlockHash,
+		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
+		masterPubKey:           row.MasterHdPubKey,
+	})
 }
 
 // listWalletRowToInfo converts a ListWallets result row to a WalletInfo
