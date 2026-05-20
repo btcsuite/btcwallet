@@ -137,6 +137,16 @@ func (p NewImportedAddressParams) HasSecretMaterial() bool {
 	return len(p.EncryptedPrivateKey) > 0 || len(p.EncryptedScript) > 0
 }
 
+// HasScript returns true if the params include script spend data.
+func (p NewImportedAddressParams) HasScript() bool {
+	return len(p.EncryptedScript) > 0
+}
+
+// IsWatchOnly returns true if the params do not include private key material.
+func (p NewImportedAddressParams) IsWatchOnly() bool {
+	return !p.HasPrivateKey()
+}
+
 // IDToOrigin safely converts an integer to AccountOrigin. It returns an error
 // if the value is outside [DerivedAccount, ImportedAccount].
 func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
@@ -290,6 +300,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		Origin:       ImportedAccount,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
+		HasScript:    params.HasScript(),
 		IsWatchOnly: importedAddressIsWatchOnly(
 			walletIsWatchOnly, params.HasPrivateKey(),
 		),
@@ -389,6 +400,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		Index:        addrIndex,
 		ScriptPubKey: row.ScriptPubKey,
 		PubKey:       row.PubKey,
+		HasScript:    row.HasScript,
 		IsWatchOnly:  isWatchOnly,
 	}, nil
 }
