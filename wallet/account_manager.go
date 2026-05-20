@@ -290,6 +290,7 @@ func (w *Wallet) ListAccountsByScope(_ context.Context,
 	if err != nil {
 		return nil, err
 	}
+
 	walletWatchOnly := w.addrStore.WatchOnly()
 
 	var accounts []db.AccountInfo
@@ -358,52 +359,20 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 		// through all active scopes.
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		for _, scopeMgr := range scopes {
-			// Look up the account number for the given name in the
-			// current scope.
-			accNum, err := scopeMgr.LookupAccount(addrmgrNs, name)
-			if err != nil {
-				// If the account is not found in this scope,
-				// we can safely continue to the next one.
-				if waddrmgr.IsError(
-					err, waddrmgr.ErrAccountNotFound) {
-
-					continue
-				}
-
-				return err
-			}
-
-			// Retrieve the account's properties.
-			props, err := scopeMgr.AccountProperties(
-				addrmgrNs, accNum,
+			account, found, err := accountInfoByNameInScope(
+				scopeMgr, addrmgrNs, name,
+				scopedBalances[scopeMgr.Scope()],
+				walletWatchOnly, w.masterFingerprint,
 			)
 			if err != nil {
 				return err
 			}
 
-			// Get the pre-calculated balance for this account. If
-			// the account has no balance, it will be zero.
-			var balance btcutil.Amount
-
-			balances, ok := scopedBalances[scopeMgr.Scope()]
-			if ok {
-				balance = balances[accNum]
+			if !found {
+				continue
 			}
 
-			isImported, err := scopeMgr.IsImportedAccount(
-				addrmgrNs, accNum,
-			)
-			if err != nil {
-				return err
-			}
-
-			accounts = append(
-				accounts,
-				propertiesToAccountInfo(
-					props, balance, isImported,
-					walletWatchOnly, w.masterFingerprint,
-				),
-			)
+			accounts = append(accounts, account)
 		}
 
 		return nil
@@ -413,6 +382,40 @@ func (w *Wallet) ListAccountsByName(_ context.Context,
 	}
 
 	return accounts, nil
+}
+
+// accountInfoByNameInScope returns the account matching name in scopeMgr.
+// The found return is false when the name is absent.
+func accountInfoByNameInScope(scopeMgr waddrmgr.AccountStore,
+	addrmgrNs walletdb.ReadBucket, name string,
+	accountBalances map[uint32]btcutil.Amount, walletWatchOnly bool,
+	masterFingerprint uint32) (db.AccountInfo, bool, error) {
+
+	accNum, err := scopeMgr.LookupAccount(addrmgrNs, name)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+			return db.AccountInfo{}, false, nil
+		}
+
+		return db.AccountInfo{}, false, err
+	}
+
+	props, err := scopeMgr.AccountProperties(addrmgrNs, accNum)
+	if err != nil {
+		return db.AccountInfo{}, false, err
+	}
+
+	isImported, err := scopeMgr.IsImportedAccount(addrmgrNs, accNum)
+	if err != nil {
+		return db.AccountInfo{}, false, err
+	}
+
+	account := propertiesToAccountInfo(
+		props, accountBalances[accNum], isImported,
+		walletWatchOnly, masterFingerprint,
+	)
+
+	return account, true, nil
 }
 
 // GetAccount returns the account for a given account name and key scope.
