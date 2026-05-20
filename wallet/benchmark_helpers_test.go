@@ -1025,29 +1025,6 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 	return nil, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
 }
 
-// getBalanceDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as GetBalance by calling Accounts API across all active key scopes
-// and filtering by account name.
-func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string, _ int32) (btcutil.Amount, error) {
-
-	result, err := w.Accounts(scope)
-	if err != nil {
-		return 0, err
-	}
-
-	for _, account := range result.Accounts {
-		if account.AccountName == accountName {
-			// The deprecated Accounts API doesn't support
-			// confirmation filtering. It always returns total
-			// balance.
-			return account.TotalBalance, nil
-		}
-	}
-
-	return 0, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
-}
-
 // listAddressesDeprecated wraps the deprecated AccountAddresses and
 // TotalReceivedForAddr APIs to satisfy the same contract as ListAddresses by
 // calling the old APIs and aggregating the results with balances.
