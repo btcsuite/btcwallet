@@ -15,6 +15,10 @@ INSERT INTO address_secrets (
 SELECT
     a.id,
     a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
     a.type_id,
     a.address_branch,
     a.address_index,
@@ -22,11 +26,13 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = $1 AND a.wallet_id = $2;
@@ -82,6 +88,10 @@ RETURNING id, created_at;
 SELECT
     a.id,
     a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
     a.type_id,
     a.address_branch,
     a.address_index,
@@ -89,6 +99,7 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script

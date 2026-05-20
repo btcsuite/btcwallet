@@ -103,6 +103,10 @@ const GetAddressByScriptPubKey = `-- name: GetAddressByScriptPubKey :one
 SELECT
     a.id,
     a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
     a.type_id,
     a.address_branch,
     a.address_index,
@@ -110,11 +114,13 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = $1 AND a.wallet_id = $2
@@ -128,6 +134,10 @@ type GetAddressByScriptPubKeyParams struct {
 type GetAddressByScriptPubKeyRow struct {
 	ID                int64
 	AccountID         int64
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	Purpose           int64
+	CoinType          int64
 	TypeID            int16
 	AddressBranch     sql.NullInt16
 	AddressIndex      sql.NullInt64
@@ -135,6 +145,7 @@ type GetAddressByScriptPubKeyRow struct {
 	PubKey            []byte
 	CreatedAt         time.Time
 	OriginID          int16
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	HasPrivateKey     bool
 	HasScript         bool
@@ -147,6 +158,10 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 	err := row.Scan(
 		&i.ID,
 		&i.AccountID,
+		&i.AccountNumber,
+		&i.AccountName,
+		&i.Purpose,
+		&i.CoinType,
 		&i.TypeID,
 		&i.AddressBranch,
 		&i.AddressIndex,
@@ -154,6 +169,7 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.PubKey,
 		&i.CreatedAt,
 		&i.OriginID,
+		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.HasPrivateKey,
 		&i.HasScript,
@@ -221,6 +237,10 @@ const ListAddressesByAccount = `-- name: ListAddressesByAccount :many
 SELECT
     a.id,
     a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
     a.type_id,
     a.address_branch,
     a.address_index,
@@ -228,6 +248,7 @@ SELECT
     a.pub_key,
     a.created_at,
     acc.origin_id,
+    acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script
@@ -265,6 +286,10 @@ type ListAddressesByAccountParams struct {
 type ListAddressesByAccountRow struct {
 	ID                int64
 	AccountID         int64
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	Purpose           int64
+	CoinType          int64
 	TypeID            int16
 	AddressBranch     sql.NullInt16
 	AddressIndex      sql.NullInt64
@@ -272,6 +297,7 @@ type ListAddressesByAccountRow struct {
 	PubKey            []byte
 	CreatedAt         time.Time
 	OriginID          int16
+	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	HasPrivateKey     bool
 	HasScript         bool
@@ -300,6 +326,10 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 		if err := rows.Scan(
 			&i.ID,
 			&i.AccountID,
+			&i.AccountNumber,
+			&i.AccountName,
+			&i.Purpose,
+			&i.CoinType,
 			&i.TypeID,
 			&i.AddressBranch,
 			&i.AddressIndex,
@@ -307,6 +337,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.PubKey,
 			&i.CreatedAt,
 			&i.OriginID,
+			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.HasPrivateKey,
 			&i.HasScript,
