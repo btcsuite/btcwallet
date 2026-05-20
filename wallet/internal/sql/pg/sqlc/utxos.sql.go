@@ -51,19 +51,12 @@ WHERE
         OR acc.account_number = $5::BIGINT
     )
     AND (
-        $6::INTEGER IS NULL
-        OR $6::INTEGER = 0
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) >= $6::INTEGER
+        $6::TEXT IS NULL
+        OR acc.account_name = $6::TEXT
     )
     AND (
         $7::INTEGER IS NULL
+        OR $7::INTEGER = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -71,11 +64,22 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= $7::INTEGER
+        ) >= $7::INTEGER
     )
     AND (
         $8::INTEGER IS NULL
-        OR $8::INTEGER = 0
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) <= $8::INTEGER
+    )
+    AND (
+        $9::INTEGER IS NULL
+        OR $9::INTEGER = 0
         OR NOT t.is_coinbase
         OR (
             CASE
@@ -84,7 +88,7 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) >= $8::INTEGER
+        ) >= $9::INTEGER
     )
 `
 
@@ -94,6 +98,7 @@ type BalanceParams struct {
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
 	AccountNumber    sql.NullInt64
+	AccountName      sql.NullString
 	MinConfirms      sql.NullInt32
 	MaxConfirms      sql.NullInt32
 	CoinbaseMaturity sql.NullInt32
@@ -132,6 +137,7 @@ func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, e
 		arg.Purpose,
 		arg.CoinType,
 		arg.AccountNumber,
+		arg.AccountName,
 		arg.MinConfirms,
 		arg.MaxConfirms,
 		arg.CoinbaseMaturity,
