@@ -1247,6 +1247,15 @@ type BalanceParams struct {
 	// least this many confirmations before they count toward the returned
 	// balance result. Non-coinbase outputs ignore this filter.
 	CoinbaseMaturity *int32
+
+	// Name optionally restricts the balance to a single account by name.
+	// Account names are unique within a scope, so Name requires Scope.
+	// Name is mutually exclusive with Account: callers either know the
+	// raw account number (Account) or the account name (Name), never
+	// both. Name is the public-facing handle for imported accounts whose
+	// AccountNumber is masked to 0 by the contract; passing Account=0
+	// for such accounts would collide with the default derived account.
+	Name *string
 }
 
 // ErrBalanceParamsAccountWithoutScope is returned by BalanceParams.Validate
@@ -1258,11 +1267,36 @@ var ErrBalanceParamsAccountWithoutScope = errors.New(
 		"account-number reuse",
 )
 
+// ErrBalanceParamsNameWithoutScope is returned by BalanceParams.Validate
+// when Name is set but Scope is not. Account names are unique only within
+// a scope; a name-only balance query would sum across scopes (or depend
+// on backend-specific lookup behavior).
+var ErrBalanceParamsNameWithoutScope = errors.New(
+	"balance: Name requires Scope (account names are scope-unique)",
+)
+
+// ErrBalanceParamsAccountAndName is returned by BalanceParams.Validate when
+// both Account and Name are set. The two fields are mutually exclusive:
+// picking one disambiguates the account, picking both is contradictory.
+var ErrBalanceParamsAccountAndName = errors.New(
+	"balance: Account and Name are mutually exclusive",
+)
+
 // Validate returns ErrBalanceParamsAccountWithoutScope when Account is set
-// without Scope. All other parameter combinations are accepted.
+// without Scope, ErrBalanceParamsNameWithoutScope when Name is set without
+// Scope, or ErrBalanceParamsAccountAndName when both are set. All other
+// parameter combinations are accepted.
 func (p BalanceParams) Validate() error {
+	if p.Account != nil && p.Name != nil {
+		return ErrBalanceParamsAccountAndName
+	}
+
 	if p.Account != nil && p.Scope == nil {
 		return ErrBalanceParamsAccountWithoutScope
+	}
+
+	if p.Name != nil && p.Scope == nil {
+		return ErrBalanceParamsNameWithoutScope
 	}
 
 	return nil

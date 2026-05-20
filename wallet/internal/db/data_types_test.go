@@ -42,6 +42,7 @@ func TestBalanceParamsValidate(t *testing.T) {
 	var (
 		zeroAccount uint32
 		zeroConfs   int32
+		name        = "default"
 	)
 
 	scope := KeyScopeBIP0084
@@ -71,6 +72,14 @@ func TestBalanceParamsValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "name with scope",
+			params: BalanceParams{
+				WalletID: 1,
+				Scope:    &scope,
+				Name:     &name,
+			},
+		},
+		{
 			name: "account without scope",
 			params: BalanceParams{
 				WalletID: 1,
@@ -86,6 +95,24 @@ func TestBalanceParamsValidate(t *testing.T) {
 				MinConfs: &zeroConfs,
 			},
 			wantErr: ErrBalanceParamsAccountWithoutScope,
+		},
+		{
+			name: "name without scope",
+			params: BalanceParams{
+				WalletID: 1,
+				Name:     &name,
+			},
+			wantErr: ErrBalanceParamsNameWithoutScope,
+		},
+		{
+			name: "account and name",
+			params: BalanceParams{
+				WalletID: 1,
+				Scope:    &scope,
+				Account:  &zeroAccount,
+				Name:     &name,
+			},
+			wantErr: ErrBalanceParamsAccountAndName,
 		},
 	}
 
