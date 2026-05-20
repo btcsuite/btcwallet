@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -248,10 +249,9 @@ func TestControllerStart(t *testing.T) {
 
 	// 1. Mock verifyBirthday: Expect a call to retrieve the birthday
 	//    block.
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
+	).Once()
 
 	// 2. Mock DBGetAllAccounts: Expect a call to load active account
 	//    managers.
@@ -425,8 +425,13 @@ func TestControllerVerifyBirthday_Verified(t *testing.T) {
 	// Arrange: Setup a wallet where the birthday block is already verified.
 	w, deps := createTestWalletWithMocks(t)
 	bs := waddrmgr.BlockStamp{Height: 123, Hash: chainhash.Hash{0x01}}
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{
+			BirthdayBlock: &db.Block{
+				Height: 123,
+				Hash:   chainhash.Hash{0x01},
+			},
+		}, nil).Once()
 
 	// Act: Verify birthday.
 	err := w.verifyBirthday(t.Context())
@@ -445,11 +450,8 @@ func TestControllerVerifyBirthday_LocateFail(t *testing.T) {
 	// and chain lookup fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-		}).Once()
-	deps.addrStore.On("Birthday").Return(time.Now()).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: time.Now()}, nil).Once()
 	deps.chain.On("GetBestBlock").Return(nil, int32(0), errChainMock).Once()
 
 	// Act: Attempt to verify birthday.
@@ -468,11 +470,8 @@ func TestControllerVerifyBirthday_PutFail(t *testing.T) {
 	// persisting the birthday block fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-		}).Once()
-	deps.addrStore.On("Birthday").Return(time.Now()).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: time.Now()}, nil).Once()
 	deps.chain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(100), nil).Once()
 	deps.chain.On("GetBlockHash", mock.Anything).Return(
@@ -536,9 +535,8 @@ func TestControllerStop(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for the startup sequence.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore(nil)).Once()
@@ -584,9 +582,8 @@ func TestControllerLock(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore(nil)).Once()
@@ -626,9 +623,8 @@ func TestControllerUnlock(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore(nil)).Once()
@@ -668,9 +664,8 @@ func TestControllerChangePassphrase(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	// Setup mocks for startup.
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore(nil)).Once()
@@ -797,10 +792,9 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 	// Arrange: Setup a wallet with existing accounts in the address store.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
+	).Once()
 
 	scopedMgr := &bwmock.AccountStore{}
 	deps.addrStore.On(
@@ -1187,9 +1181,10 @@ func TestControllerInfo(t *testing.T) {
 	w, deps := createTestWalletWithMocks(t)
 
 	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{
+			BirthdayBlock: &db.Block{Height: 100},
+		}, nil).Once()
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore(nil)).Once()
@@ -1316,12 +1311,12 @@ func TestControllerRescan(t *testing.T) {
 func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where birthday block lookup fails.
+	// Arrange: Setup mock expectations where GetWallet fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, false, errDBMock).Once()
+	deps.store.On(
+		"GetWallet", mock.Anything, mock.Anything,
+	).Return(nil, errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
 	err := w.Start(t.Context())
@@ -1340,10 +1335,9 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 	// startup.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(bs, true, nil).Once()
+	deps.store.On(
+		"GetWallet", mock.Anything, mock.Anything,
+	).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 
 	mockScopedMgr := &bwmock.AccountStore{}
 	deps.addrStore.On(
@@ -1371,14 +1365,9 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	// and must be located from the chain.
 	w, deps := createTestWalletWithMocks(t)
 
-	deps.addrStore.On(
-		"BirthdayBlock", mock.Anything,
-	).Return(waddrmgr.BlockStamp{}, false, waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrBirthdayBlockNotSet,
-	}).Once()
-
 	birthday := time.Now()
-	deps.addrStore.On("Birthday").Return(birthday).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{Birthday: birthday}, nil).Once()
 
 	deps.chain.On(
 		"GetBestBlock",
@@ -1466,9 +1455,8 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 	// fails.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
-	deps.addrStore.On("BirthdayBlock", mock.Anything).Return(
-		bs, true, nil).Once()
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.addrStore.On("ActiveScopedKeyManagers").Return(
 		[]waddrmgr.AccountStore(nil)).Once()
 
