@@ -548,11 +548,21 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	require.Error(t, err)
 
 	// Arrange: Import the key as a watch-only address.
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("ImportPublicKey", mock.Anything, pubKey,
-		mock.Anything).Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Twice()
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.store.On(
+		"NewImportedAddress", mock.Anything,
+		db.NewImportedAddressParams{
+			WalletID:     w.id,
+			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: pkScript,
+			PubKey:       pubKey.SerializeCompressed(),
+		},
+	).Return(importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	), nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).
 		Return(nil).Once()
 
@@ -563,6 +573,7 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	// imported key.
 	deps.addrStore.On("Address", mock.Anything, addr).
 		Return(deps.pubKeyAddr, nil).Once()
+	deps.pubKeyAddr.On("Address").Return(addr).Once()
 	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
 	deps.pubKeyAddr.On("Imported").Return(true).Once()
 	deps.pubKeyAddr.On("Internal").Return(false).Once()
@@ -679,48 +690,37 @@ func TestListAddresses(t *testing.T) {
 func TestImportPublicKey(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// Create a new public key to import.
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
 	pubKey := privKey.PubKey()
 
-	// Import the public key.
 	addr, _ := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()),
 		w.cfg.ChainParams,
 	)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
 
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-	deps.accountManager.On("ImportPublicKey", mock.Anything, pubKey,
-		mock.Anything).Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
+	deps.store.On(
+		"NewImportedAddress", mock.Anything,
+		db.NewImportedAddressParams{
+			WalletID:     w.id,
+			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: pkScript,
+			PubKey:       pubKey.SerializeCompressed(),
+		},
+	).Return(importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	), nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).
 		Return(nil).Once()
 
 	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
 	require.NoError(t, err)
-
-	// Check that the address is now managed by the wallet.
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(true).Once()
-	deps.pubKeyAddr.On("Internal").Return(false).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	deps.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
-
-	info, err := w.GetAddressInfo(t.Context(), addr)
-	require.NoError(t, err)
-	require.NotNil(t, info)
 }
 
 // TestImportTaprootScript tests the ImportTaprootScript method to ensure it can
@@ -728,7 +728,6 @@ func TestImportPublicKey(t *testing.T) {
 func TestImportTaprootScript(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
 	// Create a new tapscript to import.
@@ -753,25 +752,37 @@ func TestImportTaprootScript(t *testing.T) {
 		Leaves: []txscript.TapLeaf{leaf},
 	}
 
-	// Import the tapscript.
 	addr, _ := address.NewAddressTaproot(
 		schnorr.SerializePubKey(txscript.ComputeTaprootOutputKey(
 			pubKey, rootHash[:],
 		)), w.cfg.ChainParams,
 	)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
 
-	deps.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0086).
-		Return(deps.accountManager, nil).Once()
+	encodedScript, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
 
-	// SyncedTo is mocked in createStartedWalletWithMocks (height 1).
-	deps.accountManager.On("ImportTaprootScript", mock.Anything,
-		mock.Anything, mock.Anything, uint8(1), false).
-		Return(deps.taprootAddr, nil).Once()
-	deps.taprootAddr.On("Address").Return(addr).Twice()
-	deps.taprootAddr.On("AddrType").Return(waddrmgr.TaprootScript).Once()
-	deps.taprootAddr.On("Imported").Return(true).Once()
-	deps.taprootAddr.On("Internal").Return(false).Once()
-	deps.taprootAddr.On("Compressed").Return(false).Once()
+	encryptedScript := []byte("encrypted tapscript")
+	deps.addrStore.On(
+		"Encrypt", waddrmgr.CKTPublic, encodedScript,
+	).Return(encryptedScript, nil).Once()
+	deps.store.On("NewImportedAddress", mock.Anything,
+		db.NewImportedAddressParams{
+			WalletID:        w.id,
+			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
+			AddressType:     db.TaprootPubKey,
+			ScriptPubKey:    pkScript,
+			EncryptedScript: encryptedScript,
+		}).Return(&db.AddressInfo{
+		AddrType:     db.TaprootPubKey,
+		Origin:       db.ImportedAccount,
+		AccountName:  db.DefaultImportedAccountName,
+		KeyScope:     db.KeyScope(waddrmgr.KeyScopeBIP0086),
+		ScriptPubKey: pkScript,
+		HasScript:    true,
+		IsWatchOnly:  true,
+	}, nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).
 		Return(nil).Once()
 
