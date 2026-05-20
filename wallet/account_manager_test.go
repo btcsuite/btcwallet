@@ -244,11 +244,15 @@ func TestListAccounts(t *testing.T) {
 			AccountNumber: 0,
 			AccountName:   "default",
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
+		Return(false, nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
 		Return(&waddrmgr.AccountProperties{
 			AccountNumber: 1,
 			AccountName:   testAccountName,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Once()
@@ -259,29 +263,29 @@ func TestListAccounts(t *testing.T) {
 	require.NoError(t, err, "unable to list accounts")
 
 	// We should have two accounts.
-	require.Len(t, accounts.Accounts, 2, "expected two accounts")
+	require.Len(t, accounts, 2, "expected two accounts")
 
 	// The first account should be the default account.
 	require.Equal(
-		t, "default", accounts.Accounts[0].AccountName,
+		t, "default", accounts[0].AccountName,
 		"expected default account",
 	)
 	require.Equal(
-		t, uint32(0), accounts.Accounts[0].AccountNumber,
+		t, uint32(0), accounts[0].AccountNumber,
 		"expected default account number",
 	)
 	require.Equal(
-		t, btcutil.Amount(0), accounts.Accounts[0].TotalBalance,
+		t, btcutil.Amount(0), accounts[0].ConfirmedBalance,
 		"expected zero balance for default account",
 	)
 
 	// The new account should also be present.
 	require.Equal(
-		t, testAccountName, accounts.Accounts[1].AccountName,
+		t, testAccountName, accounts[1].AccountName,
 		"expected new account",
 	)
 	require.Equal(
-		t, uint32(1), accounts.Accounts[1].AccountNumber,
+		t, uint32(1), accounts[1].AccountNumber,
 		"expected new account number",
 	)
 }
@@ -341,11 +345,15 @@ func TestListAccountsByScope(t *testing.T) {
 			AccountNumber: 0,
 			AccountName:   "default",
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
+		Return(false, nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
 		Return(&waddrmgr.AccountProperties{
 			AccountNumber: 1,
 			AccountName:   accBIP84Name,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Once()
@@ -357,15 +365,15 @@ func TestListAccountsByScope(t *testing.T) {
 	require.NoError(t, err)
 
 	// We should have two accounts, the default account and the new account.
-	require.Len(t, accountsBIP84.Accounts, 2)
+	require.Len(t, accountsBIP84, 2)
 
 	// The first account should be the default account.
-	require.Equal(t, "default", accountsBIP84.Accounts[0].AccountName)
-	require.Equal(t, uint32(0), accountsBIP84.Accounts[0].AccountNumber)
+	require.Equal(t, "default", accountsBIP84[0].AccountName)
+	require.Equal(t, uint32(0), accountsBIP84[0].AccountNumber)
 
 	// The second account should be the new account.
-	require.Equal(t, accBIP84Name, accountsBIP84.Accounts[1].AccountName)
-	require.Equal(t, uint32(1), accountsBIP84.Accounts[1].AccountNumber)
+	require.Equal(t, accBIP84Name, accountsBIP84[1].AccountName)
+	require.Equal(t, uint32(1), accountsBIP84[1].AccountNumber)
 
 	// Mock expectations for ListAccountsByScope (BIP49).
 	deps.addrStore.On("FetchScopedKeyManager", scopeBIP49).
@@ -378,11 +386,15 @@ func TestListAccountsByScope(t *testing.T) {
 			AccountNumber: 0,
 			AccountName:   "default",
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
+		Return(false, nil).Once()
 	deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
 		Return(&waddrmgr.AccountProperties{
 			AccountNumber: 1,
 			AccountName:   accBIP49Name,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	deps.txStore.On("UnspentOutputs", mock.Anything).
 		Return([]wtxmgr.Credit(nil), nil).Once()
@@ -392,15 +404,15 @@ func TestListAccountsByScope(t *testing.T) {
 	require.NoError(t, err)
 
 	// We should have two accounts, the default account and the new account.
-	require.Len(t, accountsBIP49.Accounts, 2)
+	require.Len(t, accountsBIP49, 2)
 
 	// The first account should be the default account.
-	require.Equal(t, "default", accountsBIP49.Accounts[0].AccountName)
-	require.Equal(t, uint32(0), accountsBIP49.Accounts[0].AccountNumber)
+	require.Equal(t, "default", accountsBIP49[0].AccountName)
+	require.Equal(t, uint32(0), accountsBIP49[0].AccountNumber)
 
 	// The second account should be the new account.
-	require.Equal(t, accBIP49Name, accountsBIP49.Accounts[1].AccountName)
-	require.Equal(t, uint32(1), accountsBIP49.Accounts[1].AccountNumber)
+	require.Equal(t, accBIP49Name, accountsBIP49[1].AccountName)
+	require.Equal(t, uint32(1), accountsBIP49[1].AccountNumber)
 }
 
 // TestListAccountsByName tests that the ListAccountsByName method works as
@@ -425,6 +437,8 @@ func TestListAccountsByName(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   accBIP84Name,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	_, err := w.NewAccount(t.Context(), scopeBIP84, accBIP84Name)
 	require.NoError(t, err)
@@ -441,6 +455,8 @@ func TestListAccountsByName(t *testing.T) {
 			AccountNumber: 1,
 			AccountName:   accBIP49Name,
 		}, nil).Once()
+	deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+		Return(false, nil).Once()
 
 	_, err = w.NewAccount(t.Context(), scopeBIP49, accBIP49Name)
 	require.NoError(t, err)
@@ -467,11 +483,11 @@ func TestListAccountsByName(t *testing.T) {
 	require.NoError(t, err)
 
 	// We should have one account.
-	require.Len(t, accountsBIP84.Accounts, 1)
+	require.Len(t, accountsBIP84, 1)
 
 	// The first account should be the new account.
-	require.Equal(t, accBIP84Name, accountsBIP84.Accounts[0].AccountName)
-	require.Equal(t, uint32(1), accountsBIP84.Accounts[0].AccountNumber)
+	require.Equal(t, accBIP84Name, accountsBIP84[0].AccountName)
+	require.Equal(t, uint32(1), accountsBIP84[0].AccountNumber)
 
 	// Mock expectations for ListAccountsByName (BIP49 name).
 	deps.addrStore.On("ActiveScopedKeyManagers").
@@ -490,11 +506,11 @@ func TestListAccountsByName(t *testing.T) {
 	require.NoError(t, err)
 
 	// We should have one account.
-	require.Len(t, accountsBIP49.Accounts, 1)
+	require.Len(t, accountsBIP49, 1)
 
 	// The first account should be the new account.
-	require.Equal(t, accBIP49Name, accountsBIP49.Accounts[0].AccountName)
-	require.Equal(t, uint32(1), accountsBIP49.Accounts[0].AccountNumber)
+	require.Equal(t, accBIP49Name, accountsBIP49[0].AccountName)
+	require.Equal(t, uint32(1), accountsBIP49[0].AccountNumber)
 
 	// Mock expectations for non-existent account.
 	deps.addrStore.On("ActiveScopedKeyManagers").
@@ -509,7 +525,52 @@ func TestListAccountsByName(t *testing.T) {
 	// account.
 	accounts, err := w.ListAccountsByName(t.Context(), "non-existent")
 	require.NoError(t, err)
-	require.Empty(t, accounts.Accounts)
+	require.Empty(t, accounts)
+}
+
+// TestListAccountsByNameIncludesImportedPseudoAccount verifies that the
+// AccountInfo read surface keeps waddrmgr's legacy imported-address
+// pseudo-account queryable by name.
+func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	importedAccount := uint32(waddrmgr.ImportedAddrAccount)
+
+	deps.addrStore.On("ActiveScopedKeyManagers").
+		Return([]waddrmgr.AccountStore{deps.accountManager}).Once()
+	deps.accountManager.On("Scope").Return(scope).Maybe()
+	deps.accountManager.On(
+		"LookupAccount", mock.Anything,
+		waddrmgr.ImportedAddrAccountName,
+	).Return(importedAccount, nil).Once()
+	deps.accountManager.On(
+		"AccountProperties", mock.Anything,
+		importedAccount,
+	).Return(&waddrmgr.AccountProperties{
+		AccountNumber:    importedAccount,
+		AccountName:      waddrmgr.ImportedAddrAccountName,
+		ImportedKeyCount: 2,
+	}, nil).Once()
+	deps.accountManager.On(
+		"IsImportedAccount", mock.Anything,
+		importedAccount,
+	).Return(true, nil).Once()
+	deps.txStore.On("UnspentOutputs", mock.Anything).
+		Return([]wtxmgr.Credit(nil), nil).Once()
+
+	accounts, err := w.ListAccountsByName(
+		t.Context(), waddrmgr.ImportedAddrAccountName,
+	)
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+	require.Equal(t, waddrmgr.ImportedAddrAccountName,
+		accounts[0].AccountName)
+	require.Equal(t, db.ImportedAccount, accounts[0].Origin)
+	require.Equal(t, uint32(0), accounts[0].AccountNumber)
+	require.Equal(t, uint32(2), accounts[0].ImportedKeyCount)
 }
 
 // TestGetAccount tests that the GetAccount method works as expected.
@@ -592,6 +653,48 @@ func TestGetAccount(t *testing.T) {
 		t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound),
 		"expected ErrAccountNotFound",
 	)
+}
+
+// TestGetAccountIncludesImportedPseudoAccount verifies that the AccountInfo
+// read surface keeps waddrmgr's legacy imported-address pseudo-account
+// queryable by name.
+func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	importedAccount := uint32(waddrmgr.ImportedAddrAccount)
+
+	deps.addrStore.On("FetchScopedKeyManager", scope).
+		Return(deps.accountManager, nil).Once()
+	deps.accountManager.On(
+		"LookupAccount", mock.Anything,
+		waddrmgr.ImportedAddrAccountName,
+	).Return(importedAccount, nil).Once()
+	deps.accountManager.On(
+		"AccountProperties", mock.Anything,
+		importedAccount,
+	).Return(&waddrmgr.AccountProperties{
+		AccountNumber:    importedAccount,
+		AccountName:      waddrmgr.ImportedAddrAccountName,
+		ImportedKeyCount: 3,
+	}, nil).Once()
+	deps.accountManager.On(
+		"IsImportedAccount", mock.Anything,
+		importedAccount,
+	).Return(true, nil).Once()
+	deps.txStore.On("UnspentOutputs", mock.Anything).
+		Return([]wtxmgr.Credit(nil), nil).Once()
+
+	account, err := w.GetAccount(
+		t.Context(), scope, waddrmgr.ImportedAddrAccountName,
+	)
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.ImportedAddrAccountName, account.AccountName)
+	require.Equal(t, db.ImportedAccount, account.Origin)
+	require.Equal(t, uint32(0), account.AccountNumber)
+	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
 
 // TestRenameAccount tests that the RenameAccount method works as expected.
@@ -1225,20 +1328,26 @@ func TestListAccountsWithBalances(t *testing.T) {
 				AccountNumber: 0,
 				AccountName:   "default",
 			}, nil).Once()
+		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(0)).
+			Return(false, nil).Once()
 		deps.accountManager.On("AccountProperties", mock.Anything, uint32(1)).
 			Return(&waddrmgr.AccountProperties{
 				AccountNumber: 1,
 				AccountName:   acc1Name,
 			}, nil).Once()
+		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(1)).
+			Return(false, nil).Once()
 		deps.accountManager.On("AccountProperties", mock.Anything, uint32(2)).
 			Return(&waddrmgr.AccountProperties{
 				AccountNumber: 2,
 				AccountName:   acc2Name,
 			}, nil).Once()
+		deps.accountManager.On("IsImportedAccount", mock.Anything, uint32(2)).
+			Return(false, nil).Once()
 
 		// Call the function under test.
 		results, err := listAccountsWithBalances(
-			deps.accountManager, addrmgrNs, balances,
+			deps.accountManager, addrmgrNs, balances, false, 0,
 		)
 		require.NoError(t, err)
 
@@ -1249,17 +1358,17 @@ func TestListAccountsWithBalances(t *testing.T) {
 		// Check the default account's result.
 		require.Equal(t, "default", results[0].AccountName)
 		require.Equal(t, uint32(0), results[0].AccountNumber)
-		require.Equal(t, btcutil.Amount(100), results[0].TotalBalance)
+		require.Equal(t, btcutil.Amount(100), results[0].ConfirmedBalance)
 
 		// Check the first new account's result.
 		require.Equal(t, acc1Name, results[1].AccountName)
 		require.Equal(t, uint32(1), results[1].AccountNumber)
-		require.Equal(t, btcutil.Amount(200), results[1].TotalBalance)
+		require.Equal(t, btcutil.Amount(200), results[1].ConfirmedBalance)
 
 		// Check the second new account's result (zero balance).
 		require.Equal(t, acc2Name, results[2].AccountName)
 		require.Equal(t, uint32(2), results[2].AccountNumber)
-		require.Equal(t, btcutil.Amount(0), results[2].TotalBalance)
+		require.Equal(t, btcutil.Amount(0), results[2].ConfirmedBalance)
 
 		return nil
 	})
