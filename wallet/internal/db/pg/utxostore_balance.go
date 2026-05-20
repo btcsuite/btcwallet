@@ -32,6 +32,7 @@ func (s *Store) Balance(ctx context.Context,
 			Purpose:       purpose,
 			CoinType:      coinType,
 			AccountNumber: db.NullableUint32ToSQLInt64(params.Account),
+			AccountName:   db.NullableStringToSQLNullString(params.Name),
 			MinConfirms:   db.NullableInt32ToSQLInt32(params.MinConfs),
 			MaxConfirms:   db.NullableInt32ToSQLInt32(params.MaxConfs),
 			CoinbaseMaturity: db.NullableInt32ToSQLInt32(
