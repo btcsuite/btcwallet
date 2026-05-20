@@ -167,6 +167,26 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// AccountID is the database unique identifier for the account.
 	AccountID int64
 
+	// AccountNumber is the BIP44 account index of the owning account when the
+	// account is derived. Imported accounts leave this NULL.
+	AccountNumber sql.NullInt64
+
+	// AccountName is the human-readable name of the owning account.
+	AccountName string
+
+	// MasterFingerprint is the root fingerprint stored on the owning account.
+	MasterFingerprint sql.NullInt64
+
+	// AccountProps contains account metadata fetched separately when the
+	// address query does not join all account fields.
+	AccountProps *AccountInfo
+
+	// Purpose is the BIP43 purpose component of the owning scope.
+	Purpose int64
+
+	// CoinType is the BIP44 coin type component of the owning scope.
+	CoinType int64
+
 	// TypeID is the database identifier for the address type.
 	TypeID TypeID
 
@@ -257,6 +277,95 @@ func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
 	}
 
 	return addrID, acctID, nil
+}
+
+// convertAccountMetadata converts account-level row data into wallet-facing
+// fields on AddressInfo.
+func convertAccountMetadata(accountNumber sql.NullInt64,
+	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (uint32,
+	uint32, KeyScope, error) {
+
+	var account uint32
+	if accountNumber.Valid {
+		converted, err := Int64ToUint32(accountNumber.Int64)
+		if err != nil {
+			return 0, 0, KeyScope{}, fmt.Errorf("account number: %w", err)
+		}
+
+		account = converted
+	}
+
+	var fingerprint uint32
+	if masterFingerprint.Valid {
+		converted, err := Int64ToUint32(masterFingerprint.Int64)
+		if err != nil {
+			return 0, 0, KeyScope{},
+				fmt.Errorf("master fingerprint: %w", err)
+		}
+
+		fingerprint = converted
+	}
+
+	convertedPurpose, err := Int64ToUint32(purpose)
+	if err != nil {
+		return 0, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
+	}
+
+	convertedCoin, err := Int64ToUint32(coinType)
+	if err != nil {
+		return 0, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
+	}
+
+	return account, fingerprint, KeyScope{
+		Purpose: convertedPurpose,
+		Coin:    convertedCoin,
+	}, nil
+}
+
+// convertAddressAccountMetadata converts the owning account metadata for an
+// address row. SQL backends may fetch account properties separately to avoid
+// widening address queries.
+func convertAddressAccountMetadata[TypeID, OriginIDType any](
+	row AddressInfoRow[TypeID, OriginIDType]) (uint32, string, uint32,
+	KeyScope, error) {
+
+	if row.AccountProps != nil {
+		return row.AccountProps.AccountNumber, row.AccountProps.AccountName,
+			row.AccountProps.MasterKeyFingerprint,
+			row.AccountProps.KeyScope, nil
+	}
+
+	accountNumber, masterFingerprint, keyScope, err :=
+		convertAccountMetadata(
+			row.AccountNumber, row.MasterFingerprint, row.Purpose,
+			row.CoinType,
+		)
+	if err != nil {
+		return 0, "", 0, KeyScope{}, err
+	}
+
+	return accountNumber, row.AccountName, masterFingerprint, keyScope, nil
+}
+
+// ApplyAddressAccountMetadata converts and copies raw account metadata onto an
+// address info returned by a create path.
+func ApplyAddressAccountMetadata(info *AddressInfo,
+	accountNumber sql.NullInt64, accountName string,
+	masterFingerprint sql.NullInt64, purpose, coinType int64) error {
+
+	acctNum, fingerprint, keyScope, err := convertAccountMetadata(
+		accountNumber, masterFingerprint, purpose, coinType,
+	)
+	if err != nil {
+		return err
+	}
+
+	info.AccountNumber = acctNum
+	info.AccountName = accountName
+	info.KeyScope = keyScope
+	info.MasterKeyFingerprint = fingerprint
+
+	return nil
 }
 
 // newImportedAddressTx handles the shared transaction flow for creating an
@@ -371,6 +480,12 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
+	accountNumber, accountName, masterFingerprint, keyScope, err :=
+		convertAddressAccountMetadata(row)
+	if err != nil {
+		return nil, err
+	}
+
 	addrType, origin, err := convertAddressMetadata(row)
 	if err != nil {
 		return nil, err
@@ -391,17 +506,21 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 	}
 
 	return &AddressInfo{
-		ID:           id,
-		AccountID:    accountID,
-		AddrType:     addrType,
-		CreatedAt:    row.CreatedAt,
-		Origin:       origin,
-		Branch:       addrBranch,
-		Index:        addrIndex,
-		ScriptPubKey: row.ScriptPubKey,
-		PubKey:       row.PubKey,
-		HasScript:    row.HasScript,
-		IsWatchOnly:  isWatchOnly,
+		ID:                   id,
+		AccountID:            accountID,
+		AccountNumber:        accountNumber,
+		AccountName:          accountName,
+		KeyScope:             keyScope,
+		MasterKeyFingerprint: masterFingerprint,
+		AddrType:             addrType,
+		CreatedAt:            row.CreatedAt,
+		Origin:               origin,
+		Branch:               addrBranch,
+		Index:                addrIndex,
+		ScriptPubKey:         row.ScriptPubKey,
+		PubKey:               row.PubKey,
+		HasScript:            row.HasScript,
+		IsWatchOnly:          isWatchOnly,
 	}, nil
 }
 
