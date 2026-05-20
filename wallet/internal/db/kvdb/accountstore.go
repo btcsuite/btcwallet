@@ -37,6 +37,13 @@ var (
 	errNoDefaultSchema = errors.New(
 		"kvdb: no default schema for scope",
 	)
+
+	// errScopedAccountDeriverUnsupported is returned when a mocked or
+	// alternate scoped manager does not provide kvdb's native derivation
+	// fallback.
+	errScopedAccountDeriverUnsupported = errors.New(
+		"kvdb: scoped account derivation unsupported",
+	)
 )
 
 // CreateDerivedAccount runs the shared CreateDerivedAccountWithOps workflow
@@ -57,6 +64,7 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		}
 
 		ops := &createDerivedAccountOps{mgr: mgr, ns: ns}
+		deriveFn = ops.deriveWithScopedFallback(deriveFn)
 
 		built, err := db.CreateDerivedAccountWithOps(
 			ctx, params, ops, deriveFn,
@@ -84,6 +92,11 @@ type createDerivedAccountOps struct {
 	ns        walletdb.ReadWriteBucket
 	scope     waddrmgr.KeyScope
 	scopedMgr waddrmgr.AccountStore
+}
+
+type derivedAccountKeyDeriver interface {
+	DeriveAccountKeys(ns walletdb.ReadBucket,
+		account uint32) ([]byte, []byte, error)
 }
 
 // WalletWatchOnly implements db.CreateDerivedAccountOps.
@@ -194,6 +207,57 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 			Valid: true,
 		},
 		CreatedAt: now,
+	}, nil
+}
+
+// deriveWithScopedFallback wraps the wallet-supplied derivation callback with
+// the legacy kvdb fallback. Neutered-root wallets no longer have the master HD
+// private key, but their scoped coin-type private keys remain and are the
+// legacy source for deriving additional accounts within an existing scope.
+func (o *createDerivedAccountOps) deriveWithScopedFallback(
+	deriveFn db.AccountDerivationFunc) db.AccountDerivationFunc {
+
+	if deriveFn == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, scope db.KeyScope, account uint32,
+		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
+
+		derived, err := deriveFn(
+			ctx, scope, account, walletIsWatchOnly,
+		)
+		if err == nil || !errors.Is(err, db.ErrSecretNotFound) {
+			return derived, err
+		}
+
+		return o.deriveAccountFromScopedKey(account)
+	}
+}
+
+// deriveAccountFromScopedKey derives account material from waddrmgr's scoped
+// coin-type private key after the shared workflow has allocated the next
+// account number.
+func (o *createDerivedAccountOps) deriveAccountFromScopedKey(
+	account uint32) (*db.DerivedAccountData, error) {
+
+	if o.scopedMgr == nil {
+		return nil, errScopedMgrUninitialized
+	}
+
+	deriver, ok := o.scopedMgr.(derivedAccountKeyDeriver)
+	if !ok {
+		return nil, errScopedAccountDeriverUnsupported
+	}
+
+	pubKey, encPrivKey, err := deriver.DeriveAccountKeys(o.ns, account)
+	if err != nil {
+		return nil, fmt.Errorf("derive scoped account: %w", err)
+	}
+
+	return &db.DerivedAccountData{
+		PublicKey:           pubKey,
+		EncryptedPrivateKey: encPrivKey,
 	}, nil
 }
 
