@@ -179,6 +179,12 @@ type WalletStore interface {
 	// or an error if the retrieval fails.
 	GetEncryptedHDSeed(ctx context.Context, walletID uint32) ([]byte, error)
 
+	// GetWalletSecrets retrieves the encrypted wallet secret material for the
+	// given wallet. Watch-only wallets may return empty secret fields without
+	// error when those values are absent in storage.
+	GetWalletSecrets(ctx context.Context, walletID uint32) (*WalletSecrets,
+		error)
+
 	// UpdateWalletSecrets updates the secrets for the wallet.
 	UpdateWalletSecrets(ctx context.Context,
 		params UpdateWalletSecretsParams) error
