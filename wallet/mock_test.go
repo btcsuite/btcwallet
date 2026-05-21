@@ -127,6 +127,18 @@ func (m *mockStore) GetEncryptedHDSeed(ctx context.Context,
 	return args.Get(0).([]byte), args.Error(1)
 }
 
+// GetWalletSecrets implements the db.WalletStore interface.
+func (m *mockStore) GetWalletSecrets(ctx context.Context,
+	walletID uint32) (*db.WalletSecrets, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.WalletSecrets), args.Error(1)
+}
+
 // UpdateWalletSecrets implements the db.WalletStore interface.
 func (m *mockStore) UpdateWalletSecrets(ctx context.Context,
 	params db.UpdateWalletSecretsParams) error {
