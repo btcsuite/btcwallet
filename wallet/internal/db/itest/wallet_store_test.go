@@ -49,9 +49,9 @@ func TestCreateWallet(t *testing.T) {
 	require.True(t, info.Birthday.IsZero())
 }
 
-// TestCreateWallet_WithBirthday checks that CreateWallet correctly sets the
+// TestCreateWalletWithBirthday checks that CreateWallet correctly sets the
 // wallet's birthday timestamp.
-func TestCreateWallet_WithBirthday(t *testing.T) {
+func TestCreateWalletWithBirthday(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -68,9 +68,9 @@ func TestCreateWallet_WithBirthday(t *testing.T) {
 	require.Nil(t, info.BirthdayBlock)
 }
 
-// TestCreateWallet_DuplicateName verifies that creating a wallet with a
+// TestCreateWalletDuplicateName verifies that creating a wallet with a
 // duplicate name fails with an appropriate error.
-func TestCreateWallet_DuplicateName(t *testing.T) {
+func TestCreateWalletDuplicateName(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -104,8 +104,8 @@ func TestCreateWallet_DuplicateName(t *testing.T) {
 	require.Equal(t, before.Errors.FatalErrs, after.Errors.FatalErrs)
 }
 
-// TestCreateWallet_Variants tests different wallet types.
-func TestCreateWallet_Variants(t *testing.T) {
+// TestCreateWalletVariants tests different wallet types.
+func TestCreateWalletVariants(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -163,9 +163,9 @@ func TestGetWallet(t *testing.T) {
 	require.Equal(t, created.IsWatchOnly, retrieved.IsWatchOnly)
 }
 
-// TestGetWallet_NotFound verifies that GetWallet returns ErrWalletNotFound
+// TestGetWalletNotFound verifies that GetWallet returns ErrWalletNotFound
 // when the wallet doesn't exist.
-func TestGetWallet_NotFound(t *testing.T) {
+func TestGetWalletNotFound(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -680,9 +680,9 @@ func flattenWalletPages(
 	return wallets
 }
 
-// TestUpdateWallet_SyncedTo checks that updating the wallet's synced-to block
+// TestUpdateWalletSyncedTo checks that updating the wallet's synced-to block
 // works correctly.
-func TestUpdateWallet_SyncedTo(t *testing.T) {
+func TestUpdateWalletSyncedTo(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -715,9 +715,9 @@ func TestUpdateWallet_SyncedTo(t *testing.T) {
 	require.Nil(t, retrieved.BirthdayBlock)
 }
 
-// TestUpdateWallet_BirthdayBlock checks that updating the wallet's birthday
+// TestUpdateWalletBirthdayBlock checks that updating the wallet's birthday
 // block works correctly.
-func TestUpdateWallet_BirthdayBlock(t *testing.T) {
+func TestUpdateWalletBirthdayBlock(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -756,9 +756,9 @@ func TestUpdateWallet_BirthdayBlock(t *testing.T) {
 	require.Nil(t, retrieved.SyncedTo)
 }
 
-// TestUpdateWallet_Birthday checks that updating the wallet's birthday
+// TestUpdateWalletBirthday checks that updating the wallet's birthday
 // timestamp works correctly.
-func TestUpdateWallet_Birthday(t *testing.T) {
+func TestUpdateWalletBirthday(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -790,8 +790,8 @@ func TestUpdateWallet_Birthday(t *testing.T) {
 	require.Nil(t, retrieved.SyncedTo)
 }
 
-// TestUpdateWallet_NotFound verifies that updating a non-existent wallet fails.
-func TestUpdateWallet_NotFound(t *testing.T) {
+// TestUpdateWalletNotFound verifies that updating a non-existent wallet fails.
+func TestUpdateWalletNotFound(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -890,7 +890,7 @@ func TestGetWalletSecretsNotFound(t *testing.T) {
 
 // TestGetEncryptedHDSeedWatchOnly verifies that watch-only wallets
 // have no encrypted seed.
-func TestGetEncryptedHDSeed_WatchOnly(t *testing.T) {
+func TestGetEncryptedHDSeedWatchOnly(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -1268,9 +1268,9 @@ func TestUpdateWalletSecrets(t *testing.T) {
 	require.Equal(t, newSecrets.EncryptedMasterHdPrivKey, seed)
 }
 
-// TestUpdateWallet_AutoBlockInsertion verifies that UpdateWallet automatically
+// TestUpdateWalletAutoBlockInsertion verifies that UpdateWallet automatically
 // inserts blocks when updating SyncedTo or BirthdayBlock.
-func TestUpdateWallet_AutoBlockInsertion(t *testing.T) {
+func TestUpdateWalletAutoBlockInsertion(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
