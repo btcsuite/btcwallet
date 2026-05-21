@@ -86,6 +86,13 @@ func (s *Store) GetEncryptedHDSeed(_ context.Context,
 	return encrypted, nil
 }
 
+// GetWalletSecrets is not yet implemented for kvdb.
+func (s *Store) GetWalletSecrets(ctx context.Context,
+	_ uint32) (*db.WalletSecrets, error) {
+
+	return nil, notImplemented(ctx, "GetWalletSecrets")
+}
+
 // UpdateWalletSecrets is not yet implemented for kvdb.
 func (s *Store) UpdateWalletSecrets(ctx context.Context,
 	_ db.UpdateWalletSecretsParams) error {
