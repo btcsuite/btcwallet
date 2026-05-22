@@ -943,6 +943,39 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	require.NoError(t, vm.Execute(), "script execution failed")
 }
 
+// TestGetPrivKeyForAddressSQLDerivedAddress verifies that GetPrivKeyForAddress
+// recovers the private key for an address whose only persistent record lives
+// in the SQL store. Regression coverage for the GetPrivKeyForAddress path
+// raised in PR #1214 review comment r3287556227.
+func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
+	t.Parallel()
+
+	w, chain := newSQLAddressSigningWallet(t)
+	chain.On(
+		"NotifyReceived",
+		mock.MatchedBy(func(addrs []address.Address) bool {
+			return len(addrs) == 1
+		}),
+	).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	// The legacy managed-address lookup should fail for a SQL-only
+	// derived address — this confirms the test exercises the derivation
+	// path rather than the kvdb fallback.
+	_, err = w.loadManagedPubKeyAddr(addr)
+	require.Error(t, err)
+
+	priv, err := w.GetPrivKeyForAddress(t.Context(), addr)
+	require.NoError(t, err, "GetPrivKeyForAddress must succeed for "+
+		"SQL-derived addresses (regression r3287556227)")
+	require.NotNil(t, priv)
+	priv.Zero()
+}
+
 // TestComputeUnlockingScriptFail_ScriptForOutput tests failure when
 // ScriptForOutput returns an error.
 func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
@@ -2111,7 +2144,8 @@ func TestDerivePrivKeyFails(t *testing.T) {
 }
 
 // TestGetPrivKeyForAddressSuccess tests the successful retrieval of a private
-// key by address.
+// key by address via the legacy fallback when the address is not in the
+// store (kvdb-backed wallet path).
 func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -2125,6 +2159,17 @@ func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 		pubKeyHash, w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// The store returns ErrAddressNotFound so GetPrivKeyForAddress falls
+	// through to the legacy PrivKeyForAddress path. This matches the
+	// kvdb-backed wallet shape.
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: pkScript,
+	}).Return((*db.AddressInfo)(nil), db.ErrAddressNotFound).Once()
 
 	// Configure the mock chain to return the test private key.
 	//
@@ -2144,7 +2189,8 @@ func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 }
 
 // TestGetPrivKeyForAddressFail tests the failure cases for retrieval of a
-// private key by address.
+// private key by address. Each case exercises the legacy fallback after the
+// store reports ErrAddressNotFound.
 func TestGetPrivKeyForAddressFail(t *testing.T) {
 	t.Parallel()
 
@@ -2154,6 +2200,16 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// The store does not know the address in either case, so
+	// GetPrivKeyForAddress falls through to PrivKeyForAddress.
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: pkScript,
+	}).Return((*db.AddressInfo)(nil), db.ErrAddressNotFound).Twice()
 
 	// Case 1: Address lookup fails.
 	mocks.addrStore.On("Address", mock.Anything, addr).
