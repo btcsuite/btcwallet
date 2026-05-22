@@ -5,19 +5,26 @@
 package wallet
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -884,6 +891,58 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
+// TestComputeUnlockingScriptSQLDerivedAddress verifies that an address created
+// only in the SQL address store can still be signed for using its derivation
+// metadata.
+func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
+	t.Parallel()
+
+	w, chain := newSQLAddressSigningWallet(t)
+	chain.On(
+		"NotifyReceived",
+		mock.MatchedBy(func(addrs []address.Address) bool {
+			return len(addrs) == 1
+		}),
+	).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	_, err = w.loadManagedPubKeyAddr(addr)
+	require.Error(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+	require.Nil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+
+	tx.TxIn[0].Witness = script.Witness
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+}
+
 // TestComputeUnlockingScriptFail_ScriptForOutput tests failure when
 // ScriptForOutput returns an error.
 func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
@@ -962,8 +1021,7 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 		Return(mocks.pubKeyAddr, nil).Once()
 	mocks.pubKeyAddr.On("Imported").Return(false).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044,
-		waddrmgr.DerivationPath{
+		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
 			InternalAccount: 0,
 			Account:         0,
 			Branch:          0,
@@ -1197,6 +1255,152 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 	tx.AddTxOut(wire.NewTxOut(90000, nil))
 
 	return prevOut, tx
+}
+
+// newSQLAddressSigningWallet returns a started, unlocked wallet whose address
+// records are stored in SQLite while signing keys come from legacy waddrmgr.
+func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *mockChain) {
+	t.Helper()
+
+	legacyDB, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddressManager(t, legacyDB)
+	t.Cleanup(func() {
+		addrStore.Close()
+	})
+
+	var w *Wallet
+
+	deriveAddress := func(ctx context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		return w.deriveAddressData(ctx, params)
+	}
+
+	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
+		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
+		DeriveAddress: deriveAddress,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), db.CreateWalletParams{
+			Name:                     "sql-signing",
+			ManagerVersion:           1,
+			EncryptedMasterPrivKey:   []byte{1},
+			MasterPubKey:             []byte{2},
+			MasterKeyPrivParams:      []byte{3},
+			EncryptedCryptoPrivKey:   []byte{4},
+			EncryptedCryptoScriptKey: []byte{5},
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletInfo.ID,
+			Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Name:     "default",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+
+	chain := &mockChain{}
+	w = &Wallet{
+		addrStore: addrStore,
+		store:     store,
+		keyVault:  addrStore,
+		state:     newWalletState(nil),
+		cfg: Config{
+			DB:          legacyDB,
+			Chain:       chain,
+			ChainParams: &chainParams,
+		},
+		id: walletInfo.ID,
+	}
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+	w.state.toUnlocked()
+
+	t.Cleanup(func() {
+		chain.AssertExpectations(t)
+	})
+
+	return w, chain
+}
+
+// newSpendableAddressManager creates and unlocks a deterministic legacy
+// waddrmgr manager for signer integration tests.
+func newSpendableAddressManager(t *testing.T,
+	dbConn walletdb.DB) *waddrmgr.Manager {
+
+	t.Helper()
+
+	const (
+		pubPass  = "pub"
+		privPass = "priv"
+	)
+
+	seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	var mgr *waddrmgr.Manager
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := waddrmgr.Create(
+			ns, rootKey, []byte(pubPass), []byte(privPass),
+			&chainParams, &waddrmgr.FastScryptOptions, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+
+		mgr, err = waddrmgr.Open(ns, []byte(pubPass), &chainParams)
+		if err != nil {
+			return err
+		}
+
+		return mgr.Unlock(ns, []byte(privPass))
+	})
+	require.NoError(t, err)
+
+	manager, err := mgr.FetchScopedKeyManager(waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		_, err := manager.LookupAccount(ns, "default")
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return mgr
+}
+
+// testAccountDerivationFunc returns minimal spendable account material for SQL
+// account creation in signer tests.
+func testAccountDerivationFunc() db.AccountDerivationFunc {
+	return func(_ context.Context, _ db.KeyScope, _ uint32,
+		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
+
+		data := &db.DerivedAccountData{
+			PublicKey:            []byte{2},
+			MasterKeyFingerprint: 1,
+		}
+		if !walletIsWatchOnly {
+			data.EncryptedPrivateKey = []byte{3}
+		}
+
+		return data, nil
+	}
 }
 
 // TestComputeRawSigLegacyP2PKH tests the successful signing of a legacy P2PKH
