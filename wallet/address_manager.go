@@ -21,6 +21,9 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -49,11 +52,14 @@ var (
 	// ErrUnableToExtractAddress is returned when an address cannot be
 	// extracted from a pkscript.
 	ErrUnableToExtractAddress = errors.New("unable to extract address")
-
 	// errStopIteration is a special error used to stop the iteration in
 	// ForEachAccountAddress.
 	errStopIteration = errors.New("stop iteration")
 )
+
+// addressManagerPageLimit is the transitional address iteration page size.
+// TODO(yy): Make this configurable once the address store is fully wired.
+const addressManagerPageLimit = 500
 
 // AddressProperty represents an address and its balance.
 type AddressProperty struct {
@@ -127,9 +133,14 @@ type OutputScriptInfo struct {
 	// RedeemScript is the redeem script committed to by the outer P2SH output.
 	// For nested P2WPKH-in-P2SH spends, this is the inner witness program, for
 	// example `OP_0 <20-byte-key-hash>`. Native witness spends, such as P2WPKH
-	// and P2TR, leave this nil. The final scriptSig wrapper for nested witness
-	// spends can be rebuilt from this script when assembling the input.
+	// and P2TR, leave this nil.
 	RedeemScript []byte
+
+	// SigScript is the final scriptSig wrapper needed to spend outputs that are
+	// wrapped in P2SH.
+	// For nested P2WPKH-in-P2SH spends, this is a single push of RedeemScript.
+	// Native witness spends leave this nil.
+	SigScript []byte
 }
 
 // AddressManager provides an interface for generating and inspecting wallet
@@ -223,6 +234,77 @@ func addressInfoFromManagedAddress(
 	}
 
 	return info, nil
+}
+
+// addressPageRequest returns the standard page request used by address-manager
+// iteration helpers.
+func addressPageRequest() (page.Request[uint32], error) {
+	return page.NewRequest[uint32](addressManagerPageLimit)
+}
+
+// addressInfoFromStoreAddress converts one db-native address record into the
+// wallet-owned address metadata shape exposed by the public API.
+func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
+	chainParams *chaincfg.Params) (AddressInfo, error) {
+
+	addr := extractAddrFromPKScript(storeAddr.ScriptPubKey, chainParams)
+	if addr == nil {
+		return AddressInfo{}, fmt.Errorf("%w: from pkscript %x",
+			ErrUnableToExtractAddress, storeAddr.ScriptPubKey)
+	}
+
+	addrType, err := addresstype.ToWallet(
+		storeAddr.AddrType, storeAddr.HasScript,
+	)
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf("%w: %v", ErrUnknownAddrType,
+			storeAddr.AddrType)
+	}
+
+	internal := storeAddr.Origin == db.DerivedAccount &&
+		storeAddr.Branch == 1
+
+	info := AddressInfo{
+		Addr:       addr,
+		AddrType:   addrType,
+		Imported:   storeAddr.Origin == db.ImportedAccount,
+		Internal:   internal,
+		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
+	}
+
+	if len(storeAddr.PubKey) == 0 {
+		return info, nil
+	}
+
+	pubKey, err := btcec.ParsePubKey(storeAddr.PubKey)
+	if err != nil {
+		return AddressInfo{}, fmt.Errorf("parse pubkey: %w", err)
+	}
+
+	info.PubKey = pubKey
+
+	if info.Imported {
+		return info, nil
+	}
+
+	info.Derivation = &AddressDerivation{
+		KeyScope: waddrmgr.KeyScope{
+			Purpose: storeAddr.KeyScope.Purpose,
+			Coin:    storeAddr.KeyScope.Coin,
+		},
+		Account:              storeAddr.AccountNumber,
+		Branch:               storeAddr.Branch,
+		Index:                storeAddr.Index,
+		MasterKeyFingerprint: storeAddr.MasterKeyFingerprint,
+	}
+
+	return info, nil
+}
+
+// storeAddressPubKeyCompressed reports whether store pubkey bytes use the
+// compressed secp256k1 encoding.
+func storeAddressPubKeyCompressed(pubKey []byte) bool {
+	return len(pubKey) == btcec.PubKeyBytesLenCompressed
 }
 
 // NewAddress returns a new address for the given account and address type.
@@ -660,7 +742,7 @@ func (w *Wallet) ImportPublicKey(_ context.Context, pubKey *btcec.PublicKey,
 
 	manager, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
 	var addr btcutil.Address
@@ -898,7 +980,7 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 
 	keyScope := addressInfo.Derivation.KeyScope
 
-	return &psbt.Bip32Derivation{
+	derivationInfo := &psbt.Bip32Derivation{
 		PubKey:               addressInfo.PubKey.SerializeCompressed(),
 		MasterKeyFingerprint: addressInfo.Derivation.MasterKeyFingerprint,
 		Bip32Path: []uint32{
@@ -908,5 +990,7 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 			addressInfo.Derivation.Branch,
 			addressInfo.Derivation.Index,
 		},
-	}, nil
+	}
+
+	return derivationInfo, nil
 }
