@@ -4,8 +4,10 @@ import (
 	"context"
 	"iter"
 
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 // A compile-time assertion to ensure Store implements the wallet store.
@@ -50,11 +52,38 @@ func (s *Store) UpdateWallet(ctx context.Context,
 	return notImplemented(ctx, "UpdateWallet")
 }
 
-// GetEncryptedHDSeed is not yet implemented for kvdb.
-func (s *Store) GetEncryptedHDSeed(ctx context.Context,
+// GetEncryptedHDSeed reads the encrypted master HD private key from the
+// legacy waddrmgr main bucket. Watch-only wallets are surfaced as
+// db.ErrSecretNotFound.
+func (s *Store) GetEncryptedHDSeed(_ context.Context,
 	_ uint32) ([]byte, error) {
 
-	return nil, notImplemented(ctx, "GetEncryptedHDSeed")
+	var encrypted []byte
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return db.ErrSecretNotFound
+		}
+
+		raw, readErr := s.addrStore.EncryptedMasterHDPriv(ns)
+		if readErr != nil {
+			if waddrmgr.IsError(readErr, waddrmgr.ErrWatchingOnly) {
+				return db.ErrSecretNotFound
+			}
+
+			return readErr
+		}
+
+		encrypted = raw
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return encrypted, nil
 }
 
 // UpdateWalletSecrets is not yet implemented for kvdb.
