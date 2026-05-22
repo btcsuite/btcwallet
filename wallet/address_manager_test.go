@@ -7,7 +7,6 @@ package wallet
 import (
 	"iter"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -19,7 +18,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -597,10 +595,8 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 func TestListAddresses(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// Get a new address and give it a balance.
 	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
@@ -616,68 +612,21 @@ func TestListAddresses(t *testing.T) {
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
-
-	// We need to create a realistic transaction that has at least one
-	// input.
-	deps.txStore.On("InsertTx", mock.Anything, mock.Anything,
-		mock.Anything).Return(nil).Once()
-	deps.txStore.On("AddCredit", mock.Anything, mock.Anything,
-		mock.Anything, uint32(0), false).Return(nil).Once()
-	deps.addrStore.On("MarkUsed", mock.Anything, addr).Return(nil).Once()
-
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		// Create a new transaction and set the output to the address
-		// we want to mark as used.
-		msgTx := TstTx.MsgTx()
-		msgTx.TxOut = []*wire.TxOut{{
-			PkScript: pkScript,
-			Value:    1000,
-		}}
-
-		rec, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Now())
-		if err != nil {
-			return err
-		}
-
-		err = w.txStore.InsertTx(txmgrNs, rec, nil)
-		if err != nil {
-			return err
-		}
-
-		err = w.txStore.AddCredit(txmgrNs, rec, nil, 0, false)
-		if err != nil {
-			return err
-		}
-
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		return w.addrStore.MarkUsed(addrmgrNs, addr)
-	})
+	req, err := addressPageRequest()
 	require.NoError(t, err)
 
-	// List the addresses for the default account.
-	deps.txStore.On("UnspentOutputs", mock.Anything).Return([]wtxmgr.Credit{
-		{
-			Amount:   1000,
-			PkScript: pkScript,
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: "default",
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Page:        req,
 		},
-	}, nil).Once()
-
-	deps.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(deps.accountManager, nil).Once()
-
-	deps.accountManager.On("LookupAccount", mock.Anything, "default").
-		Return(uint32(0), nil).Once()
-
-	deps.accountManager.On("ForEachAccountAddress", mock.Anything, uint32(0),
-		mock.Anything).Run(func(args mock.Arguments) {
-		f, ok := args.Get(2).(func(waddrmgr.ManagedAddress) error)
-		require.True(t, ok)
-		deps.addr.On("Address").Return(addr).Once()
-		_ = f(deps.addr)
-	}).Return(nil).Once()
+	).Return(addressIter(db.AddressInfo{ScriptPubKey: pkScript})).Once()
+	deps.txStore.On(
+		"UnspentOutputs", mock.Anything,
+	).Return([]wtxmgr.Credit{{Amount: 1000, PkScript: pkScript}}, nil).Once()
 
 	addrs, err := w.ListAddresses(
 		t.Context(), "default", waddrmgr.WitnessPubKey,
