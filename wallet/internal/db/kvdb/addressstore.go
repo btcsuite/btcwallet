@@ -1,18 +1,116 @@
 package kvdb
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"iter"
+	"sort"
 
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
-// NewDerivedAddress is not yet implemented for kvdb.
-func (s *Store) NewDerivedAddress(ctx context.Context,
-	_ db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+var (
+	// errUnexpectedAddressCount is returned when legacy address derivation
+	// returns a number of addresses different from the requested count.
+	errUnexpectedAddressCount = errors.New("unexpected derived address count")
 
-	return nil, notImplemented(ctx, "NewDerivedAddress")
+	// errImportedAddressMismatch is returned when a legacy imported address
+	// does not match the store request's type or script.
+	errImportedAddressMismatch = errors.New("imported address mismatch")
+
+	// errMissingAddrmgrNamespace is returned when the waddrmgr namespace
+	// bucket is absent from the database.
+	errMissingAddrmgrNamespace = errors.New(
+		"kvdb: missing waddrmgr namespace",
+	)
+)
+
+// NewDerivedAddress creates one derived address through the legacy address-
+// manager path.
+func (s *Store) NewDerivedAddress(ctx context.Context,
+	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	if params.AccountName == "" {
+		return nil, db.ErrMissingAccountName
+	}
+
+	addrMgr := s.addrStore
+
+	manager, err := addrMgr.FetchScopedKeyManager(
+		waddrmgr.KeyScope(params.Scope),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("NewDerivedAddress: fetch scoped manager: "+
+			"%w", err)
+	}
+
+	var info *db.AddressInfo
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		info, err = derivedAddressInfo(
+			ns, manager, addrMgr.WatchOnly(), params,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("NewDerivedAddress: %w", err)
+	}
+
+	return info, nil
+}
+
+// derivedAddressInfo creates one derived address info using the legacy scoped
+// manager and assigns its synthetic address ID.
+func derivedAddressInfo(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore,
+	walletIsWatchOnly bool,
+	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
+
+	account, err := manager.LookupAccount(ns, params.AccountName)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+			return nil, db.ErrAccountNotFound
+		}
+
+		return nil, fmt.Errorf("lookup account: %w", err)
+	}
+
+	managedAddr, err := nextAddress(ns, manager, account, params.Change)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := managedAddressInfo(
+		ns, manager, walletIsWatchOnly, managedAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = setAddressID(ns, manager, account, walletIsWatchOnly, info)
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
 }
 
 // NewImportedAddress is not yet implemented for kvdb.
@@ -98,4 +196,244 @@ var addressTypes = []db.AddressTypeInfo{
 	{Type: db.WitnessScript, Description: "P2WSH"},
 	{Type: db.TaprootPubKey, Description: "P2TR"},
 	{Type: db.Anchor, Description: "P2A"},
+}
+
+// nextAddress allocates the next external or internal address for an account.
+func nextAddress(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore, account uint32,
+	change bool) (waddrmgr.ManagedAddress, error) {
+
+	var (
+		addrs []waddrmgr.ManagedAddress
+		err   error
+	)
+
+	if change {
+		addrs, err = manager.NextInternalAddresses(ns, account, 1)
+	} else {
+		addrs, err = manager.NextExternalAddresses(ns, account, 1)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("derive address: %w", err)
+	}
+
+	if len(addrs) != 1 {
+		return nil, fmt.Errorf("derive address: expected 1, got %d: %w",
+			len(addrs), errUnexpectedAddressCount)
+	}
+
+	return addrs[0], nil
+}
+
+// setAddressID assigns target's synthetic ID from the current legacy
+// account view.
+func setAddressID(ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
+	account uint32, walletIsWatchOnly bool, target *db.AddressInfo) error {
+
+	items, err := accountAddressInfos(
+		ns, manager, account, walletIsWatchOnly,
+	)
+	if err != nil {
+		return err
+	}
+
+	for i := range items {
+		if bytes.Equal(items[i].ScriptPubKey, target.ScriptPubKey) {
+			target.ID = items[i].ID
+
+			return nil
+		}
+	}
+
+	return db.ErrAddressNotFound
+}
+
+// accountAddressInfos loads all addresses for a legacy account and assigns
+// collision-free synthetic IDs for the current sorted account view.
+func accountAddressInfos(ns walletdb.ReadBucket,
+	manager waddrmgr.AccountStore, account uint32,
+	walletIsWatchOnly bool) ([]db.AddressInfo, error) {
+
+	var items []db.AddressInfo
+
+	err := manager.ForEachAccountAddress(
+		ns, account, func(managedAddr waddrmgr.ManagedAddress) error {
+			info, err := managedAddressInfo(
+				ns, manager, walletIsWatchOnly, managedAddr,
+			)
+			if err != nil {
+				return err
+			}
+
+			items = append(items, *info)
+
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("iterate account addresses: %w", err)
+	}
+
+	// NOTE: waddrmgr does not expose SQL-style cursor queries, so the
+	// transitional kvdb adapter materializes the full legacy account before
+	// slicing a page.
+	err = sortAddressInfos(items)
+	if err != nil {
+		return nil, err
+	}
+
+	return items, nil
+}
+
+// sortAddressInfos sorts address infos and assigns one-based ordinal IDs.
+func sortAddressInfos(items []db.AddressInfo) error {
+	sort.Slice(items, func(i, j int) bool {
+		return addressLess(items[i], items[j])
+	})
+
+	for i := range items {
+		id, err := db.Int64ToUint32(int64(i + 1))
+		if err != nil {
+			return fmt.Errorf("address ordinal: %w", err)
+		}
+
+		items[i].ID = id
+	}
+
+	return nil
+}
+
+// addressLess reports whether a sorts before b in the synthetic address view.
+func addressLess(a, b db.AddressInfo) bool {
+	if a.Origin != b.Origin {
+		return a.Origin < b.Origin
+	}
+
+	if a.Branch != b.Branch {
+		return a.Branch < b.Branch
+	}
+
+	if a.Index != b.Index {
+		return a.Index < b.Index
+	}
+
+	return bytes.Compare(a.ScriptPubKey, b.ScriptPubKey) < 0
+}
+
+// managedAddressInfo adapts one legacy managed address into the db address view
+// used by store callers.
+func managedAddressInfo(ns walletdb.ReadBucket,
+	manager waddrmgr.AccountStore, walletIsWatchOnly bool,
+	managedAddr waddrmgr.ManagedAddress) (*db.AddressInfo, error) {
+
+	scriptPubKey, err := txscript.PayToAddrScript(managedAddr.Address())
+	if err != nil {
+		return nil, fmt.Errorf("pay to address script: %w", err)
+	}
+
+	addrType, err := addresstype.FromWallet(managedAddr.AddrType())
+	if err != nil {
+		return nil, fmt.Errorf("legacy address type: %w", err)
+	}
+
+	accountNumber := managedAddr.InternalAccount()
+	accountName := db.DefaultImportedAccountName
+	keyScope := db.KeyScope(manager.Scope())
+	origin := db.DerivedAccount
+
+	if managedAddr.Imported() {
+		accountNumber = 0
+		origin = db.ImportedAccount
+	} else {
+		accountName, err = manager.AccountName(ns, accountNumber)
+		if err != nil {
+			return nil, fmt.Errorf("account name: %w", err)
+		}
+	}
+
+	var (
+		branch      uint32
+		index       uint32
+		fingerprint uint32
+		pubKey      []byte
+	)
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if ok {
+		pubKey = managedAddressPubKey(pubKeyAddr)
+
+		scope, path, ok := pubKeyAddr.DerivationInfo()
+		if ok {
+			accountNumber = path.InternalAccount
+			branch = path.Branch
+			index = path.Index
+			fingerprint = path.MasterKeyFingerprint
+			keyScope = db.KeyScope(scope)
+		}
+	}
+
+	isWatchOnly, err := managedAddressIsWatchOnly(
+		walletIsWatchOnly, managedAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &db.AddressInfo{
+		AccountID:            accountNumber,
+		AccountNumber:        accountNumber,
+		AccountName:          accountName,
+		KeyScope:             keyScope,
+		MasterKeyFingerprint: fingerprint,
+		AddrType:             addrType.Type,
+		Origin:               origin,
+		Branch:               branch,
+		Index:                index,
+		ScriptPubKey:         scriptPubKey,
+		PubKey:               pubKey,
+		HasScript:            addrType.HasScript,
+		IsWatchOnly:          isWatchOnly,
+		IsUsed:               managedAddr.Used(ns),
+	}, nil
+}
+
+// managedAddressPubKey returns a managed address's public key using its
+// actual legacy encoding.
+func managedAddressPubKey(
+	managedAddr waddrmgr.ManagedPubKeyAddress) []byte {
+
+	if managedAddr.Compressed() {
+		return managedAddr.PubKey().SerializeCompressed()
+	}
+
+	return managedAddr.PubKey().SerializeUncompressed()
+}
+
+// managedAddressIsWatchOnly reports whether a managed address is unable to
+// spend due to wallet-level watch-only mode or missing private key material.
+func managedAddressIsWatchOnly(walletIsWatchOnly bool,
+	managedAddr waddrmgr.ManagedAddress) (bool, error) {
+
+	if walletIsWatchOnly {
+		return true, nil
+	}
+
+	if !managedAddr.Imported() {
+		return false, nil
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return true, nil
+	}
+
+	hasPrivateKey, err := waddrmgr.ManagedPubKeyAddressHasPrivateKey(
+		pubKeyAddr,
+	)
+	if err != nil {
+		return false, fmt.Errorf("managed pubkey private key state: %w", err)
+	}
+
+	return !hasPrivateKey, nil
 }
