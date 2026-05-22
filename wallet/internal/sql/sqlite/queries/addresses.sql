@@ -28,6 +28,13 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
@@ -101,6 +108,13 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a

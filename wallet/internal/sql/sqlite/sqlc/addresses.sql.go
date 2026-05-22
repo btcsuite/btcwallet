@@ -116,6 +116,13 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
@@ -147,6 +154,7 @@ type GetAddressByScriptPubKeyRow struct {
 	OriginID          int64
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	IsUsed            bool
 	HasPrivateKey     bool
 	HasScript         bool
 }
@@ -171,6 +179,7 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.OriginID,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
+		&i.IsUsed,
 		&i.HasPrivateKey,
 		&i.HasScript,
 	)
@@ -250,6 +259,13 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
     s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
@@ -299,6 +315,7 @@ type ListAddressesByAccountRow struct {
 	OriginID          int64
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
+	IsUsed            bool
 	HasPrivateKey     bool
 	HasScript         bool
 }
@@ -339,6 +356,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.OriginID,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
+			&i.IsUsed,
 			&i.HasPrivateKey,
 			&i.HasScript,
 		); err != nil {
