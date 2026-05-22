@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -102,6 +103,51 @@ func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	deps.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
 }
 
+// expectSignerAddressInfo mocks Store.GetAddress to return a minimal
+// AddressInfo for tests that exercise the wallet's address-info read
+// path. No call-count constraint — the same address may be looked up
+// multiple times (input decoration + change output info).
+//
+//nolint:unparam // Keep branch metadata in the helper signature.
+func expectSignerAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
+	addr address.Address, addrType db.AddressType,
+	internal, imported bool, pubKey *btcec.PublicKey) {
+
+	t.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	origin := db.DerivedAccount
+	if imported {
+		origin = db.ImportedAccount
+	}
+
+	var branch uint32
+	if internal {
+		branch = 1
+	}
+
+	var pubKeyBytes []byte
+	if pubKey != nil {
+		pubKeyBytes = pubKey.SerializeCompressed()
+	}
+
+	deps.store.On(
+		"GetAddress", mock.Anything,
+		db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		},
+	).Return(&db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     addrType,
+		Origin:       origin,
+		Branch:       branch,
+		PubKey:       pubKeyBytes,
+	}, nil)
+}
+
 // addressIter returns an address iterator over static test records.
 func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
 	return func(yield func(db.AddressInfo, error) bool) {
@@ -116,6 +162,24 @@ func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
 // TestNewAddress tests the NewAddress method, ensuring it can generate
 // various address types for different accounts and correctly handles both
 // internal and external address generation.
+// expectStoreAddressInfo configures mock expectations for address lookup.
+func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
+	addr address.Address, info *db.AddressInfo) {
+
+	t.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.store.On(
+		"GetAddress", mock.Anything,
+		db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		},
+	).Return(info, nil).Once()
+}
+
 func TestNewAddress(t *testing.T) {
 	t.Parallel()
 
@@ -214,8 +278,17 @@ func TestNewAddress(t *testing.T) {
 			scope, err := tc.addrType.KeyScope()
 			require.NoError(t, err)
 
+			storeAddrType, err := addresstype.FromWallet(tc.addrType)
+			require.NoError(t, err)
+
 			expectStoreNewAddress(
 				t, w, deps, tc.accountName, scope, tc.change, addr,
+			)
+			expectStoreAddressInfo(t, w, deps, addr,
+				derivedAddressInfoFromAddr(
+					t, addr, storeAddrType.Type, tc.accountName, scope,
+					tc.change, 0, 0, nil,
+				),
 			)
 
 			addr, err = w.NewAddress(
@@ -226,6 +299,10 @@ func TestNewAddress(t *testing.T) {
 			require.NotNil(t, addr)
 
 			require.IsType(t, tc.expectedAddrType, addr)
+
+			addrInfo, err := w.GetAddressInfo(t.Context(), addr)
+			require.NoError(t, err)
+			require.Equal(t, tc.change, addrInfo.Internal)
 		})
 	}
 }
@@ -325,71 +402,40 @@ func TestGetUnusedAddress(t *testing.T) {
 func TestGetAddressInfo(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet.
 	w, deps := createStartedWalletWithMocks(t)
-
-	// Get a new external address to test with.
-	var addr address.Address
-
-	addr, _ = address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), w.cfg.ChainParams,
-	)
-
-	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, addr,
-	)
-
-	extAddr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
-	)
+	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
-	// Get the address info for the external address.
-	deps.addrStore.On("Address", mock.Anything, extAddr).
-		Return(deps.addr, nil).Once()
-	deps.addr.On("Address").Return(extAddr).Once()
-	deps.addr.On("Internal").Return(false).Once()
-	deps.addr.On("Compressed").Return(true).Once()
-	deps.addr.On("Imported").Return(false).Once()
-	deps.addr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	pubKey := privKey.PubKey()
+
+	extAddr, _ := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	expectStoreAddressInfo(t, w, deps, extAddr, derivedAddressInfoFromAddr(
+		t, extAddr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
+		false, 0, 0, pubKey,
+	))
 
 	extInfo, err := w.GetAddressInfo(t.Context(), extAddr)
 	require.NoError(t, err)
 
-	// Check the external address info.
 	require.Equal(t, extAddr.String(), extInfo.Addr.String())
 	require.False(t, extInfo.Internal)
 	require.True(t, extInfo.Compressed)
 	require.False(t, extInfo.Imported)
 	require.Equal(t, waddrmgr.WitnessPubKey, extInfo.AddrType)
 
-	// Get a new internal address to test with.
-	addr, _ = address.NewAddressWitnessPubKeyHash(
+	intAddr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
-
-	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, true, addr,
-	)
-
-	intAddr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, true,
-	)
-	require.NoError(t, err)
-
-	// Get the address info for the internal address.
-	deps.addrStore.On("Address", mock.Anything, intAddr).
-		Return(deps.addr, nil).Once()
-	deps.addr.On("Address").Return(intAddr).Once()
-	deps.addr.On("Internal").Return(true).Once()
-	deps.addr.On("Compressed").Return(true).Once()
-	deps.addr.On("Imported").Return(false).Once()
-	deps.addr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
+	expectStoreAddressInfo(t, w, deps, intAddr, derivedAddressInfoFromAddr(
+		t, intAddr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
+		true, 0, 0, pubKey,
+	))
 
 	intInfo, err := w.GetAddressInfo(t.Context(), intAddr)
 	require.NoError(t, err)
 
-	// Check the internal address info.
 	require.Equal(t, intAddr.String(), intInfo.Addr.String())
 	require.True(t, intInfo.Internal)
 	require.True(t, intInfo.Compressed)
@@ -402,34 +448,13 @@ func TestGetAddressInfo(t *testing.T) {
 func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a new test wallet and a new p2wkh address to test
-	// with.
 	w, deps := createStartedWalletWithMocks(t)
-	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
+	addr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
-	)
-
-	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
-	)
-	require.NoError(t, err)
-
-	// Act: Get the derivation info for the address.
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(false).Once()
-	deps.pubKeyAddr.On("Internal").Return(false).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-
 	privKey, _ := btcec.NewPrivateKey()
 	pubKey := privKey.PubKey()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 
 	scope := waddrmgr.KeyScopeBIP0084
 	path := waddrmgr.DerivationPath{
@@ -438,11 +463,13 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 		Index:                0,
 		MasterKeyFingerprint: 123,
 	}
-	deps.pubKeyAddr.On("DerivationInfo").Return(scope, path, true).Once()
+	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
+		t, addr, db.WitnessPubKey, "default", scope, false, path.Index,
+		path.MasterKeyFingerprint, pubKey,
+	))
 
 	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
 
-	// Assert: Check that the correct derivation info is returned.
 	require.NoError(t, err)
 	require.NotNil(t, derivationInfo)
 
@@ -465,34 +492,13 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a new test wallet and a new p2wkh change address to
-	// test with.
 	w, deps := createStartedWalletWithMocks(t)
-	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
+	addr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, true, mockAddr,
-	)
-
-	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, true,
-	)
-	require.NoError(t, err)
-
-	// Act: Get the derivation info for the address.
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(false).Once()
-	deps.pubKeyAddr.On("Internal").Return(true).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-
 	privKey, _ := btcec.NewPrivateKey()
 	pubKey := privKey.PubKey()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
 
 	scope := waddrmgr.KeyScopeBIP0084
 	path := waddrmgr.DerivationPath{
@@ -501,11 +507,13 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 		Index:                0,
 		MasterKeyFingerprint: 123,
 	}
-	deps.pubKeyAddr.On("DerivationInfo").Return(scope, path, true).Once()
+	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
+		t, addr, db.WitnessPubKey, "default", scope, true, path.Index,
+		path.MasterKeyFingerprint, pubKey,
+	))
 
 	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
 
-	// Assert: Check that the correct derivation info is returned.
 	require.NoError(t, err)
 	require.NotNil(t, derivationInfo)
 
@@ -541,16 +549,21 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 
 	// Act & Assert: Check that we get an error for an address not in the
 	// wallet.
-	deps.addrStore.On("Address", mock.Anything, addr).Return(
-		nil, errDBMock).Once()
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.store.On(
+		"GetAddress", mock.Anything,
+		db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		},
+	).Return(nil, errDBMock).Once()
 
 	_, err = w.GetDerivationInfo(t.Context(), addr)
 	require.Error(t, err)
 
 	// Arrange: Import the key as a watch-only address.
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
 	deps.store.On(
 		"NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
@@ -571,17 +584,9 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 
 	// Act & Assert: Check that we still get an error because it's an
 	// imported key.
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(true).Once()
-	deps.pubKeyAddr.On("Internal").Return(false).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	deps.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
+	expectStoreAddressInfo(t, w, deps, addr, importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	))
 
 	_, err = w.GetDerivationInfo(t.Context(), addr)
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
@@ -721,6 +726,14 @@ func TestImportPublicKey(t *testing.T) {
 
 	err = w.ImportPublicKey(t.Context(), pubKey, waddrmgr.WitnessPubKey)
 	require.NoError(t, err)
+
+	expectStoreAddressInfo(t, w, deps, addr, importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	))
+
+	info, err := w.GetAddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+	require.NotNil(t, info)
 }
 
 // TestImportTaprootScript tests the ImportTaprootScript method to ensure it can
@@ -798,23 +811,12 @@ func TestImportTaprootScript(t *testing.T) {
 func TestScriptForOutput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a started wallet, one witness output, and matching
-	// managed address metadata.
 	w, deps := createStartedWalletWithMocks(t)
 
-	// Create a new p2wkh address and output.
-	mockAddr, _ := address.NewAddressWitnessPubKeyHash(
+	addr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 
-	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
-	)
-
-	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
-	)
-	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
@@ -824,24 +826,15 @@ func TestScriptForOutput(t *testing.T) {
 	}
 
 	_, pubKey := deterministicPrivKey(t)
+	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
+		t, addr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
+		false, 0, 0, pubKey,
+	))
 
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(false).Once()
-	deps.pubKeyAddr.On("Internal").Return(false).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	deps.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, false,
-	).Once()
-
-	// Act: Build the spending metadata for the witness output.
 	script, err := w.ScriptForOutput(t.Context(), output)
 	require.NoError(t, err)
 
-	// Assert: The output metadata matches the native witness spend shape.
+	// Check that the script is correct.
 	require.Equal(t, addr, script.Addr)
 	require.Equal(t, waddrmgr.WitnessPubKey, script.AddrType)
 	require.Equal(t, pkScript, script.WitnessProgram)
@@ -853,8 +846,6 @@ func TestScriptForOutput(t *testing.T) {
 func TestScriptForOutputNestedWitness(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a started wallet, a nested witness output, and matching
-	// managed address metadata.
 	w, deps := createStartedWalletWithMocks(t)
 	_, pubKey := deterministicPrivKey(t)
 	witnessProgram, err := txscript.NewScriptBuilder().
@@ -867,31 +858,25 @@ func TestScriptForOutputNestedWitness(t *testing.T) {
 	require.NoError(t, err)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
+	expectedSigScript, err := txscript.NewScriptBuilder().
+		AddData(witnessProgram).
+		Script()
+	require.NoError(t, err)
 
-	deps.addrStore.On("Address", mock.Anything, addr).
-		Return(deps.pubKeyAddr, nil).Once()
-	deps.pubKeyAddr.On("Address").Return(addr).Once()
-	deps.pubKeyAddr.On("AddrType").Return(waddrmgr.NestedWitnessPubKey).Once()
-	deps.pubKeyAddr.On("Imported").Return(false).Once()
-	deps.pubKeyAddr.On("Internal").Return(false).Once()
-	deps.pubKeyAddr.On("Compressed").Return(true).Once()
-	deps.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	deps.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{}, false,
-	).Once()
+	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
+		t, addr, db.NestedWitnessPubKey, "default",
+		waddrmgr.KeyScopeBIP0049Plus, false, 0, 0, pubKey,
+	))
 
-	// Act: Build the spending metadata for the nested witness output.
 	scriptInfo, err := w.ScriptForOutput(t.Context(), wire.TxOut{
 		Value:    1000,
 		PkScript: pkScript,
 	})
 	require.NoError(t, err)
-
-	// Assert: The output metadata carries the inner witness program and redeem
-	// script required for nested witness spends.
 	require.Equal(t, addr, scriptInfo.Addr)
 	require.Equal(t, waddrmgr.NestedWitnessPubKey,
 		scriptInfo.AddrType)
 	require.Equal(t, witnessProgram, scriptInfo.WitnessProgram)
 	require.Equal(t, witnessProgram, scriptInfo.RedeemScript)
+	require.Equal(t, expectedSigScript, scriptInfo.SigScript)
 }
