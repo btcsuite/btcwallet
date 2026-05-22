@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -277,38 +278,17 @@ func TestDecorateInputSegWitV0(t *testing.T) {
 	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
 	require.NoError(t, err)
 
-	// Arrange: Define key scope and derivation path for address manager
-	// mocks.
-	keyScope := waddrmgr.KeyScopeBIP0084
-	derivationPath := waddrmgr.DerivationPath{
-		Account: 0,
-		Branch:  0,
-		Index:   0,
-	}
-
 	w, mocks := createStartedWalletWithMocks(t)
 
 	// Arrange: Mock the address manager to return our P2WKH address as a
 	// ManagedPubKeyAddress when `Address` is called with the P2WKH
 	// address.
-	mocks.addrStore.On(
-		"Address", mock.Anything,
-		mock.MatchedBy(func(addr btcutil.Address) bool {
-			return addr.String() == p2wkhAddr.String()
-		}),
-	).Return(mocks.pubKeyAddr, nil)
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	)
 
 	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
 	// derivation and public key information.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		keyScope, derivationPath, true,
-	).Once()
 
 	// Arrange: Create a UTXO with the P2WKH script and an empty PSBT input.
 	utxo := &wire.TxOut{
@@ -355,40 +335,19 @@ func TestDecorateInputTaproot(t *testing.T) {
 	taprootScript, err := txscript.PayToAddrScript(taprootAddr)
 	require.NoError(t, err)
 
-	// Arrange: Define key scope and derivation path for address manager
-	// mocks.
-	keyScope := waddrmgr.KeyScopeBIP0084
-	derivationPath := waddrmgr.DerivationPath{
-		Account: 0,
-		Branch:  0,
-		Index:   0,
-	}
-
 	w, mocks := createStartedWalletWithMocks(t)
 
 	// Arrange: Mock the address manager to return our Taproot address as a
 	// ManagedPubKeyAddress when `Address` is called with the Taproot
 	// address.
-	mocks.addrStore.On(
-		"Address", mock.Anything,
-		mock.MatchedBy(func(addr btcutil.Address) bool {
-			return addr.String() == taprootAddr.String()
-		}),
-	).Return(mocks.pubKeyAddr, nil)
+	expectSignerAddressInfo(
+		t, w, mocks, taprootAddr, db.TaprootPubKey, false, false, pubKey,
+	)
 
 	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
 	// derivation and public key information. AddrType is not strictly
 	// checked for Taproot inputs in decorateInput, so no mock is needed
 	// for it.
-	mocks.pubKeyAddr.On("Address").Return(taprootAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.TaprootPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		keyScope, derivationPath, true,
-	).Once()
 
 	// Arrange: Create a UTXO with the Taproot script and an empty PSBT
 	// input.
@@ -460,10 +419,9 @@ func TestDecorateInputErrAddrInfo(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock AddressInfo to return an error.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(nil, errDb)
+	// Arrange: Mock Store.GetAddress to return an error.
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return((*db.AddressInfo)(nil), errDb)
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -500,17 +458,14 @@ func TestDecorateInputErrNotPubKey(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock AddressInfo to return a generic ManagedAddress
-	// (mocks.addr) instead of a ManagedPubKeyAddress (mocks.pubKeyAddr).
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.addr, nil)
-
-	mocks.addr.On("Address").Return(p2wkhAddr)
-	mocks.addr.On("AddrType").Return(waddrmgr.Script)
-	mocks.addr.On("Imported").Return(false)
-	mocks.addr.On("Internal").Return(false)
-	mocks.addr.On("Compressed").Return(false)
+	// Arrange: Mock Store.GetAddress to return an AddressInfo without
+	// a PubKey so buildScriptsForAddressInfo errors with ErrNotPubKeyAddress.
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return(&db.AddressInfo{
+			ScriptPubKey: p2wkhScript,
+			AddrType:     db.WitnessPubKey,
+			Origin:       db.DerivedAccount,
+		}, nil)
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -549,19 +504,9 @@ func TestDecorateInputErrImported(t *testing.T) {
 
 	// Arrange: Mock AddressInfo to return a ManagedPubKeyAddress that is
 	// marked as imported.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(true).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, true, pubKey,
+	)
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -600,19 +545,9 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 
 	// Arrange: Mock AddressInfo to return a ManagedPubKeyAddress that has
 	// no derivation info.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, true, pubKey,
+	)
 
 	utxo := &wire.TxOut{
 		Value:    1000,
@@ -655,21 +590,9 @@ func TestDecorateInputNestedWitnessUsesRedeemScript(t *testing.T) {
 	require.NoError(t, err)
 
 	w, mocks := createStartedWalletWithMocks(t)
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-
-	mocks.pubKeyAddr.On("Address").Return(nestedAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(
-		waddrmgr.NestedWitnessPubKey,
-	).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{}, true,
-	).Once()
+	expectSignerAddressInfo(
+		t, w, mocks, nestedAddr, db.NestedWitnessPubKey, false, false, pubKey,
+	)
 
 	pInput := &psbt.PInput{}
 	utxo := &wire.TxOut{Value: 1000, PkScript: pkScript}
@@ -775,32 +698,11 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	).Return(txDetails2, nil)
 
 	// Arrange: Mock Address lookup (common for both known inputs).
-	mocks.addrStore.On(
-		"Address", mock.Anything,
-		mock.MatchedBy(func(addr btcutil.Address) bool {
-			return addr.String() == p2wkhAddr.String()
-		}),
-	).Return(mocks.pubKeyAddr, nil)
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	)
 
 	// Arrange: Mock ManagedPubKeyAddress methods.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
 
 	// Act: Call DecorateInputs with skipUnknown=true.
 	_, err = w.DecorateInputs(t.Context(), packet, true)
@@ -932,10 +834,9 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 		"TxDetails", mock.Anything, mock.Anything,
 	).Return(txDetails, nil)
 
-	// Arrange: Mock AddressInfo to fail (causing decorateInput to fail).
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(nil, errDb)
+	// Arrange: Mock Store.GetAddress to fail (causing decorateInput to fail).
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return((*db.AddressInfo)(nil), errDb)
 
 	// Act: Call DecorateInputs.
 	_, err = w.DecorateInputs(t.Context(), packet, true)
@@ -1245,23 +1146,10 @@ func TestAddChangeOutputInfoSuccess(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock Address lookup.
-	mocks.addrStore.On(
-		"Address", mock.Anything,
-		mock.MatchedBy(func(addr btcutil.Address) bool {
-			return addr.String() == p2wkhAddr.String()
-		}),
-	).Return(mocks.pubKeyAddr, nil)
-
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
+	// Arrange: Mock Store.GetAddress for the change address.
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	)
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1306,10 +1194,9 @@ func TestAddChangeOutputInfoErrScriptFail(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock Address lookup to fail.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(nil, errDb)
+	// Arrange: Mock Store.GetAddress to fail.
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return((*db.AddressInfo)(nil), errDb)
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1348,15 +1235,14 @@ func TestAddChangeOutputInfoErrNotPubKey(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock Address lookup to return a generic address.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.addr, nil)
-	mocks.addr.On("Address").Return(p2wkhAddr)
-	mocks.addr.On("AddrType").Return(waddrmgr.WitnessPubKey)
-	mocks.addr.On("Imported").Return(false)
-	mocks.addr.On("Internal").Return(false)
-	mocks.addr.On("Compressed").Return(true)
+	// Arrange: Mock Store.GetAddress to return an AddressInfo with no
+	// PubKey so buildScriptsForAddressInfo returns ErrNotPubKeyAddress.
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return(&db.AddressInfo{
+			ScriptPubKey: p2wkhScript,
+			AddrType:     db.WitnessPubKey,
+			Origin:       db.DerivedAccount,
+		}, nil)
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1396,20 +1282,15 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock Address lookup.
-	mocks.addrStore.On(
-		"Address", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
+	// Arrange: Mock Store.GetAddress to return an imported AddressInfo
+	// so addChangeOutputInfo fails (change addr cannot be imported).
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return(&db.AddressInfo{
+			ScriptPubKey: p2wkhScript,
+			AddrType:     db.WitnessPubKey,
+			Origin:       db.ImportedAccount,
+			PubKey:       pubKey.SerializeCompressed(),
+		}, nil)
 
 	// Act: Call addChangeOutputInfo.
 	err = w.addChangeOutputInfo(t.Context(), packet, authoredTx)
@@ -1497,33 +1378,20 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 		mocks.txStore.On("TxDetails", mock.Anything, mock.Anything).
 			Return(txDetails, nil)
 
-		// Mock Address lookup for Input (Success)
-		mocks.addrStore.On(
-			"Address", mock.Anything,
-			mock.MatchedBy(func(a btcutil.Address) bool {
-				return a.String() == addrIn.String()
-			}),
-		).Return(mocks.pubKeyAddr, nil)
+		// Mock Address lookup for Input.
+		expectSignerAddressInfo(
+			t, w, mocks, addrIn, db.WitnessPubKey, false, false, pubKey,
+		)
 
-		mocks.pubKeyAddr.On("Address").Return(addrIn).Once()
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-		mocks.pubKeyAddr.On("Imported").Return(false).Once()
-		mocks.pubKeyAddr.On("Internal").Return(false).Once()
-		mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-		mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-		mocks.pubKeyAddr.On("DerivationInfo").Return(
-			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-		).Once()
+		// Mock Store.GetAddress for Output (Fail)
+		scriptOut2, err := txscript.PayToAddrScript(addrOut)
+		require.NoError(t, err)
+		mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: scriptOut2,
+		}).Return((*db.AddressInfo)(nil), errDb)
 
-		// Mock Address lookup for Output (Fail)
-		mocks.addrStore.On(
-			"Address", mock.Anything,
-			mock.MatchedBy(func(a btcutil.Address) bool {
-				return a.String() == addrOut.String()
-			}),
-		).Return(nil, errDb)
-
-		_, _, err := w.populatePsbtPacket(
+		_, _, err = w.populatePsbtPacket(
 			t.Context(), packet, authoredTx,
 		)
 		require.ErrorIs(t, err, errDb)
@@ -1595,29 +1463,13 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 
 	// Arrange: Mock Address lookup (used for both input decoration and
 	// change output info).
-	mocks.addrStore.On("Address", mock.Anything, mock.Anything).
-		Return(mocks.pubKeyAddr, nil)
-
-	// Arrange: Mock ManagedPubKeyAddress methods for both input decoration and
-	// change output info.
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
-	mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
+	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+		Return(&db.AddressInfo{
+			ScriptPubKey: p2wkhScript,
+			AddrType:     db.WitnessPubKey,
+			Origin:       db.DerivedAccount,
+			PubKey:       pubKey.SerializeCompressed(),
+		}, nil)
 
 	// Act: Call populatePsbtPacket.
 	updatedPacket, changeIdx, err := w.populatePsbtPacket(
@@ -1750,13 +1602,10 @@ func TestFundPsbtWorkflow(t *testing.T) {
 	mocks.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084).
 		Return(mocks.accountManager, nil).Times(3)
 
-	// 8. Mock `addrStore.Address` for `decorateInput` during
-	//    `DecorateInputs`:
-	mocks.addrStore.On("Address", mock.Anything,
-		mock.MatchedBy(func(addr btcutil.Address) bool {
-			return addr.String() == p2wkhAddr.String()
-		}),
-	).Return(mocks.pubKeyAddr, nil).Times(2)
+	// 8. Mock Store.GetAddress for decorateInput during DecorateInputs:
+	expectSignerAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	)
 
 	// --- Mock accountManager ---
 	// 3. Mock `accountManager.LookupAccount` for the default account:
@@ -1785,27 +1634,6 @@ func TestFundPsbtWorkflow(t *testing.T) {
 	// 6. The generated change address is read directly while assembling the
 	// transaction.
 	mockManagedAddr.On("Address").Return(changeAddr).Once()
-
-	// 9. Mock the metadata reads needed by both input decoration and change
-	// output info.
-	mocks.pubKeyAddr.On("Address").Return(changeAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
-	mocks.pubKeyAddr.On("Address").Return(changeAddr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-	).Once()
 
 	// Act: Execute the FundPsbt workflow with the configured intent.
 	fundedPacket, changeIndex, err := w.FundPsbt(t.Context(), intent)
@@ -3523,18 +3351,11 @@ func TestFinalizeInput(t *testing.T) {
 		w, mocks := createUnlockedWalletWithMocks(t)
 
 		// Arrange: Mock dependencies.
-		mocks.addrStore.On(
-			"Address", mock.Anything, mock.Anything,
-		).Return(mocks.pubKeyAddr, nil).Twice()
-		mocks.pubKeyAddr.On("Address").Return(p2wkhAddr).Once()
-		mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-		mocks.pubKeyAddr.On("Imported").Return(false).Once()
-		mocks.pubKeyAddr.On("Internal").Return(false).Once()
-		mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-		mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-		mocks.pubKeyAddr.On("DerivationInfo").Return(
-			waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{}, true,
-		).Once()
+		expectSignerAddressInfo(
+			t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+		)
+		mocks.addrStore.On("Address", mock.Anything, mock.Anything).
+			Return(mocks.pubKeyAddr, nil).Once()
 		expectDerivedSignerPrivKey(
 			t, mocks, waddrmgr.KeyScopeBIP0084,
 			waddrmgr.DerivationPath{}, privKey,
@@ -3685,23 +3506,20 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 
 			w, mocks := createUnlockedWalletWithMocks(t)
 
-			// Arrange: Mock address lookup.
-			mocks.addrStore.On(
-				"Address", mock.Anything,
+			// Arrange: Mock Store.GetAddress for ScriptForOutput.
+			dbAddrType := db.WitnessPubKey
+			if tc.addrType == waddrmgr.TaprootPubKey {
+				dbAddrType = db.TaprootPubKey
+			}
+
+			expectSignerAddressInfo(
+				t, w, mocks, tc.addr, dbAddrType, false, false, pubKey,
+			)
+			mocks.addrStore.On("Address", mock.Anything,
 				mock.MatchedBy(func(a btcutil.Address) bool {
 					return a.String() == tc.addr.String()
 				}),
-			).Return(mocks.pubKeyAddr, nil).Twice()
-			mocks.pubKeyAddr.On("Address").Return(tc.addr).Once()
-			mocks.pubKeyAddr.On("AddrType").Return(tc.addrType).Once()
-			mocks.pubKeyAddr.On("Imported").Return(false).Once()
-			mocks.pubKeyAddr.On("Internal").Return(false).Once()
-			mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-			mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-			mocks.pubKeyAddr.On("DerivationInfo").Return(
-				keyScope, waddrmgr.DerivationPath{}, true,
-			).Once()
-
+			).Return(mocks.pubKeyAddr, nil).Once()
 			// Create a copy of the private key to avoid data races
 			// when parallel tests call Zero() on it.
 			privKeyCopy := *privKey
@@ -3769,12 +3587,11 @@ func TestFinalizePsbtErrors(t *testing.T) {
 
 		w, mocks := createUnlockedWalletWithMocks(t)
 
-		// Arrange: Mock Address lookup to return error (or watch only).
-		// Simulating "Address not found" or "Key not found".
+		// Arrange: Mock Store.GetAddress to return an error.
 		// ComputeUnlockingScript will fail, log, and continue.
 		// Then MaybeFinalizeAll will fail because no witness.
-		mocks.addrStore.On("Address", mock.Anything, mock.Anything).
-			Return(nil, errAddrNotFound)
+		mocks.store.On("GetAddress", mock.Anything, mock.Anything).
+			Return((*db.AddressInfo)(nil), errAddrNotFound)
 
 		// Act.
 		err = w.FinalizePsbt(t.Context(), packet)
