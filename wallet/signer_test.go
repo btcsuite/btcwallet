@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -578,23 +579,12 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 	// when queried, will provide the private key for signing. This
 	// simulates a real scenario where the wallet's address manager would
 	// fetch the key from the database.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+	).Return(mocks.pubKeyAddr, nil).Once()
 
 	// Configure the full mock chain to return the test private key.
 	//
@@ -669,23 +659,12 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 	// The wallet needs to be able to find the private key for the given
 	// address. We mock the address store to return a mock address that,
 	// when queried, will provide the private key for signing.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.WitnessPubKey, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+	).Return(mocks.pubKeyAddr, nil).Once()
 
 	// Configure the full mock chain to return the test private key.
 	//
@@ -764,23 +743,12 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	// when queried, will provide the private key for signing. For NP2WKH,
 	// the wallet also needs the public key to reconstruct the witness
 	// program, so we mock that as well.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.NestedWitnessPubKey, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.NestedWitnessPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+	).Return(mocks.pubKeyAddr, nil).Once()
 
 	// Configure the full mock chain to return the test private key.
 	//
@@ -857,23 +825,12 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	// The wallet needs to be able to find the private key for the given
 	// address. We mock the address store to return a mock address that,
 	// when queried, will provide the private key for signing.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.TaprootPubKey, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address",
 		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.TaprootPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0086, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+	).Return(mocks.pubKeyAddr, nil).Once()
 
 	// Configure the full mock chain to return the test private key.
 	//
@@ -951,9 +908,13 @@ func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
 	// Arrange: Set up the wallet and mocks.
 	w, mocks := createUnlockedWalletWithMocks(t)
 
-	// Mock the address store to return an error.
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return((*mockManagedAddress)(nil), errManagerNotFound).Once()
+	// Mock the store to return an error.
+	pkScript_, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: pkScript_,
+	}).Return((*db.AddressInfo)(nil), errManagerNotFound).Once()
 
 	params := &UnlockingScriptParams{
 		Tx:        tx,
@@ -994,22 +955,11 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+		Return(mocks.pubKeyAddr, nil).Once()
 	mocks.pubKeyAddr.On("Imported").Return(false).Once()
 	mocks.pubKeyAddr.On("DerivationInfo").Return(
 		waddrmgr.KeyScopeBIP0044,
@@ -1112,22 +1062,11 @@ func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
+	)
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Twice()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.PubKeyHash).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
+		Return(mocks.pubKeyAddr, nil).Once()
 
 	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
 	expectDerivedSignerPrivKey(
@@ -1182,17 +1121,9 @@ func TestComputeUnlockingScriptFail_UnsupportedAddr(t *testing.T) {
 	w, mocks := createUnlockedWalletWithMocks(t)
 
 	// Mock address store and managed address.
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.RawPubKey).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{}, false,
-	).Once()
+	expectSignerAddressInfo(
+		t, w, mocks, addr, db.RawPubKey, false, false, pubKey,
+	)
 
 	params := &UnlockingScriptParams{
 		Tx:        tx,
@@ -1228,21 +1159,18 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// Mock address lookup to return a valid managed address.
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("Address").Return(addr).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("Internal").Return(false).Once()
-	mocks.pubKeyAddr.On("Compressed").Return(true).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScope{}, waddrmgr.DerivationPath{}, false,
-	).Once()
-
-	// Mock the address type to return an unknown type (e.g. 99) so the address
-	// descriptor lookup fails before signing begins.
-	mocks.pubKeyAddr.On("AddrType").Return(waddrmgr.AddressType(99))
+	pkScript99, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	// Mock Store.GetAddress to return an unknown addr type so the
+	// addressInfoFromStoreAddress conversion rejects it.
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: pkScript99,
+	}).Return(&db.AddressInfo{
+		ScriptPubKey: pkScript99,
+		AddrType:     db.AddressType(99),
+		Origin:       db.DerivedAccount,
+	}, nil).Once()
 
 	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, 10000)
 
@@ -1258,7 +1186,7 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 
 	// Assert: Verify that the unknown address type is rejected while building
 	// output metadata.
-	require.ErrorIs(t, err, ErrUnsupportedAddressType)
+	require.ErrorIs(t, err, ErrUnknownAddrType)
 }
 
 // createDummyTestTx creates a dummy transaction for testing purposes.
