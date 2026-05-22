@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -696,7 +697,7 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 		return nil, err
 	}
 
-	privKey, err := w.privKeyForOutput(scriptInfo.Addr)
+	privKey, err := w.privKeyForOutput(scriptInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -717,16 +718,52 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 }
 
 // privKeyForOutput returns the private key needed to sign for the given
-// wallet-controlled address.
-func (w *Wallet) privKeyForOutput(addr address.Address) (
+// wallet-controlled output.
+func (w *Wallet) privKeyForOutput(scriptInfo OutputScriptInfo) (
 	*btcec.PrivateKey, error) {
 
-	pubKeyAddr, err := w.loadManagedPubKeyAddr(addr)
+	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
+		return w.privKeyForAddressInfo(scriptInfo.AddressInfo)
+	}
+
+	pubKeyAddr, err := w.loadManagedPubKeyAddr(scriptInfo.Addr)
 	if err != nil {
 		return nil, err
 	}
 
 	return w.resolvePrivKey(pubKeyAddr)
+}
+
+// canUseAddressInfoDerivation reports whether address metadata contains enough
+// derivation information to derive a private key without a legacy address row.
+func canUseAddressInfoDerivation(addressInfo AddressInfo) bool {
+	if addressInfo.Imported || addressInfo.Derivation == nil {
+		return false
+	}
+
+	return addressInfo.Derivation.KeyScope != (waddrmgr.KeyScope{})
+}
+
+// privKeyForAddressInfo derives the private key described by store-backed
+// address metadata.
+func (w *Wallet) privKeyForAddressInfo(addressInfo AddressInfo) (
+	*btcec.PrivateKey, error) {
+
+	derivation := addressInfo.Derivation
+	if derivation == nil {
+		return nil, fmt.Errorf("%w: derivation info not found for %v",
+			ErrDerivationPathNotFound, addressInfo.Addr)
+	}
+
+	derivationPath := waddrmgr.DerivationPath{
+		InternalAccount:      derivation.Account,
+		Account:              derivation.Account + hdkeychain.HardenedKeyStart,
+		Branch:               derivation.Branch,
+		Index:                derivation.Index,
+		MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+	}
+
+	return w.resolveDerivedPathPrivKey(derivation.KeyScope, derivationPath)
 }
 
 // loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
@@ -782,6 +819,14 @@ func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 		return nil, fmt.Errorf("%w: addr=%v", ErrDerivationPathNotFound,
 			pubKeyAddr.Address())
 	}
+
+	return w.resolveDerivedPathPrivKey(keyScope, derivationPath)
+}
+
+// resolveDerivedPathPrivKey resolves one derived private key through the scoped
+// manager cache or the database-backed fallback.
+func (w *Wallet) resolveDerivedPathPrivKey(keyScope waddrmgr.KeyScope,
+	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
 	accountManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
