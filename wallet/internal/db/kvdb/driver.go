@@ -1,7 +1,6 @@
 package kvdb
 
 import (
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -15,7 +14,7 @@ import (
 type Store struct {
 	db        walletdb.DB
 	txStore   wtxmgr.TxStore
-	addrStore waddrmgr.AddrStore
+	addrStore any
 }
 
 // A compile-time assertion to ensure that Store implements the db.Store
@@ -24,7 +23,7 @@ var _ db.Store = (*Store)(nil)
 
 // NewStore creates a new kvdb-backed wallet store adapter.
 func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore,
-	addrStore waddrmgr.AddrStore) *Store {
+	addrStore any) *Store {
 
 	return &Store{
 		db:        dbConn,
