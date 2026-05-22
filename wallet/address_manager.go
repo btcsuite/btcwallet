@@ -30,6 +30,15 @@ import (
 )
 
 var (
+	// errMissingAccountPubKey is returned by deriveAddressData when the
+	// AddressDerivationParams arrive without the account-level extended public
+	// key required to derive an address. The wallet's account loader is
+	// expected to fill this in for every SQL-store account before address
+	// derivation.
+	errMissingAccountPubKey = errors.New(
+		"missing account public key for derivation",
+	)
+
 	// ErrDerivationPathNotFound is returned when the derivation path for a
 	// given script cannot be found. This may be because the script does
 	// not belong to the wallet, is imported, or is not a pubkey-based
@@ -300,6 +309,64 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 	}
 
 	return info, nil
+}
+
+// deriveAddressData derives one SQL-store address from account public material.
+func (w *Wallet) deriveAddressData(_ context.Context,
+	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+	if len(params.AccountPubKey) == 0 {
+		return nil, fmt.Errorf("%w: scope=%v account=%d",
+			errMissingAccountPubKey, params.Scope, params.AccountNumber)
+	}
+
+	accountPubKey, err := hdkeychain.NewKeyFromString(
+		string(params.AccountPubKey),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parse account pubkey: %w", err)
+	}
+
+	branchKey, err := deriveChildKey(accountPubKey, params.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("derive branch: %w", err)
+	}
+	defer branchKey.Zero()
+
+	addrKey, err := deriveChildKey(branchKey, params.Index)
+	if err != nil {
+		return nil, fmt.Errorf("derive address index: %w", err)
+	}
+	defer addrKey.Zero()
+
+	pubKey, err := addrKey.ECPubKey()
+	if err != nil {
+		return nil, fmt.Errorf("derive address pubkey: %w", err)
+	}
+
+	pubKeyBytes := pubKey.SerializeCompressed()
+
+	walletAddrType, err := addresstype.ToWallet(params.AddrType, false)
+	if err != nil {
+		return nil, fmt.Errorf("address type: %w", err)
+	}
+
+	addr, err := walletAddrType.AddrFromPubKeyBytes(
+		pubKeyBytes, w.cfg.ChainParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("derive address: %w", err)
+	}
+
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, fmt.Errorf("pay to addr: %w", err)
+	}
+
+	return &db.DerivedAddressData{
+		ScriptPubKey: scriptPubKey,
+		PubKey:       pubKeyBytes,
+	}, nil
 }
 
 // storeAddressPubKeyCompressed reports whether store pubkey bytes use the
