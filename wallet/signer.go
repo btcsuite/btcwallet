@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -1037,7 +1038,7 @@ func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
 // GetPrivKeyForAddress returns the private key for a given address.
 //
 // DANGER: This method exports sensitive key material.
-func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
+func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 	*btcec.PrivateKey, error) {
 
 	err := w.state.canSign()
@@ -1045,7 +1046,31 @@ func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
 		return nil, err
 	}
 
-	return w.PrivKeyForAddress(a)
+	// Try the store-routed lookup so SQL-derived addresses (persisted
+	// only in the store) can be signed for. Fall back to the legacy
+	// waddrmgr lookup ONLY when the address is genuinely not in the
+	// store, or when the store record lacks usable derivation metadata
+	// (imported / kvdb cases). Unexpected store errors must surface — do
+	// not mask them.
+	info, err := w.GetAddressInfo(ctx, a)
+	switch {
+	case err == nil && canUseAddressInfoDerivation(info):
+		return w.privKeyForAddressInfo(info)
+
+	case err == nil:
+		// Store record exists but no usable derivation info
+		// (imported case).
+		return w.PrivKeyForAddress(a)
+
+	case errors.Is(err, db.ErrAddressNotFound):
+		// Address not in the store — fall through to the legacy
+		// lookup (kvdb path or pre-store legacy address).
+		return w.PrivKeyForAddress(a)
+
+	default:
+		// Unexpected store error: surface, don't mask.
+		return nil, fmt.Errorf("GetPrivKeyForAddress: %w", err)
+	}
 }
 
 // PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK
