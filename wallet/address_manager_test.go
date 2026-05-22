@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"iter"
 	"testing"
 	"time"
 
@@ -16,11 +17,101 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// addressInfoFromAddr builds a store address record for a test address.
+func addressInfoFromAddr(t *testing.T, addr address.Address) *db.AddressInfo {
+	t.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return &db.AddressInfo{ScriptPubKey: pkScript}
+}
+
+// derivedAddressInfoFromAddr builds derived store address metadata for tests.
+func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
+	addrType db.AddressType, accountName string, scope waddrmgr.KeyScope,
+	change bool, index uint32, fingerprint uint32,
+	pubKey *btcec.PublicKey) *db.AddressInfo {
+
+	t.Helper()
+
+	info := addressInfoFromAddr(t, addr)
+	info.AddrType = addrType
+	info.Origin = db.DerivedAccount
+	info.AccountName = accountName
+	info.AccountNumber = 0
+	info.KeyScope = db.KeyScope(scope)
+	info.MasterKeyFingerprint = fingerprint
+	info.Index = index
+
+	if change {
+		info.Branch = 1
+	}
+
+	if pubKey != nil {
+		info.PubKey = pubKey.SerializeCompressed()
+	}
+
+	return info
+}
+
+// importedPubKeyAddressInfoFromAddr builds imported public-key store metadata
+// for tests.
+func importedPubKeyAddressInfoFromAddr(t *testing.T, addr address.Address,
+	scope waddrmgr.KeyScope, pubKey *btcec.PublicKey) *db.AddressInfo {
+
+	t.Helper()
+
+	info := addressInfoFromAddr(t, addr)
+	info.AddrType = db.WitnessPubKey
+	info.Origin = db.ImportedAccount
+	info.AccountName = db.DefaultImportedAccountName
+	info.KeyScope = db.KeyScope(scope)
+	info.IsWatchOnly = true
+
+	if pubKey != nil {
+		info.PubKey = pubKey.SerializeCompressed()
+	}
+
+	return info
+}
+
+// expectStoreNewAddress configures mock expectations for deriving an address.
+func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
+	accountName string, scope waddrmgr.KeyScope, change bool,
+	addr address.Address) {
+
+	t.Helper()
+
+	deps.store.On(
+		"NewDerivedAddress", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID:    w.id,
+			AccountName: accountName,
+			Scope:       db.KeyScope(scope),
+			Change:      change,
+		}, mock.Anything,
+	).Return(addressInfoFromAddr(t, addr), nil).Once()
+	deps.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
+}
+
+// addressIter returns an address iterator over static test records.
+func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
+	return func(yield func(db.AddressInfo, error) bool) {
+		for i := range items {
+			if !yield(items[i], nil) {
+				return
+			}
+		}
+	}
+}
 
 // TestNewAddress tests the NewAddress method, ensuring it can generate
 // various address types for different accounts and correctly handles both
