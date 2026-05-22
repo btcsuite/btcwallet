@@ -114,7 +114,7 @@ func (o createWalletOps) GetWalletByID(ctx context.Context,
 		return nil, err
 	}
 
-	return getWalletRowToInfo(row)
+	return walletRowToInfo(row)
 }
 
 // GetWallet retrieves information about a wallet given its name. It
@@ -128,7 +128,7 @@ func (s *Store) GetWallet(ctx context.Context,
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetWalletByName(ctx, name)
 		if err == nil {
-			info, err = getWalletRowToInfo(sqlc.GetWalletByIDRow(row))
+			info, err = walletRowToInfo(row)
 			return err
 		}
 
@@ -163,7 +163,7 @@ func (s *Store) ListWallets(ctx context.Context,
 
 		items = make([]db.WalletInfo, len(rows))
 		for i, row := range rows {
-			item, errMap := listWalletRowToInfo(row)
+			item, errMap := walletRowToInfo(row)
 			if errMap != nil {
 				return fmt.Errorf("list wallets page: map row: %w", errMap)
 			}
@@ -380,6 +380,13 @@ func (o updateWalletSecretsOps) UpdateWalletSecrets(ctx context.Context,
 	return nil
 }
 
+// walletInfoRow is a type constraint for SQLite wallet info row types
+// that share the same field structure. This enables a single generic conversion
+// function to handle all wallet query result types.
+type walletInfoRow interface {
+	sqlc.GetWalletByIDRow | sqlc.GetWalletByNameRow | sqlc.ListWalletsRow
+}
+
 // walletRowParams holds the parameters needed to build a
 // WalletInfo from a wallet row.
 type walletRowParams struct {
@@ -398,44 +405,27 @@ type walletRowParams struct {
 	masterPubKey           []byte
 }
 
-// getWalletRowToInfo converts a fetched wallet row to a WalletInfo.
-func getWalletRowToInfo(row sqlc.GetWalletByIDRow) (*db.WalletInfo, error) {
-	return buildWalletInfo(walletRowParams{
-		id:                     row.ID,
-		name:                   row.WalletName,
-		isImported:             row.IsImported,
-		managerVersion:         row.ManagerVersion,
-		isWatchOnly:            row.IsWatchOnly,
-		syncedHeight:           row.SyncedHeight,
-		syncedBlockHash:        row.SyncedBlockHash,
-		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-		birthdayHeight:         row.BirthdayHeight,
-		birthdayTimestamp:      row.BirthdayTimestamp,
-		birthdayBlockHash:      row.BirthdayBlockHash,
-		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-		masterPubKey:           row.MasterHdPubKey,
-	})
-}
-
-// listWalletRowToInfo converts a ListWallets result row to a WalletInfo
-// struct for pagination.
-func listWalletRowToInfo(
-	row sqlc.ListWalletsRow) (*db.WalletInfo, error) {
+// walletRowToInfo converts a wallet row to WalletInfo, handling type
+// conversions across different sqlc row types.
+func walletRowToInfo[T walletInfoRow](row T) (*db.WalletInfo, error) {
+	// Direct conversion works only because all constraint types have
+	// identical fields. If sqlc types diverge, compilation will fail.
+	base := sqlc.GetWalletByIDRow(row)
 
 	return buildWalletInfo(walletRowParams{
-		id:                     row.ID,
-		name:                   row.WalletName,
-		isImported:             row.IsImported,
-		managerVersion:         row.ManagerVersion,
-		isWatchOnly:            row.IsWatchOnly,
-		syncedHeight:           row.SyncedHeight,
-		syncedBlockHash:        row.SyncedBlockHash,
-		syncedBlockTimestamp:   row.SyncedBlockTimestamp,
-		birthdayHeight:         row.BirthdayHeight,
-		birthdayTimestamp:      row.BirthdayTimestamp,
-		birthdayBlockHash:      row.BirthdayBlockHash,
-		birthdayBlockTimestamp: row.BirthdayBlockTimestamp,
-		masterPubKey:           row.MasterHdPubKey,
+		id:                     base.ID,
+		name:                   base.WalletName,
+		isImported:             base.IsImported,
+		managerVersion:         base.ManagerVersion,
+		isWatchOnly:            base.IsWatchOnly,
+		syncedHeight:           base.SyncedHeight,
+		syncedBlockHash:        base.SyncedBlockHash,
+		syncedBlockTimestamp:   base.SyncedBlockTimestamp,
+		birthdayHeight:         base.BirthdayHeight,
+		birthdayTimestamp:      base.BirthdayTimestamp,
+		birthdayBlockHash:      base.BirthdayBlockHash,
+		birthdayBlockTimestamp: base.BirthdayBlockTimestamp,
+		masterPubKey:           base.MasterHdPubKey,
 	})
 }
 
