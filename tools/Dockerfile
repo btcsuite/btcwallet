@@ -1,4 +1,4 @@
-FROM golang:1.24.6-alpine
+FROM golang:1.25.5-alpine
 
 ENV GOFLAGS="-buildvcs=false"
 
@@ -13,6 +13,15 @@ RUN go install -trimpath \
     github.com/rinchsan/gosimports/cmd/gosimports \
     github.com/sqlc-dev/sqlc/cmd/sqlc \
     github.com/yoheimuta/protolint/cmd/protolint \
+    && rm -rf /go/pkg/mod \
+    && rm -rf /root/.cache/go-build \
+    && rm -rf /go/src \
+    && rm -rf /tmp/*
+
+COPY .custom-gcl.yml ./
+
+RUN golangci-lint custom \
+    && mv custom-gcl /go/bin/golangci-lint \
     && rm -rf /go/pkg/mod \
     && rm -rf /root/.cache/go-build \
     && rm -rf /go/src \
