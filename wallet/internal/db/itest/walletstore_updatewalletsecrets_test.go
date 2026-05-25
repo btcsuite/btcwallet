@@ -372,3 +372,34 @@ func TestUpdateWalletSecrets(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, newSecrets.EncryptedMasterHdPrivKey, seed)
 }
+
+// TestUpdateWalletSecretsMissingSecretsRow verifies that when a wallet exists
+// but its wallet_secrets row is missing, UpdateWalletSecrets returns
+// ErrSecretNotFound.
+func TestUpdateWalletSecretsMissingSecretsRow(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	// Create a wallet with secrets.
+	params := CreateWalletParamsFixture("missing-secrets-wallet")
+	created, err := store.CreateWallet(t.Context(), params)
+	require.NoError(t, err)
+
+	// Delete the wallet_secrets row directly.
+	err = deleteWalletSecretRaw(t, store.DB(), created.ID)
+	require.NoError(t, err)
+
+	// Attempt to update secrets on the wallet with missing secrets row.
+	updateParams := db.UpdateWalletSecretsParams{
+		WalletID:                 created.ID,
+		MasterPrivParams:         RandomBytes(16),
+		EncryptedCryptoPrivKey:   RandomBytes(32),
+		EncryptedCryptoScriptKey: RandomBytes(32),
+		EncryptedMasterHdPrivKey: RandomBytes(32),
+	}
+
+	err = store.UpdateWalletSecrets(t.Context(), updateParams)
+	require.Error(t, err)
+	require.ErrorIs(t, err, db.ErrSecretNotFound)
+}

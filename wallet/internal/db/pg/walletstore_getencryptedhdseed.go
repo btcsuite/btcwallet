@@ -34,8 +34,7 @@ func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 		}
 
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("secrets for wallet %d: %w",
-				walletID, db.ErrWalletNotFound)
+			return resolveWalletSecretsLookupErr(ctx, q, walletID)
 		}
 
 		return fmt.Errorf("get wallet secrets: %w", err)
