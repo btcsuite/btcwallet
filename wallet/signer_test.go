@@ -335,6 +335,7 @@ func TestSignDigest(t *testing.T) {
 
 				compactSig, ok := sig.(CompactSignature)
 				require.True(t, ok, "expected CompactSignature")
+
 				recoveredKey, _, err := ecdsa.RecoverCompact(
 					compactSig, msgDoubleHash,
 				)

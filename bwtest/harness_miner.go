@@ -3,6 +3,7 @@ package bwtest
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -105,11 +106,9 @@ func (h *HarnessTest) AssertTxNotInMempool(txid chainhash.Hash) {
 			return fmt.Errorf("get raw mempool: %w", err)
 		}
 
-		for _, memTxid := range txids {
-			if memTxid == txid {
-				return fmt.Errorf("%w: txid=%s", ErrMempoolTxFound,
-					txid)
-			}
+		if slices.Contains(txids, txid) {
+			return fmt.Errorf("%w: txid=%s", ErrMempoolTxFound,
+				txid)
 		}
 
 		return nil
@@ -461,17 +460,15 @@ func (h *HarnessTest) blockHasNoTxns(block *wire.MsgBlock) error {
 	}
 
 	var desc strings.Builder
-	desc.WriteString(fmt.Sprintf(
-		"block %v has %d txns:\n",
-		block.BlockHash(), len(block.Transactions)-1,
-	))
+	fmt.Fprintf(&desc, "block %v has %d txns:\n",
+		block.BlockHash(), len(block.Transactions)-1)
 
 	for _, tx := range block.Transactions[1:] {
 		if tx == nil {
 			continue
 		}
 
-		desc.WriteString(fmt.Sprintf("%v\n", tx.TxHash()))
+		fmt.Fprintf(&desc, "%v\n", tx.TxHash())
 	}
 
 	desc.WriteString(

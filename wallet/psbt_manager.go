@@ -726,7 +726,7 @@ func findChangeIndex(changeOutput *wire.TxOut,
 			// The above check ensures that the conversion to int32
 			// is safe.
 			//
-			//nolint:gosec
+
 			return int32(i), nil
 		}
 	}
@@ -876,7 +876,7 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 			// We convert the index i (int) to uint32. This is safe
 			// because a Bitcoin transaction is strictly bounded by
 			// the block size limit.
-			//nolint:gosec
+
 			signedInputs = append(signedInputs, uint32(i))
 		}
 	}

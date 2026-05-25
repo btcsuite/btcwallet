@@ -630,8 +630,10 @@ func TestGetEligibleUTXOs(t *testing.T) {
 				m.chain.On("BlockStamp").Return(
 					&waddrmgr.BlockStamp{}, nil,
 				)
+
 				scopedSrc, ok := source.(*ScopedAccount)
 				require.True(t, ok)
+
 				accountStore := &mockAccountStore{}
 
 				m.addrStore.On("FetchScopedKeyManager",
@@ -1345,6 +1347,7 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 		waddrmgr.KeyScopeBIP0086).Return(
 		accountStore, nil,
 	)
+
 	errNotFound := waddrmgr.ManagerError{
 		ErrorCode: waddrmgr.ErrAccountNotFound,
 	}

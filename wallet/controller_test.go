@@ -552,6 +552,7 @@ func TestControllerStop(t *testing.T) {
 		if !ok {
 			return
 		}
+
 		<-ctx.Done()
 	}).Return(nil).Once()
 

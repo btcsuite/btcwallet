@@ -525,7 +525,6 @@ func (s *syncer) scanBatchHeadersOnly(_ context.Context,
 		hash := hashes[i]
 		header := headers[i]
 
-		//nolint:gosec // i is bounded by batch size (2000), so
 		// addition to startHeight won't overflow int32.
 		height := startHeight + int32(i)
 
@@ -597,7 +596,6 @@ func (s *syncer) scanBatchWithFullBlocks(_ context.Context,
 		hash := hashes[i]
 		block := blocks[i]
 
-		//nolint:gosec // i is bounded by batch size (2000), so
 		// addition to startHeight won't overflow int32.
 		height := startHeight + int32(i)
 
@@ -644,7 +642,6 @@ func (s *syncer) initResultsForCFilterScan(_ context.Context,
 				Block: wtxmgr.Block{
 					Hash: hashes[i],
 
-					//nolint:gosec // i is bounded by batch
 					// size (2000), so addition to
 					// startHeight won't overflow int32.
 					Height: startHeight + int32(i),
@@ -1159,7 +1156,7 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 			entries = append(entries, AddrEntry{
 				Address: addr,
 				Credit: wtxmgr.CreditEntry{
-					//nolint:gosec // bounded.
+
 					Index: uint32(i),
 				},
 			})

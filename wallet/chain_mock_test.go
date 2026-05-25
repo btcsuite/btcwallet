@@ -192,7 +192,7 @@ func (m *mockChainClient) NotifyBlocks() error {
 	return nil
 }
 
-func (m *mockChainClient) Notifications() <-chan interface{} {
+func (m *mockChainClient) Notifications() <-chan any {
 	return nil
 }
 

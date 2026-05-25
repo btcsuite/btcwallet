@@ -206,6 +206,7 @@ func TestGetUnusedAddress(t *testing.T) {
 		mock.Anything).Run(func(args mock.Arguments) {
 		f, ok := args.Get(2).(func(waddrmgr.ManagedAddress) error)
 		require.True(t, ok)
+
 		mockAddr1 := &mockManagedAddress{}
 		mockAddr1.On("Internal").Return(false).Once()
 		mockAddr1.On("Used", mock.Anything).Return(false).Once()

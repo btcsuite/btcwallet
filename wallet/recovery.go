@@ -525,7 +525,6 @@ func (rs *RecoveryState) filterTx(tx *wire.MsgTx,
 				foundScopes[entry.addrScope] = struct{}{}
 			}
 
-			//nolint:gosec // Output index fits in uint32.
 			idx := uint32(i)
 
 			// Create result entry with Credit populated.
