@@ -181,7 +181,9 @@ type WalletStore interface {
 
 	// GetWalletSecrets retrieves the encrypted wallet secret material for the
 	// given wallet. Watch-only wallets may return empty secret fields without
-	// error when those values are absent in storage.
+	// error when those values are absent in storage. If the wallet exists but
+	// its wallet_secrets row is missing, it returns ErrSecretNotFound rather
+	// than ErrWalletNotFound.
 	GetWalletSecrets(ctx context.Context, walletID uint32) (*WalletSecrets,
 		error)
 
