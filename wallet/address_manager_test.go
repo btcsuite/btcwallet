@@ -97,7 +97,7 @@ func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
 			AccountName: accountName,
 			Scope:       db.KeyScope(scope),
 			Change:      change,
-		}, mock.Anything,
+		},
 	).Return(addressInfoFromAddr(t, addr), nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
 }
