@@ -74,7 +74,7 @@ func (o updateWalletSecretsOps) UpdateWalletSecrets(ctx context.Context,
 
 	if rowsAffected == 0 {
 		return fmt.Errorf("wallet secrets for wallet %d: %w",
-			params.WalletID, db.ErrWalletNotFound)
+			params.WalletID, db.ErrSecretNotFound)
 	}
 
 	return nil
