@@ -656,8 +656,8 @@ type AddressInfo struct {
 	// ScriptPubKey is the script pubkey (plaintext).
 	ScriptPubKey []byte
 
-	// PubKey is the public key (plaintext). Zero value for derived
-	// addresses.
+	// PubKey is the public key (plaintext) when the address is public-key
+	// based.
 	PubKey []byte
 
 	// HasScript indicates whether the address has encrypted script material.

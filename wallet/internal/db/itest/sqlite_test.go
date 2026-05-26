@@ -21,12 +21,23 @@ import (
 func NewTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 
+	return NewTestStoreWithDerive(t, mockDeriveFunc())
+}
+
+// NewTestStoreWithDerive creates a new SQLite database for testing with the
+// provided address derivation function.
+func NewTestStoreWithDerive(t *testing.T,
+	deriveAddress db.AddressDerivationFunc) *sqlite.Store {
+
+	t.Helper()
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
 	cfg := sqlite.Config{
 		DBPath:         dbPath,
 		MaxConnections: 0,
+		DeriveAddress:  deriveAddress,
 	}
 
 	store, err := sqlite.NewStore(t.Context(), cfg)

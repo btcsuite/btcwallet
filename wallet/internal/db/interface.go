@@ -238,18 +238,46 @@ type AccountStore interface {
 	RenameAccount(ctx context.Context, params RenameAccountParams) error
 }
 
-// AddressDerivationFunc is called by the database layer after allocating an
-// address index to derive the actual address data (script_pub_key). As the
-// database should not know about how to derive an address, we pass this as a
-// callback.
-type AddressDerivationFunc func(ctx context.Context, accountID uint32,
-	branch uint32, index uint32) (*DerivedAddressData, error)
+// AddressDerivationParams contains the wallet-side data needed to derive a
+// store-allocated address.
+type AddressDerivationParams struct {
+	// Scope is the key scope that owns the derived address.
+	Scope KeyScope
+
+	// AccountNumber is the BIP44 account number, not the database row ID.
+	// It is 0 for imported accounts where no BIP44 account number applies;
+	// callbacks deriving for imported accounts must use AccountPubKey only.
+	AccountNumber uint32
+
+	// Branch is the BIP44 branch number (0=external, 1=internal/change).
+	Branch uint32
+
+	// Index is the BIP44 child index allocated by the store.
+	Index uint32
+
+	// AddrType is the address type selected from the account's effective
+	// address schema for Branch.
+	AddrType AddressType
+
+	// AccountPubKey is the account-level extended public key in plaintext.
+	AccountPubKey []byte
+}
+
+// AddressDerivationFunc derives address data after a SQL backend allocates an
+// address index. The callback receives a value struct so new derivation inputs
+// can be added without changing every call site again.
+type AddressDerivationFunc func(ctx context.Context,
+	params AddressDerivationParams) (*DerivedAddressData, error)
 
 // DerivedAddressData contains the derived address information returned by
 // the AddressDerivationFunc callback.
 type DerivedAddressData struct {
 	// ScriptPubKey is the script public key for the derived address.
 	ScriptPubKey []byte
+
+	// PubKey is the serialized public key for the derived address when one is
+	// available. Script-only addresses leave this empty.
+	PubKey []byte
 }
 
 // AccountDerivationFunc is invoked by the database layer after allocating a
@@ -286,12 +314,11 @@ type DerivedAccountData struct {
 // AddressStore defines the database actions for managing addresses.
 type AddressStore interface {
 	// NewDerivedAddress creates a new HD-derived address for the specified
-	// account and key scope. The database layer allocates the address index
-	// atomically, then calls deriveFn to derive the actual address data.
-	// Returns the complete address metadata including the derived
-	// script_pub_key.
-	NewDerivedAddress(ctx context.Context, params NewDerivedAddressParams,
-		deriveFn AddressDerivationFunc) (*AddressInfo, error)
+	// account and key scope. The concrete backend owns address derivation:
+	// SQL backends use their configured AddressDerivationFunc, while kvdb
+	// preserves legacy waddrmgr derivation semantics.
+	NewDerivedAddress(ctx context.Context,
+		params NewDerivedAddressParams) (*AddressInfo, error)
 
 	// NewImportedAddress imports a new address, script, or private key.
 	// If a private key is provided in the parameters, the address will

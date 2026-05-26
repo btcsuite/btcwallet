@@ -207,10 +207,9 @@ func (m *mockStore) RenameAccount(ctx context.Context,
 
 // NewDerivedAddress implements the db.AddressStore interface.
 func (m *mockStore) NewDerivedAddress(ctx context.Context,
-	params db.NewDerivedAddressParams,
-	deriveFn db.AddressDerivationFunc) (*db.AddressInfo, error) {
+	params db.NewDerivedAddressParams) (*db.AddressInfo, error) {
 
-	args := m.Called(ctx, params, deriveFn)
+	args := m.Called(ctx, params)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
