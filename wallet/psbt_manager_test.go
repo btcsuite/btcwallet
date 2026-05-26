@@ -283,8 +283,8 @@ func TestDecorateInputSegWitV0(t *testing.T) {
 	// Arrange: Mock the address manager to return our P2WKH address as a
 	// ManagedPubKeyAddress when `Address` is called with the P2WKH
 	// address.
-	expectSignerAddressInfo(
-		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, pubKey,
 	)
 
 	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
@@ -340,8 +340,8 @@ func TestDecorateInputTaproot(t *testing.T) {
 	// Arrange: Mock the address manager to return our Taproot address as a
 	// ManagedPubKeyAddress when `Address` is called with the Taproot
 	// address.
-	expectSignerAddressInfo(
-		t, w, mocks, taprootAddr, db.TaprootPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, taprootAddr, db.TaprootPubKey, pubKey,
 	)
 
 	// Arrange: Mock the ManagedPubKeyAddress methods to return relevant
@@ -543,10 +543,10 @@ func TestDecorateInputErrDerivationMissing(t *testing.T) {
 
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Arrange: Mock AddressInfo to return a ManagedPubKeyAddress that has
-	// no derivation info.
+	// Arrange: Mock AddressInfo to return a non-imported pubkey address
+	// whose store record has no usable derivation scope.
 	expectSignerAddressInfo(
-		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, true, pubKey,
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
 	)
 
 	utxo := &wire.TxOut{
@@ -590,8 +590,8 @@ func TestDecorateInputNestedWitnessUsesRedeemScript(t *testing.T) {
 	require.NoError(t, err)
 
 	w, mocks := createStartedWalletWithMocks(t)
-	expectSignerAddressInfo(
-		t, w, mocks, nestedAddr, db.NestedWitnessPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, nestedAddr, db.NestedWitnessPubKey, pubKey,
 	)
 
 	pInput := &psbt.PInput{}
@@ -698,8 +698,8 @@ func TestDecorateInputsSuccess(t *testing.T) {
 	).Return(txDetails2, nil)
 
 	// Arrange: Mock Address lookup (common for both known inputs).
-	expectSignerAddressInfo(
-		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, pubKey,
 	)
 
 	// Arrange: Mock ManagedPubKeyAddress methods.
@@ -1147,8 +1147,8 @@ func TestAddChangeOutputInfoSuccess(t *testing.T) {
 	w, mocks := createStartedWalletWithMocks(t)
 
 	// Arrange: Mock Store.GetAddress for the change address.
-	expectSignerAddressInfo(
-		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, pubKey,
 	)
 
 	// Act: Call addChangeOutputInfo.
@@ -1379,8 +1379,8 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 			Return(txDetails, nil)
 
 		// Mock Address lookup for Input.
-		expectSignerAddressInfo(
-			t, w, mocks, addrIn, db.WitnessPubKey, false, false, pubKey,
+		expectSignerDerivedAddressInfo(
+			t, w, mocks, addrIn, db.WitnessPubKey, pubKey,
 		)
 
 		// Mock Store.GetAddress for Output (Fail)
@@ -1465,10 +1465,12 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 	// change output info).
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
-			ScriptPubKey: p2wkhScript,
-			AddrType:     db.WitnessPubKey,
-			Origin:       db.DerivedAccount,
-			PubKey:       pubKey.SerializeCompressed(),
+			ScriptPubKey:         p2wkhScript,
+			AddrType:             db.WitnessPubKey,
+			Origin:               db.DerivedAccount,
+			KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			MasterKeyFingerprint: 1,
+			PubKey:               pubKey.SerializeCompressed(),
 		}, nil)
 
 	// Act: Call populatePsbtPacket.
@@ -1603,8 +1605,8 @@ func TestFundPsbtWorkflow(t *testing.T) {
 		Return(mocks.accountManager, nil).Times(3)
 
 	// 8. Mock Store.GetAddress for decorateInput during DecorateInputs:
-	expectSignerAddressInfo(
-		t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, p2wkhAddr, db.WitnessPubKey, pubKey,
 	)
 
 	// --- Mock accountManager ---

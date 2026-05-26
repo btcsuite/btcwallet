@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -945,8 +946,7 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 
 // TestGetPrivKeyForAddressSQLDerivedAddress verifies that GetPrivKeyForAddress
 // recovers the private key for an address whose only persistent record lives
-// in the SQL store. Regression coverage for the GetPrivKeyForAddress path
-// raised in PR #1214 review comment r3287556227.
+// in the SQL store.
 func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
@@ -971,9 +971,45 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 
 	priv, err := w.GetPrivKeyForAddress(t.Context(), addr)
 	require.NoError(t, err, "GetPrivKeyForAddress must succeed for "+
-		"SQL-derived addresses (regression r3287556227)")
+		"SQL-derived addresses")
 	require.NotNil(t, priv)
 	priv.Zero()
+}
+
+// TestNewAddressOnSQLOnlyAccount verifies that SQL-owned accounts can derive
+// receive addresses without a mirrored legacy waddrmgr account.
+//
+// The test exercises the public-key path only. Signing with addresses owned
+// by a SQL-only account currently routes through the legacy waddrmgr
+// derivation cache, which does not see SQL-only accounts; that gap is
+// tracked separately and will be closed by the signer-store work on
+// impl-tx-creator-store using keyVault-backed account-secret derivation.
+func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
+	t.Parallel()
+
+	w, chain := newSQLAddressSigningWallet(t)
+
+	_, err := w.store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Name:     "secondary",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+
+	chain.On(
+		"NotifyReceived",
+		mock.MatchedBy(func(addrs []btcutil.Address) bool {
+			return len(addrs) == 1
+		}),
+	).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, addr)
 }
 
 // TestComputeUnlockingScriptFail_ScriptForOutput tests failure when
@@ -1421,11 +1457,31 @@ func newSpendableAddressManager(t *testing.T,
 // testAccountDerivationFunc returns minimal spendable account material for SQL
 // account creation in signer tests.
 func testAccountDerivationFunc() db.AccountDerivationFunc {
-	return func(_ context.Context, _ db.KeyScope, _ uint32,
+	return func(_ context.Context, scope db.KeyScope, accountNumber uint32,
 		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
 
+		seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+
+		masterKey, err := hdkeychain.NewMaster(seed, &chainParams)
+		if err != nil {
+			return nil, fmt.Errorf("new master key: %w", err)
+		}
+
+		accountKey, err := deriveBIP44AccountKey(
+			masterKey, scope, accountNumber,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("derive account key: %w", err)
+		}
+		defer accountKey.Zero()
+
+		accountPubKey, err := accountKey.Neuter()
+		if err != nil {
+			return nil, fmt.Errorf("neuter account key: %w", err)
+		}
+
 		data := &db.DerivedAccountData{
-			PublicKey:            []byte{2},
+			PublicKey:            []byte(accountPubKey.String()),
 			MasterKeyFingerprint: 1,
 		}
 		if !walletIsWatchOnly {

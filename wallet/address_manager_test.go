@@ -111,6 +111,41 @@ func expectSignerAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	internal, imported bool, pubKey *btcec.PublicKey) {
 
 	t.Helper()
+	expectSignerAddressInfoWithKeyScope(
+		t, w, deps, addr, addrType, internal, imported, pubKey,
+		waddrmgr.KeyScope{},
+	)
+}
+
+// expectSignerDerivedAddressInfo mocks Store.GetAddress to return address
+// metadata with a usable derivation scope for PSBT derivation tests. The
+// helper hard-codes internal=false because every PSBT derivation test
+// asserts against an external-branch address.
+func expectSignerDerivedAddressInfo(t *testing.T, w *Wallet,
+	deps *mockWalletDeps, addr btcutil.Address, addrType db.AddressType,
+	pubKey *btcec.PublicKey) {
+
+	t.Helper()
+
+	walletAddrType, err := addresstype.ToWallet(addrType, false)
+	require.NoError(t, err)
+
+	keyScope, err := walletAddrType.KeyScope()
+	require.NoError(t, err)
+
+	expectSignerAddressInfoWithKeyScope(
+		t, w, deps, addr, addrType, false, false, pubKey, keyScope,
+	)
+}
+
+// expectSignerAddressInfoWithKeyScope mocks Store.GetAddress with the provided
+// derivation scope. A zero key scope represents missing derivation metadata.
+func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
+	deps *mockWalletDeps, addr btcutil.Address, addrType db.AddressType,
+	internal, imported bool, pubKey *btcec.PublicKey,
+	keyScope waddrmgr.KeyScope) {
+
+	t.Helper()
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -130,19 +165,25 @@ func expectSignerAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 		pubKeyBytes = pubKey.SerializeCompressed()
 	}
 
+	storeInfo := &db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     addrType,
+		Origin:       origin,
+		Branch:       branch,
+		PubKey:       pubKeyBytes,
+	}
+	if keyScope != (waddrmgr.KeyScope{}) {
+		storeInfo.KeyScope = db.KeyScope(keyScope)
+		storeInfo.MasterKeyFingerprint = 1
+	}
+
 	deps.store.On(
 		"GetAddress", mock.Anything,
 		db.GetAddressQuery{
 			WalletID:     w.id,
 			ScriptPubKey: pkScript,
 		},
-	).Return(&db.AddressInfo{
-		ScriptPubKey: pkScript,
-		AddrType:     addrType,
-		Origin:       origin,
-		Branch:       branch,
-		PubKey:       pubKeyBytes,
-	}, nil)
+	).Return(storeInfo, nil)
 }
 
 // addressIter returns an address iterator over static test records.
