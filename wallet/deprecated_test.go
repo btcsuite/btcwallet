@@ -23,6 +23,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -30,6 +31,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
@@ -453,6 +455,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 	}
 }
 
+// TestEndRecovery verifies that wallet shutdown interrupts recovery cleanly.
 func TestEndRecovery(t *testing.T) {
 	// This is an unconventional unit test, but I'm trying to keep things as
 	// succint as possible so that this test is readable without having to mock
@@ -473,17 +476,21 @@ func TestEndRecovery(t *testing.T) {
 
 	blockHashCalled := make(chan struct{})
 
-	chainClient := &mockChainClient{
-		// Force the loop to iterate about forever.
-		getBestBlockHeight: math.MaxInt32,
-		// Get control of when the loop iterates.
-		getBlockHashFunc: func() (*chainhash.Hash, error) {
+	chainClient := &bwmock.Chain{}
+	// Force the loop to iterate about forever.
+	chainClient.On("GetBestBlock").Return(
+		(*chainhash.Hash)(nil), int32(math.MaxInt32), error(nil),
+	)
+	// Get control of when the loop iterates by signaling on each call.
+	chainClient.On("GetBlockHash", mock.Anything).Run(
+		func(args mock.Arguments) {
 			blockHashCalled <- struct{}{}
-			return &chainhash.Hash{}, nil
 		},
-		// Avoid a panic.
-		getBlockHeader: &wire.BlockHeader{},
-	}
+	).Return(&chainhash.Hash{}, error(nil))
+	// Avoid a panic when the recovery loop inspects the block header.
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, error(nil),
+	)
 
 	recoveryDone := make(chan struct{})
 	go func() {
@@ -878,6 +885,7 @@ func TestImportAccountDeprecated(t *testing.T) {
 	}
 }
 
+// testImportAccount exercises legacy account import behavior for one case.
 func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	name string) {
 
@@ -1066,7 +1074,19 @@ func testWallet(t *testing.T) *Wallet {
 		t.Fatalf("unable to create wallet: %v", err)
 	}
 
-	chainClient := &mockChainClient{}
+	chainClient := &bwmock.Chain{}
+	chainClient.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: testBlockHeight}, nil,
+	).Maybe()
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+	chainClient.On("Stop").Return().Maybe()
+	chainClient.On("WaitForShutdown").Return().Maybe()
+	chainClient.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(testBlockHeight), nil,
+	).Maybe()
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, nil,
+	).Maybe()
 	w.chainClient = chainClient
 
 	// Start the wallet.
@@ -1101,7 +1121,19 @@ func testWalletWatchingOnly(t *testing.T) *Wallet {
 	if err != nil {
 		t.Fatalf("unable to create wallet: %v", err)
 	}
-	chainClient := &mockChainClient{}
+	chainClient := &bwmock.Chain{}
+	chainClient.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: testBlockHeight}, nil,
+	).Maybe()
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+	chainClient.On("Stop").Return().Maybe()
+	chainClient.On("WaitForShutdown").Return().Maybe()
+	chainClient.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(testBlockHeight), nil,
+	).Maybe()
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, nil,
+	).Maybe()
 	w.chainClient = chainClient
 
 	err = walletdb.Update(w.Database(), func(tx walletdb.ReadWriteTx) error {
@@ -1485,6 +1517,7 @@ func TestFundPsbt(t *testing.T) {
 	}
 }
 
+// assertTxInputs verifies that a PSBT contains the expected unsigned inputs.
 func assertTxInputs(t *testing.T, packet *psbt.Packet,
 	expected []wire.OutPoint) {
 
@@ -1526,6 +1559,7 @@ func assertChangeOutputScope(t *testing.T, pkScript []byte,
 	}
 }
 
+// containsUtxo reports whether the candidate outpoint is in the list.
 func containsUtxo(list []wire.OutPoint, candidate wire.OutPoint) bool {
 	for _, utxo := range list {
 		if utxo == candidate {
@@ -1636,7 +1670,7 @@ var (
 	alwaysAllowUtxo = func(utxo wtxmgr.Credit) bool { return true }
 )
 
-// TestTxToOutput checks that no new address is added to he database if we
+// TestTxToOutputsDryRun checks that no new address is added to the database if
 // request a dry run of the txToOutputs call. It also makes sure a subsequent
 // non-dry run call produces a similar transaction to the dry-run.
 func TestTxToOutputsDryRun(t *testing.T) {
@@ -2225,6 +2259,7 @@ func TestComputeInputScript(t *testing.T) {
 	}
 }
 
+// runTestCase verifies input script generation for one address scope.
 func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	scriptLen int) {
 
