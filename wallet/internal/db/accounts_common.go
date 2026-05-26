@@ -367,6 +367,40 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	return externalKeyCount, internalKeyCount, importedKeyCount, nil
 }
 
+// DerivedAddressAccountNumber converts a derived account number from an
+// account lookup row to the wallet-compatible uint32 account number.
+func DerivedAddressAccountNumber(accountNumber sql.NullInt64) (uint32,
+	error) {
+
+	if !accountNumber.Valid {
+		return 0, ErrNilDBAccountNumber
+	}
+
+	return validateAccountNumber(accountNumber.Int64)
+}
+
+// DerivedAddressAccountSchema builds the effective address schema from the
+// key-scope address-type IDs materialized by an account lookup row.
+func DerivedAddressAccountSchema[AddrTypeID ~int16 | ~int64](
+	internalTypeID AddrTypeID, externalTypeID AddrTypeID) (ScopeAddrSchema,
+	error) {
+
+	internalType, err := IDToAddressType(internalTypeID)
+	if err != nil {
+		return ScopeAddrSchema{}, fmt.Errorf("internal address type: %w", err)
+	}
+
+	externalType, err := IDToAddressType(externalTypeID)
+	if err != nil {
+		return ScopeAddrSchema{}, fmt.Errorf("external address type: %w", err)
+	}
+
+	return ScopeAddrSchema{
+		InternalAddrType: internalType,
+		ExternalAddrType: externalType,
+	}, nil
+}
+
 // AccountPropsRowToInfo converts a database row containing full account
 // properties into an AccountInfo struct. The idToAddrType function is
 // used to convert the internal and external address type IDs to AddressType
