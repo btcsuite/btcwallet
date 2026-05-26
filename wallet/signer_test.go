@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
@@ -96,7 +97,7 @@ func TestDerivePubKeyFetchManagerFails(t *testing.T) {
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
 
 	// Act: Attempt to derive the public key.
 	_, err := w.DerivePubKey(t.Context(), path)
@@ -127,7 +128,7 @@ func TestDerivePubKeyDeriveFails(t *testing.T) {
 		Return(mocks.accountManager, nil).Once()
 	mocks.accountManager.On(
 		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
-	).Return((*mockManagedPubKeyAddr)(nil), errDerivationFailed).Once()
+	).Return((*bwmock.ManagedPubKeyAddr)(nil), errDerivationFailed).Once()
 
 	// Act: Attempt to derive the public key.
 	_, err := w.DerivePubKey(t.Context(), path)
@@ -237,7 +238,7 @@ func TestECDHFails(t *testing.T) {
 	remotePubKey := remoteKey.PubKey()
 
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errDerivationFailed).Once()
+		Return((*bwmock.AccountStore)(nil), errDerivationFailed).Once()
 
 	// Act: Attempt to perform the ECDH operation.
 	_, err = w.ECDH(t.Context(), path, remotePubKey)
@@ -463,7 +464,7 @@ func TestSignDigestFail(t *testing.T) {
 	// Test Case 1: Fetching the key manager fails.
 	// We expect an `errManagerNotFound` error to be returned.
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
 
 	_, err := w.SignDigest(t.Context(), path, intent)
 	require.ErrorIs(t, err, errManagerNotFound)
@@ -1328,7 +1329,7 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 
 // newSQLAddressSigningWallet returns a started, unlocked wallet whose address
 // records are stored in SQLite while signing keys come from legacy waddrmgr.
-func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *mockChain) {
+func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 	t.Helper()
 
 	legacyDB, cleanup := setupTestDB(t)
@@ -1378,7 +1379,7 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *mockChain) {
 	)
 	require.NoError(t, err)
 
-	chain := &mockChain{}
+	chain := &bwmock.Chain{}
 	w = &Wallet{
 		addrStore: addrStore,
 		store:     store,
@@ -1908,7 +1909,7 @@ func TestComputeRawSigFail(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
 		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return((*mockAccountStore)(nil),
+			Return((*bwmock.AccountStore)(nil),
 				errManagerNotFound).Once()
 
 		params := &RawSigParams{
@@ -2190,7 +2191,7 @@ func TestDerivePrivKeyFails(t *testing.T) {
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
 
 	// Act: Attempt to derive the private key.
 	_, err := w.DerivePrivKey(t.Context(), path)
@@ -2269,7 +2270,7 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 
 	// Case 1: Address lookup fails.
 	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return((*mockManagedAddress)(nil), errManagerNotFound).Once()
+		Return((*bwmock.ManagedAddress)(nil), errManagerNotFound).Once()
 
 	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
 	require.ErrorIs(t, err, errManagerNotFound)
@@ -2280,7 +2281,7 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 	// NOTE: We can reuse the existing mocks but need to reset expectations
 	// or ensure ordering. Since we are in a single test function, we can
 	// just sequence them.
-	mockScriptAddr := &mockManagedAddress{}
+	mockScriptAddr := &bwmock.ManagedAddress{}
 	mocks.addrStore.On("Address", mock.Anything, addr).
 		Return(mockScriptAddr, nil).Once()
 
@@ -2300,7 +2301,7 @@ func TestDerivePrivKeyFail(t *testing.T) {
 	// We mock the address store to return an error when fetching the key
 	// manager. We expect this error to be propagated.
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
 
 	_, err := w.DerivePrivKey(t.Context(), path)
 	require.ErrorIs(t, err, errManagerNotFound)
@@ -2335,7 +2336,7 @@ func TestECDHFail(t *testing.T) {
 	// We mock the address store to return an error when fetching the key
 	// manager. We expect this error to be propagated.
 	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*mockAccountStore)(nil), errManagerNotFound).Once()
+		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
 
 	_, err := w.ECDH(t.Context(), path, privKey.PubKey())
 	require.ErrorIs(t, err, errManagerNotFound)

@@ -16,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -282,7 +283,7 @@ func TestFilterOwnedAddresses(t *testing.T) {
 	}
 
 	// Set up the mock for the address store.
-	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr := &bwmock.ManagedAddress{}
 	errAddrNotFound := waddrmgr.ManagerError{
 		ErrorCode: waddrmgr.ErrAddressNotFound,
 	}
@@ -324,7 +325,7 @@ func TestRecordTxAndCredits(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr := &bwmock.ManagedAddress{}
 	mockManagedAddr.On("Internal").Return(false)
 	credits := []creditInfo{{
 		index: 0,
@@ -446,7 +447,7 @@ func TestAddTxToWallet(t *testing.T) {
 		// transaction, and credit the wallet with the new UTXOs.
 		//
 		// Set up the mock for the address store.
-		mockManagedAddr := &mockManagedAddress{}
+		mockManagedAddr := &bwmock.ManagedAddress{}
 		mockManagedAddr.On("Internal").Return(false)
 
 		errAddrNotFound := waddrmgr.ManagerError{
@@ -734,7 +735,7 @@ func TestBroadcastSuccess(t *testing.T) {
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
 	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr := &bwmock.ManagedAddress{}
 	mockManagedAddr.On("Internal").Return(false)
 	m.addrStore.On("Address",
 		mock.Anything, ownedAddr,
@@ -812,7 +813,7 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
 	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr := &bwmock.ManagedAddress{}
 	mockManagedAddr.On("Internal").Return(false)
 	m.addrStore.On("Address",
 		mock.Anything, ownedAddr,
@@ -874,7 +875,7 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
 	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &mockManagedAddress{}
+	mockManagedAddr := &bwmock.ManagedAddress{}
 	mockManagedAddr.On("Internal").Return(false)
 
 	// Mock addrStore to succeed.

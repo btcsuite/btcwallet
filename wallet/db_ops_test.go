@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -335,13 +336,13 @@ func TestDBPutBlocks(t *testing.T) {
 	// 1. Transaction Resolution.
 	//
 	// Setup mocks to resolve the address scope for the transaction output.
-	mockAddr := &mockManagedPubKeyAddr{}
+	mockAddr := &bwmock.ManagedPubKeyAddr{}
 	mockAddr.On("Internal").Return(false).Once()
 	mocks.addrStore.On("Address", mock.Anything, addr).Return(
 		mockAddr, nil,
 	).Once()
 
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 	mocks.addrStore.On("AddrAccount", mock.Anything, addr).Return(
 		scopedMgr, uint32(0), nil,
@@ -395,13 +396,13 @@ func TestDBPutTxns(t *testing.T) {
 
 	// Setup mock calls to resolve the address scope and persist the
 	// unconfirmed transaction.
-	mockAddr := &mockManagedPubKeyAddr{}
+	mockAddr := &bwmock.ManagedPubKeyAddr{}
 	mockAddr.On("Internal").Return(false).Once()
 	mocks.addrStore.On("Address", mock.Anything, addr).Return(
 		mockAddr, nil,
 	).Once()
 
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 	mocks.addrStore.On("AddrAccount", mock.Anything, addr).Return(
 		scopedMgr, uint32(0), nil,
@@ -445,7 +446,7 @@ func TestPutAddrHorizons(t *testing.T) {
 
 	// Setup mock calls for fetching the manager and extending the
 	// addresses.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager", bs.Scope).Return(
 		scopedMgr, nil,
 	).Once()
@@ -482,7 +483,7 @@ func TestDBGetScanData(t *testing.T) {
 	}}
 
 	// 1. Horizons lookup.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager",
 		waddrmgr.KeyScopeBIP0084,
 	).Return(scopedMgr, nil).Once()
@@ -595,7 +596,7 @@ func TestDBGetAllAccounts_Error(t *testing.T) {
 	// Arrange: Create a test wallet and setup a mock call that simulates a
 	// failure while querying for the last account index.
 	w, mocks := createTestWalletWithMocks(t)
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 
 	mocks.addrStore.On("ActiveScopedKeyManagers").Return(
 		[]waddrmgr.AccountStore{scopedMgr},
@@ -628,7 +629,7 @@ func TestDBGetScanData_MultipleTargets(t *testing.T) {
 	}
 
 	// Setup mock calls to handle property retrieval for both targets.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).Return(
 		scopedMgr, nil,
 	).Twice()
@@ -695,8 +696,8 @@ func TestDBPutTargetedBatch_WithTxns(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
@@ -736,7 +737,7 @@ func TestDBPutSyncTip_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("SetSyncedTo", mock.Anything,
@@ -758,8 +759,8 @@ func TestDBPutTargetedBatch_Errors(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
@@ -798,7 +799,7 @@ func TestDBPutTxns_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	addr, err := address.NewAddressPubKeyHash(
@@ -832,8 +833,8 @@ func TestDBPutTxns_UnconfirmedError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
@@ -849,12 +850,12 @@ func TestDBPutTxns_UnconfirmedError(t *testing.T) {
 		},
 	}
 
-	maddr := &mockManagedAddress{}
+	maddr := &bwmock.ManagedAddress{}
 	maddr.On("Internal").Return(false).Maybe()
 	mockAddrStore.On("Address", mock.Anything, mock.Anything).Return(maddr,
 		nil).Once()
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 	mockAddrStore.On("AddrAccount", mock.Anything, mock.Anything).Return(
 		mgr,
@@ -880,7 +881,7 @@ func TestPutSyncTip_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	// Act: Execute sync tip update within a database transaction.
@@ -904,7 +905,7 @@ func TestDBGetScanData_ManagerError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	targets := []waddrmgr.AccountScope{
@@ -933,8 +934,8 @@ func TestDBGetScanData_UTXOError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
 	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
@@ -962,7 +963,7 @@ func TestPutAddrHorizons_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	results := []scanResult{
@@ -994,7 +995,7 @@ func TestDBGetScanData_AddressError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
@@ -1019,8 +1020,8 @@ func TestDBPutTxns_InternalAddressAsChange(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
 	addr, err := address.NewAddressPubKeyHash(
@@ -1035,12 +1036,12 @@ func TestDBPutTxns_InternalAddressAsChange(t *testing.T) {
 		},
 	}
 
-	maddr := &mockManagedAddress{}
+	maddr := &bwmock.ManagedAddress{}
 	maddr.On("Internal").Return(true).Once()
 	mockAddrStore.On("Address",
 		mock.Anything, mock.Anything).Return(maddr, nil).Once()
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 	mockAddrStore.On("AddrAccount",
 		mock.Anything, mock.Anything).Return(mgr, uint32(0), nil).Once()
@@ -1068,8 +1069,8 @@ func TestDBPutTxns_AddressNotFound(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 
 	addr, err := address.NewAddressPubKeyHash(
@@ -1109,7 +1110,7 @@ func TestDBPutRewind_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("SetSyncedTo",
