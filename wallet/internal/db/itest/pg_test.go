@@ -251,6 +251,16 @@ func sanitizedPgDBName(t *testing.T) string {
 // to the subtest's parallel slot.
 func NewTestStore(t *testing.T) *pg.Store {
 	t.Helper()
+
+	return NewTestStoreWithDerive(t, mockDeriveFunc())
+}
+
+// NewTestStoreWithDerive creates a new PostgreSQL database for testing with the
+// provided address derivation function.
+func NewTestStoreWithDerive(t *testing.T,
+	deriveAddress db.AddressDerivationFunc) *pg.Store {
+
+	t.Helper()
 	ctx := t.Context()
 
 	container, err := GetPostgresContainer(ctx)
@@ -282,6 +292,7 @@ func NewTestStore(t *testing.T) *pg.Store {
 	cfg := pg.Config{
 		Dsn:            testConnStr,
 		MaxConnections: 0,
+		DeriveAddress:  deriveAddress,
 	}
 
 	store, err := pg.NewStore(t.Context(), cfg)
