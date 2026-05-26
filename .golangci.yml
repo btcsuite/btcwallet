@@ -164,6 +164,30 @@ linters:
           # the convert.
           - forcetypeassert
 
+      # The shared bwtest/mock and wallet/internal/bwtest/mock packages embed
+      # testify.Mock; the testify pattern triggers magic-number, nil-nil, and
+      # missing-blank-line-before-return linters that don't apply to mocked
+      # interface implementations. Exclude those linters for these packages.
+      - path: bwtest/mock/.*\.go
+        linters:
+          - mnd
+          - nilnil
+          - nlreturn
+          - revive
+          - forcetypeassert
+          - wrapcheck
+          - wsl_v5
+
+      - path: wallet/internal/bwtest/mock/.*\.go
+        linters:
+          - mnd
+          - nilnil
+          - nlreturn
+          - revive
+          - forcetypeassert
+          - wrapcheck
+          - wsl_v5
+
       # Allow fmt.Printf() in commands.
       - path: cmd/commands/*
         linters:
