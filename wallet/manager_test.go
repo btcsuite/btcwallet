@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
@@ -111,7 +112,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			m := NewManager()
 			cfg := Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				PubPassphrase:  []byte("public"),
@@ -228,7 +229,7 @@ func TestManagerCreateError(t *testing.T) {
 			m := NewManager()
 			cfg := Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -364,7 +365,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 	m := NewManager()
 	cfg := Config{
 		DB:             db,
-		Chain:          &mockChain{},
+		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
 		PubPassphrase:  []byte("public"),
@@ -410,7 +411,7 @@ func TestManagerLoad_ExistingWallet(t *testing.T) {
 	m := NewManager()
 	cfg := Config{
 		DB:             db,
-		Chain:          &mockChain{},
+		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
 		PubPassphrase:  []byte("public"),
@@ -461,7 +462,7 @@ func TestManagerLoadError(t *testing.T) {
 		m := NewManager()
 		cfg := Config{
 			DB:          db,
-			Chain:       &mockChain{},
+			Chain:       &bwmock.Chain{},
 			ChainParams: &chainParams,
 			Name:        "test",
 		}

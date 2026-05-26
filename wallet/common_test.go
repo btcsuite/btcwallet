@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/mock"
@@ -93,15 +95,15 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
-	addrStore      *mockAddrStore
-	store          *mockStore
-	txStore        *mockTxStore
+	addrStore      *bwmock.AddrStore
+	store          *walletmock.Store
+	txStore        *bwmock.TxStore
 	syncer         *mockChainSyncer
-	chain          *mockChain
-	addr           *mockManagedAddress
-	accountManager *mockAccountStore
-	pubKeyAddr     *mockManagedPubKeyAddr
-	taprootAddr    *mockManagedTaprootScriptAddress
+	chain          *bwmock.Chain
+	addr           *bwmock.ManagedAddress
+	accountManager *bwmock.AccountStore
+	pubKeyAddr     *bwmock.ManagedPubKeyAddr
+	taprootAddr    *bwmock.ManagedTaprootScriptAddress
 }
 
 // createTestWalletWithMocks creates a Wallet instance with mocked
@@ -113,15 +115,15 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	db, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 
-	mockAddrStore := &mockAddrStore{}
-	mockStore := &mockStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockStore := &walletmock.Store{}
+	mockTxStore := &bwmock.TxStore{}
 	mockSyncer := &mockChainSyncer{}
-	mockChain := &mockChain{}
-	mockAddr := &mockManagedAddress{}
-	mockAccountManager := &mockAccountStore{}
-	mockPubKeyAddr := &mockManagedPubKeyAddr{}
-	mockTaprootAddr := &mockManagedTaprootScriptAddress{}
+	mockChain := &bwmock.Chain{}
+	mockAddr := &bwmock.ManagedAddress{}
+	mockAccountManager := &bwmock.AccountStore{}
+	mockPubKeyAddr := &bwmock.ManagedPubKeyAddr{}
+	mockTaprootAddr := &bwmock.ManagedTaprootScriptAddress{}
 
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -258,6 +260,7 @@ func createUnlockedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	return w, deps
 }
 
+// init configures package-level test defaults before tests run.
 func init() {
 	// Use fast scrypt options for tests to avoid CPU exhaustion and
 	// timeouts, especially when running with -race.
