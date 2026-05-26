@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -801,7 +802,7 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 		"BirthdayBlock", mock.Anything,
 	).Return(bs, true, nil).Once()
 
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
@@ -1344,7 +1345,7 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 		"BirthdayBlock", mock.Anything,
 	).Return(bs, true, nil).Once()
 
-	mockScopedMgr := &mockAccountStore{}
+	mockScopedMgr := &bwmock.AccountStore{}
 	deps.addrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore{mockScopedMgr}).Once()
