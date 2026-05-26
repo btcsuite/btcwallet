@@ -333,6 +333,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -364,6 +366,8 @@ type GetAccountByScopeAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -385,6 +389,8 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -405,6 +411,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -436,6 +444,8 @@ type GetAccountByScopeAndNumberRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -457,6 +467,8 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -477,6 +489,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -514,6 +528,8 @@ type GetAccountByWalletScopeAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -540,6 +556,8 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -560,6 +578,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -597,6 +617,8 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -623,6 +645,8 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -644,6 +668,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -668,6 +694,8 @@ type GetAccountPropsByIdRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -687,6 +715,8 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
@@ -736,6 +766,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -763,6 +795,8 @@ type ListAccountsByScopeRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -791,6 +825,8 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
@@ -821,6 +857,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -848,6 +886,8 @@ type ListAccountsByWalletRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -876,6 +916,8 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
@@ -906,6 +948,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -938,6 +982,8 @@ type ListAccountsByWalletAndNameRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -966,6 +1012,8 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
@@ -996,6 +1044,8 @@ SELECT
     a.created_at,
     ks.purpose,
     ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
@@ -1032,6 +1082,8 @@ type ListAccountsByWalletScopeRow struct {
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
@@ -1060,6 +1112,8 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
+			&i.InternalTypeID,
+			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
 			&i.ImportedKeyCount,
