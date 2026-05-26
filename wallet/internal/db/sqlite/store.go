@@ -20,6 +20,9 @@ type Store struct {
 	// queries executes SQLite statements on db.
 	queries *sqlc.Queries
 
+	// deriveAddress derives address data for SQL-derived address rows.
+	deriveAddress db.AddressDerivationFunc
+
 	// runtimeStats tracks shared runtime counters and unhealthy state.
 	runtimeStats dbruntime.Stats
 }
@@ -74,8 +77,9 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 	}
 
 	return &Store{
-		db:      dbConn,
-		queries: queries,
+		db:            dbConn,
+		queries:       queries,
+		deriveAddress: cfg.DeriveAddress,
 	}, nil
 }
 
