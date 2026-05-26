@@ -676,8 +676,8 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	// TODO(yy): switch to Store.ListUTXOs once it is implemented for
-	// kvdb (PR #1238).
+	// TODO(yy): switch to Store.ListUTXOs once the kvdb backend
+	// implements it.
 	balances, err := w.legacyAddressBalances()
 	if err != nil {
 		return nil, err
@@ -1006,6 +1006,10 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 	}
 
 	keyScope := addressInfo.Derivation.KeyScope
+	if keyScope == (waddrmgr.KeyScope{}) {
+		return nil, fmt.Errorf("%w: derivation scope not found for %v",
+			ErrDerivationPathNotFound, addressInfo.Addr)
+	}
 
 	derivationInfo := &psbt.Bip32Derivation{
 		PubKey:               addressInfo.PubKey.SerializeCompressed(),
