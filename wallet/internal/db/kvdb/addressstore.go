@@ -10,8 +10,7 @@ import (
 
 // NewDerivedAddress is not yet implemented for kvdb.
 func (s *Store) NewDerivedAddress(ctx context.Context,
-	_ db.NewDerivedAddressParams,
-	_ db.AddressDerivationFunc) (*db.AddressInfo, error) {
+	_ db.NewDerivedAddressParams) (*db.AddressInfo, error) {
 
 	return nil, notImplemented(ctx, "NewDerivedAddress")
 }
