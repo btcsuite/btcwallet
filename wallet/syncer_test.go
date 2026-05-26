@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -25,8 +26,8 @@ func TestSyncerInitialization(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize mock dependencies for the syncer.
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	// Act: Create a new syncer instance with a recovery window of 1.
@@ -48,8 +49,8 @@ func TestSyncerRequestScan(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a syncer and a rewind scan request.
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{}, mockAddrStore, mockTxStore, mockPublisher)
@@ -81,8 +82,8 @@ func TestSyncerRequestScanBlocked(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and fill its scan request buffer.
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{}, mockAddrStore, mockTxStore, mockPublisher)
@@ -108,8 +109,8 @@ func TestSyncerRun(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and mock its chain and address store.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -138,7 +139,7 @@ func TestWaitUntilBackendSynced(t *testing.T) {
 
 	// Arrange: Initialize a syncer and mock its chain to simulate a
 	// delayed synchronization.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	// Simulate the backend not being current on the first check, but
@@ -161,8 +162,8 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockChain := &mockChain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockChain := &bwmock.Chain{}
 
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db}, mockAddrStore, nil, nil,
@@ -205,9 +206,9 @@ func TestCheckRollbackDetected(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockChain := &mockChain{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -267,8 +268,8 @@ func TestInitChainSync(t *testing.T) {
 
 	// Arrange: Initialize a syncer and mock its dependencies for the
 	// initial synchronization sequence.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -296,7 +297,7 @@ func TestScanBatchHeadersOnly(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and mock block and header retrieval.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
@@ -332,8 +333,8 @@ func TestSyncerLoadScanState(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -346,7 +347,7 @@ func TestSyncerLoadScanState(t *testing.T) {
 	)
 
 	// Mock active scoped key managers.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mockAddrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
@@ -379,7 +380,7 @@ func TestSyncerLoadScanState(t *testing.T) {
 
 	// Mock address derivation for the lookahead window (10 addresses for
 	// each branch).
-	mockAddr := &mockAddress{}
+	mockAddr := &bwmock.Address{}
 	mockAddr.On("EncodeAddress").Return("addr")
 	mockAddr.On("ScriptAddress").Return([]byte{0x00})
 	scopedMgr.On(
@@ -401,12 +402,12 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and a recovery state for scanning.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	scanState := NewRecoveryState(
 		10, &chainParams, mockAddrStore,
 	)
@@ -441,14 +442,14 @@ func TestScanBatchWithCFilters(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db}, nil, nil, mockPublisher,
 	)
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	scanState := NewRecoveryState(
 		10, &chainParams, mockAddrStore,
 	)
@@ -502,7 +503,7 @@ func TestDispatchScanStrategy(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and mock dependencies.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
@@ -566,8 +567,8 @@ func TestScanBatch(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockChain := &mockChain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -576,7 +577,7 @@ func TestScanBatch(t *testing.T) {
 	)
 
 	// Mock loading of the full scan state required by the batch scan.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	scopedMgr.On("ActiveAccounts").Return([]uint32{0}).Once()
 	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 	scopedMgr.On(
@@ -592,7 +593,7 @@ func TestScanBatch(t *testing.T) {
 		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
 	).Return(nil).Once()
 
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s.txStore = mockTxStore
 	mockTxStore.On(
 		"OutputsToWatch", mock.Anything,
@@ -625,7 +626,7 @@ func TestFetchAndFilterBlocks(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and mock chain for block fetching.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher)
@@ -660,9 +661,9 @@ func TestAdvanceChainSync(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -697,7 +698,7 @@ func TestAdvanceChainSync(t *testing.T) {
 
 	// Set up mocks for the batch scan triggered by advancement.
 	// Mock loading of the full scan state.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mockAddrStore.On(
 		"ActiveScopedKeyManagers",
 	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
@@ -725,7 +726,7 @@ func TestAdvanceChainSync(t *testing.T) {
 	scopedMgr.On(
 		"DeriveAddr", mock.Anything, mock.Anything, mock.Anything,
 	).Return(
-		&mockAddress{}, []byte{}, nil,
+		&bwmock.Address{}, []byte{}, nil,
 	).Maybe()
 
 	// Mock fetching and filtering of blocks for the missing height range.
@@ -790,9 +791,9 @@ func TestHandleChainUpdate(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -866,7 +867,7 @@ func TestHandleScanReq(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -887,7 +888,7 @@ func TestHandleScanReq(t *testing.T) {
 		"SetSyncedTo", mock.Anything, mock.Anything,
 	).Return(nil).Once()
 
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s.txStore = mockTxStore
 	mockTxStore.On("Rollback", mock.Anything, int32(51)).Return(nil).Once()
 
@@ -901,14 +902,14 @@ func TestHandleScanReq(t *testing.T) {
 		startBlock: waddrmgr.BlockStamp{Height: 100},
 		targets:    []waddrmgr.AccountScope{{Account: 1}},
 	}
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s.cfg.Chain = mockChain
 	mockChain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(101), nil,
 	).Once()
 
 	// Mock loading of targeted scan data.
-	scopedMgr := &mockAccountStore{}
+	scopedMgr := &bwmock.AccountStore{}
 	mockAddrStore.On(
 		"FetchScopedKeyManager", mock.Anything,
 	).Return(scopedMgr, nil).Times(3)
@@ -934,7 +935,7 @@ func TestHandleScanReq(t *testing.T) {
 	// Use Maybe() to avoid assertions on specific iteration counts.
 	scopedMgr.On(
 		"DeriveAddr", mock.Anything, mock.Anything, mock.Anything,
-	).Return(&mockAddress{}, []byte{}, nil).Maybe()
+	).Return(&bwmock.Address{}, []byte{}, nil).Maybe()
 
 	// Mock block hash retrieval for the targeted scan range.
 	mockChain.On(
@@ -972,9 +973,9 @@ func TestWaitForEvent(t *testing.T) {
 
 	// Arrange: Initialize a syncer and mock its dependencies for testing
 	// the event loop.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -1024,8 +1025,8 @@ func TestSyncerFullRun(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -1063,7 +1064,7 @@ func TestSyncerFullRun(t *testing.T) {
 	).Once()
 
 	// Mock retrieval of unmined transactions from the store.
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s.txStore = mockTxStore
 	mockTxStore.On("UnminedTxs", mock.Anything).Return(
 		[]*wire.MsgTx(nil), nil,
@@ -1102,9 +1103,9 @@ func TestProcessChainUpdate_Disconnect(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -1140,7 +1141,7 @@ func TestBroadcastUnminedTxns_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher)
@@ -1161,8 +1162,8 @@ func TestInitChainSync_BackendNotSynced(t *testing.T) {
 
 	// Arrange: Initialize a syncer and mock the backend as not being
 	// current to test initialization timeout.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
@@ -1187,13 +1188,13 @@ func TestDispatchScanStrategy_CFilterFail(t *testing.T) {
 
 	// Arrange: Initialize a syncer and mock a CFilter retrieval failure
 	// to test fallback to full block scanning.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 	s := newSyncer(
 		Config{Chain: mockChain, SyncMethod: SyncMethodAuto}, nil, nil,
 		mockPublisher,
 	)
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	scanState := NewRecoveryState(
 		10, &chainParams, mockAddrStore,
 	)
@@ -1225,7 +1226,7 @@ func TestFilterBatch_MatchFound(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer configured for CFilter scanning.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{Chain: mockChain, SyncMethod: SyncMethodCFilters},
 		nil, nil, nil,
@@ -1241,7 +1242,7 @@ func TestFilterBatch_MatchFound(t *testing.T) {
 	// Setup scan state watching the data.
 	scanState := NewRecoveryState(10, &chainParams, nil)
 
-	mockAddr := &mockAddress{}
+	mockAddr := &bwmock.Address{}
 	mockAddr.On("ScriptAddress").Return(data)
 	mockAddr.On("String").Return("addr")
 
@@ -1281,7 +1282,7 @@ func TestScanBatchWithCFilters_GetHeadersFail(t *testing.T) {
 
 	// Arrange: Setup a syncer and mock CFilter success but header retrieval
 	// failure.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 	scanState := NewRecoveryState(10, &chainParams, nil)
 	hashes := []chainhash.Hash{{0x01}}
@@ -1315,7 +1316,7 @@ func TestFetchAndFilterBlocks_NonEmpty(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer with a non-empty scan state.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	scanState := NewRecoveryState(10, &chainParams, nil)
@@ -1352,7 +1353,7 @@ func TestFetchAndFilterBlocks_Errors(t *testing.T) {
 
 	// Arrange: Setup a syncer with a non-empty scan state and mock a hash
 	// fetch failure.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 	scanState := NewRecoveryState(10, &chainParams, nil)
 	scanState.AddWatchedOutPoint(&wire.OutPoint{Index: 0}, nil)
@@ -1380,9 +1381,9 @@ func TestScanBatch_Empty(t *testing.T) {
 
 	// Arrange: Setup a syncer that returns empty blocks during a batch
 	// scan.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
@@ -1423,8 +1424,8 @@ func TestInitChainSync_Errors(t *testing.T) {
 
 		// Arrange: Setup a syncer where DB operations fail during
 		// rollback check.
-		mockChain := &mockChain{}
-		addrStore := &mockAddrStore{}
+		mockChain := &bwmock.Chain{}
+		addrStore := &bwmock.AddrStore{}
 
 		s := newSyncer(
 			Config{Chain: mockChain, DB: db}, addrStore, nil, nil,
@@ -1452,8 +1453,8 @@ func TestInitChainSync_Errors(t *testing.T) {
 		defer cleanup()
 
 		// Arrange: Setup a syncer where block notifications fail.
-		mockChain := &mockChain{}
-		addrStore := &mockAddrStore{}
+		mockChain := &bwmock.Chain{}
+		addrStore := &bwmock.AddrStore{}
 		s := newSyncer(
 			Config{Chain: mockChain, DB: db}, addrStore, nil, nil,
 		)
@@ -1494,8 +1495,8 @@ func TestSyncerRun_InitError(t *testing.T) {
 	defer cleanup()
 
 	// Arrange: Setup a syncer where initialization fails.
-	mockChain := &mockChain{}
-	addrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	addrStore := &bwmock.AddrStore{}
 
 	s := newSyncer(Config{Chain: mockChain, DB: db}, addrStore, nil, nil)
 
@@ -1522,9 +1523,9 @@ func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
-	mockChain := &mockChain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{
 			Chain:       mockChain,
@@ -1572,7 +1573,7 @@ func TestDispatchScanStrategy_AutoFallback(t *testing.T) {
 
 	// Arrange: Setup a syncer with a low filter item threshold to force
 	// fallback.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{
 			Chain:           mockChain,
@@ -1621,7 +1622,7 @@ func TestBroadcastUnminedTxns_Success(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher)
@@ -1644,7 +1645,7 @@ func TestFilterBatch_EmptyFilter(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer and mock an empty filter response.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{Chain: mockChain, SyncMethod: SyncMethodCFilters},
 		nil, nil, nil,
@@ -1687,7 +1688,7 @@ func TestWaitForEvent_NotificationsClosed(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer with a closed notification channel.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	closedChan := make(chan any)
@@ -1708,7 +1709,7 @@ func TestWaitForEvent_ContextCancelled(t *testing.T) {
 
 	// Arrange: Setup a syncer with a blocking notification channel and a
 	// cancelled context.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	blockChan := make(chan any)
@@ -1729,7 +1730,7 @@ func TestMatchAndFetchBatch_GetBlocksError(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a syncer and setup a recovery state.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	state := NewRecoveryState(1, nil, nil)
@@ -1806,7 +1807,7 @@ func TestInitChainSync_WaitUntilSyncedError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where the backend is not current,
 	// then cancel the context.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	mockChain.On("IsCurrent").Return(false).Maybe()
@@ -1826,7 +1827,7 @@ func TestScanBatchHeadersOnly_ContextCancelled(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup mock expectations and a cancelled context.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1850,7 +1851,7 @@ func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where a transaction broadcast fails.
 	mockPublisher := &mockTxPublisher{}
-	mockTxStore := &mockTxStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -1879,7 +1880,7 @@ func TestCheckRollback_DBError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("SyncedTo").Return(
@@ -1904,8 +1905,8 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
 		mockAddrStore, nil, nil,
@@ -1958,8 +1959,8 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	defer cleanup()
 
 	// Arrange: Setup mock expectations where block notification fails.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
 		mockAddrStore, nil, nil,
@@ -1989,7 +1990,7 @@ func TestScanBatchHeadersOnly_Errors(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Setup mock expectations where GetBlockHashes fails.
-		mockChain := &mockChain{}
+		mockChain := &bwmock.Chain{}
 		s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 		mockChain.On("GetBlockHashes", mock.Anything,
@@ -2008,7 +2009,7 @@ func TestScanBatchHeadersOnly_Errors(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Setup mock expectations where GetBlockHeaders fails.
-		mockChain := &mockChain{}
+		mockChain := &bwmock.Chain{}
 		s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 		mockChain.On("GetBlockHashes", mock.Anything,
@@ -2034,8 +2035,8 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
 		mockAddrStore, nil, nil,
@@ -2112,9 +2113,9 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	defer mockChain.AssertExpectations(t)
 	defer mockAddrStore.AssertExpectations(t)
@@ -2136,7 +2137,7 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	mockTxStore.On("OutputsToWatch", mock.Anything).Return(
 		[]wtxmgr.Credit{{PkScript: []byte{0x01}}}, nil).Once()
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mockAddrStore.On("FetchScopedKeyManager", mock.Anything).Return(mgr,
 		nil).Times(3)
 	mgr.On("AccountProperties", mock.Anything, mock.Anything).Return(
@@ -2170,7 +2171,7 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 
 	// Arrange: Setup mock neutrino chain service and a syncer with a
 	// NeutrinoClient.
-	mockCS := &mockNeutrinoChain{}
+	mockCS := &bwmock.NeutrinoChain{}
 	// IsCurrent called by waitUntilBackendSynced.
 	// Return false to keep polling until context cancel.
 	mockCS.On("IsCurrent").Return(false).Maybe()
@@ -2178,7 +2179,7 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 	nc := &chain.NeutrinoClient{
 		CS: mockCS,
 	}
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	// Birthday called by SetStartTime.
 	mockAddrStore.On("Birthday").Return(time.Time{}).Once()
 
@@ -2202,7 +2203,7 @@ func TestFetchAndFilterBlocks_HeaderScan(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a syncer with an empty scan state.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	scanState := NewRecoveryState(10, nil, nil)
@@ -2235,10 +2236,10 @@ func TestScanBatchWithFullBlocks_ProcessError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain, DB: db}, nil, nil, nil)
 
-	addrStore := &mockAccountStore{}
+	addrStore := &bwmock.AccountStore{}
 	rs := NewRecoveryState(10, &chainParams, nil)
 	rs.addrFilters = make(map[string]AddrEntry)
 	rs.outpoints = make(map[wire.OutPoint][]byte)
@@ -2286,7 +2287,7 @@ func TestDispatchScanStrategy_Auto(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup mock expectations for the auto dispatch strategy.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{
 			Chain:           mockChain,
@@ -2323,7 +2324,7 @@ func TestDispatchScanStrategy_AutoFallback_Final(t *testing.T) {
 
 	// Arrange: Setup mock expectations where CFilters are unavailable,
 	// triggering a fallback to full blocks.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{
 			Chain:      mockChain,
@@ -2361,7 +2362,7 @@ func TestProcessChainUpdate_Disconnected(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("SyncedTo").Return(
@@ -2388,9 +2389,9 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		db, cleanup := setupTestDB(t)
 		defer cleanup()
 
-		mockChain := &mockChain{}
-		mockAddrStore := &mockAddrStore{}
-		mockTxStore := &mockTxStore{}
+		mockChain := &bwmock.Chain{}
+		mockAddrStore := &bwmock.AddrStore{}
+		mockTxStore := &bwmock.TxStore{}
 
 		s := newSyncer(
 			Config{
@@ -2406,7 +2407,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 			}},
 		}
 
-		mgr := &mockAccountStore{}
+		mgr := &bwmock.AccountStore{}
 		mockAddrStore.On("FetchScopedKeyManager",
 			mock.Anything).Return(mgr, nil)
 		mgr.On("AccountProperties", mock.Anything, mock.Anything).Return(
@@ -2432,9 +2433,9 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		db, cleanup := setupTestDB(t)
 		defer cleanup()
 
-		mockChain := &mockChain{}
-		mockAddrStore := &mockAddrStore{}
-		mockTxStore := &mockTxStore{}
+		mockChain := &bwmock.Chain{}
+		mockAddrStore := &bwmock.AddrStore{}
+		mockTxStore := &bwmock.TxStore{}
 
 		s := newSyncer(
 			Config{
@@ -2450,7 +2451,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 			}},
 		}
 
-		mgr := &mockAccountStore{}
+		mgr := &bwmock.AccountStore{}
 		mockAddrStore.On("FetchScopedKeyManager",
 			mock.Anything).Return(mgr, nil)
 		mgr.On("AccountProperties", mock.Anything, mock.Anything).Return(
@@ -2480,7 +2481,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		db, cleanup := setupTestDB(t)
 		defer cleanup()
 
-		mockAddrStore := &mockAddrStore{}
+		mockAddrStore := &bwmock.AddrStore{}
 		s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 		mockAddrStore.On("FetchScopedKeyManager", mock.Anything).Return(
@@ -2509,7 +2510,7 @@ func TestScanBatchWithCFilters_InitResultsError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where header retrieval fails during
 	// initialization for a CFilter scan.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{
 			Chain:      mockChain,
@@ -2543,14 +2544,16 @@ func TestProcessChainUpdate(t *testing.T) {
 	tests := []struct {
 		name   string
 		update interface{}
-		setup  func(*mockAddrStore, *mockTxStore, *mockChain)
+		setup  func(*bwmock.AddrStore, *bwmock.TxStore, *bwmock.Chain)
 	}{
 		{
 			name: "BlockConnected",
 			update: chain.BlockConnected{
 				Block: wtxmgr.Block{Height: 100},
 			},
-			setup: func(as *mockAddrStore, ts *mockTxStore, c *mockChain) {
+			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
+				c *bwmock.Chain) {
+
 				as.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
 					func(bs *waddrmgr.BlockStamp) bool {
 						return bs.Height == 100
@@ -2562,7 +2565,9 @@ func TestProcessChainUpdate(t *testing.T) {
 			update: chain.RelevantTx{
 				TxRecord: &wtxmgr.TxRecord{MsgTx: *wire.NewMsgTx(1)},
 			},
-			setup: func(as *mockAddrStore, ts *mockTxStore, c *mockChain) {
+			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
+				c *bwmock.Chain) {
+
 				ts.On("InsertUnconfirmedTx", mock.Anything, mock.Anything,
 					mock.Anything).Return(nil).Once()
 			},
@@ -2574,7 +2579,9 @@ func TestProcessChainUpdate(t *testing.T) {
 					Block: wtxmgr.Block{Height: 102},
 				},
 			},
-			setup: func(as *mockAddrStore, ts *mockTxStore, c *mockChain) {
+			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
+				c *bwmock.Chain) {
+
 				as.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
 					func(bs *waddrmgr.BlockStamp) bool {
 						return bs.Height == 102
@@ -2586,7 +2593,9 @@ func TestProcessChainUpdate(t *testing.T) {
 			update: chain.BlockDisconnected{
 				Block: wtxmgr.Block{Height: 100, Hash: chainhash.Hash{0x01}},
 			},
-			setup: func(as *mockAddrStore, ts *mockTxStore, c *mockChain) {
+			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
+				c *bwmock.Chain) {
+
 				as.On("SyncedTo").Return(
 					waddrmgr.BlockStamp{Height: 100},
 				).Once()
@@ -2607,9 +2616,9 @@ func TestProcessChainUpdate(t *testing.T) {
 			t.Parallel()
 
 			// Arrange
-			mockAddrStore := &mockAddrStore{}
-			mockTxStore := &mockTxStore{}
-			mockChain := &mockChain{}
+			mockAddrStore := &bwmock.AddrStore{}
+			mockTxStore := &bwmock.TxStore{}
+			mockChain := &bwmock.Chain{}
 			s := newSyncer(
 				Config{
 					Chain:       mockChain,
@@ -2636,7 +2645,7 @@ func TestHandleChainUpdate_SpecialNotifs(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer for special notification handling.
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{}, mockAddrStore, nil, nil)
 
 	// 1. RescanProgress
@@ -2685,7 +2694,7 @@ func TestFetchAndFilterBlocks_BatchCapping(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer with expectations for batch capping.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 	scanState := NewRecoveryState(10, nil, nil)
 
@@ -2712,9 +2721,9 @@ func TestRunSyncStep_Unfinished(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a syncer and mock an incomplete sync state.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -2764,7 +2773,7 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Setup a syncer for FullBlocks strategy.
-		mockChain := &mockChain{}
+		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
 				Chain:      mockChain,
@@ -2788,7 +2797,7 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Setup a syncer for CFilters strategy.
-		mockChain := &mockChain{}
+		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
 				Chain:      mockChain,
@@ -2817,7 +2826,7 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Setup a syncer with an unknown method.
-		mockChain := &mockChain{}
+		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
 				Chain:      mockChain,
@@ -2846,7 +2855,7 @@ func TestHandleChainUpdate_Error(t *testing.T) {
 
 	// Arrange: Setup a syncer where chain update processing will fail due
 	// to a database error.
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
 	mockAddrStore.On("SyncedTo").Return(
@@ -2872,9 +2881,9 @@ func TestRunSyncStep_Success(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 	s := newSyncer(
 		Config{
 			Chain: mockChain,
@@ -2912,9 +2921,9 @@ func TestScanBatchWithCFilters_HorizonExpansion(t *testing.T) {
 	// Arrange: Setup a complex mock scenario where finding an address
 	// triggers a horizon expansion, requiring a re-match of the block
 	// batch.
-	mockChain := &mockChain{}
-	addrStore := &mockAddrStore{}
-	accountStore := &mockAccountStore{}
+	mockChain := &bwmock.Chain{}
+	addrStore := &bwmock.AddrStore{}
+	accountStore := &bwmock.AccountStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -2993,8 +3002,8 @@ func TestRunSyncStep_AdvanceError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
 		mockAddrStore, nil, nil,
@@ -3006,7 +3015,7 @@ func TestRunSyncStep_AdvanceError(t *testing.T) {
 	mockChain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(101), nil).Once()
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mockAddrStore.On("ActiveScopedKeyManagers").Return(
 		[]waddrmgr.AccountStore{mgr}).Once()
 	mgr.On("ActiveAccounts").Return([]uint32{0}).Once()
@@ -3031,10 +3040,10 @@ func TestLoadFullScanState_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mgr.On("ActiveAccounts").Return([]uint32{0}).Once()
 	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
 
@@ -3060,8 +3069,8 @@ func TestScanWithRewind_Error(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockTxStore := &mockTxStore{}
-	mockAddrStore := &mockAddrStore{}
+	mockTxStore := &bwmock.TxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
 	mockAddrStore.On("SyncedTo").Return(
 		waddrmgr.BlockStamp{Height: 100}).Maybe()
@@ -3088,7 +3097,7 @@ func TestMatchAndFetchBatch_GetBlockHeadersError(t *testing.T) {
 
 	// Arrange: Create a nil filter to force a match, bypassing complex
 	// filter logic, then mock a block fetch failure.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	filters := []*gcs.Filter{nil}
@@ -3119,7 +3128,7 @@ func TestScanBatchWithCFilters_FilterBatchError(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup mock expectations where CFilter retrieval fails.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	hashes := []chainhash.Hash{{0x01}}
@@ -3146,10 +3155,10 @@ func TestScanBatch_GetScanDataError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockAddrStore := &mockAddrStore{}
+	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
-	mgr := &mockAccountStore{}
+	mgr := &bwmock.AccountStore{}
 	mockAddrStore.On("ActiveScopedKeyManagers").Return(
 		[]waddrmgr.AccountStore{mgr}).Once()
 	mgr.On("ActiveAccounts").Return([]uint32{0}).Once()
@@ -3173,7 +3182,7 @@ func TestInitResultsForCFilterScan_Error(t *testing.T) {
 
 	// Arrange: Setup mock expectations where header retrieval fails during
 	// initialization for a CFilter scan.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	hashes := []chainhash.Hash{{0x01}}
@@ -3195,7 +3204,7 @@ func TestDispatchScanStrategy_AutoError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where header retrieval fails during
 	// an auto-dispatch scan.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{Chain: mockChain, SyncMethod: SyncMethodAuto},
 		nil, nil, nil,
@@ -3225,9 +3234,9 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 
 	// Arrange: Setup mock expectations for a small gap where silent sync
 	// is preferred.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -3273,9 +3282,9 @@ func TestRunSyncStep_BroadcastError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	s := newSyncer(
 		Config{Chain: mockChain, DB: db},
@@ -3303,7 +3312,7 @@ func TestFetchAndFilterBlocks_DispatchError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where an invalid sync method is
 	// encountered during block filtering.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain, SyncMethod: 99}, nil, nil, nil)
 
 	hashes := []chainhash.Hash{{0x01}}
@@ -3328,8 +3337,8 @@ func TestAdvanceChainSync_ScanBatchError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where address iteration fails
 	// during chain sync advancement.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -3362,7 +3371,7 @@ func TestDispatchScanStrategy_FullBlocksError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where block retrieval fails during
 	// a full-block scan.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(
 		Config{Chain: mockChain, SyncMethod: SyncMethodFullBlocks},
 		nil, nil, nil,
@@ -3430,7 +3439,7 @@ func TestAdvanceChainSync_GetBestBlockError(t *testing.T) {
 
 	// Arrange: Setup mock expectations where GetBestBlock fails during
 	// chain sync advancement.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil)
 
 	mockChain.On("GetBestBlock").Return((*chainhash.Hash)(nil), int32(0),
@@ -3450,7 +3459,7 @@ func TestDispatchScanStrategy_AutoDefaultThreshold(t *testing.T) {
 
 	// Arrange: Setup mock expectations for auto strategy with a zero
 	// threshold for compact filters.
-	mockChain := &mockChain{}
+	mockChain := &bwmock.Chain{}
 	s := newSyncer(Config{
 		Chain:           mockChain,
 		SyncMethod:      SyncMethodAuto,
@@ -3484,9 +3493,9 @@ func TestAdvanceChainSync_LargeGap(t *testing.T) {
 
 	// Arrange: Setup mock expectations for a large sync gap where explicit
 	// scanning is triggered.
-	mockChain := &mockChain{}
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockChain := &bwmock.Chain{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
 
 	db, cleanup := setupTestDB(t)
 	defer cleanup()

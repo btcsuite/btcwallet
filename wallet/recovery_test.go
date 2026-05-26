@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -230,22 +231,27 @@ func TestBranchRecoveryState(t *testing.T) {
 	}
 }
 
+// assertHorizon checks the expected recovery horizon for a step.
 func assertHorizon(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect horizon", have, want)
 }
 
+// assertDelta checks the expected horizon delta for a step.
 func assertDelta(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect delta", have, want)
 }
 
+// assertNextUnfound checks the expected next unfound child for a step.
 func assertNextUnfound(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect next unfound", have, want)
 }
 
+// assertNumInvalid checks the expected invalid child count for a step.
 func assertNumInvalid(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect num invalid children", have, want)
 }
 
+// assertHaveWant compares recovery test values with step context.
 func assertHaveWant(t *testing.T, i int, msg string, have, want uint32) {
 	t.Helper()
 	require.Equal(t, want, have, "[step: %d] %s", i, msg)
@@ -343,7 +349,7 @@ func TestBranchRecoveryStateInvalidChild(t *testing.T) {
 func TestGetBranchState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{
@@ -359,7 +365,7 @@ func TestGetBranchState(t *testing.T) {
 	// Expect FetchScopedKeyManager to be called only once for a given
 	// scope.
 	addrMgr.On("FetchScopedKeyManager", scope).Return(
-		&mockAccountStore{}, nil,
+		&bwmock.AccountStore{}, nil,
 	).Once()
 
 	rs := NewRecoveryState(10, &chainParams, addrMgr)
@@ -384,10 +390,10 @@ func TestGetBranchState(t *testing.T) {
 func TestInitialize(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -410,7 +416,7 @@ func TestInitialize(t *testing.T) {
 	mockDerive := func(branch, count uint32) {
 		for i := range count {
 			id := int(branch)*1000 + int(i)
-			addr := &mockAddress{}
+			addr := &bwmock.Address{}
 			addrStr := fmt.Sprintf("addr-%d", id)
 			script := fmt.Appendf(nil, "script-%d", id)
 
@@ -453,10 +459,10 @@ func TestInitialize(t *testing.T) {
 func TestProcessBlock(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -569,7 +575,7 @@ func TestProcessBlock(t *testing.T) {
 func TestBuildCFilterData(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, &chainParams, addrMgr)
@@ -620,10 +626,10 @@ func TestBuildCFilterData(t *testing.T) {
 func TestInitAccountState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -649,7 +655,7 @@ func TestInitAccountState(t *testing.T) {
 	mockDerive := func(branch uint32) {
 		for i := range uint32(2) {
 			id := int(branch)*1000 + int(i)
-			addr := &mockAddress{}
+			addr := &bwmock.Address{}
 			addrStr := fmt.Sprintf("b%d-%d", branch, i)
 			script := fmt.Appendf(nil, "script-%d", id)
 
@@ -680,7 +686,7 @@ func TestInitAccountState(t *testing.T) {
 func TestExpandHorizons(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -697,7 +703,7 @@ func TestExpandHorizons(t *testing.T) {
 
 	// Expect derivation of 0, 1, 2.
 	for i := range uint32(3) {
-		addr := &mockAddress{}
+		addr := &bwmock.Address{}
 		addrStr := fmt.Sprintf("addr-%d", i)
 		script := fmt.Appendf(nil, "script-%d", i)
 
@@ -823,9 +829,9 @@ func TestRecoveryStateWatchedOutPoints(t *testing.T) {
 	require.Empty(t, rs.WatchedOutPoints())
 
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}
-	addr1 := &mockAddress{}
+	addr1 := &bwmock.Address{}
 	op2 := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 1}
-	addr2 := &mockAddress{}
+	addr2 := &bwmock.Address{}
 
 	rs.AddWatchedOutPoint(&op1, addr1)
 	rs.AddWatchedOutPoint(&op2, addr2)
@@ -874,7 +880,7 @@ var errFetch = errors.New("fetch error")
 func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -889,7 +895,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	brs.ReportFound(0)
 
 	// Expect derivation of 0 -> Success
-	addr0 := &mockAddress{}
+	addr0 := &bwmock.Address{}
 	addr0.On("EncodeAddress").Return("addr-0")
 	addr0.On("ScriptAddress").Return([]byte("script-0"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(0)).Return(
@@ -902,7 +908,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	).Once()
 
 	// Expect derivation of 2 -> Success
-	addr2 := &mockAddress{}
+	addr2 := &bwmock.Address{}
 	addr2.On("EncodeAddress").Return("addr-2")
 	addr2.On("ScriptAddress").Return([]byte("script-2"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(2)).Return(
@@ -910,7 +916,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	).Once()
 
 	// Expect derivation of 3 -> Success (to fill window)
-	addr3 := &mockAddress{}
+	addr3 := &bwmock.Address{}
 	addr3.On("EncodeAddress").Return("addr-3")
 	addr3.On("ScriptAddress").Return([]byte("script-3"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(3)).Return(
@@ -934,7 +940,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 func TestInitializeError(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, nil, addrMgr)
@@ -953,8 +959,8 @@ func TestInitializeError(t *testing.T) {
 func TestInitAccountStateDeriveError(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
-	accountStore := &mockAccountStore{}
+	addrMgr := &bwmock.AddrStore{}
+	accountStore := &bwmock.AccountStore{}
 
 	defer addrMgr.AssertExpectations(t)
 	defer accountStore.AssertExpectations(t)
@@ -983,7 +989,7 @@ func TestInitAccountStateDeriveError(t *testing.T) {
 func TestExpandHorizonsError(t *testing.T) {
 	t.Parallel()
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -1008,13 +1014,13 @@ func TestExpandHorizonsError(t *testing.T) {
 func TestInitializeWithState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, nil, addrMgr)
 
 	// Mock address and outpoint.
-	addr := &mockAddress{}
+	addr := &bwmock.Address{}
 	addr.On("EncodeAddress").Return("addr1")
 
 	outpoint := wtxmgr.Credit{
@@ -1035,7 +1041,7 @@ func TestInitializeWithState(t *testing.T) {
 func TestProcessBlockError(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, &chainParams, nil)

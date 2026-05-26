@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +55,7 @@ func TestConfigValidate(t *testing.T) {
 			name: "valid config",
 			config: Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -64,7 +65,7 @@ func TestConfigValidate(t *testing.T) {
 			name: "invalid RecoveryWindow",
 			config: Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow - 1,
@@ -74,7 +75,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing DB",
 			config: Config{
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -95,7 +96,7 @@ func TestConfigValidate(t *testing.T) {
 			name: "missing ChainParams",
 			config: Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
 			},
@@ -105,7 +106,7 @@ func TestConfigValidate(t *testing.T) {
 			name: "missing Name",
 			config: Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				RecoveryWindow: MinRecoveryWindow,
 			},

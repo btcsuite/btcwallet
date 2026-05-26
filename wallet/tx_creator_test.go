@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -324,13 +325,17 @@ func TestValidateTxIntent(t *testing.T) {
 // testing purposes.
 type unsupportedInputs struct{}
 
-func (u *unsupportedInputs) isInputs()       {}
+// isInputs marks unsupportedInputs as an Inputs implementation.
+func (u *unsupportedInputs) isInputs() {}
+
+// validate returns no error for unsupportedInputs test values.
 func (u *unsupportedInputs) validate() error { return nil }
 
 // unsupportedCoinSource is a mock implementation of the CoinSource interface
 // used for testing purposes.
 type unsupportedCoinSource struct{}
 
+// isCoinSource marks unsupportedCoinSource as a CoinSource implementation.
 func (u *unsupportedCoinSource) isCoinSource() {}
 
 // TestDetermineChangeSource tests the behavior of the determineChangeSource
@@ -417,6 +422,7 @@ type mockReadTx struct {
 	walletdb.ReadTx
 }
 
+// ReadBucket returns a stub read bucket for UTXO tests.
 func (m *mockReadTx) ReadBucket(key []byte) walletdb.ReadBucket {
 	return &mockReadBucket{}
 }
@@ -575,7 +581,7 @@ func TestGetEligibleUTXOsFromAccount(t *testing.T) {
 	minconf := uint32(1)
 
 	w, mocks := createStartedWalletWithMocks(t)
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager", keyScope).
 		Return(accountStore, nil)
 
@@ -632,7 +638,8 @@ func TestGetEligibleUTXOs(t *testing.T) {
 				)
 				scopedSrc, ok := source.(*ScopedAccount)
 				require.True(t, ok)
-				accountStore := &mockAccountStore{}
+
+				accountStore := &bwmock.AccountStore{}
 
 				m.addrStore.On("FetchScopedKeyManager",
 					scopedSrc.KeyScope,
@@ -1001,7 +1008,7 @@ func TestCreateTransactionSuccessManualInputs(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mockChangeAddr := &mockManagedAddress{}
+	mockChangeAddr := &bwmock.ManagedAddress{}
 	mockChangeAddr.On("Address").Return(changeAddr)
 	mockChangeAddr.On("Internal").Return(true)
 	mockChangeAddr.On("Compressed").Return(true)
@@ -1029,7 +1036,7 @@ func TestCreateTransactionSuccessManualInputs(t *testing.T) {
 		FeeRate: btcunit.NewSatPerKVByte(1000),
 	}
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager",
 		waddrmgr.KeyScopeBIP0086).Return(accountStore, nil)
 
@@ -1095,7 +1102,7 @@ func TestCreateTransactionSuccessNilChangeSourceManualInputs(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mockChangeAddr := &mockManagedAddress{}
+	mockChangeAddr := &bwmock.ManagedAddress{}
 	mockChangeAddr.On("Address").Return(changeAddr)
 	mockChangeAddr.On("Internal").Return(true)
 	mockChangeAddr.On("Compressed").Return(true)
@@ -1120,7 +1127,7 @@ func TestCreateTransactionSuccessNilChangeSourceManualInputs(t *testing.T) {
 		FeeRate:      btcunit.NewSatPerKVByte(1000),
 	}
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager",
 		waddrmgr.KeyScopeBIP0086,
 	).Return(accountStore, nil)
@@ -1188,7 +1195,7 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	mockChangeAddr := &mockManagedAddress{}
+	mockChangeAddr := &bwmock.ManagedAddress{}
 	mockChangeAddr.On("Address").Return(changeAddr)
 	mockChangeAddr.On("Internal").Return(true)
 	mockChangeAddr.On("Compressed").Return(true)
@@ -1216,7 +1223,7 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 		FeeRate:      btcunit.NewSatPerKVByte(1000),
 	}
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager",
 		waddrmgr.KeyScopeBIP0086,
 	).Return(accountStore, nil)
@@ -1263,7 +1270,7 @@ func TestCreateTransactionSuccessNilChangeSourcePolicyInputs(t *testing.T) {
 
 	// We'll also need to set up the address store to know about the test
 	// account.
-	mockAddr := &mockManagedAddress{}
+	mockAddr := &bwmock.ManagedAddress{}
 	mockAddr.On("Account").Return(uint32(1))
 	accountStore.On("Address",
 		mock.Anything, testAddr,
@@ -1340,7 +1347,7 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 		FeeRate: btcunit.NewSatPerKVByte(1000),
 	}
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	mocks.addrStore.On("FetchScopedKeyManager",
 		waddrmgr.KeyScopeBIP0086).Return(
 		accountStore, nil,

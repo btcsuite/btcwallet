@@ -12,71 +12,18 @@ import (
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// mockVault is a testify-based mock for the keyvault interface that
-// newAccountDeriveFn consumes. Each test configures its own expectations on
-// the embedded mock.Mock so encrypt/decrypt behavior is locally scoped and
-// does not leak between cases.
-type mockVault struct {
-	mock.Mock
-}
-
-// Encrypt forwards to the configured testify expectations. When the test
-// programmed a function via Return, the function is invoked with the call
-// args to compute the returned bytes; otherwise the static []byte (or nil)
-// is returned as-is.
-func (m *mockVault) Encrypt(keyType waddrmgr.CryptoKeyType,
-	plaintext []byte) ([]byte, error) {
-
-	args := m.Called(keyType, plaintext)
-
-	return returnBytes(args, keyType, plaintext), args.Error(1)
-}
-
-// Decrypt forwards to the configured testify expectations. See Encrypt for
-// the function-vs-static-bytes return semantics.
-func (m *mockVault) Decrypt(keyType waddrmgr.CryptoKeyType,
-	ciphertext []byte) ([]byte, error) {
-
-	args := m.Called(keyType, ciphertext)
-
-	return returnBytes(args, keyType, ciphertext), args.Error(1)
-}
-
-// returnBytes resolves the first programmed Return arg into a []byte
-// slice. When the test set Return(fn, ...), where fn has the same shape as
-// the mocked method, fn is invoked with the actual call args to compute
-// the returned bytes (this is how the identity vault roundtrips bytes
-// without static expectations).
-func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
-	input []byte) []byte {
-
-	if fn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte); ok {
-		return fn(keyType, input)
-	}
-
-	if args.Get(0) == nil {
-		return nil
-	}
-
-	b, ok := args.Get(0).([]byte)
-	if !ok {
-		return nil
-	}
-
-	return b
-}
-
-// newIdentityVault returns a mockVault configured to act as an identity
+// newIdentityVault returns a Vault configured to act as an identity
 // crypt — Encrypt and Decrypt both return a fresh copy of the input bytes
 // with no error. This lets tests roundtrip derived account material
 // without bringing in real cryptoKey wiring.
-func newIdentityVault() *mockVault {
-	vault := &mockVault{}
+func newIdentityVault() *walletmock.Vault {
+	vault := &walletmock.Vault{}
 	identity := func(_ waddrmgr.CryptoKeyType, b []byte) []byte {
 		out := make([]byte, len(b))
 		copy(out, b)
@@ -95,11 +42,11 @@ func newIdentityVault() *mockVault {
 // errors via errors.Is.
 var errEncryptForTest = errors.New("encrypt boom")
 
-// newEncryptErrorVault returns a mockVault whose Encrypt call always fails
+// newEncryptErrorVault returns a Vault whose Encrypt call always fails
 // with errEncryptForTest. Decrypt is left unconfigured because the tests
 // that consume this vault never reach a decrypt path.
-func newEncryptErrorVault() *mockVault {
-	vault := &mockVault{}
+func newEncryptErrorVault() *walletmock.Vault {
+	vault := &walletmock.Vault{}
 	vault.On("Encrypt", mock.Anything, mock.Anything).Return(
 		nil, errEncryptForTest,
 	)
@@ -164,7 +111,7 @@ func TestNewAccountDeriveFn_MaxAccountNumber(t *testing.T) {
 	masterKey := testMasterKey(t)
 	scope := db.KeyScope{Purpose: 84, Coin: 0}
 
-	derive := newAccountDeriveFn(masterKey, &mockVault{}, 0)
+	derive := newAccountDeriveFn(masterKey, &walletmock.Vault{}, 0)
 	data, err := derive(t.Context(), scope, db.MaxAccountNumber+1, false)
 
 	require.Nil(t, data)
