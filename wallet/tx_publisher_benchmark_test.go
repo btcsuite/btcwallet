@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -95,7 +96,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
 
-		chainBackend = &mockChainClient{}
+		chainBackend = &bwmock.MempoolChain{}
 	)
 
 	err := chainBackend.Start(b.Context())
@@ -137,7 +138,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 
 				// Clear mempool to ensure clean state for
 				// benchmark baseline.
-				chainBackend.ResetMempool()
+				chainBackend.Reset()
 
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -151,8 +152,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 					)
 					require.NoError(b, err)
 
-					result, err = chainBackend.GetMempool()
-					require.NoError(b, err)
+					result = chainBackend.Snapshot()
 
 					// Capture baseline after each
 					// transaction in the first cycle. This
@@ -185,7 +185,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 
 				// Clear mempool to ensure clean state for
 				// benchmark baseline.
-				chainBackend.ResetMempool()
+				chainBackend.Reset()
 
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -199,8 +199,7 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 					)
 					require.NoError(b, err)
 
-					result, err = chainBackend.GetMempool()
-					require.NoError(b, err)
+					result = chainBackend.Snapshot()
 
 					// Capture baseline after each
 					// transaction in the first cycle. This
@@ -311,7 +310,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 
 		scopes = []waddrmgr.KeyScope{waddrmgr.KeyScopeBIP0084}
 
-		chainBackend = &mockChainClient{}
+		chainBackend = &bwmock.MempoolChain{}
 	)
 
 	err := chainBackend.Start(b.Context())
@@ -348,7 +347,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 
 				// Clear mempool to ensure clean state for
 				// benchmark baseline.
-				chainBackend.ResetMempool()
+				chainBackend.Reset()
 
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -365,10 +364,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 					}
 				})
 
-				var err error
-
-				beforeResult, err = chainBackend.GetMempool()
-				require.NoError(b, err)
+				beforeResult = chainBackend.Snapshot()
 			})
 
 			b.Run("1-After", func(b *testing.B) {
@@ -376,7 +372,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 
 				// Clear mempool to ensure clean state for
 				// benchmark baseline.
-				chainBackend.ResetMempool()
+				chainBackend.Reset()
 
 				b.ReportAllocs()
 				b.ResetTimer()
@@ -394,10 +390,7 @@ func BenchmarkBroadcastAPIConcurrently(b *testing.B) {
 					}
 				})
 
-				var err error
-
-				afterResult, err = chainBackend.GetMempool()
-				require.NoError(b, err)
+				afterResult = chainBackend.Snapshot()
 			})
 
 			assertBroadcastAPIsEquivalent(
