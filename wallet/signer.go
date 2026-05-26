@@ -829,6 +829,15 @@ func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 func (w *Wallet) resolveDerivedPathPrivKey(keyScope waddrmgr.KeyScope,
 	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
+	// TODO(yy): SQL-only accounts (created via Store.CreateDerivedAccount
+	// without a mirrored legacy waddrmgr account) miss both
+	// DeriveFromKeyPathCache and the DB-backed DeriveFromKeyPath fallback
+	// below because the legacy waddrmgr has no row for them. The
+	// signer-store PR (impl-tx-creator-store) will replace this path for
+	// SQL-only accounts with a keyVault-backed derivation: fetch
+	// account_secrets.encrypted_priv_key, decrypt via w.keyVault, and
+	// derive at branch/index locally — symmetric to deriveAddressData's
+	// AccountPubKey plumbing on the public-key side.
 	accountManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
 		return nil, fmt.Errorf("fetch scoped key manager: %w", err)
