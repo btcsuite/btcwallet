@@ -14,7 +14,9 @@ import (
 // Ensure Store satisfies the AccountStore interface.
 var _ db.AccountStore = (*Store)(nil)
 
-var errDryRunRollback = errors.New("postgres imported account dry run rollback")
+var (
+	errDryRunRollback = errors.New("postgres imported account dry run rollback")
+)
 
 // GetAccount retrieves information about a specific account, identified by its
 // name or account number within a given key scope.
@@ -377,12 +379,38 @@ func derivedAddressGetAccountID(
 	return row.ID
 }
 
+// derivedAddressGetAccountNumber extracts the derived account number from a
+// row.
+func derivedAddressGetAccountNumber(
+	row sqlc.GetAccountByWalletScopeAndNameRow) (uint32, error) {
+
+	return db.DerivedAddressAccountNumber(row.AccountNumber)
+}
+
 // derivedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
 // from a row.
 func derivedAddressGetWalletWatchOnly(
 	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
 
 	return row.WalletIsWatchOnly
+}
+
+// derivedAddressGetAccountAddrSchema returns the address schema persisted for
+// the account's key scope.
+func derivedAddressGetAccountAddrSchema(
+	row sqlc.GetAccountByWalletScopeAndNameRow) (db.ScopeAddrSchema,
+	error) {
+
+	return db.DerivedAddressAccountSchema(
+		row.InternalTypeID, row.ExternalTypeID,
+	)
+}
+
+// derivedAddressGetAccountPubKey extracts the account public key from a row.
+func derivedAddressGetAccountPubKey(
+	row sqlc.GetAccountByWalletScopeAndNameRow) []byte {
+
+	return row.PublicKey
 }
 
 // importedAddressGetAccountID extracts the account ID from a row.
