@@ -8,29 +8,10 @@ import (
 	"context"
 
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 )
-
-// mockCoinSelectionStrategy is a mock implementation of the
-// CoinSelectionStrategy interface used for testing purposes.
-type mockCoinSelectionStrategy struct {
-	mock.Mock
-}
-
-// ArrangeCoins implements the CoinSelectionStrategy interface.
-func (m *mockCoinSelectionStrategy) ArrangeCoins(coins []Coin,
-	feePerKb btcutil.Amount) ([]Coin, error) {
-
-	args := m.Called(coins, feePerKb)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-
-	return args.Get(0).([]Coin), args.Error(1)
-}
 
 // mockSpendDetails is a mock implementation of the SpendDetails interface.
 type mockSpendDetails struct {
