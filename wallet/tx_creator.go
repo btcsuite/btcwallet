@@ -17,7 +17,6 @@ import (
 	"math/rand"
 	"sort"
 
-	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -1005,79 +1004,6 @@ func inputYieldsPositively(credit *wire.TxOut,
 	inputFee := feeRate.FeeForVByte(btcunit.NewVByte(inputSize))
 
 	return inputFee < btcutil.Amount(credit.Value)
-}
-
-// addrMgrWithChangeSource returns the address manager bucket and a change
-// source that returns change addresses from said address manager. The change
-// addresses will come from the specified key scope and account, unless a key
-// scope is not specified. In that case, change addresses will always come from
-// the P2WKH key scope.
-func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	changeKeyScope *waddrmgr.KeyScope, account uint32) (
-	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
-
-	// Determine the address type for change addresses of the given
-	// account.
-	if changeKeyScope == nil {
-		changeKeyScope = &waddrmgr.KeyScopeBIP0086
-	}
-
-	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
-
-	// It's possible for the account to have an address schema override, so
-	// prefer that if it exists.
-	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	accountInfo, err := scopeMgr.AccountProperties(addrmgrNs, account)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if accountInfo.AddrSchema != nil {
-		addrType = accountInfo.AddrSchema.InternalAddrType
-	}
-
-	// Compute the expected size of the script for the change address type.
-	scriptSize, err := addrType.ScriptPubKeySize()
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-	}
-
-	newChangeScript := func() ([]byte, error) {
-		// Derive the change output script. As a hack to allow spending
-		// from the imported account, change addresses are created from
-		// account 0.
-		var (
-			changeAddr address.Address
-			err        error
-		)
-		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, 0, *changeKeyScope,
-			)
-		} else {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, account, *changeKeyScope,
-			)
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		return txscript.PayToAddrScript(changeAddr)
-	}
-
-	return addrmgrNs, &txauthor.ChangeSource{
-		ScriptSize: scriptSize,
-		NewScript:  newChangeScript,
-	}, nil
 }
 
 // sortByAmount is a generic sortable type for sorting coins by their amount.
