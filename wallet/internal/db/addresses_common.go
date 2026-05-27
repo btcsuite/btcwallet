@@ -946,6 +946,14 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 				return errWatchOnly
 			}
 
+			errSpendable := requireAddressPrivKeyOnSpendable(
+				params.WalletID, walletIsWatchOnly,
+				params.HasPrivateKey(),
+			)
+			if errSpendable != nil {
+				return errSpendable
+			}
+
 			acctID := adapters.GetAccountID(row)
 
 			info, errAddr := newImportedAddressTx(
