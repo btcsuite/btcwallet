@@ -127,7 +127,8 @@ func (o createDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 
 // EnsureScope implements db.CreateDerivedAccountOps.
 func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
-	walletID uint32, scope db.KeyScope) (int64, error) {
+	walletID uint32,
+	scope db.KeyScope) (int64, db.ScopeAddrSchema, error) {
 
 	return ensureKeyScope(ctx, o.q, walletID, scope, nil)
 }
@@ -205,10 +206,12 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 
 		props, err = db.CreateImportedAccount(
 			ctx, params, func() (int64, error) {
-				return ensureKeyScope(
+				id, _, err := ensureKeyScope(
 					ctx, qtx, params.WalletID, params.Scope,
 					params.AddrSchema,
 				)
+
+				return id, err
 			}, func() (bool, error) {
 				return getWalletWatchOnly(ctx, qtx, params.WalletID)
 			}, qtx.CreateImportedAccount,
@@ -322,15 +325,20 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 			CreatedAt:         row.CreatedAt,
 			Purpose:           row.Purpose,
 			CoinType:          row.CoinType,
+			InternalTypeID:    row.InternalTypeID,
+			ExternalTypeID:    row.ExternalTypeID,
 			IDToOriginType:    db.IDToAccountOrigin[int16],
 		},
 	)
 }
 
-// ensureKeyScope retrieves an existing key scope or creates it if missing for
-// PostgreSQL. It returns the scope ID once available.
+// ensureKeyScope retrieves an existing key scope or creates it if missing
+// for PostgreSQL. It returns the scope ID together with the schema that is
+// now persisted for the scope so callers can build AccountInfo from
+// authoritative state instead of recomputing from ScopeAddrMap.
 func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
-	scope db.KeyScope, addrSchema *db.ScopeAddrSchema) (int64, error) {
+	scope db.KeyScope,
+	addrSchema *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema, error) {
 
 	return db.EnsureKeyScope(
 		ctx, qtx.GetKeyScopeByWalletAndScope,
@@ -355,7 +363,15 @@ func ensureKeyScope(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 		},
 		func(row sqlc.GetKeyScopeByWalletAndScopeRow) int64 {
 			return row.ID
-		}, scope, addrSchema,
+		},
+		func(row sqlc.GetKeyScopeByWalletAndScopeRow) (
+			db.ScopeAddrSchema, error) {
+
+			return db.DerivedAddressAccountSchema(
+				row.InternalTypeID, row.ExternalTypeID,
+			)
+		},
+		scope, addrSchema,
 	)
 }
 
@@ -450,6 +466,8 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			CreatedAt:         base.CreatedAt,
 			Purpose:           base.Purpose,
 			CoinType:          base.CoinType,
+			InternalTypeID:    base.InternalTypeID,
+			ExternalTypeID:    base.ExternalTypeID,
 			IDToOriginType:    db.IDToAccountOrigin[int16],
 		},
 	)

@@ -287,8 +287,8 @@ func TestRenameAccountRejectsImported(t *testing.T) {
 	}
 	name := "imported-rename"
 
-	_, err = store.CreateImportedAccount(t.Context(),
-		db.CreateImportedAccountParams{
+	_, err = store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              name,
 			MasterFingerprint: 0xDEADBEEF,
@@ -328,10 +328,12 @@ func TestRenameAccountRejectsImported(t *testing.T) {
 	})
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 
-	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
-		Scope: scope,
-		Name:  &name,
-	})
+	info, err := store.GetAccount(
+		t.Context(), db.GetAccountQuery{
+			Scope: scope,
+			Name:  &name,
+		},
+	)
 	require.NoError(t, err)
 	require.Equal(t, name, info.AccountName)
 }
@@ -722,7 +724,7 @@ func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 	}
 
 	name := "imported-schema"
-	_, err = store.CreateImportedAccount(t.Context(),
+	info, err := store.CreateImportedAccount(t.Context(),
 		db.CreateImportedAccountParams{
 			Scope:             scope,
 			Name:              name,
@@ -732,6 +734,16 @@ func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+	require.Equal(t, addrSchema, info.AddrSchema)
+
+	info, err = store.GetAccount(
+		t.Context(), db.GetAccountQuery{
+			Scope: scope,
+			Name:  &name,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, addrSchema, info.AddrSchema)
 
 	scopedMgr, err := store.addrStore.FetchScopedKeyManager(
 		waddrmgr.KeyScope(scope),

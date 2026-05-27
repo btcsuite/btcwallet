@@ -205,6 +205,13 @@ type AccountStore interface {
 	// Scope returns the key scope of the manager.
 	Scope() KeyScope
 
+	// AddrSchema returns the persisted address schema for this scope. The
+	// returned value matches what was passed to the underlying
+	// ScopedKeyManager at creation time, so callers building public
+	// AccountInfo rows can use it instead of recomputing from the global
+	// default map.
+	AddrSchema() ScopeAddrSchema
+
 	// AccountProperties returns the properties of an account, including
 	// address indexes and name.
 	AccountProperties(ns walletdb.ReadBucket,
