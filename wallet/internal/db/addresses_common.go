@@ -110,7 +110,13 @@ func (p NewImportedAddressParams) ValidateBasic() error {
 }
 
 // ValidateWatchOnly checks imported address creation parameters against the
-// parent wallet's watch-only state.
+// parent wallet's watch-only state. A watch-only wallet must not receive
+// private-key-bearing imports. The symmetric direction (a spendable wallet
+// must not receive an imported address without private-key material) is
+// enforced at the SQL-backend entry through requireAddressPrivKeyOnSpendable;
+// kvdb's data model carries different invariants around legacy imported
+// address rows (a grandfathered legacy shape), so the symmetric check is not
+// applied there.
 func (p NewImportedAddressParams) ValidateWatchOnly(
 	walletIsWatchOnly bool) error {
 
@@ -121,6 +127,25 @@ func (p NewImportedAddressParams) ValidateWatchOnly(
 	}
 
 	return nil
+}
+
+// requireAddressPrivKeyOnSpendable enforces the ADR 0012 symmetric
+// invariant for SQL backends: a spendable wallet must not receive an
+// imported address without encrypted private-key material. Public-only
+// and script-only imports are both rejected (HasPrivateKey covers both
+// — script-only imports have material in EncryptedScript but no priv
+// key).
+func requireAddressPrivKeyOnSpendable(walletID uint32,
+	walletIsWatchOnly bool, hasPrivKey bool) error {
+
+	if walletIsWatchOnly || hasPrivKey {
+		return nil
+	}
+
+	return fmt.Errorf("spendable wallet %d cannot import address "+
+		"without private-key material into account %q: %w",
+		walletID, DefaultImportedAccountName,
+		ErrSpendableWalletNeedsAddressPrivKey)
 }
 
 // HasPrivateKey returns true if the params include private key material.
