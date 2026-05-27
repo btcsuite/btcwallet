@@ -1356,3 +1356,39 @@ func (p BalanceParams) Validate() error {
 
 // LockID represents a unique context-specific ID assigned to an output lock.
 type LockID [32]byte
+
+// DerivedAddressData contains the derived address information returned by
+// the AddressDerivationFunc callback.
+type DerivedAddressData struct {
+	// ScriptPubKey is the script public key for the derived address.
+	ScriptPubKey []byte
+
+	// PubKey is the serialized public key for the derived address when one is
+	// available. Script-only addresses leave this empty.
+	PubKey []byte
+}
+
+// AddressDerivationParams contains the wallet-side data needed to derive a
+// store-allocated address.
+type AddressDerivationParams struct {
+	// Scope is the key scope that owns the derived address.
+	Scope KeyScope
+
+	// AccountNumber is the BIP44 account number, not the database row ID.
+	// It is 0 for imported accounts where no BIP44 account number applies;
+	// callbacks deriving for imported accounts must use AccountPubKey only.
+	AccountNumber uint32
+
+	// Branch is the BIP44 branch number (0=external, 1=internal/change).
+	Branch uint32
+
+	// Index is the BIP44 child index allocated by the store.
+	Index uint32
+
+	// AddrType is the address type selected from the account's effective
+	// address schema for Branch.
+	AddrType AddressType
+
+	// AccountPubKey is the account-level extended public key in plaintext.
+	AccountPubKey []byte
+}
