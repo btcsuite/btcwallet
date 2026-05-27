@@ -420,6 +420,25 @@ type Wallet struct {
 	// this cache. Shell / watch-only wallets that lack a stored master
 	// HD pubkey leave this at zero, matching their existing behavior.
 	masterFingerprint uint32
+
+	// isWatchOnly is the cached wallet-level watch-only flag from ADR
+	// 0012. The value is sourced from waddrmgr.Manager.WatchOnly() on
+	// kvdb backends and from wallets.is_watch_only on SQL backends, then
+	// normalized to a single immutable bool at Wallet construction.
+	// Callers read it through IsWatchOnly(); the read-side joins against
+	// account_secrets are obsolete now that the value is wallet-level.
+	isWatchOnly bool
+}
+
+// IsWatchOnly reports whether this wallet was created without private-key
+// material. The value is the canonical wallet-level watch-only flag from
+// ADR 0012: it is set once at wallet construction and immutable thereafter.
+// Callers SHOULD prefer IsWatchOnly over the per-account or per-address
+// IsWatchOnly fields on db.AccountInfo / db.AddressInfo — those fields
+// are wallet-level convenience copies that may be removed in a future
+// cleanup task.
+func (w *Wallet) IsWatchOnly() bool {
+	return w.isWatchOnly
 }
 
 // ID returns the runtime wallet identifier for the wallet.

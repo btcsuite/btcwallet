@@ -407,10 +407,12 @@ type AccountInfo struct {
 	// unconfirmed transactions.
 	UnconfirmedBalance btcutil.Amount
 
-	// IsWatchOnly indicates whether the account is in watch-only mode.
-	// Derived accounts inherit the wallet's watch-only status. Imported
-	// accounts are watch-only if the wallet is watch-only OR if the imported
-	// account has no private key material (account_secret is NULL).
+	// IsWatchOnly is a wallet-level convenience copy of the wallet's
+	// watch-only state. Per ADR 0012 (wallet-level watch-only as a uniform
+	// invariant) every account in the same wallet shares this value;
+	// callers that want the canonical reading use Wallet.IsWatchOnly().
+	// The field is retained as a convenience to minimize caller churn and
+	// may be removed in a future cleanup task.
 	IsWatchOnly bool
 
 	// CreatedAt is the timestamp when the account was created in the database.
@@ -688,8 +690,11 @@ type AddressInfo struct {
 	// ambiguous, such as P2TR key-path versus P2TR script-path imports.
 	HasScript bool
 
-	// IsWatchOnly indicates whether the address belongs to a watch-only
-	// wallet or does not have private keys.
+	// IsWatchOnly is a wallet-level convenience copy of the wallet's
+	// watch-only state. Per ADR 0012 every address in the same wallet
+	// shares this value; callers that want the canonical reading use
+	// Wallet.IsWatchOnly(). The field is retained as a convenience and
+	// may be removed in a future cleanup task.
 	IsWatchOnly bool
 
 	// IsUsed reports whether the address has a non-abandoned
