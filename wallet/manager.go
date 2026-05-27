@@ -321,6 +321,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		cancel:            cancel,
 		lockTimer:         lockTimer,
 		masterFingerprint: masterFingerprint,
+		isWatchOnly:       addrMgr.WatchOnly(),
 	}
 
 	w.sync = newSyncer(cfg, w.addrStore, w.txStore, w)
