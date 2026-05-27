@@ -133,6 +133,46 @@ func flattenAddressPages(
 	return addresses
 }
 
+// importedAddressWallet picks the wallet flavor a subtest needs based on
+// whether the imported address carries private-key material. Per ADR
+// 0012, public-only (no private key) imports require a watch-only
+// wallet, while imports with private-key material require a spendable
+// wallet.
+func importedAddressWallet(t *testing.T, store db.WalletStore,
+	name string, withPrivateKey bool) uint32 {
+
+	t.Helper()
+
+	if withPrivateKey {
+		return newWallet(t, store, name)
+	}
+
+	return newWatchOnlyWallet(t, store, name)
+}
+
+// newImportedAccount creates an imported account on the given wallet
+// with the right shape for the wallet's watch-only state. Spendable
+// wallets receive an account with EncryptedPrivateKey; watch-only
+// wallets get the public-only variant.
+func newImportedAccount(t *testing.T, store db.AccountStore,
+	walletID uint32, scope db.KeyScope, withPrivateKey bool) {
+
+	t.Helper()
+
+	params := db.CreateImportedAccountParams{
+		WalletID:  walletID,
+		Name:      "imported",
+		Scope:     scope,
+		PublicKey: RandomBytes(32),
+	}
+	if withPrivateKey {
+		params.EncryptedPrivateKey = RandomBytes(32)
+	}
+
+	_, err := store.CreateImportedAccount(t.Context(), params)
+	require.NoError(t, err)
+}
+
 // TestNewImportedAddress verifies that NewImportedAddress correctly imports
 // addresses of different types, with and without private key material.
 func TestNewImportedAddress(t *testing.T) {
@@ -140,11 +180,6 @@ func TestNewImportedAddress(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	walletID := newWallet(t, store, "wallet-imported-addresses")
-
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0086, "imported")
 
 	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -219,6 +254,15 @@ func TestNewImportedAddress(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			walletID := importedAddressWallet(
+				t, store, "wallet-imported-"+tc.name,
+				tc.providePrivateKey,
+			)
+			newImportedAccount(
+				t, store, walletID, tc.scope,
+				tc.providePrivateKey,
+			)
+
 			params := db.NewImportedAddressParams{
 				WalletID:     walletID,
 				Scope:        tc.scope,
@@ -289,6 +333,84 @@ func TestNewImportedAddress(t *testing.T) {
 	}
 }
 
+// TestImportedAddressLandsInImportedAccount documents the SQL import policy
+// for private-key address imports: an imported address is always placed in
+// the per-scope dedicated "imported" account and is never treated as a
+// member of a derived (HD) account, even when a derived account already
+// exists in the same scope. See ADR 0012.
+func TestImportedAddressLandsInImportedAccount(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	scope := db.KeyScopeBIP0084
+
+	// Spendable wallet so the private-key-bearing import is the path the
+	// ADR 0012 symmetric invariant accepts.
+	walletID := newWallet(t, store, "wallet-import-lands-in-imported")
+
+	// A derived account exists in the same scope. The imported address
+	// must NOT be attributed to it; it must go to the dedicated "imported"
+	// account instead.
+	createDerivedAccount(t, store, walletID, scope, "derived-acct")
+
+	// The dedicated imported account the import flow resolves to. It is
+	// spendable, so it carries account-level private-key material.
+	newImportedAccount(t, store, walletID, scope, true)
+
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               scope,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	// The address is owned by the "imported" account, not the derived one.
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.Equal(t, db.DefaultImportedAccountName, info.AccountName)
+
+	importedAccountID := GetAccountID(
+		t, store.Queries(),
+		GetKeyScopeID(t, store.Queries(), walletID, scope),
+		db.DefaultImportedAccountName,
+	)
+	require.EqualValues(t, importedAccountID, info.AccountID)
+}
+
+// TestImportedAddressWithoutImportedAccountIsRejected documents that the SQL
+// import flow never retargets an imported address into a derived account: if
+// the dedicated "imported" account does not yet exist in the address's scope,
+// the import fails with ErrAccountNotFound even though a derived account is
+// present. See ADR 0012.
+func TestImportedAddressWithoutImportedAccountIsRejected(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	scope := db.KeyScopeBIP0084
+
+	walletID := newWallet(t, store, "wallet-import-no-imported-account")
+
+	// Only a derived account exists; no "imported" account has been
+	// created in this scope.
+	createDerivedAccount(t, store, walletID, scope, "derived-only")
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               scope,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
 // TestNewImportedAddressWithEncryptedScript verifies that NewImportedAddress
 // correctly imports script-based addresses (P2SH, P2WSH) with EncryptedScript,
 // and that the EncryptedScript is stored and retrievable via GetAddressSecret.
@@ -297,42 +419,6 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	walletID := newWallet(t, store, "wallet-encrypted-script")
-
-	_, err := store.CreateImportedAccount(
-		t.Context(), db.CreateImportedAccountParams{
-			WalletID:            walletID,
-			Name:                db.DefaultImportedAccountName,
-			Scope:               db.KeyScopeBIP0044,
-			PublicKey:           RandomBytes(32),
-			EncryptedPrivateKey: RandomBytes(32),
-		},
-	)
-	require.NoError(t, err)
-
-	_, err = store.CreateImportedAccount(
-		t.Context(), db.CreateImportedAccountParams{
-			WalletID:            walletID,
-			Name:                db.DefaultImportedAccountName,
-			Scope:               db.KeyScopeBIP0049Plus,
-			PublicKey:           RandomBytes(32),
-			EncryptedPrivateKey: RandomBytes(32),
-		},
-	)
-	require.NoError(t, err)
-
-	require.False(
-		t, getAccountByName(
-			t, store, walletID, db.KeyScopeBIP0044,
-			db.DefaultImportedAccountName,
-		).IsWatchOnly,
-	)
-	require.False(
-		t, getAccountByName(
-			t, store, walletID, db.KeyScopeBIP0049Plus,
-			db.DefaultImportedAccountName,
-		).IsWatchOnly,
-	)
 
 	redeemScript := RandomBytes(32)
 	witnessScript := RandomBytes(48)
@@ -383,6 +469,14 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			walletID := importedAddressWallet(
+				t, store, "wallet-encrypted-script-"+tc.name,
+				tc.hasPrivateKey,
+			)
+			newImportedAccount(
+				t, store, walletID, tc.scope, tc.hasPrivateKey,
+			)
+
 			scriptPubKey := RandomBytes(32)
 
 			params := db.NewImportedAddressParams{
@@ -442,8 +536,12 @@ func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-empty-private-import")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-empty-private-import",
+	)
+	newImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0044, false,
+	)
 
 	params := db.NewImportedAddressParams{
 		WalletID:            walletID,
@@ -540,7 +638,7 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 				t.Helper()
 				CreateImportedAccount(
 					t, store, walletID, db.KeyScopeBIP0084,
-					db.DefaultImportedAccountName,
+					db.DefaultImportedAccountName, false,
 				)
 
 				info, err := store.NewImportedAddress(
@@ -562,9 +660,9 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 		},
 		{
 			name: "standard wallet imported address without " +
-				"private key is watch-only",
-			walletParams:  CreateWalletParamsFixture,
-			wantWatchOnly: true,
+				"private key is rejected",
+			walletParams: CreateWalletParamsFixture,
+			wantErr:      db.ErrSpendableWalletNeedsAddressPrivKey,
 			createAddressFn: func(t *testing.T, store watchOnlyAddressStore,
 				walletID uint32) (bool, error) {
 
@@ -711,7 +809,7 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 
 		CreateImportedAccount(
 			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			db.DefaultImportedAccountName,
+			db.DefaultImportedAccountName, true,
 		)
 
 		info, err := store.NewImportedAddress(
@@ -745,7 +843,7 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 
 		CreateImportedAccount(
 			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			db.DefaultImportedAccountName,
+			db.DefaultImportedAccountName, true,
 		)
 
 		info, err := store.NewImportedAddress(
@@ -768,44 +866,37 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 		requireDriverConstraintError(t, err)
 	})
 
-	t.Run("non-watch-only insert and update succeed", func(t *testing.T) {
+	t.Run("non-watch-only update succeeds", func(t *testing.T) {
 		t.Parallel()
 
 		store := NewTestStore(t)
 
-		walletID := newWallet(t, store, "spendable-address-secret-trigger")
-		CreateImportedAccount(
-			t, store, walletID, db.KeyScopeBIP0084,
-			db.DefaultImportedAccountName,
+		// ADR 0012: an imported address on a spendable wallet must
+		// carry encrypted private-key material at creation time, so
+		// the API path inserts the secret row. The trigger's
+		// non-watch-only allow path is exercised via UPDATE on that
+		// row; a raw INSERT would conflict with the API-inserted
+		// row and is no longer reachable.
+		walletID := newWallet(
+			t, store, "spendable-address-secret-trigger",
+		)
+		newImportedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, true,
 		)
 
+		initialPrivKey := RandomBytes(32)
 		info, err := store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
-				WalletID:     walletID,
-				Scope:        db.KeyScopeBIP0084,
-				AddressType:  db.WitnessPubKey,
-				PubKey:       RandomBytes(33),
-				ScriptPubKey: RandomBytes(32),
+				WalletID:            walletID,
+				Scope:               db.KeyScopeBIP0084,
+				AddressType:         db.WitnessPubKey,
+				PubKey:              RandomBytes(33),
+				ScriptPubKey:        RandomBytes(32),
+				EncryptedPrivateKey: initialPrivKey,
 			},
 		)
 		require.NoError(t, err)
-		require.True(t, info.IsWatchOnly)
-
-		insertedPrivKey := RandomBytes(32)
-		err = insertAddressSecretRaw(
-			t, store.DB(), int64(info.ID), insertedPrivKey, nil,
-		)
-		require.NoError(t, err)
-
-		secret, err := store.GetAddressSecret(
-			t.Context(), db.GetAddressSecretQuery{
-				WalletID:  walletID,
-				AddressID: info.ID,
-			},
-		)
-		require.NoError(t, err)
-		require.Equal(t, insertedPrivKey, secret.EncryptedPrivKey)
-		require.Empty(t, secret.EncryptedScript)
+		require.False(t, info.IsWatchOnly)
 
 		updatedPrivKey := RandomBytes(32)
 		updatedScript := RandomBytes(48)
@@ -814,7 +905,7 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		secret, err = store.GetAddressSecret(
+		secret, err := store.GetAddressSecret(
 			t.Context(), db.GetAddressSecretQuery{
 				WalletID:  walletID,
 				AddressID: info.ID,
@@ -833,8 +924,14 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 
 	store := NewTestStore(t)
 	dbConn := store.DB()
-	walletID := newWallet(t, store, "wallet-imported-counter")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	// ADR 0012: imported addresses without private-key material need a
+	// watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-counter",
+	)
+	newImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, false,
+	)
 
 	const importedAddrCount = 5
 
@@ -882,8 +979,14 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 
 	store := NewTestStore(t)
 	dbConn := store.DB()
-	walletID := newWallet(t, store, "wallet-imported-counter-concurrent")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	// ADR 0012: imported addresses without private-key material need a
+	// watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-counter-concurrent",
+	)
+	newImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, false,
+	)
 
 	const workers = 20
 
@@ -970,7 +1073,9 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-duplicate-import")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "imported", false,
+	)
 
 	// Set up encryption parameters (same for both imports).
 	scriptPubKey := RandomBytes(32)
@@ -1002,9 +1107,17 @@ func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-duplicate-import-cross-scope")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, "imported")
+	// ADR 0012: imported addresses without private-key material require
+	// a watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-cross-scope",
+	)
+	newImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0044, false,
+	)
+	newImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, false,
+	)
 
 	scriptPubKey := RandomBytes(32)
 
@@ -1040,14 +1153,20 @@ func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	firstWalletID := newWallet(t, store, "wallet-duplicate-import-a")
-	secondWalletID := newWallet(t, store, "wallet-duplicate-import-b")
-
-	CreateImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+	// ADR 0012: imported addresses without private-key material require
+	// watch-only wallets to satisfy the symmetric invariant.
+	firstWalletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-a",
 	)
-	CreateImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0084, "imported",
+	secondWalletID := newWatchOnlyWallet(
+		t, store, "wallet-duplicate-import-b",
+	)
+
+	newImportedAccount(
+		t, store, firstWalletID, db.KeyScopeBIP0084, false,
+	)
+	newImportedAccount(
+		t, store, secondWalletID, db.KeyScopeBIP0084, false,
 	)
 
 	scriptPubKey := RandomBytes(32)
@@ -1089,10 +1208,10 @@ func TestCreateImportedAddressRejectsWalletAccountMismatch(t *testing.T) {
 	secondWalletID := newWallet(t, store, "wallet-raw-import-mismatch-b")
 
 	CreateImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+		t, store, firstWalletID, db.KeyScopeBIP0084, "imported", false,
 	)
 	CreateImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0084, "imported",
+		t, store, secondWalletID, db.KeyScopeBIP0084, "imported", false,
 	)
 
 	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
@@ -1141,16 +1260,20 @@ func TestAddressWalletIDImmutable(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	sourceWalletID := newWallet(t, store, "address-wallet-immutable-source")
-	targetWalletID := newWallet(t, store, "address-wallet-immutable-target")
-
-	CreateImportedAccount(
-		t, store, sourceWalletID, db.KeyScopeBIP0084,
-		db.DefaultImportedAccountName,
+	// ADR 0012: public-only imported addresses need watch-only wallets
+	// to satisfy the symmetric invariant.
+	sourceWalletID := newWatchOnlyWallet(
+		t, store, "address-wallet-immutable-source",
 	)
-	CreateImportedAccount(
-		t, store, targetWalletID, db.KeyScopeBIP0084,
-		db.DefaultImportedAccountName,
+	targetWalletID := newWatchOnlyWallet(
+		t, store, "address-wallet-immutable-target",
+	)
+
+	newImportedAccount(
+		t, store, sourceWalletID, db.KeyScopeBIP0084, false,
+	)
+	newImportedAccount(
+		t, store, targetWalletID, db.KeyScopeBIP0084, false,
 	)
 
 	scriptPubKey := RandomBytes(32)
@@ -1169,7 +1292,7 @@ func TestAddressWalletIDImmutable(t *testing.T) {
 		t, queries, targetWalletID, db.KeyScopeBIP0084,
 	)
 	targetAccountID := GetAccountID(
-		t, queries, targetScopeID, db.DefaultImportedAccountName,
+		t, queries, targetScopeID, "imported",
 	)
 
 	err = reparentAddressRaw(
@@ -1196,8 +1319,6 @@ func TestGetAddressSecret(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-secrets")
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0044, "imported")
 
 	testCases := []struct {
 		name              string
@@ -1218,6 +1339,15 @@ func TestGetAddressSecret(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			walletID := importedAddressWallet(
+				t, store, "wallet-secrets-"+tc.name,
+				tc.providePrivateKey,
+			)
+			newImportedAccount(
+				t, store, walletID, db.KeyScopeBIP0044,
+				tc.providePrivateKey,
+			)
+
 			params := db.NewImportedAddressParams{
 				WalletID:     walletID,
 				Scope:        db.KeyScopeBIP0044,
@@ -1260,9 +1390,14 @@ func TestGetAddressSecret(t *testing.T) {
 	}
 
 	t.Run("cross-wallet address denied", func(t *testing.T) {
+		walletID := newWallet(t, store, "wallet-secrets-cross-self")
+		newImportedAccount(
+			t, store, walletID, db.KeyScopeBIP0044, true,
+		)
+
 		otherWalletID := newWallet(t, store, "wallet-secrets-other")
-		CreateImportedAccount(
-			t, store, otherWalletID, db.KeyScopeBIP0044, "imported",
+		newImportedAccount(
+			t, store, otherWalletID, db.KeyScopeBIP0044, true,
 		)
 
 		params := db.NewImportedAddressParams{
@@ -1288,6 +1423,8 @@ func TestGetAddressSecret(t *testing.T) {
 
 	// Test non-existent address ID.
 	t.Run("non-existent address", func(t *testing.T) {
+		walletID := newWallet(t, store, "wallet-secrets-nonexistent")
+
 		_, err := store.GetAddressSecret(
 			t.Context(), db.GetAddressSecretQuery{
 				WalletID:  walletID,
@@ -1308,19 +1445,21 @@ func TestGetAddress(t *testing.T) {
 		name      string
 		setupFunc func(t *testing.T, addrStore db.AddressStore,
 			accountStore db.AccountStore, walletID uint32) db.GetAddressQuery
-		wantErr  error
-		validate func(t *testing.T, addr *db.AddressInfo)
+		watchOnlyWallet bool
+		wantErr         error
+		validate        func(t *testing.T, addr *db.AddressInfo)
 	}{
 		{
-			name: "get by encrypted script pubkey",
+			name:            "get by encrypted script pubkey",
+			watchOnlyWallet: true,
 			setupFunc: func(t *testing.T, addrStore db.AddressStore,
 				accountStore db.AccountStore,
 				walletID uint32) db.GetAddressQuery {
 
 				t.Helper()
 
-				CreateImportedAccount(
-					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
+				newImportedAccount(
+					t, accountStore, walletID, db.KeyScopeBIP0084, false,
 				)
 
 				script := RandomBytes(32)
@@ -1355,7 +1494,8 @@ func TestGetAddress(t *testing.T) {
 
 				t.Helper()
 				CreateImportedAccount(
-					t, accountStore, walletID, db.KeyScopeBIP0084, "imported",
+					t, accountStore, walletID, db.KeyScopeBIP0084,
+					"imported", false,
 				)
 
 				script := RandomBytes(32)
@@ -1413,7 +1553,15 @@ func TestGetAddress(t *testing.T) {
 			t.Parallel()
 
 			store := NewTestStore(t)
-			walletID := newWallet(t, store, tc.name+"-wallet")
+
+			var walletID uint32
+			if tc.watchOnlyWallet {
+				walletID = newWatchOnlyWallet(
+					t, store, tc.name+"-wallet",
+				)
+			} else {
+				walletID = newWallet(t, store, tc.name+"-wallet")
+			}
 
 			query := tc.setupFunc(t, store, store, walletID)
 			addr, err := store.GetAddress(t.Context(), query)
@@ -1733,11 +1881,12 @@ func TestNewDerivedAddressUsesStoredScopeSchema(t *testing.T) {
 
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:   walletID,
-			Scope:      db.KeyScopeBIP0049Plus,
-			Name:       "strict-bip49-import",
-			PublicKey:  RandomBytes(32),
-			AddrSchema: strictBIP49,
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0049Plus,
+			Name:                "strict-bip49-import",
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+			AddrSchema:          strictBIP49,
 		},
 	)
 	require.NoError(t, err)
@@ -1811,7 +1960,11 @@ func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-imported-derive")
+	// ADR 0012: a public-only xpub import requires a watch-only wallet;
+	// the spendable-wallet invariant rejects the same import.
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-imported-derive",
+	)
 
 	// Create an imported xpub account: real PublicKey, no encrypted
 	// private key (watch-only xpub import).
@@ -1955,10 +2108,10 @@ func TestNewImportedAddressWalletAccountMismatch(t *testing.T) {
 	secondWalletID := newWallet(t, store, "wallet-import-mismatch-b")
 
 	CreateImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, "imported",
+		t, store, firstWalletID, db.KeyScopeBIP0084, "imported", false,
 	)
 	CreateImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0044, "imported",
+		t, store, secondWalletID, db.KeyScopeBIP0044, "imported", false,
 	)
 
 	_, err := store.NewImportedAddress(

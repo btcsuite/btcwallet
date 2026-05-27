@@ -109,6 +109,7 @@ func TestAccountWalletIDImmutable(t *testing.T) {
 
 	CreateImportedAccount(
 		t, store, sourceWalletID, db.KeyScopeBIP0084, "source-imported",
+		false,
 	)
 	createDerivedAccount(
 		t, store, targetWalletID, db.KeyScopeBIP0084, "target-derived",
@@ -165,10 +166,11 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 
 	props, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  walletID,
-			Scope:     db.KeyScopeBIP0084,
-			Name:      "imported-account",
-			PublicKey: RandomBytes(32),
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0084,
+			Name:                "imported-account",
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
@@ -271,9 +273,9 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 		},
 		{
 			name: "standard wallet imported account without " +
-				"private key is watch-only",
-			walletParams:  CreateWalletParamsFixture,
-			wantWatchOnly: true,
+				"private key is rejected",
+			walletParams: CreateWalletParamsFixture,
+			wantErr:      db.ErrSpendableWalletNeedsAccountPrivKey,
 			createAccountFn: func(t *testing.T, store db.AccountStore,
 				walletID uint32) (bool, error) {
 
