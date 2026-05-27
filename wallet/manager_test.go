@@ -610,3 +610,58 @@ func TestManager_deriveRootKey(t *testing.T) {
 		require.True(t, key.IsPrivate())
 	})
 }
+
+// TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
+// a non-watch-only wallet cannot ship with InitialAccounts. The validator
+// runs before DBCreateWallet so the failure is atomic and no half-created
+// wallet is left on disk.
+func TestValidateInitialAccountsModeUpfront(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		params  CreateWalletParams
+		wantErr bool
+	}{
+		{
+			name: "watch-only with initial accounts is fine",
+			params: CreateWalletParams{
+				WatchOnly: true,
+				InitialAccounts: []WatchOnlyAccount{{
+					Name: "imported-xpub",
+				}},
+			},
+		},
+		{
+			name: "spendable with no initial accounts is fine",
+			params: CreateWalletParams{
+				WatchOnly: false,
+			},
+		},
+		{
+			name: "spendable with initial accounts is rejected",
+			params: CreateWalletParams{
+				WatchOnly: false,
+				InitialAccounts: []WatchOnlyAccount{{
+					Name: "imported-xpub",
+				}},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateInitialAccountsMode(tc.params)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrWalletParams)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
