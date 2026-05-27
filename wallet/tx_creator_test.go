@@ -11,6 +11,7 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -1365,4 +1366,149 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 	// Assert.
 	require.ErrorIs(t, err, ErrAccountNotFound)
 	require.Nil(t, tx)
+}
+
+// TestCreateChangeSourceRedirectsDefaultImported verifies how change is routed
+// for imported accounts: a non-default imported xpub account keeps its own
+// change destination, while the default imported bucket redirects change to
+// derived account 0 resolved by number (so it follows a renamed account 0
+// rather than assuming the literal "default" name).
+func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
+	t.Parallel()
+
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+
+	testCases := []struct {
+		name string
+
+		// accountName is the change account requested by the caller.
+		accountName string
+
+		// derivedName, when non-empty, is the current name of derived
+		// account 0 returned by the by-number resolution. It is only
+		// looked up for the default imported bucket.
+		derivedName string
+
+		// expectedChangeAccount is the account name the change script
+		// is finally derived under.
+		expectedChangeAccount string
+	}{
+		{
+			name:                  "imported xpub account",
+			accountName:           "cold",
+			expectedChangeAccount: "cold",
+		},
+		{
+			name:                  "default imported redirects to account 0",
+			accountName:           db.DefaultImportedAccountName,
+			derivedName:           waddrmgr.DefaultAccountName,
+			expectedChangeAccount: waddrmgr.DefaultAccountName,
+		},
+		{
+			name:                  "default imported follows renamed account 0",
+			accountName:           db.DefaultImportedAccountName,
+			derivedName:           "renamed-default",
+			expectedChangeAccount: "renamed-default",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createTestWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			changeScript := []byte{0x00, 0x04}
+
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id,
+					Scope:    db.KeyScope(scope),
+					Name:     &tc.accountName,
+				},
+			).Return(&db.AccountInfo{
+				AccountName: tc.accountName,
+				Origin:      db.ImportedAccount,
+				AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
+			}, nil).Once()
+
+			// The default imported bucket resolves derived account 0
+			// by number to follow a possible rename.
+			if tc.derivedName != "" {
+				mocks.store.On("GetAccount", mock.Anything,
+					db.GetAccountQuery{
+						WalletID:      w.id,
+						Scope:         db.KeyScope(scope),
+						AccountNumber: &defaultAccountNum,
+					},
+				).Return(&db.AccountInfo{
+					AccountNumber: waddrmgr.DefaultAccountNum,
+					AccountName:   tc.derivedName,
+					Origin:        db.DerivedAccount,
+				}, nil).Once()
+			}
+
+			mocks.store.On("NewDerivedAddress", mock.Anything,
+				db.NewDerivedAddressParams{
+					WalletID:    w.id,
+					AccountName: tc.expectedChangeAccount,
+					Scope:       db.KeyScope(scope),
+					Change:      true,
+				},
+			).Return(&db.AddressInfo{
+				ScriptPubKey: changeScript,
+			}, nil).Once()
+
+			changeSource, err := w.createChangeSource(
+				t.Context(), &ScopedAccount{
+					AccountName: tc.accountName,
+					KeyScope:    scope,
+				},
+			)
+			require.NoError(t, err)
+
+			script, err := changeSource.NewScript()
+			require.NoError(t, err)
+			require.Equal(t, changeScript, script)
+		})
+	}
+}
+
+// TestCreateChangeSourceDefaultImportedMissingAccountZero verifies that a
+// not-found error while resolving derived account 0 for default-imported
+// change surfaces as the wallet-level ErrAccountNotFound.
+func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	accountName := db.DefaultImportedAccountName
+
+	mocks.store.On("GetAccount", mock.Anything,
+		db.GetAccountQuery{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     &accountName,
+		},
+	).Return(&db.AccountInfo{
+		AccountName: accountName,
+		Origin:      db.ImportedAccount,
+		AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
+	}, nil).Once()
+
+	// Resolving derived account 0 by number reports not found.
+	mocks.store.On("GetAccount", mock.Anything,
+		mock.MatchedBy(func(q db.GetAccountQuery) bool {
+			return q.AccountNumber != nil &&
+				*q.AccountNumber == waddrmgr.DefaultAccountNum
+		}),
+	).Return(nil, db.ErrAccountNotFound).Once()
+
+	_, err := w.createChangeSource(
+		t.Context(), &ScopedAccount{
+			AccountName: accountName,
+			KeyScope:    scope,
+		},
+	)
+	require.ErrorIs(t, err, ErrAccountNotFound)
 }
