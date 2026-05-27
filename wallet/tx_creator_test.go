@@ -11,6 +11,7 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -1365,4 +1366,71 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 	// Assert.
 	require.ErrorIs(t, err, ErrAccountNotFound)
 	require.Nil(t, tx)
+}
+
+// TestCreateChangeSourceOnlyRedirectsImportedCatchAll verifies that imported
+// xpub-style accounts keep their own change destination.
+func TestCreateChangeSourceOnlyRedirectsImportedCatchAll(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name                  string
+		accountName           string
+		expectedChangeAccount string
+	}{
+		{
+			name:                  "imported xpub account",
+			accountName:           "cold",
+			expectedChangeAccount: "cold",
+		},
+		{
+			name:                  "imported catch all account",
+			accountName:           db.DefaultImportedAccountName,
+			expectedChangeAccount: waddrmgr.DefaultAccountName,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createTestWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			changeScript := []byte{0x00, 0x04}
+
+			mocks.store.On("GetAccount", mock.Anything,
+				db.GetAccountQuery{
+					WalletID: w.id,
+					Scope:    db.KeyScope(scope),
+					Name:     &tc.accountName,
+				},
+			).Return(&db.AccountInfo{
+				AccountName: tc.accountName,
+				Origin:      db.ImportedAccount,
+				AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
+			}, nil).Once()
+			mocks.store.On("NewDerivedAddress", mock.Anything,
+				db.NewDerivedAddressParams{
+					WalletID:    w.id,
+					AccountName: tc.expectedChangeAccount,
+					Scope:       db.KeyScope(scope),
+					Change:      true,
+				},
+			).Return(&db.AddressInfo{
+				ScriptPubKey: changeScript,
+			}, nil).Once()
+
+			changeSource, err := w.createChangeSource(
+				t.Context(), &ScopedAccount{
+					AccountName: tc.accountName,
+					KeyScope:    scope,
+				},
+			)
+			require.NoError(t, err)
+
+			script, err := changeSource.NewScript()
+			require.NoError(t, err)
+			require.Equal(t, changeScript, script)
+		})
+	}
 }

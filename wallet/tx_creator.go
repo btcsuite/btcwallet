@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -526,6 +527,78 @@ func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
 	}
 
 	return inputSource, changeSource, nil
+}
+
+// createChangeSource creates a store-backed change source for transaction
+// authoring.
+func (w *Wallet) createChangeSource(ctx context.Context,
+	changeAccount *ScopedAccount) (*txauthor.ChangeSource, error) {
+
+	accountName := changeAccount.AccountName
+
+	accountInfo, err := w.cache.GetAccount(
+		ctx, db.GetAccountQuery{
+			WalletID: w.id,
+			Scope:    db.KeyScope(changeAccount.KeyScope),
+			Name:     &accountName,
+		},
+	)
+	if errors.Is(err, db.ErrAccountNotFound) {
+		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountName)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("get account %q: %w", accountName, err)
+	}
+
+	// Use the account's effective AddrSchema instead of the scope
+	// default so strict BIP49 imports (and any other per-account
+	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
+	// produce change scripts the external signer expects. SQL backends
+	// currently store schema at the key-scope level only and surface
+	// the effective scope schema here; per-account-only overrides
+	// under a shared scope still fall through to the scope default and
+	// are tracked as a known limitation in the AddrSchema docstring.
+	storeAddrType := accountInfo.AddrSchema.InternalAddrType
+
+	addrType, err := addresstype.ToWallet(storeAddrType, false)
+	if err != nil {
+		return nil, err
+	}
+
+	scriptSize, err := addrType.ScriptPubKeySize()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
+	}
+
+	derivationAccount := accountName
+	if accountInfo.Origin == db.ImportedAccount &&
+		accountInfo.AccountName == db.DefaultImportedAccountName {
+
+		derivationAccount = waddrmgr.DefaultAccountName
+	}
+
+	newChangeScript := func() ([]byte, error) {
+		addrInfo, err := w.store.NewDerivedAddress(
+			ctx, db.NewDerivedAddressParams{
+				WalletID:    w.id,
+				AccountName: derivationAccount,
+				Scope:       db.KeyScope(changeAccount.KeyScope),
+				Change:      true,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return addrInfo.ScriptPubKey, nil
+	}
+
+	return &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript:  newChangeScript,
+	}, nil
 }
 
 // CreateTransaction creates a new unsigned transaction spending unspent outputs
