@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -194,7 +195,7 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	).Once()
 	ensureScopeCall := ops.On(
 		"EnsureScope", mock.Anything, uint32(7), params.Scope,
-	).Return(int64(11), nil).Once()
+	).Return(int64(11), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	allocateCall := ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(11),
 	).Return(int64(12), nil).Once()
@@ -217,6 +218,63 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	require.True(t, info.IsWatchOnly)
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, params.Scope, info.KeyScope)
+	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
+}
+
+// TestAccountRowToInfoPopulatesAddrSchema verifies SQL account rows expose the
+// effective key-scope address schema on AccountInfo.
+func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
+	t.Parallel()
+
+	row := AccountInfoRow[int16]{
+		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
+		AccountName:      "strict",
+		OriginID:         int16(ImportedAccount),
+		ExternalKeyCount: 1,
+		InternalKeyCount: 2,
+		ImportedKeyCount: 3,
+		CreatedAt:        time.Unix(123, 0).UTC(),
+		Purpose:          49,
+		CoinType:         0,
+		InternalTypeID:   int16(NestedWitnessPubKey),
+		ExternalTypeID:   int16(NestedWitnessPubKey),
+		IDToOriginType:   IDToAccountOrigin[int16],
+	}
+
+	info, err := AccountRowToInfo(row)
+	require.NoError(t, err)
+	require.Equal(t, ScopeAddrSchema{
+		ExternalAddrType: NestedWitnessPubKey,
+		InternalAddrType: NestedWitnessPubKey,
+	}, info.AddrSchema)
+}
+
+// TestScopeAddrSchemaFromWaddrmgr verifies legacy address-manager schemas are
+// converted into the database account schema shape.
+func TestScopeAddrSchemaFromWaddrmgr(t *testing.T) {
+	t.Parallel()
+
+	schema, err := ScopeAddrSchemaFromWaddrmgr(waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+		InternalAddrType: waddrmgr.WitnessPubKey,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ScopeAddrSchema{
+		ExternalAddrType: NestedWitnessPubKey,
+		InternalAddrType: WitnessPubKey,
+	}, schema)
+
+	// BIP44 schemas (waddrmgr.PubKeyHash external + waddrmgr.PubKeyHash
+	// internal) regression test for the enum-ordinal mismatch.
+	schema, err = ScopeAddrSchemaFromWaddrmgr(waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.PubKeyHash,
+		InternalAddrType: waddrmgr.PubKeyHash,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ScopeAddrSchema{
+		ExternalAddrType: PubKeyHash,
+		InternalAddrType: PubKeyHash,
+	}, schema)
 }
 
 // TestCreateDerivedAccountWithOpsRejectsInvalidParams verifies that the shared
@@ -262,7 +320,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -302,7 +360,7 @@ func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(^uint32(0))+1, nil,
 	).Once()
@@ -354,7 +412,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 						Purpose: 49,
 						Coin:    0,
 					},
-				).Return(int64(0), errTestScope).Once()
+				).Return(int64(0), ScopeAddrSchema{}, errTestScope).Once()
 
 				return ops
 			},
@@ -372,7 +430,9 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 						Purpose: 49,
 						Coin:    0,
 					},
-				).Return(int64(8), nil).Once()
+				).Return(
+					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
+				).Once()
 				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 					int64(0), errTestBoom,
 				).Once()
@@ -392,7 +452,9 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 				ops.On("EnsureScope", mock.Anything, uint32(7), KeyScope{
 					Purpose: 49,
 					Coin:    0,
-				}).Return(int64(8), nil).Once()
+				}).Return(
+					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
+				).Once()
 				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 					int64(9), nil,
 				).Once()
@@ -457,7 +519,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -504,7 +566,7 @@ func TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -564,7 +626,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -603,7 +665,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey(
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -642,7 +704,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey(
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -681,7 +743,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv(
 			Purpose: 49,
 			Coin:    0,
 		},
-	).Return(int64(8), nil).Once()
+	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
 		int64(9), nil,
 	).Once()
@@ -732,16 +794,24 @@ func (m *mockCreateDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 
 // EnsureScope implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) EnsureScope(ctx context.Context,
-	walletID uint32, scope KeyScope) (int64, error) {
+	walletID uint32,
+	scope KeyScope) (int64, ScopeAddrSchema, error) {
 
 	args := m.Called(ctx, walletID, scope)
 
 	scopeID, ok := args.Get(0).(int64)
 	if !ok {
-		return 0, mockTypeError("EnsureScope result")
+		return 0, ScopeAddrSchema{}, mockTypeError("EnsureScope result")
 	}
 
-	return scopeID, args.Error(1)
+	schema, ok := args.Get(1).(ScopeAddrSchema)
+	if !ok {
+		return 0, ScopeAddrSchema{}, mockTypeError(
+			"EnsureScope schema result",
+		)
+	}
+
+	return scopeID, schema, args.Error(2)
 }
 
 // AllocateAccountNumber implements CreateDerivedAccountOps.

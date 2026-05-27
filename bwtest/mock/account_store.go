@@ -30,6 +30,12 @@ func (m *AccountStore) Scope() waddrmgr.KeyScope {
 	return args.Get(0).(waddrmgr.KeyScope)
 }
 
+// AddrSchema implements the waddrmgr.AccountStore interface.
+func (m *AccountStore) AddrSchema() waddrmgr.ScopeAddrSchema {
+	args := m.Called()
+	return args.Get(0).(waddrmgr.ScopeAddrSchema)
+}
+
 // AccountProperties implements the waddrmgr.AccountStore interface.
 func (m *AccountStore) AccountProperties(ns walletdb.ReadBucket,
 	account uint32) (*waddrmgr.AccountProperties, error) {
