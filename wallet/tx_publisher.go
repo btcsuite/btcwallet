@@ -404,7 +404,7 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]btcutil.Address {
 		// It's not possible for a transaction to have this many
 		// outputs, so we can ignore the gosec error.
 		//
-		//nolint:gosec
+
 		txOutAddrs[uint32(i)] = addrs
 	}
 

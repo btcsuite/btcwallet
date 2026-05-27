@@ -1745,6 +1745,7 @@ func TestMatchAndFetchBatch_GetBlocksError(t *testing.T) {
 	filters := []*gcs.Filter{nil}
 
 	blockMap := make(map[chainhash.Hash]*wire.MsgBlock)
+
 	mockChain.On("GetBlocks", mock.Anything).Return(
 		([]*wire.MsgBlock)(nil), errGetBlocks).Once()
 
@@ -2542,7 +2543,7 @@ func TestProcessChainUpdate(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		update interface{}
+		update any
 		setup  func(*mockAddrStore, *mockTxStore, *mockChain)
 	}{
 		{

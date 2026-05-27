@@ -1,0 +1,4 @@
+version: v2.12.2
+plugins:
+  - module: 'github.com/lightningnetwork/lnd/tools/linters'
+    version: v0.0.0-20260525132409-9f03672bdaba

@@ -9,6 +9,9 @@ run:
 
 linters:
   default: all
+  enable:
+    # Enable the custom ll linter with log-regex support.
+    - ll
   disable:
     # TODO(yy): Re-enable this linter once the refactoring series is done.
     - ireturn
@@ -41,8 +44,21 @@ linters:
     # Deprecated - this is replaced by wsl_v5.
     - wsl
 
+    # Disable lll in favor of ll with log-regex support.
+    - lll
+
   # All available settings of specific linters.
   settings:
+    custom:
+      ll:
+        type: "module"
+        description: "Long line linter with structured logging awareness"
+        settings:
+          line-length: 80
+          tab-width: 4
+          #log-regex: '(log\.|logger\.|slog\.|btclog\.)'
+          log-regex: ^\s*.*(L|l)og\.(Info|Debug|Trace|Warn|Error|Critical)S\(
+
     nlreturn:
       # Size of the block (including return statement that is still "OK")
       # so no return split required.
@@ -73,16 +89,6 @@ linters:
       # signature. This is the standard Go style.
       disable:
         - leading-whitespace
-
-    lll:
-      # Max line length, lines longer will be reported.
-      # '\t' is counted as 1 character by default, and can be changed with the
-      # tab-width option. 
-      # Default: 120.
-      line-length: 80
-      # Tab width in spaces.
-      # Default: 1
-      tab-width: 4
 
     whitespace:
       multi-func: true

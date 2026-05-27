@@ -239,6 +239,7 @@ func TestListTxDetailsWithOpsUnminedFirst(t *testing.T) {
 		callOrder = append(callOrder, "outputs")
 		ids, ok := args.Get(2).([]int64)
 		require.True(t, ok)
+
 		batchedIDs = append([]int64(nil), ids...)
 	}).Once()
 

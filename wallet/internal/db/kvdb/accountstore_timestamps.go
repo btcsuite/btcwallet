@@ -67,7 +67,7 @@ func putAccountCreatedAt(ns walletdb.ReadWriteBucket,
 	key := newAccountCreatedAtKey(scope, account)
 
 	var value [createdAtValueLen]byte
-	//nolint:gosec // UnixNano() always fits in uint64 for times after 1970.
+
 	binary.BigEndian.PutUint64(value[:], uint64(t.UTC().UnixNano()))
 
 	err = bucket.Put(key[:], value[:])
