@@ -33,6 +33,12 @@ var (
 	// reports success but does not return any derived account material.
 	ErrNilDerivedAccountData = errors.New("derived account data is nil")
 
+	// ErrAccountSecretUnavailable is returned when a backend does not expose
+	// store-side account secret material through AccountStore.
+	ErrAccountSecretUnavailable = errors.New(
+		"account secret unavailable",
+	)
+
 	// errMissingDerivedPublicKey is returned when the derivation callback
 	// returns data with an empty public key. Every derived account must
 	// have a public key.
@@ -58,6 +64,20 @@ var (
 func (params *CreateDerivedAccountParams) Validate() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
+	}
+
+	return nil
+}
+
+// Validate checks whether a GetAccountSecretQuery identifies exactly one
+// account selector.
+func (query GetAccountSecretQuery) Validate() error {
+	if query.Name == nil && query.AccountNumber == nil {
+		return ErrInvalidAccountQuery
+	}
+
+	if query.Name != nil && query.AccountNumber != nil {
+		return ErrInvalidAccountQuery
 	}
 
 	return nil

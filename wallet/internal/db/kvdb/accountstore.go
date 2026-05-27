@@ -519,6 +519,19 @@ func (s *Store) GetAccount(_ context.Context,
 	return info, nil
 }
 
+// GetAccountSecret reports that kvdb account secrets are not exposed through
+// the store-side account-secret contract.
+func (s *Store) GetAccountSecret(_ context.Context,
+	query db.GetAccountSecretQuery) (*db.AccountSecret, error) {
+
+	err := query.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, db.ErrAccountSecretUnavailable
+}
+
 // lookupAccount performs the per-transaction work of GetAccount: scope
 // resolution, account-number lookup, AccountInfo build, contract
 // enforcement, and optional balance attachment.
