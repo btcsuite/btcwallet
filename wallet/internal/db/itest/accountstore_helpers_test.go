@@ -22,8 +22,30 @@ func newWallet(t *testing.T, store db.WalletStore, name string) uint32 {
 	return walletInfo.ID
 }
 
-// createAllAccounts creates all accounts from AllAccountCases for the given
-// wallet ID using the provided account store.
+// newWatchOnlyWallet creates a watch-only wallet and returns its ID. It is the
+// watch-only counterpart of newWallet and used by tests that exercise
+// imported-account or imported-address flows that require public-only material
+// — combinations the ADR 0012 spendable-wallet invariant rejects on a normal
+// wallet.
+func newWatchOnlyWallet(t *testing.T, store db.WalletStore,
+	name string) uint32 {
+
+	t.Helper()
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), CreateWatchOnlyWalletParams(name),
+	)
+	require.NoError(t, err)
+
+	return walletInfo.ID
+}
+
+// createAllAccounts creates all accounts from AllAccountCases for the
+// given wallet ID using the provided account store. AllAccountCases now
+// only contains spendable-compatible accounts (derived +
+// imported-with-private-keys); tests that need to exercise watch-only
+// accounts create them on a watch-only wallet directly via the
+// PublicOnlyImportedAccountCases slice.
 func createAllAccounts(t *testing.T, store db.AccountStore, walletID uint32) {
 	t.Helper()
 
@@ -87,21 +109,27 @@ func createDerivedAccount(t *testing.T, store db.AccountStore, walletID uint32,
 }
 
 // CreateImportedAccount creates a new imported account with the given name,
-// scope, and wallet ID using the provided account store. A random public key
-// is generated for the account.
+// scope, and wallet ID using the provided account store. The caller passes the
+// wallet's watch-only state explicitly (it already knows the shape it created):
+// a spendable wallet (watchOnly == false) gets an EncryptedPrivateKey to
+// satisfy the ADR 0012 spendable-wallet invariant; a watch-only wallet gets a
+// public-only account to satisfy the symmetric invariant.
 func CreateImportedAccount(t *testing.T, store db.AccountStore, walletID uint32,
-	scope db.KeyScope, name string) {
+	scope db.KeyScope, name string, watchOnly bool) {
 
 	t.Helper()
 
-	_, err := store.CreateImportedAccount(
-		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  walletID,
-			Name:      name,
-			Scope:     scope,
-			PublicKey: RandomBytes(32),
-		},
-	)
+	params := db.CreateImportedAccountParams{
+		WalletID:  walletID,
+		Name:      name,
+		Scope:     scope,
+		PublicKey: RandomBytes(32),
+	}
+	if !watchOnly {
+		params.EncryptedPrivateKey = RandomBytes(32)
+	}
+
+	_, err := store.CreateImportedAccount(t.Context(), params)
 	require.NoError(t, err)
 }
 

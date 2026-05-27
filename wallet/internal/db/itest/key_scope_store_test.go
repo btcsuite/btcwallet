@@ -31,7 +31,7 @@ func TestWatchOnlyKeyScopeSecretTriggers(t *testing.T) {
 
 		CreateImportedAccount(
 			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			"watch-only-key-scope-scope-absent",
+			"watch-only-key-scope-scope-absent", true,
 		)
 
 		scopeID := GetKeyScopeID(t, queries, walletInfo.ID, db.KeyScopeBIP0084)
@@ -57,7 +57,7 @@ func TestWatchOnlyKeyScopeSecretTriggers(t *testing.T) {
 
 		CreateImportedAccount(
 			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			"watch-only-key-scope-scope-insert",
+			"watch-only-key-scope-scope-insert", true,
 		)
 
 		scopeID := GetKeyScopeID(t, queries, walletInfo.ID, db.KeyScopeBIP0084)

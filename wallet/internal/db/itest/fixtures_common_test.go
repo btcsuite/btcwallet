@@ -209,11 +209,15 @@ var PublicOnlyImportedAccountCases = []AccountTestCase{
 	},
 }
 
-// AllAccountCases combines all account test cases (derived, imported with
-// private keys, and public-only imported) into a single slice.
+// AllAccountCases combines spendable-wallet-compatible account test cases
+// (derived + imported-with-private-keys) into a single slice. Public-only
+// (watch-only) imported cases are intentionally excluded so the slice
+// satisfies the ADR 0012 spendable-wallet invariant; tests that need
+// public-only fixtures use PublicOnlyImportedAccountCases directly with a
+// watch-only wallet.
 var AllAccountCases = append(
-	append(DerivedAccountCases, ImportedAccountCases...),
-	PublicOnlyImportedAccountCases...,
+	append([]AccountTestCase{}, DerivedAccountCases...),
+	ImportedAccountCases...,
 )
 
 // AllImportedAccountCases combines imported account cases (with and without

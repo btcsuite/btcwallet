@@ -35,7 +35,13 @@ func (params *CreateImportedAccountParams) ValidateBasic() error {
 }
 
 // ValidateWatchOnly validates watch-only invariants for creating an imported
-// account.
+// account. A watch-only wallet must not receive private-key material. The
+// symmetric direction (a spendable wallet must not receive an imported
+// account without private-key material) is enforced at the SQL-backend
+// entry through requireAccountPrivKeyOnSpendable; kvdb's data model cannot
+// persist account-level private keys at all, so the symmetric check would
+// conflict with the legitimate watch-only-account-in-spendable-wallet flow
+// that kvdb supports today (a grandfathered legacy shape).
 func (params *CreateImportedAccountParams) ValidateWatchOnly(
 	walletIsWatchOnly bool) error {
 
@@ -46,6 +52,21 @@ func (params *CreateImportedAccountParams) ValidateWatchOnly(
 	}
 
 	return nil
+}
+
+// requireAccountPrivKeyOnSpendable enforces the ADR 0012 symmetric
+// invariant for SQL backends: a spendable wallet must not contain an
+// imported account without encrypted private-key material. Called from
+// the SQL-only CreateImportedAccount workflow below.
+func requireAccountPrivKeyOnSpendable(walletID uint32, name string,
+	walletIsWatchOnly bool, encryptedPrivKey []byte) error {
+
+	if walletIsWatchOnly || len(encryptedPrivKey) > 0 {
+		return nil
+	}
+
+	return fmt.Errorf("wallet %d cannot create imported account %q: %w",
+		walletID, name, ErrSpendableWalletNeedsAccountPrivKey)
 }
 
 // CreateImportedAccountOps is the backend adapter the shared

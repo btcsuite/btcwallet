@@ -68,10 +68,11 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  walletID,
-			Name:      db.DefaultImportedAccountName,
-			Scope:     scope,
-			PublicKey: RandomBytes(32),
+			WalletID:            walletID,
+			Name:                db.DefaultImportedAccountName,
+			Scope:               scope,
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
@@ -88,7 +89,9 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	require.True(t, imported.IsWatchOnly)
+	// ADR 0012: imported accounts on a spendable wallet carry private-
+	// key material, so they inherit the wallet's spendable state.
+	require.False(t, imported.IsWatchOnly)
 }
 
 // TestGetAccountReturnsPublicKeyAndFingerprint verifies that derived and
@@ -108,7 +111,8 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 			WalletID: walletID,
 			Scope:    scope,
 			Name:     "derived",
-		}, SpendableDeriveFn())
+		}, SpendableDeriveFn(),
+	)
 	require.NoError(t, err)
 	require.NotEmpty(t, derived.PublicKey)
 	require.NotZero(t, derived.MasterKeyFingerprint)
@@ -125,10 +129,11 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 	importedPubKey := RandomBytes(32)
 	_, err = store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  walletID,
-			Name:      "imported",
-			Scope:     scope,
-			PublicKey: importedPubKey,
+			WalletID:            walletID,
+			Name:                "imported",
+			Scope:               scope,
+			PublicKey:           importedPubKey,
+			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
