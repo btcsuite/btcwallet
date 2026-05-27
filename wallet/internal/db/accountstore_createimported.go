@@ -137,6 +137,19 @@ func CreateImportedAccountWithOps(ctx context.Context,
 		return nil, err
 	}
 
+	// ADR 0012 invariant: a spendable wallet must not hold an imported
+	// account without encrypted private-key material. Applies to the SQL
+	// backends only — kvdb's data model cannot persist account-level
+	// private keys, and its legacy watch-only-account-in-spendable-wallet
+	// flow is grandfathered.
+	err = requireAccountPrivKeyOnSpendable(
+		params.WalletID, params.Name, walletIsWatchOnly,
+		params.EncryptedPrivateKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	scopeID, err := ops.EnsureKeyScope(
 		ctx, params.WalletID, params.Scope, params.AddrSchema,
 	)
