@@ -2143,7 +2143,9 @@ func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
 
 	store := NewTestStore(t)
 	queries := store.Queries()
-	walletID := newWallet(t, store, "wallet-balance-name-filter")
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-balance-name-filter",
+	)
 
 	const (
 		derivedName  = "default"
@@ -2151,7 +2153,9 @@ func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
 	)
 
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, derivedName)
-	CreateImportedAccount(t, store, walletID, db.KeyScopeBIP0084, importedName)
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, importedName, true,
+	)
 
 	derivedAddr := newDerivedAddress(
 		t, store, walletID, db.KeyScopeBIP0084, derivedName, false,

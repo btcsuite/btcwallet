@@ -25,6 +25,7 @@ func TestCreateImportedAccountRejectsWalletScopeMismatch(t *testing.T) {
 	)
 	CreateImportedAccount(
 		t, store, firstWalletID, db.KeyScopeBIP0084, "seed-imported-scope",
+		false,
 	)
 
 	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
@@ -49,27 +50,30 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 		{
 			name: "missing name",
 			params: db.CreateImportedAccountParams{
-				Name:      "",
-				Scope:     db.KeyScopeBIP0084,
-				PublicKey: RandomBytes(32),
+				Name:                "",
+				Scope:               db.KeyScopeBIP0084,
+				PublicKey:           RandomBytes(32),
+				EncryptedPrivateKey: RandomBytes(32),
 			},
 			wantErr: db.ErrMissingAccountName,
 		},
 		{
 			name: "missing public key",
 			params: db.CreateImportedAccountParams{
-				Name:      "missing-pubkey",
-				Scope:     db.KeyScopeBIP0084,
-				PublicKey: nil,
+				Name:                "missing-pubkey",
+				Scope:               db.KeyScopeBIP0084,
+				PublicKey:           nil,
+				EncryptedPrivateKey: RandomBytes(32),
 			},
 			wantErr: db.ErrMissingAccountPublicKey,
 		},
 		{
 			name: "unknown scope",
 			params: db.CreateImportedAccountParams{
-				Name:      "unknown-scope",
-				Scope:     db.KeyScope{Purpose: 999, Coin: 999},
-				PublicKey: RandomBytes(32),
+				Name:                "unknown-scope",
+				Scope:               db.KeyScope{Purpose: 999, Coin: 999},
+				PublicKey:           RandomBytes(32),
+				EncryptedPrivateKey: RandomBytes(32),
 			},
 			wantErr: db.ErrUnknownKeyScope,
 		},
@@ -98,10 +102,11 @@ func TestCreateImportedAccountMissingWallet(t *testing.T) {
 	store := NewTestStore(t)
 
 	params := db.CreateImportedAccountParams{
-		WalletID:  99999,
-		Name:      "missing-wallet-imported",
-		Scope:     db.KeyScopeBIP0084,
-		PublicKey: RandomBytes(32),
+		WalletID:            99999,
+		Name:                "missing-wallet-imported",
+		Scope:               db.KeyScopeBIP0084,
+		PublicKey:           RandomBytes(32),
+		EncryptedPrivateKey: RandomBytes(32),
 	}
 
 	props, err := store.CreateImportedAccount(t.Context(), params)
@@ -118,10 +123,11 @@ func TestCreateImportedAccountValidationPrecedesWalletLookup(t *testing.T) {
 
 	props, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  99999,
-			Name:      "",
-			Scope:     db.KeyScopeBIP0084,
-			PublicKey: RandomBytes(32),
+			WalletID:            99999,
+			Name:                "",
+			Scope:               db.KeyScopeBIP0084,
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
 	require.ErrorIs(t, err, db.ErrMissingAccountName)
@@ -138,10 +144,11 @@ func TestCreateImportedAccountDuplicateName(t *testing.T) {
 	walletID := newWallet(t, store, "imported-duplicate-name-wallet")
 
 	params := db.CreateImportedAccountParams{
-		WalletID:  walletID,
-		Name:      "duplicate-imported",
-		Scope:     db.KeyScopeBIP0084,
-		PublicKey: RandomBytes(32),
+		WalletID:            walletID,
+		Name:                "duplicate-imported",
+		Scope:               db.KeyScopeBIP0084,
+		PublicKey:           RandomBytes(32),
+		EncryptedPrivateKey: RandomBytes(32),
 	}
 
 	_, err := store.CreateImportedAccount(t.Context(), params)

@@ -348,10 +348,11 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
-			WalletID:  walletID,
-			Name:      db.DefaultImportedAccountName,
-			Scope:     scope,
-			PublicKey: RandomBytes(32),
+			WalletID:            walletID,
+			Name:                db.DefaultImportedAccountName,
+			Scope:               scope,
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
@@ -378,7 +379,9 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 	)
 
 	require.False(t, derived.IsWatchOnly)
-	require.True(t, imported.IsWatchOnly)
+	// ADR 0012: an imported account on a spendable wallet carries
+	// private-key material, so it inherits the wallet's spendable state.
+	require.False(t, imported.IsWatchOnly)
 }
 
 // TestListAccountsOrdering verifies that ListAccounts returns derived accounts
@@ -393,9 +396,9 @@ func TestListAccountsOrdering(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	// Create accounts in mixed order: imported, derived, imported, derived.
-	CreateImportedAccount(t, store, walletID, scope, "imported-first")
+	CreateImportedAccount(t, store, walletID, scope, "imported-first", false)
 	createDerivedAccount(t, store, walletID, scope, "derived-0")
-	CreateImportedAccount(t, store, walletID, scope, "imported-second")
+	CreateImportedAccount(t, store, walletID, scope, "imported-second", false)
 	createDerivedAccount(t, store, walletID, scope, "derived-1")
 
 	query := db.ListAccountsQuery{
