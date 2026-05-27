@@ -715,6 +715,79 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 	return i, err
 }
 
+const GetAccountSecret = `-- name: GetAccountSecret :one
+SELECT
+    a.wallet_id,
+    ks.purpose,
+    ks.coin_type,
+    a.account_number,
+    a.account_name,
+    a.public_key,
+    acs.encrypted_private_key,
+    a.master_fingerprint
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
+WHERE
+    a.wallet_id = $1
+    AND ks.purpose = $2
+    AND ks.coin_type = $3
+    AND (
+        (
+            $4::BIGINT IS NOT NULL
+            AND a.account_number = $4::BIGINT
+        )
+        OR (
+            $5::TEXT IS NOT NULL
+            AND a.account_name = $5::TEXT
+        )
+    )
+`
+
+type GetAccountSecretParams struct {
+	WalletID      int64
+	Purpose       int64
+	CoinType      int64
+	AccountNumber sql.NullInt64
+	AccountName   sql.NullString
+}
+
+type GetAccountSecretRow struct {
+	WalletID            int64
+	Purpose             int64
+	CoinType            int64
+	AccountNumber       sql.NullInt64
+	AccountName         string
+	PublicKey           []byte
+	EncryptedPrivateKey []byte
+	MasterFingerprint   sql.NullInt64
+}
+
+// Returns account-level key material for signing. The account row is returned
+// even when no account_secrets row exists so callers can distinguish a
+// watch-only account from an absent account.
+func (q *Queries) GetAccountSecret(ctx context.Context, arg GetAccountSecretParams) (GetAccountSecretRow, error) {
+	row := q.queryRow(ctx, q.getAccountSecretStmt, GetAccountSecret,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AccountNumber,
+		arg.AccountName,
+	)
+	var i GetAccountSecretRow
+	err := row.Scan(
+		&i.WalletID,
+		&i.Purpose,
+		&i.CoinType,
+		&i.AccountNumber,
+		&i.AccountName,
+		&i.PublicKey,
+		&i.EncryptedPrivateKey,
+		&i.MasterFingerprint,
+	)
+	return i, err
+}
+
 const GetAndIncrementNextExternalIndex = `-- name: GetAndIncrementNextExternalIndex :one
 UPDATE accounts
 SET next_external_index = next_external_index + 1

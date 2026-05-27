@@ -150,6 +150,10 @@ type Querier interface {
 	GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error)
 	// Returns full account properties by account id.
 	GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error)
+	// Returns account-level key material for signing. The account row is returned
+	// even when no account_secrets row exists so callers can distinguish a
+	// watch-only account from an absent account.
+	GetAccountSecret(ctx context.Context, arg GetAccountSecretParams) (GetAccountSecretRow, error)
 	// Returns the lock ID for the current active lease on a UTXO ID.
 	//
 	// How:
