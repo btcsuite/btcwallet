@@ -108,8 +108,8 @@ func (o *createDerivedAccountOps) WalletWatchOnly(
 
 // EnsureScope implements db.CreateDerivedAccountOps. waddrmgr scopes are
 // pre-registered; the call only fetches and caches the scoped manager.
-func (o *createDerivedAccountOps) EnsureScope(_ context.Context,
-	_ uint32, scope db.KeyScope) (int64, error) {
+func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
+	scope db.KeyScope) (int64, db.ScopeAddrSchema, error) {
 
 	waddrScope := waddrmgr.KeyScope{
 		Purpose: scope.Purpose,
@@ -118,13 +118,28 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context,
 
 	scopedMgr, err := o.mgr.FetchScopedKeyManager(waddrScope)
 	if err != nil {
-		return 0, translateAccountErr(err, db.ErrAccountNotFound)
+		return 0, db.ScopeAddrSchema{}, translateAccountErr(
+			err, db.ErrAccountNotFound,
+		)
 	}
 
 	o.scope = waddrScope
 	o.scopedMgr = scopedMgr
 
-	return 0, nil
+	// Read the persisted scope schema from the waddrmgr scoped manager
+	// instead of the global ScopeAddrMap default. A scope that was
+	// created with a non-default schema (e.g. a custom BIP49 variant)
+	// surfaces its actual schema here rather than getting recomputed.
+	// per-account overrides ride on props.AddrSchema at load time.
+	waddrSchema := scopedMgr.AddrSchema()
+
+	addrSchema, err := db.ScopeAddrSchemaFromWaddrmgr(waddrSchema)
+	if err != nil {
+		return 0, db.ScopeAddrSchema{}, fmt.Errorf("scope schema: %w",
+			err)
+	}
+
+	return 0, addrSchema, nil
 }
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
@@ -593,6 +608,56 @@ func sanitizeAccountNumber(acctNum uint32) (uint32, error) {
 	return acctNum, nil
 }
 
+// effectiveAddrSchema resolves the per-account schema from the legacy
+// waddrmgr override when present, otherwise falls back to the
+// scope-level persisted schema the scoped manager reports. The
+// persisted schema covers custom (non-default) scopes that
+// db.ScopeAddrMap does not enumerate, so derived accounts under a
+// custom scope still get the correct address types instead of
+// failing with ErrUnknownKeyScope or silently picking the default
+// BIP49-plus shape.
+func effectiveAddrSchema(scopeSchema waddrmgr.ScopeAddrSchema,
+	override *waddrmgr.ScopeAddrSchema) (db.ScopeAddrSchema, error) {
+
+	source := scopeSchema
+	if override != nil {
+		source = *override
+	}
+
+	schema, err := db.ScopeAddrSchemaFromWaddrmgr(source)
+	if err != nil {
+		return db.ScopeAddrSchema{}, fmt.Errorf("convert "+
+			"scope schema: %w", err)
+	}
+
+	return schema, nil
+}
+
+// resolveMasterFingerprintForAccount returns the master-key fingerprint
+// for the account at props.AccountNumber. For imported accounts the value
+// lives on the waddrmgr watch-only row in props.MasterKeyFingerprint. For
+// derived accounts waddrmgr's default-account row has no fingerprint
+// column, so kvdb stores it in a side bucket; legacy derived rows have
+// no side-bucket entry and the wallet layer fills in the cached value
+// at the public boundary.
+func resolveMasterFingerprintForAccount(ns walletdb.ReadBucket,
+	scope waddrmgr.KeyScope,
+	props *waddrmgr.AccountProperties) (uint32, error) {
+
+	persisted, ok, err := getAccountMasterFingerprint(
+		ns, scope, props.AccountNumber,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("read master fingerprint: %w", err)
+	}
+
+	if ok {
+		return persisted, nil
+	}
+
+	return props.MasterKeyFingerprint, nil
+}
+
 // loadAccountInfo materializes a db.AccountInfo from waddrmgr's
 // AccountProperties + IsImportedAccount classifier.
 func loadAccountInfo(ns walletdb.ReadBucket,
@@ -632,26 +697,11 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, fmt.Errorf("read created-at: %w", err)
 	}
 
-	// For imported accounts the per-row master_fingerprint is the
-	// parent xpub fingerprint persisted on the watch-only row. For
-	// derived accounts waddrmgr's default-account row has no
-	// fingerprint column; the kvdb side bucket
-	// (accountMasterFingerprintBucketKey) holds it for new rows
-	// written through this adapter. Legacy derived rows have no
-	// side-bucket entry and props.MasterKeyFingerprint is 0; the
-	// wallet-layer override fills in the cached value at the public
-	// boundary for the legacy case.
-	fingerprint := props.MasterKeyFingerprint
-
-	persisted, ok, fpErr := getAccountMasterFingerprint(
-		ns, scope, props.AccountNumber,
+	fingerprint, err := resolveMasterFingerprintForAccount(
+		ns, scope, props,
 	)
-	if fpErr != nil {
-		return nil, fmt.Errorf("read master fingerprint: %w", fpErr)
-	}
-
-	if ok {
-		fingerprint = persisted
+	if err != nil {
+		return nil, err
 	}
 
 	// Imported accounts in kvdb share waddrmgr's per-scope counter
@@ -662,6 +712,13 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	accountNumberForContract := props.AccountNumber
 	if origin == db.ImportedAccount {
 		accountNumberForContract = 0
+	}
+
+	addrSchema, err := effectiveAddrSchema(
+		scopedMgr.AddrSchema(), props.AddrSchema,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &db.AccountInfo{
@@ -676,6 +733,7 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 			Purpose: scope.Purpose,
 			Coin:    scope.Coin,
 		},
+		AddrSchema:           addrSchema,
 		PublicKey:            pubKey,
 		MasterKeyFingerprint: fingerprint,
 		CreatedAt:            createdAt,

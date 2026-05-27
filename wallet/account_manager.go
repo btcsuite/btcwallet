@@ -243,6 +243,20 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		fingerprint = props.MasterKeyFingerprint
 	}
 
+	scope := db.KeyScope(props.KeyScope)
+	addrSchema := db.ScopeAddrMap[scope]
+
+	if props.AddrSchema != nil {
+		override, err := db.ScopeAddrSchemaFromWaddrmgr(*props.AddrSchema)
+		if err != nil {
+			log.Errorf("propertiesToAccountInfo: skipping invalid "+
+				"AddrSchema override (%v); falling back to scope "+
+				"default", err)
+		} else {
+			addrSchema = override
+		}
+	}
+
 	return db.AccountInfo{
 		AccountNumber:        accountNumber,
 		AccountName:          props.AccountName,
@@ -251,7 +265,8 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		InternalKeyCount:     props.InternalKeyCount,
 		ImportedKeyCount:     props.ImportedKeyCount,
 		IsWatchOnly:          isWatchOnly,
-		KeyScope:             db.KeyScope(props.KeyScope),
+		KeyScope:             scope,
+		AddrSchema:           addrSchema,
 		PublicKey:            pubKey,
 		MasterKeyFingerprint: fingerprint,
 		ConfirmedBalance:     total,
