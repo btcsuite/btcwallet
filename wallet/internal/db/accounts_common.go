@@ -314,7 +314,7 @@ func (params RenameAccountParams) Validate() error {
 
 // AccountPropsRow represents the raw database fields needed to construct
 // AccountInfo.
-type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
+type AccountPropsRow[AddrTypeId ~int16 | ~int64, AccOriginId any] struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	OriginID          AccOriginId
@@ -329,7 +329,6 @@ type AccountPropsRow[AddrTypeId, AccOriginId any] struct {
 	CoinType          int64
 	InternalTypeID    AddrTypeId
 	ExternalTypeID    AddrTypeId
-	IDToAddrType      func(AddrTypeId) (AddressType, error)
 	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
 }
 
@@ -402,10 +401,8 @@ func DerivedAddressAccountSchema[AddrTypeID ~int16 | ~int64](
 }
 
 // AccountPropsRowToInfo converts a database row containing full account
-// properties into an AccountInfo struct. The idToAddrType function is
-// used to convert the internal and external address type IDs to AddressType
-// values.
-func AccountPropsRowToInfo[AddrTypeId, AccOriginId any](
+// properties into an AccountInfo struct.
+func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
 	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountInfo, error) {
 
 	var accountNum uint32
@@ -551,7 +548,7 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
-type AccountInfoRow[AccOriginId any] struct {
+type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	AccountNumber      sql.NullInt64
 	AccountName        string
 	OriginID           AccOriginId
@@ -571,7 +568,7 @@ type AccountInfoRow[AccOriginId any] struct {
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
 // struct. It handles type conversion and validation for each field.
-func AccountRowToInfo[AccOriginId any](
+func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	row AccountInfoRow[AccOriginId]) (*AccountInfo, error) {
 
 	var accountNum uint32
