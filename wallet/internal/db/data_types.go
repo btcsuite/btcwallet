@@ -324,6 +324,24 @@ type UpdateWalletParams struct {
 	SyncedTo *Block
 }
 
+// WalletSecrets contains the encrypted secret material stored for one wallet.
+type WalletSecrets struct {
+	// MasterPrivParams are the parameters used to derive the master private
+	// key.
+	MasterPrivParams []byte
+
+	// EncryptedCryptoPrivKey is the encrypted private crypto key used to
+	// protect private keys in the database.
+	EncryptedCryptoPrivKey []byte
+
+	// EncryptedCryptoScriptKey is the encrypted script crypto key used to
+	// protect scripts in the database.
+	EncryptedCryptoScriptKey []byte
+
+	// EncryptedMasterHdPrivKey is the encrypted master HD private key.
+	EncryptedMasterHdPrivKey []byte
+}
+
 // UpdateWalletSecretsParams contains the parameters for updating a wallet's
 // secrets.
 type UpdateWalletSecretsParams struct {
