@@ -84,7 +84,7 @@ func TestRenameAccountRejectsImported(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 	name := "imported-rename"
 
-	CreateImportedAccount(t, store, walletID, scope, name)
+	CreateImportedAccount(t, store, walletID, scope, name, false)
 
 	err := store.RenameAccount(t.Context(), db.RenameAccountParams{
 		WalletID: walletID,
