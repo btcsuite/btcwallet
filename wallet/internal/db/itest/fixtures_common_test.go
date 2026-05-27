@@ -20,12 +20,23 @@ func CreateWalletParamsFixture(name string) db.CreateWalletParams {
 		ManagerVersion:           1,
 		IsWatchOnly:              false,
 		EncryptedMasterPrivKey:   RandomBytes(32),
-		MasterPubKey:             RandomBytes(32),
+		MasterPubKey:             []byte(testMasterHDPubKey),
 		MasterKeyPrivParams:      RandomBytes(16),
 		EncryptedCryptoPrivKey:   RandomBytes(32),
 		EncryptedCryptoScriptKey: RandomBytes(32),
 	}
 }
+
+// testMasterHDPubKey is a fixed, valid serialized BIP32 extended public
+// key suitable for use as wallets.master_hd_pub_key in tests. Production
+// code parses this column via hdkeychain.NewKeyFromString to derive the
+// BIP32 master fingerprint at read time, so fixtures
+// cannot use placeholder bytes.
+//
+// Derived from the waddrmgr test vector via Neuter(); fingerprint is
+// 0x73c5da0a (used by SpendableDeriveFn so create/read return the same
+// value).
+const testMasterHDPubKey = "xpub661MyMwAqRbcFkPHucMnrGNzDwb6teAX1RbKQmqtEF8kK3Z7LZ59qafCjB9eCRLiTVG3uxBxgKvRgbubRhqSKXnGGb1aoaqLrpMBDrVxga8" //nolint:lll
 
 // CreateImportedWalletParams creates test parameters for an imported wallet.
 func CreateImportedWalletParams(name string) db.CreateWalletParams {
@@ -242,8 +253,16 @@ func SpendableDeriveFn() db.AccountDerivationFunc {
 		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
 
 		data := &db.DerivedAccountData{
-			PublicKey:            RandomBytes(33),
-			MasterKeyFingerprint: 0xC0DEC0DE,
+			PublicKey: RandomBytes(33),
+			// 0x73c5da0a is the BIP32 fingerprint of the xpub returned
+			// by testMasterHDPubKey; CreateDerivedAccount on SQL
+			// ignores this field (writes NULL) and
+			// reads derive the value from wallets.master_hd_pub_key,
+			// so the create-return AccountInfo and re-read AccountInfo
+			// would otherwise disagree. Setting this to the matching
+			// value keeps the regression test for fingerprint
+			// round-tripping meaningful.
+			MasterKeyFingerprint: 0x73c5da0a,
 		}
 		if !walletIsWatchOnly {
 			data.EncryptedPrivateKey = RandomBytes(48)

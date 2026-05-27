@@ -54,8 +54,27 @@ CREATE TABLE accounts (
     -- Reference to the origin of the account.
     origin_id INTEGER NOT NULL,
 
-    -- Master fingerprint is the fingerprint of the master pub key that created
-    -- this account.
+    -- BIP32 master-key fingerprint (HASH160(serialized master pubkey)[0:4],
+    -- big-endian) used by hardware wallets and PSBT signers
+    -- (PSBT_IN_BIP32_DERIVATION.MasterFingerprint) to identify the BIP32
+    -- root chain.
+    --
+    -- Stored per origin to keep a single source of truth for each
+    -- logical fact:
+    --
+    --   * Imported (origin_id = 1): identifies the parent of the
+    --     imported xpub. Per-account metadata with no wallet-level
+    --     analog, so it is stored here NOT NULL.
+    --   * Derived (origin_id = 0): identifies the wallet's BIP32
+    --     master, which is exactly HASH160(wallets.master_hd_pub_key)[0:4].
+    --     To avoid two sources of truth that can drift, derived rows
+    --     store NULL here; the read path JOINs wallets and computes
+    --     the fingerprint via the Go helper
+    --     MasterKeyFingerprintFromExtKeyBytes in
+    --     wallet/internal/db/accounts_common.go.
+    --
+    -- The CHECK constraint below enforces this invariant at the
+    -- database boundary.
     master_fingerprint INTEGER,
 
     -- Public key for the account. Stored plaintext per ADR 0009
@@ -82,6 +101,13 @@ CREATE TABLE accounts (
 
     -- Imported address counter must be non-negative.
     CHECK (imported_key_count >= 0),
+
+    -- Enforce the master_fingerprint SSOT invariant documented on the
+    -- column above.
+    CHECK (
+        (origin_id = 1 AND master_fingerprint IS NOT NULL)
+        OR (origin_id = 0 AND master_fingerprint IS NULL)
+    ),
 
     -- Composite foreign key to key scopes. This ensures scope_id belongs to
     -- the same wallet_id as the account row. Wallet ownership is transitively

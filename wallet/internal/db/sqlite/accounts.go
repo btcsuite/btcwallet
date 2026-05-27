@@ -159,10 +159,12 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 			AccountName: name,
 			OriginID:    int64(db.DerivedAccount),
 			PublicKey:   derived.PublicKey,
-			MasterFingerprint: sql.NullInt64{
-				Int64: int64(derived.MasterKeyFingerprint),
-				Valid: true,
-			},
+			// Derived accounts inherit their fingerprint from the
+			// wallet's master HD pubkey at read time. Schema CHECK
+			// requires NULL here for derived rows; see the column
+			// comment on accounts.master_fingerprint in migration
+			// 000005_accounts.up.sql.
+			MasterFingerprint: sql.NullInt64{Valid: false},
 		},
 	)
 	if err != nil {
@@ -346,19 +348,20 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	return db.AccountPropsRowToInfo(db.AccountPropsRow[int64, int64]{
-		AccountNumber:     row.AccountNumber,
-		AccountName:       row.AccountName,
-		OriginID:          row.OriginID,
-		ExternalKeyCount:  row.ExternalKeyCount,
-		InternalKeyCount:  row.InternalKeyCount,
-		ImportedKeyCount:  row.ImportedKeyCount,
-		PublicKey:         row.PublicKey,
-		MasterFingerprint: row.MasterFingerprint,
-		IsWatchOnly:       row.IsWatchOnly,
-		CreatedAt:         row.CreatedAt,
-		Purpose:           row.Purpose,
-		CoinType:          row.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int64],
+		AccountNumber:        row.AccountNumber,
+		AccountName:          row.AccountName,
+		OriginID:             row.OriginID,
+		ExternalKeyCount:     row.ExternalKeyCount,
+		InternalKeyCount:     row.InternalKeyCount,
+		ImportedKeyCount:     row.ImportedKeyCount,
+		PublicKey:            row.PublicKey,
+		MasterFingerprint:    row.MasterFingerprint,
+		WalletMasterHDPubKey: row.WalletMasterHdPubKey,
+		IsWatchOnly:          row.IsWatchOnly,
+		CreatedAt:            row.CreatedAt,
+		Purpose:              row.Purpose,
+		CoinType:             row.CoinType,
+		IDToOriginType:       db.IDToAccountOrigin[int64],
 	})
 }
 
@@ -373,6 +376,30 @@ type accountInfoRow interface {
 		sqlc.ListAccountsByWalletRow |
 		sqlc.ListAccountsByWalletScopeRow |
 		sqlc.ListAccountsByWalletAndNameRow
+}
+
+// processAccountRows converts a batch of sqlc account rows into AccountInfo
+// slices and captures account IDs for the balance lookup. The getID closure
+// extracts the account ID from each row because Go generics don't allow
+// direct field access on a type-parameter constrained by a union.
+func processAccountRows[T accountInfoRow](
+	rows []T, getID func(T) int64) (
+	[]db.AccountInfo, []int64, error) {
+
+	infos := make([]db.AccountInfo, len(rows))
+	ids := make([]int64, len(rows))
+
+	for i := range rows {
+		info, err := accountRowToInfo(rows[i])
+		if err != nil {
+			return nil, nil, err
+		}
+
+		infos[i] = *info
+		ids[i] = getID(rows[i])
+	}
+
+	return infos, ids, nil
 }
 
 // derivedAddressGetAccountID extracts the account ID from a row.
@@ -416,19 +443,20 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int64]{
-		AccountNumber:     base.AccountNumber,
-		AccountName:       base.AccountName,
-		OriginID:          base.OriginID,
-		ExternalKeyCount:  base.ExternalKeyCount,
-		InternalKeyCount:  base.InternalKeyCount,
-		ImportedKeyCount:  base.ImportedKeyCount,
-		PublicKey:         base.PublicKey,
-		MasterFingerprint: base.MasterFingerprint,
-		IsWatchOnly:       base.IsWatchOnly,
-		CreatedAt:         base.CreatedAt,
-		Purpose:           base.Purpose,
-		CoinType:          base.CoinType,
-		IDToOriginType:    db.IDToAccountOrigin[int64],
+		AccountNumber:        base.AccountNumber,
+		AccountName:          base.AccountName,
+		OriginID:             base.OriginID,
+		ExternalKeyCount:     base.ExternalKeyCount,
+		InternalKeyCount:     base.InternalKeyCount,
+		ImportedKeyCount:     base.ImportedKeyCount,
+		PublicKey:            base.PublicKey,
+		MasterFingerprint:    base.MasterFingerprint,
+		WalletMasterHDPubKey: base.WalletMasterHdPubKey,
+		IsWatchOnly:          base.IsWatchOnly,
+		CreatedAt:            base.CreatedAt,
+		Purpose:              base.Purpose,
+		CoinType:             base.CoinType,
+		IDToOriginType:       db.IDToAccountOrigin[int64],
 	})
 }
 
@@ -454,20 +482,14 @@ func (s accountListQueries) byScope(ctx context.Context,
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
 
-	infos, err := db.ProcessAccountRows(
-		rows,
-		func(r sqlc.ListAccountsByWalletScopeRow) (*db.AccountInfo, int64,
-			error) {
-
-			info, err := accountRowToInfo(r)
-			return info, r.ID, err
-		},
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletScopeRow) int64 { return r.ID },
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.attachBalances(ctx, query, infos)
+	return s.attachBalances(ctx, query, infos, ids)
 }
 
 // byName lists accounts filtered by wallet ID and account name, then
@@ -486,20 +508,14 @@ func (s accountListQueries) byName(ctx context.Context,
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
 
-	infos, err := db.ProcessAccountRows(
-		rows,
-		func(r sqlc.ListAccountsByWalletAndNameRow) (*db.AccountInfo, int64,
-			error) {
-
-			info, err := accountRowToInfo(r)
-			return info, r.ID, err
-		},
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletAndNameRow) int64 { return r.ID },
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.attachBalances(ctx, query, infos)
+	return s.attachBalances(ctx, query, infos, ids)
 }
 
 // all lists every account for a wallet, then attaches each account's
@@ -512,56 +528,57 @@ func (s accountListQueries) all(ctx context.Context,
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
 
-	infos, err := db.ProcessAccountRows(
-		rows,
-		func(r sqlc.ListAccountsByWalletRow) (*db.AccountInfo, int64,
-			error) {
-
-			info, err := accountRowToInfo(r)
-			return info, r.ID, err
-		},
+	infos, ids, err := processAccountRows(
+		rows, func(r sqlc.ListAccountsByWalletRow) int64 { return r.ID },
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.attachBalances(ctx, query, infos)
+	return s.attachBalances(ctx, query, infos, ids)
 }
 
-// attachBalances forwards to db.AttachBalances with a backend-specific
-// closure that runs AccountBalancesByIDs and converts the sqlc rows into
-// the dialect-agnostic db.AccountBalance shape.
+// attachBalances issues the AccountBalancesByIDs batch query, scoped to
+// and merges each returned (account_id, confirmed, unconfirmed) tuple
+// into the matching AccountInfo entry. The dispatch is skipped when
+// query.SkipBalance is true or there are no infos to enrich, in which
+// case every entry keeps zero balance fields.
 func (s accountListQueries) attachBalances(ctx context.Context,
-	query db.ListAccountsQuery,
-	infos []*db.AccountInfo) ([]db.AccountInfo, error) {
+	query db.ListAccountsQuery, infos []db.AccountInfo,
+	ids []int64) ([]db.AccountInfo, error) {
 
-	return db.AttachBalances(
-		ctx, query.WalletID, query.SkipBalance, infos,
-		func(ctx context.Context, walletID uint32,
-			ids []int64) ([]db.AccountBalance, error) {
+	if query.SkipBalance || len(infos) == 0 {
+		return infos, nil
+	}
 
-			rows, err := s.q.AccountBalancesByIDs(
-				ctx, sqlc.AccountBalancesByIDsParams{
-					WalletID:   int64(walletID),
-					AccountIds: ids,
-				},
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			balances := make([]db.AccountBalance, len(rows))
-			for i := range rows {
-				balances[i] = db.AccountBalance{
-					AccountID:   rows[i].AccountID,
-					Confirmed:   rows[i].ConfirmedBalance,
-					Unconfirmed: rows[i].UnconfirmedBalance,
-				}
-			}
-
-			return balances, nil
+	balances, err := s.q.AccountBalancesByIDs(
+		ctx, sqlc.AccountBalancesByIDsParams{
+			WalletID:   int64(query.WalletID),
+			AccountIds: ids,
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("account balances: %w", err)
+	}
+
+	byID := make(map[int64]sqlc.AccountBalancesByIDsRow, len(balances))
+	for i := range balances {
+		byID[balances[i].AccountID] = balances[i]
+	}
+
+	for i, id := range ids {
+		bal, ok := byID[id]
+		if !ok {
+			continue
+		}
+
+		infos[i].ConfirmedBalance = btcutil.Amount(bal.ConfirmedBalance)
+		infos[i].UnconfirmedBalance = btcutil.Amount(
+			bal.UnconfirmedBalance,
+		)
+	}
+
+	return infos, nil
 }
 
 // accountGetQueries groups SQLite account retrieval query methods.
