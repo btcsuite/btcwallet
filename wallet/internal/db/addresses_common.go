@@ -167,11 +167,6 @@ func (p NewImportedAddressParams) HasScript() bool {
 	return len(p.EncryptedScript) > 0
 }
 
-// IsWatchOnly returns true if the params do not include private key material.
-func (p NewImportedAddressParams) IsWatchOnly() bool {
-	return !p.HasPrivateKey()
-}
-
 // IDToOrigin safely converts an integer to AccountOrigin. It returns an error
 // if the value is outside [DerivedAccount, ImportedAccount].
 func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
