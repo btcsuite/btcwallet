@@ -22,6 +22,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
@@ -76,6 +77,10 @@ var (
 
 	// ErrNilTxIntent is returned when a nil `TxIntent` is provided.
 	ErrNilTxIntent = errors.New("nil TxIntent")
+
+	// errNegativeHeight is returned when a height expected to be non-negative
+	// is negative.
+	errNegativeHeight = errors.New("negative height")
 )
 
 var (
@@ -881,9 +886,29 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 	}
 }
 
+// constantInputCredit is a wallet-owned output usable by constantInputSource.
+type constantInputCredit interface {
+	db.UtxoInfo | wtxmgr.Credit
+}
+
 // constantInputSource creates an input source function that always returns the
 // static set of user-selected UTXOs.
-func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+func constantInputSource[T constantInputCredit](
+	eligible []T) txauthor.InputSource {
+
+	switch eligible := any(eligible).(type) {
+	case []db.UtxoInfo:
+		return constantUtxoInputSource(eligible)
+
+	case []wtxmgr.Credit:
+		return constantCreditInputSource(eligible)
+	}
+
+	return constantUtxoInputSource(nil)
+}
+
+// constantUtxoInputSource adapts static UTXO info into an input source.
+func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	// Current inputs and their total value. These won't change over
 	// different invocations as we want our inputs to remain static since
 	// they're selected by the user.
@@ -907,6 +932,44 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 		return currentTotal, currentInputs, currentInputValues,
 			currentScripts, nil
 	}
+}
+
+// constantCreditInputSource adapts static legacy credits into an input source.
+func constantCreditInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	utxos := make([]db.UtxoInfo, len(eligible))
+	for i := range eligible {
+		height := db.UnminedHeight
+		if eligible[i].Height >= 0 {
+			confirmedHeight, err := nonNegativeHeightToUint32(
+				eligible[i].Height,
+			)
+			if err != nil {
+				continue
+			}
+
+			height = confirmedHeight
+		}
+
+		utxos[i] = db.UtxoInfo{
+			OutPoint:     eligible[i].OutPoint,
+			Amount:       eligible[i].Amount,
+			PkScript:     eligible[i].PkScript,
+			Received:     eligible[i].Received,
+			FromCoinBase: eligible[i].FromCoinBase,
+			Height:       height,
+		}
+	}
+
+	return constantUtxoInputSource(utxos)
+}
+
+// nonNegativeHeightToUint32 converts a non-negative block height to uint32.
+func nonNegativeHeightToUint32(height int32) (uint32, error) {
+	if height < 0 {
+		return 0, fmt.Errorf("%w: %d", errNegativeHeight, height)
+	}
+
+	return uint32(height), nil
 }
 
 // filterEligibleOutputs finds eligible outputs for the given key scope and
