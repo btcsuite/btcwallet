@@ -95,8 +95,24 @@ type CreateWalletParams struct {
 	PrivatePassphrase []byte
 }
 
-// validate ensures that the parameters are consistent with the chosen creation
-// mode.
+// validateInitialAccountsMode enforces the ADR 0012 wallet-level watch-only
+// invariant against the params before any on-disk artifact is created. A
+// non-watch-only wallet cannot ship with watch-only InitialAccounts; the
+// import would later be rejected by requireAccountPrivKeyOnSpendable but
+// only after the wallet row had already been written. The check fires
+// once at create time so the failure is atomic.
+func validateInitialAccountsMode(params CreateWalletParams) error {
+	if params.WatchOnly || len(params.InitialAccounts) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%w: cannot create a non-watch-only wallet with "+
+		"InitialAccounts; xpub-only imports require WatchOnly=true",
+		ErrWalletParams)
+}
+
+// validate ensures that the parameters are consistent with the chosen
+// creation mode.
 //
 // We skip cyclop because this method performs exhaustive validation of
 // mutually exclusive fields across all creation modes.
@@ -207,6 +223,16 @@ func (m *Manager) Create(cfg Config,
 	params CreateWalletParams) (*Wallet, error) {
 
 	rootKey, err := m.prepareWalletCreation(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
+	// spendable. Validate the params.InitialAccounts list upfront so a
+	// mismatched-mode create fails before DBCreateWallet runs (otherwise
+	// the wallet row exists on disk while importInitialAccounts later
+	// rejects an entry, leaving a half-created wallet).
+	err = validateInitialAccountsMode(params)
 	if err != nil {
 		return nil, err
 	}
