@@ -419,6 +419,12 @@ type AccountInfo struct {
 	// derivation path and the default address schema.
 	KeyScope KeyScope
 
+	// AddrSchema is the effective address schema for the account. SQL backends
+	// expose the key-scope schema because they do not currently model legacy
+	// per-account schema overrides; kvdb uses the waddrmgr account override
+	// when one is present.
+	AddrSchema ScopeAddrSchema
+
 	// PublicKey is the account-level extended public key in plaintext.
 	// It is set for both derived and imported accounts where the wallet
 	// knows the account public material.

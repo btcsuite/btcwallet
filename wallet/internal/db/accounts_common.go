@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 var (
@@ -89,10 +90,14 @@ type CreateDerivedAccountOps interface {
 	// watch-only mode.
 	WalletWatchOnly(ctx context.Context, walletID uint32) (bool, error)
 
-	// EnsureScope returns the existing or newly created key-scope row ID for
-	// the wallet/scope pair.
+	// EnsureScope returns the existing or newly created key-scope row ID
+	// for the wallet/scope pair together with the schema persisted for that
+	// scope. The persisted schema may differ from ScopeAddrMap when the
+	// scope was originally created with a non-default override (e.g. an
+	// imported account that overrode the BIP44 / BIP49 / BIP84 / BIP86
+	// defaults).
 	EnsureScope(ctx context.Context, walletID uint32,
-		scope KeyScope) (int64, error)
+		scope KeyScope) (int64, ScopeAddrSchema, error)
 
 	// AllocateAccountNumber advances and returns the next derived account
 	// number for the provided scope row.
@@ -211,7 +216,9 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, fmt.Errorf("wallet watch only: %w", err)
 	}
 
-	scopeID, err := ops.EnsureScope(ctx, params.WalletID, params.Scope)
+	scopeID, addrSchema, err := ops.EnsureScope(
+		ctx, params.WalletID, params.Scope,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("ensure scope: %w", err)
 	}
@@ -249,7 +256,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 
 	return BuildAccountInfo(
 		accNumber, params.Name, DerivedAccount, 0, 0, 0,
-		walletIsWatchOnly, row.CreatedAt, params.Scope,
+		walletIsWatchOnly, row.CreatedAt, params.Scope, addrSchema,
 		derived.PublicKey, derived.MasterKeyFingerprint,
 		0, 0,
 	), nil
@@ -445,6 +452,13 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
 		return nil, err
 	}
 
+	addrSchema, err := DerivedAddressAccountSchema(
+		row.InternalTypeID, row.ExternalTypeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("address schema: %w", err)
+	}
+
 	return &AccountInfo{
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
@@ -458,6 +472,7 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
 			Purpose: purposeNum,
 			Coin:    coinTypeNum,
 		},
+		AddrSchema:  addrSchema,
 		IsWatchOnly: row.IsWatchOnly,
 		CreatedAt:   row.CreatedAt,
 	}, nil
@@ -495,6 +510,68 @@ func ListAccounts[T any, Args any](ctx context.Context,
 	return accountInfosFromRows(rows, toInfo)
 }
 
+// addrTypeFromWaddrmgr maps a legacy waddrmgr.AddressType to the database
+// AddressType. The two enums share names but not ordinal values, so a direct
+// cast would corrupt the schema (e.g. waddrmgr.PubKeyHash=0 collides with
+// db.RawPubKey=0). Script-bearing variants are folded into their hashing
+// counterparts because ScopeAddrSchema does not carry script metadata.
+func addrTypeFromWaddrmgr(t waddrmgr.AddressType) (AddressType, error) {
+	switch t {
+	case waddrmgr.RawPubKey:
+		return RawPubKey, nil
+
+	case waddrmgr.PubKeyHash:
+		return PubKeyHash, nil
+
+	case waddrmgr.Script:
+		return ScriptHash, nil
+
+	case waddrmgr.NestedWitnessPubKey:
+		return NestedWitnessPubKey, nil
+
+	case waddrmgr.WitnessPubKey:
+		return WitnessPubKey, nil
+
+	case waddrmgr.WitnessScript:
+		return WitnessScript, nil
+
+	case waddrmgr.TaprootPubKey:
+		return TaprootPubKey, nil
+
+	case waddrmgr.TaprootScript:
+		// ScopeAddrSchema does not carry script metadata; collapse the
+		// script-bearing taproot type onto its pubkey-hash counterpart
+		// so the schema round-trip stays lossless for the type axis.
+		return TaprootPubKey, nil
+
+	default:
+		return 0, fmt.Errorf("%w: waddrmgr address type %d",
+			ErrInvalidParam, t)
+	}
+}
+
+// ScopeAddrSchemaFromWaddrmgr converts a legacy address-manager schema into
+// the database account schema shape. An unknown address type is surfaced as
+// ErrInvalidParam rather than coerced to a different enum value.
+func ScopeAddrSchemaFromWaddrmgr(
+	schema waddrmgr.ScopeAddrSchema) (ScopeAddrSchema, error) {
+
+	external, err := addrTypeFromWaddrmgr(schema.ExternalAddrType)
+	if err != nil {
+		return ScopeAddrSchema{}, fmt.Errorf("external: %w", err)
+	}
+
+	internal, err := addrTypeFromWaddrmgr(schema.InternalAddrType)
+	if err != nil {
+		return ScopeAddrSchema{}, fmt.Errorf("internal: %w", err)
+	}
+
+	return ScopeAddrSchema{
+		ExternalAddrType: external,
+		InternalAddrType: internal,
+	}, nil
+}
+
 // getAddrSchemaForScope returns the address schema for a given key scope or
 // returns an error if the scope is not in ScopeAddrMap.
 func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
@@ -515,7 +592,7 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 func BuildAccountInfo(accountNum uint32, accountName string,
 	origin AccountOrigin, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
-	scope KeyScope, publicKey []byte,
+	scope KeyScope, addrSchema ScopeAddrSchema, publicKey []byte,
 	masterKeyFingerprint uint32,
 	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
 
@@ -531,6 +608,7 @@ func BuildAccountInfo(accountNum uint32, accountName string,
 		IsWatchOnly:          isWatchOnly,
 		CreatedAt:            createdAt,
 		KeyScope:             scope,
+		AddrSchema:           addrSchema,
 		PublicKey:            publicKey,
 		MasterKeyFingerprint: masterKeyFingerprint,
 	}
@@ -561,6 +639,8 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	CreatedAt          time.Time
 	Purpose            int64
 	CoinType           int64
+	InternalTypeID     AccOriginId
+	ExternalTypeID     AccOriginId
 	ConfirmedBalance   int64
 	UnconfirmedBalance int64
 	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
@@ -611,10 +691,17 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		}
 	}
 
+	addrSchema, err := DerivedAddressAccountSchema(
+		row.InternalTypeID, row.ExternalTypeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("address schema: %w", err)
+	}
+
 	return BuildAccountInfo(
 		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
-		KeyScope{Purpose: purposeNum, Coin: coinTypeNum},
+		KeyScope{Purpose: purposeNum, Coin: coinTypeNum}, addrSchema,
 		row.PublicKey, fingerprint,
 		btcutil.Amount(row.ConfirmedBalance),
 		btcutil.Amount(row.UnconfirmedBalance),
@@ -627,16 +714,26 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	ctx context.Context, getter func(context.Context, GetArgs) (Row, error),
 	getArgs GetArgs, creator func(context.Context, CreateArgs) (int64, error),
 	createArgs func(ScopeAddrSchema) CreateArgs, rowToID func(Row) int64,
-	scope KeyScope, schemaOverride *ScopeAddrSchema) (int64, error) {
+	rowToSchema func(Row) (ScopeAddrSchema, error),
+	scope KeyScope, schemaOverride *ScopeAddrSchema,
+) (int64, ScopeAddrSchema, error) {
 
 	scopeInfo, err := getter(ctx, getArgs)
 	if err == nil {
-		// Fast path: when the scope already exists.
-		return rowToID(scopeInfo), nil
+		// Fast path: when the scope already exists. Use the persisted
+		// schema so callers see whatever was originally stored, not the
+		// caller's override or the ScopeAddrMap default.
+		persisted, err := rowToSchema(scopeInfo)
+		if err != nil {
+			return 0, ScopeAddrSchema{}, fmt.Errorf("scope "+
+				"schema: %w", err)
+		}
+
+		return rowToID(scopeInfo), persisted, nil
 	}
 
 	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("check key scope: %w", err)
+		return 0, ScopeAddrSchema{}, fmt.Errorf("check key scope: %w", err)
 	}
 
 	var addrSchema ScopeAddrSchema
@@ -645,7 +742,7 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	} else {
 		defaultAddrSchema, err := getAddrSchemaForScope(scope)
 		if err != nil {
-			return 0, err
+			return 0, ScopeAddrSchema{}, err
 		}
 
 		addrSchema = defaultAddrSchema
@@ -658,23 +755,31 @@ func EnsureKeyScope[Row any, GetArgs any, CreateArgs any](
 	// return sql.ErrNoRows.
 	id, err := creator(ctx, createArgs(addrSchema))
 	if err == nil {
-		return id, nil
+		return id, addrSchema, nil
 	}
 
 	if !errors.Is(err, sql.ErrNoRows) {
 		// A real database error occurred (not a conflict).
-		return 0, fmt.Errorf("create key scope: %w", err)
+		return 0, ScopeAddrSchema{}, fmt.Errorf("create key scope: %w", err)
 	}
 
 	// ErrNoRows means the scope was created concurrently by another process
 	// (the INSERT hit DO NOTHING due to conflict). Re-fetch the scope that
-	// now exists.
+	// now exists so we return the schema that actually landed in the DB,
+	// not the one we tried to insert.
 	scopeInfo, err = getter(ctx, getArgs)
 	if err != nil {
-		return 0, fmt.Errorf("get scope after create: %w", err)
+		return 0, ScopeAddrSchema{}, fmt.Errorf("get scope after "+
+			"create: %w", err)
 	}
 
-	return rowToID(scopeInfo), nil
+	persisted, err := rowToSchema(scopeInfo)
+	if err != nil {
+		return 0, ScopeAddrSchema{}, fmt.Errorf("scope schema after "+
+			"create: %w", err)
+	}
+
+	return rowToID(scopeInfo), persisted, nil
 }
 
 // GetAccountFunc defines a function signature for retrieving a single account.
