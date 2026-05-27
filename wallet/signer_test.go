@@ -945,6 +945,109 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	require.NoError(t, vm.Execute(), "script execution failed")
 }
 
+// TestComputeUnlockingScriptSQLOnlyAccount verifies that signing can derive a
+// private key from SQL account secrets when the account does not exist in
+// legacy waddrmgr.
+func TestComputeUnlockingScriptSQLOnlyAccount(t *testing.T) {
+	t.Parallel()
+
+	w, chain := newSQLAddressSigningWallet(t)
+	_, err := w.NewAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, "secondary",
+	)
+	require.NoError(t, err)
+
+	chain.On(
+		"NotifyReceived",
+		mock.MatchedBy(func(addrs []btcutil.Address) bool {
+			return len(addrs) == 1
+		}),
+	).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	_, err = w.loadManagedPubKeyAddr(addr)
+	require.Error(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+	require.Nil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+
+	tx.TxIn[0].Witness = script.Witness
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+}
+
+// TestResolveDerivedPrivKeyFromStoreRejectsWatchOnly verifies that the
+// store-only signer branch returns a precise error for accounts without
+// encrypted private key material.
+func TestResolveDerivedPrivKeyFromStoreRejectsWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	path := waddrmgr.DerivationPath{InternalAccount: 3}
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountNumber: &path.InternalAccount,
+	}
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		&db.AccountSecret{AccountNumber: path.InternalAccount}, nil,
+	).Once()
+
+	_, err := w.resolveDerivedPrivKeyFromStore(
+		t.Context(), waddrmgr.KeyScopeBIP0084, path,
+	)
+	require.ErrorIs(t, err, ErrWatchOnlyAccount)
+}
+
+// TestResolveDerivedPrivKeyFromStoreAbsentAccount verifies that a missing
+// account row terminates the store-only signer branch with
+// ErrAccountNotInStore.
+func TestResolveDerivedPrivKeyFromStoreAbsentAccount(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	path := waddrmgr.DerivationPath{InternalAccount: 7}
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountNumber: &path.InternalAccount,
+	}
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		(*db.AccountSecret)(nil), db.ErrAccountNotFound,
+	).Once()
+
+	_, err := w.resolveDerivedPrivKeyFromStore(
+		t.Context(), waddrmgr.KeyScopeBIP0084, path,
+	)
+	require.ErrorIs(t, err, ErrAccountNotInStore)
+}
+
 // TestGetPrivKeyForAddressSQLDerivedAddress verifies that GetPrivKeyForAddress
 // recovers the private key for an address whose only persistent record lives
 // in the SQL store.
@@ -1159,7 +1262,7 @@ func TestResolvePrivKeyFallsBackAfterCacheMiss(t *testing.T) {
 	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil).Once()
 
 	// Act: Resolve the private key for the managed pubkey address.
-	resolvedPrivKey, err := w.resolvePrivKey(mocks.pubKeyAddr)
+	resolvedPrivKey, err := w.resolvePrivKey(t.Context(), mocks.pubKeyAddr)
 	require.NoError(t, err)
 
 	// Assert: The fallback path returns the same private key bytes.
@@ -1335,10 +1438,22 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 	legacyDB, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 
-	addrStore := newSpendableAddressManager(t, legacyDB)
+	addrStore, rootKey := newSpendableAddressManager(t, legacyDB)
 	t.Cleanup(func() {
 		addrStore.Close()
 	})
+	t.Cleanup(rootKey.Zero)
+
+	masterFingerprint, err := masterKeyFingerprint(rootKey)
+	require.NoError(t, err)
+
+	encryptedRoot, err := addrStore.Encrypt(
+		waddrmgr.CKTPrivate, []byte(rootKey.String()),
+	)
+	require.NoError(t, err)
+
+	rootPub, err := rootKey.Neuter()
+	require.NoError(t, err)
 
 	var w *Wallet
 
@@ -1361,8 +1476,8 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 		t.Context(), db.CreateWalletParams{
 			Name:                     "sql-signing",
 			ManagerVersion:           1,
-			EncryptedMasterPrivKey:   []byte{1},
-			MasterPubKey:             []byte{2},
+			EncryptedMasterPrivKey:   encryptedRoot,
+			MasterPubKey:             []byte(rootPub.String()),
 			MasterKeyPrivParams:      []byte{3},
 			EncryptedCryptoPrivKey:   []byte{4},
 			EncryptedCryptoScriptKey: []byte{5},
@@ -1375,16 +1490,18 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 			WalletID: walletInfo.ID,
 			Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			Name:     "default",
-		}, testAccountDerivationFunc(),
+		}, newAccountDeriveFn(rootKey, addrStore, masterFingerprint),
 	)
 	require.NoError(t, err)
 
 	chain := &bwmock.Chain{}
 	w = &Wallet{
-		addrStore: addrStore,
-		store:     store,
-		keyVault:  addrStore,
-		state:     newWalletState(nil),
+		addrStore:         addrStore,
+		store:             store,
+		cache:             newStoreRuntimeCache(store),
+		keyVault:          addrStore,
+		state:             newWalletState(nil),
+		masterFingerprint: masterFingerprint,
 		cfg: Config{
 			DB:          legacyDB,
 			Chain:       chain,
@@ -1405,9 +1522,9 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 }
 
 // newSpendableAddressManager creates and unlocks a deterministic legacy
-// waddrmgr manager for signer integration tests.
+// waddrmgr manager and returns its root key for signer integration tests.
 func newSpendableAddressManager(t *testing.T,
-	dbConn walletdb.DB) *waddrmgr.Manager {
+	dbConn walletdb.DB) (*waddrmgr.Manager, *hdkeychain.ExtendedKey) {
 
 	t.Helper()
 
@@ -1452,7 +1569,7 @@ func newSpendableAddressManager(t *testing.T,
 	})
 	require.NoError(t, err)
 
-	return mgr
+	return mgr, rootKey
 }
 
 // testAccountDerivationFunc returns minimal spendable account material for SQL
