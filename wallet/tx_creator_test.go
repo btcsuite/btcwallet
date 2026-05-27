@@ -1,7 +1,6 @@
 package wallet
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -12,19 +11,11 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 var (
-	// errStrategy is used to simulate failures in coin selection
-	// strategies within tests.
-	errStrategy = errors.New("strategy error")
-
-	// errDB is used to simulate database operation failures within tests.
-	errDB = errors.New("db error")
-
 	// defaultAccountName is the name of the default account.
 	defaultAccountName = "default"
 )
@@ -411,19 +402,6 @@ func TestDetermineChangeSource(t *testing.T) {
 			require.Equal(t, tc.expectedSource, source)
 		})
 	}
-}
-
-type mockReadBucket struct {
-	walletdb.ReadBucket
-}
-
-type mockReadTx struct {
-	walletdb.ReadTx
-}
-
-// ReadBucket returns a stub read bucket for UTXO tests.
-func (m *mockReadTx) ReadBucket(key []byte) walletdb.ReadBucket {
-	return &mockReadBucket{}
 }
 
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
