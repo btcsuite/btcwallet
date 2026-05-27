@@ -252,8 +252,8 @@ type Block struct {
 	// Height is the height of the block in the blockchain.
 	Height uint32
 
-	// Timestamp is the timestamp of the block, which is used for wallet
-	// synchronization and rescan operations.
+	// Timestamp is the UTC timestamp of the block, which is used for
+	// wallet synchronization and rescan operations.
 	Timestamp time.Time
 }
 
