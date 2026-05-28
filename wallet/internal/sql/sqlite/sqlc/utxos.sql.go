@@ -229,22 +229,45 @@ SELECT
     a.script_pub_key,
     t.received_time,
     t.is_coinbase,
-    t.block_height
+    t.block_height,
+    -- Enrichment columns derived from the ownership joins below.
+    acc.account_name, -- owning account
+    acc.origin_id, -- derived vs imported account
+    a.type_id, -- address type, used for coin selection
+    ks.purpose, -- BIP-43 key scope purpose
+    ks.coin_type, -- BIP-43 key scope coin type
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    asec.encrypted_script IS NOT NULL AS has_script,
+    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- now_utc is a caller-supplied current UTC timestamp used for the lease
+    -- expiry comparison; passed in rather than read from the DB clock so results
+    -- are deterministic/testable and consistent with the Balance/lease queries.
+    CASE
+        WHEN
+            l.utxo_id IS NOT NULL
+            AND l.expires_at > ?1 THEN 1
+        ELSE 0
+    END AS is_locked
 FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
+LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 WHERE
-    t.wallet_id = ?1
-    AND ks.wallet_id = ?1
-    AND t.tx_hash = ?2
-    AND u.output_index = ?3
+    t.wallet_id = ?2
+    AND ks.wallet_id = ?2
+    AND t.tx_hash = ?3
+    AND u.output_index = ?4
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
 `
 
 type GetUtxoByOutpointParams struct {
+	NowUtc      time.Time
 	WalletID    int64
 	TxHash      []byte
 	OutputIndex int64
@@ -258,6 +281,13 @@ type GetUtxoByOutpointRow struct {
 	ReceivedTime time.Time
 	IsCoinbase   bool
 	BlockHeight  sql.NullInt64
+	AccountName  string
+	OriginID     int64
+	TypeID       int64
+	Purpose      int64
+	CoinType     int64
+	HasScript    bool
+	IsLocked     int64
 }
 
 // Retrieves a single unspent UTXO by its outpoint.
@@ -276,7 +306,12 @@ type GetUtxoByOutpointRow struct {
 //   - The wallet-scoped tx hash lookup and unique outpoint constraint keep the
 //     join fanout to at most one candidate output.
 func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointParams) (GetUtxoByOutpointRow, error) {
-	row := q.queryRow(ctx, q.getUtxoByOutpointStmt, GetUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.queryRow(ctx, q.getUtxoByOutpointStmt, GetUtxoByOutpoint,
+		arg.NowUtc,
+		arg.WalletID,
+		arg.TxHash,
+		arg.OutputIndex,
+	)
 	var i GetUtxoByOutpointRow
 	err := row.Scan(
 		&i.TxHash,
@@ -286,6 +321,13 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.ReceivedTime,
 		&i.IsCoinbase,
 		&i.BlockHeight,
+		&i.AccountName,
+		&i.OriginID,
+		&i.TypeID,
+		&i.Purpose,
+		&i.CoinType,
+		&i.HasScript,
+		&i.IsLocked,
 	)
 	return i, err
 }
@@ -527,44 +569,55 @@ SELECT
     a.script_pub_key,
     t.received_time,
     t.is_coinbase,
-    t.block_height
+    t.block_height,
+    -- Enrichment columns derived from the ownership joins below.
+    acc.account_name, -- owning account
+    acc.origin_id, -- derived vs imported account
+    a.type_id, -- address type, used for coin selection
+    ks.purpose, -- BIP-43 key scope purpose
+    ks.coin_type, -- BIP-43 key scope coin type
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    asec.encrypted_script IS NOT NULL AS has_script,
+    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- now_utc is a caller-supplied current UTC timestamp used for the lease
+    -- expiry comparison; passed in rather than read from the DB clock so results
+    -- are deterministic/testable and consistent with the Balance/lease queries.
+    CASE
+        WHEN
+            l.utxo_id IS NOT NULL
+            AND l.expires_at > ?1 THEN 1
+        ELSE 0
+    END AS is_locked
 FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
+LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
-    t.wallet_id = ?1
-    AND ks.wallet_id = ?1
+    t.wallet_id = ?2
+    AND ks.wallet_id = ?2
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
-        cast(?2 AS INTEGER) IS NULL
-        OR ks.purpose = cast(?2 AS INTEGER)
-    )
-    AND (
         cast(?3 AS INTEGER) IS NULL
-        OR ks.coin_type = cast(?3 AS INTEGER)
+        OR ks.purpose = cast(?3 AS INTEGER)
     )
     AND (
         cast(?4 AS INTEGER) IS NULL
-        OR acc.account_number = cast(?4 AS INTEGER)
+        OR ks.coin_type = cast(?4 AS INTEGER)
     )
     AND (
         cast(?5 AS INTEGER) IS NULL
-        OR cast(?5 AS INTEGER) = 0
-        OR (
-            CASE
-                WHEN t.block_height IS NULL THEN 0
-                WHEN s.synced_height IS NULL THEN NULL
-                WHEN t.block_height > s.synced_height THEN NULL
-                ELSE s.synced_height - t.block_height + 1
-            END
-        ) >= cast(?5 AS INTEGER)
+        OR acc.account_number = cast(?5 AS INTEGER)
     )
     AND (
         cast(?6 AS INTEGER) IS NULL
+        OR cast(?6 AS INTEGER) = 0
         OR (
             CASE
                 WHEN t.block_height IS NULL THEN 0
@@ -572,12 +625,24 @@ WHERE
                 WHEN t.block_height > s.synced_height THEN NULL
                 ELSE s.synced_height - t.block_height + 1
             END
-        ) <= cast(?6 AS INTEGER)
+        ) >= cast(?6 AS INTEGER)
+    )
+    AND (
+        cast(?7 AS INTEGER) IS NULL
+        OR (
+            CASE
+                WHEN t.block_height IS NULL THEN 0
+                WHEN s.synced_height IS NULL THEN NULL
+                WHEN t.block_height > s.synced_height THEN NULL
+                ELSE s.synced_height - t.block_height + 1
+            END
+        ) <= cast(?7 AS INTEGER)
     )
 ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
+	NowUtc        time.Time
 	WalletID      int64
 	Purpose       sql.NullInt64
 	CoinType      sql.NullInt64
@@ -594,6 +659,13 @@ type ListUtxosRow struct {
 	ReceivedTime time.Time
 	IsCoinbase   bool
 	BlockHeight  sql.NullInt64
+	AccountName  string
+	OriginID     int64
+	TypeID       int64
+	Purpose      int64
+	CoinType     int64
+	HasScript    bool
+	IsLocked     int64
 }
 
 // Lists unspent UTXOs that match the provided filters.
@@ -619,6 +691,7 @@ type ListUtxosRow struct {
 //     distinguish "not set" from an explicit zero-conf request.
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
 	rows, err := q.query(ctx, q.listUtxosStmt, ListUtxos,
+		arg.NowUtc,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -641,6 +714,13 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.ReceivedTime,
 			&i.IsCoinbase,
 			&i.BlockHeight,
+			&i.AccountName,
+			&i.OriginID,
+			&i.TypeID,
+			&i.Purpose,
+			&i.CoinType,
+			&i.HasScript,
+			&i.IsLocked,
 		); err != nil {
 			return nil, err
 		}
