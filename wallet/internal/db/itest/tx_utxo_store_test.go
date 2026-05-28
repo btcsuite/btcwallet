@@ -1893,15 +1893,156 @@ func TestListUTXOsFiltersByAccount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	scope := db.KeyScopeBIP0084
 	account := uint32(1)
 	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID: walletID,
+		Scope:    &scope,
 		Account:  &account,
 	})
 
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
+}
+
+// TestListUTXOsFiltersByAccountName verifies that ListUTXOs filters by the
+// paired (Scope, AccountName) combination. Account names are unique only
+// within a scope, so the Scope is required alongside AccountName.
+func TestListUTXOsFiltersByAccountName(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(
+		t, store, "wallet-list-utxos-account-name",
+	)
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "default",
+	)
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "savings",
+	)
+
+	defaultAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	savingsAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "savings", false,
+	)
+
+	txDefault := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{Value: 22000, PkScript: defaultAddr.ScriptPubKey},
+		},
+	)
+	txSavings := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{Value: 23000, PkScript: savingsAddr.ScriptPubKey},
+		},
+	)
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txDefault,
+		Received: time.Unix(1710001700, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]btcutil.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       txSavings,
+		Received: time.Unix(1710001710, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]btcutil.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	scope := db.KeyScopeBIP0084
+	name := "savings"
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &name,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
+}
+
+// TestListUTXOsRejectsAccountWithoutScope verifies that the
+// ListUtxosQuery validator rejects a numeric account filter that arrives
+// without the matching key scope. Account numbers are allocated per scope,
+// so a number-only filter would silently mix outputs across scopes.
+func TestListUTXOsRejectsAccountWithoutScope(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(
+		t, store, "wallet-list-utxos-account-without-scope",
+	)
+
+	account := uint32(0)
+	_, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+		Account:  &account,
+	})
+
+	require.ErrorIs(
+		t, err, db.ErrListUtxosQueryAccountWithoutScope,
+	)
+}
+
+// TestListUTXOsRejectsNameWithoutScope verifies that AccountName-only
+// filters are rejected for the same scope-uniqueness reason that
+// BalanceParams enforces.
+func TestListUTXOsRejectsNameWithoutScope(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(
+		t, store, "wallet-list-utxos-name-without-scope",
+	)
+
+	name := "default"
+	_, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID:    walletID,
+		AccountName: &name,
+	})
+
+	require.ErrorIs(
+		t, err, db.ErrListUtxosQueryNameWithoutScope,
+	)
+}
+
+// TestListUTXOsRejectsAccountAndName verifies that callers cannot pass
+// both Account and AccountName: those fields are mutually exclusive
+// disambiguation handles.
+func TestListUTXOsRejectsAccountAndName(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(
+		t, store, "wallet-list-utxos-account-and-name",
+	)
+
+	scope := db.KeyScopeBIP0084
+	account := uint32(0)
+	name := "default"
+	_, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		Account:     &account,
+		AccountName: &name,
+	})
+
+	require.ErrorIs(
+		t, err, db.ErrListUtxosQueryAccountAndName,
+	)
 }
 
 // TestLeaseOutputLocksCurrentUtxo verifies that LeaseOutput returns the active

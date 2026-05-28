@@ -1247,8 +1247,27 @@ type ListUtxosQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Account is an optional BIP44 account-number filter.
+	// Scope optionally restricts the listing to a single key scope. When
+	// Account or AccountName is also set, Scope is required to
+	// disambiguate cross-scope account reuse: account numbers are
+	// allocated per scope and account names are unique only within a
+	// scope.
+	Scope *KeyScope
+
+	// Account optionally restricts the listing to one BIP44 account
+	// number. When Account is set, callers must also set Scope so the
+	// filter is uniquely scoped (see Scope above). Account is mutually
+	// exclusive with AccountName.
 	Account *uint32
+
+	// AccountName optionally restricts the listing to a single account
+	// by name. Account names are unique within a scope, so AccountName
+	// requires Scope. AccountName is mutually exclusive with Account:
+	// the caller picks one disambiguation handle, not both.
+	// AccountName is the public-facing handle for imported accounts
+	// whose AccountNumber collapses to 0 on read (NULL → zero for SQL
+	// backends).
+	AccountName *string
 
 	// MinConfs optionally requires each returned UTXO to have at least this
 	// many confirmations.
@@ -1257,6 +1276,55 @@ type ListUtxosQuery struct {
 	// MaxConfs optionally requires each returned UTXO to have at most this
 	// many confirmations.
 	MaxConfs *int32
+}
+
+// ErrListUtxosQueryAccountWithoutScope is returned by
+// ListUtxosQuery.Validate when Account is set but Scope is not.
+// Account numbers are allocated per-scope on legacy wallets, so a UTXO
+// listing filtered by account number alone would silently mix outputs
+// across scopes.
+var ErrListUtxosQueryAccountWithoutScope = errors.New(
+	"list utxos: Account requires Scope to disambiguate per-scope " +
+		"account-number reuse",
+)
+
+// ErrListUtxosQueryNameWithoutScope is returned by
+// ListUtxosQuery.Validate when AccountName is set but Scope is not.
+// Account names are unique only within a scope; a name-only UTXO
+// listing would return outputs across scopes (or depend on
+// backend-specific lookup behavior).
+var ErrListUtxosQueryNameWithoutScope = errors.New(
+	"list utxos: AccountName requires Scope (account names are " +
+		"scope-unique)",
+)
+
+// ErrListUtxosQueryAccountAndName is returned by
+// ListUtxosQuery.Validate when both Account and AccountName are set.
+// The two fields are mutually exclusive: picking one disambiguates
+// the account, picking both is contradictory.
+var ErrListUtxosQueryAccountAndName = errors.New(
+	"list utxos: Account and AccountName are mutually exclusive",
+)
+
+// Validate returns ErrListUtxosQueryAccountWithoutScope when Account
+// is set without Scope, ErrListUtxosQueryNameWithoutScope when
+// AccountName is set without Scope, or
+// ErrListUtxosQueryAccountAndName when both are set. All other
+// parameter combinations are accepted.
+func (q ListUtxosQuery) Validate() error {
+	if q.Account != nil && q.AccountName != nil {
+		return ErrListUtxosQueryAccountAndName
+	}
+
+	if q.Account != nil && q.Scope == nil {
+		return ErrListUtxosQueryAccountWithoutScope
+	}
+
+	if q.AccountName != nil && q.Scope == nil {
+		return ErrListUtxosQueryNameWithoutScope
+	}
+
+	return nil
 }
 
 // LeaseOutputParams contains the parameters for leasing a UTXO.
