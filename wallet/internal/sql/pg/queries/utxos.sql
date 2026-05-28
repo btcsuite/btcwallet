@@ -84,17 +84,37 @@ SELECT
     a.script_pub_key,
     t.received_time,
     t.is_coinbase,
-    t.block_height
+    t.block_height,
+    -- Enrichment columns derived from the ownership joins below.
+    acc.account_name, -- owning account
+    acc.origin_id, -- derived vs imported account
+    a.type_id, -- address type, used for coin selection
+    ks.purpose, -- BIP-43 key scope purpose
+    ks.coin_type, -- BIP-43 key scope coin type
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    (asec.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- now_utc is a caller-supplied current UTC timestamp used for the lease
+    -- expiry comparison; passed in rather than read from the DB clock so results
+    -- are deterministic/testable and consistent with the Balance/lease queries.
+    coalesce(
+        l.utxo_id IS NOT NULL
+        AND l.expires_at > sqlc.arg('now_utc')::TIMESTAMP, FALSE
+    )::BOOLEAN AS is_locked
 FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
+LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 WHERE
-    t.wallet_id = $1
-    AND ks.wallet_id = $1
-    AND t.tx_hash = $2
-    AND u.output_index = $3
+    t.wallet_id = sqlc.arg('wallet_id')
+    AND ks.wallet_id = sqlc.arg('wallet_id')
+    AND t.tx_hash = sqlc.arg('tx_hash')
+    AND u.output_index = sqlc.arg('output_index')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1);
 
@@ -126,12 +146,32 @@ SELECT
     a.script_pub_key,
     t.received_time,
     t.is_coinbase,
-    t.block_height
+    t.block_height,
+    -- Enrichment columns derived from the ownership joins below.
+    acc.account_name, -- owning account
+    acc.origin_id, -- derived vs imported account
+    a.type_id, -- address type, used for coin selection
+    ks.purpose, -- BIP-43 key scope purpose
+    ks.coin_type, -- BIP-43 key scope coin type
+    -- has_script: the credited address has a persisted encrypted script (e.g. a
+    -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
+    -- FALSE instead of being dropped.
+    (asec.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    -- is_locked: TRUE when an active (non-expired) lease exists for this output.
+    -- now_utc is a caller-supplied current UTC timestamp used for the lease
+    -- expiry comparison; passed in rather than read from the DB clock so results
+    -- are deterministic/testable and consistent with the Balance/lease queries.
+    coalesce(
+        l.utxo_id IS NOT NULL
+        AND l.expires_at > sqlc.arg('now_utc')::TIMESTAMP, FALSE
+    )::BOOLEAN AS is_locked
 FROM transactions AS t
-INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
 INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
+LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
