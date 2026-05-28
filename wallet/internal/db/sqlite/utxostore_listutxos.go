@@ -18,13 +18,23 @@ import (
 func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
+	err := query.Validate()
+	if err != nil {
+		return nil, err
+	}
+
 	var utxos []db.UtxoInfo
 
-	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+	err = s.execRead(ctx, func(q *sqlc.Queries) error {
+		purpose, coinType := db.ScopeFilter(query.Scope)
+
 		rows, err := q.ListUtxos(ctx, sqlc.ListUtxosParams{
 			NowUtc:        time.Now().UTC(),
 			WalletID:      int64(query.WalletID),
+			Purpose:       purpose,
+			CoinType:      coinType,
 			AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
+			AccountName:   db.NullableStringToSQLNullString(query.AccountName),
 			MinConfirms:   db.NullableInt32ToSQLInt64(query.MinConfs),
 			MaxConfirms:   db.NullableInt32ToSQLInt64(query.MaxConfs),
 		})
