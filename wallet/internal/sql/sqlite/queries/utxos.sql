@@ -195,6 +195,10 @@ WHERE
         OR acc.account_number = cast(sqlc.narg('account_number') AS INTEGER)
     )
     AND (
+        cast(sqlc.narg('account_name') AS TEXT) IS NULL
+        OR acc.account_name = cast(sqlc.narg('account_name') AS TEXT)
+    )
+    AND (
         cast(sqlc.narg('min_confirms') AS INTEGER) IS NULL
         OR cast(sqlc.narg('min_confirms') AS INTEGER) = 0
         OR (
