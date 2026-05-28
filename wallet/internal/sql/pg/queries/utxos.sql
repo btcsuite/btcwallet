@@ -191,6 +191,10 @@ WHERE
         OR acc.account_number = sqlc.narg('account_number')::BIGINT
     )
     AND (
+        sqlc.narg('account_name')::TEXT IS NULL
+        OR acc.account_name = sqlc.narg('account_name')::TEXT
+    )
+    AND (
         sqlc.narg('min_confirms')::INTEGER IS NULL
         OR sqlc.narg('min_confirms')::INTEGER = 0
         OR (
