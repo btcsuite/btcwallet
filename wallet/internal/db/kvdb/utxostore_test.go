@@ -257,6 +257,38 @@ func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }
 
+// TestListLeasedOutputsSuccess verifies that kvdb.Store exposes the active
+// legacy lease set through the db-native shape.
+func TestListLeasedOutputsSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 3000, 3,
+	)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{2},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+	require.Len(t, leases, 1)
+	require.Equal(t, outPoint, leases[0].OutPoint)
+	require.Equal(t, db.LockID{2}, leases[0].LockID)
+}
+
 // TestListUTXOsIncludesLockedOutputs verifies kvdb returns current UTXOs even
 // when they are actively leased.
 func TestListUTXOsIncludesLockedOutputs(t *testing.T) {
@@ -389,6 +421,37 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	require.False(t, got.HasScript)
 	require.True(t, got.IsLocked)
 	require.Equal(t, wantScope, got.KeyScope)
+}
+
+// TestListLeasedOutputsDropsSpentLeases verifies kvdb omits active leases once
+// the leased outpoint is spent by an unmined wallet transaction.
+func TestListLeasedOutputsDropsSpentLeases(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 3000, 3,
+	)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{4},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	insertUnminedSpend(t, dbConn, txStore, outPoint)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), 0)
+	require.NoError(t, err)
+	require.Empty(t, leases)
 }
 
 // TestListUTXOsFiltersByConfirms verifies that kvdb.Store applies the
