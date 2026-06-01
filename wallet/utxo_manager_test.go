@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -19,18 +20,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestListUnspent tests the ListUnspent method with various filters.
+// TestListUnspent tests that ListUnspent composes store UTXO, lease, and
+// address reads into sorted wallet-facing results.
 func TestListUnspent(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Define account names.
-	account1 := defaultAccountName
-	account2 := "test"
-
-	// Create the addresses that our mocks will return.
 	privKeyDefault, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	addrDefault, err := address.NewAddressPubKey(
@@ -45,151 +41,115 @@ func TestListUnspent(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to match the default mock (1).
-	currentHeight := int32(1)
-
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
-		false, account1, waddrmgr.WitnessPubKey,
-	)
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrTest).Return(
-		false, account2, waddrmgr.NestedWitnessPubKey,
-	)
-
-	// Now that the mocks are set up, we can create the pkScripts.
 	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
 	require.NoError(t, err)
 	pkScriptTest, err := txscript.PayToAddrScript(addrTest)
 	require.NoError(t, err)
 
-	const (
-		minConf = 2
-		maxConf = 6
+	utxoDefault := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      200000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
+	}
+	utxoTest := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptTest,
+		Height:      1,
+		AccountName: "test",
+		Origin:      db.DerivedAccount,
+		AddrType:    db.NestedWitnessPubKey,
+		IsLocked:    true,
+	}
+
+	query := UtxoQuery{MinConfs: 0, MaxConfs: 999999}
+	minConfs := query.MinConfs
+	maxConfs := query.MaxConfs
+
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+		MinConfs: &minConfs,
+		MaxConfs: &maxConfs,
+	}).Return([]db.UtxoInfo{utxoDefault, utxoTest}, nil).Once()
+
+	utxos, err := w.ListUnspent(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+	require.Equal(t, addrTest.String(), utxos[0].Address.String())
+	require.Equal(t, btcutil.Amount(100000), utxos[0].Amount)
+	require.True(t, utxos[0].Locked)
+	require.Equal(t, addrDefault.String(), utxos[1].Address.String())
+	require.False(t, utxos[1].Locked)
+}
+
+// TestListUnspentFiltersByAccount tests that ListUnspent applies the
+// wallet-facing account-name filter after reading store UTXO rows.
+func TestListUnspentFiltersByAccount(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := address.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
 	)
+	require.NoError(t, err)
 
-	// Create two UTXOs, one for each address.
-	utxo1 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{1},
-			Index: 0,
-		},
-		Amount:   100000,
-		PkScript: pkScriptDefault,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - minConf + 1,
-			},
-		},
-	}
-	utxo2 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{2},
-			Index: 0,
-		},
-		Amount:   200000,
-		PkScript: pkScriptTest,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - maxConf + 1,
-			},
-		},
-	}
-
-	// Mock the UnspentOutputs method to return the two UTXOs.
-	mocks.txStore.On("UnspentOutputs", mock.Anything).Return(
-		[]wtxmgr.Credit{utxo1, utxo2}, nil,
+	privKeyTest, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrTest, err := address.NewAddressPubKey(
+		privKeyTest.PubKey().SerializeCompressed(), &chainParams,
 	)
+	require.NoError(t, err)
 
-	testCases := []struct {
-		name          string
-		query         UtxoQuery
-		expectedCount int
-		expectedAddrs map[string]bool
-	}{
-		{
-			name:          "no filter",
-			query:         UtxoQuery{MinConfs: 0, MaxConfs: 999999},
-			expectedCount: 2,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-				addrTest.String():    true,
-			},
-		},
-		{
-			name: "filter by default account",
-			query: UtxoQuery{
-				Account:  account1,
-				MinConfs: 0,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-			},
-		},
-		{
-			name: "filter by test account",
-			query: UtxoQuery{
-				Account:  account2,
-				MinConfs: 0,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrTest.String(): true,
-			},
-		},
-		{
-			name: "filter by min confs",
-			query: UtxoQuery{
-				MinConfs: minConf + 1,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrTest.String(): true,
-			},
-		},
-		{
-			name: "filter by max confs",
-			query: UtxoQuery{
-				MinConfs: 0,
-				MaxConfs: maxConf - 1,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-			},
-		},
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+	pkScriptTest, err := txscript.PayToAddrScript(addrTest)
+	require.NoError(t, err)
+
+	utxoDefault := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
+	}
+	utxoTest := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:      200000,
+		PkScript:    pkScriptTest,
+		Height:      1,
+		AccountName: "test",
+		Origin:      db.DerivedAccount,
+		AddrType:    db.NestedWitnessPubKey,
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			utxos, err := w.ListUnspent(t.Context(), tc.query)
-			require.NoError(t, err)
-			require.Len(t, utxos, tc.expectedCount)
-
-			// Check that the correct addresses are returned. We do
-			// this by creating a map of the returned addresses and
-			// comparing it to the expected map. This ensures that
-			// all expected addresses are present and there are no
-			// duplicates.
-			returnedAddrs := make(map[string]bool)
-			for _, utxo := range utxos {
-				returnedAddrs[utxo.Address.String()] = true
-			}
-
-			require.Equal(t, tc.expectedAddrs, returnedAddrs)
-
-			// Check that the UTXOs are sorted by amount in
-			// ascending order.
-			for i := range len(utxos) - 1 {
-				require.LessOrEqual(
-					t, utxos[i].Amount, utxos[i+1].Amount,
-				)
-			}
-		})
+	query := UtxoQuery{
+		Account:  "test",
+		MinConfs: 0,
+		MaxConfs: 999999,
 	}
+	minConfs := query.MinConfs
+	maxConfs := query.MaxConfs
+
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+		MinConfs: &minConfs,
+		MaxConfs: &maxConfs,
+	}).Return([]db.UtxoInfo{utxoDefault, utxoTest}, nil).Once()
+
+	utxos, err := w.ListUnspent(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, addrTest.String(), utxos[0].Address.String())
+	require.Equal(t, btcutil.Amount(200000), utxos[0].Amount)
 }
 
 // TestGetUtxo tests that the GetUtxo method can successfully retrieve a UTXO.
