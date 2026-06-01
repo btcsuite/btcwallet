@@ -2389,6 +2389,30 @@ func storeScanCredit(utxo db.UtxoInfo) (wtxmgr.Credit, error) {
 	}, nil
 }
 
+// loadStoreScanData retrieves recovery scan initialization data through the
+// store.
+func (s *syncer) loadStoreScanData(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties,
+	[]address.Address, []wtxmgr.Credit, error) {
+
+	horizons, err := s.storeScanHorizons(ctx, targets)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	addrs, err := s.storeScanAddresses(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	unspent, err := s.storeScanUnspent(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return horizons, addrs, unspent, nil
+}
+
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
 // specific accounts.
 func (s *syncer) loadTargetedScanState(ctx context.Context,
@@ -2432,6 +2456,10 @@ func (s *syncer) loadTargetedScanData(ctx context.Context,
 func (s *syncer) loadWalletScanData(ctx context.Context) (
 	[]*waddrmgr.AccountProperties, []address.Address,
 	[]wtxmgr.Credit, error) {
+
+	if s.store != nil {
+		return s.loadStoreScanData(ctx, nil)
+	}
 
 	var targets []waddrmgr.AccountScope
 	for _, scopedMgr := range s.addrStore.ActiveScopedKeyManagers() {

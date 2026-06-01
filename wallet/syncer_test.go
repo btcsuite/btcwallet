@@ -2658,6 +2658,77 @@ func TestStoreScanUnspent(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestLoadWalletScanDataStore verifies wallet scan-data loading uses the store
+// when store wiring is available.
+func TestLoadWalletScanDataStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with one account, address, and
+	// watch output.
+	const walletID uint32 = 17
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountNumber:    testUint32Ptr(3),
+		AccountName:      "default",
+		ExternalKeyCount: 4,
+		InternalKeyCount: 5,
+		KeyScope:         db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Twice()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "default" &&
+				query.Scope == db.KeyScopeBIP0084
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+	}, nil).Once()
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(accounts), nil,
+	)
+
+	store.On(
+		"ListOutputsToWatch", mock.Anything, walletID,
+	).Return([]db.UtxoInfo{{
+		OutPoint: wire.OutPoint{Hash: chainhash.Hash{0x17}, Index: 1},
+		PkScript: pkScript,
+		Height:   db.UnminedHeight,
+	}}, nil).Once()
+
+	// Act: Load wallet scan data through the store-backed path.
+	horizons, addrs, unspent, err := s.loadWalletScanData(t.Context())
+
+	// Assert: All scan initialization groups came from the store.
+	require.NoError(t, err)
+	require.Len(t, horizons, 1)
+	require.Equal(t, uint32(3), horizons[0].AccountNumber)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	require.Len(t, unspent, 1)
+	require.Equal(t, int32(-1), unspent[0].Height)
+	store.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
