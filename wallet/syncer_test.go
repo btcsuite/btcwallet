@@ -2107,6 +2107,108 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestLoadScanDataLegacyFallback verifies scan-data loading still uses the
+// legacy database path when the transitional store is not configured.
+func TestLoadScanDataLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a syncer without store-backed runtime wiring.
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	require.Nil(t, s.store)
+
+	target := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 7,
+	}
+	targetedProps := &waddrmgr.AccountProperties{
+		AccountNumber: target.Account,
+		KeyScope:      target.Scope,
+	}
+	targetedCredit := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{
+			Hash:  chainhash.Hash{0x18},
+			Index: 1,
+		},
+	}
+	targetedMgr := &bwmock.AccountStore{}
+
+	mocks.addrStore.On(
+		"FetchScopedKeyManager", target.Scope,
+	).Return(targetedMgr, nil).Once()
+	targetedMgr.On(
+		"AccountProperties", mock.Anything, target.Account,
+	).Return(targetedProps, nil).Once()
+	mocks.addrStore.On(
+		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+	mocks.txStore.On(
+		"OutputsToWatch", mock.Anything,
+	).Return([]wtxmgr.Credit{targetedCredit}, nil).Once()
+
+	// Act: Load targeted scan data through the legacy fallback path.
+	horizons, addrs, unspent, err := s.loadTargetedScanData(
+		t.Context(), []waddrmgr.AccountScope{target},
+	)
+
+	// Assert: The targeted scan data came from the legacy DB path.
+	require.NoError(t, err)
+	require.Len(t, horizons, 1)
+	require.Equal(t, targetedProps, horizons[0])
+	require.Empty(t, addrs)
+	require.Equal(t, []wtxmgr.Credit{targetedCredit}, unspent)
+
+	walletTarget := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0049Plus,
+		Account: 9,
+	}
+	walletProps := &waddrmgr.AccountProperties{
+		AccountNumber: walletTarget.Account,
+		KeyScope:      walletTarget.Scope,
+	}
+	walletCredit := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{
+			Hash:  chainhash.Hash{0x19},
+			Index: 2,
+		},
+	}
+	walletMgr := &bwmock.AccountStore{}
+
+	mocks.addrStore.On(
+		"ActiveScopedKeyManagers",
+	).Return([]waddrmgr.AccountStore{walletMgr}).Once()
+	walletMgr.On("ActiveAccounts").Return(
+		[]uint32{walletTarget.Account},
+	).Once()
+	walletMgr.On("Scope").Return(walletTarget.Scope).Once()
+	mocks.addrStore.On(
+		"FetchScopedKeyManager", walletTarget.Scope,
+	).Return(walletMgr, nil).Once()
+	walletMgr.On(
+		"AccountProperties", mock.Anything, walletTarget.Account,
+	).Return(walletProps, nil).Once()
+	mocks.addrStore.On(
+		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
+	).Return(nil).Once()
+	mocks.txStore.On(
+		"OutputsToWatch", mock.Anything,
+	).Return([]wtxmgr.Credit{walletCredit}, nil).Once()
+
+	// Act: Load wallet scan data through the legacy fallback path.
+	horizons, addrs, unspent, err = s.loadWalletScanData(t.Context())
+
+	// Assert: The wallet scan data came from the legacy DB path.
+	require.NoError(t, err)
+	require.Len(t, horizons, 1)
+	require.Equal(t, walletProps, horizons[0])
+	require.Empty(t, addrs)
+	require.Equal(t, []wtxmgr.Credit{walletCredit}, unspent)
+	mocks.addrStore.AssertExpectations(t)
+	mocks.txStore.AssertExpectations(t)
+	targetedMgr.AssertExpectations(t)
+	walletMgr.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
