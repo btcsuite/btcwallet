@@ -266,44 +266,18 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 	return utxo, nil
 }
 
-// LeaseOutput locks an output for a given duration, preventing it from being
-// used in transactions.
+// LeaseOutput locks an output for a given duration, reserving it so that it is
+// not selected for other transactions until the lease expires.
 //
-// This method allows a caller to reserve a specific UTXO for a certain period,
-// making it unavailable for other operations like coin selection. This is
-// useful in scenarios where a transaction is being built and its inputs need to
-// be protected from being used by other concurrent operations.
-//
-// How it works:
-// The method delegates the locking operation to the underlying transaction
-// store (`wtxmgr`), which maintains a record of all leased outputs. The lease
-// is identified by a unique `LockID` and has a specific `duration`.
-//
-// Logical Steps:
-//  1. Initiate a read-write database transaction.
-//  2. Call the `wtxmgr.LockOutput` method with the provided `LockID`,
-//     outpoint, and `duration`.
-//  3. The `wtxmgr` checks if the output is known and not already locked by a
-//     different ID.
-//  4. If the checks pass, it records the lock with an expiration time.
-//  5. The expiration time is returned to the caller.
-//
-// Database Actions:
-//   - This method performs a single read-write database transaction
-//     (`walletdb.Update`).
-//   - It writes to the `wtxmgr` namespace to record the output lock.
-//
-// Time Complexity:
-//   - The complexity is O(1) as it involves a direct lookup and write in the
-//     database.
-//
-// TODO(yy): The current `wtxmgr.LockOutput` implementation does not check if
-// the output is already spent by an unmined transaction. This could lead to a
-// scenario where a spent output is leased. The implementation should be
-// improved to perform this check.
+// The lock is acquired by delegating to the wallet's db.Store implementation,
+// which records the lease under the supplied LockID and returns its expiration
+// time. The store gates the outpoint against the current UTXO set first, so an
+// unknown or already-spent output yields db.ErrUtxoNotFound and an output held
+// under a different lock ID yields db.ErrOutputAlreadyLeased; any other store
+// error is wrapped for context.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
-func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
+func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 	op wire.OutPoint, duration time.Duration) (time.Time, error) {
 
 	err := w.state.validateStarted()
@@ -311,19 +285,19 @@ func (w *Wallet) LeaseOutput(_ context.Context, id wtxmgr.LockID,
 		return time.Time{}, err
 	}
 
-	var expiration time.Time
+	lease, err := w.store.LeaseOutput(
+		ctx, db.LeaseOutputParams{
+			WalletID: w.id,
+			ID:       db.LockID(id),
+			OutPoint: op,
+			Duration: duration,
+		},
+	)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("lease output: %w", err)
+	}
 
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		expiration, err = w.txStore.LockOutput(
-			txmgrNs, id, op, duration,
-		)
-
-		return err
-	})
-
-	return expiration, err
+	return lease.Expiration, nil
 }
 
 // ReleaseOutput unlocks a previously leased output, making it available for
