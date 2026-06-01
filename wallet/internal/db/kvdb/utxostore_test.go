@@ -199,6 +199,61 @@ func TestCalcConfsGenesisHeight(t *testing.T) {
 	require.Equal(t, int32(0), calcConfs(0, 100))
 }
 
+// TestLeaseOutputSuccess verifies that kvdb.Store adapts one legacy lease write
+// into the db-native leased-output view.
+func TestLeaseOutputSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	lease, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, outPoint, lease.OutPoint)
+	require.Equal(t, db.LockID{1}, lease.LockID)
+	require.True(t, lease.Expiration.After(time.Now().UTC()))
+}
+
+// TestLeaseOutputRejectsSpentByUnminedTx verifies leases cannot be acquired for
+// outputs already spent by an unmined wallet transaction.
+func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+	insertUnminedSpend(t, dbConn, txStore, outPoint)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
 // insertKnownCredit inserts one test credit and returns its outpoint.
 func insertKnownCredit(t *testing.T, dbConn walletdb.DB, txStore *wtxmgr.Store,
 	pkScript []byte, value int64, height int32) wire.OutPoint {
