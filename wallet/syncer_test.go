@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1875,6 +1876,129 @@ func TestStoreScanHorizonsListAccountsSkipsImported(t *testing.T) {
 	require.Equal(t, uint32(8), props[0].ExternalKeyCount)
 	require.Equal(t, uint32(4), props[0].InternalKeyCount)
 
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddresses verifies scan address reads use paginated store
+// address queries.
+func TestStoreScanAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one stored address script.
+	const walletID uint32 = 15
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := btcutil.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo{{
+		AccountName: "default",
+		KeyScope:    db.KeyScopeBIP0084,
+	}}, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "default" &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.Page.Limit() == scanAddressPageLimit
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+	}, nil).Once()
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The stored script was converted into a scan address.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesNonDefaultScope verifies that, for non-default key
+// scopes, only internal-branch (change) addresses are watched, matching the
+// legacy ForEachRelevantActiveAddress filtering.
+func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer with one non-default-scope account
+	// holding one external and one internal address.
+	const walletID uint32 = 23
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	// A purpose outside waddrmgr.DefaultKeyScopes is a non-default scope.
+	nonDefault := db.KeyScope{Purpose: 1017, Coin: 0}
+
+	externalAddr, err := btcutil.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	externalScript, err := txscript.PayToAddrScript(externalAddr)
+	require.NoError(t, err)
+
+	internalAddr, err := btcutil.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	internalScript, err := txscript.PayToAddrScript(internalAddr)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo{{
+		AccountName: "custom",
+		KeyScope:    nonDefault,
+	}}, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "custom" &&
+				query.Scope == nonDefault
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{
+			{
+				ScriptPubKey: externalScript,
+				Branch:       waddrmgr.ExternalBranch,
+			},
+			{
+				ScriptPubKey: internalScript,
+				Branch:       waddrmgr.InternalBranch,
+			},
+		},
+	}, nil).Once()
+
+	// Act: load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: only the internal-branch address survived the filter.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, internalAddr.EncodeAddress(), addrs[0].EncodeAddress())
 	store.AssertExpectations(t)
 }
 

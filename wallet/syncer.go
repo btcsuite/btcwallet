@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -82,6 +83,10 @@ const (
 	//    Funds" errors or extremely inaccurate fee estimates increases,
 	//    making the explicit "Syncing" state a necessary safeguard.
 	syncStateSwitchThreshold = 6
+
+	// scanAddressPageLimit is the store page size used when loading recovery
+	// scan addresses.
+	scanAddressPageLimit = 1000
 )
 
 // syncState represents the synchronization status of the wallet with the
@@ -1957,6 +1962,107 @@ func storeAccountProperties(
 // identity rather than by the masked account number.
 func withholdFromRecoveryHorizons(info db.AccountInfo) bool {
 	return info.Origin == db.ImportedAccount
+}
+
+// storeScanAddresses loads active scan addresses through the store, paging per
+// (key scope, account) pair because ListAddresses is scoped to a single pair.
+//
+// This reproduces the legacy ForEachRelevantActiveAddress filtering that
+// DBGetScanData relies on: for default key scopes every active address is
+// watched, while for non-default key scopes only internal-branch (change)
+// addresses are watched. The non-default external branches are intentionally
+// skipped because they only ever existed due to a since-fixed bug, and
+// watching them would diverge from the legacy recovery set.
+func (s *syncer) storeScanAddresses(
+	ctx context.Context) ([]btcutil.Address, error) {
+
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:    s.walletID,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	var addrs []btcutil.Address
+	for i := range accounts {
+		accountAddrs, err := s.storeAccountScanAddresses(
+			ctx, accounts[i],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		addrs = append(addrs, accountAddrs...)
+	}
+
+	return addrs, nil
+}
+
+// storeAccountScanAddresses pages through a single account's addresses,
+// converting each stored script into its wallet address. It mirrors the legacy
+// ForEachRelevantActiveAddress filtering: addresses in default key scopes are
+// all relevant, while non-default key scopes only contribute their
+// internal-branch (change) addresses.
+func (s *syncer) storeAccountScanAddresses(ctx context.Context,
+	account db.AccountInfo) ([]btcutil.Address, error) {
+
+	pageReq, err := page.NewRequest[uint32](scanAddressPageLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Outside the default key scopes only the internal (change) branch is
+	// relevant, matching ForEachRelevantActiveAddress's handling of change
+	// addresses that a since-fixed bug created in non-default scopes.
+	isDefaultScope := waddrmgr.IsDefaultScope(
+		waddrmgr.KeyScope(account.KeyScope),
+	)
+
+	query := db.ListAddressesQuery{
+		WalletID:    s.walletID,
+		Scope:       account.KeyScope,
+		AccountName: account.AccountName,
+		Page:        pageReq,
+	}
+
+	var addrs []btcutil.Address
+	for {
+		result, err := s.store.ListAddresses(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("list scan addresses: %w", err)
+		}
+
+		for _, info := range result.Items {
+			// Skip non-default-scope external addresses to match
+			// the legacy relevant-address set.
+			if !isDefaultScope &&
+				info.Branch != waddrmgr.InternalBranch {
+
+				continue
+			}
+
+			_, scriptAddrs, _, err := txscript.ExtractPkScriptAddrs(
+				info.ScriptPubKey, s.cfg.ChainParams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("scan address script: %w", err)
+			}
+
+			if len(scriptAddrs) == 0 {
+				return nil, fmt.Errorf("scan address script: %w",
+					db.ErrAddressNotFound)
+			}
+
+			addrs = append(addrs, scriptAddrs[0])
+		}
+
+		if result.Next == nil {
+			return addrs, nil
+		}
+
+		query.Page.After = result.Next
+	}
 }
 
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
