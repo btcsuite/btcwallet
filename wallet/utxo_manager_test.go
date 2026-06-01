@@ -220,25 +220,24 @@ func TestGetUtxoErr(t *testing.T) {
 func TestLeaseOutput(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Create a UTXO.
-	utxo := wire.OutPoint{
-		Hash:  [32]byte{1},
-		Index: 0,
-	}
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	expiration := time.Now().Add(time.Hour).UTC()
 
-	// Mock the LockOutput method to return a fixed expiration time.
-	expiration := time.Now().Add(time.Hour)
-	mocks.txStore.On("LockOutput", mock.Anything, mock.Anything, utxo,
-		mock.Anything).Return(expiration, nil)
+	mocks.store.On("LeaseOutput", mock.Anything, db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Hour,
+	}).Return(&db.LeasedOutput{
+		OutPoint:   outPoint,
+		LockID:     db.LockID{1},
+		Expiration: expiration,
+	}, nil).Once()
 
-	// Now, try to lease the output.
-	leaseID := wtxmgr.LockID{1}
-	leaseDuration := time.Hour
 	actualExpiration, err := w.LeaseOutput(
-		t.Context(), leaseID, utxo, leaseDuration,
+		t.Context(), wtxmgr.LockID{1}, outPoint, time.Hour,
 	)
 	require.NoError(t, err)
 	require.Equal(t, expiration, actualExpiration)
