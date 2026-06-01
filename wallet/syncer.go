@@ -2065,6 +2065,54 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 	}
 }
 
+// storeScanUnspent loads UTXOs that recovery scans should watch through the
+// store.
+func (s *syncer) storeScanUnspent(ctx context.Context) (
+	[]wtxmgr.Credit, error) {
+
+	utxos, err := s.store.ListOutputsToWatch(ctx, s.walletID)
+	if err != nil {
+		return nil, fmt.Errorf("list outputs to watch: %w", err)
+	}
+
+	credits := make([]wtxmgr.Credit, 0, len(utxos))
+	for i := range utxos {
+		credit, err := storeScanCredit(utxos[i])
+		if err != nil {
+			return nil, err
+		}
+
+		credits = append(credits, credit)
+	}
+
+	return credits, nil
+}
+
+// storeScanCredit converts one store UTXO row into the recovery scan credit
+// shape.
+func storeScanCredit(utxo db.UtxoInfo) (wtxmgr.Credit, error) {
+	height := int32(-1)
+	if utxo.Height != db.UnminedHeight {
+		var err error
+
+		height, err = db.Uint32ToInt32(utxo.Height)
+		if err != nil {
+			return wtxmgr.Credit{}, fmt.Errorf("utxo height: %w", err)
+		}
+	}
+
+	return wtxmgr.Credit{
+		OutPoint: utxo.OutPoint,
+		BlockMeta: wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: height},
+		},
+		Amount:       utxo.Amount,
+		PkScript:     utxo.PkScript,
+		Received:     utxo.Received,
+		FromCoinBase: utxo.FromCoinBase,
+	}, nil
+}
+
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
 // specific accounts.
 func (s *syncer) loadTargetedScanState(ctx context.Context,
