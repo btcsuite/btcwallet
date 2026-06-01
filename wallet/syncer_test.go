@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -2611,6 +2612,49 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, addrs, 1)
 	require.Equal(t, internalAddr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanUnspent verifies scan UTXO reads use the store watch-output API.
+func TestStoreScanUnspent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one watch output.
+	const walletID uint32 = 16
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x16}, Index: 2}
+	received := time.Unix(987, 0).UTC()
+	utxos := []db.UtxoInfo{{
+		OutPoint:     outpoint,
+		Amount:       btcutil.Amount(1234),
+		PkScript:     []byte{0x51},
+		Received:     received,
+		FromCoinBase: true,
+		Height:       42,
+	}}
+
+	store.On(
+		"ListOutputsToWatch", mock.Anything, walletID,
+	).Return(utxos, nil).Once()
+
+	// Act: Load scan UTXOs from the store.
+	credits, err := s.storeScanUnspent(t.Context())
+
+	// Assert: The store UTXO row was converted into a recovery credit.
+	require.NoError(t, err)
+	require.Len(t, credits, 1)
+	require.Equal(t, outpoint, credits[0].OutPoint)
+	require.Equal(t, utxos[0].Amount, credits[0].Amount)
+	require.Equal(t, utxos[0].PkScript, credits[0].PkScript)
+	require.Equal(t, received, credits[0].Received)
+	require.Equal(t, int32(42), credits[0].Height)
+	require.True(t, credits[0].FromCoinBase)
 	store.AssertExpectations(t)
 }
 
