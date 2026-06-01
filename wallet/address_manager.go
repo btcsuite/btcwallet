@@ -27,7 +27,6 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
-	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -376,6 +375,33 @@ func storeAddressPubKeyCompressed(pubKey []byte) bool {
 	return len(pubKey) == btcec.PubKeyBytesLenCompressed
 }
 
+// addrBalances returns wallet address balances from store UTXO rows.
+func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
+	error) {
+
+	balances := make(map[string]btcutil.Amount)
+
+	utxos, err := w.store.ListUTXOs(ctx, db.ListUtxosQuery{
+		WalletID: w.id,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list utxos: %w", err)
+	}
+
+	for i := range utxos {
+		addr := extractAddrFromPKScript(
+			utxos[i].PkScript, w.cfg.ChainParams,
+		)
+		if addr == nil {
+			continue
+		}
+
+		balances[addr.String()] += utxos[i].Amount
+	}
+
+	return balances, nil
+}
+
 // NewAddress returns a new address for the given account and address type.
 // This method is a low-level primitive that will always derive a new, unused
 // address from the end of the address chain.
@@ -619,43 +645,6 @@ func (w *Wallet) GetAddressInfo(ctx context.Context, a address.Address) (
 	return addressInfoFromStoreAddress(storeAddr, w.cfg.ChainParams)
 }
 
-// legacyAddressBalances returns wallet address balances from the legacy
-// transaction store.
-//
-// TODO(yy): remove this helper once the UTXO store implementation is
-// finished — Wallet.ListAddresses will source balances via
-// Store.ListUTXOs instead.
-func (w *Wallet) legacyAddressBalances() (map[string]btcutil.Amount, error) {
-	balances := make(map[string]btcutil.Amount)
-
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
-		if err != nil {
-			return err
-		}
-
-		for i := range utxos {
-			addr := extractAddrFromPKScript(
-				utxos[i].PkScript, w.cfg.ChainParams,
-			)
-			if addr == nil {
-				continue
-			}
-
-			balances[addr.String()] += utxos[i].Amount
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return balances, nil
-}
-
 // ListAddresses lists all addresses for a given account, including their
 // balances.
 func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
@@ -676,9 +665,7 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	// TODO(yy): switch to Store.ListUTXOs once the kvdb backend
-	// implements it.
-	balances, err := w.legacyAddressBalances()
+	balances, err := w.addrBalances(ctx)
 	if err != nil {
 		return nil, err
 	}
