@@ -6,22 +6,30 @@
 // around the concept of a UtxoManager, which is responsible for managing the
 // wallet's UTXO set.
 //
-// TODO(yy): bring wrapcheck back when implementing the `Store` interface.
-//
 //nolint:wrapcheck
 package wallet
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+)
+
+var (
+	errUtxoHeightOverflow  = errors.New("utxo height overflows int32")
+	errUtxoScriptNoAddress = errors.New(
+		"utxo pkScript has no extractable address",
+	)
 )
 
 // Utxo provides a detailed overview of an unspent transaction output.
@@ -278,50 +286,87 @@ func (w *Wallet) processUnspentOutput(addrmgrNs walletdb.ReadBucket,
 	}
 }
 
-// GetUtxo returns the output information for a given outpoint.
+// buildWalletUtxoFromStore converts one store-level UTXO row into the
+// wallet's public Utxo view. The enrichment fields populated by the
+// store (AccountName, Origin, AddrType, HasScript, IsLocked) supersede
+// the prior per-UTXO follow-up calls to GetAddress / ListLeasedOutputs.
 //
-// This method provides a detailed view of a single UTXO, identified by its
-// outpoint. The result is enriched with detailed information about the UTXO,
-// such as its address, account, and spendability.
+// This is a pure mapper: the store only returns wallet-owned, enrichable
+// rows, so a row whose script cannot be converted to an address is an
+// unexpected store/wallet disagreement and surfaces as an error rather
+// than a silent skip. Account filtering is the caller's responsibility
+// and is applied before this conversion.
 //
-// How it works:
-// The method performs a direct lookup of the UTXO in the wallet's transaction
-// store (`wtxmgr`). If the UTXO is found, it then performs an additional
-// lookup in the address manager (`waddrmgr`) to enrich the UTXO data with
-// details like the owning account name, address type, and spendability.
-//
-// Logical Steps:
-//  1. Initiate a single, read-only database transaction to ensure a
-//     consistent view of the data.
-//  2. Fetch the unspent transaction output from the `wtxmgr` namespace using
-//     the provided outpoint.
-//  3. If the UTXO is not found, return a `wtxmgr.ErrUtxoNotFound` error.
-//  4. Calculate its current confirmation status based on the wallet's
-//     synced block height.
-//  5. Extract the address from the UTXO's public key script. For
-//     multi-address scripts, the first address is used.
-//  6. Call `waddrmgr.AddressDetails` to get the spendability status,
-//     account name, and address type in a single, efficient lookup.
-//  7. Construct the final `Utxo` struct with all the combined data.
-//  8. Return the final `Utxo` struct.
-//
-// Database Actions:
-//   - This method performs a single read-only database transaction
-//     (`walletdb.View`).
-//   - It reads from both the `wtxmgr` (for the UTXO) and `waddrmgr` (for
-//     address details) namespaces.
-//
-// Time Complexity:
-//   - The complexity is O(A_l), where A_l is the average cost of the
-//     address and account lookups (`AddressDetails`).
-//
-// TODO(yy): The current implementation of GetUtxo performs separate database
-// lookups for the UTXO and its details. The upcoming SQL schema redesign should
-// address this issue by denormalizing the data, which would turn the multiple
-// lookups into a single, efficient query.
+// Spendability follows ADR 0012 (wallet-level watch-only invariant):
+// a UTXO is spendable when the wallet is not watch-only AND the owning
+// account is not imported. Imported-account outputs are unspendable
+// even when the wallet holds private-key material for them — matching
+// the legacy waddrmgr.AddressDetails policy that this routing path
+// replaces.
+func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
+	currentHeight int32) (*Utxo, error) {
+
+	addr := extractAddrFromPKScript(info.PkScript, w.cfg.ChainParams)
+	if addr == nil {
+		return nil, fmt.Errorf("%w: outpoint %v", errUtxoScriptNoAddress,
+			info.OutPoint)
+	}
+
+	walletAddrType, err := addresstype.ToWallet(
+		info.AddrType, info.HasScript,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	confirmations, err := utxoConfirmations(info.Height, currentHeight)
+	if err != nil {
+		return nil, err
+	}
+
+	spendable := !w.IsWatchOnly() &&
+		info.Origin != db.ImportedAccount
+
+	if info.FromCoinBase {
+		maturity := w.cfg.ChainParams.CoinbaseMaturity
+		if confirmations < int32(maturity) {
+			spendable = false
+		}
+	}
+
+	return &Utxo{
+		OutPoint:      info.OutPoint,
+		Amount:        info.Amount,
+		PkScript:      info.PkScript,
+		Confirmations: confirmations,
+		Spendable:     spendable,
+		Address:       addr,
+		Account:       info.AccountName,
+		AddressType:   walletAddrType,
+		Locked:        info.IsLocked,
+	}, nil
+}
+
+// utxoConfirmations converts one db-native UTXO height into wallet confirmation
+// semantics.
+func utxoConfirmations(height uint32, currentHeight int32) (int32, error) {
+	if height == db.UnminedHeight {
+		return 0, nil
+	}
+
+	txHeight, ok := safeUint32ToInt32(height)
+	if !ok {
+		return 0, fmt.Errorf("%w: %d", errUtxoHeightOverflow, height)
+	}
+
+	return calcConf(txHeight, currentHeight), nil
+}
+
+// GetUtxo returns one wallet-owned UTXO together with its wallet-facing
+// metadata.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
-func (w *Wallet) GetUtxo(_ context.Context,
+func (w *Wallet) GetUtxo(ctx context.Context,
 	prevOut wire.OutPoint) (*Utxo, error) {
 
 	err := w.state.validateStarted()
@@ -329,65 +374,22 @@ func (w *Wallet) GetUtxo(_ context.Context,
 		return nil, err
 	}
 
-	// Calculate the current confirmation status based on the wallet's
-	// synced block height.
-	syncBlock := w.addrStore.SyncedTo()
-	currentHeight := syncBlock.Height
+	currentHeight := w.addrStore.SyncedTo().Height
 
-	var utxo *Utxo
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-		// First, fetch the unspent transaction output from the UTXO
-		// set.
-		output, err := w.txStore.GetUtxo(txmgrNs, prevOut)
-		if err != nil {
-			return err
-		}
-
-		// If the output is not found, return an error.
-		if output == nil {
-			return wtxmgr.ErrUtxoNotFound
-		}
-
-		confs := calcConf(output.Height, currentHeight)
-
-		// Extract the address from the UTXO's public key script.
-		// For multi-address scripts, the first address is used.
-		addr := extractAddrFromPKScript(
-			output.PkScript, w.cfg.ChainParams,
-		)
-		if addr == nil {
-			return wtxmgr.ErrUtxoNotFound
-		}
-
-		// In a single lookup, get all the required
-		// address-related details: spendability, account name,
-		// and address type. This avoids the N+1 query problem.
-		spendable, account, addrType := w.addrStore.AddressDetails(
-			addrmgrNs, addr,
-		)
-
-		// If all filters pass, construct the final Utxo struct
-		// with all the combined data.
-		utxo = &Utxo{
-			OutPoint:      output.OutPoint,
-			Amount:        output.Amount,
-			PkScript:      output.PkScript,
-			Confirmations: confs,
-			Spendable:     spendable,
-			Address:       addr,
-			Account:       account,
-			AddressType:   addrType,
-			Locked:        output.Locked,
-		}
-
-		return nil
+	info, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: prevOut,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("get utxo: %w", err)
+	}
 
-	return utxo, err
+	utxo, err := w.buildWalletUtxoFromStore(info, currentHeight)
+	if err != nil {
+		return nil, err
+	}
+
+	return utxo, nil
 }
 
 // LeaseOutput locks an output for a given duration, preventing it from being
