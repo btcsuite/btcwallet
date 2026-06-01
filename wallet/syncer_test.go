@@ -22,6 +22,7 @@ import (
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
@@ -2233,6 +2234,260 @@ func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
 	require.NoError(t, err)
 
 	return internalNumber
+}
+
+// expectImportedScanAddressPage expects the Store scan path to page raw imports
+// using the accountless imported-address query shape.
+func expectImportedScanAddressPage(store *walletmock.Store,
+	walletID uint32, result page.Result[db.AddressInfo, uint32]) {
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == nil &&
+				query.Scope == nil &&
+				query.Page.Limit() == scanAddressPageLimit
+		},
+	)).Return(result, nil).Once()
+}
+
+// TestStoreScanAddresses verifies scan address reads use paginated store
+// address queries.
+func TestStoreScanAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one stored address script.
+	const walletID uint32 = 15
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "default",
+		KeyScope:    db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName != nil &&
+				*query.AccountName == "default" &&
+				query.Scope != nil &&
+				*query.Scope == db.KeyScopeBIP0084 &&
+				query.Page.Limit() == scanAddressPageLimit
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+	}, nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{},
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The stored script was converted into a scan address.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesIncludesImportedAlias verifies raw imported addresses
+// are loaded from the reserved imported account alias even though ListAccounts
+// does not materialize that pseudo-account.
+func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with one materialized scope and a
+	// raw imported address exposed only through the imported alias.
+	const walletID uint32 = 24
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x24}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "default",
+		KeyScope:    db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName != nil &&
+				*query.AccountName == "default" &&
+				query.Scope != nil &&
+				*query.Scope == db.KeyScopeBIP0084
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{}, nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{
+			Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+		},
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The raw imported address was included in the scan set.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesIncludesRawImportOnlyScope verifies raw imports are
+// watched even when their key scope has no materialized account rows.
+func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer where ListAccounts returns no
+	// account rows, but the default BIP84 raw-import alias has one address.
+	const walletID uint32 = 25
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x25}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo(nil), nil).Once()
+
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{
+			Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+		},
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The raw imported-only scope was probed and included.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesNonDefaultScope verifies that, for non-default key
+// scopes, only internal-branch (change) addresses are watched, matching the
+// legacy ForEachRelevantActiveAddress filtering.
+func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer with one non-default-scope account
+	// holding one external and one internal address.
+	const walletID uint32 = 23
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	// A purpose outside waddrmgr.DefaultKeyScopes is a non-default scope.
+	nonDefault := db.KeyScope{Purpose: 1017, Coin: 0}
+
+	externalAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	externalScript, err := txscript.PayToAddrScript(externalAddr)
+	require.NoError(t, err)
+
+	internalAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	internalScript, err := txscript.PayToAddrScript(internalAddr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "custom",
+		KeyScope:    nonDefault,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName != nil &&
+				*query.AccountName == "custom" &&
+				query.Scope != nil &&
+				*query.Scope == nonDefault
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{
+			{
+				ScriptPubKey: externalScript,
+				Branch:       waddrmgr.ExternalBranch,
+			},
+			{
+				ScriptPubKey: internalScript,
+				Branch:       waddrmgr.InternalBranch,
+			},
+		},
+	}, nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{},
+	)
+
+	// Act: load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: only the internal-branch address survived the filter.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, internalAddr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
 }
 
 // TestExtractAddrEntries verifies address extraction from outputs.

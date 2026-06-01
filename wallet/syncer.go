@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -90,6 +91,10 @@ const (
 	//    Funds" errors or extremely inaccurate fee estimates increases,
 	//    making the explicit "Syncing" state a necessary safeguard.
 	syncStateSwitchThreshold = 6
+
+	// scanAddressPageLimit is the store page size used when loading recovery
+	// scan addresses.
+	scanAddressPageLimit = 1000
 )
 
 // syncState represents the synchronization status of the wallet with the
@@ -2141,6 +2146,148 @@ func (s *syncer) lookupStoreAccountNumber(info db.AccountInfo) (uint32, error) {
 // its materialized addresses are loaded separately by storeScanAddresses.
 func keylessImportedAccount(info db.AccountInfo) bool {
 	return info.IsImported && len(info.PublicKey) == 0
+}
+
+// storeScanAddresses loads active scan addresses through the store, paging per
+// (key scope, account) pair because ListAddresses is scoped to a single pair.
+//
+// This reproduces the legacy ForEachRelevantActiveAddress filtering that
+// DBGetScanData relies on: for default key scopes every active address is
+// watched, while for non-default key scopes only internal-branch (change)
+// addresses are watched. The non-default external branches are intentionally
+// skipped because they only ever existed due to a since-fixed bug, and
+// watching them would diverge from the legacy recovery set.
+func (s *syncer) storeScanAddresses(
+	ctx context.Context) ([]address.Address, error) {
+
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:    s.walletID,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	var addrs []address.Address
+	for i := range accounts {
+		if keylessImportedAccount(accounts[i]) {
+			continue
+		}
+
+		accountAddrs, err := s.storeAccountScanAddresses(
+			ctx, accounts[i],
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		addrs = append(addrs, accountAddrs...)
+	}
+
+	importedAddrs, err := s.storeImportedScanAddresses(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	addrs = append(addrs, importedAddrs...)
+
+	return addrs, nil
+}
+
+// storeImportedScanAddresses loads raw imported addresses through the
+// accountless query shape that ListAccounts intentionally omits.
+func (s *syncer) storeImportedScanAddresses(
+	ctx context.Context) ([]address.Address, error) {
+
+	return s.storeAccountScanAddresses(ctx, db.AccountInfo{
+		AccountName: db.DefaultImportedAccountName,
+		IsImported:  true,
+	})
+}
+
+// storeScanAddressRelevant reports whether a stored address row belongs in the
+// recovery scan set for its account shape and key scope.
+func storeScanAddressRelevant(isRawImported, isDefaultScope bool,
+	info db.AddressInfo) bool {
+
+	if isRawImported || isDefaultScope {
+		return true
+	}
+
+	return info.Branch == waddrmgr.InternalBranch
+}
+
+// storeAccountScanAddresses pages through a single account's addresses,
+// converting each stored script into its wallet address. It mirrors the legacy
+// ForEachRelevantActiveAddress filtering: addresses in default key scopes are
+// all relevant, while non-default key scopes only contribute their
+// internal-branch (change) addresses.
+func (s *syncer) storeAccountScanAddresses(ctx context.Context,
+	account db.AccountInfo) ([]address.Address, error) {
+
+	pageReq, err := page.NewRequest[uint32](scanAddressPageLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Outside the default key scopes only the internal (change) branch is
+	// relevant, matching ForEachRelevantActiveAddress's handling of change
+	// addresses that a since-fixed bug created in non-default scopes.
+	isDefaultScope := waddrmgr.IsDefaultScope(
+		waddrmgr.KeyScope(account.KeyScope),
+	)
+	isRawImported := keylessImportedAccount(account)
+
+	query := db.ListAddressesQuery{
+		WalletID: s.walletID,
+		Page:     pageReq,
+	}
+	if !isRawImported {
+		scope := account.KeyScope
+		accountName := account.AccountName
+
+		query.Scope = &scope
+		query.AccountName = &accountName
+	}
+
+	var addrs []address.Address
+	for {
+		result, err := s.store.ListAddresses(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("list scan addresses: %w", err)
+		}
+
+		for _, info := range result.Items {
+			// Skip non-default-scope external addresses to match
+			// the legacy relevant-address set.
+			relevant := storeScanAddressRelevant(
+				isRawImported, isDefaultScope, info,
+			)
+			if !relevant {
+				continue
+			}
+
+			_, scriptAddrs, _, err := txscript.ExtractPkScriptAddrs(
+				info.ScriptPubKey, s.cfg.ChainParams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("scan address script: %w", err)
+			}
+
+			if len(scriptAddrs) == 0 {
+				return nil, fmt.Errorf("scan address script: %w",
+					db.ErrAddressNotFound)
+			}
+
+			addrs = append(addrs, scriptAddrs[0])
+		}
+
+		if result.Next == nil {
+			return addrs, nil
+		}
+
+		query.Page.After = result.Next
+	}
 }
 
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
