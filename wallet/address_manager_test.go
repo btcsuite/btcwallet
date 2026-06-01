@@ -17,7 +17,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -664,9 +663,14 @@ func TestListAddresses(t *testing.T) {
 			Page:        req,
 		},
 	).Return(addressIter(db.AddressInfo{ScriptPubKey: pkScript})).Once()
-	deps.txStore.On(
-		"UnspentOutputs", mock.Anything,
-	).Return([]wtxmgr.Credit{{Amount: 1000, PkScript: pkScript}}, nil).Once()
+	deps.store.On(
+		"ListUTXOs", mock.Anything, db.ListUtxosQuery{
+			WalletID: w.id,
+		},
+	).Return([]db.UtxoInfo{{
+		Amount:   1000,
+		PkScript: pkScript,
+	}}, nil).Once()
 
 	addrs, err := w.ListAddresses(
 		t.Context(), "default", waddrmgr.WitnessPubKey,

@@ -518,3 +518,118 @@ func creditImportedKeyAtHeight(t *testing.T, dbConn walletdb.DB,
 		t, dbConn, mgr, txStore, pkScript, amount, height, false,
 	)
 }
+
+// TestBalanceExcludesImportedFromNumericAccountFilter verifies that the
+// Balance Account filter matches SQL semantics: a numeric Account filter
+// never counts imported UTXOs (the legacy ImportedAddrAccount pseudo-account
+// has no numeric counterpart on SQL backends), while derived accounts are
+// still summed by number. Imported balances remain reachable via
+// (Scope, Name), exercised separately by TestBalanceNameFilter.
+func TestBalanceExcludesImportedFromNumericAccountFilter(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScopeBIP0084
+
+	// Arrange: a derived-account (account 0) UTXO and an imported-key UTXO.
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(100),
+		balanceTestTipHeight, false,
+	)
+	creditImportedKeyAtHeight(
+		t, store.db, mgr, txStore, scope, btcutil.Amount(300),
+		balanceTestTipHeight,
+	)
+
+	// A numeric Account filter set to the imported pseudo-account number
+	// sums nothing: imported outputs are not numerically addressable.
+	importedAcct := uint32(waddrmgr.ImportedAddrAccount)
+	res, err := store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope:   &dbScope,
+			Account: &importedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Zero(t, res.Total)
+
+	// The derived account is still summed by its account number, and the
+	// imported output does not leak into the result.
+	derivedAcct := uint32(0)
+	res, err = store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope:   &dbScope,
+			Account: &derivedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(100), res.Total)
+}
+
+// TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter verifies that an
+// imported xpub (watch-only) account is excluded from the numeric Account
+// balance filter even though it carries an ordinary kvdb account number. SQL
+// backends store NULL account_number for imported accounts, so they can never
+// be summed numerically; kvdb must match that, while the account stays
+// reachable through (Scope, Name).
+func TestBalanceExcludesWatchOnlyAccountFromNumericAccountFilter(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScopeBIP0084
+
+	// Arrange: a derived account-0 UTXO and an imported xpub-account UTXO
+	// whose account carries an ordinary (non-pseudo) account number.
+	importedName := "imported-xpub-balance"
+	importedAcct := createImportedXpubAccount(
+		t, store, scope, importedName, 0xBE,
+	)
+
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(100),
+		balanceTestTipHeight, false,
+	)
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, importedAcct,
+		btcutil.Amount(300), balanceTestTipHeight, false,
+	)
+
+	// A numeric Account filter on the imported account's ordinary number
+	// must sum nothing: imported accounts are not numerically addressable.
+	res, err := store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope:   &dbScope,
+			Account: &importedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Zero(t, res.Total)
+
+	// The derived account is still summed by its number, with no leakage
+	// from the imported account.
+	derivedAcct := uint32(0)
+	res, err = store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope:   &dbScope,
+			Account: &derivedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(100), res.Total)
+
+	// The imported account remains summable through its (Scope, Name).
+	res, err = store.Balance(
+		t.Context(), db.BalanceParams{
+			Scope: &dbScope,
+			Name:  &importedName,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(300), res.Total)
+}

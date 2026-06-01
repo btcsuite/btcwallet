@@ -424,8 +424,8 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 		return 0, 0, nil
 	}
 
-	nameFound, err := s.resolveBalanceNameFilter(
-		addrmgrNs, &params, scopeFilter,
+	nameAcct, nameFound, err := s.resolveBalanceNameFilter(
+		addrmgrNs, params, scopeFilter,
 	)
 	if err != nil {
 		return 0, 0, err
@@ -447,31 +447,51 @@ func (s *Store) walkBalanceUTXOs(addrmgrNs, txmgrNs walletdb.ReadBucket,
 	for i := range unspent {
 		output := &unspent[i]
 
-		owner, account, ok := s.classifyBalanceUTXO(
-			addrmgrNs, output, chainParams,
+		accepted, err := s.balanceOutputAccepted(
+			addrmgrNs, output, scopeFilter, params, nameAcct,
+			syncBlock.Height, chainParams,
 		)
-		if !ok {
-			continue
+		if err != nil {
+			return 0, 0, err
 		}
 
-		if !balanceFilterAllows(
-			scopeFilter, owner, params, account,
-		) {
-
-			continue
+		if accepted {
+			total, locked = addBalanceOutput(total, locked, output)
 		}
-
-		if !confsAllowed(
-			output, syncBlock.Height, params,
-		) {
-
-			continue
-		}
-
-		total, locked = addBalanceOutput(total, locked, output)
 	}
 
 	return total, locked, nil
+}
+
+// balanceOutputAccepted reports whether one unspent output counts toward the
+// balance under the BalanceParams filters. It resolves the owning account,
+// applies the Scope/account filters (via balanceFilterAllows) and the
+// confirmation filters (via confsAllowed), and returns false for outputs that
+// are unowned or filtered out so the caller skips them without error.
+func (s *Store) balanceOutputAccepted(addrmgrNs walletdb.ReadBucket,
+	output *wtxmgr.Credit, scopeFilter *waddrmgr.KeyScope,
+	params db.BalanceParams, nameAcct *uint32, syncHeight int32,
+	chainParams *chaincfg.Params) (bool, error) {
+
+	owner, account, ok := s.classifyBalanceUTXO(
+		addrmgrNs, output, chainParams,
+	)
+	if !ok {
+		return false, nil
+	}
+
+	allowed, err := balanceFilterAllows(
+		addrmgrNs, scopeFilter, owner, params, nameAcct, account,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if !allowed {
+		return false, nil
+	}
+
+	return confsAllowed(output, syncHeight, params), nil
 }
 
 // addBalanceOutput adds an accepted output to the total balance and, when the
@@ -488,34 +508,40 @@ func addBalanceOutput(total, locked btcutil.Amount,
 }
 
 // resolveBalanceNameFilter resolves BalanceParams.Name into the real waddrmgr
-// account number before the UTXO walk. A missing name means no UTXOs match,
-// so the caller should return a zero balance without an error.
+// account number used for the UTXO walk. It returns (nil, true, nil) when no
+// Name filter is set, the resolved account number when one is, and
+// (nil, false, nil) when the name does not exist so the caller returns a zero
+// balance without an error.
+//
+// The resolved number is returned separately rather than folded into
+// params.Account: a Name filter is the public handle that selects an account
+// by name regardless of origin (including imported accounts), whereas a
+// numeric params.Account filter must never match imported accounts. Keeping
+// the two distinct lets balanceFilterAllows apply the imported exclusion only
+// to the numeric path.
 func (s *Store) resolveBalanceNameFilter(addrmgrNs walletdb.ReadBucket,
-	params *db.BalanceParams, scopeFilter *waddrmgr.KeyScope) (bool, error) {
+	params db.BalanceParams,
+	scopeFilter *waddrmgr.KeyScope) (*uint32, bool, error) {
 
 	if params.Name == nil {
-		return true, nil
+		return nil, true, nil
 	}
 
 	scopedMgr, err := s.addrStore.FetchScopedKeyManager(*scopeFilter)
 	if err != nil {
-		return false, fmt.Errorf("fetch scoped manager: %w", err)
+		return nil, false, fmt.Errorf("fetch scoped manager: %w", err)
 	}
 
 	acctNum, err := scopedMgr.LookupAccount(addrmgrNs, *params.Name)
 	if err != nil {
 		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
-			return false, nil
+			return nil, false, nil
 		}
 
-		return false, fmt.Errorf("lookup account: %w", err)
+		return nil, false, fmt.Errorf("lookup account: %w", err)
 	}
 
-	// Internal filtering stays on the real account number; the public
-	// AccountInfo.AccountNumber masking only applies at the read API boundary.
-	params.Account = &acctNum
-
-	return true, nil
+	return &acctNum, true, nil
 }
 
 // classifyBalanceUTXO maps an unspent output to its owning address and
@@ -541,21 +567,39 @@ func (s *Store) classifyBalanceUTXO(addrmgrNs walletdb.ReadBucket,
 	return owner, account, true
 }
 
-// balanceFilterAllows reports whether an output's owning address and
-// account survive the Scope and Account filters from BalanceParams.
-func balanceFilterAllows(scopeFilter *waddrmgr.KeyScope,
-	owner waddrmgr.AccountStore, params db.BalanceParams,
-	account uint32) bool {
+// balanceFilterAllows reports whether an output's owning address and account
+// survive the Scope and account filters from BalanceParams. nameAcct is the
+// account number resolved from a Name filter, if any; it selects that account
+// by exact number regardless of origin. A numeric params.Account filter, by
+// contrast, never matches an imported account (see numericAccountMatches).
+// Account and Name are mutually exclusive, so at most one of the two account
+// filters applies.
+func balanceFilterAllows(addrmgrNs walletdb.ReadBucket,
+	scopeFilter *waddrmgr.KeyScope, owner waddrmgr.AccountStore,
+	params db.BalanceParams, nameAcct *uint32, account uint32) (bool, error) {
 
 	if scopeFilter != nil && *scopeFilter != owner.Scope() {
-		return false
+		return false, nil
 	}
 
-	if params.Account != nil && *params.Account != account {
-		return false
+	// A Name filter resolves to a concrete account number and matches it
+	// exactly; imported accounts are reachable this way by design.
+	if nameAcct != nil {
+		return account == *nameAcct, nil
 	}
 
-	return true
+	if params.Account == nil {
+		return true, nil
+	}
+
+	imported, err := accountIsImported(addrmgrNs, owner, account)
+	if err != nil {
+		return false, err
+	}
+
+	return numericAccountMatches(
+		account, *params.Account, imported,
+	), nil
 }
 
 // confsAllowed reports whether an unspent output's confirmation depth
