@@ -196,13 +196,8 @@ func TestListUnspent(t *testing.T) {
 func TestGetUtxo(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Define account names.
-	account1 := "default"
-
-	// Create the addresses that our mocks will return.
 	privKeyDefault, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	addrDefault, err := address.NewAddressPubKey(
@@ -210,72 +205,55 @@ func TestGetUtxo(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to match the default mock (1).
-	currentHeight := int32(1)
-
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
-		false, account1, waddrmgr.WitnessPubKey,
-	)
-
-	// Now that the mocks are set up, we can create the pkScripts.
 	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
 	require.NoError(t, err)
 
-	// Create a UTXO.
-	utxo1 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{1},
-			Index: 0,
-		},
-		Amount:   100000,
-		PkScript: pkScriptDefault,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight,
-			},
-		},
+	utxoInfo := &db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
 	}
 
-	// Mock the GetUtxo method to return the UTXO.
-	mocks.txStore.On("GetUtxo", mock.Anything, utxo1.OutPoint).Return(
-		&utxo1, nil,
-	)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: utxoInfo.OutPoint,
+	}).Return(utxoInfo, nil).Once()
 
-	// Construct the expected Utxo.
 	expectedUtxo := &Utxo{
-		OutPoint:      utxo1.OutPoint,
-		Amount:        utxo1.Amount,
-		PkScript:      utxo1.PkScript,
+		OutPoint:      utxoInfo.OutPoint,
+		Amount:        utxoInfo.Amount,
+		PkScript:      utxoInfo.PkScript,
 		Confirmations: 1,
-		Spendable:     false,
+		Spendable:     true,
 		Address:       addrDefault,
-		Account:       account1,
+		Account:       defaultAccountName,
 		AddressType:   waddrmgr.WitnessPubKey,
+		Locked:        false,
 	}
 
-	// Now, try to get the UTXO and compare it to our expected result.
-	utxo, err := w.GetUtxo(t.Context(), utxo1.OutPoint)
+	utxo, err := w.GetUtxo(t.Context(), utxoInfo.OutPoint)
 	require.NoError(t, err)
 	require.Equal(t, expectedUtxo, utxo)
 }
 
-// TestGetUtxo_Err tests the error conditions of the GetUtxo method.
-func TestGetUtxo_Err(t *testing.T) {
+// TestGetUtxoErr tests the error conditions of the GetUtxo method.
+func TestGetUtxoErr(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Test the case where the UTXO is not found.
-	utxoNotFound := wire.OutPoint{
-		Hash:  [32]byte{2},
-		Index: 0,
-	}
-	mocks.txStore.On("GetUtxo", mock.Anything, utxoNotFound).Return(
-		nil, wtxmgr.ErrUtxoNotFound,
-	)
+	utxoNotFound := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: utxoNotFound,
+	}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
+
 	utxo, err := w.GetUtxo(t.Context(), utxoNotFound)
-	require.ErrorIs(t, err, wtxmgr.ErrUtxoNotFound)
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 	require.Nil(t, utxo)
 }
 
