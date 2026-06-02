@@ -28,64 +28,33 @@ func TestReleaseOutputSuccess(t *testing.T) {
 	txStore := newTxStore(t, dbConn)
 	store := NewStore(dbConn, txStore, nil)
 
-	lockID := wtxmgr.LockID{1}
-	op := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	// Arrange: insert a current credit and lease it so there is something
+	// to release.
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 1000, 1,
+	)
 
-	// Arrange: Create a lease so there is something to release.
-	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		require.NotNil(t, ns)
-
-		// Create a mock transaction to satisfy the "known output" check in
-		// wtxmgr.
-		txMsg := &wire.MsgTx{
-			Version: 1,
-			TxOut: []*wire.TxOut{{
-				Value:    1000,
-				PkScript: []byte{0x00}, // OP_0
-			}},
-		}
-
-		rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
-		if err != nil {
-			return fmt.Errorf("create tx record: %w", err)
-		}
-
-		// Insert the transaction as mined.
-		block := &wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{Height: 1},
-			Time:  time.Now(),
-		}
-
-		err = txStore.InsertTx(ns, rec, block)
-		if err != nil {
-			return fmt.Errorf("insert tx: %w", err)
-		}
-
-		// Add the output as a credit so wtxmgr knows about it.
-		err = txStore.AddCredit(ns, rec, block, 0, false)
-		if err != nil {
-			return fmt.Errorf("add credit: %w", err)
-		}
-
-		// Use the inserted transaction's hash for the outpoint.
-		op.Hash = rec.Hash
-
-		_, err = txStore.LockOutput(ns, lockID, op, time.Hour)
-
-		return err
-	})
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
 	require.NoError(t, err)
 
-	// Act: Release the lease through the kvdb store implementation.
-	err = store.ReleaseOutput(t.Context(), db.ReleaseOutputParams{
-		WalletID: 1,
-		ID:       [32]byte(lockID),
-		OutPoint: op,
-	})
+	// Act: release the lease through the kvdb store implementation.
+	err = store.ReleaseOutput(
+		t.Context(), db.ReleaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+		},
+	)
 	require.NoError(t, err)
 
-	// Assert: The lock set is now empty.
+	// Assert: the lock set is now empty.
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
 		require.NotNil(t, ns)
@@ -116,6 +85,143 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, walletdb.ErrBucketNotFound)
+}
+
+// TestReleaseOutputWrongLockID verifies that releasing a current output with
+// a lock ID other than the active one reports db.ErrOutputUnlockNotAllowed,
+// matching the shared db.UTXOStore release contract.
+func TestReleaseOutputWrongLockID(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	// Arrange: insert a current credit and lease it under lock ID 1.
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	// Act: attempt to release using a different lock ID.
+	err = store.ReleaseOutput(
+		t.Context(), db.ReleaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{2},
+			OutPoint: outPoint,
+		},
+	)
+
+	// Assert: the mismatched lock ID is rejected with the db sentinel.
+	require.ErrorIs(t, err, db.ErrOutputUnlockNotAllowed)
+}
+
+// TestReleaseOutputMissingUtxo verifies that releasing an outpoint that is not
+// in the current wallet UTXO set reports db.ErrUtxoNotFound.
+func TestReleaseOutputMissingUtxo(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	// Act: release an outpoint that was never inserted as a credit.
+	err := store.ReleaseOutput(
+		t.Context(), db.ReleaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: wire.OutPoint{Hash: [32]byte{9}, Index: 0},
+		},
+	)
+
+	// Assert: the unknown outpoint maps to the db sentinel.
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestReleaseOutputRejectsSpentByUnminedTx verifies that an output already
+// spent by an unmined wallet transaction is no longer current and therefore
+// reports db.ErrUtxoNotFound on release, even when it still carries a lease.
+func TestReleaseOutputRejectsSpentByUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	// Arrange: insert a current credit, lease it, then spend it with an
+	// unmined transaction so it drops out of the current UTXO set.
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 1500, 1,
+	)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	insertUnminedSpend(t, dbConn, txStore, outPoint)
+
+	// Act: release the now non-current output.
+	err = store.ReleaseOutput(
+		t.Context(), db.ReleaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+		},
+	)
+
+	// Assert: the non-current output maps to the db sentinel.
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestReleaseOutputAlreadyUnlocked verifies that releasing a current output
+// that carries no active lease is a no-op rather than an error, matching the
+// expired/already-released behavior of the shared release contract.
+func TestReleaseOutputAlreadyUnlocked(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	// Arrange: insert a current credit that was never leased.
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 2500, 2,
+	)
+
+	// Act: release the unleased output.
+	err := store.ReleaseOutput(
+		t.Context(), db.ReleaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{1},
+			OutPoint: outPoint,
+		},
+	)
+
+	// Assert: an output with no active lease releases as a no-op.
+	require.NoError(t, err)
 }
 
 // TestGetUtxoSuccess verifies that kvdb.Store adapts one wallet-owned legacy
