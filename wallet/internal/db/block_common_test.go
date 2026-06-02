@@ -66,13 +66,12 @@ func TestBlockFromBlockStamp(t *testing.T) {
 }
 
 // TestOptionalBlockFromBlockStamp verifies that optional legacy block-stamps
-// map negative heights to missing block metadata.
+// map negative heights to nil block metadata.
 func TestOptionalBlockFromBlockStamp(t *testing.T) {
 	t.Parallel()
 
-	block, err := OptionalBlockFromBlockStamp(waddrmgr.BlockStamp{
+	block := OptionalBlockFromBlockStamp(waddrmgr.BlockStamp{
 		Height: -1,
 	})
-	require.ErrorIs(t, err, ErrBlockNotFound)
 	require.Nil(t, block)
 }
