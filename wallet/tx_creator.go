@@ -459,68 +459,28 @@ func validateTxIntent(intent *TxIntent) error {
 
 // prepareTxAuthSources creates the input and change sources required to
 // author a transaction.
-func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
+func (w *Wallet) prepareTxAuthSources(ctx context.Context, intent *TxIntent) (
 	txauthor.InputSource, *txauthor.ChangeSource, error) {
+
 	// Determine the change source. If not specified, a default will be
 	// used.
 	changeAccount := w.determineChangeSource(intent)
 
-	manager, err := w.addrStore.FetchScopedKeyManager(
-		changeAccount.KeyScope,
-	)
+	changeSource, err := w.createChangeSource(ctx, changeAccount)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			changeAccount.AccountName)
+		return nil, nil, err
 	}
 
-	var (
-		changeSource *txauthor.ChangeSource
-		inputSource  txauthor.InputSource
-	)
-	// We perform the core logic of creating the input and change sources
-	// within a single database transaction to ensure atomicity.
-	err = walletdb.Update(w.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
-		changeKeyScope := &changeAccount.KeyScope
-		accountName := changeAccount.AccountName
-
-		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Query the account's number using the account name.
-		//
-		// TODO(yy): Remove this query in upcoming SQL.
-		account, err := manager.LookupAccount(addrmgrNs, accountName)
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrAccountNotFound,
-				accountName)
-		}
-
-		// Create the change source, which is a closure that the
-		// txauthor package will use to generate a new change address
-		// when needed.
-		//
-		// TODO(yy): Refactor to ensure atomicity. The underlying
-		// `GetUnusedAddress` call creates its own database
-		// transaction, breaking the atomicity of this
-		// `walletdb.Update` block. A new method should be added to
-		// `AccountStore` that accepts an active database transaction
-		// and returns an unused address. This will allow the address
-		// derivation to occur within the same atomic transaction as
-		// the rest of the tx creation logic.
-		_, changeSource, err = w.addrMgrWithChangeSource(
-			dbtx, changeKeyScope, account,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Create the input source, which is a closure that the
-		// txauthor package will use to select coins.
+	// Create the input source, which is a closure that the txauthor
+	// package will use to select coins. The input path still reads
+	// through the legacy walletdb tx; it is routed onto the store in a
+	// follow-up commit.
+	var inputSource txauthor.InputSource
+	err = walletdb.View(w.cfg.DB, func(dbtx walletdb.ReadTx) error {
+		var err error
 		inputSource, err = w.createInputSource(dbtx, intent)
-		if err != nil {
-			return err
-		}
 
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, nil, err
@@ -605,7 +565,7 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 // to the given outputs. It is the main implementation of the TxCreator
 // interface. The method will produce a valid, unsigned transaction, which can
 // then be passed to the Signer interface to be signed.
-func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
+func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
 	*txauthor.AuthoredTx, error) {
 
 	err := w.state.validateSynced()
@@ -632,7 +592,7 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 		return nil, err
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(intent)
+	inputSource, changeSource, err := w.prepareTxAuthSources(ctx, intent)
 	if err != nil {
 		return nil, err
 	}
