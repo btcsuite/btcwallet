@@ -57,13 +57,15 @@ func BlockFromBlockStamp(block waddrmgr.BlockStamp) (*Block, error) {
 }
 
 // OptionalBlockFromBlockStamp converts a legacy block-stamp into the database
-// store block shape, treating negative heights as missing metadata.
-func OptionalBlockFromBlockStamp(
-	block waddrmgr.BlockStamp) (*Block, error) {
-
+// store block shape, returning nil for missing metadata.
+func OptionalBlockFromBlockStamp(block waddrmgr.BlockStamp) *Block {
 	if block.Height < 0 {
-		return nil, ErrBlockNotFound
+		return nil
 	}
 
-	return BlockFromBlockStamp(block)
+	return &Block{
+		Hash:      block.Hash,
+		Height:    uint32(block.Height),
+		Timestamp: block.Timestamp.UTC(),
+	}
 }
