@@ -244,11 +244,17 @@ func (s *Store) LeaseOutput(_ context.Context,
 	}, nil
 }
 
-// ReleaseOutput releases a previously leased output.
+// ReleaseOutput releases a previously leased output, aligning the kvdb
+// backend with the shared db.UTXOStore release contract (see
+// db.ReleaseOutputWithOps).
 //
-// How it works:
-// The method executes a single walletdb update transaction that deletes the
-// lock record associated with the specified outpoint.
+// The outpoint is first gated through the current wallet UTXO set: a missing
+// or non-current (spent-by-unmined) outpoint maps to db.ErrUtxoNotFound, the
+// same sentinel the SQL backends return. The legacy unlock is then translated
+// onto the shared sentinels: a wrong active lock ID becomes
+// db.ErrOutputUnlockNotAllowed, while an already-unlocked or expired lease is
+// a no-op. The translation mirrors the wtxmgr.Err* -> db.Err* mapping already
+// used by GetUtxo and LeaseOutput in this file.
 //
 // Database Actions:
 //   - Performs exactly one write transaction (walletdb.Update).
@@ -270,8 +276,34 @@ func (s *Store) ReleaseOutput(_ context.Context,
 			)
 		}
 
-		err := s.txStore.UnlockOutput(ns, lockID, op)
+		// Gate the outpoint through the current UTXO set first so a
+		// missing or non-current output reports db.ErrUtxoNotFound,
+		// matching the SQL backends which resolve the wallet-owned row
+		// before attempting the release.
+		current, err := s.currentUTXOSet(ns)
 		if err != nil {
+			return err
+		}
+
+		if _, ok := current[op]; !ok {
+			return db.ErrUtxoNotFound
+		}
+
+		err = s.txStore.UnlockOutput(ns, lockID, op)
+		if err != nil {
+			switch {
+			// wtxmgr only knows the output through the lock bucket,
+			// so an unknown output here means it left the current
+			// set between the gate above and the unlock; report it
+			// as not found for parity with the SQL backends.
+			case errors.Is(err, wtxmgr.ErrUnknownOutput),
+				errors.Is(err, wtxmgr.ErrUtxoNotFound):
+				return db.ErrUtxoNotFound
+
+			case errors.Is(err, wtxmgr.ErrOutputUnlockNotAllowed):
+				return db.ErrOutputUnlockNotAllowed
+			}
+
 			return fmt.Errorf("unlock output: %w", err)
 		}
 
