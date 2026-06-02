@@ -75,12 +75,7 @@ func (s *Store) GetWallet(_ context.Context,
 		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
 	}
 
-	syncedTo, err := db.OptionalBlockFromBlockStamp(addrStore.SyncedTo())
-	if errors.Is(err, db.ErrBlockNotFound) {
-		syncedTo = nil
-	} else if err != nil {
-		return nil, fmt.Errorf("kvdb.Store.GetWallet: %w", err)
-	}
+	syncedTo := db.OptionalBlockFromBlockStamp(addrStore.SyncedTo())
 
 	return &db.WalletInfo{
 		ID:            0,
