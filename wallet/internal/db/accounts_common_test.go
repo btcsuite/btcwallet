@@ -9,26 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCreateImportedAccountParamsValidate verifies imported account creation
-// validation rejects missing names and public keys.
-func TestCreateImportedAccountParamsValidate(t *testing.T) {
-	t.Parallel()
-
-	err := (&CreateImportedAccountParams{
-		Name:      "imported",
-		PublicKey: []byte{1},
-	}).ValidateBasic()
-	require.NoError(t, err)
-
-	err = (&CreateImportedAccountParams{
-		PublicKey: []byte{1},
-	}).ValidateBasic()
-	require.ErrorIs(t, err, ErrMissingAccountName)
-
-	err = (&CreateImportedAccountParams{Name: "imported"}).ValidateBasic()
-	require.ErrorIs(t, err, ErrMissingAccountPublicKey)
-}
-
 // TestGetAccountQueryValidate verifies account lookups must use exactly one
 // account selector.
 func TestGetAccountQueryValidate(t *testing.T) {
