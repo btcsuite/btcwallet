@@ -25,6 +25,29 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// The following are the public, wallet-owned sentinel errors returned by the
+// UTXO and lease methods (GetUtxo, LeaseOutput, ReleaseOutput). They are
+// intentionally decoupled from the wallet's internal storage layers: callers
+// match on these values with errors.Is and must not reach for the internal
+// db.Err* sentinels (which live in an internal package) or the legacy
+// wtxmgr.Err* sentinels (whose package is slated to become internal). The
+// names mirror the historical wtxmgr sentinels so that downstream callers can
+// migrate mechanically.
+var (
+	// ErrUnknownOutput is returned when the requested output is not known
+	// to the wallet's UTXO set.
+	ErrUnknownOutput = errors.New("unknown output")
+
+	// ErrOutputAlreadyLocked is returned when an output is already leased
+	// under a different lock ID and therefore cannot be leased again.
+	ErrOutputAlreadyLocked = errors.New("output already locked")
+
+	// ErrOutputUnlockNotAllowed is returned when an output cannot be
+	// unlocked, for example because it is held under a different lock ID
+	// than the one supplied.
+	ErrOutputUnlockNotAllowed = errors.New("output unlock not allowed")
+)
+
 var (
 	errUtxoHeightOverflow  = errors.New("utxo height overflows int32")
 	errUtxoScriptNoAddress = errors.New(
@@ -266,6 +289,13 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 		OutPoint: prevOut,
 	})
 	if err != nil {
+		// Translate the internal store sentinel into the public,
+		// wallet-owned error so callers do not couple to the internal
+		// db package.
+		if errors.Is(err, db.ErrUtxoNotFound) {
+			return nil, ErrUnknownOutput
+		}
+
 		return nil, fmt.Errorf("get utxo: %w", err)
 	}
 
@@ -282,10 +312,10 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 //
 // The lock is acquired by delegating to the wallet's db.Store implementation,
 // which records the lease under the supplied LockID and returns its expiration
-// time. The store gates the outpoint against the current UTXO set first, so an
-// unknown or already-spent output yields db.ErrUtxoNotFound and an output held
-// under a different lock ID yields db.ErrOutputAlreadyLeased; any other store
-// error is wrapped for context.
+// time. The store's internal sentinels are translated into the public,
+// wallet-owned errors: an unknown or already-spent output becomes
+// ErrUnknownOutput and an output held under a different lock ID becomes
+// ErrOutputAlreadyLocked; any other store error is wrapped for context.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
 func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
@@ -305,6 +335,17 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 		},
 	)
 	if err != nil {
+		// Translate the internal store sentinels into the public,
+		// wallet-owned errors so callers do not couple to the internal
+		// db package.
+		switch {
+		case errors.Is(err, db.ErrUtxoNotFound):
+			return time.Time{}, ErrUnknownOutput
+
+		case errors.Is(err, db.ErrOutputAlreadyLeased):
+			return time.Time{}, ErrOutputAlreadyLocked
+		}
+
 		return time.Time{}, fmt.Errorf("lease output: %w", err)
 	}
 
@@ -314,7 +355,9 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 // ReleaseOutput unlocks a previously leased output, making it available for
 // coin selection again.
 //
-// The lock is released by delegating to the wallet's db.Store implementation.
+// The lock is released by delegating to the wallet's db.Store implementation;
+// the store's internal sentinels are translated into the public, wallet-owned
+// ErrUnknownOutput / ErrOutputUnlockNotAllowed errors.
 func (w *Wallet) ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 	op wire.OutPoint) error {
 
@@ -329,7 +372,23 @@ func (w *Wallet) ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 		OutPoint: op,
 	}
 
-	return w.store.ReleaseOutput(ctx, params)
+	err = w.store.ReleaseOutput(ctx, params)
+	if err != nil {
+		// Translate the internal store sentinels into the public,
+		// wallet-owned errors so callers do not couple to the internal
+		// db package.
+		switch {
+		case errors.Is(err, db.ErrUtxoNotFound):
+			return ErrUnknownOutput
+
+		case errors.Is(err, db.ErrOutputUnlockNotAllowed):
+			return ErrOutputUnlockNotAllowed
+		}
+
+		return fmt.Errorf("release output: %w", err)
+	}
+
+	return nil
 }
 
 // ListLeasedOutputs returns the wallet-owned outputs that currently have active
