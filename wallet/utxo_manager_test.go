@@ -213,7 +213,7 @@ func TestGetUtxoErr(t *testing.T) {
 	}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
 
 	utxo, err := w.GetUtxo(t.Context(), utxoNotFound)
-	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+	require.ErrorIs(t, err, ErrUnknownOutput)
 	require.Nil(t, utxo)
 }
 
@@ -244,6 +244,56 @@ func TestLeaseOutput(t *testing.T) {
 	require.Equal(t, expiration, actualExpiration)
 }
 
+// TestLeaseOutputErr tests that LeaseOutput translates the store's db-native
+// sentinels into the public, wallet-owned errors.
+func TestLeaseOutputErr(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		expectedErr error
+	}{
+		{
+			name:        "missing output",
+			storeErr:    db.ErrUtxoNotFound,
+			expectedErr: ErrUnknownOutput,
+		},
+		{
+			name:        "already leased",
+			storeErr:    db.ErrOutputAlreadyLeased,
+			expectedErr: ErrOutputAlreadyLocked,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+
+			mocks.store.On(
+				"LeaseOutput", mock.Anything,
+				db.LeaseOutputParams{
+					WalletID: w.id,
+					ID:       db.LockID{1},
+					OutPoint: outPoint,
+					Duration: time.Hour,
+				},
+			).Return((*db.LeasedOutput)(nil), tc.storeErr).Once()
+
+			expiration, err := w.LeaseOutput(
+				t.Context(), wtxmgr.LockID{1}, outPoint,
+				time.Hour,
+			)
+			require.ErrorIs(t, err, tc.expectedErr)
+			require.True(t, expiration.IsZero())
+		})
+	}
+}
+
 // TestReleaseOutput tests the ReleaseOutput method.
 func TestReleaseOutput(t *testing.T) {
 	t.Parallel()
@@ -268,6 +318,52 @@ func TestReleaseOutput(t *testing.T) {
 	leaseID := wtxmgr.LockID{1}
 	err := w.ReleaseOutput(t.Context(), leaseID, utxo)
 	require.NoError(t, err)
+}
+
+// TestReleaseOutputErr tests that ReleaseOutput translates the store's
+// db-native sentinels into the public, wallet-owned errors.
+func TestReleaseOutputErr(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	leaseID := wtxmgr.LockID{1}
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		expectedErr error
+	}{
+		{
+			name:        "missing output",
+			storeErr:    db.ErrUtxoNotFound,
+			expectedErr: ErrUnknownOutput,
+		},
+		{
+			name:        "wrong lock id",
+			storeErr:    db.ErrOutputUnlockNotAllowed,
+			expectedErr: ErrOutputUnlockNotAllowed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithID(t, 7)
+
+			mocks.store.On(
+				"ReleaseOutput", mock.Anything,
+				db.ReleaseOutputParams{
+					WalletID: 7,
+					ID:       [32]byte{1},
+					OutPoint: outPoint,
+				},
+			).Return(tc.storeErr).Once()
+
+			err := w.ReleaseOutput(t.Context(), leaseID, outPoint)
+			require.ErrorIs(t, err, tc.expectedErr)
+		})
+	}
 }
 
 // TestListLeasedOutputs tests the ListLeasedOutputs method.
