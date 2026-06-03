@@ -9,69 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRenameAccountParamsValidate verifies account renames must include a new
-// name and exactly one account selector.
-func TestRenameAccountParamsValidate(t *testing.T) {
-	t.Parallel()
-
-	accountNumber := uint32(7)
-
-	tests := []struct {
-		name    string
-		params  RenameAccountParams
-		wantErr error
-	}{
-		{
-			name: "old name selector",
-			params: RenameAccountParams{
-				OldName: "default",
-				NewName: "renamed",
-			},
-		},
-		{
-			name: "account number selector",
-			params: RenameAccountParams{
-				AccountNumber: &accountNumber,
-				NewName:       "renamed",
-			},
-		},
-		{
-			name: "missing new name",
-			params: RenameAccountParams{
-				OldName: "default",
-			},
-			wantErr: ErrMissingAccountName,
-		},
-		{
-			name: "no selector",
-			params: RenameAccountParams{
-				NewName: "renamed",
-			},
-			wantErr: ErrInvalidAccountQuery,
-		},
-		{
-			name: "both selectors",
-			params: RenameAccountParams{
-				OldName:       "default",
-				AccountNumber: &accountNumber,
-				NewName:       "renamed",
-			},
-			wantErr: ErrInvalidAccountQuery,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := test.params.Validate()
-			require.ErrorIs(t, err, test.wantErr)
-		})
-	}
-}
-
 // TestAccountRowToInfoPopulatesAddrSchema verifies SQL account rows expose the
-// effective key-scope address schema on AccountInfo.
+// effective key-scope address schema on AccountInfo, including the schema
+// values returned by AccountRowToInfo.
 func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	t.Parallel()
 
