@@ -325,6 +325,51 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountMaxAccountNumber verifies that CreateDerivedAccount
+// allocates the last valid account number and then reports overflow on the
+// next allocation.
+func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "max-account-wallet")
+
+	// Arrange: create a derived account and seed the scope near the limit.
+	createDerivedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, "seed-derived-account",
+	)
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	CreateAccountWithNumber(
+		t, queries, scopeID, db.MaxAccountNumber-1, "account-max-minus-one",
+	)
+	UpdateKeyScopeNextAccountNumber(t, store.DB(), scopeID, db.MaxAccountNumber)
+
+	// Act: allocate the last valid account number.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "account-max",
+		},
+		SpendableDeriveFn(),
+	)
+
+	// Assert: the max allocation succeeds, and the next one fails.
+	require.NoError(t, err)
+	require.Equal(t, db.MaxAccountNumber, info.AccountNumber)
+
+	_, err = store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    db.KeyScopeBIP0084,
+			Name:     "account-overflow",
+		},
+		SpendableDeriveFn(),
+	)
+	require.ErrorIs(t, err, db.ErrMaxAccountNumberReached)
+}
+
 // TestCreateDerivedAccountConcurrent verifies that concurrent account creation
 // yields unique, sequential account numbers without errors.
 func TestCreateDerivedAccountConcurrent(t *testing.T) {
