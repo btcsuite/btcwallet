@@ -67,12 +67,17 @@ DOCKER_TOOLS = docker run \
   $(GIT_VOLUME) \
   btcwallet-tools
 
+# Pin the sqlfluff image by digest to keep linting results stable across
+# environments and over time. The tag alone is mutable, so it could later point
+# to a different build with changed rules or behavior. This digest currently
+# corresponds to sqlfluff 4.2.1 on Docker Hub:
+# https://hub.docker.com/layers/sqlfluff/sqlfluff/4.2.1
 SQLFLUFF = docker run \
 	--rm \
 	--user $$(id -u):$$(id -g) \
     -v $$(pwd):/sql \
     -w /sql \
-    sqlfluff/sqlfluff
+    sqlfluff/sqlfluff@sha256:0b1f131e3e9b4ac10bf45f1b2cb8680e67f74e63f8e6db9f0f0207dbbe3c71d2
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
