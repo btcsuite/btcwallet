@@ -18,17 +18,17 @@ func (s *Store) GetAccount(ctx context.Context,
 
 	var account *db.AccountInfo
 
-	err := s.execRead(ctx, func(q *sqlc.Queries) error {
-		getQueries := accountGetQueries{q: q}
+	err := s.execRead(
+		ctx, func(q *sqlc.Queries) error {
+			getQueries := accountGetQueries{q: q}
 
-		var err error
+			var err error
 
-		account, err = db.GetAccountByQuery(
-			ctx, query, getQueries.byNumber, getQueries.byName,
-		)
+			account, err = db.GetAccountWithOps(ctx, query, getQueries)
 
-		return err
-	})
+			return err
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -41,10 +41,11 @@ type accountGetQueries struct {
 	q *sqlc.Queries
 }
 
-// byNumber retrieves an account by wallet ID, scope, and account number,
-// then attaches its balance via AccountBalance unless query.SkipBalance
-// is set.
-func (s accountGetQueries) byNumber(ctx context.Context,
+// Verify accountGetQueries implements GetAccountOps.
+var _ db.GetAccountOps = accountGetQueries{}
+
+// GetAccountByNumber implements db.GetAccountOps.
+func (s accountGetQueries) GetAccountByNumber(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	row, err := s.q.GetAccountByWalletScopeAndNumber(
@@ -56,7 +57,7 @@ func (s accountGetQueries) byNumber(ctx context.Context,
 		},
 	)
 	if err != nil {
-		return nil, mapGetAccountErr(err, query)
+		return nil, mapGetAccountErr(err)
 	}
 
 	info, err := accountRowToInfo(row)
@@ -64,12 +65,11 @@ func (s accountGetQueries) byNumber(ctx context.Context,
 		return nil, err
 	}
 
-	return s.attachBalance(ctx, query, info, row.ID)
+	return info, nil
 }
 
-// byName retrieves an account by wallet ID, scope, and account name, then
-// attaches its balance via AccountBalance unless query.SkipBalance is set.
-func (s accountGetQueries) byName(ctx context.Context,
+// GetAccountByName implements db.GetAccountOps.
+func (s accountGetQueries) GetAccountByName(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	row, err := s.q.GetAccountByWalletScopeAndName(
@@ -81,7 +81,7 @@ func (s accountGetQueries) byName(ctx context.Context,
 		},
 	)
 	if err != nil {
-		return nil, mapGetAccountErr(err, query)
+		return nil, mapGetAccountErr(err)
 	}
 
 	info, err := accountRowToInfo(row)
@@ -89,19 +89,23 @@ func (s accountGetQueries) byName(ctx context.Context,
 		return nil, err
 	}
 
-	return s.attachBalance(ctx, query, info, row.ID)
+	return info, nil
 }
 
-// attachBalance fills ConfirmedBalance and UnconfirmedBalance on info via
-// the dedicated AccountBalance query, unless the caller opted out via
-// query.SkipBalance. The query runs inside the caller's read transaction.
-func (s accountGetQueries) attachBalance(ctx context.Context,
-	query db.GetAccountQuery, info *db.AccountInfo,
-	accountID int64) (*db.AccountInfo, error) {
-
-	if query.SkipBalance {
-		return info, nil
+// mapGetAccountErr normalizes SQLite not-found transport errors to the
+// backend-neutral account contract.
+func mapGetAccountErr(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ErrAccountNotFound
 	}
+
+	return fmt.Errorf("get account: %w", err)
+}
+
+// AttachAccountBalance implements db.GetAccountOps.
+func (s accountGetQueries) AttachAccountBalance(ctx context.Context,
+	query db.GetAccountQuery, accountID int64,
+	info *db.AccountInfo) (*db.AccountInfo, error) {
 
 	bal, err := s.q.AccountBalance(
 		ctx, sqlc.AccountBalanceParams{
@@ -117,24 +121,4 @@ func (s accountGetQueries) attachBalance(ctx context.Context,
 	info.UnconfirmedBalance = btcutil.Amount(bal.UnconfirmedBalance)
 
 	return info, nil
-}
-
-// mapGetAccountErr returns the typed ErrAccountNotFound when err is
-// sql.ErrNoRows, falling back to a wrapped form otherwise. The caller
-// names the queried account in the error using whichever selector
-// (Name or AccountNumber) was set.
-func mapGetAccountErr(err error, query db.GetAccountQuery) error {
-	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("get account: %w", err)
-	}
-
-	if query.Name != nil {
-		return fmt.Errorf("account %q in scope %d/%d: %w", *query.Name,
-			query.Scope.Purpose, query.Scope.Coin,
-			db.ErrAccountNotFound)
-	}
-
-	return fmt.Errorf("account %d in scope %d/%d: %w",
-		*query.AccountNumber, query.Scope.Purpose, query.Scope.Coin,
-		db.ErrAccountNotFound)
 }
