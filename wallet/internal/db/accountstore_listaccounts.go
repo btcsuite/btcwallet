@@ -16,38 +16,6 @@ func (query ListAccountsQuery) Validate() error {
 	return nil
 }
 
-// ListAccountsFunc defines the selector callback shape used by legacy backend
-// adapters while the shared list-accounts workflow is being introduced.
-type ListAccountsFunc func(context.Context, ListAccountsQuery) ([]AccountInfo,
-	error)
-
-// ListAccountsByQuery validates query and dispatches to the matching list
-// selector.
-//
-// This compatibility helper keeps the workflow commit buildable against the
-// pre-ops backend adapters; the follow-up adapter commit switches those
-// backends to ListAccountsWithOps directly.
-func ListAccountsByQuery(ctx context.Context, query ListAccountsQuery,
-	listByScope ListAccountsFunc, listByName ListAccountsFunc,
-	listAll ListAccountsFunc) ([]AccountInfo, error) {
-
-	err := query.Validate()
-	if err != nil {
-		return nil, err
-	}
-
-	switch {
-	case query.Scope != nil:
-		return listByScope(ctx, query)
-
-	case query.Name != nil:
-		return listByName(ctx, query)
-
-	default:
-		return listAll(ctx, query)
-	}
-}
-
 // ListAccountsOps is the backend adapter the shared ListAccounts workflow uses.
 //
 // The shared account-list algorithm is intentionally ordered:
