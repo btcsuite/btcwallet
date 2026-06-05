@@ -164,6 +164,7 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 		sqlc.InsertAddressSecretParams]{
 		GetAccount:           getAccountFromKey(s.queries),
 		AccountParams:        db.AccountKeyFromImportedParams,
+		CreateBucketAccount:  createImportedBucketAccount,
 		GetAccountID:         importedAddressGetAccountID,
 		GetWalletWatchOnly:   importedAddressGetWalletWatchOnly,
 		CreateAddr:           createImportedAddress,
@@ -259,6 +260,44 @@ func derivedAddressRowCreatedAt(
 	row sqlc.CreateDerivedAddressRow) time.Time {
 
 	return row.CreatedAt
+}
+
+// createImportedBucketAccount materializes the keyless wallet-level imported
+// bucket account for the import's scope inside the active write transaction
+// and returns the freshly looked-up account row. The bucket carries empty
+// account-level key material (no public key, no master fingerprint) and no
+// account_secrets row: it is a holder for individually-imported addresses, not
+// an imported xpub account. The key scope is created on demand using its
+// default address schema if it does not already exist. The row is re-read
+// through GetAccountByWalletScopeAndName so its shape matches the existing-
+// bucket lookup path exactly.
+func createImportedBucketAccount(ctx context.Context, qtx *sqlc.Queries,
+	params db.NewImportedAddressParams) (
+	sqlc.GetAccountByWalletScopeAndNameRow, error) {
+
+	var zero sqlc.GetAccountByWalletScopeAndNameRow
+
+	scopeID, _, err := ensureKeyScope(
+		ctx, qtx, params.WalletID, params.Scope, nil,
+	)
+	if err != nil {
+		return zero, fmt.Errorf("ensure scope: %w", err)
+	}
+
+	_, err = qtx.CreateImportedAccount(
+		ctx, sqlc.CreateImportedAccountParams{
+			ScopeID:     scopeID,
+			AccountName: db.DefaultImportedAccountName,
+			OriginID:    int64(db.ImportedAccount),
+		},
+	)
+	if err != nil {
+		return zero, fmt.Errorf("create account: %w", err)
+	}
+
+	return getAccountFromKey(qtx)(
+		ctx, db.AccountKeyFromImportedParams(params),
+	)
 }
 
 // createImportedAddress returns the imported address insert helper.
@@ -364,7 +403,6 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 		TypeID:            base.TypeID,
 		OriginID:          base.OriginID,
 		WalletIsWatchOnly: base.WalletIsWatchOnly,
-		HasPrivateKey:     base.HasPrivateKey,
 		HasScript:         base.HasScript,
 		CreatedAt:         base.CreatedAt,
 		AddressBranch:     base.AddressBranch,

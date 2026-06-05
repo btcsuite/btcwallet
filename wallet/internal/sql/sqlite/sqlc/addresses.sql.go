@@ -123,7 +123,6 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
-    s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
@@ -155,7 +154,6 @@ type GetAddressByScriptPubKeyRow struct {
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsUsed            bool
-	HasPrivateKey     bool
 	HasScript         bool
 }
 
@@ -180,7 +178,6 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsUsed,
-		&i.HasPrivateKey,
 		&i.HasScript,
 	)
 	return i, err
@@ -266,7 +263,6 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
-    s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
@@ -316,7 +312,6 @@ type ListAddressesByAccountRow struct {
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsUsed            bool
-	HasPrivateKey     bool
 	HasScript         bool
 }
 
@@ -357,7 +352,6 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsUsed,
-			&i.HasPrivateKey,
 			&i.HasScript,
 		); err != nil {
 			return nil, err
