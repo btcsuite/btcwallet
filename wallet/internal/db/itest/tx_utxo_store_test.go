@@ -104,7 +104,6 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 
 	scope := db.KeyScopeBIP0084
 	importedName := db.DefaultImportedAccountName
-	CreateImportedAccount(t, store, walletID, scope, importedName, true)
 
 	// Build a 1-of-2 bare-multisig script. memberScript is the member's own
 	// P2PK script (what PayToAddrScript(memberAddr) yields), which the wallet
