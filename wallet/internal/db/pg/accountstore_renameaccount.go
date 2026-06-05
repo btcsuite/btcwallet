@@ -13,49 +13,44 @@ func (s *Store) RenameAccount(ctx context.Context,
 	params db.RenameAccountParams) error {
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		renameQueries := accountRenameQueries{q: qtx}
-
-		return db.RenameAccountByQuery(
-			ctx, params, renameQueries.byNumber, renameQueries.byName,
-		)
+		renameOps := accountRenameOps{q: qtx}
+		return db.RenameAccountWithOps(ctx, params, renameOps)
 	})
 }
 
-// accountRenameQueries groups PostgreSQL account rename query methods.
-type accountRenameQueries struct {
+// accountRenameOps implements db.RenameAccountOps for PostgreSQL.
+type accountRenameOps struct {
 	q *sqlc.Queries
 }
 
-// byNumber renames an account identified by wallet ID, scope, and account
-// number.
-func (p accountRenameQueries) byNumber(ctx context.Context,
-	params db.RenameAccountParams) error {
+// RenameByNumber renames an account identified by wallet ID, scope, and
+// account number. It returns the number of rows affected.
+func (p accountRenameOps) RenameByNumber(ctx context.Context,
+	params db.RenameAccountParams) (int64, error) {
 
-	return db.RenameAccount(
-		ctx, p.q.UpdateAccountNameByWalletScopeAndNumber,
+	return p.q.UpdateAccountNameByWalletScopeAndNumber(ctx,
 		sqlc.UpdateAccountNameByWalletScopeAndNumberParams{
 			NewName:       params.NewName,
 			WalletID:      int64(params.WalletID),
 			Purpose:       int64(params.Scope.Purpose),
 			CoinType:      int64(params.Scope.Coin),
 			AccountNumber: db.NullableUint32ToSQLInt64(params.AccountNumber),
-		}, params,
+		},
 	)
 }
 
-// byName renames an account identified by wallet ID, scope, and old account
-// name.
-func (p accountRenameQueries) byName(ctx context.Context,
-	params db.RenameAccountParams) error {
+// RenameByName renames an account identified by wallet ID, scope, and old
+// account name. It returns the number of rows affected.
+func (p accountRenameOps) RenameByName(ctx context.Context,
+	params db.RenameAccountParams) (int64, error) {
 
-	return db.RenameAccount(
-		ctx, p.q.UpdateAccountNameByWalletScopeAndName,
+	return p.q.UpdateAccountNameByWalletScopeAndName(ctx,
 		sqlc.UpdateAccountNameByWalletScopeAndNameParams{
 			NewName:  params.NewName,
 			WalletID: int64(params.WalletID),
 			Purpose:  int64(params.Scope.Purpose),
 			CoinType: int64(params.Scope.Coin),
 			OldName:  params.OldName,
-		}, params,
+		},
 	)
 }
