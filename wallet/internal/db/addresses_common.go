@@ -27,16 +27,6 @@ func requireUnreservedAccountName(name string) error {
 	return nil
 }
 
-// importedAddressIsWatchOnly determines whether an imported address is
-// watch-only based on wallet-level watch-only mode and address-level private
-// key presence. An imported address is watch-only if the wallet is watch-only
-// or if the address does not carry encrypted private key material.
-func importedAddressIsWatchOnly(walletIsWatchOnly bool,
-	hasPrivateKey bool) bool {
-
-	return walletIsWatchOnly || !hasPrivateKey
-}
-
 var (
 	// errNilAddressDerivationFunc is returned when derived address creation is
 	// called without a derivation callback.
@@ -231,9 +221,6 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// WalletIsWatchOnly indicates whether the wallet is watch-only.
 	WalletIsWatchOnly bool
 
-	// HasPrivateKey indicates whether the address has an encrypted private key.
-	HasPrivateKey bool
-
 	// HasScript indicates whether the address has an encrypted script.
 	HasScript bool
 
@@ -409,9 +396,9 @@ func ApplyAddressAccountMetadata(info *AddressInfo,
 // newImportedAddressTx handles the shared transaction flow for creating an
 // imported address across database backends. It creates the address row and
 // conditionally inserts the address_secrets row when any encrypted private key
-// or encrypted script material is present. Imported addresses are watch-only
-// when their parent wallet is watch-only or when the address itself does not
-// carry private key material.
+// or encrypted script material is present. Imported addresses copy the
+// parent wallet's watch-only mode; private-key presence is a signing-capability
+// detail, not an address-level watch-only signal.
 func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 	ctx context.Context, create func(context.Context, CreateArgs) (Row, error),
 	createArgs CreateArgs,
@@ -448,9 +435,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
 		HasScript:    params.HasScript(),
-		IsWatchOnly: importedAddressIsWatchOnly(
-			walletIsWatchOnly, params.HasPrivateKey(),
-		),
+		IsWatchOnly:  walletIsWatchOnly,
 	}, nil
 }
 
@@ -507,9 +492,8 @@ func convertAddressPath(origin AccountOrigin, branch,
 // AddressRowToInfo converts raw database field values into an AddressInfo
 // struct. It handles type conversion and validation for each field.
 //
-// Watch-only computation: derived addresses follow wallet watch-only mode.
-// Imported addresses are watch-only when the wallet is watch-only or when the
-// imported address does not carry encrypted private key material.
+// Watch-only state is copied directly from the wallet-level flag. Address
+// secret presence is not used to infer public watch-only state.
 func AddressRowToInfo[TypeID, OriginIDType any](
 	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
 
@@ -536,13 +520,6 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
-	isWatchOnly := row.WalletIsWatchOnly
-	if origin == ImportedAccount {
-		isWatchOnly = importedAddressIsWatchOnly(
-			row.WalletIsWatchOnly, row.HasPrivateKey,
-		)
-	}
-
 	return &AddressInfo{
 		ID:                   id,
 		AccountID:            accountID,
@@ -558,7 +535,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		ScriptPubKey:         row.ScriptPubKey,
 		PubKey:               row.PubKey,
 		HasScript:            row.HasScript,
-		IsWatchOnly:          isWatchOnly,
+		IsWatchOnly:          row.WalletIsWatchOnly,
 		IsUsed:               row.IsUsed,
 	}, nil
 }
@@ -655,6 +632,19 @@ type ImportedAddressAdapters[QTX any, AccountRow any,
 
 	// AccountParams converts params to account lookup parameters.
 	AccountParams func(NewImportedAddressParams) AccountParams
+
+	// CreateBucketAccount materializes the wallet-level imported "bucket"
+	// account inside the supplied write transaction and returns the freshly
+	// looked-up account row. The bucket is intentionally keyless: it carries
+	// no account-level key material and no account_secrets row, because the
+	// spend-capability invariant for imported single addresses is enforced
+	// per-address via requireAddressPrivKeyOnSpendable. It is created only on
+	// the first import into a scope (the GetAccount sql.ErrNoRows branch); a
+	// pre-existing bucket is reused unchanged. Returning the same row type as
+	// GetAccount lets the caller reuse one downstream creation path for both
+	// the existing-bucket and just-created-bucket cases.
+	CreateBucketAccount func(context.Context, QTX,
+		NewImportedAddressParams) (AccountRow, error)
 
 	// GetAccountID extracts the account ID from an account row.
 	GetAccountID func(AccountRow) int64
@@ -929,8 +919,16 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 	return result, nil
 }
 
-// NewImportedAddressWithTx combines transaction execution, account lookup,
-// and imported address creation in one helper.
+// NewImportedAddressWithTx combines transaction execution, bucket-account
+// resolution, and imported address creation in one helper.
+//
+// The owning account is the wallet-level imported "bucket": a single keyless
+// account per scope that holds individually-imported address rows. On the
+// first import into a scope the bucket does not yet exist, so this helper
+// auto-creates it (keyless, origin=imported) inside the same write
+// transaction rather than failing; subsequent imports reuse it. Because both
+// the pre-existing and just-created cases yield the same account row, the
+// address is then created through one shared path for both.
 func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	CreateArgs any, AddrRow any, SecretParams any](
 	ctx context.Context, params NewImportedAddressParams,
@@ -947,59 +945,92 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 
 	err := executeTx(ctx, func(qtx QTX) error {
 		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
-		if err == nil {
-			walletIsWatchOnly := adapters.GetWalletWatchOnly(row)
 
-			errWatchOnly := params.ValidateWatchOnly(walletIsWatchOnly)
-			if errWatchOnly != nil {
-				return errWatchOnly
-			}
-
-			errSpendable := requireAddressPrivKeyOnSpendable(
-				params.WalletID, walletIsWatchOnly,
-				params.HasPrivateKey(),
-			)
-			if errSpendable != nil {
-				return errSpendable
-			}
-
-			acctID := adapters.GetAccountID(row)
-
-			info, errAddr := newImportedAddressTx(
-				ctx, adapters.CreateAddr(qtx),
-				adapters.CreateParams(int64(params.WalletID), acctID, params),
-				adapters.InsertSecret, qtx,
-				adapters.SecretParams, params, acctID, walletIsWatchOnly,
-				adapters.RowID,
-				adapters.RowCreatedAt)
-			if errAddr != nil {
-				return errAddr
-			}
-
-			errMeta := adapters.ApplyAccountMetadata(info, row)
-			if errMeta != nil {
-				return fmt.Errorf("apply address account metadata: %w",
-					errMeta)
-			}
-
-			result = info
-
-			return nil
-		}
-
+		// First import into this scope: the bucket does not exist
+		// yet, so materialize the keyless bucket in the same write
+		// transaction and use the row it returns. A pre-existing
+		// bucket (err == nil) is reused as-is.
+		//
+		// This get-then-create is intentionally not hardened
+		// against concurrency: imported-address creation is a
+		// sequential, low-frequency path the wallet does not drive
+		// concurrently, so two first-imports racing to create the
+		// same bucket is not a real scenario. If that changes, make
+		// the bucket insert an idempotent get-or-create.
 		if errors.Is(err, sql.ErrNoRows) {
-			key := AccountKeyFromImportedParams(params)
-
-			return fmt.Errorf("account %q in scope %d/%d: %w",
-				key.AccountName, key.Purpose, key.CoinType,
-				ErrAccountNotFound)
+			row, err = adapters.CreateBucketAccount(ctx, qtx, params)
 		}
 
-		return fmt.Errorf("get account: %w", err)
+		// This guards both a non-ErrNoRows GetAccount failure and any
+		// bucket-creation failure above.
+		if err != nil {
+			return fmt.Errorf("resolve imported bucket: %w", err)
+		}
+
+		info, errAddr := importAddressIntoResolvedAccount(
+			ctx, qtx, params, row, adapters,
+		)
+		if errAddr != nil {
+			return errAddr
+		}
+
+		result = info
+
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return result, nil
+}
+
+// importAddressIntoResolvedAccount creates an imported address row in the
+// already-resolved owning bucket account. It enforces the wallet-level
+// watch-only invariants for the imported address, inserts the address (and
+// any secret material) on the supplied transaction, and copies the owning
+// account metadata onto the result. Both the existing-bucket and
+// just-created-bucket cases funnel through here so the per-address spendable
+// invariant (requireAddressPrivKeyOnSpendable) always runs regardless of how
+// the bucket was resolved.
+func importAddressIntoResolvedAccount[QTX any, AccountRow any,
+	AccountParams any, CreateArgs any, AddrRow any, SecretParams any](
+	ctx context.Context, qtx QTX, params NewImportedAddressParams,
+	row AccountRow,
+	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
+		AddrRow, SecretParams]) (*AddressInfo, error) {
+
+	walletIsWatchOnly := adapters.GetWalletWatchOnly(row)
+
+	errWatchOnly := params.ValidateWatchOnly(walletIsWatchOnly)
+	if errWatchOnly != nil {
+		return nil, errWatchOnly
+	}
+
+	errSpendable := requireAddressPrivKeyOnSpendable(
+		params.WalletID, walletIsWatchOnly, params.HasPrivateKey(),
+	)
+	if errSpendable != nil {
+		return nil, errSpendable
+	}
+
+	acctID := adapters.GetAccountID(row)
+
+	info, err := newImportedAddressTx(
+		ctx, adapters.CreateAddr(qtx),
+		adapters.CreateParams(int64(params.WalletID), acctID, params),
+		adapters.InsertSecret, qtx,
+		adapters.SecretParams, params, acctID, walletIsWatchOnly,
+		adapters.RowID, adapters.RowCreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = adapters.ApplyAccountMetadata(info, row)
+	if err != nil {
+		return nil, fmt.Errorf("apply address account metadata: %w", err)
+	}
+
+	return info, nil
 }

@@ -116,7 +116,6 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
-    (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -152,7 +151,6 @@ type GetAddressByScriptPubKeyRow struct {
 	OriginID          int16
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	HasPrivateKey     bool
 	HasScript         bool
 	IsUsed            bool
 }
@@ -177,7 +175,6 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.OriginID,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
-		&i.HasPrivateKey,
 		&i.HasScript,
 		&i.IsUsed,
 	)
@@ -257,7 +254,6 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
-    (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -311,7 +307,6 @@ type ListAddressesByAccountRow struct {
 	OriginID          int16
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	HasPrivateKey     bool
 	HasScript         bool
 	IsUsed            bool
 }
@@ -352,7 +347,6 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.OriginID,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
-			&i.HasPrivateKey,
 			&i.HasScript,
 			&i.IsUsed,
 		); err != nil {

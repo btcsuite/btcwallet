@@ -28,7 +28,6 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
-    (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -106,7 +105,6 @@ SELECT
     acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
-    (s.encrypted_priv_key IS NOT NULL)::BOOLEAN AS has_private_key,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
