@@ -93,6 +93,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 
 	return db.AccountRowToInfo(
 		db.AccountInfoRow[int16]{
+			RowID:             base.ID,
 			AccountNumber:     base.AccountNumber,
 			AccountName:       base.AccountName,
 			OriginID:          base.OriginID,
