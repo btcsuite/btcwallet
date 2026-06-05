@@ -69,7 +69,7 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
 			WalletID:            walletID,
-			Name:                db.DefaultImportedAccountName,
+			Name:                "imported-xpub",
 			Scope:               scope,
 			PublicKey:           RandomBytes(32),
 			EncryptedPrivateKey: RandomBytes(32),
@@ -85,7 +85,7 @@ func TestGetAccountWatchOnlyMapping(t *testing.T) {
 
 	imported, err := store.GetAccount(
 		t.Context(), getAccountQueryByName(
-			walletID, scope, db.DefaultImportedAccountName,
+			walletID, scope, "imported-xpub",
 		),
 	)
 	require.NoError(t, err)
@@ -130,7 +130,7 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 	_, err = store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
 			WalletID:            walletID,
-			Name:                "imported",
+			Name:                "imported-xpub",
 			Scope:               scope,
 			PublicKey:           importedPubKey,
 			EncryptedPrivateKey: RandomBytes(32),
@@ -139,7 +139,7 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 	require.NoError(t, err)
 
 	importedRead, err := store.GetAccount(
-		t.Context(), getAccountQueryByName(walletID, scope, "imported"),
+		t.Context(), getAccountQueryByName(walletID, scope, "imported-xpub"),
 	)
 	require.NoError(t, err)
 	require.Equal(t, importedPubKey, importedRead.PublicKey)

@@ -73,16 +73,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1 AND a.account_name = $2;
 
 -- name: GetAccountByScopeAndNumber :one
@@ -102,16 +96,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1 AND a.account_number = $2;
 
 -- name: GetAccountByWalletScopeAndName :one
@@ -131,16 +119,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -164,16 +146,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -196,15 +172,10 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.id = $1;
 
 -- name: ListAccountsByScope :many
@@ -225,16 +196,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1
 ORDER BY a.account_number NULLS LAST;
 
@@ -256,16 +221,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -290,16 +249,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = $1 AND a.account_name = $2
 ORDER BY a.account_number NULLS LAST;
 
@@ -321,16 +274,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = $1
 ORDER BY a.account_number NULLS LAST;
 
