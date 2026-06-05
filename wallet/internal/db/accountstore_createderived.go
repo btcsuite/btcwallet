@@ -46,7 +46,7 @@ func (params *CreateDerivedAccountParams) Validate() error {
 		return ErrMissingAccountName
 	}
 
-	return nil
+	return requireUnreservedAccountName(params.Name)
 }
 
 // CreateDerivedAccountRow contains the backend-independent fields the shared
@@ -192,9 +192,9 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, errNilAccountDerivationFunc
 	}
 
-	paramsErr := params.Validate()
-	if paramsErr != nil {
-		return nil, paramsErr
+	err := params.Validate()
+	if err != nil {
+		return nil, err
 	}
 
 	walletIsWatchOnly, err := ops.WalletWatchOnly(ctx, params.WalletID)

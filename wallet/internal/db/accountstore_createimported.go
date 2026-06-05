@@ -21,8 +21,8 @@ type CreateImportedAccountInsertRequest struct {
 	MasterFingerprint uint32
 }
 
-// ValidateBasic validates required fields for creating an imported account.
-func (params *CreateImportedAccountParams) ValidateBasic() error {
+// Validate validates required fields for creating an imported account.
+func (params *CreateImportedAccountParams) Validate() error {
 	if params.Name == "" {
 		return ErrMissingAccountName
 	}
@@ -31,7 +31,7 @@ func (params *CreateImportedAccountParams) ValidateBasic() error {
 		return ErrMissingAccountPublicKey
 	}
 
-	return nil
+	return requireUnreservedAccountName(params.Name)
 }
 
 // ValidateWatchOnly validates watch-only invariants for creating an imported
@@ -110,6 +110,44 @@ type CreateImportedAccountOps interface {
 		error)
 }
 
+// validateCreateImportedParams runs the backend-independent validation
+// sequence for the imported-account workflow before any backend write: basic
+// field checks, the reserved-name guard, and the watch-only/private-key
+// invariants resolved against the persisted wallet mode.
+func validateCreateImportedParams(ctx context.Context,
+	ops CreateImportedAccountOps, params CreateImportedAccountParams) error {
+
+	err := params.Validate()
+	if err != nil {
+		return err
+	}
+
+	walletIsWatchOnly, err := ops.IsWalletWatchOnly(ctx, params.WalletID)
+	if err != nil {
+		return fmt.Errorf("wallet watch only: %w", err)
+	}
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return err
+	}
+
+	// ADR 0012 invariant: a spendable wallet must not hold an imported
+	// account without encrypted private-key material. Applies to the SQL
+	// backends only — kvdb's data model cannot persist account-level
+	// private keys, and its legacy watch-only-account-in-spendable-wallet
+	// flow is grandfathered.
+	err = requireAccountPrivKeyOnSpendable(
+		params.WalletID, params.Name, walletIsWatchOnly,
+		params.EncryptedPrivateKey,
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // CreateImportedAccountWithOps runs the backend-independent imported-account
 // workflow once the caller has opened a backend-specific SQL transaction.
 //
@@ -122,30 +160,7 @@ func CreateImportedAccountWithOps(ctx context.Context,
 	params CreateImportedAccountParams,
 	ops CreateImportedAccountOps) (*AccountInfo, error) {
 
-	err := params.ValidateBasic()
-	if err != nil {
-		return nil, err
-	}
-
-	walletIsWatchOnly, err := ops.IsWalletWatchOnly(ctx, params.WalletID)
-	if err != nil {
-		return nil, fmt.Errorf("wallet watch only: %w", err)
-	}
-
-	err = params.ValidateWatchOnly(walletIsWatchOnly)
-	if err != nil {
-		return nil, err
-	}
-
-	// ADR 0012 invariant: a spendable wallet must not hold an imported
-	// account without encrypted private-key material. Applies to the SQL
-	// backends only — kvdb's data model cannot persist account-level
-	// private keys, and its legacy watch-only-account-in-spendable-wallet
-	// flow is grandfathered.
-	err = requireAccountPrivKeyOnSpendable(
-		params.WalletID, params.Name, walletIsWatchOnly,
-		params.EncryptedPrivateKey,
-	)
+	err := validateCreateImportedParams(ctx, ops, params)
 	if err != nil {
 		return nil, err
 	}
