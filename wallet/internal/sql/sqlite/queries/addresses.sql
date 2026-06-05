@@ -35,7 +35,6 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
-    s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
@@ -115,7 +114,6 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
-    s.encrypted_priv_key IS NOT NULL AS has_private_key,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN accounts AS acc ON a.account_id = acc.id
