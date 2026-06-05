@@ -1749,9 +1749,8 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	scope := db.KeyScopeBIP0084
 
 	// Imported script address: the encrypted script secret drives HasScript,
-	// and its account drives Origin == ImportedAccount.
-	CreateImportedAccount(t, store, walletID, scope, importedName, true)
-
+	// and the import auto-creates the wallet-level imported bucket that drives
+	// Origin == ImportedAccount.
 	importedScript := RandomBytes(32)
 	_, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
