@@ -13,6 +13,20 @@ import (
 // addresses.
 const DefaultImportedAccountName = "imported"
 
+// requireUnreservedAccountName rejects a caller-initiated account creation
+// that targets the reserved imported-bucket name. The bucket slot is owned
+// exclusively by the keyless wallet-level imported bucket, which is created
+// only via the auto-create path in NewImportedAddressWithTx; the public
+// derived and imported-xpub account APIs must not occupy it. Centralized here
+// so both SQL account-creation paths share one definition of "reserved".
+func requireUnreservedAccountName(name string) error {
+	if name == DefaultImportedAccountName {
+		return fmt.Errorf("%q: %w", name, ErrReservedAccountName)
+	}
+
+	return nil
+}
+
 // importedAddressIsWatchOnly determines whether an imported address is
 // watch-only based on wallet-level watch-only mode and address-level private
 // key presence. An imported address is watch-only if the wallet is watch-only
