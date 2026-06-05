@@ -150,29 +150,6 @@ func importedAddressWallet(t *testing.T, store db.WalletStore,
 	return newWatchOnlyWallet(t, store, name)
 }
 
-// newImportedAccount creates an imported account on the given wallet
-// with the right shape for the wallet's watch-only state. Spendable
-// wallets receive an account with EncryptedPrivateKey; watch-only
-// wallets get the public-only variant.
-func newImportedAccount(t *testing.T, store db.AccountStore,
-	walletID uint32, scope db.KeyScope, withPrivateKey bool) {
-
-	t.Helper()
-
-	params := db.CreateImportedAccountParams{
-		WalletID:  walletID,
-		Name:      "imported",
-		Scope:     scope,
-		PublicKey: RandomBytes(32),
-	}
-	if withPrivateKey {
-		params.EncryptedPrivateKey = RandomBytes(32)
-	}
-
-	_, err := store.CreateImportedAccount(t.Context(), params)
-	require.NoError(t, err)
-}
-
 // TestNewImportedAddress verifies that NewImportedAddress correctly imports
 // addresses of different types, with and without private key material.
 func TestNewImportedAddress(t *testing.T) {
@@ -256,10 +233,6 @@ func TestNewImportedAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			walletID := importedAddressWallet(
 				t, store, "wallet-imported-"+tc.name,
-				tc.providePrivateKey,
-			)
-			newImportedAccount(
-				t, store, walletID, tc.scope,
 				tc.providePrivateKey,
 			)
 
@@ -349,14 +322,12 @@ func TestImportedAddressLandsInImportedAccount(t *testing.T) {
 	walletID := newWallet(t, store, "wallet-import-lands-in-imported")
 
 	// A derived account exists in the same scope. The imported address
-	// must NOT be attributed to it; it must go to the dedicated "imported"
-	// account instead.
+	// must NOT be attributed to it; it must go to the auto-created
+	// wallet-level "imported" bucket instead.
 	createDerivedAccount(t, store, walletID, scope, "derived-acct")
 
-	// The dedicated imported account the import flow resolves to. It is
-	// spendable, so it carries account-level private-key material.
-	newImportedAccount(t, store, walletID, scope, true)
-
+	// Import a private-key-bearing address. No "imported" account exists
+	// yet in this scope, so the import auto-creates the keyless bucket.
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:            walletID,
@@ -381,24 +352,31 @@ func TestImportedAddressLandsInImportedAccount(t *testing.T) {
 	require.EqualValues(t, importedAccountID, info.AccountID)
 }
 
-// TestImportedAddressWithoutImportedAccountIsRejected documents that the SQL
-// import flow never retargets an imported address into a derived account: if
-// the dedicated "imported" account does not yet exist in the address's scope,
-// the import fails with ErrAccountNotFound even though a derived account is
-// present. See ADR 0012.
-func TestImportedAddressWithoutImportedAccountIsRejected(t *testing.T) {
+// TestImportedAddressNeverLandsInDerivedAccount documents that the SQL import
+// flow never retargets an imported address into a derived account: when no
+// "imported" bucket exists yet in the address's scope, the import
+// auto-creates the keyless wallet-level bucket and attributes the address to
+// it, even though a derived account is present in the same scope. See ADR
+// 0012.
+func TestImportedAddressNeverLandsInDerivedAccount(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	queries := store.Queries()
 	scope := db.KeyScopeBIP0084
 
 	walletID := newWallet(t, store, "wallet-import-no-imported-account")
 
-	// Only a derived account exists; no "imported" account has been
-	// created in this scope.
+	// Only a derived account exists; no "imported" bucket has been created
+	// in this scope. The import must NOT reuse the derived account.
 	createDerivedAccount(t, store, walletID, scope, "derived-only")
 
-	_, err := store.NewImportedAddress(
+	derivedAccountID := GetAccountID(
+		t, queries, GetKeyScopeID(t, queries, walletID, scope),
+		"derived-only",
+	)
+
+	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:            walletID,
 			Scope:               scope,
@@ -408,7 +386,13 @@ func TestImportedAddressWithoutImportedAccountIsRejected(t *testing.T) {
 			EncryptedPrivateKey: RandomBytes(32),
 		},
 	)
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.NoError(t, err)
+
+	// The address landed in the freshly auto-created imported bucket, not
+	// in the pre-existing derived account.
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.Equal(t, db.DefaultImportedAccountName, info.AccountName)
+	require.NotEqualValues(t, derivedAccountID, info.AccountID)
 }
 
 // TestNewImportedAddressWithEncryptedScript verifies that NewImportedAddress
@@ -469,12 +453,10 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			walletIsWatchOnly := !tc.hasPrivateKey
 			walletID := importedAddressWallet(
 				t, store, "wallet-encrypted-script-"+tc.name,
 				tc.hasPrivateKey,
-			)
-			newImportedAccount(
-				t, store, walletID, tc.scope, tc.hasPrivateKey,
 			)
 
 			scriptPubKey := RandomBytes(32)
@@ -504,7 +486,7 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 			require.NotNil(t, info.PubKey)
 			require.NotNil(t, info.ScriptPubKey)
 			require.Equal(t, tc.expectedAddrType, info.AddrType)
-			require.Equal(t, !tc.hasPrivateKey, info.IsWatchOnly)
+			require.Equal(t, walletIsWatchOnly, info.IsWatchOnly)
 
 			addressID := getAddressID(
 				t, queries, params.ScriptPubKey, walletID,
@@ -538,9 +520,6 @@ func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
 	store := NewTestStore(t)
 	walletID := newWatchOnlyWallet(
 		t, store, "wallet-empty-private-import",
-	)
-	newImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0044, false,
 	)
 
 	params := db.NewImportedAddressParams{
@@ -636,11 +615,9 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 				walletID uint32) (bool, error) {
 
 				t.Helper()
-				CreateImportedAccount(
-					t, store, walletID, db.KeyScopeBIP0084,
-					db.DefaultImportedAccountName, false,
-				)
 
+				// No "imported" account is pre-created: the import
+				// auto-creates the keyless bucket.
 				info, err := store.NewImportedAddress(
 					t.Context(), db.NewImportedAddressParams{
 						WalletID:            walletID,
@@ -667,17 +644,9 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 				walletID uint32) (bool, error) {
 
 				t.Helper()
-				_, err := store.CreateImportedAccount(
-					t.Context(), db.CreateImportedAccountParams{
-						WalletID:            walletID,
-						Name:                db.DefaultImportedAccountName,
-						Scope:               db.KeyScopeBIP0084,
-						PublicKey:           RandomBytes(32),
-						EncryptedPrivateKey: RandomBytes(32),
-					},
-				)
-				require.NoError(t, err)
 
+				// The spendable-wallet invariant rejects a public-only
+				// import before any bucket is created.
 				info, err := store.NewImportedAddress(
 					t.Context(), db.NewImportedAddressParams{
 						WalletID:     walletID,
@@ -703,16 +672,10 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 				walletID uint32) (bool, error) {
 
 				t.Helper()
-				_, err := store.CreateImportedAccount(
-					t.Context(), db.CreateImportedAccountParams{
-						WalletID:  walletID,
-						Name:      db.DefaultImportedAccountName,
-						Scope:     db.KeyScopeBIP0084,
-						PublicKey: RandomBytes(32),
-					},
-				)
-				require.NoError(t, err)
 
+				// The import auto-creates the keyless bucket; a
+				// script-only import on a watch-only wallet is
+				// watch-only.
 				info, err := store.NewImportedAddress(
 					t.Context(), db.NewImportedAddressParams{
 						WalletID:        walletID,
@@ -739,16 +702,9 @@ func TestWatchOnlyHierarchyAddressRules(t *testing.T) {
 				walletID uint32) (bool, error) {
 
 				t.Helper()
-				_, err := store.CreateImportedAccount(
-					t.Context(), db.CreateImportedAccountParams{
-						WalletID:  walletID,
-						Name:      db.DefaultImportedAccountName,
-						Scope:     db.KeyScopeBIP0084,
-						PublicKey: RandomBytes(32),
-					},
-				)
-				require.NoError(t, err)
 
+				// The watch-only invariant rejects a private-key
+				// import before any bucket is created.
 				info, err := store.NewImportedAddress(
 					t.Context(), db.NewImportedAddressParams{
 						WalletID:            walletID,
@@ -807,11 +763,8 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		CreateImportedAccount(
-			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			db.DefaultImportedAccountName, true,
-		)
-
+		// The import auto-creates the keyless bucket; no "imported"
+		// account is pre-created.
 		info, err := store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
 				WalletID:     walletInfo.ID,
@@ -841,11 +794,8 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		CreateImportedAccount(
-			t, store, walletInfo.ID, db.KeyScopeBIP0084,
-			db.DefaultImportedAccountName, true,
-		)
-
+		// The import auto-creates the keyless bucket; no "imported"
+		// account is pre-created.
 		info, err := store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
 				WalletID:        walletInfo.ID,
@@ -879,9 +829,6 @@ func TestWatchOnlyAddressSecretTriggers(t *testing.T) {
 		// row and is no longer reachable.
 		walletID := newWallet(
 			t, store, "spendable-address-secret-trigger",
-		)
-		newImportedAccount(
-			t, store, walletID, db.KeyScopeBIP0084, true,
 		)
 
 		initialPrivKey := RandomBytes(32)
@@ -929,19 +876,14 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 	walletID := newWatchOnlyWallet(
 		t, store, "wallet-imported-counter",
 	)
-	newImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0084, false,
-	)
 
 	const importedAddrCount = 5
 
 	addressIDs := make([]uint32, 0, importedAddrCount)
 
-	account := getAccountByName(
-		t, store, walletID, db.KeyScopeBIP0084, "imported",
-	)
-	require.Zero(t, account.ImportedKeyCount)
-
+	// The bucket does not exist until the first import auto-creates it, so
+	// the counter starts implicitly at zero and reaches importedAddrCount
+	// once every address is imported.
 	for range importedAddrCount {
 		info, err := store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
@@ -957,7 +899,7 @@ func TestImportedAddressCounterInsertDelete(t *testing.T) {
 		addressIDs = append(addressIDs, info.ID)
 	}
 
-	account = getAccountByName(
+	account := getAccountByName(
 		t, store, walletID, db.KeyScopeBIP0084, "imported",
 	)
 	require.Equal(t, uint32(importedAddrCount), account.ImportedKeyCount)
@@ -984,14 +926,26 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	walletID := newWatchOnlyWallet(
 		t, store, "wallet-imported-counter-concurrent",
 	)
-	newImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0084, false,
-	)
 
 	const workers = 20
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
+	// Materialize the bucket with one sequential import before the
+	// concurrent inserts so all workers reuse it. Concurrent first-imports
+	// would otherwise race to auto-create the same (scope, name) bucket and
+	// collide on the unique constraint.
+	warmup, err := store.NewImportedAddress(
+		ctx, db.NewImportedAddressParams{
+			WalletID:     walletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: RandomBytes(32),
+			PubKey:       RandomBytes(33),
+		},
+	)
+	require.NoError(t, err)
 
 	type insertResult struct {
 		id  uint32
@@ -1029,20 +983,22 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	wg.Wait()
 	close(insertResultChan)
 
-	addressIDs := make([]uint32, 0, workers)
+	addressIDs := make([]uint32, 0, workers+1)
+	addressIDs = append(addressIDs, warmup.ID)
+
 	for result := range insertResultChan {
 		require.NoError(t, result.err)
 		addressIDs = append(addressIDs, result.id)
 	}
 
-	require.Len(t, addressIDs, workers)
+	require.Len(t, addressIDs, workers+1)
 
 	account := getAccountByName(
 		t, store, walletID, db.KeyScopeBIP0084, "imported",
 	)
-	require.Equal(t, uint32(workers), account.ImportedKeyCount)
+	require.Equal(t, uint32(workers+1), account.ImportedKeyCount)
 
-	deleteErrChan := make(chan error, workers)
+	deleteErrChan := make(chan error, len(addressIDs))
 	for _, addressID := range addressIDs {
 		wg.Add(1)
 
@@ -1073,11 +1029,9 @@ func TestNewImportedAddressDuplicate(t *testing.T) {
 
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-duplicate-import")
-	CreateImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0084, "imported", false,
-	)
 
-	// Set up encryption parameters (same for both imports).
+	// Set up encryption parameters (same for both imports). The first
+	// import auto-creates the keyless bucket.
 	scriptPubKey := RandomBytes(32)
 
 	params := db.NewImportedAddressParams{
@@ -1111,12 +1065,6 @@ func TestNewImportedAddressDuplicateAcrossScopes(t *testing.T) {
 	// a watch-only wallet to satisfy the symmetric invariant.
 	walletID := newWatchOnlyWallet(
 		t, store, "wallet-duplicate-import-cross-scope",
-	)
-	newImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0044, false,
-	)
-	newImportedAccount(
-		t, store, walletID, db.KeyScopeBIP0084, false,
 	)
 
 	scriptPubKey := RandomBytes(32)
@@ -1162,13 +1110,6 @@ func TestNewImportedAddressDuplicateAcrossWallets(t *testing.T) {
 		t, store, "wallet-duplicate-import-b",
 	)
 
-	newImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, false,
-	)
-	newImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0084, false,
-	)
-
 	scriptPubKey := RandomBytes(32)
 
 	_, err := store.NewImportedAddress(
@@ -1207,17 +1148,24 @@ func TestCreateImportedAddressRejectsWalletAccountMismatch(t *testing.T) {
 	firstWalletID := newWallet(t, store, "wallet-raw-import-mismatch-a")
 	secondWalletID := newWallet(t, store, "wallet-raw-import-mismatch-b")
 
-	CreateImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, "imported", false,
+	// Materialize the keyless bucket in the first wallet via a real import
+	// so its account row exists for the raw-insert mismatch below.
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            firstWalletID,
+			Scope:               db.KeyScopeBIP0084,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
 	)
-	CreateImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0084, "imported", false,
-	)
+	require.NoError(t, err)
 
 	firstScopeID := GetKeyScopeID(t, queries, firstWalletID, db.KeyScopeBIP0084)
 	firstAccountID := GetAccountID(t, queries, firstScopeID, "imported")
 
-	err := createImportedAddressRaw(
+	err = createImportedAddressRaw(
 		t.Context(), queries, secondWalletID, firstAccountID, RandomBytes(32),
 	)
 	require.Error(t, err)
@@ -1269,13 +1217,6 @@ func TestAddressWalletIDImmutable(t *testing.T) {
 		t, store, "address-wallet-immutable-target",
 	)
 
-	newImportedAccount(
-		t, store, sourceWalletID, db.KeyScopeBIP0084, false,
-	)
-	newImportedAccount(
-		t, store, targetWalletID, db.KeyScopeBIP0084, false,
-	)
-
 	scriptPubKey := RandomBytes(32)
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
@@ -1284,6 +1225,19 @@ func TestAddressWalletIDImmutable(t *testing.T) {
 			AddressType:  db.WitnessPubKey,
 			PubKey:       RandomBytes(33),
 			ScriptPubKey: scriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+
+	// Materialize the target wallet's bucket via a real import so its
+	// account row exists for the raw reparent attempt below.
+	_, err = store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     targetWalletID,
+			Scope:        db.KeyScopeBIP0084,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: RandomBytes(32),
 		},
 	)
 	require.NoError(t, err)
@@ -1343,10 +1297,6 @@ func TestGetAddressSecret(t *testing.T) {
 				t, store, "wallet-secrets-"+tc.name,
 				tc.providePrivateKey,
 			)
-			newImportedAccount(
-				t, store, walletID, db.KeyScopeBIP0044,
-				tc.providePrivateKey,
-			)
 
 			params := db.NewImportedAddressParams{
 				WalletID:     walletID,
@@ -1391,14 +1341,8 @@ func TestGetAddressSecret(t *testing.T) {
 
 	t.Run("cross-wallet address denied", func(t *testing.T) {
 		walletID := newWallet(t, store, "wallet-secrets-cross-self")
-		newImportedAccount(
-			t, store, walletID, db.KeyScopeBIP0044, true,
-		)
 
 		otherWalletID := newWallet(t, store, "wallet-secrets-other")
-		newImportedAccount(
-			t, store, otherWalletID, db.KeyScopeBIP0044, true,
-		)
 
 		params := db.NewImportedAddressParams{
 			WalletID:            walletID,
@@ -1458,10 +1402,6 @@ func TestGetAddress(t *testing.T) {
 
 				t.Helper()
 
-				newImportedAccount(
-					t, accountStore, walletID, db.KeyScopeBIP0084, false,
-				)
-
 				script := RandomBytes(32)
 				params := db.NewImportedAddressParams{
 					WalletID:     walletID,
@@ -1493,10 +1433,6 @@ func TestGetAddress(t *testing.T) {
 				walletID uint32) db.GetAddressQuery {
 
 				t.Helper()
-				CreateImportedAccount(
-					t, accountStore, walletID, db.KeyScopeBIP0084,
-					"imported", false,
-				)
 
 				script := RandomBytes(32)
 				params := db.NewImportedAddressParams{
@@ -2071,59 +2007,126 @@ func TestNewDerivedAddressDerivationGuards(t *testing.T) {
 	})
 }
 
-// TestNewImportedAddress_NonExistentImportedAccount verifies that calling
-// NewImportedAddress when the implicit "imported" account doesn't exist
-// returns db.ErrAccountNotFound. This validates that the implicit account
-// lookup fails appropriately when the "imported" account has not been created
-// in the specified scope.
-func TestNewImportedAddress_NonExistentImportedAccount(t *testing.T) {
+// TestNewImportedAddressAutoCreatesAndReusesBucket verifies that importing an
+// address into a scope with no "imported" account auto-creates the keyless
+// wallet-level bucket, and that a second import into the same scope reuses
+// that bucket rather than creating a duplicate account.
+func TestNewImportedAddressAutoCreatesAndReusesBucket(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
+	queries := store.Queries()
 	walletID := newWallet(t, store, "test-wallet")
+	scope := db.KeyScopeBIP0084
 
-	// Attempt to import address when "imported" account doesn't exist.
-	params := db.NewImportedAddressParams{
-		WalletID:            walletID,
-		Scope:               db.KeyScopeBIP0084,
-		AddressType:         db.WitnessPubKey,
-		PubKey:              RandomBytes(33),
-		EncryptedPrivateKey: RandomBytes(32),
-		ScriptPubKey:        RandomBytes(32),
-	}
-	_, err := store.NewImportedAddress(t.Context(), params)
-
-	// Expect account not found error because an implicit "imported" account
-	// doesn't exist.
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
-}
-
-// TestNewImportedAddressWalletAccountMismatch verifies that imported address
-// creation rejects a wallet/scope lookup that only exists in another wallet.
-func TestNewImportedAddressWalletAccountMismatch(t *testing.T) {
-	t.Parallel()
-
-	store := NewTestStore(t)
-	firstWalletID := newWallet(t, store, "wallet-import-mismatch-a")
-	secondWalletID := newWallet(t, store, "wallet-import-mismatch-b")
-
-	CreateImportedAccount(
-		t, store, firstWalletID, db.KeyScopeBIP0084, "imported", false,
-	)
-	CreateImportedAccount(
-		t, store, secondWalletID, db.KeyScopeBIP0044, "imported", false,
-	)
-
-	_, err := store.NewImportedAddress(
+	// First import into the scope. No "imported" account exists yet, so the
+	// bucket must be auto-created.
+	first, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
-			WalletID:     secondWalletID,
-			Scope:        db.KeyScopeBIP0084,
-			AddressType:  db.WitnessPubKey,
-			PubKey:       RandomBytes(33),
-			ScriptPubKey: RandomBytes(32),
+			WalletID:            walletID,
+			Scope:               scope,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: RandomBytes(32),
+			ScriptPubKey:        RandomBytes(32),
 		},
 	)
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.NoError(t, err)
+	require.Equal(t, db.ImportedAccount, first.Origin)
+	require.Equal(t, db.DefaultImportedAccountName, first.AccountName)
+
+	// The bucket is keyless: it must carry no account-level key material.
+	bucket, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, db.DefaultImportedAccountName,
+		),
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.ImportedAccount, bucket.Origin)
+	require.Empty(t, bucket.PublicKey)
+	require.Zero(t, bucket.MasterKeyFingerprint)
+	require.False(t, bucket.IsWatchOnly)
+
+	bucketID := GetAccountID(
+		t, queries, GetKeyScopeID(t, queries, walletID, scope),
+		db.DefaultImportedAccountName,
+	)
+	require.EqualValues(t, bucketID, first.AccountID)
+
+	// Second import into the same scope must reuse the same bucket, not
+	// create a duplicate account.
+	second, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               scope,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			EncryptedPrivateKey: RandomBytes(32),
+			ScriptPubKey:        RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.AccountID, second.AccountID)
+
+	// Exactly one "imported" account exists in this wallet/scope.
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+
+	var importedCount int
+	for _, acct := range accounts {
+		if acct.AccountName == db.DefaultImportedAccountName {
+			importedCount++
+		}
+	}
+
+	require.Equal(t, 1, importedCount)
+}
+
+// TestNewImportedAddressBucketIsScopeIsolated verifies that the imported
+// bucket is per-scope: a bucket auto-created in one scope is not reused for an
+// import into a different scope of the same wallet. The second import
+// auto-creates a distinct bucket rather than failing.
+func TestNewImportedAddressBucketIsScopeIsolated(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-import-scope-isolated")
+
+	// First import auto-creates the bucket in BIP0044.
+	bip44, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0044,
+			AddressType:         db.PubKeyHash,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	// Importing into BIP0084 must not reuse the BIP0044 bucket; it
+	// auto-creates a separate bucket in the BIP0084 scope.
+	bip84, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               db.KeyScopeBIP0084,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, db.DefaultImportedAccountName, bip44.AccountName)
+	require.Equal(t, db.DefaultImportedAccountName, bip84.AccountName)
+	require.NotEqual(t, bip44.AccountID, bip84.AccountID)
 }
 
 // TestGetAddressSecret_DerivedAddress verifies that calling GetAddressSecret
