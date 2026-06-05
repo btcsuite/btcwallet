@@ -135,10 +135,13 @@ func (s accountListQueries) all(ctx context.Context,
 // the dialect-agnostic db.AccountBalance shape.
 func (s accountListQueries) attachBalances(ctx context.Context,
 	query db.ListAccountsQuery,
-	infos []*db.AccountInfo) ([]db.AccountInfo, error) {
+	infos []db.AccountInfo) ([]db.AccountInfo, error) {
+	if query.SkipBalance {
+		return infos, nil
+	}
 
-	return db.AttachBalances(
-		ctx, query.WalletID, query.SkipBalance, infos,
+	return db.AttachAccountBalances(
+		ctx, query.WalletID, infos,
 		func(ctx context.Context, walletID uint32,
 			ids []int64) ([]db.AccountBalance, error) {
 
