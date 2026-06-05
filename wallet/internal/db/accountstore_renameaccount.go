@@ -22,55 +22,6 @@ func (params RenameAccountParams) Validate() error {
 	return nil
 }
 
-// RenameAccountFunc defines the selector callback shape used by legacy backend
-// adapters while the shared rename-account workflow is being introduced.
-type RenameAccountFunc func(context.Context, RenameAccountParams) error
-
-// RenameAccountByQuery validates params and dispatches to the matching rename
-// selector.
-//
-// This compatibility helper keeps the workflow commit buildable against the
-// pre-ops backend adapters; the follow-up adapter commit switches those
-// backends to RenameAccountWithOps directly.
-func RenameAccountByQuery(ctx context.Context, params RenameAccountParams,
-	renameByNumber RenameAccountFunc, renameByName RenameAccountFunc) error {
-
-	err := params.Validate()
-	if err != nil {
-		return err
-	}
-
-	if params.AccountNumber != nil {
-		return renameByNumber(ctx, params)
-	}
-
-	return renameByName(ctx, params)
-}
-
-// RenameAccount preserves the pre-ops generic helper used by the existing
-// backend adapters while the shared workflow is being introduced.
-func RenameAccount[Args any](ctx context.Context,
-	update func(context.Context, Args) (int64, error), args Args,
-	params RenameAccountParams) error {
-
-	rowsAffected, err := update(ctx, args)
-	if err != nil {
-		return fmt.Errorf("rename account: %w", err)
-	}
-
-	if rowsAffected != 0 {
-		return nil
-	}
-
-	if params.OldName != "" {
-		return fmt.Errorf("account %q in scope %d/%d: %w", params.OldName,
-			params.Scope.Purpose, params.Scope.Coin, ErrAccountNotFound)
-	}
-
-	return fmt.Errorf("account %d in scope %d/%d: %w", *params.AccountNumber,
-		params.Scope.Purpose, params.Scope.Coin, ErrAccountNotFound)
-}
-
 // RenameAccountOps is the backend adapter the shared RenameAccount workflow
 // uses.
 //
