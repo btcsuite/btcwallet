@@ -94,6 +94,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 	base := sqlc.GetAccountByScopeAndNameRow(row)
 
 	return db.AccountRowToInfo(db.AccountInfoRow[int64]{
+		RowID:             base.ID,
 		AccountNumber:     base.AccountNumber,
 		AccountName:       base.AccountName,
 		OriginID:          base.OriginID,

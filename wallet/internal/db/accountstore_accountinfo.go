@@ -288,6 +288,7 @@ func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
+	RowID              int64
 	AccountNumber      sql.NullInt64
 	AccountName        string
 	OriginID           AccOriginId
@@ -359,14 +360,17 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		return nil, fmt.Errorf("address schema: %w", err)
 	}
 
-	return BuildAccountInfo(
+	info := BuildAccountInfo(
 		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
 		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum}, addrSchema,
 		row.PublicKey, fingerprint,
 		btcutil.Amount(row.ConfirmedBalance),
 		btcutil.Amount(row.UnconfirmedBalance),
-	), nil
+	)
+	info.rowID = row.RowID
+
+	return info, nil
 }
 
 // ProcessAccountRows converts a batch of dialect-specific account rows into
