@@ -72,7 +72,7 @@ func (s *Store) CreateImportedAccount(_ context.Context,
 func validateImportedAccountParams(params db.CreateImportedAccountParams,
 	walletIsWatchOnly bool) (*hdkeychain.ExtendedKey, error) {
 
-	err := params.ValidateBasic()
+	err := params.Validate()
 	if err != nil {
 		return nil, err
 	}
