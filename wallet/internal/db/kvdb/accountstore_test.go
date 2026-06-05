@@ -944,6 +944,98 @@ func TestGetAccountSkipBalanceZeros(t *testing.T) {
 	require.Zero(t, info.UnconfirmedBalance)
 }
 
+// TestGetAccountImportedPopulatesBalance verifies that GetAccount attaches
+// the correct balance for imported accounts, even though their public
+// AccountNumber is masked to 0 in the contract.
+func TestGetAccountImportedPopulatesBalance(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	// Create an imported account via the kvdb adapter.
+	scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+	}
+
+	xpub, err := hdkeychain.NewKeyFromString(
+		"xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6o" +
+			"DMSgv6Zz8idoc4a6mr8BDzTJY47LJhkJ8UB7WEGuduB",
+	)
+	require.NoError(t, err)
+
+	importedInfo, err := store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			Scope:      scope,
+			Name:       "test-imported",
+			PublicKey:  []byte(xpub.String()),
+			AddrSchema: nil,
+			DryRun:     false,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.ImportedAccount, importedInfo.Origin)
+	require.Equal(
+		t, uint32(0), importedInfo.AccountNumber,
+		"imported account public number must be masked to 0",
+	)
+
+	// Resolve the internal waddrmgr account number by name so we can
+	// credit it with a UTXO.
+	var internalAccountNumber uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		scopedMgr, err := mgr.FetchScopedKeyManager(
+			waddrmgr.KeyScope{
+				Purpose: scope.Purpose,
+				Coin:    scope.Coin,
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		internalAccountNumber, err = scopedMgr.LookupAccount(
+			ns, "test-imported",
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.NotEqual(
+		t, uint32(0), internalAccountNumber,
+		"internal account number must not be 0",
+	)
+
+	// Credit the imported account with a UTXO at its next external address.
+	const utxoAmount = btcutil.Amount(75_000)
+	creditNextAccountAddress(
+		t, store.db, mgr, txStore,
+		waddrmgr.KeyScope{
+			Purpose: scope.Purpose,
+			Coin:    scope.Coin,
+		},
+		internalAccountNumber,
+		utxoAmount,
+	)
+
+	// GetAccount by name should now return the balance.
+	name := "test-imported"
+	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope:       scope,
+		Name:        &name,
+		SkipBalance: false,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.Equal(t, uint32(0), info.AccountNumber)
+	require.Equal(t, utxoAmount, info.ConfirmedBalance)
+	require.Zero(t, info.UnconfirmedBalance)
+}
+
 // TestListAccountsScopeFilter verifies that ListAccounts narrows to the
 // requested scope.
 func TestListAccountsScopeFilter(t *testing.T) {

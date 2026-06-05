@@ -11,13 +11,8 @@ import (
 
 // GetAccount returns the account identified by the given query within the
 // requested scope.
-func (s *Store) GetAccount(_ context.Context,
+func (s *Store) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
-
-	err := query.Validate()
-	if err != nil {
-		return nil, err
-	}
 
 	scope := waddrmgr.KeyScope{
 		Purpose: query.Scope.Purpose,
@@ -26,8 +21,14 @@ func (s *Store) GetAccount(_ context.Context,
 
 	var info *db.AccountInfo
 
-	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
-		built, err := s.lookupAccount(tx, query, scope)
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ops := accountGetOps{
+			store: s,
+			tx:    tx,
+			scope: scope,
+		}
+
+		built, err := db.GetAccountWithOps(ctx, query, &ops)
 		if err != nil {
 			return err
 		}
@@ -43,57 +44,76 @@ func (s *Store) GetAccount(_ context.Context,
 	return info, nil
 }
 
-// lookupAccount performs the per-transaction work of GetAccount: scope
-// resolution, account-number lookup, AccountInfo build, contract
-// enforcement, and optional balance attachment.
-func (s *Store) lookupAccount(tx walletdb.ReadTx,
-	query db.GetAccountQuery,
-	scope waddrmgr.KeyScope) (*db.AccountInfo, error) {
+// accountGetOps adapts waddrmgr-backed kvdb reads to the shared GetAccount
+// workflow. The same walletdb read tx covers account loading and optional
+// balance attachment.
+type accountGetOps struct {
+	store *Store
+	tx    walletdb.ReadTx
+	scope waddrmgr.KeyScope
 
-	ns := tx.ReadBucket(waddrmgr.NamespaceKey)
-	if ns == nil {
-		return nil, db.ErrAccountNotFound
+	ns walletdb.ReadBucket
+
+	// internalAccountNumber caches the resolved waddrmgr account number from
+	// loadAccountByNumber so AttachAccountBalance can use it for balance
+	// lookups. This is necessary because imported accounts mask their public
+	// AccountNumber to 0 in the contract, but balance lookups still need the
+	// original waddrmgr number to avoid colliding with derived account 0.
+	internalAccountNumber uint32
+}
+
+// Verify accountGetOps implements GetAccountOps.
+var _ db.GetAccountOps = (*accountGetOps)(nil)
+
+// GetAccountByNumber implements db.GetAccountOps.
+func (o *accountGetOps) GetAccountByNumber(_ context.Context,
+	query db.GetAccountQuery) (*db.AccountInfo, error) {
+
+	acctNum, err := sanitizeAccountNumber(*query.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
-	scopedMgr, err := s.addrStore.FetchScopedKeyManager(scope)
+	return o.loadAccountByNumber(acctNum)
+}
+
+// GetAccountByName implements db.GetAccountOps.
+func (o *accountGetOps) GetAccountByName(_ context.Context,
+	query db.GetAccountQuery) (*db.AccountInfo, error) {
+
+	ns, scopedMgr, err := o.resolveAccountNamespaceAndManager()
+	if err != nil {
+		return nil, err
+	}
+
+	acctNum, err := scopedMgr.LookupAccount(ns, *query.Name)
 	if err != nil {
 		return nil, translateAccountErr(err, db.ErrAccountNotFound)
 	}
 
-	acctNum, err := resolveAccountNumber(ns, scopedMgr, query)
-	if err != nil {
-		return nil, err
-	}
+	return o.loadAccountByNumber(acctNum)
+}
 
-	built, err := loadAccountInfo(
-		ns, scopedMgr, acctNum, s.addrStore.WatchOnly(),
-	)
-	if err != nil {
-		return nil, err
-	}
+// AttachAccountBalance implements db.GetAccountOps.
+func (o *accountGetOps) AttachAccountBalance(_ context.Context,
+	_ db.GetAccountQuery, _ int64, built *db.AccountInfo) (*db.AccountInfo,
+	error) {
 
-	// Imported accounts may only be looked up by Name; their
-	// AccountNumber is masked to 0 in the contract, which would
-	// otherwise collide with the default derived account. Reject
-	// inbound number-based lookups that resolve to imported.
-	if query.AccountNumber != nil &&
-		built.Origin == db.ImportedAccount {
-
+	if o.ns == nil {
 		return nil, db.ErrAccountNotFound
 	}
 
-	if query.SkipBalance {
-		return built, nil
-	}
+	txmgrNs := o.tx.ReadBucket(wtxmgrNamespaceKey)
 
-	txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-	balances, err := s.fetchAccountBalances(ns, txmgrNs, &scope)
+	balances, err := o.store.fetchAccountBalances(o.ns, txmgrNs, &o.scope)
 	if err != nil {
 		return nil, err
 	}
 
-	key := accountBalanceKey{scope: scope, account: acctNum}
+	key := accountBalanceKey{
+		scope:   o.scope,
+		account: o.internalAccountNumber,
+	}
 	if pair, ok := balances[key]; ok {
 		built.ConfirmedBalance = pair.confirmed
 		built.UnconfirmedBalance = pair.unconfirmed
@@ -102,22 +122,45 @@ func (s *Store) lookupAccount(tx walletdb.ReadTx,
 	return built, nil
 }
 
-// resolveAccountNumber turns a GetAccountQuery into the legacy account
-// number, looking up by name when AccountNumber is nil.
-func resolveAccountNumber(ns walletdb.ReadBucket,
-	scopedMgr waddrmgr.AccountStore,
-	query db.GetAccountQuery) (uint32, error) {
+// loadAccountByNumber retrieves an account by already-resolved internal
+// waddrmgr account number.
+func (o *accountGetOps) loadAccountByNumber(
+	accountNumber uint32) (*db.AccountInfo, error) {
 
-	if query.AccountNumber != nil {
-		return sanitizeAccountNumber(*query.AccountNumber)
-	}
-
-	acctNum, err := scopedMgr.LookupAccount(ns, *query.Name)
+	ns, scopedMgr, err := o.resolveAccountNamespaceAndManager()
 	if err != nil {
-		return 0, translateAccountErr(err, db.ErrAccountNotFound)
+		return nil, err
 	}
 
-	return acctNum, nil
+	info, err := loadAccountInfo(
+		ns, scopedMgr, accountNumber, o.store.addrStore.WatchOnly(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	o.ns = ns
+	o.internalAccountNumber = accountNumber
+
+	return info, nil
+}
+
+// resolveAccountNamespaceAndManager loads the account namespace bucket and
+// scoped key manager for account reads.
+func (o *accountGetOps) resolveAccountNamespaceAndManager() (
+	walletdb.ReadBucket, waddrmgr.AccountStore, error) {
+
+	ns := o.tx.ReadBucket(waddrmgr.NamespaceKey)
+	if ns == nil {
+		return nil, nil, db.ErrAccountNotFound
+	}
+
+	scopedMgr, err := o.store.addrStore.FetchScopedKeyManager(o.scope)
+	if err != nil {
+		return nil, nil, translateAccountErr(err, db.ErrAccountNotFound)
+	}
+
+	return ns, scopedMgr, nil
 }
 
 // sanitizeAccountNumber rejects legacy pseudo-account slots for number-based
