@@ -19,31 +19,6 @@ func (query GetAccountQuery) Validate() error {
 	return nil
 }
 
-// GetAccountFunc defines the selector callback shape used by legacy backend
-// adapters while the shared get-account workflow is being introduced.
-type GetAccountFunc func(context.Context, GetAccountQuery) (*AccountInfo, error)
-
-// GetAccountByQuery validates query and dispatches to the matching selector.
-//
-// This compatibility helper keeps the workflow commit buildable against the
-// pre-ops backend adapters; the follow-up adapter commit switches those
-// backends to GetAccountWithOps directly.
-func GetAccountByQuery(ctx context.Context, query GetAccountQuery,
-	getByNumber GetAccountFunc, getByName GetAccountFunc) (*AccountInfo,
-	error) {
-
-	err := query.Validate()
-	if err != nil {
-		return nil, err
-	}
-
-	if query.AccountNumber != nil {
-		return getByNumber(ctx, query)
-	}
-
-	return getByName(ctx, query)
-}
-
 // GetAccountOps is the backend adapter the shared GetAccount workflow uses.
 //
 // The shared account-read algorithm is intentionally ordered:
