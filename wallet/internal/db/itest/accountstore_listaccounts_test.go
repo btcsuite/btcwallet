@@ -350,7 +350,7 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 	_, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
 			WalletID:            walletID,
-			Name:                db.DefaultImportedAccountName,
+			Name:                "imported-xpub",
 			Scope:               scope,
 			PublicKey:           RandomBytes(32),
 			EncryptedPrivateKey: RandomBytes(32),
@@ -374,7 +374,7 @@ func TestListAccountsWatchOnlyMapping(t *testing.T) {
 	)
 	imported := findAccountInList(
 		t, accounts, AccountTestCase{
-			Name:  db.DefaultImportedAccountName,
+			Name:  "imported-xpub",
 			Scope: scope,
 		},
 	)

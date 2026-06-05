@@ -330,16 +330,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1 AND a.account_name = $2
 `
 
@@ -364,7 +358,6 @@ type GetAccountByScopeAndNameRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Returns a single account by scope id and account name.
@@ -387,7 +380,6 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
-		&i.IsWatchOnly,
 	)
 	return i, err
 }
@@ -408,16 +400,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1 AND a.account_number = $2
 `
 
@@ -442,7 +428,6 @@ type GetAccountByScopeAndNumberRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Returns a single account by scope id and account number.
@@ -465,7 +450,6 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
-		&i.IsWatchOnly,
 	)
 	return i, err
 }
@@ -486,16 +470,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -526,7 +504,6 @@ type GetAccountByWalletScopeAndNameRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Returns a single account by wallet id, scope tuple, and account name.
@@ -554,7 +531,6 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
-		&i.IsWatchOnly,
 	)
 	return i, err
 }
@@ -575,16 +551,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -615,7 +585,6 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Returns a single account by wallet id, scope tuple, and account number.
@@ -643,7 +612,6 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
-		&i.IsWatchOnly,
 	)
 	return i, err
 }
@@ -663,15 +631,10 @@ SELECT
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
     a.imported_key_count,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.id = $1
 `
 
@@ -689,7 +652,7 @@ type GetAccountPropsByIdRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	ImportedKeyCount  int64
-	IsWatchOnly       bool
+	WalletIsWatchOnly bool
 }
 
 // Returns full account properties by account id.
@@ -710,7 +673,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
 		&i.ImportedKeyCount,
-		&i.IsWatchOnly,
+		&i.WalletIsWatchOnly,
 	)
 	return i, err
 }
@@ -763,16 +726,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE a.scope_id = $1
 ORDER BY a.account_number NULLS LAST
 `
@@ -793,7 +750,6 @@ type ListAccountsByScopeRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Lists all accounts in a scope, ordered by account number. Imported accounts
@@ -823,7 +779,6 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
-			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
@@ -854,16 +809,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = $1
 ORDER BY a.account_number NULLS LAST
 `
@@ -884,7 +833,6 @@ type ListAccountsByWalletRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Lists all accounts for a wallet, ordered by account number. Imported
@@ -914,7 +862,6 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
-			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
@@ -945,16 +892,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE ks.wallet_id = $1 AND a.account_name = $2
 ORDER BY a.account_number NULLS LAST
 `
@@ -980,7 +921,6 @@ type ListAccountsByWalletAndNameRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Lists all accounts for a wallet filtered by account name, ordered by account
@@ -1010,7 +950,6 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
-			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}
@@ -1041,16 +980,10 @@ SELECT
     a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
-    w.is_watch_only AS wallet_is_watch_only,
-    CASE
-        WHEN w.is_watch_only THEN TRUE
-        WHEN a.origin_id = 1 AND acs.account_id IS NULL THEN TRUE
-        ELSE FALSE
-    END AS is_watch_only
+    w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
 WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
@@ -1080,7 +1013,6 @@ type ListAccountsByWalletScopeRow struct {
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
-	IsWatchOnly       bool
 }
 
 // Lists all accounts for a wallet and scope tuple, ordered by account number.
@@ -1110,7 +1042,6 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
-			&i.IsWatchOnly,
 		); err != nil {
 			return nil, err
 		}

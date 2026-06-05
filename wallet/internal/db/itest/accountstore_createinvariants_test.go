@@ -258,7 +258,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
 						WalletID:            walletID,
-						Name:                db.DefaultImportedAccountName,
+						Name:                "imported-xpub",
 						Scope:               db.KeyScopeBIP0084,
 						PublicKey:           RandomBytes(32),
 						EncryptedPrivateKey: RandomBytes(32),
@@ -283,7 +283,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
 						WalletID:  walletID,
-						Name:      db.DefaultImportedAccountName,
+						Name:      "imported-xpub",
 						Scope:     db.KeyScopeBIP0084,
 						PublicKey: RandomBytes(32),
 					},
@@ -307,7 +307,7 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 				props, err := store.CreateImportedAccount(
 					t.Context(), db.CreateImportedAccountParams{
 						WalletID:  walletID,
-						Name:      db.DefaultImportedAccountName,
+						Name:      "imported-xpub",
 						Scope:     db.KeyScopeBIP0084,
 						PublicKey: RandomBytes(32),
 					},
@@ -365,4 +365,57 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 			require.Equal(t, tc.wantWatchOnly, isWatchOnly)
 		})
 	}
+}
+
+// TestReservedImportedBucketNameRejected verifies that the wallet-level
+// imported bucket name (db.DefaultImportedAccountName) is reserved: neither a
+// caller-initiated derived account nor a caller-initiated imported (xpub)
+// account may occupy that slot. The bucket is materialized only by the import
+// auto-create path, so both public account-creation APIs must reject it with
+// db.ErrReservedAccountName.
+func TestReservedImportedBucketNameRejected(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-reserved-bucket-name")
+	scope := db.KeyScopeBIP0084
+
+	// A derived account cannot claim the reserved bucket name.
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    scope,
+			Name:     db.DefaultImportedAccountName,
+		},
+		SpendableDeriveFn(),
+	)
+	require.ErrorIs(t, err, db.ErrReservedAccountName)
+
+	// An imported (xpub) account cannot claim the reserved bucket name
+	// either, even with otherwise-valid spendable key material.
+	_, err = store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:            walletID,
+			Scope:               scope,
+			Name:                db.DefaultImportedAccountName,
+			PublicKey:           RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.ErrorIs(t, err, db.ErrReservedAccountName)
+
+	// The reserved name remains free for the auto-create path: importing an
+	// address materializes the bucket under that exact name.
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:            walletID,
+			Scope:               scope,
+			AddressType:         db.WitnessPubKey,
+			PubKey:              RandomBytes(33),
+			ScriptPubKey:        RandomBytes(32),
+			EncryptedPrivateKey: RandomBytes(32),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.DefaultImportedAccountName, info.AccountName)
 }
