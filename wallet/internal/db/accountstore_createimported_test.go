@@ -19,22 +19,28 @@ var (
 	errTestImportedReload  = errors.New("reload")
 )
 
-// TestCreateImportedAccountParamsValidateBasic verifies imported account
+// TestCreateImportedAccountParamsValidate verifies imported account
 // creation validation rejects missing account names and public keys.
-func TestCreateImportedAccountParamsValidateBasic(t *testing.T) {
+func TestCreateImportedAccountParamsValidate(t *testing.T) {
 	t.Parallel()
 
 	err := (&CreateImportedAccountParams{
-		Name:      "imported",
+		Name:      "imported-xpub",
 		PublicKey: []byte{1},
-	}).ValidateBasic()
+	}).Validate()
 	require.NoError(t, err)
 
-	err = (&CreateImportedAccountParams{}).ValidateBasic()
+	err = (&CreateImportedAccountParams{}).Validate()
 	require.ErrorIs(t, err, ErrMissingAccountName)
 
-	err = (&CreateImportedAccountParams{Name: "imported"}).ValidateBasic()
+	err = (&CreateImportedAccountParams{Name: "imported-xpub"}).Validate()
 	require.ErrorIs(t, err, ErrMissingAccountPublicKey)
+
+	err = (&CreateImportedAccountParams{
+		Name:      DefaultImportedAccountName,
+		PublicKey: []byte{1},
+	}).Validate()
+	require.ErrorIs(t, err, ErrReservedAccountName)
 }
 
 // TestCreateImportedAccountWithOps verifies that the shared helper owns the
@@ -142,7 +148,7 @@ func TestCreateImportedAccountWithOpsRejectsWatchOnlyViolation(t *testing.T) {
 	require.Nil(t, info)
 	require.ErrorIs(t, err, ErrWatchOnlyViolation)
 	require.EqualError(
-		t, err, "wallet 7 cannot create account \"imported\": watch-only "+
+		t, err, "wallet 7 cannot create account \"imported-xpub\": watch-only "+
 			"invariant violation",
 	)
 	ops.AssertNotCalled(t, "EnsureKeyScope")
@@ -157,6 +163,11 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 	t.Parallel()
 
 	params := testCreateImportedAccountParams()
+	// A watch-only wallet legitimately has no account private-key
+	// material, so the secret-insertion step is skipped. A spendable
+	// wallet without a private key would instead be rejected by the
+	// ADR 0012 invariant, so the no-secret path is exercised here
+	// against a watch-only wallet.
 	params.EncryptedPrivateKey = nil
 	expectedInfo := &AccountInfo{
 		AccountNumber:        0,
@@ -176,7 +187,7 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 
 	walletCall := ops.On("IsWalletWatchOnly", mock.Anything,
 		params.WalletID,
-	).Return(false, nil).Once()
+	).Return(true, nil).Once()
 	ensureScopeCall := ops.On("EnsureKeyScope", mock.Anything,
 		params.WalletID, params.Scope, params.AddrSchema,
 	).Return(int64(11), nil).Once()
@@ -367,7 +378,7 @@ func TestCreateImportedAccountWithOpsWrapsStageErrors(t *testing.T) {
 func testCreateImportedAccountParams() CreateImportedAccountParams {
 	return CreateImportedAccountParams{
 		WalletID: 7,
-		Name:     "imported",
+		Name:     "imported-xpub",
 		Scope: KeyScope{
 			Purpose: 84,
 			Coin:    0,

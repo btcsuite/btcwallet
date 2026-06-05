@@ -19,7 +19,7 @@ var (
 )
 
 // TestCreateDerivedAccountParamsValidate verifies derived account creation
-// validation rejects missing names.
+// validation rejects missing and reserved names.
 func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 	t.Parallel()
 
@@ -28,6 +28,11 @@ func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 
 	err = (&CreateDerivedAccountParams{}).Validate()
 	require.ErrorIs(t, err, ErrMissingAccountName)
+
+	err = (&CreateDerivedAccountParams{
+		Name: DefaultImportedAccountName,
+	}).Validate()
+	require.ErrorIs(t, err, ErrReservedAccountName)
 }
 
 // TestCreateDerivedAccountWithOps verifies that the shared helper owns the
