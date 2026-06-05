@@ -18,39 +18,19 @@ import (
 func (s *Store) CreateImportedAccount(ctx context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
-	var props *db.AccountInfo
+	var info *db.AccountInfo
 
 	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		var err error
 
-		props, err = db.CreateImportedAccount(
-			ctx, params, func() (int64, error) {
-				id, _, err := ensureKeyScope(
-					ctx, qtx, params.WalletID, params.Scope,
-					params.AddrSchema,
-				)
-
-				return id, err
-			}, func() (bool, error) {
-				return getWalletWatchOnly(ctx, qtx, params.WalletID)
-			}, qtx.CreateImportedAccount,
-			buildCreateImportedAccountArgs(params),
-			func(row sqlc.CreateImportedAccountRow) int64 { return row.ID },
-			qtx.CreateAccountSecret, buildCreateAccountSecretArgs(params),
-			func(accountID int64) (*db.AccountInfo, error) {
-				return getAccountProps(ctx, qtx, accountID)
-			},
+		info, err = db.CreateImportedAccountWithOps(
+			ctx, params, createImportedAccountOps{q: qtx},
 		)
 		if err != nil {
 			return err
 		}
 
 		if params.DryRun {
-			// TODO: Reuse the SQL address-derivation helpers to match
-			// kvdb/legacy dry-run by deriving sample external and
-			// internal addresses before rolling this tx back. Account
-			// import needs a derivation callback before it can call
-			// those helpers.
 			return errDryRunRollback
 		}
 
@@ -58,13 +38,83 @@ func (s *Store) CreateImportedAccount(ctx context.Context,
 	})
 	if err != nil {
 		if params.DryRun && errors.Is(err, errDryRunRollback) {
-			return props, nil
+			return info, nil
 		}
 
 		return nil, err
 	}
 
-	return props, nil
+	return info, nil
+}
+
+// createImportedAccountOps adapts PostgreSQL sqlc queries to the shared
+// CreateImportedAccount workflow.
+type createImportedAccountOps struct {
+	q *sqlc.Queries
+}
+
+// Verify createImportedAccountOps implements db.CreateImportedAccountOps.
+var _ db.CreateImportedAccountOps = createImportedAccountOps{}
+
+// IsWalletWatchOnly implements db.CreateImportedAccountOps.
+func (o createImportedAccountOps) IsWalletWatchOnly(ctx context.Context,
+	walletID uint32) (bool, error) {
+
+	return getWalletWatchOnly(ctx, o.q, walletID)
+}
+
+// EnsureKeyScope implements db.CreateImportedAccountOps.
+func (o createImportedAccountOps) EnsureKeyScope(ctx context.Context,
+	walletID uint32, scope db.KeyScope,
+	addrSchema *db.ScopeAddrSchema) (int64, error) {
+
+	return db.EnsureKeyScopeWithOps(
+		ctx, pgEnsureKeyScopeOps(o), walletID, scope, addrSchema,
+	)
+}
+
+// CreateImportedAccount implements db.CreateImportedAccountOps.
+func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
+	req db.CreateImportedAccountInsertRequest) (int64, error) {
+
+	row, err := o.q.CreateImportedAccount(
+		ctx, sqlc.CreateImportedAccountParams{
+			ScopeID:     req.ScopeID,
+			AccountName: req.Name,
+			OriginID:    int16(db.ImportedAccount),
+			PublicKey:   req.PublicKey,
+			MasterFingerprint: sql.NullInt64{
+				Int64: int64(req.MasterFingerprint),
+				Valid: true,
+			},
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	return row.ID, nil
+}
+
+// CreateAccountSecret implements db.CreateImportedAccountOps.
+func (o createImportedAccountOps) CreateAccountSecret(ctx context.Context,
+	accountID int64, encryptedPrivateKey []byte) error {
+
+	return o.q.CreateAccountSecret(
+		ctx, sqlc.CreateAccountSecretParams{
+			AccountID: accountID,
+			EncryptedPrivateKey: db.NilIfEmptyBytes(
+				encryptedPrivateKey,
+			),
+		},
+	)
+}
+
+// GetAccountInfoByID implements db.CreateImportedAccountOps.
+func (o createImportedAccountOps) GetAccountInfoByID(ctx context.Context,
+	accountID int64) (*db.AccountInfo, error) {
+
+	return getAccountProps(ctx, o.q, accountID)
 }
 
 // getWalletWatchOnly returns the current watch-only mode for the wallet.
@@ -82,42 +132,6 @@ func getWalletWatchOnly(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	return false, fmt.Errorf("get wallet: %w", err)
-}
-
-// buildCreateImportedAccountArgs returns a function that builds the
-// CreateImportedAccountParams for PostgreSQL.
-func buildCreateImportedAccountArgs(
-	params db.CreateImportedAccountParams,
-) func(int64) sqlc.CreateImportedAccountParams {
-
-	return func(scopeID int64) sqlc.CreateImportedAccountParams {
-		return sqlc.CreateImportedAccountParams{
-			ScopeID:     scopeID,
-			AccountName: params.Name,
-			OriginID:    int16(db.ImportedAccount),
-			PublicKey:   params.PublicKey,
-			MasterFingerprint: sql.NullInt64{
-				Int64: int64(params.MasterFingerprint),
-				Valid: true,
-			},
-		}
-	}
-}
-
-// buildCreateAccountSecretArgs returns a function that builds the
-// CreateAccountSecretParams for PostgreSQL.
-func buildCreateAccountSecretArgs(
-	params db.CreateImportedAccountParams,
-) func(int64) sqlc.CreateAccountSecretParams {
-
-	return func(accountID int64) sqlc.CreateAccountSecretParams {
-		return sqlc.CreateAccountSecretParams{
-			AccountID: accountID,
-			EncryptedPrivateKey: db.NilIfEmptyBytes(
-				params.EncryptedPrivateKey,
-			),
-		}
-	}
 }
 
 // getAccountProps fetches full account properties from the database and
