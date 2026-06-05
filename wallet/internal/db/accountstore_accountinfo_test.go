@@ -16,6 +16,7 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	t.Parallel()
 
 	row := AccountInfoRow[int16]{
+		RowID:            42,
 		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
 		AccountName:      "strict",
 		OriginID:         int16(ImportedAccount),
@@ -36,6 +37,7 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 		ExternalAddrType: NestedWitnessPubKey,
 		InternalAddrType: NestedWitnessPubKey,
 	}, info.AddrSchema)
+	require.Equal(t, int64(42), info.rowID)
 }
 
 // TestScopeAddrSchemaFromWaddrmgr verifies legacy address-manager schemas are
