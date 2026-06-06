@@ -320,8 +320,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 
 		// Finally, we'll request the backend to notify us of the
 		// transaction that pays to the change address, if there is one,
-		// when it confirms.
-		if tx.ChangeIndex >= 0 {
+		// when it confirms. We skip this for external change addresses
+		// since they are not wallet-owned — registering them would cause
+		// future payments to that address to be treated as wallet-relevant
+		// transactions.
+		if tx.ChangeIndex >= 0 && changeAddr == nil {
 			changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
 			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				changePkScript, w.chainParams,
@@ -441,6 +444,11 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 	if changeAddr != nil {
+		if !changeAddr.IsForNet(w.chainParams) {
+			return nil, nil, fmt.Errorf("change address %v is not "+
+				"for network %v", changeAddr, w.chainParams.Name)
+		}
+
 		pkScript, err := txscript.PayToAddrScript(changeAddr)
 		if err != nil {
 			return nil, nil, err

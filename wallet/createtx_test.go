@@ -471,10 +471,10 @@ func TestTxToOutputsCustomChangeAddr(t *testing.T) {
 
 	// Derive an external address to use as the custom change destination.
 	// This address is not wallet-managed — it simulates a user-supplied
-	// address.
+	// address. Must be a testnet address since testWallet uses TestNet3Params.
 	changeAddr, err := btcutil.DecodeAddress(
-		"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-		&chaincfg.MainNetParams,
+		"tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+		&chaincfg.TestNet3Params,
 	)
 	require.NoError(t, err)
 
