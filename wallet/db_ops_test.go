@@ -566,6 +566,10 @@ func TestDBPutRewind(t *testing.T) {
 
 	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 
+	// DBPutRewind snapshots the synced tip inside the update so it can
+	// restore it on failure; the successful path never restores.
+	preRewindTip := waddrmgr.BlockStamp{Height: 50, Hash: chainhash.Hash{0x09}}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
 	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
 	mocks.txStore.On("Rollback",
 		mock.Anything, int32(101),
@@ -574,8 +578,47 @@ func TestDBPutRewind(t *testing.T) {
 	// Act: Rewind the wallet state to the specified block height.
 	err := s.DBPutRewind(t.Context(), bs)
 
-	// Assert: Verify that the rewind operation succeeded.
+	// Assert: Verify that the rewind operation succeeded. The mock's
+	// AssertExpectations confirms RestoreSyncedTo was not called.
 	require.NoError(t, err)
+}
+
+// TestDBPutRewind_RollbackFailureRestoresTip verifies that when SetSyncedTo
+// succeeds and advances the in-memory synced tip but the subsequent
+// txStore.Rollback fails, DBPutRewind conditionally restores the in-memory tip
+// to the pre-rewind value. SetSyncedTo writes the bucket and advances the live
+// manager's tip immediately, so a rolled-back update would otherwise leave the
+// tip rewound to a fork point that was never persisted.
+func TestDBPutRewind_RollbackFailureRestoresTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: SetSyncedTo succeeds (advancing the in-memory tip) and then
+	// Rollback fails, forcing the restore path.
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+
+	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+
+	preRewindTip := waddrmgr.BlockStamp{
+		Height: 150, Hash: chainhash.Hash{0x42},
+	}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
+	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
+	mocks.txStore.On("Rollback",
+		mock.Anything, int32(101),
+	).Return(errRollbackFail).Once()
+	mocks.addrStore.On("RestoreSyncedToIfCurrent", preRewindTip, bs).
+		Return(true).Once()
+
+	// Act: Rewind the wallet state, expecting the rollback to fail.
+	err := s.DBPutRewind(t.Context(), bs)
+
+	// Assert: The error propagates and the pre-rewind tip is restored if the
+	// live tip still points at the rewound fork point. The mock's
+	// AssertExpectations confirms the conditional restore was called with the
+	// snapshotted pre-rewind tip and the rewind target.
+	require.ErrorIs(t, err, errRollbackFail)
+	mocks.addrStore.AssertExpectations(t)
 }
 
 // TestDBPutBirthdayBlock_Error verifies that DBPutBirthdayBlock correctly
@@ -1296,12 +1339,23 @@ func TestDBPutRewind_Error(t *testing.T) {
 	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
+	// The synced tip is snapshotted before the update and conditionally
+	// restored after the update fails so the in-memory tip is not left at
+	// the never-persisted fork point.
+	preRewindTip := waddrmgr.BlockStamp{Height: 50, Hash: chainhash.Hash{0x09}}
+	rewindTip := waddrmgr.BlockStamp{}
+
+	mockAddrStore.On("SyncedTo").Return(preRewindTip).Once()
 	mockAddrStore.On("SetSyncedTo",
 		mock.Anything, mock.Anything).Return(errSetSync).Once()
+	mockAddrStore.On(
+		"RestoreSyncedToIfCurrent", preRewindTip, rewindTip,
+	).Return(false).Once()
 
 	// Act: Perform DBPutRewind.
 	err := s.DBPutRewind(t.Context(), waddrmgr.BlockStamp{})
 
-	// Assert: Verify failure.
+	// Assert: Verify failure and that the pre-rewind tip was restored.
 	require.ErrorIs(t, err, errSetSync)
+	mockAddrStore.AssertExpectations(t)
 }
