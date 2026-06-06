@@ -501,9 +501,20 @@ func (s *syncer) DBGetSyncedBlocks(_ context.Context, startHeight,
 func (s *syncer) DBPutRewind(_ context.Context,
 	bs waddrmgr.BlockStamp) error {
 
+	var preRewindTip waddrmgr.BlockStamp
+
 	err := walletdb.Update(s.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		// SetSyncedTo below writes the addrmgr bucket and advances the live
+		// manager's in-memory synced tip immediately. If the subsequent
+		// Rollback fails, walletdb rolls the bucket write back but the
+		// in-memory tip stays rewound to a fork point that was never
+		// persisted. Snapshot the pre-rewind tip inside this write transaction,
+		// immediately before the rewind, so a failed update restores the latest
+		// committed live tip.
+		preRewindTip = s.addrStore.SyncedTo()
 
 		err := s.addrStore.SetSyncedTo(addrmgrNs, &bs)
 		if err != nil {
@@ -513,6 +524,12 @@ func (s *syncer) DBPutRewind(_ context.Context,
 		return s.txStore.Rollback(txmgrNs, bs.Height+1)
 	})
 	if err != nil {
+		// walletdb rolled the addrmgr bucket back, but any synced-tip
+		// advance from SetSyncedTo survives in memory. Restore the
+		// pre-rewind tip only if the live manager still points at the
+		// rolled-back rewind target.
+		s.addrStore.RestoreSyncedToIfCurrent(preRewindTip, bs)
+
 		return fmt.Errorf("rollback wallet: %w", err)
 	}
 
