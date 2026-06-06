@@ -881,9 +881,12 @@ func TestHandleScanReq(t *testing.T) {
 		typ:        scanTypeRewind,
 		startBlock: waddrmgr.BlockStamp{Height: 50},
 	}
+	// SyncedTo is read twice: once by scanWithRewind to decide whether a
+	// rewind is needed, and once by DBPutRewind to snapshot the pre-rewind
+	// tip for its restore-on-failure path.
 	mockAddrStore.On("SyncedTo").Return(
 		waddrmgr.BlockStamp{Height: 100},
-	).Once()
+	).Twice()
 
 	// Expect sync state update and transaction rollback for the rewind.
 	mockAddrStore.On(
@@ -3199,6 +3202,10 @@ func TestScanWithRewind_Error(t *testing.T) {
 		mock.Anything).Return(nil).Maybe()
 	mockTxStore.On("Rollback", mock.Anything, mock.Anything).Return(
 		errRollbackFail).Once()
+
+	// The failed rollback drives DBPutRewind's restore path, which resets
+	// the in-memory synced tip to the pre-rewind snapshot.
+	mockAddrStore.On("RestoreSyncedTo", mock.Anything).Maybe()
 
 	// Act: Attempt to perform a scan with rewind.
 	err := s.scanWithRewind(
