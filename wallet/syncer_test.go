@@ -2814,6 +2814,14 @@ func TestRewindToBlockFallsBackToLegacy(t *testing.T) {
 
 	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 
+	// DBPutRewind snapshots the live synced tip before the rollback so it
+	// can restore it on failure, so SyncedTo is consulted first. The
+	// rollback here succeeds, so the snapshot is never restored; a valid
+	// pre-rewind tip just satisfies the read.
+	preRewindTip := waddrmgr.BlockStamp{
+		Height: 200, Hash: chainhash.Hash{0x02},
+	}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
 	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
 	mocks.txStore.On("Rollback",
 		mock.Anything, int32(101),
