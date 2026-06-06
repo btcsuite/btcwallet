@@ -142,7 +142,8 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	account uint32, minconf int32, feeSatPerKb btcutil.Amount,
 	strategy CoinSelectionStrategy, dryRun bool,
 	selectedUtxos []wire.OutPoint,
-	allowUtxo func(utxo wtxmgr.Credit) bool) (
+	allowUtxo func(utxo wtxmgr.Credit) bool,
+	changeAddr btcutil.Address) (
 	*txauthor.AuthoredTx, error) {
 
 	chainClient, err := w.requireChainClient()
@@ -176,7 +177,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	var tx *txauthor.AuthoredTx
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs, changeSource, err := w.addrMgrWithChangeSource(
-			dbtx, changeKeyScope, account,
+			dbtx, changeKeyScope, account, changeAddr,
 		)
 		if err != nil {
 			return err
@@ -319,8 +320,11 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 
 		// Finally, we'll request the backend to notify us of the
 		// transaction that pays to the change address, if there is one,
-		// when it confirms.
-		if tx.ChangeIndex >= 0 {
+		// when it confirms. We skip this for external change addresses
+		// since they are not wallet-owned — registering them would cause
+		// future payments to that address to be treated as wallet-relevant
+		// transactions.
+		if tx.ChangeIndex >= 0 && changeAddr == nil {
 			changePkScript := tx.Tx.TxOut[tx.ChangeIndex].PkScript
 			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 				changePkScript, w.chainParams,
@@ -429,13 +433,31 @@ func inputYieldsPositively(credit *wire.TxOut,
 }
 
 // addrMgrWithChangeSource returns the address manager bucket and a change
-// source that returns change addresses from said address manager. The change
-// addresses will come from the specified key scope and account, unless a key
-// scope is not specified. In that case, change addresses will always come from
-// the P2WKH key scope.
+// source. If changeAddr is non-nil, the change source always pays to that
+// address. Otherwise, change addresses are derived from the wallet using the
+// specified key scope and account (defaulting to P2TR if no scope is given).
 func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	changeKeyScope *waddrmgr.KeyScope, account uint32) (
+	changeKeyScope *waddrmgr.KeyScope, account uint32,
+	changeAddr btcutil.Address) (
 	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
+
+	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+	if changeAddr != nil {
+		if !changeAddr.IsForNet(w.chainParams) {
+			return nil, nil, fmt.Errorf("change address %v is not "+
+				"for network %v", changeAddr, w.chainParams.Name)
+		}
+
+		pkScript, err := txscript.PayToAddrScript(changeAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		return addrmgrNs, &txauthor.ChangeSource{
+			ScriptSize: len(pkScript),
+			NewScript:  func() ([]byte, error) { return pkScript, nil },
+		}, nil
+	}
 
 	// Determine the address type for change addresses of the given
 	// account.
@@ -446,7 +468,6 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 
 	// It's possible for the account to have an address schema override, so
 	// prefer that if it exists.
-	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 	scopeMgr, err := w.Manager.FetchScopedKeyManager(*changeKeyScope)
 	if err != nil {
 		return nil, nil, err
@@ -480,22 +501,22 @@ func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
 		// from the imported account, change addresses are created from
 		// account 0.
 		var (
-			changeAddr btcutil.Address
-			err        error
+			derivedAddr btcutil.Address
+			err         error
 		)
 		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.newChangeAddress(
+			derivedAddr, err = w.newChangeAddress(
 				addrmgrNs, 0, *changeKeyScope,
 			)
 		} else {
-			changeAddr, err = w.newChangeAddress(
+			derivedAddr, err = w.newChangeAddress(
 				addrmgrNs, account, *changeKeyScope,
 			)
 		}
 		if err != nil {
 			return nil, err
 		}
-		return txscript.PayToAddrScript(changeAddr)
+		return txscript.PayToAddrScript(derivedAddr)
 	}
 
 	return addrmgrNs, &txauthor.ChangeSource{

@@ -247,7 +247,8 @@ type Interface interface {
 	SendOutputs(outputs []*wire.TxOut,
 		coinSelectKeyScope *waddrmgr.KeyScope, account uint32,
 		minconf int32, satPerKb btcutil.Amount,
-		strategy CoinSelectionStrategy, label string) (*wire.MsgTx, error)
+		strategy CoinSelectionStrategy, label string,
+		optFuncs ...TxCreateOption) (*wire.MsgTx, error)
 
 	// SendOutputsWithInput is a variant of SendOutputs that allows
 	// specifying a particular input to use for the transaction.
@@ -255,7 +256,8 @@ type Interface interface {
 		coinSelectKeyScope *waddrmgr.KeyScope, account uint32,
 		minconf int32, satPerKb btcutil.Amount,
 		strategy CoinSelectionStrategy, label string,
-		inputs []wire.OutPoint) (*wire.MsgTx, error)
+		inputs []wire.OutPoint,
+		optFuncs ...TxCreateOption) (*wire.MsgTx, error)
 
 	// PublishTransaction broadcasts a transaction to the network.
 	PublishTransaction(tx *wire.MsgTx, label string) error

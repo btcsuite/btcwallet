@@ -49,6 +49,17 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	coinSelectionStrategy CoinSelectionStrategy,
 	optFuncs ...TxCreateOption) (int32, error) {
 
+	// WithChangeAddress is not supported for PSBT funding.
+	// It requires the address to be wallet-owned.
+	opts := defaultTxCreateOptions()
+	for _, f := range optFuncs {
+		f(opts)
+	}
+	if opts.changeAddr != nil {
+		return 0, fmt.Errorf("WithChangeAddress is not supported for " +
+			"PSBT funding")
+	}
+
 	// Make sure the packet is well formed. We only require there to be at
 	// least one input or output.
 	err := psbt.VerifyInputOutputLen(packet, false, false)
@@ -182,7 +193,7 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 		// a new change address into the database.
 		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
 			_, changeSource, err := w.addrMgrWithChangeSource(
-				dbtx, opts.changeKeyScope, account,
+				dbtx, opts.changeKeyScope, account, nil,
 			)
 			if err != nil {
 				return err

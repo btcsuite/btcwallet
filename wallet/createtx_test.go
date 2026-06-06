@@ -81,7 +81,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// database us not inflated.
 	dryRunTx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
-		nil, alwaysAllowUtxo,
+		nil, alwaysAllowUtxo, nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -99,7 +99,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 
 	dryRunTx2, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true,
-		nil, alwaysAllowUtxo,
+		nil, alwaysAllowUtxo, nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -135,7 +135,7 @@ func TestTxToOutputsDryRun(t *testing.T) {
 	// to the database.
 	tx, err := w.txToOutputs(
 		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, false,
-		nil, alwaysAllowUtxo,
+		nil, alwaysAllowUtxo, nil,
 	)
 	if err != nil {
 		t.Fatalf("unable to author tx: %v", err)
@@ -326,7 +326,7 @@ func TestTxToOutputsRandom(t *testing.T) {
 	createTx := func() *txauthor.AuthoredTx {
 		tx, err := w.txToOutputs(
 			txOuts, nil, nil, 0, 1, feeSatPerKb,
-			CoinSelectionRandom, true, nil, alwaysAllowUtxo,
+			CoinSelectionRandom, true, nil, alwaysAllowUtxo, nil,
 		)
 		require.NoError(t, err)
 		return tx
@@ -398,7 +398,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	}
 	tx1, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
-		CoinSelectionLargest, true, nil, alwaysAllowUtxo,
+		CoinSelectionLargest, true, nil, alwaysAllowUtxo, nil,
 	)
 	require.NoError(t, err)
 
@@ -424,7 +424,7 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 	tx2, err := w.txToOutputs(
 		[]*wire.TxOut{targetTxOut}, &waddrmgr.KeyScopeBIP0086,
 		&waddrmgr.KeyScopeBIP0084, 0, 1, 1000, CoinSelectionLargest,
-		true, nil, alwaysAllowUtxo,
+		true, nil, alwaysAllowUtxo, nil,
 	)
 	require.NoError(t, err)
 
@@ -444,6 +444,60 @@ func TestCreateSimpleCustomChange(t *testing.T) {
 
 		require.Equal(t, scriptType, txscript.WitnessV0PubKeyHashTy)
 	}
+}
+
+// TestTxToOutputsCustomChangeAddr tests that when a custom change address is
+// passed to txToOutputs, the resulting transaction sends change to that address
+// rather than a wallet-derived one.
+func TestTxToOutputsCustomChangeAddr(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Fund the wallet with a P2WKH output.
+	p2wkhAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	const fundAmt = 2_000_000
+	incomingTx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{wire.NewTxOut(fundAmt, p2wkhScript)},
+	}
+	addUtxo(t, w, incomingTx)
+
+	// Derive an external address to use as the custom change destination.
+	// This address is not wallet-managed — it simulates a user-supplied
+	// address. Must be a testnet address since testWallet uses TestNet3Params.
+	changeAddr, err := btcutil.DecodeAddress(
+		"tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+		&chaincfg.TestNet3Params,
+	)
+	require.NoError(t, err)
+
+	changeScript, err := txscript.PayToAddrScript(changeAddr)
+	require.NoError(t, err)
+
+	// Send 500_000 sats — less than the funded amount so a change output
+	// must be produced.
+	targetTxOut := &wire.TxOut{
+		Value:    500_000,
+		PkScript: p2wkhScript,
+	}
+	tx, err := w.txToOutputs(
+		[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1, 1000,
+		CoinSelectionLargest, true, nil, alwaysAllowUtxo, changeAddr,
+	)
+	require.NoError(t, err)
+	require.NotEqual(t, tx.ChangeIndex, -1, "expected a change output")
+
+	// The change output must use the caller-supplied script.
+	changeOut := tx.Tx.TxOut[tx.ChangeIndex]
+	require.Equal(t, changeScript, changeOut.PkScript,
+		"change output does not use the custom change address")
 }
 
 // TestSelectUtxosTxoToOutpoint tests that it is possible to use passed
@@ -562,7 +616,7 @@ func TestSelectUtxosTxoToOutpoint(t *testing.T) {
 			tx1, err := w.txToOutputs(
 				[]*wire.TxOut{targetTxOut}, nil, nil, 0, 1,
 				1000, CoinSelectionLargest, true,
-				tc.selectUTXOs, alwaysAllowUtxo,
+				tc.selectUTXOs, alwaysAllowUtxo, nil,
 			)
 			if tc.errString != "" {
 				require.ErrorContains(t, err, tc.errString)
