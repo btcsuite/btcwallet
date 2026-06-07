@@ -269,6 +269,13 @@ func (m *AccountStore) InvalidateAccountCache(account uint32) {
 	m.Called(account)
 }
 
+// EvictDerivedAddresses implements the waddrmgr.AccountStore interface.
+func (m *AccountStore) EvictDerivedAddresses(account, branch, fromIndex,
+	toIndex uint32) {
+
+	m.Called(account, branch, fromIndex, toIndex)
+}
+
 // ImportPrivateKey implements the waddrmgr.AccountStore interface.
 func (m *AccountStore) ImportPrivateKey(ns walletdb.ReadWriteBucket,
 	wif *btcutil.WIF,

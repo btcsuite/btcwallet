@@ -353,6 +353,13 @@ type AccountStore interface {
 	// InvalidateAccountCache invalidates the account cache.
 	InvalidateAccountCache(account uint32)
 
+	// EvictDerivedAddresses removes the in-memory traces (recent-address
+	// cache entries and pending unlock-derivation entries) of the
+	// addresses derived for the given account branch over the half-open
+	// index range [fromIndex, toIndex), undoing a rolled-back horizon
+	// extension.
+	EvictDerivedAddresses(account, branch, fromIndex, toIndex uint32)
+
 	// ImportPrivateKey imports a private key.
 	ImportPrivateKey(ns walletdb.ReadWriteBucket, wif *btcutil.WIF,
 		bs *BlockStamp) (ManagedPubKeyAddress, error)

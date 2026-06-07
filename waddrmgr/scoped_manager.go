@@ -2917,6 +2917,71 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	delete(s.acctInfo, account)
 }
 
+// EvictDerivedAddresses removes the in-memory traces of the addresses derived
+// for the given account branch over the half-open index range [fromIndex,
+// toIndex) from the live manager. It drops those addresses from the
+// recent-address cache and discards any matching pending deriveOnUnlock
+// entries.
+//
+// extendAddresses mutates this in-memory state synchronously, before the
+// surrounding walletdb transaction commits, so a horizon extension that is
+// later rolled back would otherwise leave scan-derived addresses observable
+// through Address and queued for derivation on the next unlock even though they
+// were never persisted. This lets the caller undo exactly those in-memory
+// mutations for a rolled-back batch without disturbing the persisted state.
+func (s *ScopedKeyManager) EvictDerivedAddresses(account, branch, fromIndex,
+	toIndex uint32) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// The account info is needed to re-derive the cached addresses' script
+	// addresses, which are the cache keys. A rolled-back extension cannot have
+	// evicted the account from the cache, but guard regardless: with no cached
+	// account there is nothing this manager could have derived.
+	acctInfo, ok := s.acctInfo[account]
+	if !ok {
+		return
+	}
+
+	// Re-derive each address in the rolled-back range and drop it from the
+	// recent-address cache. Derivation is deterministic and database-free, so
+	// the script addresses recomputed here match the keys extendAddresses
+	// inserted; deleting an absent key is a no-op, so an index skipped during
+	// extension simply has nothing to remove.
+	for index := fromIndex; index < toIndex; index++ {
+		addr, _, err := s.deriveAddr(acctInfo, account, branch, index)
+		if err != nil {
+			continue
+		}
+
+		s.addrs.Delete(addrKey(addr.ScriptAddress()))
+	}
+
+	// Drop the pending unlock-derivation entries the rolled-back extension
+	// queued for this account, branch, and range, filtering in place so entries
+	// from other accounts, branches, or unrelated extensions survive.
+	filtered := s.deriveOnUnlock[:0]
+	for _, info := range s.deriveOnUnlock {
+		rolledBack := info.managedAddr.InternalAccount() == account &&
+			info.branch == branch &&
+			info.index >= fromIndex && info.index < toIndex
+		if rolledBack {
+			continue
+		}
+
+		filtered = append(filtered, info)
+	}
+
+	// Clear the tail the in-place filter left behind so the dropped entries'
+	// managed addresses can be garbage collected.
+	for i := len(filtered); i < len(s.deriveOnUnlock); i++ {
+		s.deriveOnUnlock[i] = nil
+	}
+
+	s.deriveOnUnlock = filtered
+}
+
 // NewAddress returns a new address for the given account. The `change`
 // parameter dictates whether a change address (internal) or a receiving
 // address (external) should be generated. The caller is responsible for
