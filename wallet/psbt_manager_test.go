@@ -1486,6 +1486,9 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 			KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			MasterKeyFingerprint: 1,
 			PubKey:               pubKey.SerializeCompressed(),
+			// HD-derived rows carry a path; the mapper needs this to
+			// populate derivation info for PSBT decoration.
+			HasDerivationPath: true,
 		}, nil)
 
 	// Act: Call populatePsbtPacket.

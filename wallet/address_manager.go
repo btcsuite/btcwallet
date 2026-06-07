@@ -270,13 +270,24 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			storeAddr.AddrType)
 	}
 
-	internal := storeAddr.Origin == db.DerivedAccount &&
-		storeAddr.Branch == 1
+	// Origin records provenance (how the owning account entered the
+	// wallet), not whether the address itself is HD. HasDerivationPath is
+	// the authoritative signal: an imported-xpub watch-only account is
+	// genuinely HD and its children carry a real branch/index, so they
+	// must be classified exactly like derived-account children. Only a raw
+	// single import (the keyless imported bucket) is a true non-HD
+	// imported address. This mirrors legacy waddrmgr keyToManaged: any
+	// address with a derivation path takes Internal from its branch and is
+	// never flagged Imported, regardless of account provenance.
+	imported := storeAddr.Origin == db.ImportedAccount &&
+		!storeAddr.HasDerivationPath
+	internal := storeAddr.HasDerivationPath &&
+		storeAddr.Branch == waddrmgr.InternalBranch
 
 	info := AddressInfo{
 		Addr:       addr,
 		AddrType:   addrType,
-		Imported:   storeAddr.Origin == db.ImportedAccount,
+		Imported:   imported,
 		Internal:   internal,
 		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
 	}
@@ -292,7 +303,9 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	if info.Imported {
+	// A raw single import has no chain position, so it carries no
+	// derivation path; every HD address (derived or imported-xpub) does.
+	if !storeAddr.HasDerivationPath {
 		return info, nil
 	}
 

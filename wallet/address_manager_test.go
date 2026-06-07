@@ -48,6 +48,11 @@ func derivedAddressInfoFromAddr(t *testing.T, addr btcutil.Address,
 	info.MasterKeyFingerprint = fingerprint
 	info.Index = index
 
+	// Mirror the store read path, which flags every HD-derived row as
+	// carrying a derivation path; the mapper relies on this to populate
+	// derivation info and classify the internal branch.
+	info.HasDerivationPath = true
+
 	if change {
 		info.Branch = 1
 	}
@@ -170,6 +175,11 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 		Origin:       origin,
 		Branch:       branch,
 		PubKey:       pubKeyBytes,
+		// A derived address is HD and carries a real path; a raw single
+		// import does not. The mapper relies on this flag (not Origin)
+		// to decide whether to populate derivation info, mirroring the
+		// store read path.
+		HasDerivationPath: !imported,
 	}
 	if keyScope != (waddrmgr.KeyScope{}) {
 		storeInfo.KeyScope = db.KeyScope(keyScope)
