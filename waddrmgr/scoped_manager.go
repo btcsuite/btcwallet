@@ -2918,6 +2918,39 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	delete(s.acctInfo, account)
 }
 
+// EvictDerivedAddresses removes the in-memory traces of the addresses derived
+// for the given account branch over the half-open index range [fromIndex,
+// toIndex) from the live manager. It drops those addresses from the
+// recent-address cache, discards any matching pending deriveOnUnlock entries,
+// and invalidates the cached account info so the bumped next-index and
+// last-address fields are reloaded from the committed state.
+//
+// extendAddresses mutates this in-memory state synchronously, before the
+// surrounding walletdb transaction commits, so a horizon extension that is
+// later rolled back would otherwise leave scan-derived addresses observable
+// through Address, queued for derivation on the next unlock, and reflected in
+// the account's next-index and last-address fields even though they were never
+// persisted. This lets the caller undo exactly those in-memory mutations for a
+// rolled-back batch without disturbing the persisted state.
+func (s *ScopedKeyManager) EvictDerivedAddresses(account, branch, fromIndex,
+	toIndex uint32) {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	s.evictDerivedAddressCache(account, branch, fromIndex, toIndex)
+	s.evictDeriveOnUnlock(account, branch, fromIndex, toIndex)
+
+	// extendAddresses also advanced this account's cached next-index and
+	// last-address fields. Those were not persisted by the rolled-back
+	// transaction, so drop the cached account entry as well; loadAccountInfo
+	// reloads the committed state from the database on the next read instead
+	// of exposing the uncommitted horizon through AccountProperties or the
+	// last-address getters. The lock is already held, so the delete is inlined
+	// rather than routed through InvalidateAccountCache.
+	delete(s.acctInfo, account)
+}
+
 // NewAddress returns a new address for the given account. The `change`
 // parameter dictates whether a change address (internal) or a receiving
 // address (external) should be generated. The caller is responsible for
@@ -2960,6 +2993,91 @@ func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
 	addr := addrs[0].Address()
 
 	return addr, nil
+}
+
+// evictDerivedAddressCache removes rolled-back derived addresses from the
+// recent-address cache by scanning the bounded in-memory cache entries.
+func (s *ScopedKeyManager) evictDerivedAddressCache(account, branch, fromIndex,
+	toIndex uint32) {
+
+	var keys []addrKey
+	s.addrs.Range(func(key addrKey, cachedAddr *cachedAddr) bool {
+		if cachedAddr == nil {
+			return true
+		}
+
+		match := derivedAddressMatches(
+			cachedAddr.addr, account, branch, fromIndex, toIndex,
+		)
+		if match {
+			keys = append(keys, key)
+		}
+
+		return true
+	})
+
+	for _, key := range keys {
+		s.addrs.Delete(key)
+	}
+}
+
+// evictDeriveOnUnlock removes rolled-back pending private-key derivations for
+// one account branch and index range.
+func (s *ScopedKeyManager) evictDeriveOnUnlock(account, branch, fromIndex,
+	toIndex uint32) {
+
+	// Drop the pending unlock-derivation entries the rolled-back extension
+	// queued for this account, branch, and range, filtering in place so entries
+	// from other accounts, branches, or unrelated extensions survive.
+	filtered := s.deriveOnUnlock[:0]
+	for _, info := range s.deriveOnUnlock {
+		if pendingDeriveMatches(info, account, branch, fromIndex, toIndex) {
+			continue
+		}
+
+		filtered = append(filtered, info)
+	}
+
+	// Clear the tail the in-place filter left behind so the dropped entries'
+	// managed addresses can be garbage collected.
+	for i := len(filtered); i < len(s.deriveOnUnlock); i++ {
+		s.deriveOnUnlock[i] = nil
+	}
+
+	s.deriveOnUnlock = filtered
+}
+
+// pendingDeriveMatches reports whether one unlock-time derivation request is in
+// the rolled-back account branch and index range.
+func pendingDeriveMatches(info *unlockDeriveInfo, account, branch, fromIndex,
+	toIndex uint32) bool {
+
+	if info == nil || info.managedAddr == nil {
+		return false
+	}
+
+	return info.managedAddr.InternalAccount() == account &&
+		info.branch == branch &&
+		info.index >= fromIndex && info.index < toIndex
+}
+
+// derivedAddressMatches reports whether one cached address belongs to the
+// rolled-back account branch and index range.
+func derivedAddressMatches(addr ManagedAddress, account, branch, fromIndex,
+	toIndex uint32) bool {
+
+	addrWithPath, ok := addr.(ManagedPubKeyAddress)
+	if !ok {
+		return false
+	}
+
+	_, path, ok := addrWithPath.DerivationInfo()
+	if !ok {
+		return false
+	}
+
+	return path.InternalAccount == account && path.Branch == branch &&
+		path.Index >= fromIndex && path.Index < toIndex
 }
 
 // getNextIndex fetches the current next address index for the specified branch
