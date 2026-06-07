@@ -89,6 +89,11 @@ type AddrStore interface {
 	// address manager is synced through at the very least.
 	SyncedTo() BlockStamp
 
+	// RestoreSyncedTo resets the in-memory synced-to block stamp to the
+	// given value without touching the database, undoing synced-tip
+	// advances whose bucket writes were rolled back.
+	RestoreSyncedTo(bs BlockStamp)
+
 	// BlockHash returns the block hash at a particular block height.
 	BlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, error)
 

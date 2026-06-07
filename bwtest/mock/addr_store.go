@@ -51,6 +51,11 @@ func (m *AddrStore) SyncedTo() waddrmgr.BlockStamp {
 	return args.Get(0).(waddrmgr.BlockStamp)
 }
 
+// RestoreSyncedTo implements the waddrmgr.AddrStore interface.
+func (m *AddrStore) RestoreSyncedTo(bs waddrmgr.BlockStamp) {
+	m.Called(bs)
+}
+
 // BlockHash returns the block hash at a particular block height.
 func (m *AddrStore) BlockHash(ns walletdb.ReadBucket,
 	height int32) (*chainhash.Hash, error) {

@@ -69,6 +69,23 @@ func (m *Manager) SetSyncedTo(ns walletdb.ReadWriteBucket, bs *BlockStamp) error
 	return nil
 }
 
+// RestoreSyncedTo resets the manager's in-memory synced-to block stamp to bs
+// without touching the database. It is the in-memory-only counterpart to
+// SetSyncedTo, used to undo synced-tip advances whose backing bucket writes
+// were rolled back by a failed batch.
+//
+// SetSyncedTo advances m.syncState.syncedTo as soon as it writes the bucket, so
+// when several synced blocks are applied inside one transaction and a later
+// step fails, walletdb rolls the bucket back but the in-memory tip stays
+// advanced. Restoring it to the pre-batch stamp keeps the in-memory tip in step
+// with the persisted state.
+func (m *Manager) RestoreSyncedTo(bs BlockStamp) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	m.syncState.syncedTo = bs
+}
+
 // SyncedTo returns details about the block height and hash that the address
 // manager is synced through at the very least.  The intention is that callers
 // can use this information for intelligently initiating rescans to sync back to
