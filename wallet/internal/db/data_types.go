@@ -683,8 +683,12 @@ type AddressInfo struct {
 	// CreatedAt is when the address was created in the wallet database.
 	CreatedAt time.Time
 
-	// Origin indicates whether this is a derived HD address or an imported
-	// address. Reuses the AccountOrigin enum.
+	// Origin records the provenance of the owning account (how it entered
+	// the wallet), reusing the AccountOrigin enum. It is NOT a signal of
+	// whether the address itself is HD: an imported-xpub watch-only account
+	// has ImportedAccount origin yet derives genuinely HD children that
+	// carry a real path. Use HasDerivationPath to tell an HD address from a
+	// raw single import.
 	Origin AccountOrigin
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).

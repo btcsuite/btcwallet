@@ -8,13 +8,17 @@
 -- tx_status soft-delete (see ADR 0006) and ON DELETE RESTRICT. See
 -- ADR 0011 for the full design rationale.
 --
--- Addresses table stores all addresses under each account. Addresses can be
--- either HD-derived (following BIP32/BIP44 derivation paths) or imported from
--- external sources (e.g., watch-only addresses, hardware wallet addresses).
+-- Addresses table stores all addresses under each account. Addresses are
+-- either HD-derived (following BIP32/BIP44 derivation paths) or raw single
+-- imports (individually imported keys/scripts, e.g. hardware-wallet
+-- addresses). Note that imported-xpub watch-only accounts are themselves
+-- HD: their addresses are derived from the account xpub and carry a real
+-- path, so they are HD-derived rows, not raw imports.
 --
--- The table supports both address types through nullable derivation fields:
--- - HD-derived addresses have address_branch and address_index values
--- - Imported addresses have NULL derivation fields and store pub_key
+-- The table supports both kinds through nullable derivation fields:
+-- - HD-derived addresses (normal derived accounts and imported-xpub
+--   watch-only children alike) have address_branch and address_index values
+-- - Raw single imports have NULL derivation fields and store pub_key
 CREATE TABLE addresses (
     -- DB ID of the address, primary key.
     id INTEGER PRIMARY KEY,
@@ -34,14 +38,16 @@ CREATE TABLE addresses (
     type_id INTEGER NOT NULL,
 
     -- Branch number in BIP44 derivation path (typically 0 for external, 1 for
-    -- internal/change). NULL for imported addresses.
+    -- internal/change). NULL only for raw single imports, which have no chain
+    -- position; HD-derived rows (including imported-xpub children) set it.
     address_branch INTEGER,
 
     -- Index number in BIP44 derivation path (sequential counter within each
-    -- branch). NULL for imported addresses.
+    -- branch). NULL only for raw single imports; HD-derived rows (including
+    -- imported-xpub children) set it.
     address_index INTEGER,
 
-    -- Public key for imported addresses (stored in plaintext per ADR 0009:
+    -- Public key for raw single imports (stored in plaintext per ADR 0009:
     -- docs/developer/adr/0009-single-passphrase-encryption.md). NULL for
     -- HD-derived addresses since their public keys are derived from the
     -- account key.
@@ -51,7 +57,7 @@ CREATE TABLE addresses (
     created_at DATETIME NOT NULL DEFAULT current_timestamp,
 
     -- Branch and index are set together for HD-derived addresses and both
-    -- NULL for imported addresses.
+    -- NULL for raw single imports.
     CHECK ((address_branch IS NULL) = (address_index IS NULL)),
 
     -- Branch must be a BIP44 branch number when set.
@@ -75,7 +81,8 @@ CREATE TABLE addresses (
 
 -- Unique partial index to prevent duplicate address derivations within the
 -- same account. Only enforced when both branch and index are non-NULL
--- (HD-derived addresses). Imported addresses are excluded from this constraint.
+-- (HD-derived addresses, including imported-xpub children). Raw single
+-- imports, whose path is NULL, are excluded from this constraint.
 CREATE UNIQUE INDEX uidx_addresses_branch_index
 ON addresses (account_id, address_branch, address_index)
 WHERE
@@ -160,7 +167,9 @@ BEGIN
         );
 END;
 
--- Increments imported_key_count when a new imported address is inserted.
+-- Increments imported_key_count when a raw single import (NULL path) is
+-- inserted. HD-derived rows, including imported-xpub children, carry a path
+-- and are not counted here.
 CREATE TRIGGER trg_addresses_imported_key_count_insert
 AFTER INSERT ON addresses
 WHEN new.address_branch IS NULL
@@ -170,7 +179,8 @@ BEGIN
     WHERE id = new.account_id;
 END;
 
--- Decrements imported_key_count when an imported address is deleted.
+-- Decrements imported_key_count when a raw single import (NULL path) is
+-- deleted.
 CREATE TRIGGER trg_addresses_imported_key_count_delete
 AFTER DELETE ON addresses
 WHEN old.address_branch IS NULL
