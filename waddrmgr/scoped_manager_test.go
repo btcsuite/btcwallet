@@ -611,3 +611,224 @@ func TestDeriveAddr(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestEvictDerivedAddressesUnlocked verifies that EvictDerivedAddresses removes
+// exactly the addresses derived over the given range from the recent-address
+// cache, leaving addresses outside the range cached. This is the in-memory undo
+// a rolled-back scan-batch horizon extension relies on so unpersisted
+// scan-derived addresses do not stay observable through the cache.
+func TestEvictDerivedAddressesUnlocked(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an unlocked manager with a handful of derived external
+	// addresses cached.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, privPassphrase)
+	})
+	require.NoError(t, err)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	const lastIndex = 4
+
+	var derived []ManagedAddress
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Re-derive the addresses for indices [0, lastIndex] so the test
+		// can address the exact cache keys ExtendAddresses inserted.
+		for index := uint32(0); index <= lastIndex; index++ {
+			addr, _, err := scopedMgr.DeriveAddr(
+				DefaultAccountNum, ExternalBranch, index,
+			)
+			if err != nil {
+				return err
+			}
+
+			ma, err := scopedMgr.Address(ns, addr)
+			if err != nil {
+				return err
+			}
+
+			derived = append(derived, ma)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, derived, lastIndex+1)
+
+	// Sanity check: every derived address starts out cached.
+	for _, ma := range derived {
+		_, err := scopedMgr.addrs.Get(addrKey(ma.Address().ScriptAddress()))
+		require.NoError(t, err)
+	}
+
+	// Act: evict the addresses derived over the upper part of the range,
+	// leaving index 0 cached.
+	const evictFrom = 1
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, evictFrom, lastIndex+1,
+	)
+
+	// Assert: indices in [evictFrom, lastIndex] are gone from the cache while
+	// index 0 stays cached, proving the eviction is bounded to the range.
+	for index, ma := range derived {
+		key := addrKey(ma.Address().ScriptAddress())
+		_, err := scopedMgr.addrs.Get(key)
+
+		if index < evictFrom {
+			require.NoError(t, err)
+			continue
+		}
+
+		require.Error(t, err)
+	}
+}
+
+// TestEvictDerivedAddressesLockedDropsPending verifies that
+// EvictDerivedAddresses discards the pending unlock-derivation entries an
+// extension queued while the manager was locked. A rolled-back scan batch must
+// not leave addresses queued for private-key derivation on the next unlock when
+// their persisted rows were rolled back.
+func TestEvictDerivedAddressesLockedDropsPending(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a locked manager. Extending addresses while locked queues the
+	// derived children for derivation on the next unlock.
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 3
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		return scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	// Sanity check: the locked extension queued the children for unlock-time
+	// derivation.
+	require.NotEmpty(t, scopedMgr.deriveOnUnlock)
+
+	// Act: evict the queued range.
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+
+	// Assert: no pending unlock-derivation entries remain for the evicted
+	// branch range.
+	for _, info := range scopedMgr.deriveOnUnlock {
+		stillQueued := info.branch == ExternalBranch &&
+			info.index <= lastIndex
+		require.False(t, stillQueued)
+	}
+}
+
+// TestEvictDerivedAddressesLockedKeepsOtherAccountsPending verifies that
+// EvictDerivedAddresses only removes pending unlock-derivation entries for the
+// requested account. A rolled-back scan batch for one account must not discard
+// pending private-key derivations queued by another account at the same branch
+// and child indexes.
+func TestEvictDerivedAddressesLockedKeepsOtherAccountsPending(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+
+	var otherAccount uint32
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := mgr.Unlock(ns, privPassphrase)
+		if err != nil {
+			return err
+		}
+
+		otherAccount, err = scopedMgr.NewAccount(ns, "acct-1")
+
+		return err
+	})
+	require.NoError(t, err)
+	require.NoError(t, mgr.Lock())
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 2
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendAddresses(
+			ns, otherAccount, lastIndex, ExternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	countPending := func(account uint32) int {
+		count := 0
+		for _, info := range scopedMgr.deriveOnUnlock {
+			matches := info.managedAddr.InternalAccount() == account &&
+				info.branch == ExternalBranch &&
+				info.index <= lastIndex
+			if matches {
+				count++
+			}
+		}
+
+		return count
+	}
+
+	defaultPending := countPending(DefaultAccountNum)
+	otherPending := countPending(otherAccount)
+
+	require.GreaterOrEqual(t, defaultPending, int(lastIndex+1))
+	require.Equal(t, int(lastIndex+1), otherPending)
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+
+	require.Zero(t, countPending(DefaultAccountNum))
+	require.Equal(t, otherPending, countPending(otherAccount))
+}
