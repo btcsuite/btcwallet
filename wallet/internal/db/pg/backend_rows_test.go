@@ -31,10 +31,11 @@ func (r staticResult) RowsAffected() (int64, error) {
 // rowDBTX is a sqlc DBTX stub that lets tests mix fixed exec counts with
 // query-row scan failures from a temporary sqlite handle.
 type rowDBTX struct {
-	row      *sql.Row
-	queryErr error
-	execErr  error
-	rows     int64
+	row       *sql.Row
+	queryRows *sql.Rows
+	queryErr  error
+	execErr   error
+	rows      int64
 }
 
 // ExecContext implements the sqlc DBTX interface.
@@ -57,7 +58,11 @@ func (r rowDBTX) PrepareContext(context.Context, string) (*sql.Stmt, error) {
 func (r rowDBTX) QueryContext(context.Context, string,
 	...any) (*sql.Rows, error) {
 
-	return nil, r.queryErr
+	if r.queryErr != nil {
+		return nil, r.queryErr
+	}
+
+	return r.queryRows, nil
 }
 
 // QueryRowContext implements the sqlc DBTX interface.
@@ -83,6 +88,26 @@ func newSQLiteRow(t *testing.T, query string, args ...any) *sql.Row {
 	})
 
 	return db.QueryRowContext(t.Context(), query, args...)
+}
+
+// newSQLiteRows runs a multi-row query against an in-memory sqlite database so
+// sqlc :many scan paths can be exercised without standing up a real store.
+func newSQLiteRows(t *testing.T, query string, args ...any) *sql.Rows {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	rows, err := db.QueryContext(t.Context(), query, args...)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = rows.Close()
+	})
+
+	return rows
 }
 
 // TestPgCreateTxOpsAdditionalBranches covers remaining postgres CreateTx helper
