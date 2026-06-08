@@ -3397,3 +3397,164 @@ func (r *recordEvictAddrStore) FetchScopedKeyManager(
 
 	return r.spy, nil
 }
+
+// TestApplyScanBatchRollbackEvictsThroughAdvancedNextIndex verifies that when a
+// horizon extension advances the branch's next index past horizon.Index+1 (as
+// when ExtendAddresses skips HD-invalid children), a failed batch evicts every
+// derived child through the actual advanced next index, not just the requested
+// horizon child. The rollback must re-read the post-extension next index rather
+// than assuming horizon.Index+1.
+func TestApplyScanBatchRollbackEvictsThroughAdvancedNextIndex(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const (
+		account      = waddrmgr.DefaultAccountNum
+		horizonIndex = 5
+
+		// The post-extension next index lands two past horizon.Index+1,
+		// emulating ExtendAddresses skipping HD-invalid children at
+		// indices 6 and 7 before settling on 8.
+		advancedNextIndex = horizonIndex + 3
+	)
+
+	// Wrap the real manager so the post-extension AccountProperties re-read
+	// reports the advanced next index and the eviction range is recorded.
+	spy := &recordEvictScopedMgr{
+		branch:           waddrmgr.ExternalBranch,
+		postExtNextIndex: advancedNextIndex,
+	}
+	addrStore := &recordEvictAddrStore{AddrStore: mgr, spy: spy}
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// A synced block whose height overflows the legacy int32 height domain
+	// fails the batch after the horizon extension has already advanced the
+	// manager's in-memory address state, forcing the rollback path.
+	overflowBlock := db.Block{
+		Hash:      chainhash.Hash{0xCD},
+		Height:    uint32(math.MaxInt32) + 1,
+		Timestamp: time.Unix(1_700_000_000, 0),
+	}
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     account,
+			AccountName: waddrmgr.DefaultAccountName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+		SyncedBlocks: []db.Block{overflowBlock},
+	})
+	require.Error(t, err)
+
+	// The rollback must have evicted from the pre-extension next index (0)
+	// through the advanced post-extension next index, covering the invalid-
+	// child-skip children, not just horizon.Index+1.
+	require.True(t, spy.evicted)
+	require.Equal(t, uint32(0), spy.evictFrom)
+	require.Equal(t, uint32(advancedNextIndex), spy.evictTo)
+	require.Greater(t, spy.evictTo, uint32(horizonIndex+1))
+}
+
+// TestApplyScanBatchRejectsInvalidBranch verifies that ApplyScanBatch rejects a
+// horizon whose branch is neither external nor internal, mirroring the SQL
+// backend's ExtendScanHorizon, and that the malformed branch does not extend
+// either the external or internal horizon state.
+func TestApplyScanBatchRejectsInvalidBranch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const account = waddrmgr.DefaultAccountNum
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+	require.Zero(t, internalKeyCount(t, dbConn, scopedMgr, account))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	// Branch 2 is neither external (0) nor internal (1); the legacy
+	// ExtendAddresses would coerce it to external, but the store must reject
+	// it as an invalid param instead.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     account,
+			AccountName: waddrmgr.DefaultAccountName,
+			Branch:      2,
+			Index:       9,
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// Neither branch's horizon state may have advanced.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+	require.Zero(t, internalKeyCount(t, dbConn, scopedMgr, account))
+}
+
+// internalKeyCount reports the number of internal keys the scoped manager
+// considers derived for the account, read through the live manager so any
+// unpersisted in-memory advance would be observable.
+func internalKeyCount(t *testing.T, dbConn walletdb.DB,
+	scopedMgr waddrmgr.AccountStore, account uint32) uint32 {
+
+	t.Helper()
+
+	var count uint32
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		props, err := scopedMgr.AccountProperties(ns, account)
+		if err != nil {
+			return err
+		}
+
+		count = props.InternalKeyCount
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return count
+}
