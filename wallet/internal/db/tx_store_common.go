@@ -898,6 +898,31 @@ func checkReuseCreateTx(req CreateTxRequest,
 	return true
 }
 
+// CanSkipCreateTxDuplicate reports whether a batch insert may treat an
+// ErrTxAlreadyExists result as an idempotent no-op. Only the exact current row
+// shape is skippable: unmined duplicates must have the same live status and no
+// block, while mined duplicates must be published in the same block. Terminal
+// history such as failed, replaced, or orphaned rows must not be skipped
+// because doing so would leave stale state in place.
+func CanSkipCreateTxDuplicate(req CreateTxRequest, status TxStatus,
+	block *Block) bool {
+
+	if req.Params.Block == nil {
+		return block == nil && status == req.Params.Status
+	}
+
+	if req.Params.Status != TxStatusPublished {
+		return false
+	}
+
+	if status != TxStatusPublished || block == nil {
+		return false
+	}
+
+	return block.Height == req.Params.Block.Height &&
+		block.Hash == req.Params.Block.Hash
+}
+
 // loadCreateTxExisting resolves any wallet-scoped row already stored for the
 // requested tx hash and reports whether one was found.
 func loadCreateTxExisting(ctx context.Context, req CreateTxRequest,
