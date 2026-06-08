@@ -3947,12 +3947,8 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Fail the rollback step that runs after the sync-tip rewind.
+	// Fail the transaction rollback before the live sync tip is rewound.
 	mockTxStore := &bwmock.TxStore{}
-	mockTxStore.On(
-		"RangeTransactions", mock.Anything, int32(forkHeight),
-		int32(forkHeight), mock.Anything,
-	).Return(nil).Once()
 	mockTxStore.On("Rollback", mock.Anything, int32(rollbackHeight)).
 		Return(errForcedRollback).Once()
 
@@ -3962,7 +3958,8 @@ func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
 	require.ErrorIs(t, err, errForcedRollback)
 
 	// The persisted and live sync tips must remain at the original height: the
-	// rewind rolled back atomically with the failed transaction rollback.
+	// store does not rewind wallet metadata until the transaction rollback
+	// succeeds.
 	require.EqualValues(t, initialHeight, persistedSyncedHeight(t, dbConn))
 	require.EqualValues(t, initialHeight, addrMgr.SyncedTo().Height)
 	require.Equal(t, tipStamp.Hash, addrMgr.SyncedTo().Hash)
