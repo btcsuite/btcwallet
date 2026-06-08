@@ -390,6 +390,114 @@ type scanHorizonRollback struct {
 	toIndex uint32
 }
 
+// ApplyScanBatch atomically applies recovery scan writes through the legacy
+// walletdb managers.
+func (s *Store) ApplyScanBatch(_ context.Context,
+	params db.ScanBatchParams) error {
+
+	if s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w",
+			errMissingAddrStore)
+	}
+
+	// The horizon extensions and synced-block updates below mutate the live
+	// address manager's in-memory state synchronously, before this batch
+	// commits, yet walletdb only rolls back the backing bucket writes on
+	// failure. Snapshot the pre-batch synced tip and accumulate the horizon
+	// ranges actually extended so a rolled-back batch can undo exactly those
+	// in-memory advances.
+	preBatchSyncedTo := s.addrStore.SyncedTo()
+
+	var horizonRollbacks []scanHorizonRollback
+
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		// Horizons are extended first because the transaction batch
+		// below resolves every scan-discovered credit against the
+		// address manager, so a freshly derived address must already be
+		// written to the addrmgr bucket before its crediting transaction
+		// is recorded.
+		err := s.applyLegacyScanHorizons(
+			addrmgrNs, params.Horizons, &horizonRollbacks,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = s.applyLegacyTxBatch(
+			addrmgrNs, txmgrNs, params.Transactions,
+		)
+		if err != nil {
+			return err
+		}
+
+		return s.applyLegacySyncedBlocks(addrmgrNs, params.SyncedBlocks)
+	})
+	if err != nil {
+		// walletdb has rolled the addrmgr bucket back, but the in-memory
+		// side effects of the horizon extensions and synced-block
+		// updates survive. Undo them so the live manager matches the
+		// persisted (rolled-back) state on the next access.
+		s.rollbackScanBatchCaches(horizonRollbacks, preBatchSyncedTo)
+
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w", err)
+	}
+
+	return nil
+}
+
+// rollbackScanBatchCaches reverts the in-memory address-manager state advanced
+// by a failed ApplyScanBatch. The batch wrote the addrmgr bucket, which
+// walletdb has since rolled back, but the live manager retains the matching
+// in-memory mutations: extended horizons bumped the cached next indices,
+// inserted scan-derived addresses into the recent-address cache, and queued
+// pending unlock-derivation entries, while connected synced blocks advanced the
+// in-memory synced tip. This restores the manager to its pre-batch state so no
+// unpersisted advance stays observable.
+func (s *Store) rollbackScanBatchCaches(rollbacks []scanHorizonRollback,
+	preBatchSyncedTo waddrmgr.BlockStamp) {
+
+	for _, rollback := range rollbacks {
+		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScope(rollback.scope),
+		)
+		if err != nil {
+			// The scope resolved while applying the batch, so a
+			// lookup miss here is unexpected; skip it as there is no
+			// cache to revert for an unknown scope.
+			continue
+		}
+
+		// Evict the derived addresses before invalidating the account
+		// cache: eviction re-derives the rolled-back children from the
+		// cached account info to compute their cache keys, so it must run
+		// while that account info is still present. Eviction removes the
+		// children from the recent-address cache and the pending
+		// unlock-derivation queue; invalidating the account cache then
+		// reloads the persisted next indices on the next access.
+		scopedMgr.EvictDerivedAddresses(
+			rollback.account, rollback.branch, rollback.fromIndex,
+			rollback.toIndex,
+		)
+		scopedMgr.InvalidateAccountCache(rollback.account)
+	}
+
+	// Restore the in-memory synced tip to the pre-batch value. Any
+	// synced-block update that advanced it had its bucket write rolled back,
+	// so leaving the in-memory tip advanced would let the next scan decision
+	// start from a tip that was never persisted.
+	s.addrStore.RestoreSyncedTo(preBatchSyncedTo)
+}
+
 // GetTx retrieves one wallet-scoped transaction snapshot through the legacy
 // wtxmgr query path.
 func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
