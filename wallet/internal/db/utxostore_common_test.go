@@ -1,7 +1,9 @@
 package db
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -532,4 +534,75 @@ func TestBuildLeasedOutputInvalidHash(t *testing.T) {
 	_, err := BuildLeasedOutput([]byte{1, 2, 3}, 7, lockID, time.Unix(777, 0))
 
 	require.Error(t, err)
+}
+
+// TestWatchOutputFromRow verifies that WatchOutputFromRow reads the watch
+// script from the funding transaction's own output for a valid index.
+//
+// Scenario:
+// - One outputs-to-watch row carries a serialized funding transaction.
+// Setup:
+// - Build a single-output transaction and serialize it.
+// Action:
+// - Convert the row into the public watch-output view.
+// Assertions:
+// - Only the outpoint and the on-chain output script are populated.
+func TestWatchOutputFromRow(t *testing.T) {
+	t.Parallel()
+
+	hash := chainhash.Hash{4, 5, 6}
+	pkScript := []byte{0x00, 0x14, 0x01, 0x02, 0x03}
+
+	tx := wire.NewMsgTx(2)
+	// A non-empty input set keeps the serialized form unambiguous: a tx with
+	// zero inputs serializes a leading zero that Deserialize would misread as
+	// the SegWit marker.
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(1000, pkScript))
+
+	var buf bytes.Buffer
+	require.NoError(t, tx.Serialize(&buf))
+
+	info, err := WatchOutputFromRow(hash[:], 0, buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, hash, info.OutPoint.Hash)
+	require.Equal(t, uint32(0), info.OutPoint.Index)
+	require.Equal(t, pkScript, info.PkScript)
+}
+
+// TestWatchOutputFromRowIndexAboveMaxInt32 verifies that an output index above
+// math.MaxInt32 is rejected with db.ErrInvalidParam rather than overflowing the
+// bounds check on 32-bit platforms.
+//
+// Scenario:
+// - An outputs-to-watch row claims an output index above math.MaxInt32.
+// Setup:
+// - Build a single-output transaction so any large index is out of range.
+// Action:
+//   - Convert the row, supplying an index that still fits in uint32 (so the
+//     int64->uint32 narrowing succeeds) but exceeds math.MaxInt32.
+//
+// Assertions:
+//   - The bounds check rejects the index with ErrInvalidParam, without
+//     panicking or wrapping to a negative slice index.
+func TestWatchOutputFromRowIndexAboveMaxInt32(t *testing.T) {
+	t.Parallel()
+
+	hash := chainhash.Hash{7, 8, 9}
+
+	tx := wire.NewMsgTx(2)
+	// A non-empty input set keeps the serialized form unambiguous: a tx with
+	// zero inputs serializes a leading zero that Deserialize would misread as
+	// the SegWit marker.
+	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, nil, nil))
+	tx.AddTxOut(wire.NewTxOut(1000, []byte{0x00, 0x14}))
+
+	var buf bytes.Buffer
+	require.NoError(t, tx.Serialize(&buf))
+
+	// math.MaxInt32+1 narrows cleanly to a uint32 but, converted to int on a
+	// 32-bit platform, would overflow to a negative value and wrongly pass an
+	// int(index) < len bounds check.
+	_, err := WatchOutputFromRow(hash[:], math.MaxInt32+1, buf.Bytes())
+	require.ErrorIs(t, err, ErrInvalidParam)
 }
