@@ -98,6 +98,21 @@ func corruptTransactionHash(t *testing.T, store *sqlite.Store,
 	require.NoError(t, tx.Commit())
 }
 
+// forceRollbackBlockDeleteFailure installs a trigger that fails the rollback
+// block-deletion stage after sync-state rewind has run.
+func forceRollbackBlockDeleteFailure(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+
+	_, err := store.DB().ExecContext(
+		t.Context(),
+		"CREATE TRIGGER fail_rollback_block_delete "+
+			"BEFORE DELETE ON blocks "+
+			"BEGIN SELECT RAISE(FAIL, "+
+			"'forced rollback block delete failure'); END",
+	)
+	require.NoError(t, err)
+}
+
 // corruptTransactionBlockHeight writes an invalid block height after first
 // creating a matching block row in sqlite. The corruption itests use this to
 // verify that reads reject impossible confirmation metadata.
