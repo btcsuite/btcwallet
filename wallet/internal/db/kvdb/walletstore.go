@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -19,6 +20,17 @@ var _ db.WalletStore = (*Store)(nil)
 // errMissingAddrStore is returned when a legacy address-manager backed store
 // operation has no address manager wired.
 var errMissingAddrStore = errors.New("missing legacy addr store")
+
+// syncedBlockSpan returns the inclusive range length after a safe int32 cast.
+func syncedBlockSpan(startHeight, endHeight uint32) (int32, error) {
+	span := uint64(endHeight) - uint64(startHeight) + 1
+	if span > math.MaxInt32 {
+		return 0, fmt.Errorf("could not cast synced block span %d to "+
+			"int32: %w", span, db.ErrCastingOverflow)
+	}
+
+	return int32(span), nil
+}
 
 // CreateWallet is not yet implemented for kvdb.
 func (s *Store) CreateWallet(ctx context.Context,
@@ -103,6 +115,66 @@ func (s *Store) IterWallets(ctx context.Context,
 	return func(yield func(db.WalletInfo, error) bool) {
 		_ = yield(db.WalletInfo{}, notImplemented(ctx, "IterWallets"))
 	}
+}
+
+// ListSyncedBlocks reads block hashes from the legacy address manager.
+func (s *Store) ListSyncedBlocks(_ context.Context,
+	query db.ListSyncedBlocksQuery) ([]db.Block, error) {
+
+	if s.addrStore == nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w",
+			errMissingAddrStore)
+	}
+
+	if query.EndHeight < query.StartHeight {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w: end "+
+			"height before start height", db.ErrInvalidParam)
+	}
+
+	// Preallocate for the inclusive [StartHeight, EndHeight] range. The
+	// span is computed in uint64 so a full-width uint32 range cannot wrap to
+	// zero before validation.
+	length, err := syncedBlockSpan(query.StartHeight, query.EndHeight)
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w", err)
+	}
+
+	blocks := make([]db.Block, 0, int(length))
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		for height := query.StartHeight; ; height++ {
+			height32, err := db.Uint32ToInt32(height)
+			if err != nil {
+				return fmt.Errorf("convert block height %d: %w",
+					height, err)
+			}
+
+			hash, err := s.addrStore.BlockHash(ns, height32)
+			if err != nil {
+				return fmt.Errorf("get block hash %d: %w", height, err)
+			}
+
+			blocks = append(blocks, db.Block{
+				Hash:   *hash,
+				Height: height,
+			})
+			if height == query.EndHeight {
+				break
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w", err)
+	}
+
+	return blocks, nil
 }
 
 // UpdateWallet writes wallet runtime metadata through the legacy address
