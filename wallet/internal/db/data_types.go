@@ -1078,6 +1078,20 @@ type CreateTxParams struct {
 	Credits map[uint32]address.Address
 }
 
+// TxBatchParams contains a wallet transaction batch and optional sync-tip
+// update that should be applied atomically.
+type TxBatchParams struct {
+	// WalletID is the ID of the wallet receiving the batch.
+	WalletID uint32
+
+	// Transactions contains the transaction records to apply.
+	Transactions []CreateTxParams
+
+	// SyncedTo optionally records the wallet's new chain sync tip as part of
+	// the same batch.
+	SyncedTo *Block
+}
+
 // UpdateTxState contains one requested transaction-state change.
 type UpdateTxState struct {
 	// Block records the transaction as confirmed in the provided block.
