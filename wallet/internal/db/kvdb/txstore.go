@@ -1644,6 +1644,161 @@ func (s *Store) rollbackForkBlock(ns walletdb.ReadBucket,
 	}
 }
 
+// scanHorizonRollback records one horizon extension's pre-batch state so its
+// in-memory side effects can be undone if the surrounding batch is rolled back.
+type scanHorizonRollback struct {
+	// scope is the key scope whose scoped manager performed the extension.
+	scope db.KeyScope
+
+	// account is the account whose branch was extended.
+	account uint32
+
+	// branch is the extended branch number.
+	branch uint32
+
+	// fromIndex is the branch's next index before the extension, i.e. the
+	// first child the extension may have derived.
+	fromIndex uint32
+
+	// toIndex is the branch's next index after the extension, i.e. one past
+	// the last child the extension may have derived.
+	toIndex uint32
+}
+
+// classifyLegacyHorizonBranch validates a scan horizon's branch and reports
+// whether it is the internal branch. Any value other than the canonical
+// external/internal pair is rejected before the manager is touched: the legacy
+// ExtendAddresses treats every non-internal value as external, which would
+// silently coerce a malformed branch and diverge from the SQL backend's
+// ExtendScanHorizon.
+func classifyLegacyHorizonBranch(branch uint32) (bool, error) {
+	internal := branch == waddrmgr.InternalBranch
+	if branch != waddrmgr.ExternalBranch && !internal {
+		return false, fmt.Errorf("%w: horizon branch %d is neither "+
+			"external nor internal", db.ErrInvalidParam, branch)
+	}
+
+	return internal, nil
+}
+
+// resolveLegacyHorizonAccount resolves the waddrmgr account number a scan
+// horizon targets. KVDB does not expose a separate account row ID, so the
+// legacy path uses the account name when present to distinguish imported xpub
+// accounts whose Account field can be masked to 0. The numeric account is a
+// fallback for legacy callers that do not include a name.
+func resolveLegacyHorizonAccount(ns walletdb.ReadWriteBucket,
+	scopedMgr waddrmgr.AccountStore, horizon db.ScanHorizon) (uint32, error) {
+
+	if horizon.AccountName == "" {
+		return horizon.Account, nil
+	}
+
+	account, err := scopedMgr.LookupAccount(ns, horizon.AccountName)
+	if err != nil {
+		// A lookup miss means the named account no longer exists (e.g. a
+		// rename raced this scan). Failing here is mandatory: silently
+		// falling back to horizon.Account would extend the default
+		// account (0) with another account's addresses.
+		return 0, fmt.Errorf("lookup account %q: %w",
+			horizon.AccountName, err)
+	}
+
+	return account, nil
+}
+
+// applyLegacyScanHorizons extends legacy address branches for scan hits. For
+// every branch it extends it appends a rollback range to rollbacks so the
+// caller can undo the extension's in-memory side effects if the surrounding
+// batch fails; rollbacks accumulates across all horizons, including the one
+// that triggered a mid-batch failure.
+func (s *Store) applyLegacyScanHorizons(ns walletdb.ReadWriteBucket,
+	horizons []db.ScanHorizon, rollbacks *[]scanHorizonRollback) error {
+
+	for _, horizon := range horizons {
+		internal, err := classifyLegacyHorizonBranch(horizon.Branch)
+		if err != nil {
+			return err
+		}
+
+		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScope(horizon.Scope),
+		)
+		if err != nil {
+			return fmt.Errorf("fetch scoped manager: %w", err)
+		}
+
+		account, err := resolveLegacyHorizonAccount(ns, scopedMgr, horizon)
+		if err != nil {
+			return err
+		}
+
+		// Capture the branch's next index before extending so a
+		// rollback knows the first child this extension may have
+		// derived. Read it now, while the cache still mirrors the
+		// persisted state, since ExtendAddresses advances it in place.
+		props, err := scopedMgr.AccountProperties(ns, account)
+		if err != nil {
+			return fmt.Errorf("account properties: %w", err)
+		}
+
+		fromIndex := props.ExternalKeyCount
+		if internal {
+			fromIndex = props.InternalKeyCount
+		}
+
+		err = scopedMgr.ExtendAddresses(
+			ns, account, horizon.Index, horizon.Branch,
+		)
+		if err != nil {
+			return fmt.Errorf("extend addresses: %w", err)
+		}
+
+		// ExtendAddresses derives at least through horizon.Index, but it
+		// skips HD-invalid children, so the branch's next index can land
+		// past horizon.Index+1. Re-read the post-extension next index so
+		// the rollback range covers every child this extension may have
+		// cached, not just the requested one.
+		props, err = scopedMgr.AccountProperties(ns, account)
+		if err != nil {
+			return fmt.Errorf("account properties: %w", err)
+		}
+
+		toIndex := props.ExternalKeyCount
+		if internal {
+			toIndex = props.InternalKeyCount
+		}
+
+		*rollbacks = append(*rollbacks, scanHorizonRollback{
+			scope:     horizon.Scope,
+			account:   account,
+			branch:    horizon.Branch,
+			fromIndex: fromIndex,
+			toIndex:   toIndex,
+		})
+	}
+
+	return nil
+}
+
+// applyLegacySyncedBlocks connects a sequence of legacy synced blocks.
+func (s *Store) applyLegacySyncedBlocks(ns walletdb.ReadWriteBucket,
+	blocks []db.Block) error {
+
+	for i := range blocks {
+		block, err := db.BlockStampFromBlock(&blocks[i])
+		if err != nil {
+			return err
+		}
+
+		err = s.addrStore.SetSyncedTo(ns, &block)
+		if err != nil {
+			return fmt.Errorf("set synced block %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
 // forkBlockTimestamp returns the legacy tx-store timestamp for the surviving
 // fork block when that block contains wallet transactions. The address manager
 // keeps historical block hashes but not historical timestamps for empty wallet
