@@ -35,6 +35,12 @@ const (
 	// hardened-child cap of 2^31 - 1; the -2 leaves the topmost child
 	// number for the legacy imported-account sentinel.
 	MaxAccountNumber uint32 = (1 << 31) - 2 //nolint:mnd
+
+	// MaxAddressIndex is the largest derived address child index the store may
+	// allocate on a branch. It matches waddrmgr.MaxAddressesPerAccount
+	// (hdkeychain.HardenedKeyStart - 1), so recovery horizon extension rejects
+	// the same out-of-range index the legacy address manager would.
+	MaxAddressIndex uint32 = (1 << 31) - 1 //nolint:mnd
 )
 
 // ============================================================================
@@ -682,12 +688,29 @@ type AddressInfo struct {
 	Origin AccountOrigin
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
-	// Zero value for imported addresses.
+	// HD-derived addresses carry a real branch: this includes both normal
+	// derived accounts and imported-xpub watch-only children, which the
+	// scan-batch horizon extension derives from the account xpub and
+	// persists with a real path. Raw single imports (the keyless imported
+	// bucket) have no chain position, so the field is left at its zero
+	// value; use HasDerivationPath to tell the two apart.
 	Branch uint32
 
-	// Index is the BIP44 index within the branch. Zero value for imported
-	// addresses.
+	// Index is the BIP44 index within the branch. As with Branch, it is set
+	// for HD-derived addresses (normal derived accounts and imported-xpub
+	// watch-only children) and left at its zero value for raw single
+	// imports. Use HasDerivationPath to disambiguate a genuine (0, 0) HD
+	// child from an unset path.
 	Index uint32
+
+	// HasDerivationPath is true iff the address carries a BIP44
+	// branch/index, i.e. it is HD-derived. This covers normal derived
+	// accounts and imported-xpub watch-only children alike. It is false for
+	// raw single imports (the keyless imported bucket), whose Branch/Index
+	// are zero only because no chain position exists. Without this signal a
+	// raw import at (0, 0) is indistinguishable from a real HD child at
+	// (0, 0), since both expose Branch and Index as plain uint32.
+	HasDerivationPath bool
 
 	// ScriptPubKey is the script pubkey (plaintext).
 	ScriptPubKey []byte
@@ -1089,6 +1112,51 @@ type TxBatchParams struct {
 	// SyncedTo optionally records the wallet's new chain sync tip as part of
 	// the same batch.
 	SyncedTo *Block
+}
+
+// ScanHorizon records the highest recovered address index for one account
+// branch.
+type ScanHorizon struct {
+	// Scope is the key scope containing the branch.
+	Scope KeyScope
+
+	// Account is the account number containing the branch. It is a derived
+	// fast-path identity only: both backends mask an imported account's
+	// number to 0 when emitting the horizon, so a backend resolving the
+	// horizon's owning account MUST prefer AccountName and treat Account as
+	// an optimization that is only trustworthy for derived accounts.
+	Account uint32
+
+	// AccountName is the durable, backend-agnostic identity of the
+	// horizon's owning account. Account names are unique per scope, so a
+	// backend can always resolve the correct account from it even when
+	// Account has been masked to 0 for an imported account. It is populated
+	// on every horizon, not only imported ones, so resolution never has to
+	// guess whether Account is trustworthy.
+	AccountName string
+
+	// Branch is the account branch number.
+	Branch uint32
+
+	// Index is the highest discovered address child index on the branch.
+	Index uint32
+}
+
+// ScanBatchParams contains the database updates produced by one recovery scan
+// batch.
+type ScanBatchParams struct {
+	// WalletID is the ID of the wallet receiving the batch.
+	WalletID uint32
+
+	// Horizons contains address horizon extensions discovered by the scan.
+	Horizons []ScanHorizon
+
+	// Transactions contains relevant transaction records found by the scan.
+	Transactions []CreateTxParams
+
+	// SyncedBlocks contains the synced block sequence to connect after writing
+	// horizons and transactions. Targeted rescans leave this empty.
+	SyncedBlocks []Block
 }
 
 // UpdateTxState contains one requested transaction-state change.
