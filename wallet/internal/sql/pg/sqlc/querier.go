@@ -355,6 +355,11 @@ type Querier interface {
 	// When cursor_id is provided, only rows strictly after that address ID are
 	// returned. Returns up to page_limit rows.
 	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
+	// Resolves a batch of script pubkeys to the wallet-owned address rows in a
+	// single query. Returns one row per matching script; scripts with no matching
+	// address are simply absent from the result. The Go caller is responsible for
+	// short-circuiting an empty script set before issuing this query.
+	ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
