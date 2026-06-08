@@ -122,6 +122,91 @@ func TestReleaseOutputTwiceIsNoOp(t *testing.T) {
 	require.Empty(t, leases)
 }
 
+// TestDeleteExpiredLeasesRemovesOnlyExpired verifies that cleanup removes
+// expired leases without touching active leases for the same wallet.
+func TestDeleteExpiredLeasesRemovesOnlyExpired(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-delete-expired-leases")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr0 := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	addr1 := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 271)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{
+			Value:    8000,
+			PkScript: addr0.ScriptPubKey,
+		}, {
+			Value:    9000,
+			PkScript: addr1.ScriptPubKey,
+		}},
+	)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710001400, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+		Credits: map[uint32]address.Address{
+			0: nil,
+			1: nil,
+		},
+	})
+	require.NoError(t, err)
+
+	expiredID := RandomHash()
+	activeID := RandomHash()
+	expiredOutPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+	activeOutPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 1}
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		ID:       expiredID,
+		OutPoint: expiredOutPoint,
+		Duration: time.Hour,
+	})
+	require.NoError(t, err)
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		ID:       activeID,
+		OutPoint: activeOutPoint,
+		Duration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	query := "UPDATE utxo_leases SET expires_at = ? " +
+		"WHERE wallet_id = ? AND lock_id = ?"
+	if _, ok := any(store).(*pg.Store); ok {
+		query = "UPDATE utxo_leases SET expires_at = $1 " +
+			"WHERE wallet_id = $2 AND lock_id = $3"
+	}
+
+	result, err := store.DB().ExecContext(
+		t.Context(), query, time.Now().Add(-time.Hour).UTC(),
+		int64(walletID), expiredID[:],
+	)
+	require.NoError(t, err)
+	rows, err := result.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rows)
+
+	err = store.DeleteExpiredLeases(t.Context(), walletID)
+	require.NoError(t, err)
+
+	leases, err := store.ListLeasedOutputs(t.Context(), walletID)
+	require.NoError(t, err)
+	require.Len(t, leases, 1)
+	require.Equal(t, activeOutPoint, leases[0].OutPoint)
+	require.Equal(t, db.LockID(activeID), leases[0].LockID)
+}
+
 // TestListLeasedOutputsRejectsCorruptedLockID verifies that active lease reads
 // fail loudly when the stored lock ID cannot be decoded.
 func TestListLeasedOutputsRejectsCorruptedLockID(t *testing.T) {

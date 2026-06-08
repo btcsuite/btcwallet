@@ -53,3 +53,24 @@ func (s *Store) ListLeasedOutputs(ctx context.Context,
 
 	return leases, nil
 }
+
+// DeleteExpiredLeases removes expired lease records for one wallet.
+func (s *Store) DeleteExpiredLeases(ctx context.Context,
+	walletID uint32) error {
+
+	nowUTC := time.Now().UTC()
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		_, err := qtx.DeleteExpiredUtxoLeases(
+			ctx, sqlc.DeleteExpiredUtxoLeasesParams{
+				WalletID: int64(walletID),
+				NowUtc:   nowUTC,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("delete expired utxo leases: %w", err)
+		}
+
+		return nil
+	})
+}
