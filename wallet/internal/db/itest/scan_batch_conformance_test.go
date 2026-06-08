@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -646,6 +648,253 @@ func TestApplyScanBatchSkipsInvalidChild(t *testing.T) {
 
 	// The next external index must advance past the discovered horizon so a
 	// subsequent allocation does not collide with the derived range.
+	account := getAccountByName(t, store, walletID, scope, accountName)
+	require.Equal(t, uint32(5), account.ExternalKeyCount)
+}
+
+// deriveScanAddress derives the BIP0084 P2WPKH address and its script for the
+// given branch and index from the account extended public key, matching both
+// the kvdb address manager and the SQL derivation callback.
+func deriveScanAddress(t *testing.T, accountXPub string, branch uint32,
+	index uint32) (btcutil.Address, []byte) {
+
+	t.Helper()
+
+	accountKey, err := hdkeychain.NewKeyFromString(accountXPub)
+	require.NoError(t, err)
+
+	branchKey, err := accountKey.Derive(branch)
+	require.NoError(t, err)
+
+	addrKey, err := branchKey.Derive(index)
+	require.NoError(t, err)
+
+	pubKey, err := addrKey.ECPubKey()
+	require.NoError(t, err)
+
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(pubKey.SerializeCompressed()), scanBatchChainParams,
+	)
+	require.NoError(t, err)
+
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, script
+}
+
+// watchOutPoints returns the set of outpoints a store reports as needing to be
+// watched during recovery.
+func watchOutPoints(t *testing.T, store db.Store,
+	walletID uint32) map[wire.OutPoint]struct{} {
+
+	t.Helper()
+
+	utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+	require.NoError(t, err)
+
+	out := make(map[wire.OutPoint]struct{}, len(utxos))
+	for _, utxo := range utxos {
+		out[utxo.OutPoint] = struct{}{}
+	}
+
+	return out
+}
+
+// TestListOutputsToWatchConformance proves that kvdb and the SQL backend under
+// test report the same recovery watch set for an identical transaction history
+// covering an unspent credit, a credit spent by an unmined transaction, and a
+// leased credit. Comparing each SQL backend against an in-process kvdb store
+// (and exercising both build tags) establishes kvdb == sqlite == postgres.
+func TestListOutputsToWatchConformance(t *testing.T) {
+	t.Parallel()
+
+	fixture := newKVDBScanFixture(t)
+
+	sqlStore := NewTestStoreWithDerive(t, realAddressDeriveFunc())
+	walletID := newWallet(t, sqlStore, "wallet-watch-conformance")
+
+	deriveAccount := func(_ context.Context, _ db.KeyScope, _ uint32,
+		watchOnly bool) (*db.DerivedAccountData, error) {
+
+		data := &db.DerivedAccountData{
+			PublicKey:            []byte(fixture.accountXPub),
+			MasterKeyFingerprint: 0x01020304,
+		}
+		if !watchOnly {
+			data.EncryptedPrivateKey = RandomBytes(48)
+		}
+
+		return data, nil
+	}
+
+	_, err := sqlStore.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: walletID,
+			Scope:    fixture.scope,
+			Name:     fixture.accountName,
+		}, deriveAccount,
+	)
+	require.NoError(t, err)
+
+	// Extend the external branch on both backends so the credited addresses
+	// below are owned by each store.
+	horizon := []db.ScanHorizon{{
+		Scope:       fixture.scope,
+		Account:     waddrmgr.DefaultAccountNum,
+		AccountName: fixture.accountName,
+		Branch:      0,
+		Index:       5,
+	}}
+	require.NoError(t, fixture.store.ApplyScanBatch(t.Context(),
+		db.ScanBatchParams{WalletID: 0, Horizons: horizon}))
+	require.NoError(t, sqlStore.ApplyScanBatch(t.Context(),
+		db.ScanBatchParams{WalletID: walletID, Horizons: horizon}))
+
+	// addrKept funds an output that stays unspent; addrSpent funds an output
+	// that a later unmined transaction spends.
+	addrKept, scriptKept := deriveScanAddress(t, fixture.accountXPub, 0, 0)
+	addrSpent, scriptSpent := deriveScanAddress(t, fixture.accountXPub, 0, 1)
+
+	fundingTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{Value: 6000, PkScript: scriptKept},
+			{Value: 7000, PkScript: scriptSpent},
+		},
+	)
+	fundingHash := fundingTx.TxHash()
+
+	// An unmined transaction that spends the second funding output. The
+	// spent-by-unmined output must still be watched on both backends.
+	spendTx := newRegularTx(
+		[]wire.OutPoint{{Hash: fundingHash, Index: 1}},
+		[]*wire.TxOut{{Value: 6500, PkScript: scriptKept}},
+	)
+
+	apply := func(store db.Store, id uint32) {
+		err := store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: id,
+			Tx:       fundingTx,
+			Received: time.Unix(1710000200, 0),
+			Status:   db.TxStatusPublished,
+			Credits: map[uint32]btcutil.Address{
+				0: addrKept,
+				1: addrSpent,
+			},
+		})
+		require.NoError(t, err)
+
+		err = store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: id,
+			Tx:       spendTx,
+			Received: time.Unix(1710000300, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: addrKept},
+		})
+		require.NoError(t, err)
+	}
+
+	apply(fixture.store, 0)
+	apply(sqlStore, walletID)
+
+	// Lease the still-unspent funding output on both backends; leased outputs
+	// must remain in the watch set.
+	leaseID := db.LockID{0x07}
+
+	keptOutPoint := wire.OutPoint{Hash: fundingHash, Index: 0}
+	for _, lease := range []struct {
+		store db.Store
+		id    uint32
+	}{{fixture.store, 0}, {sqlStore, walletID}} {
+		_, err := lease.store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+			WalletID: lease.id,
+			ID:       leaseID,
+			OutPoint: keptOutPoint,
+			Duration: time.Hour,
+		})
+		require.NoError(t, err)
+	}
+
+	kvdbWatch := watchOutPoints(t, fixture.store, 0)
+	sqlWatch := watchOutPoints(t, sqlStore, walletID)
+
+	// Expected watch set: the leased unspent output (funding:0), the
+	// spent-by-unmined output (funding:1), and the unmined spend's own
+	// credit (spend:0).
+	expected := map[wire.OutPoint]struct{}{
+		{Hash: fundingHash, Index: 0}:      {},
+		{Hash: fundingHash, Index: 1}:      {},
+		{Hash: spendTx.TxHash(), Index: 0}: {},
+	}
+	require.Equal(t, expected, kvdbWatch)
+	require.Equal(t, expected, sqlWatch)
+	require.Equal(t, kvdbWatch, sqlWatch,
+		"kvdb and SQL must report the same recovery watch set")
+}
+
+// TestApplyScanBatchSkipsInvalidLastChild verifies that when the discovered
+// horizon index itself is HD-invalid, the SQL extension keeps deriving past it
+// to the next valid child and stores that address, matching the legacy
+// extendAddresses nested loop (which derives one index beyond an invalid
+// terminal index).
+func TestApplyScanBatchSkipsInvalidLastChild(t *testing.T) {
+	t.Parallel()
+
+	const invalidIndex = 3
+
+	scope := db.KeyScopeBIP0084
+	accountName := "skip-last-account"
+
+	derive := func(_ context.Context,
+		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		if params.Branch == 0 && params.Index == invalidIndex {
+			return nil, hdkeychain.ErrInvalidChild
+		}
+
+		script := make([]byte, 22)
+		script[0] = 0x00
+		script[1] = 0x14
+		script[2] = byte(params.Branch)
+		script[3] = byte(params.Index)
+
+		return &db.DerivedAddressData{ScriptPubKey: script}, nil
+	}
+
+	store := NewTestStoreWithDerive(t, derive)
+	walletID := newWallet(t, store, "wallet-scan-skip-last")
+	createDerivedAccount(t, store, walletID, scope, accountName)
+
+	// The discovered horizon index (3) is itself invalid.
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID,
+		Horizons: []db.ScanHorizon{{
+			Scope:       scope,
+			Account:     0,
+			AccountName: accountName,
+			Branch:      0,
+			Index:       invalidIndex,
+		}},
+	})
+	require.NoError(t, err)
+
+	scripts := collectDerivedScripts(t, store, walletID, scope, accountName)
+
+	// Indices 0,1,2 derive normally; index 3 is invalid so derivation
+	// continues to index 4 and stores it, matching the legacy nested loop.
+	require.Len(t, scripts, 4)
+
+	for _, idx := range []uint32{0, 1, 2, 4} {
+		_, ok := scripts[derivedAddressKey{branch: 0, index: idx}]
+		require.Truef(t, ok, "expected derived index %d", idx)
+	}
+
+	_, skipped := scripts[derivedAddressKey{branch: 0, index: invalidIndex}]
+	require.False(t, skipped, "invalid terminal index must be skipped")
+
+	// The next external index advances to one past the address derived
+	// beyond the invalid terminal index (index 4 -> next index 5).
 	account := getAccountByName(t, store, walletID, scope, accountName)
 	require.Equal(t, uint32(5), account.ExternalKeyCount)
 }
