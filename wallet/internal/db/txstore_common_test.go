@@ -2370,3 +2370,79 @@ func TestValidateCreditAddrMembership(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateBatchTransactionsWalletID verifies that the shared batch
+// wallet-ID validator accepts a batch whose transactions all match the batch
+// wallet and rejects any transaction owned by a different wallet with
+// ErrInvalidParam.
+func TestValidateBatchTransactionsWalletID(t *testing.T) {
+	t.Parallel()
+
+	const batchWalletID = 7
+
+	t.Run("all match", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID,
+			[]CreateTxParams{
+				{WalletID: batchWalletID},
+				{WalletID: batchWalletID},
+			})
+		require.NoError(t, err)
+	})
+
+	t.Run("empty batch", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("mismatch rejected", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID,
+			[]CreateTxParams{
+				{WalletID: batchWalletID},
+				{WalletID: 99},
+			})
+		require.ErrorIs(t, err, ErrInvalidParam)
+	})
+}
+
+// TestValidateBatchTransactionsTx verifies that the shared batch nil-Tx
+// validator accepts a batch whose transactions all carry a Tx and rejects a
+// batch with any nil Tx with ErrInvalidParam, so the parents-first sort never
+// dereferences a nil transaction.
+func TestValidateBatchTransactionsTx(t *testing.T) {
+	t.Parallel()
+
+	tx := testRegularMsgTx()
+
+	t.Run("all present", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx([]CreateTxParams{
+			{Tx: tx},
+			{Tx: tx},
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("empty batch", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx(nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("nil tx rejected", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx([]CreateTxParams{
+			{Tx: tx},
+			{Tx: nil},
+		})
+		require.ErrorIs(t, err, ErrInvalidParam)
+	})
+}
