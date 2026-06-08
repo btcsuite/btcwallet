@@ -41,6 +41,16 @@ type Querier interface {
 	// - Locks the target utxo row during resolution so concurrent spend updates on
 	//   that row serialize with lease acquisition.
 	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	// Advances the external branch's next index to the supplied value during
+	// recovery horizon extension. The GREATEST guard keeps the counter monotonic
+	// so a slower concurrent writer cannot regress it below an already-recorded
+	// index.
+	AdvanceNextExternalIndex(ctx context.Context, arg AdvanceNextExternalIndexParams) error
+	// Advances the internal/change branch's next index to the supplied value
+	// during recovery horizon extension. The GREATEST guard keeps the counter
+	// monotonic so a slower concurrent writer cannot regress it below an
+	// already-recorded index.
+	AdvanceNextInternalIndex(ctx context.Context, arg AdvanceNextInternalIndexParams) error
 	// Returns the total and locked value represented by the wallet's current
 	// unspent UTXO set.
 	//
