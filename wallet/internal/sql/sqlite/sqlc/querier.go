@@ -169,6 +169,7 @@ type Querier interface {
 	// Returns the current index value (before incrementing) for the address derivation.
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
+	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
 	// Retrieves a key scope by its ID.
 	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
