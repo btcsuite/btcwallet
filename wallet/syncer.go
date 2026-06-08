@@ -464,10 +464,6 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 func (s *syncer) rewindToBlock(ctx context.Context,
 	block waddrmgr.BlockStamp) error {
 
-	if s.store == nil {
-		return s.DBPutRewind(ctx, block)
-	}
-
 	rollbackBoundary := int64(block.Height) + 1
 
 	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
@@ -554,10 +550,6 @@ func (s *syncer) resolveRewindBlock(
 func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 	endHeight int32) ([]*chainhash.Hash, error) {
 
-	if s.store == nil {
-		return s.DBGetSyncedBlocks(ctx, startHeight, endHeight)
-	}
-
 	start, err := db.Int64ToUint32(int64(startHeight))
 	if err != nil {
 		return nil, fmt.Errorf("start height %d: %w", startHeight, err)
@@ -586,21 +578,15 @@ func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
 	return hashes, nil
 }
 
-// syncedTo returns the wallet's current synced-to block. In store-backed mode
-// it reads the tip from the Store so callers do not depend on the legacy
-// addrStore tip being kept in lockstep by ApplyScanBatch; otherwise it falls
-// back to the legacy addrStore.
+// syncedTo returns the wallet's current synced-to block from the Store.
 func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
-	if s.store == nil {
-		return s.addrStore.SyncedTo(), nil
-	}
-
 	walletInfo, err := s.store.GetWallet(ctx, s.cfg.Name)
 	if err != nil {
 		return waddrmgr.BlockStamp{}, fmt.Errorf("get wallet sync tip: %w",
 			err)
 	}
 
+	// A nil SyncedTo means the wallet has not been synced to any block yet.
 	if walletInfo.SyncedTo == nil {
 		return waddrmgr.BlockStamp{Height: -1}, nil
 	}
@@ -727,10 +713,6 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 // unminedTxns returns transactions that are still active in the wallet's
 // unmined set.
 func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
-	if s.store == nil {
-		return s.DBGetUnminedTxns(ctx)
-	}
-
 	infos, err := s.store.ListTxns(
 		ctx, db.ListTxnsQuery{
 			WalletID:    s.walletID,
@@ -763,13 +745,9 @@ func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
 	return wtxmgr.DependencySort(txSet), nil
 }
 
-// updateSyncTip records the latest synced block for store-backed runtime paths.
+// updateSyncTip records the latest synced block through the store.
 func (s *syncer) updateSyncTip(ctx context.Context,
 	block wtxmgr.BlockMeta) error {
-
-	if s.store == nil {
-		return s.DBPutSyncTip(ctx, block)
-	}
 
 	storeBlock, err := storeBlockFromBlockMeta(block)
 	if err != nil {
@@ -790,13 +768,9 @@ func (s *syncer) updateSyncTip(ctx context.Context,
 }
 
 // putTxNotifications records relevant transaction notifications through the
-// store when configured, falling back to the legacy walletdb path otherwise.
+// store.
 func (s *syncer) putTxNotifications(ctx context.Context,
 	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
-
-	if s.store == nil {
-		return s.DBPutTxns(ctx, matches, blockMeta)
-	}
 
 	var block *db.Block
 	if blockMeta != nil {
@@ -811,14 +785,9 @@ func (s *syncer) putTxNotifications(ctx context.Context,
 	return s.applyStoreTxBatch(ctx, matches, block, nil)
 }
 
-// putBlockNotifications records filtered block notifications through the store
-// when configured, falling back to the legacy walletdb path otherwise.
+// putBlockNotifications records filtered block notifications through the store.
 func (s *syncer) putBlockNotifications(ctx context.Context,
 	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
-
-	if s.store == nil {
-		return s.DBPutBlocks(ctx, matches, blockMeta)
-	}
 
 	if blockMeta == nil {
 		return fmt.Errorf("filtered block is missing metadata: %w",
@@ -922,13 +891,9 @@ func (s *syncer) txNotificationState(ctx context.Context,
 }
 
 // putSyncBatch records recovery scan results and synced blocks through the
-// store when configured, falling back to the legacy walletdb path otherwise.
+// store.
 func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	results []scanResult) error {
-
-	if s.store == nil {
-		return s.DBPutSyncBatch(ctx, results)
-	}
 
 	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
@@ -948,14 +913,9 @@ func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	return nil
 }
 
-// putTargetedBatch records targeted recovery scan results through the store
-// when configured, falling back to the legacy walletdb path otherwise.
+// putTargetedBatch records targeted recovery scan results through the store.
 func (s *syncer) putTargetedBatch(ctx context.Context,
 	scanState *RecoveryState, results []scanResult) error {
-
-	if s.store == nil {
-		return s.DBPutTargetedBatch(ctx, results)
-	}
 
 	params, err := s.storeScanBatchParams(scanState, results, false)
 	if err != nil {
@@ -1210,10 +1170,6 @@ func (s *syncer) loadFullScanState(
 func (s *syncer) stampRecoveryAccountIDs(ctx context.Context,
 	scanState *RecoveryState,
 	accounts []*waddrmgr.AccountProperties) error {
-
-	if s.store == nil {
-		return nil
-	}
 
 	for _, props := range accounts {
 		accountID, err := s.accountPropertiesAccountID(ctx, props)
@@ -1671,10 +1627,10 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 			err)
 	}
 
-	// Determine our current sync state. In store-backed mode this reads
-	// the synced tip from the Store rather than the legacy addrStore, so
-	// the next batch's start height no longer depends on ApplyScanBatch
-	// having mirrored the tip back into the legacy addrStore.
+	// Determine our current sync state. This reads the synced tip from the
+	// Store rather than the legacy addrStore, so the next batch's start
+	// height no longer depends on ApplyScanBatch having mirrored the tip
+	// back into the legacy addrStore.
 	syncedTo, err := s.syncedTo(ctx)
 	if err != nil {
 		return false, err
@@ -2457,24 +2413,19 @@ func (s *syncer) loadTargetedScanState(ctx context.Context,
 // loadTargetedScanData retrieves all necessary data from the database to
 // initialize the recovery state for a targeted rescan.
 //
-// The Store path first resolves the public AccountScope targets into
-// identity-aware scanTargets so it never resolves an imported account by its
-// masked number. The legacy walletdb path keeps the AccountScope targets and
-// resolves them by number, since the legacy manager does not mask imported
-// accounts.
+// It first resolves the public AccountScope targets into identity-aware
+// scanTargets so it never resolves an imported account by its masked number,
+// then loads the scan data through the Store.
 func (s *syncer) loadTargetedScanData(ctx context.Context,
 	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties,
 	[]address.Address, []wtxmgr.Credit, error) {
-	if s.store != nil {
-		resolved, err := s.resolveScanTargets(ctx, targets)
-		if err != nil {
-			return nil, nil, nil, err
-		}
 
-		return s.loadStoreScanData(ctx, resolved)
+	resolved, err := s.resolveScanTargets(ctx, targets)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
-	return s.DBGetScanData(ctx, targets)
+	return s.loadStoreScanData(ctx, resolved)
 }
 
 // resolveScanTargets converts the public AccountScope rescan targets into the
@@ -2545,19 +2496,5 @@ func (s *syncer) loadWalletScanData(ctx context.Context) (
 	[]*waddrmgr.AccountProperties, []address.Address,
 	[]wtxmgr.Credit, error) {
 
-	if s.store != nil {
-		return s.loadStoreScanData(ctx, nil)
-	}
-
-	var targets []waddrmgr.AccountScope
-	for _, scopedMgr := range s.addrStore.ActiveScopedKeyManagers() {
-		for _, accNum := range scopedMgr.ActiveAccounts() {
-			targets = append(targets, waddrmgr.AccountScope{
-				Scope:   scopedMgr.Scope(),
-				Account: accNum,
-			})
-		}
-	}
-
-	return s.DBGetScanData(ctx, targets)
+	return s.loadStoreScanData(ctx, nil)
 }
