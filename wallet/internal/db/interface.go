@@ -517,6 +517,10 @@ type UTXOStore interface {
 	// DeleteExpiredLeases removes expired UTXO lease records for the wallet.
 	DeleteExpiredLeases(ctx context.Context, walletID uint32) error
 
+	// ListOutputsToWatch returns UTXOs that recovery scans should watch.
+	ListOutputsToWatch(ctx context.Context, walletID uint32) ([]UtxoInfo,
+		error)
+
 	// Balance returns a wallet-scoped balance view for the current unspent UTXO
 	// set after applying any optional caller-supplied filters.
 	//
