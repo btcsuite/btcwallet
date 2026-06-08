@@ -731,6 +731,14 @@ func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
 		return fmt.Errorf("kvdb.Store.RollbackToBlock: height: %w", err)
 	}
 
+	var (
+		preRollbackSyncedTo waddrmgr.BlockStamp
+		syncTipRewound      bool
+	)
+	if s.addrStore != nil {
+		preRollbackSyncedTo = s.addrStore.SyncedTo()
+	}
+
 	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if txmgrNs == nil {
@@ -740,14 +748,20 @@ func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
 		// Rewind the wallet sync tip to the fork point before rolling
 		// transaction state back, so a reorg cannot disconnect blocks
 		// without also moving the sync tip in the same write.
-		err := s.rewindSyncTip(tx, height)
+		rewound, err := s.rewindSyncTip(tx, height)
 		if err != nil {
 			return err
 		}
 
+		syncTipRewound = rewound
+
 		return s.txStore.Rollback(txmgrNs, height32)
 	})
 	if err != nil {
+		if syncTipRewound {
+			s.addrStore.RestoreSyncedTo(preRollbackSyncedTo)
+		}
+
 		return fmt.Errorf("kvdb.Store.RollbackToBlock: %w", err)
 	}
 
@@ -755,43 +769,46 @@ func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
 }
 
 // rewindSyncTip rewinds the wallet sync tip to the fork point at height-1
-// within the rollback transaction. It is a no-op when no address manager is
-// configured (transaction-only rollback) or when the wallet is already synced
-// below the rollback boundary, matching the SQL backends, which only clamp
-// wallet sync states at or above the rollback height.
-func (s *Store) rewindSyncTip(tx walletdb.ReadWriteTx, height uint32) error {
+// within the rollback transaction and reports whether the in-memory sync tip
+// changed. It is a no-op when no address manager is configured
+// (transaction-only rollback) or when the wallet is already synced below the
+// rollback boundary, matching the SQL backends, which only clamp wallet sync
+// states at or above the rollback height.
+func (s *Store) rewindSyncTip(tx walletdb.ReadWriteTx,
+	height uint32) (bool, error) {
+
 	// Without an address manager there is no wallet sync state to rewind in
 	// this store, so the rollback is transaction-only.
 	if s.addrStore == nil {
-		return nil
+		return false, nil
 	}
 
 	// A rollback to genesis has no surviving fork block to rewind the sync
 	// tip to, and the reorg path never rolls back below the first block, so
 	// leave the sync tip untouched.
 	if height == 0 {
-		return nil
+		return false, nil
 	}
 
 	rollbackHeight, err := db.Uint32ToInt32(height)
 	if err != nil {
-		return fmt.Errorf("rollback height: %w", err)
+		return false, fmt.Errorf("rollback height: %w", err)
 	}
 
 	// Only wallets synced at or above the rollback boundary are affected; a
 	// sync tip already below the fork point needs no rewind.
 	if s.addrStore.SyncedTo().Height < rollbackHeight {
-		return nil
+		return false, nil
 	}
 
 	addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
 	if addrmgrNs == nil {
-		return errMissingAddrmgrNamespace
+		return false, errMissingAddrmgrNamespace
 	}
 
 	forkHeight, err := db.Uint32ToInt32(height - 1)
 	if err != nil {
-		return fmt.Errorf("fork height: %w", err)
+		return false, fmt.Errorf("fork height: %w", err)
 	}
 
 	// Derive the new sync tip from the stored fork-point block. The block at
@@ -799,7 +816,7 @@ func (s *Store) rewindSyncTip(tx walletdb.ReadWriteTx, height uint32) error {
 	// chain view is inconsistent.
 	forkHash, err := s.addrStore.BlockHash(addrmgrNs, forkHeight)
 	if err != nil {
-		return fmt.Errorf("%w: fork block at height %d: %w",
+		return false, fmt.Errorf("%w: fork block at height %d: %w",
 			db.ErrBlockNotFound, forkHeight, err)
 	}
 
@@ -810,10 +827,10 @@ func (s *Store) rewindSyncTip(tx walletdb.ReadWriteTx, height uint32) error {
 
 	err = s.addrStore.SetSyncedTo(addrmgrNs, &forkBlock)
 	if err != nil {
-		return fmt.Errorf("set synced to: %w", err)
+		return false, fmt.Errorf("set synced to: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // classifyLegacyHorizonBranch validates a scan horizon's branch and reports

@@ -2,6 +2,7 @@ package kvdb
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -2023,4 +2024,228 @@ func TestApplyScanBatchHorizonMissingNameErrors(t *testing.T) {
 	require.Zero(t, externalKeyCount(
 		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
 	))
+}
+
+// errForcedRollback is a static error injected by the rollback atomicity test
+// to fail the transaction rollback step after the sync-tip rewind has run.
+var errForcedRollback = errors.New("forced rollback failure")
+
+// rewindAddrManagerSeed is a fixed BIP32 seed used to build a real waddrmgr
+// address manager for the rollback atomicity test, so SetSyncedTo writes to a
+// real namespace that bbolt can roll back.
+var rewindAddrManagerSeed = []byte{
+	0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+	0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+	0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+	0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+}
+
+// newRealAddrManager creates the waddrmgr namespace and a real address manager
+// in the test database, returning the opened manager. The manager is used by
+// the rollback atomicity test because, unlike the mock address store, its
+// SetSyncedTo performs a real namespace write that bbolt reverts on rollback.
+func newRealAddrManager(t *testing.T,
+	dbConn walletdb.DB) *waddrmgr.Manager {
+
+	t.Helper()
+
+	rootKey, err := hdkeychain.NewMaster(
+		rewindAddrManagerSeed, &chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	pubPass := []byte("public")
+	privPass := []byte("private")
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgr.NamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		return waddrmgr.Create(
+			ns, rootKey, pubPass, privPass,
+			&chaincfg.RegressionNetParams, nil, time.Time{},
+		)
+	})
+	require.NoError(t, err)
+
+	var mgr *waddrmgr.Manager
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		mgr, err = waddrmgr.Open(ns, pubPass, &chaincfg.RegressionNetParams)
+
+		return err
+	})
+	require.NoError(t, err)
+	t.Cleanup(mgr.Close)
+
+	return mgr
+}
+
+// persistedSyncedHeight re-opens the address manager from disk and returns its
+// persisted synced-to height, bypassing the in-memory cache so the value
+// reflects what bbolt actually committed.
+func persistedSyncedHeight(t *testing.T, dbConn walletdb.DB) int32 {
+	t.Helper()
+
+	var height int32
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, ns)
+
+		fresh, err := waddrmgr.Open(
+			ns, []byte("public"), &chaincfg.RegressionNetParams,
+		)
+		if err != nil {
+			return err
+		}
+		defer fresh.Close()
+
+		height = fresh.SyncedTo().Height
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return height
+}
+
+// TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError verifies that
+// kvdb.Store.RollbackToBlock discards the sync-tip rewind when the transaction
+// rollback fails, proving both effects share one walletdb transaction.
+//
+// The address manager is real so SetSyncedTo persists, while the transaction
+// store is a mock that fails Rollback. A two-write rollback (SetSyncedTo then a
+// separate Rollback) would already have committed the rewound sync tip when the
+// rollback failed; the single-transaction implementation instead reverts it, so
+// the persisted and live sync tips must remain at their original height.
+func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrMgr := newRealAddrManager(t, dbConn)
+
+	// Seed a contiguous fork->tip chain so the rollback can derive the fork
+	// block hash at height-1, and so the synced tip starts at the rollback
+	// boundary and must survive a failed rollback.
+	const (
+		forkHeight     = 49
+		initialHeight  = 50
+		rollbackHeight = initialHeight
+	)
+
+	forkStamp := &waddrmgr.BlockStamp{
+		Height: forkHeight,
+		Hash:   chainhash.Hash{0xaa},
+	}
+	tipStamp := &waddrmgr.BlockStamp{
+		Height: initialHeight,
+		Hash:   chainhash.Hash{0xbb},
+	}
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		err := addrMgr.SetSyncedTo(ns, forkStamp)
+		if err != nil {
+			return err
+		}
+
+		return addrMgr.SetSyncedTo(ns, tipStamp)
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, initialHeight, persistedSyncedHeight(t, dbConn))
+
+	// The wtxmgr namespace must exist for the rollback transaction to find it.
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		return wtxmgr.Create(ns)
+	})
+	require.NoError(t, err)
+
+	// Fail the rollback step that runs after the sync-tip rewind.
+	mockTxStore := &bwmock.TxStore{}
+	mockTxStore.On("Rollback", mock.Anything, int32(rollbackHeight)).
+		Return(errForcedRollback).Once()
+
+	store := NewStore(dbConn, mockTxStore, addrMgr)
+
+	err = store.RollbackToBlock(t.Context(), rollbackHeight)
+	require.ErrorIs(t, err, errForcedRollback)
+
+	// The persisted and live sync tips must remain at the original height: the
+	// rewind rolled back atomically with the failed transaction rollback.
+	require.EqualValues(t, initialHeight, persistedSyncedHeight(t, dbConn))
+	require.EqualValues(t, initialHeight, addrMgr.SyncedTo().Height)
+	require.Equal(t, tipStamp.Hash, addrMgr.SyncedTo().Hash)
+	mockTxStore.AssertExpectations(t)
+}
+
+// TestRollbackToBlockRewindsSyncTip verifies the happy path of the atomic
+// rollback: it rewinds the wallet sync tip to the fork point at height-1 in the
+// same write that rolls transaction state back.
+func TestRollbackToBlockRewindsSyncTip(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrMgr := newRealAddrManager(t, dbConn)
+
+	const (
+		forkHeight     = 49
+		initialHeight  = 50
+		rollbackHeight = initialHeight
+	)
+
+	forkHash := chainhash.Hash{0xaa}
+	forkStamp := &waddrmgr.BlockStamp{Height: forkHeight, Hash: forkHash}
+	tipStamp := &waddrmgr.BlockStamp{
+		Height: initialHeight,
+		Hash:   chainhash.Hash{0xbb},
+	}
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		err := addrMgr.SetSyncedTo(ns, forkStamp)
+		if err != nil {
+			return err
+		}
+
+		return addrMgr.SetSyncedTo(ns, tipStamp)
+	})
+	require.NoError(t, err)
+
+	// The wtxmgr namespace must exist for the rollback transaction to find it.
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		return wtxmgr.Create(ns)
+	})
+	require.NoError(t, err)
+
+	// The rollback succeeds, so the sync tip must move back to the fork block.
+	mockTxStore := &bwmock.TxStore{}
+	mockTxStore.On("Rollback", mock.Anything, int32(rollbackHeight)).
+		Return(nil).Once()
+
+	store := NewStore(dbConn, mockTxStore, addrMgr)
+
+	err = store.RollbackToBlock(t.Context(), rollbackHeight)
+	require.NoError(t, err)
+
+	require.EqualValues(t, forkHeight, persistedSyncedHeight(t, dbConn))
+	require.Equal(t, forkHash, addrMgr.SyncedTo().Hash)
+	mockTxStore.AssertExpectations(t)
 }
