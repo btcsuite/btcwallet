@@ -10,6 +10,83 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
+// ApplyScanBatch atomically records recovery scan writes for one wallet.
+//
+// In a single write transaction it extends every reported address horizon
+// (deriving and persisting the recovered addresses), records the relevant
+// transactions, and connects the discovered synced blocks, mirroring the kvdb
+// backend's scan-batch semantics.
+func (s *Store) ApplyScanBatch(ctx context.Context,
+	params db.ScanBatchParams) error {
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		ops := scanHorizonOps{qtx: qtx, walletID: params.WalletID}
+		for i := range params.Horizons {
+			err := db.ExtendScanHorizon(
+				ctx, ops, s.deriveAddress, params.Horizons[i],
+			)
+			if err != nil {
+				return fmt.Errorf("horizon %d: %w", i, err)
+			}
+		}
+
+		// Connect the discovered synced blocks first so their rows exist
+		// before any relevant transaction confirmed in those blocks is
+		// created. CreateTxWithOps needs the confirming block row during
+		// PrepareBlock, so creating transactions first would fail with
+		// ErrBlockNotFound.
+		err := applyBatchSyncedBlocks(ctx, qtx, params)
+		if err != nil {
+			return err
+		}
+
+		for i := range params.Transactions {
+			err = applyBatchTransaction(ctx, qtx, params.Transactions[i])
+			if err != nil {
+				return fmt.Errorf("create tx %d: %w", i, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+// applyBatchSyncedBlocks connects the scan batch's discovered synced blocks,
+// advancing the wallet sync tip to the final block. Targeted rescans report no
+// blocks and leave the sync tip untouched.
+func applyBatchSyncedBlocks(ctx context.Context, qtx *sqlc.Queries,
+	params db.ScanBatchParams) error {
+
+	for i := range params.SyncedBlocks {
+		block := &params.SyncedBlocks[i]
+
+		err := ensureBlockExists(ctx, qtx, block)
+		if err != nil {
+			return fmt.Errorf("ensure synced block %d: %w", i, err)
+		}
+
+		syncParams, err := buildUpdateSyncParams(db.UpdateWalletParams{
+			WalletID: params.WalletID,
+			SyncedTo: block,
+		})
+		if err != nil {
+			return err
+		}
+
+		rowsAffected, err := qtx.UpdateWalletSyncState(ctx, syncParams)
+		if err != nil {
+			return fmt.Errorf("update wallet sync state: %w", err)
+		}
+
+		if rowsAffected == 0 {
+			return fmt.Errorf("wallet sync state for wallet %d: %w",
+				params.WalletID, db.ErrWalletNotFound)
+		}
+	}
+
+	return nil
+}
+
 // scanHorizonOps adapts the PostgreSQL sqlc queries to the shared horizon
 // extension workflow.
 type scanHorizonOps struct {
