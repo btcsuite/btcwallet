@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -31,15 +33,7 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 	}
 
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		// CreateTxWithOps needs each confirming block row during
-		// PrepareBlock, so materialize all batch transaction blocks before
-		// any transaction is created.
-		err := ensureBatchTxBlocks(ctx, qtx, params.Transactions)
-		if err != nil {
-			return err
-		}
-
-		err = applyBatchSyncTip(ctx, qtx, params)
+		err := applyBatchSyncTip(ctx, qtx, params)
 		if err != nil {
 			return err
 		}
@@ -53,16 +47,7 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 		txs := db.SortTxBatchParentsFirst(params.Transactions)
 
 		for i := range txs {
-			req, err := db.NewCreateTxRequest(txs[i])
-			if err != nil {
-				return fmt.Errorf("validate tx %d: %w", i, err)
-			}
-
-			err = db.CreateTxWithOps(ctx, req, &createTxOps{
-				invalidateUnminedTxOps: invalidateUnminedTxOps{
-					qtx: qtx,
-				},
-			})
+			err = applyBatchTransaction(ctx, qtx, txs[i])
 			if err != nil {
 				return fmt.Errorf("create tx %d: %w", i, err)
 			}
@@ -72,23 +57,115 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 	})
 }
 
-// ensureBatchTxBlocks materializes every confirming block referenced by a batch
-// transaction before the transaction rows are created.
-func ensureBatchTxBlocks(ctx context.Context, qtx *sqlc.Queries,
-	txs []db.CreateTxParams) error {
+// applyBatchTransaction records one transaction from a runtime batch.
+func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams) error {
 
-	for i := range txs {
-		if txs[i].Block == nil {
-			continue
-		}
+	req, err := db.NewCreateTxRequest(params)
+	if err != nil {
+		return fmt.Errorf("validate tx: %w", err)
+	}
 
-		err := ensureBlockExists(ctx, qtx, txs[i].Block)
+	ops := &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: qtx,
+		},
+	}
+
+	// A confirmed tx may reference a block the batch never advanced the
+	// sync tip to: SyncedTo is nil for standalone relevant-tx
+	// notifications. Ensure that confirming block row exists before
+	// CreateTxWithOps validates it during PrepareBlock, otherwise the
+	// confirmed insert fails with ErrBlockNotFound. This only inserts the
+	// block row; advancing the wallet sync tip stays the sole
+	// responsibility of applyBatchSyncTip.
+	if params.Block != nil {
+		err = ensureBlockExists(ctx, qtx, params.Block)
 		if err != nil {
-			return fmt.Errorf("tx %d block: %w", i, err)
+			return fmt.Errorf("ensure tx block: %w", err)
 		}
 	}
 
+	err = db.CreateTxWithOps(ctx, req, ops)
+	if !errors.Is(err, db.ErrTxAlreadyExists) {
+		return err
+	}
+
+	skip, txID, skipErr := canSkipBatchDuplicate(ctx, qtx, req)
+	if skipErr != nil {
+		return skipErr
+	}
+
+	if !skip {
+		return err
+	}
+
+	return replayBatchDuplicateEdges(ctx, req, txID, ops)
+}
+
+// replayBatchDuplicateEdges fills in any credit or wallet-input-spend edges a
+// duplicate batch tx is missing.
+//
+// CreateTxWithOps returns ErrTxAlreadyExists before it writes credits or marks
+// wallet-input spends, so a partial first insert can leave the row in place
+// without those edges. A matching row shape is therefore not enough to skip
+// on its own; the edges are replayed idempotently. InsertCredits skips outputs
+// already recorded and MarkInputsSpent treats a spend already attached to this
+// same row as a no-op, while either still rejects a genuinely conflicting edge.
+func replayBatchDuplicateEdges(ctx context.Context, req db.CreateTxRequest,
+	txID int64, ops db.CreateTxOps) error {
+
+	err := ops.InsertCredits(ctx, req, txID)
+	if err != nil {
+		return fmt.Errorf("replay duplicate tx credits: %w", err)
+	}
+
+	err = ops.MarkInputsSpent(ctx, req, txID)
+	if err != nil {
+		return fmt.Errorf("replay duplicate tx spends: %w", err)
+	}
+
 	return nil
+}
+
+// canSkipBatchDuplicate reports whether an existing transaction row matches the
+// duplicate observation closely enough for ApplyTxBatch/ApplyScanBatch to
+// replay its edges instead of failing. It also returns the existing row ID so
+// the caller can replay the credit and wallet-input-spend writes against it.
+func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest) (bool, int64, error) {
+
+	row, err := qtx.GetTransactionByHash(
+		ctx, sqlc.GetTransactionByHashParams{
+			WalletID: int64(req.Params.WalletID),
+			TxHash:   req.TxHash[:],
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, 0, nil
+		}
+
+		return false, 0, fmt.Errorf("get duplicate tx: %w", err)
+	}
+
+	status, err := db.ParseTxStatus(row.TxStatus)
+	if err != nil {
+		return false, 0, fmt.Errorf("parse duplicate tx status: %w", err)
+	}
+
+	var block *db.Block
+	if row.BlockHeight.Valid {
+		block, err = buildBlock(
+			row.BlockHeight, row.BlockHash, row.BlockTimestamp,
+		)
+		if err != nil {
+			return false, 0, fmt.Errorf("build duplicate tx block: %w",
+				err)
+		}
+	}
+
+	return db.CanSkipCreateTxDuplicate(req, status, block), row.ID, nil
 }
 
 // applyBatchSyncTip applies the optional sync-tip update within a batch.
