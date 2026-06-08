@@ -123,6 +123,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
 	}
+	if q.getBlocksInRangeStmt, err = db.PrepareContext(ctx, GetBlocksInRange); err != nil {
+		return nil, fmt.Errorf("error preparing query GetBlocksInRange: %w", err)
+	}
 	if q.getKeyScopeByIDStmt, err = db.PrepareContext(ctx, GetKeyScopeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetKeyScopeByID: %w", err)
 	}
@@ -453,6 +456,11 @@ func (q *Queries) Close() error {
 	if q.getBlockByHeightStmt != nil {
 		if cerr := q.getBlockByHeightStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getBlockByHeightStmt: %w", cerr)
+		}
+	}
+	if q.getBlocksInRangeStmt != nil {
+		if cerr := q.getBlocksInRangeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getBlocksInRangeStmt: %w", cerr)
 		}
 	}
 	if q.getKeyScopeByIDStmt != nil {
@@ -797,6 +805,7 @@ type Queries struct {
 	getAndIncrementNextExternalIndexStmt        *sql.Stmt
 	getAndIncrementNextInternalIndexStmt        *sql.Stmt
 	getBlockByHeightStmt                        *sql.Stmt
+	getBlocksInRangeStmt                        *sql.Stmt
 	getKeyScopeByIDStmt                         *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt             *sql.Stmt
 	getKeyScopeSecretsStmt                      *sql.Stmt
@@ -890,6 +899,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAndIncrementNextExternalIndexStmt:        q.getAndIncrementNextExternalIndexStmt,
 		getAndIncrementNextInternalIndexStmt:        q.getAndIncrementNextInternalIndexStmt,
 		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
+		getBlocksInRangeStmt:                        q.getBlocksInRangeStmt,
 		getKeyScopeByIDStmt:                         q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:             q.getKeyScopeByWalletAndScopeStmt,
 		getKeyScopeSecretsStmt:                      q.getKeyScopeSecretsStmt,
