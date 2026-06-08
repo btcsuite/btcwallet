@@ -1642,6 +1642,147 @@ type scanHorizonRollback struct {
 	toIndex uint32
 }
 
+// ApplyScanBatch atomically applies recovery scan writes through the legacy
+// walletdb managers.
+func (s *Store) ApplyScanBatch(_ context.Context,
+	params db.ScanBatchParams) error {
+
+	if s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w",
+			errMissingAddrStore)
+	}
+
+	err := db.ValidateBatchTransactionsWalletID(
+		params.WalletID, params.Transactions,
+	)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w", err)
+	}
+
+	// Reject a nil-Tx member before the parents-first sort below
+	// dereferences each transaction; the per-tx NewCreateTxRequest check in
+	// the apply loop runs only after the sort.
+	err = db.ValidateBatchTransactionsTx(params.Transactions)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w", err)
+	}
+
+	// Record any in-batch parent before its children. The confirmed path
+	// records a debit only against an already-inserted parent credit, so a
+	// confirmed child applied before its in-batch parent would find no credit
+	// to spend and silently leave the parent output unspent. Sorting parents
+	// first makes the batch order-independent; an already parents-first or
+	// dependency-free batch is returned unchanged.
+	params.Transactions = db.SortTxBatchParentsFirst(params.Transactions)
+
+	// The horizon extensions and synced-block updates below mutate the live
+	// address manager's in-memory state synchronously, before this batch
+	// commits, yet walletdb only rolls back the backing bucket writes on
+	// failure. Accumulate the exact in-memory advances so a rolled-back batch
+	// can undo them without clobbering unrelated live state.
+	var (
+		horizonRollbacks []scanHorizonRollback
+		syncTipRestore   batchSyncTipRestore
+	)
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		// Horizons are extended first because the transaction batch
+		// below resolves every scan-discovered credit against the
+		// address manager, so a freshly derived address must already be
+		// written to the addrmgr bucket before its crediting transaction
+		// is recorded.
+		err := s.applyLegacyScanHorizons(
+			addrmgrNs, params.Horizons, &horizonRollbacks,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = s.applyLegacyTxBatch(
+			addrmgrNs, txmgrNs, params.Transactions,
+		)
+		if err != nil {
+			return err
+		}
+
+		return s.applyLegacySyncedBlocks(
+			addrmgrNs, params.SyncedBlocks, &syncTipRestore,
+		)
+	})
+	if err != nil {
+		// walletdb has rolled the addrmgr bucket back, but the in-memory
+		// side effects of the horizon extensions and synced-block
+		// updates survive. Undo them so the live manager matches the
+		// persisted (rolled-back) state on the next access.
+		s.rollbackScanBatchCaches(horizonRollbacks, syncTipRestore)
+
+		return fmt.Errorf("kvdb.Store.ApplyScanBatch: %w", err)
+	}
+
+	return nil
+}
+
+// rollbackScanBatchCaches reverts the in-memory address-manager state advanced
+// by a failed ApplyScanBatch. The batch wrote the addrmgr bucket, which
+// walletdb has since rolled back, but the live manager retains the matching
+// in-memory mutations: extended horizons bumped the cached next indices,
+// inserted scan-derived addresses into the recent-address cache, and queued
+// pending unlock-derivation entries, while connected synced blocks advanced the
+// in-memory synced tip. This restores the manager to its pre-batch state so no
+// unpersisted advance stays observable.
+func (s *Store) rollbackScanBatchCaches(rollbacks []scanHorizonRollback,
+	syncTipRestore batchSyncTipRestore) {
+
+	for _, rollback := range rollbacks {
+		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScope(rollback.scope),
+		)
+		if err != nil {
+			// The scope resolved while applying the batch, so a
+			// lookup miss here is unexpected; skip it as there is no
+			// cache to revert for an unknown scope.
+			continue
+		}
+
+		// Evict the derived addresses before invalidating the account
+		// cache: eviction re-derives the rolled-back children from the
+		// cached account info to compute their cache keys, so it must run
+		// while that account info is still present. Eviction removes the
+		// children from the recent-address cache and the pending
+		// unlock-derivation queue; invalidating the account cache then
+		// reloads the persisted next indices on the next access.
+		scopedMgr.EvictDerivedAddresses(
+			rollback.account, rollback.branch, rollback.fromIndex,
+			rollback.toIndex,
+		)
+		scopedMgr.InvalidateAccountCache(rollback.account)
+	}
+
+	// Restore the in-memory synced tip to the pre-batch value if this batch
+	// advanced it and the live tip still matches that uncommitted advance.
+	// The bucket write was rolled back, so leaving the in-memory tip advanced
+	// would let the next scan decision start from a tip that was never
+	// persisted.
+	if syncTipRestore.snapshotTaken {
+		s.addrStore.RestoreSyncedToIfCurrent(
+			syncTipRestore.previous, syncTipRestore.attempted,
+		)
+	}
+}
+
 // classifyLegacyHorizonBranch validates a scan horizon's branch and reports
 // whether it is the internal branch. Any value other than the canonical
 // external/internal pair is rejected before the manager is touched: the legacy
@@ -1757,9 +1898,12 @@ func (s *Store) applyLegacyScanHorizons(ns walletdb.ReadWriteBucket,
 	return nil
 }
 
-// applyLegacySyncedBlocks connects a sequence of legacy synced blocks.
+// applyLegacySyncedBlocks connects a sequence of legacy synced blocks and
+// records the last successful live sync-tip advance for rollback.
 func (s *Store) applyLegacySyncedBlocks(ns walletdb.ReadWriteBucket,
-	blocks []db.Block) error {
+	blocks []db.Block, syncTipRestore *batchSyncTipRestore) error {
+
+	previous := s.addrStore.SyncedTo()
 
 	for i := range blocks {
 		block, err := db.BlockStampFromBlock(&blocks[i])
@@ -1771,6 +1915,10 @@ func (s *Store) applyLegacySyncedBlocks(ns walletdb.ReadWriteBucket,
 		if err != nil {
 			return fmt.Errorf("set synced block %d: %w", i, err)
 		}
+
+		syncTipRestore.previous = previous
+		syncTipRestore.attempted = block
+		syncTipRestore.snapshotTaken = true
 	}
 
 	return nil
