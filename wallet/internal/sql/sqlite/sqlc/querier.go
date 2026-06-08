@@ -360,6 +360,27 @@ type Querier interface {
 	ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error)
 	// Lists all key scopes for a wallet, ordered by ID.
 	ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error)
+	// Lists every output a recovery rescan must keep watching for one wallet.
+	//
+	// How:
+	// - Starts from the wallet's UTXO rows joined to their funding transaction;
+	//   the rescan needs each outpoint plus the on-chain output script. The script
+	//   is taken from the funding transaction's raw_tx (TxOut[output_index]) in the
+	//   Store Go layer rather than from the credited address: a bare-multisig
+	//   output the wallet partly owns is recorded against a member address whose
+	//   own script differs from the multisig output script, so the address script
+	//   would be the wrong thing to watch. Reading the actual output script matches
+	//   the kvdb OutputsToWatch contract.
+	// - Includes outputs whose funding transaction is still active (pending or
+	//   published); invalidated parents (replaced/failed/orphaned) are excluded so
+	//   the watch set matches the legacy wtxmgr credit walk.
+	// - Keeps an output when it is either still unspent OR spent only by an
+	//   unmined, still-active transaction. This mirrors the legacy behaviour of
+	//   returning unmined credits and credits spent by other unmined txs, while
+	//   dropping outputs already spent by a confirmed transaction.
+	// - Locked (leased) outputs are intentionally retained because leasing is
+	//   modelled separately from existence and the rescan must still watch them.
+	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
 	// may be spent by selected transaction inputs.
 	//
