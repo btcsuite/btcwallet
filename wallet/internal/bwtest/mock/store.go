@@ -223,6 +223,18 @@ func (m *Store) GetAddress(ctx context.Context,
 	return args.Get(0).(*db.AddressInfo), args.Error(1)
 }
 
+// ResolveOwnedAddresses implements the db.AddressStore interface.
+func (m *Store) ResolveOwnedAddresses(ctx context.Context,
+	query db.ResolveOwnedAddressesQuery) (map[string]*db.AddressInfo, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(map[string]*db.AddressInfo), args.Error(1)
+}
+
 // ListAddresses implements the db.AddressStore interface.
 func (m *Store) ListAddresses(ctx context.Context,
 	query db.ListAddressesQuery) (page.Result[db.AddressInfo, uint32], error) {
