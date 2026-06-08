@@ -380,6 +380,18 @@ func (m *Store) DeleteExpiredLeases(ctx context.Context,
 	return args.Error(0)
 }
 
+// ListOutputsToWatch implements the db.UTXOStore interface.
+func (m *Store) ListOutputsToWatch(ctx context.Context,
+	walletID uint32) ([]db.UtxoInfo, error) {
+
+	args := m.Called(ctx, walletID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.UtxoInfo), args.Error(1)
+}
+
 // Balance implements the db.UTXOStore interface.
 func (m *Store) Balance(ctx context.Context,
 	params db.BalanceParams) (db.BalanceResult, error) {
