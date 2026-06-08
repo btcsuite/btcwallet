@@ -434,3 +434,20 @@ WHERE
         OR (acc.is_derived = FALSE AND dacct.account_number IS NULL)
     )
 GROUP BY da.account_id;
+
+-- name: AdvanceNextExternalIndex :exec
+-- Advances the external branch's next index to the supplied value during
+-- recovery horizon extension. The MAX guard keeps the counter monotonic so a
+-- slower concurrent writer cannot regress it below an already-recorded index.
+UPDATE accounts
+SET next_external_index = max(next_external_index, sqlc.arg('next_index'))
+WHERE id = sqlc.arg('id');
+
+-- name: AdvanceNextInternalIndex :exec
+-- Advances the internal/change branch's next index to the supplied value
+-- during recovery horizon extension. The MAX guard keeps the counter monotonic
+-- so a slower concurrent writer cannot regress it below an already-recorded
+-- index.
+UPDATE accounts
+SET next_internal_index = max(next_internal_index, sqlc.arg('next_index'))
+WHERE id = sqlc.arg('id');
