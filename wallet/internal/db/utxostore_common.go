@@ -175,6 +175,52 @@ func BuildUtxoInfo(hash []byte, outputIndex uint32, amount int64,
 	}, nil
 }
 
+// WatchOutputFromRow converts a ListOutputsToWatch result row into the public
+// UtxoInfo shape. Only OutPoint and PkScript are populated, mirroring the
+// legacy wtxmgr OutputsToWatch contract where those are the only fields a
+// rescan reads; the remaining fields keep their zero values so SQL backends
+// stay byte-for-byte identical to the kvdb watch-output view.
+//
+// The watch script is read from the funding transaction's own output
+// (TxOut[outputIndex].PkScript) rather than from the credited address row.
+// A bare-multisig output the wallet partly owns is recorded against a member
+// address whose own script differs from the multisig output script, so the
+// address script would watch the wrong thing; the on-chain output script is
+// what a rescan must match, matching the kvdb credit walk.
+func WatchOutputFromRow(hash []byte, outputIndex int64,
+	rawTx []byte) (*UtxoInfo, error) {
+
+	index, err := Int64ToUint32(outputIndex)
+	if err != nil {
+		return nil, fmt.Errorf("watch output index: %w", err)
+	}
+
+	outPoint, err := buildOutPoint(hash, index)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := deserializeMsgTx(rawTx)
+	if err != nil {
+		return nil, fmt.Errorf("watch output %v: %w", outPoint, err)
+	}
+
+	// Compare in uint64 so the bounds check stays correct for output
+	// indexes above math.MaxInt32: an int(index) conversion can overflow to
+	// a negative value on 32-bit platforms and wrongly pass the check. len
+	// is never negative, so widening it to uint64 is lossless.
+	if uint64(index) >= uint64(len(tx.TxOut)) {
+		return nil, fmt.Errorf("%w: watch output index %d out of range "+
+			"for tx %s with %d outputs", ErrInvalidParam, index,
+			outPoint.Hash, len(tx.TxOut))
+	}
+
+	return &UtxoInfo{
+		OutPoint: outPoint,
+		PkScript: tx.TxOut[index].PkScript,
+	}, nil
+}
+
 // BuildLeasedOutput converts SQL lease-row fields into the public LeasedOutput
 // type.
 func BuildLeasedOutput(hash []byte, outputIndex uint32, lockID []byte,
