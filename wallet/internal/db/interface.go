@@ -411,6 +411,10 @@ type TxStore interface {
 	// graph-affecting lifecycle changes.
 	UpdateTx(ctx context.Context, params UpdateTxParams) error
 
+	// ApplyTxBatch atomically records a batch of transaction records and an
+	// optional wallet sync-tip update.
+	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
+
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
 	// transaction is not found.
