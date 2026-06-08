@@ -1574,6 +1574,111 @@ func TestGetAddress(t *testing.T) {
 	}
 }
 
+// TestResolveOwnedAddresses verifies the batched address resolver: it returns
+// only the wallet-owned subset of a mixed script set, omits scripts that do not
+// belong to the wallet, and treats an empty input as an empty result without
+// error.
+func TestResolveOwnedAddresses(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWatchOnlyWallet(t, store, "resolve-addresses-wallet")
+
+	// Import three addresses with known scripts; these are the wallet-owned
+	// scripts the batch lookup must resolve.
+	ownedScripts := make([][]byte, 0, 3)
+	for range 3 {
+		script := RandomBytes(32)
+		_, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     walletID,
+				Scope:        db.KeyScopeBIP0084,
+				AddressType:  db.WitnessPubKey,
+				PubKey:       RandomBytes(33),
+				ScriptPubKey: script,
+			},
+		)
+		require.NoError(t, err)
+
+		ownedScripts = append(ownedScripts, script)
+	}
+
+	// Two scripts the wallet does not own. They must be omitted from the
+	// result rather than surfaced as an error.
+	foreignScripts := [][]byte{RandomBytes(32), RandomBytes(32)}
+
+	t.Run("mixed owned and foreign", func(t *testing.T) {
+		t.Parallel()
+
+		query := db.ResolveOwnedAddressesQuery{WalletID: walletID}
+		query.ScriptPubKeys = append(query.ScriptPubKeys, ownedScripts...)
+		query.ScriptPubKeys = append(
+			query.ScriptPubKeys, foreignScripts...,
+		)
+
+		owned, err := store.ResolveOwnedAddresses(t.Context(), query)
+		require.NoError(t, err)
+
+		// Only the owned scripts come back, keyed by string(script).
+		require.Len(t, owned, len(ownedScripts))
+
+		for _, script := range ownedScripts {
+			info, ok := owned[string(script)]
+			require.True(t, ok)
+			require.Equal(t, script, info.ScriptPubKey)
+		}
+
+		for _, script := range foreignScripts {
+			_, ok := owned[string(script)]
+			require.False(t, ok)
+		}
+	})
+
+	t.Run("only foreign scripts", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID:      walletID,
+				ScriptPubKeys: foreignScripts,
+			},
+		)
+		require.NoError(t, err)
+		require.Empty(t, owned)
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{WalletID: walletID},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, owned)
+		require.Empty(t, owned)
+	})
+
+	t.Run("wallet scoping", func(t *testing.T) {
+		t.Parallel()
+
+		// A different wallet must not see the first wallet's owned
+		// scripts even when asked for them by script.
+		otherWalletID := newWatchOnlyWallet(
+			t, store, "resolve-addresses-other-wallet",
+		)
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID:      otherWalletID,
+				ScriptPubKeys: ownedScripts,
+			},
+		)
+		require.NoError(t, err)
+		require.Empty(t, owned)
+	})
+}
+
 // TestListAddresses verifies that ListAddresses correctly returns addresses
 // with page-contract behavior, filters by scope appropriately, and handles
 // empty results without error.
