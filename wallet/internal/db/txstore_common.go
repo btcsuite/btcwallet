@@ -1815,3 +1815,200 @@ func IsUnminedStatus(status TxStatus) bool {
 		return false
 	}
 }
+
+// ValidateBatchTransactionsWalletID rejects a batch whose transactions are not
+// all owned by batchWalletID. A batch applies sync state (sync tip or scan
+// horizons) to batchWalletID but records each transaction under that
+// transaction's own WalletID, so a mismatched member would let one wallet's
+// sync state advance atomically with another wallet's transaction write. The
+// check runs before any backend write so the batch invariant is enforced
+// up front, before horizon derivation or synced-block work is wasted.
+func ValidateBatchTransactionsWalletID(batchWalletID uint32,
+	txs []CreateTxParams) error {
+
+	for i := range txs {
+		if txs[i].WalletID == batchWalletID {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d wallet id %d does not "+
+			"match batch wallet id %d", ErrInvalidParam, i,
+			txs[i].WalletID, batchWalletID)
+	}
+
+	return nil
+}
+
+// ValidateBatchTransactionsTx rejects a batch in which any transaction has a
+// nil Tx. A batch is reordered parents-first by SortTxBatchParentsFirst before
+// it is applied, and that sort dereferences each transaction's Tx to read its
+// hash and inputs. Per-transaction NewCreateTxRequest validation would catch a
+// nil Tx, but only inside the apply loop that runs after the sort, so a nil Tx
+// would panic during reordering. Running this check up front, before the sort,
+// turns that into the same ErrInvalidParam every backend returns uniformly.
+func ValidateBatchTransactionsTx(txs []CreateTxParams) error {
+	for i := range txs {
+		if txs[i].Tx != nil {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d tx is required",
+			ErrInvalidParam, i)
+	}
+
+	return nil
+}
+
+// SortTxBatchParentsFirst returns the batch transactions reordered so that any
+// transaction creating an output another batch member spends is positioned
+// before that spending member, regardless of the caller's original order.
+//
+// The SQL backends record a transaction's wallet-owned credits and then claim
+// its spent parent inputs in the same per-transaction step. Claiming a spent
+// input is an UPDATE on the parent credit's UTXO row, so the parent credit must
+// already exist when the child is recorded; otherwise the UPDATE matches no row
+// and, finding no conflicting spend either, silently drops the spend edge and
+// leaves the parent credit unspent. Applying a batch in caller order is
+// therefore unsafe whenever a child is listed before its in-batch parent.
+//
+// This makes ApplyTxBatch order-independent: it stably topologically sorts the
+// batch so every in-batch parent precedes its children while preserving the
+// caller's relative order among transactions that have no in-batch dependency.
+// A batch that is already parents-first, has a single transaction, or has no
+// in-batch parent/child edges is returned unchanged. Edges to outpoints created
+// outside the batch impose no ordering, since those parent rows either already
+// exist or never will.
+//
+// The returned slice is a fresh reordering of the same CreateTxParams values;
+// the input slice is not mutated.
+func SortTxBatchParentsFirst(txs []CreateTxParams) []CreateTxParams {
+	// Nothing to reorder: a single transaction (or none) cannot list a
+	// child ahead of an in-batch parent.
+	if len(txs) <= 1 {
+		return txs
+	}
+
+	children, inDegree := buildTxBatchDependencyGraph(txs)
+	order := topoSortTxBatchOrder(children, inDegree)
+
+	ordered := make([]CreateTxParams, 0, len(txs))
+	for _, idx := range order {
+		ordered = append(ordered, txs[idx])
+	}
+
+	return ordered
+}
+
+// buildTxBatchDependencyGraph builds the parent->child dependency edges of a
+// transaction batch. children[p] lists the positions of the batch transactions
+// spending an output of txs[p], and inDegree[c] counts the distinct in-batch
+// parents of txs[c]. Outpoints created outside the batch contribute no edge.
+func buildTxBatchDependencyGraph(txs []CreateTxParams) ([][]int, []int) {
+	// Map every in-batch transaction hash to its position so input lookups
+	// can tell an in-batch parent from an external outpoint. A hash that
+	// repeats in the batch keeps its first position; a later duplicate is
+	// rejected by CreateTxWithOps regardless of order, so the dependency
+	// edge only needs to point at one occurrence.
+	indexByHash := make(map[chainhash.Hash]int, len(txs))
+	for i := range txs {
+		hash := txs[i].Tx.TxHash()
+		if _, ok := indexByHash[hash]; !ok {
+			indexByHash[hash] = i
+		}
+	}
+
+	children := make([][]int, len(txs))
+
+	inDegree := make([]int, len(txs))
+	for child := range txs {
+		// Deduplicate parents within one child so a child spending two
+		// outputs of the same in-batch parent only adds one edge, which
+		// keeps the in-degree bookkeeping exact.
+		seen := make(map[int]struct{})
+		for _, txIn := range txs[child].Tx.TxIn {
+			parent, ok := indexByHash[txIn.PreviousOutPoint.Hash]
+			if !ok || parent == child {
+				continue
+			}
+
+			if _, dup := seen[parent]; dup {
+				continue
+			}
+
+			seen[parent] = struct{}{}
+			children[parent] = append(children[parent], child)
+			inDegree[child]++
+		}
+	}
+
+	return children, inDegree
+}
+
+// topoSortTxBatchOrder returns batch transaction positions in a stable
+// parents-first topological order using Kahn's algorithm with an
+// ascending-index ready set: among transactions whose in-batch parents are all
+// already emitted, the one with the lowest original position goes next. That
+// keeps the caller's relative order for independent transactions and leaves an
+// already parents-first batch unchanged.
+//
+// A dependency cycle is impossible for real transactions, since an output
+// cannot be spent before the transaction creating it exists. If a malformed
+// batch still encodes one, the cyclic members never reach the ready set; they
+// are appended in their original order so no transaction is dropped and
+// CreateTxWithOps can reject the bad input downstream.
+func topoSortTxBatchOrder(children [][]int, inDegree []int) []int {
+	total := len(inDegree)
+
+	ready := make([]int, 0, total)
+	for i := range inDegree {
+		if inDegree[i] == 0 {
+			ready = append(ready, i)
+		}
+	}
+
+	order := make([]int, 0, total)
+
+	emitted := make([]bool, total)
+	for len(ready) > 0 {
+		node := popLowestIndex(&ready)
+		order = append(order, node)
+		emitted[node] = true
+
+		for _, child := range children[node] {
+			inDegree[child]--
+			if inDegree[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+
+	// Append any cyclic leftover in original order.
+	if len(order) != total {
+		for i := range total {
+			if !emitted[i] {
+				order = append(order, i)
+			}
+		}
+	}
+
+	return order
+}
+
+// popLowestIndex removes and returns the smallest value from ready, preserving
+// the order of the remaining elements.
+func popLowestIndex(ready *[]int) int {
+	r := *ready
+
+	lowest := 0
+	for i := 1; i < len(r); i++ {
+		if r[i] < r[lowest] {
+			lowest = i
+		}
+	}
+
+	node := r[lowest]
+	r = append(r[:lowest], r[lowest+1:]...)
+	*ready = r
+
+	return node
+}
