@@ -285,6 +285,109 @@ func TestGetAddressBareMultisigReturnsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrAddressNotFound)
 }
 
+// TestAddressStoreResolveOwnedAddresses verifies that the batched resolver
+// returns only the wallet-owned subset of a mixed script set in a single
+// transaction, omits scripts that are not owned, and treats an empty input as
+// an empty result without error.
+func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	// importP2WKH imports a fresh P2WKH address and returns its script.
+	importP2WKH := func(t *testing.T) []byte {
+		t.Helper()
+
+		privKey, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+
+		addr, err := btcutil.NewAddressWitnessPubKeyHash(
+			btcutil.Hash160(privKey.PubKey().SerializeCompressed()),
+			addrStore.ChainParams(),
+		)
+		require.NoError(t, err)
+
+		script, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		_, err = store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:     0,
+				Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
+				AddressType:  db.WitnessPubKey,
+				ScriptPubKey: script,
+				PubKey: privKey.PubKey().
+					SerializeCompressed(),
+			},
+		)
+		require.NoError(t, err)
+
+		return script
+	}
+
+	owned1 := importP2WKH(t)
+	owned2 := importP2WKH(t)
+
+	// A valid P2WKH script for a key the wallet never imported.
+	foreignKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	foreignAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(foreignKey.PubKey().SerializeCompressed()),
+		addrStore.ChainParams(),
+	)
+	require.NoError(t, err)
+	foreignScript, err := txscript.PayToAddrScript(foreignAddr)
+	require.NoError(t, err)
+
+	t.Run("mixed owned and foreign", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID: 0,
+				ScriptPubKeys: [][]byte{
+					owned1, foreignScript, owned2,
+				},
+			},
+		)
+		require.NoError(t, err)
+
+		require.Len(t, owned, 2)
+		require.Contains(t, owned, string(owned1))
+		require.Contains(t, owned, string(owned2))
+		require.NotContains(t, owned, string(foreignScript))
+	})
+
+	t.Run("duplicate scripts resolve once", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{
+				WalletID:      0,
+				ScriptPubKeys: [][]byte{owned1, owned1},
+			},
+		)
+		require.NoError(t, err)
+		require.Len(t, owned, 1)
+		require.Contains(t, owned, string(owned1))
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		t.Parallel()
+
+		owned, err := store.ResolveOwnedAddresses(
+			t.Context(), db.ResolveOwnedAddressesQuery{WalletID: 0},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, owned)
+		require.Empty(t, owned)
+	})
+}
+
 // TestAddressStoreImportedPrivateKeyIsSpendable verifies that legacy imported
 // private keys are not marked watch-only.
 func TestAddressStoreImportedPrivateKeyIsSpendable(t *testing.T) {

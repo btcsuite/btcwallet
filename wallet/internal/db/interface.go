@@ -327,6 +327,23 @@ type AddressStore interface {
 	// an error if the address is not found.
 	GetAddress(ctx context.Context, query GetAddressQuery) (*AddressInfo, error)
 
+	// ResolveOwnedAddresses resolves a batch of script pubkeys to the subset
+	// that is owned by the wallet in a single store operation. It is intended
+	// to replace a per-script GetAddress loop on hot paths such as transaction-
+	// output ownership filtering.
+	//
+	// The result is keyed by string(ScriptPubKey). Only wallet-owned scripts
+	// appear in the map: a script absent from the result is simply not owned
+	// by the wallet (the batched equivalent of GetAddress returning
+	// ErrAddressNotFound), which is not an error. Both the wallet ID and the
+	// supplied script set constrain the lookup.
+	//
+	// An empty or nil ScriptPubKeys slice returns an empty, non-nil map
+	// without issuing a backend query or returning an error.
+	ResolveOwnedAddresses(ctx context.Context,
+		query ResolveOwnedAddressesQuery) (
+		map[string]*AddressInfo, error)
+
 	// ListAddresses returns one page of addresses for the given query,
 	// including a next-cursor for the following page.
 	ListAddresses(ctx context.Context, query ListAddressesQuery) (
