@@ -87,6 +87,18 @@ func (m *Store) IterWallets(ctx context.Context,
 	}
 }
 
+// ListSyncedBlocks implements the db.WalletStore interface.
+func (m *Store) ListSyncedBlocks(ctx context.Context,
+	query db.ListSyncedBlocksQuery) ([]db.Block, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).([]db.Block), args.Error(1)
+}
+
 // UpdateWallet implements the db.WalletStore interface.
 func (m *Store) UpdateWallet(ctx context.Context,
 	params db.UpdateWalletParams) error {

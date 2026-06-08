@@ -196,6 +196,11 @@ type WalletStore interface {
 	IterWallets(ctx context.Context,
 		query ListWalletsQuery) iter.Seq2[WalletInfo, error]
 
+	// ListSyncedBlocks returns the wallet's synced block metadata for the
+	// requested inclusive height range.
+	ListSyncedBlocks(ctx context.Context,
+		query ListSyncedBlocksQuery) ([]Block, error)
+
 	// UpdateWallet updates various properties of a wallet, such as its
 	// birthday, birthday block, or sync state. SQL multi-wallet backends
 	// return ErrWalletNotFound when the wallet ID is unknown. The legacy kvdb
