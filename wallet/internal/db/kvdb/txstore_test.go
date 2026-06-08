@@ -2943,3 +2943,84 @@ func TestApplyTxBatchCreditNilFallback(t *testing.T) {
 	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
 	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
 }
+
+// TestApplyScanBatchRecordsTxAndSyncedBlocks verifies that kvdb.Store applies
+// scan-discovered transactions and connected sync blocks in one write batch.
+func TestApplyScanBatchRecordsTxAndSyncedBlocks(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(false).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 11_000, PkScript: script})
+
+	syncedBlocks := []db.Block{{
+		Hash:      chainhash.Hash{66},
+		Height:    145,
+		Timestamp: time.Unix(1710003300, 0),
+	}, {
+		Hash:      chainhash.Hash{67},
+		Height:    146,
+		Timestamp: time.Unix(1710003400, 0),
+	}}
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003350, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: addr},
+		}},
+		SyncedBlocks: syncedBlocks,
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+
+		return nil
+	})
+	require.NoError(t, err)
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+	addrStore.AssertCalled(
+		t, "SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs.Height == int32(146)
+		}),
+	)
+}
