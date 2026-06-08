@@ -210,6 +210,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listAddressesByAccountStmt, err = db.PrepareContext(ctx, ListAddressesByAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAddressesByAccount: %w", err)
 	}
+	if q.listAddressesByScriptPubKeysStmt, err = db.PrepareContext(ctx, ListAddressesByScriptPubKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAddressesByScriptPubKeys: %w", err)
+	}
 	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
 	}
@@ -597,6 +600,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listAddressesByAccountStmt: %w", cerr)
 		}
 	}
+	if q.listAddressesByScriptPubKeysStmt != nil {
+		if cerr := q.listAddressesByScriptPubKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAddressesByScriptPubKeysStmt: %w", cerr)
+		}
+	}
 	if q.listKeyScopesByWalletStmt != nil {
 		if cerr := q.listKeyScopesByWalletStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listKeyScopesByWalletStmt: %w", cerr)
@@ -818,6 +826,7 @@ type Queries struct {
 	listActiveUtxoLeasesStmt                    *sql.Stmt
 	listAddressTypesStmt                        *sql.Stmt
 	listAddressesByAccountStmt                  *sql.Stmt
+	listAddressesByScriptPubKeysStmt            *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listOwnedInputPrevOutputsByTxHashesStmt     *sql.Stmt
 	listOwnedOutputsByTxIDsStmt                 *sql.Stmt
@@ -910,6 +919,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listActiveUtxoLeasesStmt:                    q.listActiveUtxoLeasesStmt,
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listAddressesByAccountStmt:                  q.listAddressesByAccountStmt,
+		listAddressesByScriptPubKeysStmt:            q.listAddressesByScriptPubKeysStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listOwnedInputPrevOutputsByTxHashesStmt:     q.listOwnedInputPrevOutputsByTxHashesStmt,
 		listOwnedOutputsByTxIDsStmt:                 q.listOwnedOutputsByTxIDsStmt,
