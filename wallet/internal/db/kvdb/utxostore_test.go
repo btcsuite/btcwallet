@@ -313,6 +313,37 @@ func TestDeleteExpiredLeases(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestListOutputsToWatchReturnsLockedCredit verifies that recovery watch lists
+// include credits even when they are currently leased.
+func TestListOutputsToWatchReturnsLockedCredit(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	pkScript := []byte{0x51, 0x21}
+	outPoint := insertKnownCredit(t, dbConn, txStore, pkScript, 3000, 4)
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		_, err := txStore.LockOutput(
+			ns, wtxmgr.LockID{3}, outPoint, time.Hour,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	utxos, err := store.ListOutputsToWatch(t.Context(), 0)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, outPoint, utxos[0].OutPoint)
+	require.Equal(t, pkScript, utxos[0].PkScript)
+}
+
 // TestGetUtxoSuccess verifies that kvdb.Store adapts one wallet-owned legacy
 // credit into the db-native UTXO shape.
 func TestGetUtxoSuccess(t *testing.T) {

@@ -186,6 +186,42 @@ func (s *Store) ListUTXOs(_ context.Context,
 	return utxos, nil
 }
 
+// ListOutputsToWatch lists outputs that recovery scans should monitor through
+// the legacy wtxmgr query path.
+func (s *Store) ListOutputsToWatch(_ context.Context,
+	_ uint32) ([]db.UtxoInfo, error) {
+
+	var utxos []db.UtxoInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		credits, err := s.txStore.OutputsToWatch(txmgrNs)
+		if err != nil {
+			return fmt.Errorf("outputs to watch: %w", err)
+		}
+
+		utxos = make([]db.UtxoInfo, len(credits))
+		for i := range credits {
+			utxos[i] = *utxoInfoBase(&credits[i])
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListOutputsToWatch: %w", err)
+	}
+
+	if len(utxos) == 0 {
+		return []db.UtxoInfo{}, nil
+	}
+
+	return utxos, nil
+}
+
 // LeaseOutput locks one known wallet UTXO through the legacy wtxmgr lease
 // path.
 func (s *Store) LeaseOutput(_ context.Context,
