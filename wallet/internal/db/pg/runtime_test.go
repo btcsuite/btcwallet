@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"io"
 	"testing"
+	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
@@ -96,4 +99,38 @@ func TestClassifyErrorBackendErrors(t *testing.T) {
 			require.Equal(t, dberr.BackendPostgres, sqlErr.Backend)
 		})
 	}
+}
+
+// TestListSyncedBlocksBuildsBlock verifies that PostgreSQL maps one block row
+// into the shared db.Block shape.
+func TestListSyncedBlocksBuildsBlock(t *testing.T) {
+	t.Parallel()
+
+	blockHash := chainhash.Hash{11, 12, 13}
+	timestamp := time.Unix(1710003600, 0)
+
+	// A single-row range result drives the :many GetBlocksInRange scan path
+	// without standing up a real postgres store.
+	rows := newSQLiteRows(
+		t, "SELECT ?, ?, ?", int32(144), blockHash[:], timestamp.Unix(),
+	)
+	require.NoError(t, rows.Err())
+
+	store := &Store{
+		queries: sqlc.New(rowDBTX{queryRows: rows}),
+	}
+
+	blocks, err := store.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			StartHeight: 144,
+			EndHeight:   144,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.Equal(t, db.Block{
+		Hash:      blockHash,
+		Height:    144,
+		Timestamp: timestamp,
+	}, blocks[0])
 }
