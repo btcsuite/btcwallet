@@ -115,6 +115,295 @@ func TestCreateTxDuplicateReturnsStoreError(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
 }
 
+// TestApplyTxBatchRecordsTxAndSyncedTo verifies that kvdb.Store applies
+// transaction notifications and sync-tip updates atomically.
+func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(true).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{63},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
+
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{64},
+		Height:    144,
+		Timestamp: time.Unix(1710003200, 0),
+	}
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003100, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: addr},
+		}},
+		SyncedTo: syncedTo,
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+		require.True(t, details.Credits[0].Change)
+
+		return nil
+	})
+	require.NoError(t, err)
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+	addrStore.AssertCalled(
+		t, "SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs.Height == int32(syncedTo.Height)
+		}),
+	)
+}
+
+// TestApplyTxBatchEmptyNoAddrStore verifies that a batch with no transactions
+// and no sync-tip update returns nil without an address manager and without
+// opening a write transaction. The store is built with a nil addrStore and the
+// db has no namespaces, so any attempt to open the addrmgr bucket would fail;
+// a nil error therefore proves the empty batch short-circuits before
+// walletdb.Update.
+func TestApplyTxBatchEmptyNoAddrStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	// Deliberately create no namespaces and pass a nil addrStore: an empty
+	// batch must touch neither.
+	store := NewStore(dbConn, nil, nil)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{WalletID: 0})
+	require.NoError(t, err)
+}
+
+// TestApplyTxBatchCreditAddrMismatch verifies that the batch credit path
+// rejects a credit whose address the output script does not pay, with the same
+// ErrInvalidParam the CreateTx path returns. This guards against recording a
+// UTXO owned by an unrelated address.
+func TestApplyTxBatchCreditAddrMismatch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	// The output pays to one address, but the credit claims otherAddr,
+	// which the output script does not contain.
+	_, script := newTestAddressScript(t)
+	otherAddr, _ := newTestAddressScript(t)
+
+	// Register no Address/MarkUsed expectations: validation must reject the
+	// mismatch before the address manager is consulted.
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{67},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 7_000, PkScript: script})
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003600, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: otherAddr},
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// The mismatch must be caught before any address-manager access.
+	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
+	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+}
+
+// TestApplyTxBatchCreditNilFallback verifies that a nil credit address in the
+// batch path records the credit via the output's own script, matching the
+// CreateTx fallback and the SQL backends. The nil path must not consult the
+// address manager (no Address/MarkUsed lookup) and must not panic.
+func TestApplyTxBatchCreditNilFallback(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	_, script := newTestAddressScript(t)
+
+	// A non-nil addrStore is required because the batch is non-empty, but
+	// the nil-credit path must only read ChainParams and never resolve or
+	// mark an address. Register no Address/MarkUsed expectations so a
+	// regression that consults the address manager surfaces here.
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{68},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 4_000, PkScript: script})
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003700, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		}},
+	})
+	require.NoError(t, err)
+
+	// The credit is recorded from the output index alone, with change
+	// cleared because there is no resolved derivation branch.
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+		require.Equal(t, uint32(0), details.Credits[0].Index)
+		require.False(t, details.Credits[0].Change)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// The address manager must not have been consulted for a nil credit.
+	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
+	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+}
+
+// TestApplyScanBatchRecordsTxAndSyncedBlocks verifies that kvdb.Store applies
+// scan-discovered transactions and connected sync blocks in one write batch.
+func TestApplyScanBatchRecordsTxAndSyncedBlocks(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(false).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 11_000, PkScript: script})
+
+	syncedBlocks := []db.Block{{
+		Hash:      chainhash.Hash{66},
+		Height:    145,
+		Timestamp: time.Unix(1710003300, 0),
+	}, {
+		Hash:      chainhash.Hash{67},
+		Height:    146,
+		Timestamp: time.Unix(1710003400, 0),
+	}}
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003350, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: addr},
+		}},
+		SyncedBlocks: syncedBlocks,
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+
+		return nil
+	})
+	require.NoError(t, err)
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+	addrStore.AssertCalled(
+		t, "SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs.Height == int32(146)
+		}),
+	)
+}
+
 // TestCreateTxCreditAddrMismatch verifies that crediting an output with an
 // address that the output script does not pay to is rejected, so a caller
 // cannot corrupt UTXO ownership by mislabeling a credit.
@@ -960,212 +1249,4 @@ func newMultisigScript(t *testing.T) (btcutil.Address, []byte) {
 	require.NoError(t, err)
 
 	return memberAddr, script
-}
-
-// TestApplyTxBatchRecordsTxAndSyncedTo verifies that kvdb.Store applies
-// transaction notifications and sync-tip updates atomically.
-func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
-	t.Parallel()
-
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
-
-	newAddrmgrNamespace(t, dbConn)
-	txStore := newTxStore(t, dbConn)
-
-	addr, script := newTestAddressScript(t)
-	managedAddr := &bwmock.ManagedAddress{}
-	managedAddr.On("Internal").Return(true).Maybe()
-	managedAddr.On("Address").Return(addr).Maybe()
-	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
-	managedAddr.On("Imported").Return(false).Maybe()
-	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
-	managedAddr.On("Compressed").Return(true).Maybe()
-	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
-	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
-
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
-	addrStore.On("Address", mock.Anything, mock.Anything).
-		Return(managedAddr, nil)
-	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
-	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
-	store := NewStore(dbConn, txStore, addrStore)
-
-	txMsg := &wire.MsgTx{Version: 1}
-	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{63},
-	}})
-	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
-
-	syncedTo := &db.Block{
-		Hash:      chainhash.Hash{64},
-		Height:    144,
-		Timestamp: time.Unix(1710003200, 0),
-	}
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
-		WalletID: 0,
-		Transactions: []db.CreateTxParams{{
-			WalletID: 0,
-			Tx:       txMsg,
-			Received: time.Unix(1710003100, 0),
-			Status:   db.TxStatusPublished,
-			Credits:  map[uint32]btcutil.Address{0: addr},
-		}},
-		SyncedTo: syncedTo,
-	})
-	require.NoError(t, err)
-
-	txid := txMsg.TxHash()
-	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		require.NotNil(t, ns)
-
-		details, err := txStore.TxDetails(ns, &txid)
-		require.NoError(t, err)
-		require.NotNil(t, details)
-		require.Len(t, details.Credits, 1)
-		require.True(t, details.Credits[0].Change)
-
-		return nil
-	})
-	require.NoError(t, err)
-	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
-	addrStore.AssertCalled(
-		t, "SetSyncedTo", mock.Anything,
-		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
-			return bs.Height == int32(syncedTo.Height)
-		}),
-	)
-}
-
-// TestApplyTxBatchEmptyNoAddrStore verifies that a batch with no transactions
-// and no sync-tip update returns nil without an address manager and without
-// opening a write transaction. The store is built with a nil addrStore and the
-// db has no namespaces, so any attempt to open the addrmgr bucket would fail;
-// a nil error therefore proves the empty batch short-circuits before
-// walletdb.Update.
-func TestApplyTxBatchEmptyNoAddrStore(t *testing.T) {
-	t.Parallel()
-
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
-
-	// Deliberately create no namespaces and pass a nil addrStore: an empty
-	// batch must touch neither.
-	store := NewStore(dbConn, nil, nil)
-
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{WalletID: 0})
-	require.NoError(t, err)
-}
-
-// TestApplyTxBatchCreditAddrMismatch verifies that the batch credit path
-// rejects a credit whose address the output script does not pay, with the same
-// ErrInvalidParam the CreateTx path returns. This guards against recording a
-// UTXO owned by an unrelated address.
-func TestApplyTxBatchCreditAddrMismatch(t *testing.T) {
-	t.Parallel()
-
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
-
-	newAddrmgrNamespace(t, dbConn)
-	txStore := newTxStore(t, dbConn)
-
-	// The output pays to one address, but the credit claims otherAddr,
-	// which the output script does not contain.
-	_, script := newTestAddressScript(t)
-	otherAddr, _ := newTestAddressScript(t)
-
-	// Register no Address/MarkUsed expectations: validation must reject the
-	// mismatch before the address manager is consulted.
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
-	store := NewStore(dbConn, txStore, addrStore)
-
-	txMsg := &wire.MsgTx{Version: 1}
-	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{67},
-	}})
-	txMsg.AddTxOut(&wire.TxOut{Value: 7_000, PkScript: script})
-
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
-		WalletID: 0,
-		Transactions: []db.CreateTxParams{{
-			WalletID: 0,
-			Tx:       txMsg,
-			Received: time.Unix(1710003600, 0),
-			Status:   db.TxStatusPublished,
-			Credits:  map[uint32]btcutil.Address{0: otherAddr},
-		}},
-	})
-	require.ErrorIs(t, err, db.ErrInvalidParam)
-
-	// The mismatch must be caught before any address-manager access.
-	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
-	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
-}
-
-// TestApplyTxBatchCreditNilFallback verifies that a nil credit address in the
-// batch path records the credit via the output's own script, matching the
-// CreateTx fallback and the SQL backends. The nil path must not consult the
-// address manager (no Address/MarkUsed lookup) and must not panic.
-func TestApplyTxBatchCreditNilFallback(t *testing.T) {
-	t.Parallel()
-
-	dbConn, cleanup := newTestDB(t)
-	t.Cleanup(cleanup)
-
-	newAddrmgrNamespace(t, dbConn)
-	txStore := newTxStore(t, dbConn)
-
-	_, script := newTestAddressScript(t)
-
-	// A non-nil addrStore is required because the batch is non-empty, but
-	// the nil-credit path must only read ChainParams and never resolve or
-	// mark an address. Register no Address/MarkUsed expectations so a
-	// regression that consults the address manager surfaces here.
-	addrStore := &bwmock.AddrStore{}
-	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
-	store := NewStore(dbConn, txStore, addrStore)
-
-	txMsg := &wire.MsgTx{Version: 1}
-	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{68},
-	}})
-	txMsg.AddTxOut(&wire.TxOut{Value: 4_000, PkScript: script})
-
-	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
-		WalletID: 0,
-		Transactions: []db.CreateTxParams{{
-			WalletID: 0,
-			Tx:       txMsg,
-			Received: time.Unix(1710003700, 0),
-			Status:   db.TxStatusPublished,
-			Credits:  map[uint32]btcutil.Address{0: nil},
-		}},
-	})
-	require.NoError(t, err)
-
-	// The credit is recorded from the output index alone, with change
-	// cleared because there is no resolved derivation branch.
-	txid := txMsg.TxHash()
-	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		require.NotNil(t, ns)
-
-		details, err := txStore.TxDetails(ns, &txid)
-		require.NoError(t, err)
-		require.NotNil(t, details)
-		require.Len(t, details.Credits, 1)
-		require.Equal(t, uint32(0), details.Credits[0].Index)
-		require.False(t, details.Credits[0].Change)
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	// The address manager must not have been consulted for a nil credit.
-	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
-	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
 }
