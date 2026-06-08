@@ -417,6 +417,9 @@ type TxStore interface {
 	// optional wallet sync-tip update.
 	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
 
+	// ApplyScanBatch atomically records recovery scan writes for one wallet.
+	ApplyScanBatch(ctx context.Context, params ScanBatchParams) error
+
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
 	// transaction is not found.
