@@ -152,6 +152,45 @@ func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesB
 	return items, nil
 }
 
+const AdvanceNextExternalIndex = `-- name: AdvanceNextExternalIndex :exec
+UPDATE accounts
+SET next_external_index = max(next_external_index, ?1)
+WHERE id = ?2
+`
+
+type AdvanceNextExternalIndexParams struct {
+	NextIndex interface{}
+	ID        int64
+}
+
+// Advances the external branch's next index to the supplied value during
+// recovery horizon extension. The MAX guard keeps the counter monotonic so a
+// slower concurrent writer cannot regress it below an already-recorded index.
+func (q *Queries) AdvanceNextExternalIndex(ctx context.Context, arg AdvanceNextExternalIndexParams) error {
+	_, err := q.exec(ctx, q.advanceNextExternalIndexStmt, AdvanceNextExternalIndex, arg.NextIndex, arg.ID)
+	return err
+}
+
+const AdvanceNextInternalIndex = `-- name: AdvanceNextInternalIndex :exec
+UPDATE accounts
+SET next_internal_index = max(next_internal_index, ?1)
+WHERE id = ?2
+`
+
+type AdvanceNextInternalIndexParams struct {
+	NextIndex interface{}
+	ID        int64
+}
+
+// Advances the internal/change branch's next index to the supplied value
+// during recovery horizon extension. The MAX guard keeps the counter monotonic
+// so a slower concurrent writer cannot regress it below an already-recorded
+// index.
+func (q *Queries) AdvanceNextInternalIndex(ctx context.Context, arg AdvanceNextInternalIndexParams) error {
+	_, err := q.exec(ctx, q.advanceNextInternalIndexStmt, AdvanceNextInternalIndex, arg.NextIndex, arg.ID)
+	return err
+}
+
 const CreateAccountSecret = `-- name: CreateAccountSecret :exec
 INSERT INTO account_secrets (
     account_id,
