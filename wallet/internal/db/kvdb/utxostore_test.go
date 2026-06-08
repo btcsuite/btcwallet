@@ -226,6 +226,93 @@ func TestReleaseOutputAlreadyUnlocked(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestDeleteExpiredLeases verifies that expired output leases are removed while
+// active leases remain in the legacy wtxmgr store.
+func TestDeleteExpiredLeases(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	var expired, active wire.OutPoint
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		recExpired, err := wtxmgr.NewTxRecordFromMsgTx(
+			&wire.MsgTx{Version: 1, TxOut: []*wire.TxOut{{
+				Value:    1000,
+				PkScript: []byte{0x51},
+			}}}, time.Now(),
+		)
+		if err != nil {
+			return err
+		}
+
+		recActive, err := wtxmgr.NewTxRecordFromMsgTx(
+			&wire.MsgTx{Version: 1, TxOut: []*wire.TxOut{{
+				Value:    2000,
+				PkScript: []byte{0x51},
+			}}}, time.Now(),
+		)
+		if err != nil {
+			return err
+		}
+
+		block := &wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 1}}
+
+		err = txStore.InsertTx(ns, recExpired, block)
+		if err != nil {
+			return err
+		}
+
+		err = txStore.AddCredit(ns, recExpired, block, 0, false)
+		if err != nil {
+			return err
+		}
+
+		err = txStore.InsertTx(ns, recActive, block)
+		if err != nil {
+			return err
+		}
+
+		err = txStore.AddCredit(ns, recActive, block, 0, false)
+		if err != nil {
+			return err
+		}
+
+		expired = wire.OutPoint{Hash: recExpired.Hash, Index: 0}
+		active = wire.OutPoint{Hash: recActive.Hash, Index: 0}
+
+		_, err = txStore.LockOutput(ns, wtxmgr.LockID{1}, expired, -time.Hour)
+		if err != nil {
+			return err
+		}
+
+		_, err = txStore.LockOutput(ns, wtxmgr.LockID{2}, active, time.Hour)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	err = store.DeleteExpiredLeases(t.Context(), 0)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		locked, err := txStore.ListLockedOutputs(ns)
+		require.NoError(t, err)
+		require.Len(t, locked, 1)
+		require.Equal(t, active, locked[0].Outpoint)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 // TestGetUtxoSuccess verifies that kvdb.Store adapts one wallet-owned legacy
 // credit into the db-native UTXO shape.
 func TestGetUtxoSuccess(t *testing.T) {
