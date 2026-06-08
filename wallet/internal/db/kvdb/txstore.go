@@ -289,6 +289,95 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	return nil
 }
 
+// legacyCreditEntries converts db-native credit addresses into legacy credit
+// entries and marks resolved addresses as used.
+//
+// Each non-nil credit is validated against the output script it claims to
+// credit using the same membership check the CreateTx path applies in
+// addCreateTxCredit, so the batch path cannot record a UTXO owned by an
+// address the output does not pay. A nil credit means the caller has no
+// resolved owner, so ownership is keyed on the output's own script: the entry
+// is recorded from the output index alone, with no address-manager lookup or
+// used-marking, matching CreateTx and the SQL backends.
+func (s *Store) legacyCreditEntries(addrmgrNs walletdb.ReadWriteBucket,
+	req db.CreateTxRequest) ([]wtxmgr.CreditEntry, error) {
+
+	chainParams := s.addrStore.ChainParams()
+
+	credits := make([]wtxmgr.CreditEntry, 0, len(req.Params.Credits))
+	for index, addr := range req.Params.Credits {
+		// A nil credit address has no owner to resolve, so key the
+		// credit on the output's own script: record it from the index
+		// with change cleared, skipping the address-manager lookup and
+		// the membership check that has no caller address to validate.
+		if addr == nil {
+			if int(index) >= len(req.Params.Tx.TxOut) {
+				return nil, fmt.Errorf("credit output %d: %w: "+
+					"index out of range", index,
+					db.ErrInvalidParam)
+			}
+
+			credits = append(credits, wtxmgr.CreditEntry{
+				Index:  index,
+				Change: false,
+			})
+
+			continue
+		}
+
+		// Validate the caller-supplied credit against the actual output
+		// script before trusting it, rejecting a mismatch with the same
+		// error CreateTx uses.
+		err := validateCreditAddr(
+			*req.Params.Tx, index, addr, chainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, fmt.Errorf("credit output %d: %w", index,
+				db.ErrAddressNotFound)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("lookup credit address %d: %w",
+				index, err)
+		}
+
+		credits = append(credits, wtxmgr.CreditEntry{
+			Index:  index,
+			Change: managedAddr.Internal(),
+		})
+
+		err = s.addrStore.MarkUsed(addrmgrNs, addr)
+		if err != nil {
+			return nil, fmt.Errorf("mark credit address used %d: %w",
+				index, err)
+		}
+	}
+
+	return credits, nil
+}
+
+// kvdbTxBlockMeta converts store block metadata into legacy transaction block
+// metadata.
+func kvdbTxBlockMeta(block *db.Block) (*wtxmgr.BlockMeta, error) {
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return nil, fmt.Errorf("convert block height: %w", err)
+	}
+
+	return &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   block.Hash,
+			Height: height,
+		},
+		Time: block.Timestamp,
+	}, nil
+}
+
 // GetTx retrieves one wallet-scoped transaction snapshot through the legacy
 // wtxmgr query path.
 func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
