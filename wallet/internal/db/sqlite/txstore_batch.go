@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -25,20 +26,7 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 		}
 
 		for i := range params.Transactions {
-			req, err := db.NewCreateTxRequest(params.Transactions[i])
-			if err != nil {
-				return fmt.Errorf("validate tx %d: %w", i, err)
-			}
-
-			err = db.CreateTxWithOps(ctx, req, &createTxOps{
-				invalidateUnminedTxOps: invalidateUnminedTxOps{
-					qtx: qtx,
-				},
-			})
-			if errors.Is(err, db.ErrTxAlreadyExists) {
-				continue
-			}
-
+			err = applyBatchTransaction(ctx, qtx, params.Transactions[i])
 			if err != nil {
 				return fmt.Errorf("create tx %d: %w", i, err)
 			}
@@ -46,6 +34,74 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 
 		return nil
 	})
+}
+
+// applyBatchTransaction records one transaction from a runtime batch.
+func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams) error {
+
+	req, err := db.NewCreateTxRequest(params)
+	if err != nil {
+		return fmt.Errorf("validate tx: %w", err)
+	}
+
+	err = db.CreateTxWithOps(ctx, req, &createTxOps{
+		invalidateUnminedTxOps: invalidateUnminedTxOps{
+			qtx: qtx,
+		},
+	})
+	if !errors.Is(err, db.ErrTxAlreadyExists) {
+		return err
+	}
+
+	skip, skipErr := canSkipBatchDuplicate(ctx, qtx, req)
+	if skipErr != nil {
+		return skipErr
+	}
+
+	if skip {
+		return nil
+	}
+
+	return err
+}
+
+// canSkipBatchDuplicate reports whether an existing transaction row matches
+// the duplicate observation closely enough for ApplyTxBatch/ApplyScanBatch to
+// treat it as an idempotent retry.
+func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest) (bool, error) {
+
+	row, err := qtx.GetTransactionByHash(
+		ctx, sqlc.GetTransactionByHashParams{
+			WalletID: int64(req.Params.WalletID),
+			TxHash:   req.TxHash[:],
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("get duplicate tx: %w", err)
+	}
+
+	status, err := db.ParseTxStatus(row.TxStatus)
+	if err != nil {
+		return false, fmt.Errorf("parse duplicate tx status: %w", err)
+	}
+
+	var block *db.Block
+	if row.BlockHeight.Valid {
+		block, err = buildBlock(
+			row.BlockHeight, row.BlockHash, row.BlockTimestamp,
+		)
+		if err != nil {
+			return false, fmt.Errorf("build duplicate tx block: %w", err)
+		}
+	}
+
+	return db.CanSkipCreateTxDuplicate(req, status, block), nil
 }
 
 // applyBatchSyncTip applies the optional sync-tip update within a batch.
