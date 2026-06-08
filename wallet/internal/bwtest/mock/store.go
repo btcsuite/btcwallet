@@ -431,6 +431,15 @@ func (m *Store) ApplyTxBatch(ctx context.Context,
 	return args.Error(0)
 }
 
+// ApplyScanBatch implements the db.TxStore interface.
+func (m *Store) ApplyScanBatch(ctx context.Context,
+	params db.ScanBatchParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
 // GetTx implements the db.TxStore interface.
 func (m *Store) GetTx(ctx context.Context,
 	query db.GetTxQuery) (*db.TxInfo, error) {
