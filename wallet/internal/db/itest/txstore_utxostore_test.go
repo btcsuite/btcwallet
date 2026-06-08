@@ -2901,3 +2901,74 @@ func txDetailHashes(infos []db.TxDetailInfo) []chainhash.Hash {
 
 	return hashes
 }
+
+// TestListOutputsToWatchBareMultisigUsesOutputScript verifies that the recovery
+// watch set reports the actual on-chain output script for a bare-multisig
+// output the wallet partly owns, rather than the member address's own script.
+//
+// A bare-multisig output is credited to one of its member pubkey addresses, so
+// the stored UTXO resolves to that member address. The member's own script
+// (PayToAddrScript) differs from the full multisig output script. A rescan must
+// watch the output script the chain actually carries, so ListOutputsToWatch
+// must derive the watch script from the funding transaction's
+// TxOut[output_index].PkScript, not from the credited address row. This locks
+// in parity with the kvdb backend, whose credit walk records the on-chain
+// output script.
+//
+// Without the fix, the query returns addresses.script_pub_key (the member's
+// P2PK script), so the rescan would watch a script the multisig output never
+// pays, and a recovered spend would be missed.
+func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	// A script-only import (no private key) requires a watch-only wallet per
+	// the ADR 0012 spendable-wallet invariant.
+	walletID := newWatchOnlyWallet(t, store, "wallet-watch-bare-multisig")
+
+	// memberScript is the member's own P2PK script (registered as the wallet
+	// address); multiSigScript is the full on-chain output script, which is
+	// never registered as an address.
+	memberAddr, memberScript, multiSigScript := newMultisigScript(t)
+	require.NotEqual(t, memberScript, multiSigScript)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			AddressType:     db.RawPubKey,
+			PubKey:          memberAddr.ScriptAddress(),
+			ScriptPubKey:    memberScript,
+			EncryptedScript: RandomBytes(48),
+		},
+	)
+	require.NoError(t, err)
+
+	// The funding transaction pays the bare-multisig output; Credits[0]
+	// carries the resolved member address exactly as the publisher supplies
+	// it after filtering ownership by the member script.
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: multiSigScript}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004500, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: memberAddr},
+	})
+	require.NoError(t, err)
+
+	utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+
+	outPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+	require.Equal(t, outPoint, utxos[0].OutPoint)
+
+	// The watch script must be the on-chain multisig output script, not the
+	// member address's own script that the UTXO row resolves to.
+	require.Equal(t, multiSigScript, utxos[0].PkScript)
+	require.NotEqual(t, memberScript, utxos[0].PkScript)
+}
