@@ -2983,3 +2983,88 @@ func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
 	require.Equal(t, multiSigScript, utxos[0].PkScript)
 	require.NotEqual(t, memberScript, utxos[0].PkScript)
 }
+
+// TestApplyTxBatchChildBeforeParent verifies that ApplyTxBatch records the
+// parent->child spend edge even when the child transaction is listed before
+// the in-batch parent whose output it spends. Each transaction claims its spent
+// parent inputs by updating the parent credit's UTXO row, so a child applied
+// before its parent would update no row and, finding no conflicting spend,
+// silently drop the spend edge while still succeeding. ApplyTxBatch must apply
+// the batch parents-first so the parent credit ends up marked spent regardless
+// of caller order.
+func TestApplyTxBatchChildBeforeParent(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-tx-batch-child-first")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	childAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	// The parent spends an external input and credits the wallet at output 0.
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: parentAddr.ScriptPubKey}},
+	)
+
+	// The child spends the parent's wallet-owned output and credits the wallet
+	// at its own output 0.
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 6000, PkScript: childAddr.ScriptPubKey}},
+	)
+
+	// Deliberately list the child before its in-batch parent. A caller-order
+	// apply would record the child first, drop its spend of the not-yet-stored
+	// parent output, and leave the parent credit unspent.
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: walletID,
+				Tx:       childTx,
+				Received: time.Unix(1710000180, 0),
+				Status:   db.TxStatusPending,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID,
+				Tx:       parentTx,
+				Received: time.Unix(1710000181, 0),
+				Status:   db.TxStatusPending,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Both transactions are recorded.
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     parentTx.TxHash(),
+	})
+	require.NoError(t, err)
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     childTx.TxHash(),
+	})
+	require.NoError(t, err)
+
+	// The child's own credit is recorded as a wallet UTXO.
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: childTx.TxHash(), Index: 0,
+	}))
+
+	// The parent credit must be marked spent: the in-batch child's spend edge
+	// was recorded even though the child was applied first. Without the
+	// parents-first ordering this edge is silently dropped and the assertion
+	// fails.
+	require.True(t, walletUtxoSpent(t, store, walletID, wire.OutPoint{
+		Hash: parentTx.TxHash(), Index: 0,
+	}))
+}
