@@ -2798,3 +2798,118 @@ func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
 	require.Equal(t, multiSigScript, utxos[0].PkScript)
 	require.NotEqual(t, memberScript, utxos[0].PkScript)
 }
+
+// TestApplyTxBatchStoresTxAndSyncTip verifies that a runtime batch can persist
+// transaction history and advance the wallet sync tip atomically.
+func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	syncedTo := NewBlockFixture(212)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000150, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		}},
+		SyncedTo: &syncedTo,
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPending, txInfo.Status)
+	require.Nil(t, txInfo.Block)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, syncedTo.Hash, walletInfo.SyncedTo.Hash)
+	require.Equal(t, syncedTo.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, syncedTo.Timestamp.Unix(),
+		walletInfo.SyncedTo.Timestamp.Unix())
+}
+
+// TestApplyTxBatchConfirmsTxInSameBlock verifies that a batch can record a
+// transaction confirmed in the very block the same batch introduces as the new
+// sync tip. The confirming block row does not exist before the batch, so the
+// batch must create the sync-tip block before recording the confirmed
+// transaction; otherwise the confirmed insert fails with ErrBlockNotFound.
+func TestApplyTxBatchConfirmsTxInSameBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-confirmed"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	// The confirming block is also the batch's new sync tip. It is not
+	// inserted ahead of time, so the batch itself must create it before the
+	// confirmed transaction is recorded.
+	block := NewBlockFixture(213)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000160, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]btcutil.Address{0: nil},
+		}},
+		SyncedTo: &block,
+	})
+	require.NoError(t, err)
+
+	// The transaction is recorded as confirmed in the batch's block and its
+	// credited output is in the wallet UTXO set.
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+
+	// The sync tip advanced to the same block.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, block.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, block.Hash, walletInfo.SyncedTo.Hash)
+}
