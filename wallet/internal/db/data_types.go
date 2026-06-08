@@ -262,6 +262,18 @@ type ListWalletsQuery struct {
 	Page page.Request[uint32]
 }
 
+// ListSyncedBlocksQuery contains the requested synced block height range.
+//
+// Synced block metadata is shared chain state rather than wallet-scoped state,
+// so the query carries no wallet ID.
+type ListSyncedBlocksQuery struct {
+	// StartHeight is the first block height to include.
+	StartHeight uint32
+
+	// EndHeight is the final block height to include.
+	EndHeight uint32
+}
+
 // CreateWalletParams contains the parameters required to create a new wallet.
 type CreateWalletParams struct {
 	// Name is the name of the new wallet.
