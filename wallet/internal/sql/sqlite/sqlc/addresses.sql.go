@@ -8,6 +8,7 @@ package sqlc
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -335,6 +336,122 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 	var items []ListAddressesByAccountRow
 	for rows.Next() {
 		var i ListAddressesByAccountRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountID,
+			&i.AccountNumber,
+			&i.AccountName,
+			&i.Purpose,
+			&i.CoinType,
+			&i.TypeID,
+			&i.AddressBranch,
+			&i.AddressIndex,
+			&i.ScriptPubKey,
+			&i.PubKey,
+			&i.CreatedAt,
+			&i.OriginID,
+			&i.MasterFingerprint,
+			&i.WalletIsWatchOnly,
+			&i.IsUsed,
+			&i.HasScript,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListAddressesByScriptPubKeys = `-- name: ListAddressesByScriptPubKeys :many
+SELECT
+    a.id,
+    a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
+    a.type_id,
+    a.address_branch,
+    a.address_index,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    acc.origin_id,
+    acc.master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
+    s.encrypted_script IS NOT NULL AS has_script
+FROM addresses AS a
+INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    a.wallet_id = ?
+    AND a.script_pub_key IN (/*SLICE:script_pub_keys*/?)
+`
+
+type ListAddressesByScriptPubKeysParams struct {
+	WalletID      int64
+	ScriptPubKeys [][]byte
+}
+
+type ListAddressesByScriptPubKeysRow struct {
+	ID                int64
+	AccountID         int64
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	Purpose           int64
+	CoinType          int64
+	TypeID            int64
+	AddressBranch     sql.NullInt64
+	AddressIndex      sql.NullInt64
+	ScriptPubKey      []byte
+	PubKey            []byte
+	CreatedAt         time.Time
+	OriginID          int64
+	MasterFingerprint sql.NullInt64
+	WalletIsWatchOnly bool
+	IsUsed            bool
+	HasScript         bool
+}
+
+// Resolves a batch of script pubkeys to the wallet-owned address rows in a
+// single query. Returns one row per matching script; scripts with no matching
+// address are simply absent from the result. The Go caller is responsible for
+// short-circuiting an empty script set before issuing this query.
+func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error) {
+	query := ListAddressesByScriptPubKeys
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.WalletID)
+	if len(arg.ScriptPubKeys) > 0 {
+		for _, v := range arg.ScriptPubKeys {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:script_pub_keys*/?", strings.Repeat(",?", len(arg.ScriptPubKeys))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:script_pub_keys*/?", "NULL", 1)
+	}
+	rows, err := q.query(ctx, nil, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAddressesByScriptPubKeysRow
+	for rows.Next() {
+		var i ListAddressesByScriptPubKeysRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.AccountID,
