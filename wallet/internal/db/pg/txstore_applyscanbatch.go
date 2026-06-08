@@ -17,6 +17,9 @@ type scanHorizonOps struct {
 	walletID uint32
 }
 
+// A compile-time assertion that scanHorizonOps satisfies the shared interface.
+var _ db.ScanHorizonOps = (*scanHorizonOps)(nil)
+
 // horizonAccountRow is the subset of an account lookup row that both the
 // by-name and by-number horizon resolution paths produce, letting them share a
 // single HorizonAccount builder.
@@ -85,6 +88,58 @@ func buildHorizonAccount(row horizonAccountRow) (*db.HorizonAccount, error) {
 		NextExternalIndex: nextExternal,
 		NextInternalIndex: nextInternal,
 	}, nil
+}
+
+// InsertDerivedAddress persists one derived address row at a fixed index.
+func (o scanHorizonOps) InsertDerivedAddress(ctx context.Context,
+	accountID int64, addrType db.AddressType, branch uint32, index uint32,
+	scriptPubKey []byte, pubKey []byte) error {
+
+	params, err := buildDerivedAddressParams(
+		int64(o.walletID), accountID, addrType, branch, index,
+		scriptPubKey, pubKey,
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = o.qtx.CreateDerivedAddress(ctx, params)
+	if err != nil {
+		return fmt.Errorf("create derived address: %w", err)
+	}
+
+	return nil
+}
+
+// AdvanceNextIndex moves the branch's next-index counter up to nextIndex.
+func (o scanHorizonOps) AdvanceNextIndex(ctx context.Context, accountID int64,
+	branch uint32, nextIndex uint32) error {
+
+	if branch == 1 {
+		err := o.qtx.AdvanceNextInternalIndex(
+			ctx, sqlc.AdvanceNextInternalIndexParams{
+				NextIndex: int64(nextIndex),
+				ID:        accountID,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("advance internal index: %w", err)
+		}
+
+		return nil
+	}
+
+	err := o.qtx.AdvanceNextExternalIndex(
+		ctx, sqlc.AdvanceNextExternalIndexParams{
+			NextIndex: int64(nextIndex),
+			ID:        accountID,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("advance external index: %w", err)
+	}
+
+	return nil
 }
 
 // horizonAccountByName resolves the horizon's owning account by its scope and
