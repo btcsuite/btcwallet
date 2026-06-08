@@ -3057,3 +3057,226 @@ func TestApplyTxBatchChildBeforeParent(t *testing.T) {
 		Hash: parentTx.TxHash(), Index: 0,
 	}))
 }
+
+// TestApplyTxBatchStoresTxAndSyncTip verifies that a runtime batch can persist
+// transaction history and advance the wallet sync tip atomically.
+func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	syncedTo := NewBlockFixture(212)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000150, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &syncedTo,
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPending, txInfo.Status)
+	require.Nil(t, txInfo.Block)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, syncedTo.Hash, walletInfo.SyncedTo.Hash)
+	require.Equal(t, syncedTo.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, syncedTo.Timestamp.Unix(),
+		walletInfo.SyncedTo.Timestamp.Unix())
+}
+
+// TestApplyTxBatchConfirmsTxInSameBlock verifies that a batch can record a
+// transaction confirmed in the very block the same batch introduces as the new
+// sync tip. The confirming block row does not exist before the batch, so the
+// batch must create the sync-tip block before recording the confirmed
+// transaction; otherwise the confirmed insert fails with ErrBlockNotFound.
+func TestApplyTxBatchConfirmsTxInSameBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-confirmed"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	// The confirming block is also the batch's new sync tip. It is not
+	// inserted ahead of time, so the batch itself must create it before the
+	// confirmed transaction is recorded.
+	block := NewBlockFixture(213)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000160, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &block,
+	})
+	require.NoError(t, err)
+
+	// The transaction is recorded as confirmed in the batch's block and its
+	// credited output is in the wallet UTXO set.
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+
+	// The sync tip advanced to the same block.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, block.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, block.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyTxBatchRejectsMismatchedWalletID verifies that a batch is rejected
+// when any transaction is owned by a wallet other than the batch wallet, and
+// that the rejection commits nothing: the sync tip is not advanced and no
+// transaction row is written.
+func TestApplyTxBatchRejectsMismatchedWalletID(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-mismatch"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	syncedTo := NewBlockFixture(214)
+
+	// The batch targets walletID, but the lone transaction claims a different
+	// wallet. The whole batch must be rejected before any write.
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID + 99,
+			Tx:       tx,
+			Received: time.Unix(1710000170, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &syncedTo,
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// The sync tip was not advanced: the wallet is still unsynced.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.Nil(t, walletInfo.SyncedTo)
+
+	// No transaction row was written for either wallet.
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
+
+// TestApplyTxBatchRejectsNilTx verifies that a multi-transaction batch with one
+// nil Tx is rejected with ErrInvalidParam rather than panicking. ApplyTxBatch
+// reorders the batch parents-first before applying it, and that sort
+// dereferences each transaction's Tx, so a nil member must be caught up front;
+// the rejection must also commit nothing.
+func TestApplyTxBatchRejectsNilTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-nil-tx"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	syncedTo := NewBlockFixture(215)
+
+	// The batch carries a valid transaction and a second one with a nil Tx.
+	// The parents-first sort runs before per-tx request validation, so the nil
+	// member must be rejected by the up-front guard rather than panicking.
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(1710000210, 0),
+				Status:   db.TxStatusPending,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID,
+				Tx:       nil,
+				Received: time.Unix(1710000211, 0),
+				Status:   db.TxStatusPending,
+			},
+		},
+		SyncedTo: &syncedTo,
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// The sync tip was not advanced and the valid transaction was not written:
+	// the whole batch is rejected before any write.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.Nil(t, walletInfo.SyncedTo)
+
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
