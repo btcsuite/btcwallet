@@ -283,6 +283,131 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	return nil
 }
 
+// ApplyTxBatch atomically records transactions and an optional sync-tip update
+// through the legacy walletdb managers.
+func (s *Store) ApplyTxBatch(_ context.Context,
+	params db.TxBatchParams) error {
+
+	// A batch with no transactions and no sync-tip update has nothing to
+	// persist. Return before the addrStore guard and walletdb.Update so an
+	// empty batch neither requires an address manager nor opens a write
+	// transaction.
+	if len(params.Transactions) == 0 && params.SyncedTo == nil {
+		return nil
+	}
+
+	if s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.ApplyTxBatch: %w",
+			errMissingAddrStore)
+	}
+
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		err := s.applyLegacyTxBatch(
+			addrmgrNs, txmgrNs, params.Transactions,
+		)
+		if err != nil {
+			return err
+		}
+
+		return s.applyLegacyBatchSyncTip(addrmgrNs, params)
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.ApplyTxBatch: %w", err)
+	}
+
+	return nil
+}
+
+// applyLegacyBatchSyncTip applies the optional sync-tip update for a legacy
+// transaction batch.
+func (s *Store) applyLegacyBatchSyncTip(ns walletdb.ReadWriteBucket,
+	params db.TxBatchParams) error {
+
+	if params.SyncedTo == nil {
+		return nil
+	}
+
+	block, err := db.BlockStampFromBlock(params.SyncedTo)
+	if err != nil {
+		return err
+	}
+
+	err = s.addrStore.SetSyncedTo(ns, &block)
+	if err != nil {
+		return fmt.Errorf("set synced tip: %w", err)
+	}
+
+	return nil
+}
+
+// applyLegacyTxBatch records one batch of relevant transaction notifications.
+func (s *Store) applyLegacyTxBatch(addrmgrNs walletdb.ReadWriteBucket,
+	txmgrNs walletdb.ReadWriteBucket, transactions []db.CreateTxParams) error {
+
+	for i := range transactions {
+		req, err := db.NewCreateTxRequest(transactions[i])
+		if err != nil {
+			return fmt.Errorf("validate tx %d: %w", i, err)
+		}
+
+		err = s.applyLegacyTxNotification(addrmgrNs, txmgrNs, req)
+		if err != nil {
+			return fmt.Errorf("apply tx %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// applyLegacyTxNotification records one relevant transaction notification using
+// legacy wtxmgr semantics.
+func (s *Store) applyLegacyTxNotification(addrmgrNs walletdb.ReadWriteBucket,
+	txmgrNs walletdb.ReadWriteBucket, req db.CreateTxRequest) error {
+
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		req.Params.Tx, req.Received,
+	)
+	if err != nil {
+		return fmt.Errorf("build tx record: %w", err)
+	}
+
+	credits, err := s.legacyCreditEntries(addrmgrNs, req)
+	if err != nil {
+		return err
+	}
+
+	if req.Params.Block == nil {
+		err := s.txStore.InsertUnconfirmedTx(txmgrNs, txRec, credits)
+		if err != nil {
+			return fmt.Errorf("insert unconfirmed tx: %w", err)
+		}
+
+		return nil
+	}
+
+	block, err := kvdbTxBlockMeta(req.Params.Block)
+	if err != nil {
+		return err
+	}
+
+	err = s.txStore.InsertConfirmedTx(txmgrNs, txRec, block, credits)
+	if err != nil {
+		return fmt.Errorf("insert confirmed tx: %w", err)
+	}
+
+	return nil
+}
+
 // legacyCreditEntries converts db-native credit addresses into legacy credit
 // entries and marks resolved addresses as used.
 //
