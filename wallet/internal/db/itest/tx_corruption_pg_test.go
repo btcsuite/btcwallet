@@ -80,6 +80,26 @@ func corruptTransactionHash(t *testing.T, store *pg.Store,
 	require.EqualValues(t, 1, rows)
 }
 
+// forceRollbackBlockDeleteFailure installs a trigger that fails the rollback
+// block-deletion stage after sync-state rewind has run.
+func forceRollbackBlockDeleteFailure(t *testing.T, store *pg.Store) {
+	t.Helper()
+
+	statements := []string{
+		"CREATE OR REPLACE FUNCTION fail_rollback_block_delete() " +
+			"RETURNS trigger LANGUAGE plpgsql AS $$ " +
+			"BEGIN RAISE EXCEPTION " +
+			"'forced rollback block delete failure'; END; $$",
+		"CREATE TRIGGER fail_rollback_block_delete " +
+			"BEFORE DELETE ON blocks FOR EACH ROW EXECUTE FUNCTION " +
+			"fail_rollback_block_delete()",
+	}
+	for _, stmt := range statements {
+		_, err := store.DB().ExecContext(t.Context(), stmt)
+		require.NoError(t, err)
+	}
+}
+
 // corruptTransactionBlockHeight writes an invalid block height after dropping
 // the non-negative height check and creating a matching block row. The
 // corruption itests use this to verify that reads reject impossible
