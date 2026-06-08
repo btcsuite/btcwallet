@@ -149,6 +149,62 @@ func TestGetEncryptedHDSeed(t *testing.T) {
 	require.NotEmpty(t, encrypted)
 }
 
+// TestListSyncedBlocksReadsTip verifies that ListSyncedBlocks adapts a
+// legacy synced-to block into the db-native block shape.
+func TestListSyncedBlocksReadsTip(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	wantHash := chainhash.Hash{1, 2, 3}
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		return mgr.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+			Hash:   wantHash,
+			Height: 7,
+		})
+	})
+	require.NoError(t, err)
+
+	store := NewStore(dbConn, nil, mgr)
+	blocks, err := store.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			StartHeight: 7,
+			EndHeight:   7,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.Equal(t, wantHash, blocks[0].Hash)
+	require.Equal(t, uint32(7), blocks[0].Height)
+}
+
+// TestListSyncedBlocksRejectsFullUint32Range verifies kvdb rejects a
+// full-width height range before the inclusive span wraps or iteration starts.
+func TestListSyncedBlocksRejectsFullUint32Range(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	store := NewStore(dbConn, nil, mgr)
+	_, err := store.ListSyncedBlocks(
+		t.Context(), db.ListSyncedBlocksQuery{
+			StartHeight: 0,
+			EndHeight:   math.MaxUint32,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrCastingOverflow)
+}
+
 // TestGetWalletReadsLegacyMetadata verifies that kvdb.Store adapts legacy
 // wallet metadata into the db-native wallet view.
 func TestGetWalletReadsLegacyMetadata(t *testing.T) {
