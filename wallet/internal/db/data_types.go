@@ -792,6 +792,22 @@ type GetAddressQuery struct {
 	ScriptPubKey []byte
 }
 
+// ResolveOwnedAddressesQuery contains the parameters for a batched,
+// wallet-scoped address ownership lookup. It resolves which of the supplied
+// script pubkeys belong to the wallet in a single store operation.
+type ResolveOwnedAddressesQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ScriptPubKeys is the set of script pubkeys to resolve. Order is not
+	// significant and duplicates are tolerated. An empty or nil slice
+	// yields an empty result without touching the backend.
+	ScriptPubKeys [][]byte
+}
+
 // GetAddressSecretQuery contains the parameters for querying an address
 // secret. The query is wallet-scoped: it retrieves the encrypted secret
 // material for a specific address within a wallet.
