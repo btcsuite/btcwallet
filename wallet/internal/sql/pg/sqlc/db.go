@@ -33,6 +33,12 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.acquireUtxoLeaseStmt, err = db.PrepareContext(ctx, AcquireUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireUtxoLease: %w", err)
 	}
+	if q.advanceNextExternalIndexStmt, err = db.PrepareContext(ctx, AdvanceNextExternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceNextExternalIndex: %w", err)
+	}
+	if q.advanceNextInternalIndexStmt, err = db.PrepareContext(ctx, AdvanceNextInternalIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceNextInternalIndex: %w", err)
+	}
 	if q.balanceStmt, err = db.PrepareContext(ctx, Balance); err != nil {
 		return nil, fmt.Errorf("error preparing query Balance: %w", err)
 	}
@@ -312,6 +318,16 @@ func (q *Queries) Close() error {
 	if q.acquireUtxoLeaseStmt != nil {
 		if cerr := q.acquireUtxoLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing acquireUtxoLeaseStmt: %w", cerr)
+		}
+	}
+	if q.advanceNextExternalIndexStmt != nil {
+		if cerr := q.advanceNextExternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceNextExternalIndexStmt: %w", cerr)
+		}
+	}
+	if q.advanceNextInternalIndexStmt != nil {
+		if cerr := q.advanceNextInternalIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceNextInternalIndexStmt: %w", cerr)
 		}
 	}
 	if q.balanceStmt != nil {
@@ -791,6 +807,8 @@ type Queries struct {
 	accountBalanceStmt                          *sql.Stmt
 	accountBalancesByIDsStmt                    *sql.Stmt
 	acquireUtxoLeaseStmt                        *sql.Stmt
+	advanceNextExternalIndexStmt                *sql.Stmt
+	advanceNextInternalIndexStmt                *sql.Stmt
 	balanceStmt                                 *sql.Stmt
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
 	createAccountSecretStmt                     *sql.Stmt
@@ -887,6 +905,8 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		accountBalanceStmt:                          q.accountBalanceStmt,
 		accountBalancesByIDsStmt:                    q.accountBalancesByIDsStmt,
 		acquireUtxoLeaseStmt:                        q.acquireUtxoLeaseStmt,
+		advanceNextExternalIndexStmt:                q.advanceNextExternalIndexStmt,
+		advanceNextInternalIndexStmt:                q.advanceNextInternalIndexStmt,
 		balanceStmt:                                 q.balanceStmt,
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
