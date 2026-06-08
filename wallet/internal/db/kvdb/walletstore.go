@@ -104,6 +104,68 @@ func (s *Store) IterWallets(ctx context.Context,
 	}
 }
 
+// ListSyncedBlocks reads block hashes from the legacy address manager.
+func (s *Store) ListSyncedBlocks(_ context.Context,
+	query db.ListSyncedBlocksQuery) ([]db.Block, error) {
+
+	if s.addrStore == nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w",
+			errMissingAddrStore)
+	}
+
+	if query.EndHeight < query.StartHeight {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w: end "+
+			"height before start height", db.ErrInvalidParam)
+	}
+
+	// Preallocate for the inclusive [StartHeight, EndHeight] range. The
+	// span is range-checked here so a height delta that overflows int32
+	// fails with a clear error instead of producing a bogus make capacity.
+	length, err := db.Uint32ToInt32(
+		query.EndHeight - query.StartHeight + 1,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w", err)
+	}
+
+	blocks := make([]db.Block, 0, int(length))
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		for height := query.StartHeight; ; height++ {
+			height32, err := db.Uint32ToInt32(height)
+			if err != nil {
+				return fmt.Errorf("convert block height %d: %w",
+					height, err)
+			}
+
+			hash, err := s.addrStore.BlockHash(ns, height32)
+			if err != nil {
+				return fmt.Errorf("get block hash %d: %w", height, err)
+			}
+
+			blocks = append(blocks, db.Block{
+				Hash:   *hash,
+				Height: height,
+			})
+			if height == query.EndHeight {
+				break
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListSyncedBlocks: %w", err)
+	}
+
+	return blocks, nil
+}
+
 // UpdateWallet writes wallet runtime metadata through the legacy address
 // manager.
 //
