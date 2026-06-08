@@ -408,3 +408,29 @@ func walletUtxoExists(t *testing.T, store *pg.Store,
 
 	return true
 }
+
+// walletUtxoSpent reports whether one wallet-scoped outpoint exists and is
+// recorded as spent, i.e. its spend edge points at a spending transaction.
+func walletUtxoSpent(t *testing.T, store *pg.Store,
+	walletID uint32,
+	outPoint wire.OutPoint) bool {
+
+	t.Helper()
+
+	spentBy, err := store.Queries().GetUtxoSpendByOutpoint(
+		t.Context(), sqlc.GetUtxoSpendByOutpointParams{
+			WalletID:    int64(walletID),
+			TxHash:      outPoint.Hash[:],
+			OutputIndex: int32(outPoint.Index),
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+
+		require.NoError(t, err)
+	}
+
+	return spentBy.Valid
+}
