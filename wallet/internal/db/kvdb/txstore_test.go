@@ -1,6 +1,7 @@
 package kvdb
 
 import (
+	"bytes"
 	"errors"
 	"math"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -3557,4 +3559,242 @@ func internalKeyCount(t *testing.T, dbConn walletdb.DB,
 	require.NoError(t, err)
 
 	return count
+}
+
+// importWatchOnlyXpubAccount imports a watch-only ("imported xpub") account
+// onto the given scope and returns its real waddrmgr account number. The
+// account key is derived from an independent master seed so the imported
+// account is distinct from the wallet's own derived accounts; what matters for
+// the scan-horizon path is only that it is a valid, child-derivable account
+// xpub the manager can extend.
+func importWatchOnlyXpubAccount(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, scope waddrmgr.KeyScope,
+	name string) uint32 {
+
+	t.Helper()
+
+	// Derive m/scope.Purpose'/scope.Coin'/0' from a distinct seed and
+	// neuter it so the manager stores a watch-only account public key.
+	seed := bytes.Repeat([]byte{0xC3}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	purposeKey, err := master.DeriveNonStandard(
+		scope.Purpose + hdkeychain.HardenedKeyStart,
+	)
+	require.NoError(t, err)
+
+	coinKey, err := purposeKey.DeriveNonStandard(
+		scope.Coin + hdkeychain.HardenedKeyStart,
+	)
+	require.NoError(t, err)
+
+	acctKey, err := coinKey.DeriveNonStandard(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+
+	acctPub, err := acctKey.Neuter()
+	require.NoError(t, err)
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var account uint32
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		account, err = scopedMgr.NewAccountWatchingOnly(
+			ns, name, acctPub, 0, nil,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return account
+}
+
+// TestApplyScanBatchHorizonResolvesImportedAccountByName verifies that a
+// horizon emitted for an imported account, whose Account number has been masked
+// to 0 (the default derived account's number), is resolved by its durable
+// AccountName and extends the imported account's branch rather than the default
+// account's.
+func TestApplyScanBatchHorizonResolvesImportedAccountByName(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// Import a watch-only account; it receives a real, non-zero waddrmgr
+	// number, but the AccountInfo contract masks imported numbers to 0.
+	const importedName = "imported-xpub"
+
+	importedAccount := importWatchOnlyXpubAccount(
+		t, dbConn, mgr, scope, importedName,
+	)
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), importedAccount)
+
+	// Neither the default nor the imported account has derived an external
+	// address yet.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, importedAccount))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	const horizonIndex = 4
+
+	// The horizon mirrors what the AccountInfo contract emits for an
+	// imported account: Account masked to 0, identity carried by name.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     0,
+			AccountName: importedName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+	})
+	require.NoError(t, err)
+
+	// The imported account's branch must have advanced past the recovered
+	// child, while the default account (number 0) must remain untouched:
+	// resolving the masked number 0 directly would have extended it.
+	require.Equal(t, uint32(horizonIndex+1), externalKeyCount(
+		t, dbConn, scopedMgr, importedAccount,
+	))
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+}
+
+// TestApplyScanBatchHorizonResolvesDerivedAccountByNumber verifies that a
+// horizon for a derived account whose name matches its real account number
+// extends that derived account, confirming the name resolution agrees with the
+// number fast path for non-imported accounts.
+func TestApplyScanBatchHorizonResolvesDerivedAccountByNumber(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// Create a second derived account so resolution must distinguish it from
+	// the default account by both its non-zero number and its name.
+	const derivedName = "derived-1"
+
+	props := createLegacyAccount(t, dbConn, mgr, scope, derivedName)
+	derivedAccount := props.AccountNumber
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), derivedAccount)
+
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, derivedAccount))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	const horizonIndex = 3
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     derivedAccount,
+			AccountName: derivedName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, uint32(horizonIndex+1), externalKeyCount(
+		t, dbConn, scopedMgr, derivedAccount,
+	))
+	// The default account must not have been touched.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+}
+
+// TestApplyScanBatchHorizonMissingNameErrors verifies that a horizon naming an
+// account that no longer exists (e.g. a rename racing the scan) fails the batch
+// instead of silently extending the default account, which shares the masked
+// Account number 0.
+func TestApplyScanBatchHorizonMissingNameErrors(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	// The horizon carries a name no account holds and the masked number 0.
+	// Resolution must surface the lookup miss instead of extending the
+	// default account that happens to own number 0.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     0,
+			AccountName: "does-not-exist",
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       7,
+		}},
+	})
+	require.Error(t, err)
+
+	// The default account (number 0) must not have absorbed the extension.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
 }
