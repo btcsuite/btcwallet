@@ -249,6 +249,92 @@ func (s *Store) GetAddress(ctx context.Context,
 	return info, nil
 }
 
+// ResolveOwnedAddresses resolves a batch of script pubkeys to the subset owned
+// by the wallet using a single read-only walletdb transaction. It restores the
+// single-transaction pattern for output ownership filtering, replacing a
+// per-script GetAddress loop.
+func (s *Store) ResolveOwnedAddresses(ctx context.Context,
+	query db.ResolveOwnedAddressesQuery) (map[string]*db.AddressInfo, error) {
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	owned := make(map[string]*db.AddressInfo)
+
+	// An empty request resolves to an empty result without opening a
+	// transaction, matching the SQL backends.
+	if len(query.ScriptPubKeys) == 0 {
+		return owned, nil
+	}
+
+	addrMgr := s.addrStore
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		return resolveOwnedScripts(
+			ns, addrMgr, query.ScriptPubKeys, owned,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ResolveOwnedAddresses: %w", err)
+	}
+
+	return owned, nil
+}
+
+// resolveOwnedScripts resolves each script pubkey to its wallet-owned address
+// inside an open read transaction, recording hits in owned keyed by
+// string(script). Scripts that resolve to no standard address or to no wallet
+// row are simply skipped, since a miss means the script is not owned.
+func resolveOwnedScripts(ns walletdb.ReadBucket, addrMgr waddrmgr.AddrStore,
+	scripts [][]byte, owned map[string]*db.AddressInfo) error {
+
+	chainParams := addrMgr.ChainParams()
+
+	for _, script := range scripts {
+		if len(script) == 0 {
+			continue
+		}
+
+		// Skip scripts that already resolved on a prior iteration so
+		// duplicate inputs cost a single lookup.
+		key := string(script)
+		if _, ok := owned[key]; ok {
+			continue
+		}
+
+		// A script with no standard address can never match a wallet
+		// row, so it is simply not owned.
+		addr := addressFromScript(script, chainParams)
+		if addr == nil {
+			continue
+		}
+
+		info, err := resolvedAddressInfo(ns, addrMgr, addr)
+
+		// A missing address means the script is not owned by the
+		// wallet, which is the common case, so we keep resolving the
+		// remaining scripts.
+		switch {
+		case errors.Is(err, db.ErrAddressNotFound):
+			continue
+
+		case err != nil:
+			return err
+		}
+
+		owned[key] = info
+	}
+
+	return nil
+}
+
 // resolvedAddressInfo resolves one legacy managed address and assigns its
 // synthetic address ID.
 func resolvedAddressInfo(ns walletdb.ReadBucket,
