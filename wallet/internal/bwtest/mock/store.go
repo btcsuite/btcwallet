@@ -422,6 +422,15 @@ func (m *Store) UpdateTx(ctx context.Context,
 	return args.Error(0)
 }
 
+// ApplyTxBatch implements the db.TxStore interface.
+func (m *Store) ApplyTxBatch(ctx context.Context,
+	params db.TxBatchParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
 // GetTx implements the db.TxStore interface.
 func (m *Store) GetTx(ctx context.Context,
 	query db.GetTxQuery) (*db.TxInfo, error) {
