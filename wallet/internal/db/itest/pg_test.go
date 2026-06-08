@@ -434,3 +434,25 @@ func walletUtxoSpent(t *testing.T, store *pg.Store,
 
 	return spentBy.SpentByTxID.Valid
 }
+
+// clearUtxosSpentByTxID clears all UTXO spend edges claimed by one transaction.
+func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
+	walletID uint32, txHash chainhash.Hash) {
+
+	t.Helper()
+
+	txID, ok := txIDByHash(t, store, walletID, txHash)
+	require.True(t, ok)
+
+	rows, err := store.Queries().ClearUtxosSpentByTxID(
+		t.Context(), sqlc.ClearUtxosSpentByTxIDParams{
+			WalletID: int64(walletID),
+			SpentByTxID: sql.NullInt64{
+				Int64: txID,
+				Valid: true,
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, rows)
+}
