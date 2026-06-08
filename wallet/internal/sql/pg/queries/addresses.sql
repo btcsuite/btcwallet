@@ -41,6 +41,42 @@ INNER JOIN wallets AS w ON a.wallet_id = w.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = $1 AND a.wallet_id = $2;
 
+-- name: ListAddressesByScriptPubKeys :many
+-- Resolves a batch of script pubkeys to the wallet-owned address rows in a
+-- single query. Returns one row per matching script; scripts with no matching
+-- address are simply absent from the result. The Go caller is responsible for
+-- short-circuiting an empty script set before issuing this query.
+SELECT
+    a.id,
+    a.account_id,
+    acc.account_number,
+    acc.account_name,
+    ks.purpose,
+    ks.coin_type,
+    a.type_id,
+    a.address_branch,
+    a.address_index,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    acc.origin_id,
+    acc.master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
+FROM addresses AS a
+INNER JOIN accounts AS acc ON a.account_id = acc.id
+INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    a.wallet_id = sqlc.arg('wallet_id')
+    AND a.script_pub_key = any(sqlc.arg('script_pub_keys')::BYTEA []);
+
 -- name: GetAddressSecret :one
 -- Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
 -- - Address exists with secret: returns full row
