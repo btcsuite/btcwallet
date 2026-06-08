@@ -363,6 +363,23 @@ func (s *Store) ListLeasedOutputs(_ context.Context,
 	return leases, nil
 }
 
+// DeleteExpiredLeases removes expired leases through the legacy wtxmgr path.
+func (s *Store) DeleteExpiredLeases(_ context.Context, _ uint32) error {
+	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		return s.txStore.DeleteExpiredLockedOutputs(ns)
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.DeleteExpiredLeases: %w", err)
+	}
+
+	return nil
+}
+
 // Balance sums the wallet's unspent outputs that satisfy the supplied
 // filters. The walk iterates every UTXO owned by the address manager
 // and applies Scope, Account, MinConfs, MaxConfs, and CoinbaseMaturity
