@@ -494,9 +494,111 @@ func (s *Store) InvalidateUnminedTx(_ context.Context,
 	return nil
 }
 
-// RollbackToBlock is not yet implemented for kvdb.
-func (s *Store) RollbackToBlock(ctx context.Context, _ uint32) error {
-	return notImplemented(ctx, "RollbackToBlock")
+// RollbackToBlock atomically rolls legacy transaction state back to the
+// provided height and rewinds the wallet sync tip to the same fork point in one
+// walletdb update, mirroring the legacy SetSyncedTo + wtxmgr Rollback rewind.
+//
+// It is the chain-reorg rollback API: a rewind must move the sync tip back and
+// disconnect the now-orphaned blocks and transactions together. Performing the
+// sync-tip update and the rollback as two separate writes is unsafe, because a
+// failure between them would leave the wallet sync tip rewound while
+// transaction state still referenced the abandoned chain (or vice versa). Both
+// effects therefore share one write transaction so the rewind is
+// all-or-nothing.
+//
+// The new sync tip is derived from the stored fork-point block at height-1. The
+// sync tip is only rewound when the wallet is currently synced at or above the
+// rollback boundary, matching the SQL backends, which clamp only wallet sync
+// states whose synced height is at or above the rollback height.
+func (s *Store) RollbackToBlock(_ context.Context, height uint32) error {
+	height32, err := db.Uint32ToInt32(height)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.RollbackToBlock: height: %w", err)
+	}
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		// Rewind the wallet sync tip to the fork point before rolling
+		// transaction state back, so a reorg cannot disconnect blocks
+		// without also moving the sync tip in the same write.
+		err := s.rewindSyncTip(tx, height)
+		if err != nil {
+			return err
+		}
+
+		return s.txStore.Rollback(txmgrNs, height32)
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.RollbackToBlock: %w", err)
+	}
+
+	return nil
+}
+
+// rewindSyncTip rewinds the wallet sync tip to the fork point at height-1
+// within the rollback transaction. It is a no-op when no address manager is
+// configured (transaction-only rollback) or when the wallet is already synced
+// below the rollback boundary, matching the SQL backends, which only clamp
+// wallet sync states at or above the rollback height.
+func (s *Store) rewindSyncTip(tx walletdb.ReadWriteTx, height uint32) error {
+	// Without an address manager there is no wallet sync state to rewind in
+	// this store, so the rollback is transaction-only.
+	if s.addrStore == nil {
+		return nil
+	}
+
+	// A rollback to genesis has no surviving fork block to rewind the sync
+	// tip to, and the reorg path never rolls back below the first block, so
+	// leave the sync tip untouched.
+	if height == 0 {
+		return nil
+	}
+
+	rollbackHeight, err := db.Uint32ToInt32(height)
+	if err != nil {
+		return fmt.Errorf("rollback height: %w", err)
+	}
+
+	// Only wallets synced at or above the rollback boundary are affected; a
+	// sync tip already below the fork point needs no rewind.
+	if s.addrStore.SyncedTo().Height < rollbackHeight {
+		return nil
+	}
+
+	addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+	if addrmgrNs == nil {
+		return errMissingAddrmgrNamespace
+	}
+
+	forkHeight, err := db.Uint32ToInt32(height - 1)
+	if err != nil {
+		return fmt.Errorf("fork height: %w", err)
+	}
+
+	// Derive the new sync tip from the stored fork-point block. The block at
+	// height-1 survives the rollback, so a missing hash means the stored
+	// chain view is inconsistent.
+	forkHash, err := s.addrStore.BlockHash(addrmgrNs, forkHeight)
+	if err != nil {
+		return fmt.Errorf("%w: fork block at height %d: %w",
+			db.ErrBlockNotFound, forkHeight, err)
+	}
+
+	forkBlock := waddrmgr.BlockStamp{
+		Height: forkHeight,
+		Hash:   *forkHash,
+	}
+
+	err = s.addrStore.SetSyncedTo(addrmgrNs, &forkBlock)
+	if err != nil {
+		return fmt.Errorf("set synced to: %w", err)
+	}
+
+	return nil
 }
 
 // validateUpdateTxParams checks whether one UpdateTx request matches the legacy

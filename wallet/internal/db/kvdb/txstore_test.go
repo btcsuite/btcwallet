@@ -372,6 +372,35 @@ func TestInvalidateUnminedTxRejectsConfirmed(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrInvalidateTx)
 }
 
+// TestRollbackToBlockMovesConfirmedTxToUnmined verifies that kvdb.Store rolls
+// back legacy transaction records from the requested height.
+func TestRollbackToBlockMovesConfirmedTxToUnmined(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	rec := insertConfirmedTx(t, dbConn, txStore, 144)
+
+	err := store.RollbackToBlock(t.Context(), 144)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &rec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, int32(-1), details.Block.Height)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 // TestUpdateTxLabelOnlySuccess verifies that kvdb.Store can apply a label-only
 // UpdateTx patch through the legacy label path.
 func TestUpdateTxLabelOnlySuccess(t *testing.T) {
