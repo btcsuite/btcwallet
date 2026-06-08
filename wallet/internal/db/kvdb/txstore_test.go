@@ -2372,7 +2372,7 @@ func TestApplyTxBatchSyncTipOnlyDoesNotRequireTxStore(t *testing.T) {
 		Timestamp: time.Unix(1710004400, 0),
 	}
 	addrStore := &bwmock.AddrStore{}
-	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{})
 	addrStore.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
 		func(bs *waddrmgr.BlockStamp) bool {
 			return bs.Height == int32(syncedTo.Height) &&
