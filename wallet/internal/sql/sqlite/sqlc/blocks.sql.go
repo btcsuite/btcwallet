@@ -35,6 +35,46 @@ func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int64) (Bloc
 	return i, err
 }
 
+const GetBlocksInRange = `-- name: GetBlocksInRange :many
+SELECT
+    block_height,
+    header_hash,
+    block_timestamp
+FROM blocks
+WHERE
+    block_height >= cast(?1 AS INTEGER)
+    AND block_height <= cast(?2 AS INTEGER)
+ORDER BY block_height
+`
+
+type GetBlocksInRangeParams struct {
+	StartHeight int64
+	EndHeight   int64
+}
+
+func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error) {
+	rows, err := q.query(ctx, q.getBlocksInRangeStmt, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Block
+	for rows.Next() {
+		var i Block
+		if err := rows.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const InsertBlock = `-- name: InsertBlock :exec
 INSERT OR IGNORE INTO blocks (block_height, header_hash, block_timestamp)
 VALUES (?, ?, ?)
