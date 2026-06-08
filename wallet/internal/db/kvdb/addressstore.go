@@ -851,16 +851,21 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 	}
 
 	var (
-		branch      uint32
-		index       uint32
-		fingerprint uint32
-		pubKey      []byte
+		branch            uint32
+		index             uint32
+		fingerprint       uint32
+		pubKey            []byte
+		hasDerivationPath bool
 	)
 
 	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 	if ok {
 		pubKey = managedAddressPubKey(pubKeyAddr)
 
+		// DerivationInfo reports ok only for HD-derived addresses (both
+		// normal derived accounts and imported-xpub watch-only children);
+		// raw single imports return false because their key has no known
+		// chain position. That is exactly the HasDerivationPath signal.
 		scope, path, ok := pubKeyAddr.DerivationInfo()
 		if ok {
 			accountNumber = path.InternalAccount
@@ -868,6 +873,7 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 			index = path.Index
 			fingerprint = path.MasterKeyFingerprint
 			keyScope = db.KeyScope(scope)
+			hasDerivationPath = true
 		}
 	}
 
@@ -888,6 +894,7 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		Origin:               origin,
 		Branch:               branch,
 		Index:                index,
+		HasDerivationPath:    hasDerivationPath,
 		ScriptPubKey:         scriptPubKey,
 		PubKey:               pubKey,
 		HasScript:            addrType.HasScript,

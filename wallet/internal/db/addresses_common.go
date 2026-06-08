@@ -459,23 +459,41 @@ func convertAddressMetadata[TypeID, OriginIDType any](
 }
 
 // convertAddressPath converts BIP44 branch/index values into uint32 fields.
-// Imported addresses must have both branch/index unset and return zero values.
-// Derived addresses must have both fields set and convertible to uint32.
+//
+// The both-or-neither invariant holds for every origin: a row must carry both
+// branch and index or neither, and exactly one set is a corrupt path. Beyond
+// that, the meaning of an unset path depends on the origin:
+//
+//   - A derived account is always HD, so both fields must be set.
+//   - An imported account spans two shapes. A raw/bucket import (a single
+//     pubkey or script with no chain position) carries neither field and maps
+//     to zero values. An imported-xpub (watch-only xpub) account is HD: the
+//     scan-batch horizon extension derives child addresses from its account
+//     xpub and persists them with a real branch/index, which the schema
+//     permits (only the both-or-neither and range constraints apply). Those
+//     rows must read back with their derivation path, not be rejected, so they
+//     surface through IterAddresses/ListAddresses like any HD address.
 func convertAddressPath(origin AccountOrigin, branch,
 	index sql.NullInt64) (uint32, uint32, error) {
 
-	if origin == ImportedAccount {
-		if branch.Valid || index.Valid {
-			return 0, 0, errInvalidDerivationPath
-		}
-
-		return 0, 0, nil
-	}
-
-	if !branch.Valid || !index.Valid {
+	// Reject a half-populated path for every origin; the remaining branches
+	// only have to distinguish "both unset" from "both set".
+	if branch.Valid != index.Valid {
 		return 0, 0, errInvalidDerivationPath
 	}
 
+	// A raw/bucket imported address carries no chain position and reads back
+	// as zero values; a derived account must always have a path set.
+	if !branch.Valid {
+		if origin == ImportedAccount {
+			return 0, 0, nil
+		}
+
+		return 0, 0, errInvalidDerivationPath
+	}
+
+	// Both fields are set: a derived address or an imported-xpub HD address,
+	// converted the same way.
 	addrBranch, err := Int64ToUint32(branch.Int64)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address branch: %w", err)
@@ -520,6 +538,11 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
+	// A row carries an HD path iff both nullable path columns are present.
+	// convertAddressPath has already rejected a half-populated path, so the
+	// two Valid flags agree here; checking both keeps the intent explicit.
+	hasDerivationPath := row.AddressBranch.Valid && row.AddressIndex.Valid
+
 	return &AddressInfo{
 		ID:                   id,
 		AccountID:            accountID,
@@ -532,6 +555,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		Origin:               origin,
 		Branch:               addrBranch,
 		Index:                addrIndex,
+		HasDerivationPath:    hasDerivationPath,
 		ScriptPubKey:         row.ScriptPubKey,
 		PubKey:               row.PubKey,
 		HasScript:            row.HasScript,
@@ -761,16 +785,17 @@ func createDerivedAddress[T any](ctx context.Context,
 	}
 
 	return &AddressInfo{
-		ID:           id,
-		AccountID:    convertedAcctID,
-		AddrType:     addrType,
-		CreatedAt:    rowCreatedAt(row),
-		Origin:       DerivedAccount,
-		Branch:       branch,
-		Index:        index,
-		ScriptPubKey: scriptPubKey,
-		PubKey:       pubKey,
-		IsWatchOnly:  walletIsWatchOnly,
+		ID:                id,
+		AccountID:         convertedAcctID,
+		AddrType:          addrType,
+		CreatedAt:         rowCreatedAt(row),
+		Origin:            DerivedAccount,
+		Branch:            branch,
+		Index:             index,
+		HasDerivationPath: true,
+		ScriptPubKey:      scriptPubKey,
+		PubKey:            pubKey,
+		IsWatchOnly:       walletIsWatchOnly,
 	}, nil
 }
 
