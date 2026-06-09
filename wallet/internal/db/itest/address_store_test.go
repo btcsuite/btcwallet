@@ -1022,6 +1022,61 @@ func TestImportedAddressCounterConcurrentInsert(t *testing.T) {
 	require.Zero(t, account.ImportedKeyCount)
 }
 
+// TestImportedBucketMaterializationIdempotent proves that materializing the
+// keyless wallet-level imported bucket is an idempotent get-or-create: once a
+// scope owns its bucket, re-running the materialization (the path a racing
+// concurrent first-import takes) is a no-op rather than a collision on the
+// (scope_id, account_name) unique index. This is the regression guard for the
+// concurrency race where two first-imports into the same empty scope both
+// observed sql.ErrNoRows and the second insert aborted the write transaction.
+func TestImportedBucketMaterializationIdempotent(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	scope := db.KeyScopeBIP0084
+
+	// ADR 0012: a keyless imported bucket and its keyless addresses need a
+	// watch-only wallet to satisfy the symmetric invariant.
+	walletID := newWatchOnlyWallet(t, store, "wallet-bucket-idempotent")
+
+	// Arrange: the first import materializes the scope and the keyless
+	// bucket, mirroring the winner of a concurrent first-import race.
+	info, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			Scope:        scope,
+			AddressType:  db.WitnessPubKey,
+			ScriptPubKey: RandomBytes(32),
+			PubKey:       RandomBytes(33),
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, db.DefaultImportedAccountName, info.AccountName)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, scope)
+	bucketID := GetAccountID(t, queries, scopeID, db.DefaultImportedAccountName)
+
+	// Act: re-run the bucket materialization twice more, exactly as the
+	// losers of a concurrent first-import race would. Before the fix these
+	// inserts hit the unique index and aborted; with ON CONFLICT DO NOTHING
+	// each is a clean no-op.
+	require.NoError(t, createImportedBucketAccountRaw(
+		t.Context(), queries, scopeID,
+	))
+	require.NoError(t, createImportedBucketAccountRaw(
+		t.Context(), queries, scopeID,
+	))
+
+	// Assert: the bucket was reused, not duplicated. A second accounts row
+	// could not exist (the unique index forbids it), and GetAccountID
+	// resolving to the original ID confirms the one bucket survived.
+	reusedID := GetAccountID(
+		t, queries, scopeID, db.DefaultImportedAccountName,
+	)
+	require.Equal(t, bucketID, reusedID)
+}
+
 // TestNewImportedAddressDuplicate verifies that importing an address with
 // a duplicate ScriptPubKey fails with a constraint error.
 func TestNewImportedAddressDuplicate(t *testing.T) {
