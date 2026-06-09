@@ -94,6 +94,13 @@ type Querier interface {
 	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
 	// Creates an imported address (no derivation path, has script/pubkey).
 	CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error)
+	// Materializes the keyless wallet-level imported "bucket" account for a scope.
+	// The bucket holds individually-imported addresses and carries no
+	// account-level key material. ON CONFLICT DO NOTHING makes the insert an
+	// idempotent get-or-create: concurrent first-imports into the same scope each
+	// attempt this insert, one wins and the rest are no-ops, so callers re-read the
+	// bucket instead of colliding on the (scope_id, account_name) unique index.
+	CreateImportedBucketAccount(ctx context.Context, arg CreateImportedBucketAccountParams) error
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
