@@ -4585,7 +4585,7 @@ func TestLoadFullScanState_Error(t *testing.T) {
 	require.ErrorContains(t, err, "db error")
 }
 
-// TestScanWithRewind_Error verifies error propagation from DBPutRewind.
+// TestScanWithRewind_Error verifies error propagation from scanWithRewind.
 func TestScanWithRewind_Error(t *testing.T) {
 	t.Parallel()
 
