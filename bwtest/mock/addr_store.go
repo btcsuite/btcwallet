@@ -189,6 +189,17 @@ func (m *AddrStore) BirthdayBlock(
 	return args.Get(0).(waddrmgr.BlockStamp), args.Bool(1), args.Error(2)
 }
 
+// MasterHDPubKey returns the plaintext master HD public key bytes persisted
+// for the wallet.
+func (m *AddrStore) MasterHDPubKey(ns walletdb.ReadBucket) ([]byte, error) {
+	args := m.Called(ns)
+	if raw, ok := args.Get(0).([]byte); ok {
+		return raw, args.Error(1)
+	}
+
+	return nil, args.Error(1)
+}
+
 // IsWatchOnlyAccount determines if the account with the given key scope
 // is set up as watch-only.
 func (m *AddrStore) IsWatchOnlyAccount(ns walletdb.ReadBucket,
