@@ -324,6 +324,42 @@ func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedA
 	return i, err
 }
 
+const CreateImportedBucketAccount = `-- name: CreateImportedBucketAccount :exec
+INSERT INTO accounts (
+    wallet_id,
+    scope_id,
+    account_number,
+    account_name,
+    origin_id
+)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    NULL AS account_number,
+    ?1 AS account_name,
+    ?2 AS origin_id
+FROM key_scopes AS ks
+WHERE ks.id = ?3
+ON CONFLICT (scope_id, account_name) DO NOTHING
+`
+
+type CreateImportedBucketAccountParams struct {
+	AccountName string
+	OriginID    int64
+	ScopeID     int64
+}
+
+// Materializes the keyless wallet-level imported "bucket" account for a scope.
+// The bucket holds individually-imported addresses and carries no
+// account-level key material. ON CONFLICT DO NOTHING makes the insert an
+// idempotent get-or-create: concurrent first-imports into the same scope each
+// attempt this insert, one wins and the rest are no-ops, so callers re-read the
+// bucket instead of colliding on the (scope_id, account_name) unique index.
+func (q *Queries) CreateImportedBucketAccount(ctx context.Context, arg CreateImportedBucketAccountParams) error {
+	_, err := q.exec(ctx, q.createImportedBucketAccountStmt, CreateImportedBucketAccount, arg.AccountName, arg.OriginID, arg.ScopeID)
+	return err
+}
+
 const GetAccountByScopeAndName = `-- name: GetAccountByScopeAndName :one
 SELECT
     a.id,
