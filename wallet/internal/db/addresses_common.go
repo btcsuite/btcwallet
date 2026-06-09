@@ -638,11 +638,14 @@ type ImportedAddressAdapters[QTX any, AccountRow any,
 	// looked-up account row. The bucket is intentionally keyless: it carries
 	// no account-level key material and no account_secrets row, because the
 	// spend-capability invariant for imported single addresses is enforced
-	// per-address via requireAddressPrivKeyOnSpendable. It is created only on
-	// the first import into a scope (the GetAccount sql.ErrNoRows branch); a
-	// pre-existing bucket is reused unchanged. Returning the same row type as
-	// GetAccount lets the caller reuse one downstream creation path for both
-	// the existing-bucket and just-created-bucket cases.
+	// per-address via requireAddressPrivKeyOnSpendable. It is materialized on
+	// the first import into a scope (the GetAccount sql.ErrNoRows branch) as
+	// an idempotent get-or-create: implementations must tolerate a concurrent
+	// first-import that already inserted the bucket and return that existing
+	// row rather than erroring on the (scope_id, account_name) unique index.
+	// Returning the same row type as GetAccount lets the caller reuse one
+	// downstream creation path for both the existing-bucket and
+	// just-created-bucket cases.
 	CreateBucketAccount func(context.Context, QTX,
 		NewImportedAddressParams) (AccountRow, error)
 
@@ -951,12 +954,12 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 		// transaction and use the row it returns. A pre-existing
 		// bucket (err == nil) is reused as-is.
 		//
-		// This get-then-create is intentionally not hardened
-		// against concurrency: imported-address creation is a
-		// sequential, low-frequency path the wallet does not drive
-		// concurrently, so two first-imports racing to create the
-		// same bucket is not a real scenario. If that changes, make
-		// the bucket insert an idempotent get-or-create.
+		// CreateBucketAccount is an idempotent get-or-create (its
+		// insert uses ON CONFLICT DO NOTHING and then re-reads), so
+		// two first-imports racing into the same empty scope both
+		// succeed: one inserts the bucket, the other observes the
+		// conflict as a no-op and re-reads the same row, rather than
+		// failing on the (scope_id, account_name) unique index.
 		if errors.Is(err, sql.ErrNoRows) {
 			row, err = adapters.CreateBucketAccount(ctx, qtx, params)
 		}
