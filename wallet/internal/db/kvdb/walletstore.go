@@ -27,6 +27,25 @@ func (s *Store) CreateWallet(ctx context.Context,
 	return nil, notImplemented(ctx, "CreateWallet")
 }
 
+// readMasterPubKey returns the plaintext master HD public key persisted for
+// the wallet, or nil for shell, watch-only, and pre-master-key wallets, which
+// persist none and surface ErrNoExist.
+func readMasterPubKey(addrStore waddrmgr.AddrStore,
+	ns walletdb.ReadBucket) ([]byte, error) {
+
+	pubKey, err := addrStore.MasterHDPubKey(ns)
+	switch {
+	case err == nil:
+		return pubKey, nil
+
+	case waddrmgr.IsError(err, waddrmgr.ErrNoExist):
+		return nil, nil
+
+	default:
+		return nil, fmt.Errorf("get master HD pubkey: %w", err)
+	}
+}
+
 // GetWallet reads wallet runtime metadata from the legacy address manager.
 //
 // NOTE: kvdb is a single-wallet legacy backend. The supplied name is not
@@ -43,12 +62,22 @@ func (s *Store) GetWallet(_ context.Context,
 
 	addrStore := s.addrStore
 
-	var birthdayBlock *db.Block
+	var (
+		birthdayBlock *db.Block
+		masterPubKey  []byte
+	)
 
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
 			return errMissingAddrmgrNamespace
+		}
+
+		var err error
+
+		masterPubKey, err = readMasterPubKey(addrStore, ns)
+		if err != nil {
+			return err
 		}
 
 		block, verified, err := addrStore.BirthdayBlock(ns)
@@ -83,6 +112,7 @@ func (s *Store) GetWallet(_ context.Context,
 		Birthday:      addrStore.Birthday().UTC(),
 		BirthdayBlock: birthdayBlock,
 		SyncedTo:      syncedTo,
+		MasterPubKey:  masterPubKey,
 	}, nil
 }
 

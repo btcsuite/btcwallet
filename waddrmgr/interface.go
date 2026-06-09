@@ -150,6 +150,11 @@ type AddrStore interface {
 	// BirthdayBlock returns the birthday block of the address store.
 	BirthdayBlock(ns walletdb.ReadBucket) (BlockStamp, bool, error)
 
+	// MasterHDPubKey returns the plaintext master HD public key bytes
+	// persisted for the wallet, or ErrNoExist when none is persisted (shell,
+	// watch-only, or pre-master-key wallets).
+	MasterHDPubKey(ns walletdb.ReadBucket) ([]byte, error)
+
 	// IsWatchOnlyAccount determines if the account with the given key scope
 	// is set up as watch-only.
 	IsWatchOnlyAccount(ns walletdb.ReadBucket, keyScope KeyScope,
