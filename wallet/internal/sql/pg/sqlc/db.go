@@ -57,6 +57,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createImportedAddressStmt, err = db.PrepareContext(ctx, CreateImportedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAddress: %w", err)
 	}
+	if q.createImportedBucketAccountStmt, err = db.PrepareContext(ctx, CreateImportedBucketAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateImportedBucketAccount: %w", err)
+	}
 	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
 	}
@@ -337,6 +340,11 @@ func (q *Queries) Close() error {
 	if q.createImportedAddressStmt != nil {
 		if cerr := q.createImportedAddressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createImportedAddressStmt: %w", cerr)
+		}
+	}
+	if q.createImportedBucketAccountStmt != nil {
+		if cerr := q.createImportedBucketAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createImportedBucketAccountStmt: %w", cerr)
 		}
 	}
 	if q.createKeyScopeStmt != nil {
@@ -759,6 +767,7 @@ type Queries struct {
 	createDerivedAddressStmt                    *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
 	createImportedAddressStmt                   *sql.Stmt
+	createImportedBucketAccountStmt             *sql.Stmt
 	createKeyScopeStmt                          *sql.Stmt
 	createWalletStmt                            *sql.Stmt
 	deleteBlockStmt                             *sql.Stmt
@@ -850,6 +859,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createDerivedAddressStmt:                    q.createDerivedAddressStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
 		createImportedAddressStmt:                   q.createImportedAddressStmt,
+		createImportedBucketAccountStmt:             q.createImportedBucketAccountStmt,
 		createKeyScopeStmt:                          q.createKeyScopeStmt,
 		createWalletStmt:                            q.createWalletStmt,
 		deleteBlockStmt:                             q.deleteBlockStmt,
