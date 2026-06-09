@@ -398,6 +398,12 @@ func TestManagerLoadSuccess(t *testing.T) {
 	require.True(t, ok)
 	require.Same(t, w, loadedW)
 	require.Zero(t, w.ID())
+
+	// The master HD fingerprint is read through the Store during load. A
+	// ModeGenSeed wallet persists a master HD public key, so the cached
+	// fingerprint is non-zero and matches the value resolved at create time.
+	require.NotZero(t, w.masterFingerprint)
+	require.Equal(t, wCreated.masterFingerprint, w.masterFingerprint)
 }
 
 // TestManagerLoad_ExistingWallet verifies that if Load is called for a wallet
