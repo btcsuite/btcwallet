@@ -2154,8 +2154,8 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 // storeScanAddresses loads active scan addresses through the store, paging per
 // (key scope, account) pair because ListAddresses is scoped to a single pair.
 //
-// This reproduces the legacy ForEachRelevantActiveAddress filtering that
-// DBGetScanData relies on: for default key scopes every active address is
+// This reproduces the legacy ForEachRelevantActiveAddress filtering used by
+// the old scan-data reader: for default key scopes every active address is
 // watched, while for non-default key scopes only internal-branch (change)
 // addresses are watched. The non-default external branches are intentionally
 // skipped because they only ever existed due to a since-fixed bug, and

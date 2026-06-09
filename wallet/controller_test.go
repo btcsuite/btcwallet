@@ -250,7 +250,7 @@ func TestControllerStart(t *testing.T) {
 		&db.WalletInfo{BirthdayBlock: &db.Block{Height: 100}}, nil,
 	).Once()
 
-	// 2. Mock DBGetAllAccounts: Expect a call to load active account
+	// 2. Mock ListAccounts: Expect a call to load active account
 	//    managers.
 	deps.store.On("ListAccounts", mock.Anything,
 		mock.AnythingOfType("db.ListAccountsQuery")).
@@ -458,7 +458,7 @@ func TestControllerVerifyBirthday_LocateFail(t *testing.T) {
 }
 
 // TestControllerVerifyBirthday_PutFail verifies verifyBirthday failure
-// when DBPutBirthdayBlock fails.
+// when UpdateWallet fails.
 func TestControllerVerifyBirthday_PutFail(t *testing.T) {
 	t.Parallel()
 
@@ -1315,9 +1315,9 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	require.False(t, w.state.isStarted())
 }
 
-// TestControllerStart_DBGetAllAccountsFail verifies Start fails when
-// DBGetAllAccounts fails.
-func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
+// TestControllerStart_ListAccountsFail verifies Start fails when
+// ListAccounts fails.
+func TestControllerStart_ListAccountsFail(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup mock expectations where account lookup fails during
