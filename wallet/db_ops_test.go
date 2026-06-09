@@ -11,6 +11,7 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -531,66 +532,40 @@ func TestDBGetScanData(t *testing.T) {
 	require.Empty(t, initialUnspent)
 }
 
-// TestLoadWalletScanDataKeepsImportedXpubHorizons verifies that full-scan setup
-// builds its horizon targets from the legacy address manager's active accounts.
-// Imported xpub accounts have real waddrmgr account numbers that must remain in
-// the lookahead set even though SQL account metadata may not expose a BIP44
-// account number for them.
+// TestLoadWalletScanDataKeepsImportedXpubHorizons verifies full-scan setup
+// preserves imported xpub recovery horizons under their non-masked waddrmgr
+// account number while still skipping the keyless imported-address bucket.
 func TestLoadWalletScanDataKeepsImportedXpubHorizons(t *testing.T) {
 	t.Parallel()
 
-	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
-
-	const importedAccount = uint32(9)
-
+	s, mgr := newStoreScanSyncer(t)
 	scope := waddrmgr.KeyScopeBIP0084
-	props := &waddrmgr.AccountProperties{
-		AccountNumber:    importedAccount,
-		AccountName:      "imported-xpub",
-		ExternalKeyCount: 5,
-		InternalKeyCount: 2,
-		KeyScope:         scope,
-		IsWatchOnly:      true,
-	}
-
-	scopedMgr := &bwmock.AccountStore{}
-	mocks.addrStore.On("ActiveScopedKeyManagers").Return(
-		[]waddrmgr.AccountStore{scopedMgr},
-	).Once()
-
-	scopedMgr.On("ActiveAccounts").Return([]uint32{importedAccount}).Once()
-	scopedMgr.On("Scope").Return(scope).Once()
-
-	mocks.addrStore.On("FetchScopedKeyManager", scope).Return(
-		scopedMgr, nil,
-	).Once()
-
-	scopedMgr.On("AccountProperties", mock.Anything, importedAccount).Return(
-		props, nil,
-	).Once()
-
-	mocks.addrStore.On("ForEachRelevantActiveAddress", mock.Anything,
-		mock.Anything,
-	).Return(nil).Once()
-
-	mocks.txStore.On("OutputsToWatch", mock.Anything).Return(
-		[]wtxmgr.Credit(nil), nil,
-	).Once()
+	importedNumber := createImportedXpubAccount(
+		t, s, mgr, scope, "imported-xpub",
+	)
 
 	horizonData, initialAddrs, initialUnspent, err := s.loadWalletScanData(
 		t.Context(),
 	)
 
 	require.NoError(t, err)
-	require.Len(t, horizonData, 1)
-	require.Equal(t, props, horizonData[0])
-	require.Equal(t, importedAccount, horizonData[0].AccountNumber)
+
+	var importedProps *waddrmgr.AccountProperties
+	for _, props := range horizonData {
+		require.NotEqual(t, db.DefaultImportedAccountName,
+			props.AccountName)
+
+		if props.AccountName == "imported-xpub" {
+			importedProps = props
+		}
+	}
+
+	require.NotNil(t, importedProps)
+	require.Equal(t, importedNumber, importedProps.AccountNumber)
+	require.Equal(t, scope, importedProps.KeyScope)
+	require.True(t, importedProps.IsWatchOnly)
 	require.Empty(t, initialAddrs)
 	require.Empty(t, initialUnspent)
-
-	mocks.addrStore.AssertExpectations(t)
-	scopedMgr.AssertExpectations(t)
 }
 
 // TestDBGetSyncedBlocks verifies that the wallet can successfully retrieve a
