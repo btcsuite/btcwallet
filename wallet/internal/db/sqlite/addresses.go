@@ -268,9 +268,14 @@ func derivedAddressRowCreatedAt(
 // account-level key material (no public key, no master fingerprint) and no
 // account_secrets row: it is a holder for individually-imported addresses, not
 // an imported xpub account. The key scope is created on demand using its
-// default address schema if it does not already exist. The row is re-read
-// through GetAccountByWalletScopeAndName so its shape matches the existing-
-// bucket lookup path exactly.
+// default address schema if it does not already exist.
+//
+// Materialization is an idempotent get-or-create: the insert uses ON CONFLICT
+// DO NOTHING so concurrent first-imports into the same scope cannot collide on
+// the (scope_id, account_name) unique index, and the row is always re-read
+// through GetAccountByWalletScopeAndName afterwards. The re-read both yields a
+// row whose shape matches the existing-bucket lookup path exactly and returns
+// the surviving bucket when this call was the no-op loser of a race.
 func createImportedBucketAccount(ctx context.Context, qtx *sqlc.Queries,
 	params db.NewImportedAddressParams) (
 	sqlc.GetAccountByWalletScopeAndNameRow, error) {
@@ -284,15 +289,18 @@ func createImportedBucketAccount(ctx context.Context, qtx *sqlc.Queries,
 		return zero, fmt.Errorf("ensure scope: %w", err)
 	}
 
-	_, err = qtx.CreateImportedAccount(
-		ctx, sqlc.CreateImportedAccountParams{
+	// ON CONFLICT DO NOTHING makes this a get-or-create: a concurrent
+	// first-import that already materialized the bucket is a no-op here,
+	// and the re-read below returns the existing row.
+	err = qtx.CreateImportedBucketAccount(
+		ctx, sqlc.CreateImportedBucketAccountParams{
 			ScopeID:     scopeID,
 			AccountName: db.DefaultImportedAccountName,
 			OriginID:    int64(db.ImportedAccount),
 		},
 	)
 	if err != nil {
-		return zero, fmt.Errorf("create account: %w", err)
+		return zero, fmt.Errorf("create bucket account: %w", err)
 	}
 
 	return getAccountFromKey(qtx)(
