@@ -652,6 +652,22 @@ func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
 	return err
 }
 
+// createImportedBucketAccountRaw runs the idempotent imported-bucket
+// materialization query directly so tests can prove that a second
+// first-import attempt into a scope that already owns the bucket is a no-op
+// (ON CONFLICT DO NOTHING) rather than a unique-constraint failure.
+func createImportedBucketAccountRaw(ctx context.Context, queries *sqlc.Queries,
+	scopeID int64) error {
+
+	return queries.CreateImportedBucketAccount(
+		ctx, sqlc.CreateImportedBucketAccountParams{
+			ScopeID:     scopeID,
+			AccountName: db.DefaultImportedAccountName,
+			OriginID:    int16(db.ImportedAccount),
+		},
+	)
+}
+
 // insertAddressSecretRaw inserts an address secret directly through the
 // database so tests can validate watch-only triggers on address_secrets.
 func insertAddressSecretRaw(t *testing.T, dbConn *sql.DB, addressID int64,
