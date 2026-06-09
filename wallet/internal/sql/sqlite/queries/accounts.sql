@@ -47,6 +47,30 @@ FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, created_at;
 
+-- name: CreateImportedBucketAccount :exec
+-- Materializes the keyless wallet-level imported "bucket" account for a scope.
+-- The bucket holds individually-imported addresses and carries no
+-- account-level key material. ON CONFLICT DO NOTHING makes the insert an
+-- idempotent get-or-create: concurrent first-imports into the same scope each
+-- attempt this insert, one wins and the rest are no-ops, so callers re-read the
+-- bucket instead of colliding on the (scope_id, account_name) unique index.
+INSERT INTO accounts (
+    wallet_id,
+    scope_id,
+    account_number,
+    account_name,
+    origin_id
+)
+SELECT
+    ks.wallet_id,
+    ks.id AS scope_id,
+    NULL AS account_number,
+    sqlc.arg('account_name') AS account_name,
+    sqlc.arg('origin_id') AS origin_id
+FROM key_scopes AS ks
+WHERE ks.id = sqlc.arg('scope_id')
+ON CONFLICT (scope_id, account_name) DO NOTHING;
+
 -- name: CreateAccountSecret :exec
 -- Inserts the encrypted private key material for an account.
 INSERT INTO account_secrets (
