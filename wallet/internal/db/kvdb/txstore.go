@@ -6,10 +6,18 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// A compile-time assertion to ensure Store implements the transaction store.
+var _ db.TxStore = (*Store)(nil)
 
 // errLegacyHeightOverflow reports that one db height cannot fit into the
 // signed legacy wtxmgr height domain.
@@ -18,6 +26,131 @@ var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
 // CreateTx is not yet implemented for kvdb.
 func (s *Store) CreateTx(ctx context.Context, _ db.CreateTxParams) error {
 	return notImplemented(ctx, "CreateTx")
+}
+
+// addCreateTxCredits records wallet-owned outputs for a legacy transaction.
+func (s *Store) addCreateTxCredits(addrmgrNs,
+	txmgrNs walletdb.ReadWriteBucket, txRec *wtxmgr.TxRecord,
+	credits map[uint32]btcutil.Address) error {
+
+	if len(credits) == 0 {
+		return nil
+	}
+
+	// CreateTx guarantees a non-nil addrStore whenever there are credits,
+	// so it is safe to read chain params here.
+	chainParams := s.addrStore.ChainParams()
+
+	// Record each credit individually. The per-credit body lives in
+	// addCreateTxCredit so this loop stays a thin driver and neither
+	// function exceeds the cyclomatic-complexity budget.
+	for index, addr := range credits {
+		err := s.addCreateTxCredit(
+			addrmgrNs, txmgrNs, txRec, index, addr, chainParams,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// addCreateTxCredit records a single wallet-owned output for a legacy
+// transaction, resolving ownership either from the caller-supplied address or,
+// when none is given, from the output's own script.
+func (s *Store) addCreateTxCredit(addrmgrNs,
+	txmgrNs walletdb.ReadWriteBucket, txRec *wtxmgr.TxRecord, index uint32,
+	addr btcutil.Address, chainParams *chaincfg.Params) error {
+
+	// A nil credit address means the caller has no resolved owner for this
+	// output, so the Store contract (CreateTxParams.Credits) keys ownership
+	// on the output's own script. SQL implements this fallback, so kvdb
+	// must match it rather than panic: record the credit straight from the
+	// output index without an address-manager lookup or used-marking, and
+	// skip membership validation, which has no caller address to check.
+	// Reaching validateCreditAddr with a nil addr would otherwise panic on
+	// addr.EncodeAddress().
+	if addr == nil {
+		if int(index) >= len(txRec.MsgTx.TxOut) {
+			return fmt.Errorf("credit output %d: %w: index out of "+
+				"range", index, db.ErrInvalidParam)
+		}
+
+		// change is false: with no resolved internal/external address
+		// there is no derivation branch to consult, and the legacy
+		// wtxmgr credit only needs the output index.
+		err := s.txStore.AddCredit(txmgrNs, txRec, nil, index, false)
+		if err != nil {
+			return fmt.Errorf("add credit output %d: %w", index, err)
+		}
+
+		return nil
+	}
+
+	// Validate the caller-supplied credit against the actual output script
+	// before trusting it. Otherwise a caller could credit output N with any
+	// wallet address even when TxOut[N] pays elsewhere, corrupting UTXO
+	// ownership.
+	err := validateCreditAddr(txRec.MsgTx, index, addr, chainParams)
+	if err != nil {
+		return err
+	}
+
+	managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
+	if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+		return fmt.Errorf("credit output %d: %w", index,
+			db.ErrAddressNotFound)
+	}
+
+	if err != nil {
+		return fmt.Errorf("lookup credit address %d: %w", index, err)
+	}
+
+	err = s.txStore.AddCredit(
+		txmgrNs, txRec, nil, index, managedAddr.Internal(),
+	)
+	if err != nil {
+		return fmt.Errorf("add credit output %d: %w", index, err)
+	}
+
+	err = s.addrStore.MarkUsed(addrmgrNs, addr)
+	if err != nil {
+		return fmt.Errorf("mark credit address used %d: %w", index, err)
+	}
+
+	return nil
+}
+
+// validateCreditAddr verifies that the caller-supplied credit address is one of
+// the addresses encoded in the output script it claims to credit. Membership
+// (not equality) is required so bare-multisig scripts, where the wallet owns
+// one of several pubkeys, still validate.
+func validateCreditAddr(msgTx wire.MsgTx, index uint32, addr btcutil.Address,
+	chainParams *chaincfg.Params) error {
+
+	if int(index) >= len(msgTx.TxOut) {
+		return fmt.Errorf("credit output %d: %w: index out of range",
+			index, db.ErrInvalidParam)
+	}
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		msgTx.TxOut[index].PkScript, chainParams,
+	)
+	if err != nil {
+		return fmt.Errorf("credit output %d: extract script addrs: %w",
+			index, err)
+	}
+
+	want := addr.EncodeAddress()
+	for _, scriptAddr := range addrs {
+		if scriptAddr.EncodeAddress() == want {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("credit output %d: %w: address %s not paid by "+
+		"output script", index, db.ErrInvalidParam, want)
 }
 
 // UpdateTx re-implements the legacy kvdb label update path through the
