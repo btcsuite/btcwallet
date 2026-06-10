@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -62,4 +66,34 @@ func newTxStore(t *testing.T, dbConn walletdb.DB) *wtxmgr.Store {
 	require.NoError(t, err)
 
 	return txStore
+}
+
+// newAddrmgrNamespace creates the top-level waddrmgr bucket expected by kvdb
+// address-related tests.
+func newAddrmgrNamespace(t *testing.T, dbConn walletdb.DB) {
+	t.Helper()
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		_, err := tx.CreateTopLevelBucket(waddrmgr.NamespaceKey)
+		return err
+	})
+	require.NoError(t, err)
+}
+
+// newTestAddressScript returns a test address and its payment script.
+func newTestAddressScript(t *testing.T) (address.Address, []byte) {
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	addr, err := address.NewAddressPubKey(
+		privKey.PubKey().SerializeCompressed(), &chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, pkScript
 }
