@@ -261,6 +261,12 @@ type AccountStore interface {
 	GetAccount(ctx context.Context, query GetAccountQuery) (
 		*AccountInfo, error)
 
+	// GetAccountSecret retrieves encrypted account-level signing material for
+	// one account. The result contains encrypted material only; callers must
+	// use the wallet key vault to decrypt it.
+	GetAccountSecret(ctx context.Context, query GetAccountSecretQuery) (
+		*AccountSecret, error)
+
 	// ListAccounts returns a slice of AccountInfo for all accounts,
 	// optionally filtered by name or key scope. It returns an empty slice
 	// if no accounts are found.
