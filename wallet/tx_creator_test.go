@@ -565,3 +565,204 @@ func TestCreateChangeSourceOnlyRedirectsImportedCatchAll(t *testing.T) {
 		})
 	}
 }
+
+// TestFilterEligibleOutputsIncludesWatchOnlyOutputs verifies that tx authoring
+// does not reject wallet-owned watch-only UTXOs before signing.
+func TestFilterEligibleOutputsIncludesWatchOnlyOutputs(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	accountName := "watch"
+	account := uint32(9)
+	targetScope := waddrmgr.KeyScopeBIP0084
+	currentBlock := &waddrmgr.BlockStamp{Height: 100}
+	script := singleAddrPkScript(t)
+	outPoint := wire.OutPoint{Hash: [32]byte{3}, Index: 0}
+	unspent := []db.UtxoInfo{
+		{
+			OutPoint: outPoint,
+			Amount:   btcutil.Amount(10000),
+			PkScript: script,
+			Height:   100,
+		},
+	}
+
+	// The store enriches each UTXO with its account, scope and lock
+	// state and ListUTXOs is already narrowed to (Scope, AccountName), so
+	// filtering no longer issues a per-UTXO GetAddress lookup. A
+	// wallet-owned watch-only output surfaced by the store must therefore
+	// survive filtering.
+	scope := db.KeyScope(targetScope)
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID:    w.id,
+		Scope:       &scope,
+		AccountName: &accountName,
+	}).Return(unspent, nil).Once()
+
+	eligible, err := w.filterEligibleOutputs(
+		t.Context(), &targetScope, accountName, account, 1,
+		currentBlock,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, eligible, 1)
+	require.Equal(t, outPoint, eligible[0].OutPoint)
+}
+
+// TestFilterEligibleOutputsTrustsStoreScopeFilter verifies that UTXO filtering
+// trusts the store's (Scope, AccountName) narrowing and the authoritative
+// per-UTXO KeyScope, rather than re-deriving a scope from the script type or
+// issuing a per-UTXO GetAddress re-check.
+func TestFilterEligibleOutputsTrustsStoreScopeFilter(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	accountName := "mixed"
+	account := uint32(7)
+	targetScope := waddrmgr.KeyScopeBIP0049Plus
+	currentBlock := &waddrmgr.BlockStamp{Height: 100}
+
+	bip49Script := singleAddrPkScript(t)
+	bip49OutPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	// ListUTXOs is queried with the target scope, so the store only
+	// returns UTXOs that belong to it, each enriched with its
+	// authoritative persisted KeyScope. A BIP0084 UTXO under the same
+	// account would never be returned for a BIP0049Plus query.
+	unspent := []db.UtxoInfo{
+		{
+			OutPoint: bip49OutPoint,
+			Amount:   btcutil.Amount(10000),
+			PkScript: bip49Script,
+			Height:   100,
+			KeyScope: db.KeyScopeBIP0049Plus,
+		},
+	}
+
+	scope := db.KeyScope(targetScope)
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID:    w.id,
+		Scope:       &scope,
+		AccountName: &accountName,
+	}).Return(unspent, nil).Once()
+
+	eligible, err := w.filterEligibleOutputs(
+		t.Context(), &targetScope, accountName, account, 1,
+		currentBlock,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, eligible, 1)
+	require.Equal(t, bip49OutPoint, eligible[0].OutPoint)
+}
+
+// singleAddrPkScript builds a standard single-address P2WPKH pkScript that
+// ExtractPkScriptAddrs resolves to exactly one address. Coin-selection
+// filtering treats such scripts as spendable, so eligible-output tests use it
+// for UTXOs that must survive the single-address spendability gate.
+func singleAddrPkScript(t *testing.T) []byte {
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(
+		btcutil.Hash160(privKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return pkScript
+}
+
+// bareMultisigPkScript builds a bare 1-of-2 multisig pkScript. Even when the
+// wallet owns one of the two member pubkeys, ExtractPkScriptAddrs resolves it
+// to two addresses, so the single-address spendability gate excludes it from
+// automatic coin selection.
+func bareMultisigPkScript(t *testing.T) []byte {
+	t.Helper()
+
+	walletKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	otherKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	walletMember, err := btcutil.NewAddressPubKey(
+		walletKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	otherMember, err := btcutil.NewAddressPubKey(
+		otherKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.MultiSigScript(
+		[]*btcutil.AddressPubKey{walletMember, otherMember}, 1,
+	)
+	require.NoError(t, err)
+
+	return pkScript
+}
+
+// TestFilterEligibleOutputsExcludesBareMultisig verifies that automatic coin
+// selection distinguishes wallet *ownership* from wallet *spendability*. The
+// store's ListUTXOs surfaces an output the moment one of its member pubkeys
+// belongs to the wallet, but a bare multisig output may require keys the
+// wallet does not hold. The single-address spendability gate must therefore
+// drop the bare-multisig UTXO while letting an ordinary single-address UTXO
+// through.
+func TestFilterEligibleOutputsExcludesBareMultisig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	w, mocks := createTestWalletWithMocks(t)
+
+	accountName := "mixed"
+	account := uint32(5)
+	targetScope := waddrmgr.KeyScopeBIP0084
+	currentBlock := &waddrmgr.BlockStamp{Height: 100}
+
+	// One UTXO is a normal single-address P2WPKH output (spendable); the
+	// other is a bare multisig the wallet only partly owns (not spendable
+	// on its own).
+	singleOutPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	multisigOutPoint := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+	unspent := []db.UtxoInfo{
+		{
+			OutPoint: singleOutPoint,
+			Amount:   btcutil.Amount(10000),
+			PkScript: singleAddrPkScript(t),
+			Height:   100,
+		},
+		{
+			OutPoint: multisigOutPoint,
+			Amount:   btcutil.Amount(20000),
+			PkScript: bareMultisigPkScript(t),
+			Height:   100,
+		},
+	}
+
+	scope := db.KeyScope(targetScope)
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID:    w.id,
+		Scope:       &scope,
+		AccountName: &accountName,
+	}).Return(unspent, nil).Once()
+
+	// Act.
+	eligible, err := w.filterEligibleOutputs(
+		t.Context(), &targetScope, accountName, account, 1,
+		currentBlock,
+	)
+
+	// Assert: only the single-address output survives filtering; the
+	// bare-multisig output is excluded despite being wallet-owned.
+	require.NoError(t, err)
+	require.Len(t, eligible, 1)
+	require.Equal(t, singleOutPoint, eligible[0].OutPoint)
+}
