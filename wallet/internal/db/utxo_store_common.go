@@ -54,8 +54,26 @@ func buildOutPoint(hash []byte, outputIndex uint32) (wire.OutPoint, error) {
 	return wire.OutPoint{Hash: *txHash, Index: outputIndex}, nil
 }
 
-// BuildUtxoInfo converts normalized SQL result fields into the public UtxoInfo
-// shape returned by the db interfaces.
+// KeyScopeFromIDs builds a KeyScope from the raw purpose / coin_type columns
+// selected from key_scopes, validating the int64 -> uint32 narrowing.
+func KeyScopeFromIDs(purpose, coinType int64) (KeyScope, error) {
+	p, err := Int64ToUint32(purpose)
+	if err != nil {
+		return KeyScope{}, fmt.Errorf("scope purpose: %w", err)
+	}
+
+	c, err := Int64ToUint32(coinType)
+	if err != nil {
+		return KeyScope{}, fmt.Errorf("scope coin type: %w", err)
+	}
+
+	return KeyScope{Purpose: p, Coin: c}, nil
+}
+
+// BuildUtxoInfo converts the normalized base SQL result fields into the public
+// UtxoInfo shape. Backends set the per-row enrichment fields (AccountName,
+// Origin, AddrType, HasScript, IsLocked, KeyScope) directly on the returned
+// value after this call.
 func BuildUtxoInfo(hash []byte, outputIndex uint32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight *uint32) (*UtxoInfo, error) {
