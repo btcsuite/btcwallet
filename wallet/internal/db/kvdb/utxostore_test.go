@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -111,6 +113,161 @@ func TestReleaseOutputMissingNamespace(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, walletdb.ErrBucketNotFound)
+}
+
+// TestGetUtxoSuccess verifies that kvdb.Store adapts one wallet-owned legacy
+// credit into the db-native UTXO shape.
+func TestGetUtxoSuccess(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	outPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(1500), 1,
+		false,
+	)
+
+	utxo, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: 0,
+			OutPoint: outPoint,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, outPoint, utxo.OutPoint)
+	require.Equal(t, btcutil.Amount(1500), utxo.Amount)
+	require.NotEmpty(t, utxo.PkScript)
+	require.Equal(t, uint32(1), utxo.Height)
+	require.Equal(t, waddrmgr.DefaultAccountName, utxo.AccountName)
+	require.Equal(t, db.DerivedAccount, utxo.Origin)
+	require.Equal(t, db.WitnessPubKey, utxo.AddrType)
+	require.False(t, utxo.HasScript)
+	require.Equal(t, db.KeyScopeBIP0084, utxo.KeyScope)
+}
+
+// TestGetUtxoNotFound verifies that kvdb.Store maps the legacy missing-UTXO
+// error onto db.ErrUtxoNotFound.
+func TestGetUtxoNotFound(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	_, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: 0,
+			OutPoint: wire.OutPoint{Hash: [32]byte{9}, Index: 0},
+		},
+	)
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestGetUtxoRejectsSpentByUnminedTx verifies GetUtxo only returns outputs
+// that remain current after unmined wallet spends are considered.
+func TestGetUtxoRejectsSpentByUnminedTx(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	outPoint := insertKnownCredit(
+		t, dbConn, txStore, []byte{0x51}, 1500, 1,
+	)
+	insertUnminedSpend(t, dbConn, txStore, outPoint)
+
+	_, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: 0,
+			OutPoint: outPoint,
+		},
+	)
+	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestCalcConfsGenesisHeight verifies the shared kvdb confirmation helper
+// treats height zero as unconfirmed.
+func TestCalcConfsGenesisHeight(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, int32(0), calcConfs(0, 100))
+}
+
+// insertKnownCredit inserts one test credit and returns its outpoint.
+func insertKnownCredit(t *testing.T, dbConn walletdb.DB, txStore *wtxmgr.Store,
+	pkScript []byte, value int64, height int32) wire.OutPoint {
+
+	t.Helper()
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Hash: [32]byte{1}},
+	})
+	txMsg.AddTxOut(&wire.TxOut{Value: value, PkScript: pkScript})
+
+	received := time.Now().UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, received)
+	require.NoError(t, err)
+
+	var block *wtxmgr.BlockMeta
+	if height >= 0 {
+		block = &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: height},
+			Time:  received,
+		}
+	}
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return walletdb.ErrBucketNotFound
+		}
+
+		err := txStore.InsertTx(ns, rec, block)
+		if err != nil {
+			return fmt.Errorf("insert tx: %w", err)
+		}
+
+		err = txStore.AddCredit(ns, rec, block, 0, false)
+		if err != nil {
+			return fmt.Errorf("add credit: %w", err)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return wire.OutPoint{Hash: rec.Hash, Index: 0}
+}
+
+// insertUnminedSpend records an unmined wallet transaction that spends the
+// given outpoint.
+func insertUnminedSpend(t *testing.T, dbConn walletdb.DB,
+	txStore *wtxmgr.Store, outPoint wire.OutPoint) {
+
+	t.Helper()
+
+	spendTx := &wire.MsgTx{Version: 1}
+	spendTx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	spendTx.AddTxOut(&wire.TxOut{Value: 1, PkScript: []byte{0x51}})
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if ns == nil {
+			return walletdb.ErrBucketNotFound
+		}
+
+		return txStore.InsertTx(ns, spendRec, nil)
+	})
+	require.NoError(t, err)
 }
 
 // TestBalanceRejectsAccountWithoutScope verifies that Balance enforces
