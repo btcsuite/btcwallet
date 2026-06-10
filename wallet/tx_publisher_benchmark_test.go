@@ -5,13 +5,19 @@
 package wallet
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +35,8 @@ import (
 //
 // The API is optimized with a 4-stage pipeline:
 //  1. Extract: O(n) - CPU-intensive address extraction (no DB locks)
-//  2. Filter: O(m·log(k)) - Read-only DB transaction to filter owned addresses
+//  2. Filter: O(m·log(k)) - Single batched read-only store lookup that resolves
+//     all m unique scripts to the owned subset in one DB operation
 //  3. Plan: O(n·m) - In-memory write plan preparation (typically O(n) as m≈1-2)
 //  4. Execute: O(c) - Atomic write transaction
 //     (c = owned outputs, typically c << n)
@@ -243,7 +250,8 @@ func BenchmarkBroadcastAPI(b *testing.B) {
 //
 // The 4-stage pipeline design provides excellent concurrent performance:
 //  1. Extract: O(n) - Parallel CPU work, no contention
-//  2. Filter: O(m·log(k)) - Read-only transactions, minimal lock contention
+//  2. Filter: O(m·log(k)) - Single batched read-only store lookup per tx,
+//     minimal lock contention
 //  3. Plan: O(n·m) - Parallel in-memory work, no contention
 //  4. Execute: O(c) - Short write transactions reduce lock contention
 //
@@ -419,4 +427,105 @@ func assertBroadcastAPIsEquivalent(b *testing.B,
 		"PublishTransaction and Broadcast APIs should produce "+
 			"equivalent mempool state",
 	)
+}
+
+// countingAddrStore is a minimal db.Store whose only purpose is to count how
+// many times ResolveOwnedAddresses is invoked, so a benchmark can assert that
+// the output-ownership filter issues a single batched lookup regardless of how
+// many outputs a transaction has. Every other Store method is intentionally
+// left unimplemented because filterOwnedAddresses only calls
+// ResolveOwnedAddresses; the embedded nil interface is therefore never
+// dereferenced.
+type countingAddrStore struct {
+	db.Store
+
+	// owned is the set of wallet-owned scripts, keyed by string(script).
+	owned map[string]*db.AddressInfo
+
+	// calls counts the number of ResolveOwnedAddresses invocations.
+	calls atomic.Int64
+}
+
+// ResolveOwnedAddresses records the call and returns the owned subset of the
+// requested scripts in a single operation, mirroring the real backends'
+// contract.
+func (c *countingAddrStore) ResolveOwnedAddresses(_ context.Context,
+	query db.ResolveOwnedAddressesQuery) (map[string]*db.AddressInfo, error) {
+
+	c.calls.Add(1)
+
+	result := make(map[string]*db.AddressInfo)
+	for _, script := range query.ScriptPubKeys {
+		if info, ok := c.owned[string(script)]; ok {
+			result[string(script)] = info
+		}
+	}
+
+	return result, nil
+}
+
+// BenchmarkFilterOwnedAddresses measures the output-ownership filter on a tx
+// with a growing number of distinct output addresses (half wallet-owned). It
+// reports a store_ops/op metric to demonstrate that the batched lookup keeps
+// the filter stage at a single store operation per transaction (N -> 1),
+// independent of the output count N.
+func BenchmarkFilterOwnedAddresses(b *testing.B) {
+	outputCounts := []int{1, 8, 64, 256, 1024}
+
+	for _, n := range outputCounts {
+		b.Run(fmt.Sprintf("Outputs-%04d", n), func(b *testing.B) {
+			// Build n distinct output addresses; every other one is
+			// wallet-owned.
+			txOutAddrs := make(map[uint32][]address.Address, n)
+			owned := make(map[string]*db.AddressInfo)
+
+			for i := range n {
+				privKey, err := btcec.NewPrivateKey()
+				require.NoError(b, err)
+
+				addr, err := address.NewAddressPubKey(
+					privKey.PubKey().SerializeCompressed(),
+					&chainParams,
+				)
+				require.NoError(b, err)
+
+				txOutAddrs[uint32(i)] = []address.Address{addr}
+
+				if i%2 != 0 {
+					continue
+				}
+
+				script, err := txscript.PayToAddrScript(addr)
+				require.NoError(b, err)
+
+				owned[string(script)] = &db.AddressInfo{
+					ScriptPubKey: script,
+				}
+			}
+
+			store := &countingAddrStore{owned: owned}
+			w := &Wallet{store: store}
+			w.cache = newStoreRuntimeCache(store)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				_, err := w.filterOwnedAddresses(
+					b.Context(), txOutAddrs,
+				)
+				require.NoError(b, err)
+			}
+
+			b.StopTimer()
+
+			// The filter must issue exactly one store lookup per
+			// call, no matter how many outputs the tx has.
+			opsPerCall := float64(store.calls.Load()) /
+				float64(b.N)
+			require.InDelta(b, 1.0, opsPerCall, 1e-9,
+				"filter stage must be a single store op per tx")
+			b.ReportMetric(opsPerCall, "store_ops/op")
+		})
+	}
 }
