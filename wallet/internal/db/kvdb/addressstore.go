@@ -36,6 +36,10 @@ var (
 	errMissingAddrmgrNamespace = errors.New(
 		"kvdb: missing waddrmgr namespace",
 	)
+
+	// errNoAddressInPkScript is returned when a script contains no standard
+	// address.
+	errNoAddressInPkScript = errors.New("pkScript has no address")
 )
 
 // NewDerivedAddress creates one derived address through the legacy address-
@@ -863,4 +867,25 @@ func addressFromScript(pkScript []byte,
 	}
 
 	return addrs[0]
+}
+
+// addressFromPkScript extracts the first standard address from one script.
+//
+// This lets the legacy address manager resolve wallet metadata from a
+// script-pubkey-only store lookup.
+func addressFromPkScript(pkScript []byte,
+	chainParams *chaincfg.Params) (btcutil.Address, error) {
+
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, chainParams)
+	if err != nil {
+		return nil, fmt.Errorf("extract address from pkScript: %w", err)
+	}
+
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf(
+			"extract address from pkScript: %w", errNoAddressInPkScript,
+		)
+	}
+
+	return addrs[0], nil
 }

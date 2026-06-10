@@ -10,7 +10,9 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -19,6 +21,15 @@ import (
 var (
 	// errNotImplemented is returned for unimplemented kvdb store methods.
 	errNotImplemented = errors.New("not implemented")
+
+	// errMissingTxmgrNamespace is returned when the legacy transaction manager
+	// bucket is not available in the kvdb wallet database.
+	errMissingTxmgrNamespace = errors.New("missing wtxmgr namespace")
+
+	// errUnownedScript is returned when a legacy credit's pkScript cannot
+	// be resolved to a wallet-owned account. The iteration skips the row
+	// rather than propagating; wallet-owned outputs should always resolve.
+	errUnownedScript = errors.New("pkScript not owned by any account")
 
 	// wtxmgrNamespaceKey is the walletdb top-level bucket key used by the
 	// transaction manager.
@@ -329,4 +340,164 @@ func calcConfs(outputHeight, curHeight int32) int32 {
 	}
 
 	return curHeight - outputHeight + 1
+}
+
+// currentUTXOSet returns the set of current UTXOs, including leased outputs
+// but excluding outputs already spent by unmined wallet transactions.
+func (s *Store) currentUTXOSet(
+	txmgrNs walletdb.ReadBucket) (map[wire.OutPoint]struct{}, error) {
+
+	credits, err := s.txStore.UnspentOutputsIncludingLocked(txmgrNs)
+	if err != nil {
+		return nil, fmt.Errorf("list current utxos: %w", err)
+	}
+
+	current := make(map[wire.OutPoint]struct{}, len(credits))
+	for i := range credits {
+		current[credits[i].OutPoint] = struct{}{}
+	}
+
+	return current, nil
+}
+
+// utxoInfoBase maps one legacy wtxmgr credit into the bare db UTXO
+// shape, without resolving the wallet-derived enrichment fields. It is
+// used by the enrichment path below as the starting point before
+// account / address-type / lease metadata is layered on.
+func utxoInfoBase(credit *wtxmgr.Credit) *db.UtxoInfo {
+	height := db.UnminedHeight
+	if credit.Height >= 0 {
+		height = nonNegativeInt32ToUint32(credit.Height)
+	}
+
+	return &db.UtxoInfo{
+		OutPoint:     credit.OutPoint,
+		Amount:       credit.Amount,
+		PkScript:     credit.PkScript,
+		Received:     credit.Received.UTC(),
+		FromCoinBase: credit.FromCoinBase,
+		Height:       height,
+	}
+}
+
+// activeLeaseSet returns the set of currently leased outpoints that
+// intersect the current UTXO set so callers can mark IsLocked on each
+// row without re-reading the lease bucket per UTXO.
+func (s *Store) activeLeaseSet(txmgrNs walletdb.ReadBucket,
+	current map[wire.OutPoint]struct{}) (
+	map[wire.OutPoint]struct{}, error) {
+
+	locked, err := s.txStore.ListLockedOutputs(txmgrNs)
+	if err != nil {
+		return nil, fmt.Errorf("list locked outputs: %w", err)
+	}
+
+	leaseSet := make(map[wire.OutPoint]struct{}, len(locked))
+	for _, lease := range locked {
+		if _, ok := current[lease.Outpoint]; !ok {
+			continue
+		}
+
+		leaseSet[lease.Outpoint] = struct{}{}
+	}
+
+	return leaseSet, nil
+}
+
+// utxoAccountBinding captures the per-row account resolution shared
+// between filter checks and enrichment population. The owning account
+// store and number are computed once and reused so callers do not
+// re-resolve the same address twice per UTXO row.
+type utxoAccountBinding struct {
+	acctStore waddrmgr.AccountStore
+	acctNum   uint32
+	scope     db.KeyScope
+}
+
+// resolveAccountForCredit maps one legacy credit's pkScript to its
+// owning account store and number. Outputs whose script cannot be
+// resolved to a wallet-owned account surface as errUnownedScript so
+// callers can skip them defensively.
+func (s *Store) resolveAccountForCredit(addrmgrNs walletdb.ReadBucket,
+	credit *wtxmgr.Credit, chainParams *chaincfg.Params) (
+	*utxoAccountBinding, btcutil.Address, error) {
+
+	addr, err := addressFromPkScript(credit.PkScript, chainParams)
+	if err != nil {
+		if errors.Is(err, errNoAddressInPkScript) {
+			return nil, nil, errUnownedScript
+		}
+
+		return nil, nil, fmt.Errorf("extract address: %w", err)
+	}
+
+	acctStore, acctNum, err := s.addrStore.AddrAccount(addrmgrNs, addr)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, nil, errUnownedScript
+		}
+
+		return nil, nil, fmt.Errorf("lookup account: %w", err)
+	}
+
+	binding := &utxoAccountBinding{
+		acctStore: acctStore,
+		acctNum:   acctNum,
+		scope:     db.KeyScope(acctStore.Scope()),
+	}
+
+	return binding, addr, nil
+}
+
+// enrichCredit produces an enriched db.UtxoInfo from one legacy credit
+// plus its already-resolved account binding. The lease-set lookup is
+// the only step that touches per-UTXO state outside the binding so the
+// caller can compute the set once for the whole listing.
+func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
+	credit *wtxmgr.Credit, addr btcutil.Address,
+	binding *utxoAccountBinding,
+	leaseSet map[wire.OutPoint]struct{}) (*db.UtxoInfo, error) {
+
+	info := utxoInfoBase(credit)
+
+	props, err := binding.acctStore.AccountProperties(
+		addrmgrNs, binding.acctNum,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("account properties: %w", err)
+	}
+
+	imported, err := binding.acctStore.IsImportedAccount(
+		addrmgrNs, binding.acctNum,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("classify account origin: %w", err)
+	}
+
+	origin := db.DerivedAccount
+	if imported {
+		origin = db.ImportedAccount
+	}
+
+	managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
+	if err != nil {
+		return nil, fmt.Errorf("managed address: %w", err)
+	}
+
+	storeType, err := addresstype.FromWallet(managedAddr.AddrType())
+	if err != nil {
+		return nil, fmt.Errorf("address type: %w", err)
+	}
+
+	info.AccountName = props.AccountName
+	info.Origin = origin
+	info.AddrType = storeType.Type
+	info.HasScript = storeType.HasScript
+	info.KeyScope = binding.scope
+
+	if _, ok := leaseSet[credit.OutPoint]; ok {
+		info.IsLocked = true
+	}
+
+	return info, nil
 }
