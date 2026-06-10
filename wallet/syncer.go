@@ -1853,6 +1853,112 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
+// storeScanHorizons loads account horizon data through the store.
+func (s *syncer) storeScanHorizons(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties, error) {
+
+	if len(targets) == 0 {
+		accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+			WalletID:    s.walletID,
+			SkipBalance: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list scan accounts: %w", err)
+		}
+
+		props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
+		for i := range accounts {
+			// Withhold every imported account from the recovery
+			// horizons; see withholdFromRecoveryHorizons for why an
+			// imported account cannot safely seed the recovery state.
+			if withholdFromRecoveryHorizons(accounts[i]) {
+				continue
+			}
+
+			props = append(props, storeAccountProperties(accounts[i]))
+		}
+
+		return props, nil
+	}
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(targets))
+	for _, target := range targets {
+		// The legacy imported-address bucket is a keyless pseudo-account,
+		// not a numeric HD account. Its addresses are already watched via
+		// storeScanAddresses, so never resolve it through GetAccount where
+		// the backend may have no numeric row for it.
+		if target.Account == waddrmgr.ImportedAddrAccount {
+			continue
+		}
+
+		account := target.Account
+
+		info, err := s.store.GetAccount(ctx, db.GetAccountQuery{
+			WalletID:      s.walletID,
+			Scope:         db.KeyScope(target.Scope),
+			AccountNumber: &account,
+			SkipBalance:   true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("get scan account: %w", err)
+		}
+
+		// Withhold every imported account, mirroring the untargeted
+		// path above; see withholdFromRecoveryHorizons for the reason.
+		if withholdFromRecoveryHorizons(*info) {
+			continue
+		}
+
+		props = append(props, storeAccountProperties(*info))
+	}
+
+	return props, nil
+}
+
+// storeAccountProperties converts store account metadata into the recovery
+// state horizon shape.
+func storeAccountProperties(
+	info db.AccountInfo) *waddrmgr.AccountProperties {
+
+	return &waddrmgr.AccountProperties{
+		AccountNumber:        info.AccountNumber,
+		AccountName:          info.AccountName,
+		ExternalKeyCount:     info.ExternalKeyCount,
+		InternalKeyCount:     info.InternalKeyCount,
+		ImportedKeyCount:     info.ImportedKeyCount,
+		MasterKeyFingerprint: info.MasterKeyFingerprint,
+		KeyScope:             waddrmgr.KeyScope(info.KeyScope),
+		IsWatchOnly:          info.IsWatchOnly,
+	}
+}
+
+// withholdFromRecoveryHorizons reports whether an account must be excluded
+// from the recovery scan horizons, which is the case for every imported
+// account regardless of whether it is the keyless imported-address bucket or a
+// true imported xpub account.
+//
+// Both store backends mask an imported account's number to 0 when surfacing it
+// (SQL stores a NULL account index for imported rows; kvdb masks the field
+// explicitly), so every imported account arrives here reporting AccountNumber
+// 0. RecoveryState keys both its accountNames map and its per-branch state by
+// the (scope, account number) pair, and derives lookahead addresses through
+// waddrmgr.DeriveAddr(number, ...), a by-number lookup in waddrmgr's extended
+// key cache. Seeding an imported account at the masked number 0 would
+// therefore collide with the default derived account, which legitimately owns
+// number 0 in the same scope: the name map would be clobbered, branch state
+// shared, and the imported account's lookahead would derive the default
+// account's addresses instead of its own.
+//
+// Withholding imported accounts loses no coverage: their addresses stay watched
+// through the active-address and UTXO-watch lists, and only the (currently
+// unsafe) HD recovery lookahead is skipped. The ScanHorizon.AccountName
+// identity is already plumbed through, so imported-xpub horizons can be safely
+// enabled once RecoveryState distinguishes accounts by that non-masked
+// identity rather than by the masked account number.
+func withholdFromRecoveryHorizons(info db.AccountInfo) bool {
+	return info.Origin == db.ImportedAccount
+}
+
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
 // specific accounts.
 func (s *syncer) loadTargetedScanState(ctx context.Context,
