@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -251,7 +252,7 @@ func TestDBPutBlocks_Error(t *testing.T) {
 	// Arrange: Create a syncer with mocked stores and setup a scenario
 	// where address lookup fails during transaction resolution.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	addr, _ := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chaincfg.MainNetParams,
@@ -278,7 +279,7 @@ func TestDBPutSyncBatch_Error(t *testing.T) {
 	// Arrange: Create a syncer and a scan result that requires updating an
 	// address manager's horizon.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	res := scanResult{
 		meta: &wtxmgr.BlockMeta{
@@ -314,7 +315,7 @@ func TestDBPutBlocks(t *testing.T) {
 	// Arrange: Create a syncer and setup test data for a confirmed
 	// transaction.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	tx := wire.NewMsgTx(1)
 	rec, _ := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
@@ -379,7 +380,7 @@ func TestDBPutTxns(t *testing.T) {
 	// Arrange: Create a syncer and setup test data for an unconfirmed
 	// transaction.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	tx := wire.NewMsgTx(1)
 	rec, _ := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
@@ -428,7 +429,7 @@ func TestPutAddrHorizons(t *testing.T) {
 	// Arrange: Create a syncer and setup a scan result that indicates a
 	// horizon expansion is needed for a specific BIP84 account.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	bs := waddrmgr.BranchScope{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -488,7 +489,7 @@ func TestDBGetScanData(t *testing.T) {
 	// Arrange: Create a syncer and setup mock expectations for all data
 	// required during rescan initialization.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	targets := []waddrmgr.AccountScope{{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -539,7 +540,7 @@ func TestLoadWalletScanDataKeepsImportedXpubHorizons(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	const importedAccount = uint32(9)
 
@@ -600,7 +601,7 @@ func TestDBGetSyncedBlocks(t *testing.T) {
 	// Arrange: Create a syncer and setup a mock expectation for fetching a
 	// block hash from the address manager.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	hash := chainhash.Hash{0x01}
 	mocks.addrStore.On("BlockHash", mock.Anything, int32(100)).Return(
@@ -624,7 +625,7 @@ func TestDBPutRewind(t *testing.T) {
 	// Arrange: Create a syncer and setup mock expectations for updating
 	// the sync tip and rolling back the transaction store.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 
@@ -657,7 +658,7 @@ func TestDBPutRewind_RollbackFailureRestoresTip(t *testing.T) {
 	// Arrange: SetSyncedTo succeeds (advancing the in-memory tip) and then
 	// Rollback fails, forcing the restore path.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 
@@ -739,7 +740,7 @@ func TestDBGetScanData_MultipleTargets(t *testing.T) {
 	// Arrange: Create a syncer and setup test data for multiple accounts
 	// across different scopes.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	targets := []waddrmgr.AccountScope{
 		{Scope: waddrmgr.KeyScopeBIP0084, Account: 0},
@@ -782,7 +783,7 @@ func TestDBGetScanData_Error(t *testing.T) {
 	// Arrange: Create a syncer and setup a mock expectation for a failure
 	// while fetching a scoped key manager.
 	w, mocks := createTestWalletWithMocks(t)
-	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil, &walletmock.Store{}, 0)
 
 	targets := []waddrmgr.AccountScope{{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -817,7 +818,10 @@ func TestDBPutTargetedBatch_WithTxns(t *testing.T) {
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
 
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
 	require.NoError(t, err)
@@ -856,7 +860,10 @@ func TestDBPutSyncTip_Error(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	mockAddrStore.On("SetSyncedTo", mock.Anything,
 		mock.Anything).Return(errSetFail).Once()
@@ -879,7 +886,10 @@ func TestDBPutTargetedBatch_Errors(t *testing.T) {
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
 	require.NoError(t, err)
@@ -943,7 +953,9 @@ func TestDBPutSyncBatchEvictsHorizonsOnSyncTipError(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil, &walletmock.Store{}, 0,
+	)
 
 	bs := waddrmgr.BranchScope{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -989,7 +1001,10 @@ func TestDBPutTargetedBatchEvictsHorizonsOnTxError(t *testing.T) {
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	bs := waddrmgr.BranchScope{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -1041,7 +1056,10 @@ func TestDBPutTxns_Error(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
@@ -1077,7 +1095,10 @@ func TestDBPutTxns_UnconfirmedError(t *testing.T) {
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
 
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
@@ -1123,7 +1144,10 @@ func TestPutSyncTip_Error(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	// Act: Execute sync tip update within a database transaction.
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
@@ -1147,7 +1171,10 @@ func TestDBGetScanData_ManagerError(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	targets := []waddrmgr.AccountScope{
 		{Scope: waddrmgr.KeyScopeBIP0084, Account: 0},
@@ -1177,7 +1204,10 @@ func TestDBGetScanData_UTXOError(t *testing.T) {
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
 		mock.AnythingOfType("func(address.Address) error"),
@@ -1205,7 +1235,10 @@ func TestPutAddrHorizons_Error(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	results := []scanResult{
 		{
@@ -1234,7 +1267,9 @@ func TestPutAddrHorizonsEvictsOnPostExtensionReadError(t *testing.T) {
 	t.Parallel()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{}, mockAddrStore, nil, nil, &walletmock.Store{}, 0,
+	)
 
 	bs := waddrmgr.BranchScope{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -1284,7 +1319,10 @@ func TestDBGetScanData_AddressError(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
 		mock.Anything).Return(errAddr).Once()
@@ -1310,7 +1348,10 @@ func TestDBPutTxns_InternalAddressAsChange(t *testing.T) {
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
@@ -1359,7 +1400,10 @@ func TestDBPutTxns_AddressNotFound(t *testing.T) {
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockTxStore := &bwmock.TxStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, mockTxStore, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), &chainParams,
@@ -1399,7 +1443,10 @@ func TestDBPutRewind_Error(t *testing.T) {
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+	s := newSyncer(
+		Config{DB: db}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	// The synced tip is snapshotted before the update and conditionally
 	// restored after the update fails so the in-memory tip is not left at
