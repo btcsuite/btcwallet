@@ -28,7 +28,6 @@ var (
 	errDeriveFail     = errors.New("derive fail")
 	errLoadStateFail  = errors.New("load state fail")
 	errRollbackFail   = errors.New("rollback fail")
-	errFetchFail      = errors.New("fetch fail")
 	errCFilterFail    = errors.New("cfilter fail")
 	errActiveMgrsFail = errors.New("active managers fail")
 
