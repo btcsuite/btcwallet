@@ -94,11 +94,11 @@ var (
 	ErrMissingAccountName = errors.New("account name is required")
 
 	// ErrReservedAccountName is returned when a caller-initiated account
-	// creation targets the reserved wallet-level imported bucket name
+	// operation targets the reserved wallet-level imported bucket name
 	// (DefaultImportedAccountName). That slot is owned exclusively by the
 	// keyless imported bucket, which is materialized only on the first
-	// address import (see NewImportedAddressWithTx); neither the derived nor
-	// the imported-xpub public APIs may occupy it.
+	// address import (see NewImportedAddressWithTx); neither the derived,
+	// imported-xpub, nor rename public APIs may occupy it.
 	ErrReservedAccountName = errors.New(
 		"account name is reserved for the imported bucket",
 	)
