@@ -933,3 +933,257 @@ func TestGetEligibleUTXOsNilSourceAccountNotFound(t *testing.T) {
 	require.ErrorIs(t, err, ErrAccountNotFound)
 	require.Nil(t, eligible)
 }
+
+// TestCreateManualInputSource verifies the coinbase-maturity gate on manually
+// selected inputs. A manual UTXO that is an immature coinbase must be rejected
+// with ErrUtxoNotEligible, matching account-based selection, while a mature
+// coinbase must be accepted and surfaced by the resulting input source.
+func TestCreateManualInputSource(t *testing.T) {
+	t.Parallel()
+
+	// The wallet treats an output as a mature coinbase only once it has
+	// reached CoinbaseMaturity confirmations against the chain tip. With
+	// the tip at height 100 and regtest maturity of 100, a coinbase mined
+	// at height 1 has exactly 100 confirmations (mature) while one mined at
+	// height 100 has a single confirmation (immature).
+	const tipHeight = 100
+
+	matureCoinbase := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	immatureCoinbase := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+
+	tests := []struct {
+		name       string
+		outPoint   wire.OutPoint
+		height     uint32
+		wantErr    bool
+		wantAmount btcutil.Amount
+	}{
+		{
+			name:     "immature coinbase rejected",
+			outPoint: immatureCoinbase,
+			height:   tipHeight,
+			wantErr:  true,
+		},
+		{
+			name:       "mature coinbase accepted",
+			outPoint:   matureCoinbase,
+			height:     1,
+			wantErr:    false,
+			wantAmount: btcutil.Amount(10000),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			w, mocks := createTestWalletWithMocks(t)
+
+			mocks.chain.On("BlockStamp").Return(
+				&waddrmgr.BlockStamp{Height: tipHeight}, nil,
+			).Once()
+
+			credit := &db.UtxoInfo{
+				OutPoint:     tc.outPoint,
+				Amount:       btcutil.Amount(10000),
+				PkScript:     singleAddrPkScript(t),
+				Height:       tc.height,
+				FromCoinBase: true,
+			}
+			mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+				WalletID: w.id,
+				OutPoint: tc.outPoint,
+			}).Return(credit, nil).Once()
+
+			// Act.
+			source, err := w.createManualInputSource(
+				t.Context(), &InputsManual{
+					UTXOs: []wire.OutPoint{tc.outPoint},
+				},
+			)
+
+			// Assert: an immature coinbase is rejected, a mature one
+			// is dispensed by the resulting input source.
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrUtxoNotEligible)
+				require.Nil(t, source)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, source)
+
+			total, inputs, _, _, err := source(0)
+			require.NoError(t, err)
+			require.Len(t, inputs, 1)
+			require.Equal(t, tc.outPoint, inputs[0].PreviousOutPoint)
+			require.Equal(t, tc.wantAmount, total)
+		})
+	}
+}
+
+// TestGetEligibleUTXOsFromList verifies that policy-selected CoinSourceUTXOs
+// excludes an immature coinbase output even when the requested confirmation
+// target is met, while a mature coinbase survives. This keeps explicit UTXO
+// selection consistent with account-based selection's coinbase-maturity gate.
+func TestGetEligibleUTXOsFromList(t *testing.T) {
+	t.Parallel()
+
+	// With the tip at height 100 and regtest maturity of 100, a coinbase
+	// mined at height 1 is mature (100 confirmations) while one mined at
+	// height 100 is immature (1 confirmation). A minconf of 1 is satisfied
+	// in both cases, so only the maturity gate can exclude the immature
+	// output.
+	const tipHeight = 100
+
+	matureCoinbase := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	immatureCoinbase := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+
+	tests := []struct {
+		name        string
+		height      uint32
+		wantInclude bool
+	}{
+		{
+			name:        "immature coinbase excluded",
+			height:      tipHeight,
+			wantInclude: false,
+		},
+		{
+			name:        "mature coinbase included",
+			height:      1,
+			wantInclude: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			w, mocks := createTestWalletWithMocks(t)
+
+			outPoint := matureCoinbase
+			if !tc.wantInclude {
+				outPoint = immatureCoinbase
+			}
+
+			source := &CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{outPoint},
+			}
+			bs := &waddrmgr.BlockStamp{Height: tipHeight}
+
+			credit := &db.UtxoInfo{
+				OutPoint:     outPoint,
+				Amount:       btcutil.Amount(10000),
+				PkScript:     singleAddrPkScript(t),
+				Height:       tc.height,
+				FromCoinBase: true,
+			}
+			mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+				WalletID: w.id,
+				OutPoint: outPoint,
+			}).Return(credit, nil).Once()
+
+			// Act: minconf of 1 is satisfied for both outputs.
+			eligible, err := w.getEligibleUTXOsFromList(
+				t.Context(), source, 1, bs,
+			)
+
+			// Assert.
+			require.NoError(t, err)
+
+			if tc.wantInclude {
+				require.Len(t, eligible, 1)
+				require.Equal(t, outPoint, eligible[0].OutPoint)
+			} else {
+				require.Empty(t, eligible)
+			}
+		})
+	}
+}
+
+// TestFilterEligibleOutputsExcludesImmatureCoinbase verifies that account-based
+// selection is unchanged by the shared coinbase-maturity helper: an immature
+// coinbase output is filtered out while a mature one is retained, even though
+// both satisfy the requested confirmation target.
+func TestFilterEligibleOutputsExcludesImmatureCoinbase(t *testing.T) {
+	t.Parallel()
+
+	const tipHeight = 100
+
+	accountName := "default"
+	account := uint32(0)
+	targetScope := waddrmgr.KeyScopeBIP0086
+
+	matureCoinbase := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	immatureCoinbase := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+
+	tests := []struct {
+		name        string
+		outPoint    wire.OutPoint
+		height      uint32
+		wantInclude bool
+	}{
+		{
+			name:        "immature coinbase excluded",
+			outPoint:    immatureCoinbase,
+			height:      tipHeight,
+			wantInclude: false,
+		},
+		{
+			name:        "mature coinbase included",
+			outPoint:    matureCoinbase,
+			height:      1,
+			wantInclude: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			w, mocks := createTestWalletWithMocks(t)
+
+			currentBlock := &waddrmgr.BlockStamp{Height: tipHeight}
+			unspent := []db.UtxoInfo{
+				{
+					OutPoint:     tc.outPoint,
+					Amount:       btcutil.Amount(10000),
+					PkScript:     singleAddrPkScript(t),
+					Height:       tc.height,
+					FromCoinBase: true,
+				},
+			}
+
+			scope := db.KeyScope(targetScope)
+			mocks.store.On("ListUTXOs", mock.Anything,
+				db.ListUtxosQuery{
+					WalletID:    w.id,
+					Scope:       &scope,
+					AccountName: &accountName,
+				},
+			).Return(unspent, nil).Once()
+
+			// Act: minconf of 1 is satisfied for both outputs.
+			eligible, err := w.filterEligibleOutputs(
+				t.Context(), &targetScope, accountName, account,
+				1, currentBlock,
+			)
+
+			// Assert.
+			require.NoError(t, err)
+
+			if tc.wantInclude {
+				require.Len(t, eligible, 1)
+				require.Equal(t, tc.outPoint,
+					eligible[0].OutPoint)
+			} else {
+				require.Empty(t, eligible)
+			}
+		})
+	}
+}
