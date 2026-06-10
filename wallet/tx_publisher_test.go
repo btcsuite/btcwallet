@@ -5,7 +5,6 @@
 package wallet
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -104,12 +103,43 @@ func matchUpdateTxParams(walletID uint32, txid chainhash.Hash,
 	})
 }
 
-// matchGetAddressQuery returns a matcher for Store address lookups.
-func matchGetAddressQuery(walletID uint32, scriptPubKey []byte) any {
-	return mock.MatchedBy(func(query db.GetAddressQuery) bool {
-		return query.WalletID == walletID &&
-			bytes.Equal(query.ScriptPubKey, scriptPubKey)
+// matchResolveOwnedAddressesQuery returns a matcher for the batched Store
+// address lookup. The wallet builds the script set from a map, so the order is
+// not deterministic; the matcher compares the scripts as a set.
+func matchResolveOwnedAddressesQuery(walletID uint32, scripts ...[]byte) any {
+	want := make(map[string]struct{}, len(scripts))
+	for _, script := range scripts {
+		want[string(script)] = struct{}{}
+	}
+
+	return mock.MatchedBy(func(query db.ResolveOwnedAddressesQuery) bool {
+		if query.WalletID != walletID {
+			return false
+		}
+
+		if len(query.ScriptPubKeys) != len(want) {
+			return false
+		}
+
+		for _, script := range query.ScriptPubKeys {
+			if _, ok := want[string(script)]; !ok {
+				return false
+			}
+		}
+
+		return true
 	})
+}
+
+// ownedAddrsResult builds the owned-subset map returned by the batched Store
+// address lookup, keyed by string(script) as the contract requires.
+func ownedAddrsResult(scripts ...[]byte) map[string]*db.AddressInfo {
+	owned := make(map[string]*db.AddressInfo, len(scripts))
+	for _, script := range scripts {
+		owned[string(script)] = &db.AddressInfo{ScriptPubKey: script}
+	}
+
+	return owned
 }
 
 // matchInvalidateUnminedTxParams returns a matcher for Store invalidation
@@ -362,14 +392,12 @@ func TestFilterOwnedAddresses(t *testing.T) {
 			2: {ownedAddr}, // Duplicate
 		}
 
-		// Each address is looked up by its own script, which for a
-		// single-address output equals the output script.
-		mocks.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, ownedScript),
-		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
-		mocks.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, unownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
+		// All addresses are resolved by their own scripts in a single
+		// batched lookup; for a single-address output a script equals
+		// the output script. Only the owned script comes back.
+		mocks.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, ownedScript, unownedScript),
+		).Return(ownedAddrsResult(ownedScript), nil).Once()
 
 		// Filter the addresses.
 		ownedAddrs, err := w.filterOwnedAddresses(
@@ -406,12 +434,9 @@ func TestFilterOwnedAddresses(t *testing.T) {
 		ownedScript := mustPayToAddrScript(ownedAddr)
 		otherScript := mustPayToAddrScript(otherAddr)
 
-		mocks.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, ownedScript),
-		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
-		mocks.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, otherScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
+		mocks.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, ownedScript, otherScript),
+		).Return(ownedAddrsResult(ownedScript), nil).Once()
 
 		ownedAddrs, err := w.filterOwnedAddresses(
 			t.Context(), txOutAddrs,
@@ -424,6 +449,61 @@ func TestFilterOwnedAddresses(t *testing.T) {
 		require.True(t, ok)
 		require.ElementsMatch(t, []uint32{uint32(0)},
 			info.outputIndices)
+	})
+
+	t.Run("single batched lookup for many outputs", func(t *testing.T) {
+		t.Parallel()
+
+		w, mocks := createStartedWalletWithMocks(t)
+
+		// Build a many-output tx with distinct addresses, every other
+		// one wallet-owned, to show the filter resolves the whole set
+		// with a single Store lookup (N outputs -> 1 op).
+		const numOutputs = 32
+
+		txOutAddrs := make(map[uint32][]address.Address, numOutputs)
+		scripts := make([][]byte, 0, numOutputs)
+		ownedScripts := make([][]byte, 0, numOutputs/2)
+		ownedKeys := make(map[string]struct{}, numOutputs/2)
+
+		for i := range numOutputs {
+			addr := mustNewPubKeyAddr(t, w)
+			script := mustPayToAddrScript(addr)
+
+			txOutAddrs[uint32(i)] = []address.Address{addr}
+
+			scripts = append(scripts, script)
+
+			// Mark every other address as wallet-owned.
+			if i%2 != 0 {
+				continue
+			}
+
+			ownedScripts = append(ownedScripts, script)
+			ownedKeys[addr.EncodeAddress()] = struct{}{}
+		}
+
+		// The whole script set is resolved in exactly one call, which
+		// .Once() plus AssertExpectations enforce.
+		mocks.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, scripts...),
+		).Return(ownedAddrsResult(ownedScripts...), nil).Once()
+
+		ownedAddrs, err := w.filterOwnedAddresses(
+			t.Context(), txOutAddrs,
+		)
+		require.NoError(t, err)
+
+		// Exactly the owned half is returned, and the filter issued a
+		// single batched Store lookup regardless of the output count.
+		require.Len(t, ownedAddrs, len(ownedKeys))
+
+		for key := range ownedAddrs {
+			_, ok := ownedKeys[key]
+			require.True(t, ok)
+		}
+
+		mocks.store.AssertNumberOfCalls(t, "ResolveOwnedAddresses", 1)
 	})
 }
 
@@ -730,12 +810,9 @@ func TestAddTxToWallet(t *testing.T) {
 		// the wallet to identify these outputs, record the
 		// transaction, and credit the wallet with the new UTXOs.
 		//
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, ownedScript),
-		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, unownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
+		m.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, ownedScript, unownedScript),
+		).Return(ownedAddrsResult(ownedScript), nil).Once()
 
 		expectedCredits := map[uint32]address.Address{
 			0: ownedAddr,
@@ -774,12 +851,9 @@ func TestAddTxToWallet(t *testing.T) {
 		//
 		// Set up the mock for the Store to own no
 		// addresses.
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, ownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, unownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
+		m.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, ownedScript, unownedScript),
+		).Return(ownedAddrsResult(), nil).Once()
 
 		// With no owned outputs, addTxToWallet falls back to checking
 		// the input side. The single input does not spend a current
@@ -818,12 +892,9 @@ func TestAddTxToWallet(t *testing.T) {
 		// A sweep pays no wallet-owned outputs but spends a wallet
 		// UTXO, so it must still be recorded (with an empty credit
 		// set) so it can be tracked and later invalidated.
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, ownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
-		m.store.On("GetAddress", mock.Anything,
-			matchGetAddressQuery(w.id, unownedScript),
-		).Return(nil, db.ErrAddressNotFound).Once()
+		m.store.On("ResolveOwnedAddresses", mock.Anything,
+			matchResolveOwnedAddressesQuery(w.id, ownedScript, unownedScript),
+		).Return(ownedAddrsResult(), nil).Once()
 
 		// The single input spends a wallet output, so GetUtxo returns
 		// a UTXO.
@@ -1109,9 +1180,9 @@ func TestBroadcastSuccess(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	m.store.On("GetAddress", mock.Anything,
-		matchGetAddressQuery(w.id, pkScript),
-	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(pkScript), nil).Once()
 	m.store.On("CreateTx", mock.Anything,
 		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
 			0: ownedAddr,
@@ -1177,9 +1248,9 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	m.store.On("GetAddress", mock.Anything,
-		matchGetAddressQuery(w.id, pkScript),
-	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(pkScript), nil).Once()
 	m.store.On("CreateTx", mock.Anything,
 		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
 			0: ownedAddr,
@@ -1232,9 +1303,9 @@ func TestBroadcastSweepPublishFailsInvalidateSucceeds(t *testing.T) {
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
 	// The output is unowned.
-	m.store.On("GetAddress", mock.Anything,
-		matchGetAddressQuery(w.id, pkScript),
-	).Return(nil, db.ErrAddressNotFound).Once()
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(), nil).Once()
 
 	// The input spends a wallet UTXO, marking the tx as ours.
 	m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
@@ -1298,9 +1369,9 @@ func TestBroadcastUnrelatedPublishFailsNoInvalidate(t *testing.T) {
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
 	// The output is unowned.
-	m.store.On("GetAddress", mock.Anything,
-		matchGetAddressQuery(w.id, pkScript),
-	).Return(nil, db.ErrAddressNotFound).Once()
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(), nil).Once()
 
 	// The input does not spend a wallet UTXO, so the tx is wallet-unrelated
 	// and is never recorded.
@@ -1366,9 +1437,9 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	m.store.On("GetAddress", mock.Anything,
-		matchGetAddressQuery(w.id, pkScript),
-	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(pkScript), nil).Once()
 	m.store.On("CreateTx", mock.Anything,
 		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
 			0: ownedAddr,
@@ -1401,4 +1472,124 @@ func TestBroadcastNilTx(t *testing.T) {
 
 	err := w.Broadcast(t.Context(), nil, label)
 	require.ErrorIs(t, err, ErrTxCannotBeNil)
+}
+
+// TestBroadcastRetryRetainedInvalidDoesNotPublish verifies the retained-invalid
+// guard added in "wallet: route tx recording and ownership filtering through
+// store": when a prior Broadcast recorded a tx, its publish failed, and cleanup
+// invalidated the row, a later retry with the same tx hash hits
+// ErrTxAlreadyExists in CreateTx. Because the only stored row is now in a
+// terminal failed state, Broadcast must refuse to report the record step a
+// success and must NOT publish the tx. The store's retained failed row is the
+// source of truth; SendRawTransaction is never reached.
+func TestBroadcastRetryRetainedInvalidDoesNotPublish(t *testing.T) {
+	t.Parallel()
+
+	label := testTxLabel
+	w, m := createStartedWalletWithMocks(t)
+
+	// Create a transaction with an owned output so it is classified as ours
+	// and recording is attempted.
+	ownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	ownedAddr, err := address.NewAddressPubKey(
+		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+	txid := tx.TxHash()
+
+	// Mock checkMempool to succeed so the flow reaches recording.
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(pkScript), nil).Once()
+
+	// The prior attempt already inserted this tx, so CreateTx reports the
+	// duplicate.
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
+			0: ownedAddr,
+		}),
+	).Return(db.ErrTxAlreadyExists).Once()
+
+	// The retained row was invalidated by the prior cleanup and is now
+	// failed, so the record step must refuse the duplicate.
+	m.store.On("GetTx", mock.Anything,
+		db.GetTxQuery{WalletID: w.id, Txid: txid},
+	).Return(&db.TxInfo{Hash: txid, Status: db.TxStatusFailed}, nil).Once()
+
+	// We deliberately register NO SendRawTransaction (and no NotifyReceived)
+	// expectation: publishing must not happen while the only stored row is
+	// failed. AssertExpectations would flag an unexpected publish call.
+	err = w.Broadcast(t.Context(), tx, label)
+	require.ErrorIs(t, err, ErrTxRetainedInvalid)
+}
+
+// TestBroadcastRetryLiveDuplicateIdempotent verifies the complementary case:
+// when CreateTx reports a duplicate but the stored row is still live
+// (TxStatusPublished), Broadcast treats the record step as an idempotent
+// success and proceeds to (re)publish the tx, leaving the live row tracked.
+func TestBroadcastRetryLiveDuplicateIdempotent(t *testing.T) {
+	t.Parallel()
+
+	label := testTxLabel
+	w, m := createStartedWalletWithMocks(t)
+
+	ownedPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	ownedAddr, err := address.NewAddressPubKey(
+		ownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(ownedAddr)
+	require.NoError(t, err)
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: pkScript}},
+	}
+	txid := tx.TxHash()
+
+	m.chain.On("TestMempoolAccept",
+		mock.Anything, mock.Anything,
+	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
+
+	m.store.On("ResolveOwnedAddresses", mock.Anything,
+		matchResolveOwnedAddressesQuery(w.id, pkScript),
+	).Return(ownedAddrsResult(pkScript), nil).Once()
+
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(w.id, tx, label, map[uint32]address.Address{
+			0: ownedAddr,
+		}),
+	).Return(db.ErrTxAlreadyExists).Once()
+
+	// The existing row is still live, so the duplicate is idempotent.
+	m.store.On("GetTx", mock.Anything,
+		db.GetTxQuery{WalletID: w.id, Txid: txid},
+	).Return(&db.TxInfo{Hash: txid, Status: db.TxStatusPublished}, nil).Once()
+
+	// A non-empty label still patches the stored label on the live row.
+	m.store.On("UpdateTx", mock.Anything,
+		matchUpdateTxParams(w.id, txid, &label, nil),
+	).Return(nil).Once()
+
+	// Recording succeeded idempotently, so publishing proceeds as normal.
+	m.chain.On("NotifyReceived", mock.Anything).Return(nil)
+	m.chain.On("SendRawTransaction",
+		mock.Anything, mock.Anything,
+	).Return(nil, nil)
+
+	err = w.Broadcast(t.Context(), tx, label)
+	require.NoError(t, err)
 }
