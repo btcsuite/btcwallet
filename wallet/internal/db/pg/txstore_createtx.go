@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
@@ -297,6 +298,54 @@ func (o *createTxOps) InsertReplacementEdges(
 	return nil
 }
 
+// creditLookupScript returns the script_pub_key used to resolve the owning
+// address row for the credited output at the given index.
+//
+// When the caller supplied a resolved credit address, ownership is keyed on
+// that address's own script (PayToAddrScript). This mirrors the kvdb backend,
+// which validates the credit as a member of the output script and then looks
+// the address up directly: a bare-multisig output the wallet partly owns is
+// stored against the wallet-owned member rather than the full multisig script,
+// which no address row would ever match. For a single-address output the
+// member script equals the output script, so the lookup is unchanged.
+//
+// When the credit address is nil the caller has no resolved owner, so the
+// on-chain output script is used directly, preserving the store's original
+// behavior.
+//
+// NOTE: This only selects the address-ownership lookup key. The stored UTXO
+// always records the on-chain output script (TxOut[index].PkScript) via
+// InsertUtxo's amount/output-index, never the member script.
+func creditLookupScript(params db.CreateTxParams, index uint32) ([]byte,
+	error) {
+
+	creditAddr := params.Credits[index]
+	if creditAddr == nil {
+		return params.Tx.TxOut[index].PkScript, nil
+	}
+
+	// A non-nil credit address is authoritative for ownership, so reject it
+	// unless the output it claims to credit actually pays to it. Without this
+	// check a caller could point output N at any wallet address and have the
+	// store record a UTXO owned by an address the output never pays,
+	// corrupting ownership. Membership (not equality) keeps bare-multisig
+	// member credits valid.
+	err := db.ValidateCreditAddrMembership(
+		creditAddr, params.Tx.TxOut[index].PkScript,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("credit output %d: %w", index, err)
+	}
+
+	lookupScript, err := txscript.PayToAddrScript(creditAddr)
+	if err != nil {
+		return nil, fmt.Errorf("credit output %d: build address script: "+
+			"%w", index, err)
+	}
+
+	return lookupScript, nil
+}
+
 // insertCredits inserts one wallet-owned UTXO row for each credited output of
 // the transaction being stored.
 func insertCredits(ctx context.Context, qtx *sqlc.Queries,
@@ -314,11 +363,14 @@ func insertCredits(ctx context.Context, qtx *sqlc.Queries,
 			continue
 		}
 
-		pkScript := params.Tx.TxOut[index].PkScript
+		lookupScript, err := creditLookupScript(params, index)
+		if err != nil {
+			return err
+		}
 
 		addrRow, err := qtx.GetAddressByScriptPubKey(
 			ctx, sqlc.GetAddressByScriptPubKeyParams{
-				ScriptPubKey: pkScript,
+				ScriptPubKey: lookupScript,
 				WalletID:     int64(params.WalletID),
 			},
 		)
