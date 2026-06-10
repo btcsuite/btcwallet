@@ -883,14 +883,14 @@ func (s *syncer) txNotificationState(ctx context.Context,
 
 // putSyncBatch records recovery scan results and synced blocks through the
 // store when configured, falling back to the legacy walletdb path otherwise.
-func (s *syncer) putSyncBatch(ctx context.Context,
+func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	results []scanResult) error {
 
 	if s.store == nil {
 		return s.DBPutSyncBatch(ctx, results)
 	}
 
-	params, err := s.storeScanBatchParams(results, true)
+	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
 		return err
 	}
@@ -911,13 +911,13 @@ func (s *syncer) putSyncBatch(ctx context.Context,
 // putTargetedBatch records targeted recovery scan results through the store
 // when configured, falling back to the legacy walletdb path otherwise.
 func (s *syncer) putTargetedBatch(ctx context.Context,
-	results []scanResult) error {
+	scanState *RecoveryState, results []scanResult) error {
 
 	if s.store == nil {
 		return s.DBPutTargetedBatch(ctx, results)
 	}
 
-	params, err := s.storeScanBatchParams(results, false)
+	params, err := s.storeScanBatchParams(scanState, results, false)
 	if err != nil {
 		return err
 	}
@@ -943,17 +943,33 @@ func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
 }
 
 // scanHorizonParams flattens the merged horizon map into store scan horizon
-// params.
-func scanHorizonParams(
+// params, stamping every horizon with the account identity resolved into the
+// recovery state.
+//
+// AccountID is the stable Store row identity that SQL backends use to resolve
+// the horizon's owning account. AccountName is retained as metadata and as a
+// compatibility fallback for backends that do not expose AccountID.
+//
+// Fail-safe: if the recovery state has no name for a branch's account, we
+// leave AccountName empty and let the backend fall back to its number-based
+// behavior. The recovery state derives the horizon map from the same account
+// properties that seed accountNames, so a miss is not expected in practice;
+// emitting a wrong name would be worse than the number fallback.
+func scanHorizonParams(scanState *RecoveryState,
 	horizons map[waddrmgr.BranchScope]uint32) []db.ScanHorizon {
 
 	params := make([]db.ScanHorizon, 0, len(horizons))
 	for bs, index := range horizons {
+		name, _ := scanState.AccountName(bs.Scope, bs.Account)
+		accountID, _ := scanState.AccountID(bs.Scope, bs.Account)
+
 		params = append(params, db.ScanHorizon{
-			Scope:   db.KeyScope(bs.Scope),
-			Account: bs.Account,
-			Branch:  bs.Branch,
-			Index:   index,
+			Scope:       db.KeyScope(bs.Scope),
+			AccountID:   accountID,
+			Account:     bs.Account,
+			AccountName: name,
+			Branch:      bs.Branch,
+			Index:       index,
 		})
 	}
 
@@ -994,8 +1010,12 @@ func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
 }
 
 // storeScanBatchParams converts recovery scan results into store batch params.
-func (s *syncer) storeScanBatchParams(results []scanResult,
-	includeSyncedBlocks bool) (db.ScanBatchParams, error) {
+// scanState is the recovery state that produced the results; it carries the
+// account identity snapshot used to stamp every emitted horizon with the stable
+// AccountID SQL backends require for horizon extension.
+func (s *syncer) storeScanBatchParams(scanState *RecoveryState,
+	results []scanResult, includeSyncedBlocks bool) (db.ScanBatchParams,
+	error) {
 
 	params := db.ScanBatchParams{WalletID: s.walletID}
 	horizons := make(map[waddrmgr.BranchScope]uint32)
@@ -1034,7 +1054,7 @@ func (s *syncer) storeScanBatchParams(results []scanResult,
 		}
 	}
 
-	params.Horizons = scanHorizonParams(horizons)
+	params.Horizons = scanHorizonParams(scanState, horizons)
 
 	return params, nil
 }
@@ -1137,7 +1157,61 @@ func (s *syncer) loadFullScanState(
 		return nil, fmt.Errorf("init scan state: %w", err)
 	}
 
+	err = s.stampRecoveryAccountIDs(ctx, scanState, horizonData)
+	if err != nil {
+		return nil, err
+	}
+
 	return scanState, nil
+}
+
+// stampRecoveryAccountIDs records stable Store account IDs in the recovery
+// state for every account loaded into the scan snapshot.
+func (s *syncer) stampRecoveryAccountIDs(ctx context.Context,
+	scanState *RecoveryState,
+	accounts []*waddrmgr.AccountProperties) error {
+
+	if s.store == nil {
+		return nil
+	}
+
+	for _, props := range accounts {
+		accountID, err := s.accountPropertiesAccountID(ctx, props)
+		if err != nil {
+			return err
+		}
+
+		scanState.setAccountID(
+			props.KeyScope, props.AccountNumber, accountID,
+		)
+	}
+
+	return nil
+}
+
+// accountPropertiesAccountID resolves the Store account row identity matching
+// the account properties loaded into a recovery scan snapshot.
+func (s *syncer) accountPropertiesAccountID(ctx context.Context,
+	props *waddrmgr.AccountProperties) (*uint32, error) {
+
+	query := db.GetAccountQuery{
+		WalletID:    s.walletID,
+		Scope:       db.KeyScope(props.KeyScope),
+		SkipBalance: true,
+	}
+	if props.AccountName != "" {
+		query.Name = &props.AccountName
+	} else {
+		account := props.AccountNumber
+		query.AccountNumber = &account
+	}
+
+	info, err := s.store.GetAccount(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get recovery account ID: %w", err)
+	}
+
+	return info.AccountID, nil
 }
 
 // scanBatchWithFullBlocks implements the fallback scanning by downloading and
@@ -1641,7 +1715,7 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 		return fmt.Errorf("%w: scan batch empty", ErrScanBatchEmpty)
 	}
 	// Process Batch (Update). We do this in a single DB transaction.
-	return s.putSyncBatch(ctx, results)
+	return s.putSyncBatch(ctx, scanState, results)
 }
 
 // handleChainUpdate processes a notification immediately.
@@ -1862,7 +1936,7 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 		}
 
 		// Process results (update DB).
-		err = s.putTargetedBatch(ctx, results)
+		err = s.putTargetedBatch(ctx, scanState, results)
 		if err != nil {
 			return err
 		}
@@ -1895,6 +1969,11 @@ func (s *syncer) loadTargetedScanState(ctx context.Context,
 	err = state.Initialize(horizonData, initialAddrs, initialUnspent)
 	if err != nil {
 		return nil, fmt.Errorf("init scan state: %w", err)
+	}
+
+	err = s.stampRecoveryAccountIDs(ctx, state, horizonData)
+	if err != nil {
+		return nil, err
 	}
 
 	return state, nil
