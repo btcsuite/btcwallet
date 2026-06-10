@@ -1,11 +1,14 @@
 package kvdb
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -528,4 +531,196 @@ func TestBalanceEmptyWallet(t *testing.T) {
 	result, err := store.Balance(t.Context(), db.BalanceParams{})
 	require.NoError(t, err)
 	require.Zero(t, result.Total)
+}
+
+// TestListUTXOsExcludesImportedFromNumericAccountFilter verifies that kvdb
+// matches SQL semantics for the db.ListUtxosQuery.Account filter: a numeric
+// Account filter never selects imported UTXOs (those carry the legacy
+// ImportedAddrAccount pseudo-account number, which has no numeric counterpart
+// on SQL backends), while derived accounts remain selectable by number.
+// Imported UTXOs stay reachable through (Scope, AccountName).
+func TestListUTXOsExcludesImportedFromNumericAccountFilter(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScopeBIP0084
+
+	// Arrange: one derived-account (account 0) UTXO and one imported-key
+	// UTXO under the legacy ImportedAddrAccount pseudo-account.
+	derivedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(1000),
+		balanceTestTipHeight, false,
+	)
+	importedPoint := creditImportedKeyAtHeight(
+		t, store.db, mgr, txStore, scope, btcutil.Amount(2000),
+		balanceTestTipHeight,
+	)
+
+	// A numeric Account filter set to the imported pseudo-account number
+	// must select nothing: imported rows are not numerically addressable,
+	// matching SQL's NULL account_number.
+	importedAcct := uint32(waddrmgr.ImportedAddrAccount)
+	utxos, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: 0,
+			Scope:    &dbScope,
+			Account:  &importedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, utxos)
+
+	// A numeric Account filter for the derived account returns only the
+	// derived UTXO; the imported UTXO is excluded.
+	derivedAcct := uint32(0)
+	utxos, err = store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: 0,
+			Scope:    &dbScope,
+			Account:  &derivedAcct,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, derivedPoint, utxos[0].OutPoint)
+	require.Equal(t, db.DerivedAccount, utxos[0].Origin)
+
+	// The imported UTXO remains selectable via (Scope, AccountName).
+	importedName := waddrmgr.ImportedAddrAccountName
+	utxos, err = store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID:    0,
+			Scope:       &dbScope,
+			AccountName: &importedName,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, importedPoint, utxos[0].OutPoint)
+	require.Equal(t, db.ImportedAccount, utxos[0].Origin)
+}
+
+// TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter verifies that
+// kvdb excludes an imported xpub (watch-only) account from the numeric
+// db.ListUtxosQuery.Account filter even though the account carries an ordinary
+// kvdb account number. SQL backends store NULL account_number for imported
+// accounts, so they are never selectable by number; kvdb must match that. The
+// imported UTXO stays reachable through (Scope, AccountName).
+func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
+	t *testing.T) {
+
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScopeBIP0084
+
+	// Arrange: a derived account-0 UTXO and an imported xpub-account UTXO
+	// whose account carries an ordinary (non-pseudo) account number.
+	importedName := "imported-xpub-list"
+	importedAcct := createImportedXpubAccount(
+		t, store, scope, importedName, 0xBE,
+	)
+
+	derivedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(1000),
+		balanceTestTipHeight, false,
+	)
+	importedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, importedAcct,
+		btcutil.Amount(2000), balanceTestTipHeight, false,
+	)
+
+	// A numeric Account filter on the imported account's ordinary number
+	// must select nothing: imported rows are not numerically addressable.
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: 0,
+		Scope:    &dbScope,
+		Account:  &importedAcct,
+	})
+	require.NoError(t, err)
+	require.Empty(t, utxos)
+
+	// The derived account is still selectable by number, with no leakage
+	// from the imported account.
+	derivedAcct := uint32(0)
+	utxos, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: 0,
+		Scope:    &dbScope,
+		Account:  &derivedAcct,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, derivedPoint, utxos[0].OutPoint)
+	require.Equal(t, db.DerivedAccount, utxos[0].Origin)
+
+	// The imported account remains selectable through (Scope, AccountName).
+	utxos, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID:    0,
+		Scope:       &dbScope,
+		AccountName: &importedName,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, importedPoint, utxos[0].OutPoint)
+	require.Equal(t, db.ImportedAccount, utxos[0].Origin)
+}
+
+// createImportedXpubAccount creates an imported (watch-only) xpub account via
+// CreateImportedAccount, which allocates an ordinary kvdb account number
+// (NewAccountWatchingOnly) rather than the legacy ImportedAddrAccount
+// pseudo-account. It returns that account number so callers can confirm a
+// numeric Account filter still excludes the account despite the ordinary
+// number. The xpub-derived seed byte keeps successive accounts distinct.
+func createImportedXpubAccount(t *testing.T, store *Store,
+	scope waddrmgr.KeyScope, name string, seedByte byte) uint32 {
+
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{seedByte}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	dbScope := db.KeyScope{Purpose: scope.Purpose, Coin: scope.Coin}
+
+	_, err = store.CreateImportedAccount(t.Context(),
+		db.CreateImportedAccountParams{
+			Scope:             dbScope,
+			Name:              name,
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+
+	scopedMgr, err := store.addrStore.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var account uint32
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var inner error
+
+		account, inner = scopedMgr.LookupAccount(ns, name)
+
+		return inner
+	})
+	require.NoError(t, err)
+
+	// The imported account must receive an ordinary account number, not the
+	// legacy pseudo-account: that is the exact case the numeric filter has to
+	// guard against.
+	require.NotEqual(t, uint32(waddrmgr.ImportedAddrAccount), account)
+
+	return account
 }
