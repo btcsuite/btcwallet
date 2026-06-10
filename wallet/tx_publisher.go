@@ -505,8 +505,9 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]btcutil.Address {
 // the wallet needs to act on.
 //
 // The function is optimized to handle transactions with multiple outputs paying
-// to the same address. It internally de-duplicates the addresses to ensure that
-// the expensive database lookup is performed only once for each unique address.
+// to the same address. It internally de-duplicates the addresses and resolves
+// wallet ownership for the entire set with a single batched Store lookup,
+// rather than one lookup per address.
 func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 	txOutAddrs map[uint32][]btcutil.Address) (
 	map[string]ownedAddrInfo, error) {
@@ -529,34 +530,50 @@ func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 		}
 	}
 
+	// Resolve each unique address by its own script rather than the whole
+	// output script. For a single-address output these are identical, but
+	// for a bare-multisig output it correctly resolves the wallet-owned
+	// member, which the multisig script itself would never match.
+	//
+	// The scripts are gathered up front so the wallet-ownership question is
+	// answered with a single batched Store lookup instead of one lookup per
+	// address.
+	scriptToKey := make(map[string]string, len(uniqueAddrs))
+	scripts := make([][]byte, 0, len(uniqueAddrs))
+
 	for key, info := range uniqueAddrs {
-		// Look the address up by its own script rather than the whole
-		// output script. For a single-address output these are
-		// identical, but for a bare-multisig output it correctly
-		// resolves the wallet-owned member, which the multisig script
-		// itself would never match.
 		ownScript, err := txscript.PayToAddrScript(info.addr)
 		if err != nil {
 			return nil, err
 		}
 
-		_, err = w.store.GetAddress(ctx, db.GetAddressQuery{
-			WalletID:     w.id,
-			ScriptPubKey: ownScript,
-		})
-
-		// If the address is not found, it simply means it does not
-		// belong to the wallet. This is the expected case for most
-		// addresses, so we can safely continue to the next one.
-		if errors.Is(err, db.ErrAddressNotFound) {
+		scriptKey := string(ownScript)
+		if _, ok := scriptToKey[scriptKey]; ok {
 			continue
 		}
 
-		if err != nil {
-			return nil, err
-		}
+		scriptToKey[scriptKey] = key
 
-		ownedAddrs[key] = info
+		scripts = append(scripts, ownScript)
+	}
+
+	// Ask the Store which of the gathered scripts are wallet-owned in one
+	// operation. A script present in the result map is owned; an absent one
+	// simply does not belong to the wallet, which is the expected case for
+	// most addresses.
+	owned, err := w.store.ResolveOwnedAddresses(
+		ctx, db.ResolveOwnedAddressesQuery{
+			WalletID:      w.id,
+			ScriptPubKeys: scripts,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for scriptKey := range owned {
+		key := scriptToKey[scriptKey]
+		ownedAddrs[key] = uniqueAddrs[key]
 	}
 
 	return ownedAddrs, nil
