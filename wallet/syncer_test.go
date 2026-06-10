@@ -1034,8 +1034,8 @@ func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 }
 
 // TestProcessRelevantTxUsesBareMultisigMember verifies store-backed relevant
-// transaction notifications keep bare-multisig credits when the wallet owns a
-// member pubkey address but not the full multisig output script.
+// transaction notifications keep bare-multisig credit candidates when the
+// wallet owns a member pubkey address but not the full multisig output script.
 func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	t.Parallel()
 
@@ -1431,12 +1431,13 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 
 // storeScanBatchFixture contains expected values for store scan batch tests.
 type storeScanBatchFixture struct {
-	result   scanResult
-	tx       *wire.MsgTx
-	addr     address.Address
-	scope    waddrmgr.BranchScope
-	block    *wtxmgr.BlockMeta
-	received time.Time
+	accountID uint32
+	result    scanResult
+	tx        *wire.MsgTx
+	addr      address.Address
+	scope     waddrmgr.BranchScope
+	block     *wtxmgr.BlockMeta
+	received  time.Time
 }
 
 // newStoreScanBatchFixture builds one scan result with a horizon and wallet
@@ -1476,6 +1477,7 @@ func newStoreScanBatchFixture(t *testing.T) storeScanBatchFixture {
 	}
 
 	return storeScanBatchFixture{
+		accountID: 33,
 		result: scanResult{
 			BlockProcessResult: &BlockProcessResult{
 				FoundHorizons: map[waddrmgr.BranchScope]uint32{
@@ -1507,9 +1509,22 @@ func matchStoreScanHorizon(horizon db.ScanHorizon,
 	fixture storeScanBatchFixture) bool {
 
 	return horizon.Scope == db.KeyScope(fixture.scope.Scope) &&
+		horizon.AccountID != nil &&
+		*horizon.AccountID == fixture.accountID &&
 		horizon.Account == fixture.scope.Account &&
 		horizon.Branch == fixture.scope.Branch &&
 		horizon.Index == 12
+}
+
+// seedScanStateAccountID records the fixture's stable account ID in the scan
+// state, mirroring loadFullScanState/loadTargetedScanState.
+func seedScanStateAccountID(scanState *RecoveryState,
+	fixture storeScanBatchFixture) {
+
+	accountID := fixture.accountID
+	scanState.setAccountID(
+		fixture.scope.Scope, fixture.scope.Account, &accountID,
+	)
 }
 
 // matchStoreScanSyncedBlocks reports whether the batch's synced blocks match
@@ -1596,6 +1611,8 @@ func TestPutSyncBatchStore(t *testing.T) {
 		syncerStoreConfig{store: store, walletID: walletID},
 	)
 	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
 
 	store.On(
 		"ApplyScanBatch", mock.Anything,
@@ -1603,7 +1620,9 @@ func TestPutSyncBatchStore(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Apply a normal sync scan batch.
-	err := s.putSyncBatch(t.Context(), []scanResult{fixture.result})
+	err := s.putSyncBatch(
+		t.Context(), scanState, []scanResult{fixture.result},
+	)
 
 	// Assert: The store saw transactions, horizons, and synced blocks.
 	require.NoError(t, err)
@@ -1624,6 +1643,8 @@ func TestPutTargetedBatchStore(t *testing.T) {
 		syncerStoreConfig{store: store, walletID: walletID},
 	)
 	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
 
 	store.On(
 		"ApplyScanBatch", mock.Anything,
@@ -1631,11 +1652,126 @@ func TestPutTargetedBatchStore(t *testing.T) {
 	).Return(nil).Once()
 
 	// Act: Apply a targeted scan batch.
-	err := s.putTargetedBatch(t.Context(), []scanResult{fixture.result})
+	err := s.putTargetedBatch(
+		t.Context(), scanState, []scanResult{fixture.result},
+	)
 
 	// Assert: The store saw transactions and horizons, but no synced blocks.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+}
+
+// TestStampRecoveryAccountIDsCarriesStableID verifies that the scan state keeps
+// the stable account ID resolved from the loaded account snapshot, so horizon
+// emission does not need a later name lookup that could race an account rename.
+func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+
+	props := &waddrmgr.AccountProperties{
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+		AccountNumber: 5,
+		AccountName:   "before-rename",
+	}
+	scanState.accountNames[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = props.AccountName
+
+	accountID := uint32(77)
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == walletID &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.Name != nil &&
+				*query.Name == "before-rename" &&
+				query.AccountNumber == nil &&
+				query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{
+		AccountID: &accountID,
+	}, nil).Once()
+
+	err := s.stampRecoveryAccountIDs(
+		t.Context(), scanState, []*waddrmgr.AccountProperties{props},
+	)
+	require.NoError(t, err)
+
+	props.AccountName = "after-rename"
+	horizons := scanHorizonParams(scanState, map[waddrmgr.BranchScope]uint32{
+		{
+			Scope:   props.KeyScope,
+			Account: props.AccountNumber,
+			Branch:  waddrmgr.ExternalBranch,
+		}: 3,
+	})
+	require.Len(t, horizons, 1)
+	require.NotNil(t, horizons[0].AccountID)
+	require.Equal(t, accountID, *horizons[0].AccountID)
+	require.Equal(t, "before-rename", horizons[0].AccountName)
+	store.AssertExpectations(t)
+}
+
+// TestScanHorizonParamsStampsAccountIdentity verifies that scanHorizonParams
+// stamps every emitted horizon with the stable account ID and account name
+// resolved from the recovery state.
+func TestScanHorizonParamsStampsAccountIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A recovery state that knows the identity of one account but not
+	// another, and a horizon map covering a branch in each.
+	rs := NewRecoveryState(0, &chainParams, nil)
+
+	named := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 5,
+	}
+	accountID := uint32(55)
+	rs.accountNames[named] = "imported-xpub"
+	rs.setAccountID(named.Scope, named.Account, &accountID)
+
+	namedBranch := waddrmgr.BranchScope{
+		Scope:   named.Scope,
+		Account: named.Account,
+		Branch:  waddrmgr.ExternalBranch,
+	}
+	unnamedBranch := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 9,
+		Branch:  waddrmgr.InternalBranch,
+	}
+	horizons := map[waddrmgr.BranchScope]uint32{
+		namedBranch:   3,
+		unnamedBranch: 7,
+	}
+
+	// Act: Flatten the horizon map into store params.
+	params := scanHorizonParams(rs, horizons)
+
+	// Assert: The known account's horizon carries its stable identity, while
+	// the unknown account's horizon falls back to no account ID or name.
+	require.Len(t, params, 2)
+
+	byAccount := make(map[uint32]db.ScanHorizon, len(params))
+	for _, horizon := range params {
+		byAccount[horizon.Account] = horizon
+	}
+
+	require.Equal(t, "imported-xpub", byAccount[5].AccountName)
+	require.NotNil(t, byAccount[5].AccountID)
+	require.Equal(t, accountID, *byAccount[5].AccountID)
+	require.Equal(t, uint32(3), byAccount[5].Index)
+	require.Empty(t, byAccount[9].AccountName)
+	require.Nil(t, byAccount[9].AccountID)
+	require.Equal(t, uint32(7), byAccount[9].Index)
 }
 
 // TestExtractAddrEntries verifies address extraction from outputs.
