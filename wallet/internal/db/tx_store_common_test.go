@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -2001,6 +2004,113 @@ func TestValidateUpdateTxState(t *testing.T) {
 			err := validateUpdateTxState(test.state, test.isCoinbase)
 			if test.wantErr != nil {
 				require.ErrorIs(t, err, test.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestValidateCreditAddrMembership verifies the chain-free credit membership
+// check used by the SQL CreateTx path. A single-address output must validate
+// by script equality, a bare-multisig member must validate by membership, and
+// any other shape that merely pushes the pubkey bytes (notably a non-paying
+// OP_RETURN <pubkey>) must be rejected with ErrInvalidParam so InsertUtxo never
+// records an unrelated script as wallet-owned.
+func TestValidateCreditAddrMembership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a wallet-owned pubkey address plus a foreign pubkey that
+	// shares a 1-of-2 bare-multisig output with it. ScriptAddress() is the
+	// chain-free serialized pubkey the check matches against.
+	params := &chaincfg.RegressionNetParams
+
+	memberKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	memberAddr, err := btcutil.NewAddressPubKey(
+		memberKey.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	foreignKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	foreignAddr, err := btcutil.NewAddressPubKey(
+		foreignKey.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	// An unrelated wallet-owned pubkey that is not part of the multisig.
+	outsiderKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	outsiderAddr, err := btcutil.NewAddressPubKey(
+		outsiderKey.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	// The member's own standard P2PK script (single-address output).
+	memberScript, err := txscript.PayToAddrScript(memberAddr)
+	require.NoError(t, err)
+
+	// A 1-of-2 bare-multisig output built from the member plus the foreign
+	// key. The full multisig script is never a single wallet address.
+	multiSigScript, err := txscript.MultiSigScript(
+		[]*btcutil.AddressPubKey{memberAddr, foreignAddr}, 1,
+	)
+	require.NoError(t, err)
+
+	// A non-paying OP_RETURN that pushes the wallet-owned member pubkey. It
+	// pushes the same bytes the multisig check looks for but pays nobody.
+	opReturnScript, err := txscript.NullDataScript(memberAddr.ScriptAddress())
+	require.NoError(t, err)
+
+	testCases := []struct {
+		name         string
+		creditAddr   btcutil.Address
+		outputScript []byte
+		wantErr      bool
+	}{
+		{
+			name:         "single address script equality",
+			creditAddr:   memberAddr,
+			outputScript: memberScript,
+		},
+		{
+			name:         "bare multisig member",
+			creditAddr:   memberAddr,
+			outputScript: multiSigScript,
+		},
+		{
+			// The regression: an OP_RETURN that pushes the
+			// wallet-owned pubkey is not a bare-multisig payment, so
+			// it must be rejected even though the bytes are present.
+			name:         "op_return pushes member pubkey",
+			creditAddr:   memberAddr,
+			outputScript: opReturnScript,
+			wantErr:      true,
+		},
+		{
+			// A pubkey that is not one of the multisig members must
+			// be rejected even though the output is bare multisig.
+			name:         "bare multisig non member",
+			creditAddr:   outsiderAddr,
+			outputScript: multiSigScript,
+			wantErr:      true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act.
+			err := ValidateCreditAddrMembership(
+				tc.creditAddr, tc.outputScript,
+			)
+
+			// Assert.
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrInvalidParam)
 				return
 			}
 
