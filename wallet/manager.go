@@ -12,7 +12,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
-	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 var (
@@ -324,6 +323,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	}
 
 	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
+	vault := kvdb.NewLegacyManagerVault(cfg.DB, addrMgr)
 
 	// Cache the wallet's master HD fingerprint up-front, before any
 	// context/cancel is set up so an error here doesn't leak a
@@ -345,7 +345,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		addrStore:         addrMgr,
 		store:             store,
 		cache:             newStoreRuntimeCache(store),
-		keyVault:          keyvault.NewDBVault(store, walletID),
+		keyVault:          vault,
 		txStore:           txMgr,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,
