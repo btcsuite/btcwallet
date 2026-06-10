@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -475,4 +476,46 @@ func insertBalanceCredit(t *testing.T, dbConn walletdb.DB,
 	require.NoError(t, err)
 
 	return wire.OutPoint{Hash: rec.Hash, Index: 0}
+}
+
+// creditImportedKeyAtHeight imports a fresh private key into the legacy
+// ImportedAddrAccount pseudo-account, inserts a credit paying to its address
+// at height, and returns the credited outpoint. Imported keys are the kvdb
+// analogue of SQL imported rows (NULL account_number), so the resulting UTXO
+// must be selectable only via (Scope, AccountName), never by numeric Account.
+func creditImportedKeyAtHeight(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, txStore *wtxmgr.Store,
+	scope waddrmgr.KeyScope, amount btcutil.Amount,
+	height int32) wire.OutPoint {
+
+	t.Helper()
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wif, err := btcutil.NewWIF(privKey, mgr.ChainParams(), true)
+	require.NoError(t, err)
+
+	var pkScript []byte
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		managedAddr, err := scopedMgr.ImportPrivateKey(ns, wif, nil)
+		if err != nil {
+			return err
+		}
+
+		pkScript, err = txscript.PayToAddrScript(managedAddr.Address())
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return insertBalanceCredit(
+		t, dbConn, mgr, txStore, pkScript, amount, height, false,
+	)
 }
