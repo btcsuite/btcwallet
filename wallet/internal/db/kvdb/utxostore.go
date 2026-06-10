@@ -156,11 +156,35 @@ func (s *Store) enrichOwnedCredit(tx walletdb.ReadTx,
 	return s.enrichCredit(addrmgrNs, credit, addr, binding, leaseSet)
 }
 
-// ListUTXOs is not yet implemented for kvdb.
-func (s *Store) ListUTXOs(ctx context.Context,
-	_ db.ListUtxosQuery) ([]db.UtxoInfo, error) {
+// ListUTXOs lists current wallet-owned UTXOs through the legacy wtxmgr query
+// path.
+func (s *Store) ListUTXOs(_ context.Context,
+	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
-	return nil, notImplemented(ctx, "ListUTXOs")
+	if s.addrStore == nil {
+		return nil, fmt.Errorf("kvdb.Store.ListUTXOs: %w",
+			errMissingAddrStore)
+	}
+
+	err := query.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	var utxos []db.UtxoInfo
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		return s.listUTXOsInView(tx, query, &utxos)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.ListUTXOs: %w", err)
+	}
+
+	if len(utxos) == 0 {
+		return []db.UtxoInfo{}, nil
+	}
+
+	return utxos, nil
 }
 
 // LeaseOutput locks one known wallet UTXO through the legacy wtxmgr lease
@@ -657,6 +681,117 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	}
 
 	return info, nil
+}
+
+// listUTXOsInView performs the legacy UTXO scan using one walletdb view
+// and populates the enriched per-row metadata (AccountName, Origin,
+// AddrType, HasScript, IsLocked).
+func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
+	query db.ListUtxosQuery, utxos *[]db.UtxoInfo) error {
+
+	txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	if txmgrNs == nil {
+		return errMissingTxmgrNamespace
+	}
+
+	addrmgrNs := tx.ReadBucket(waddrmgr.NamespaceKey)
+	if addrmgrNs == nil {
+		return errMissingAddrmgrNamespace
+	}
+
+	credits, err := s.txStore.UnspentOutputsIncludingLocked(txmgrNs)
+	if err != nil {
+		return fmt.Errorf("list unspent outputs: %w", err)
+	}
+
+	// The credits slice already enumerates the current UTXO set, so build
+	// the lease-intersection set directly from it rather than re-scanning
+	// the unspent bucket via currentUTXOSet.
+	current := make(map[wire.OutPoint]struct{}, len(credits))
+	for i := range credits {
+		current[credits[i].OutPoint] = struct{}{}
+	}
+
+	leaseSet, err := s.activeLeaseSet(txmgrNs, current)
+	if err != nil {
+		return err
+	}
+
+	currentHeight := s.addrStore.SyncedTo().Height
+	chainParams := s.addrStore.ChainParams()
+
+	for i := range credits {
+		enriched, ok, err := s.buildListedUTXO(
+			addrmgrNs, &credits[i], query, leaseSet, currentHeight,
+			chainParams,
+		)
+		if err != nil {
+			return err
+		}
+
+		if !ok {
+			continue
+		}
+
+		*utxos = append(*utxos, *enriched)
+	}
+
+	return nil
+}
+
+// buildListedUTXO converts one current credit into an enriched db.UtxoInfo,
+// applying the confirmation, owned-address, and account filters along the
+// way. It returns ok=false for a credit that does not pass a filter so the
+// caller can skip it without treating the omission as an error.
+func (s *Store) buildListedUTXO(addrmgrNs walletdb.ReadBucket,
+	credit *wtxmgr.Credit, query db.ListUtxosQuery,
+	leaseSet map[wire.OutPoint]struct{}, currentHeight int32,
+	chainParams *chaincfg.Params) (*db.UtxoInfo, bool, error) {
+
+	if !utxoMatchesConfirmations(credit.Height, currentHeight, query) {
+		return nil, false, nil
+	}
+
+	binding, addr, err := s.resolveAccountForCredit(
+		addrmgrNs, credit, chainParams,
+	)
+	if err != nil {
+		if !errors.Is(err, errUnownedScript) {
+			return nil, false, err
+		}
+
+		// A credit whose script does not join to a wallet address is
+		// dropped, matching the SQL backends which inner-join UTXO rows
+		// against owned addresses. Such rows never surface (even with no
+		// account filter).
+		return nil, false, nil
+	}
+
+	accountOK, err := accountMatchesQuery(addrmgrNs, query, binding)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if !accountOK {
+		return nil, false, nil
+	}
+
+	enriched, err := s.enrichCredit(
+		addrmgrNs, credit, addr, binding, leaseSet,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// The AccountName filter is applied after enrichment because resolving
+	// the name requires the account-properties read that enrichCredit does.
+	if query.AccountName != nil &&
+		enriched.AccountName != *query.AccountName {
+
+		return nil, false, nil
+	}
+
+	return enriched, true, nil
 }
 
 // utxoMatchesConfirmations applies the optional db.ListUtxosQuery confirmation
