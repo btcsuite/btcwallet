@@ -1607,6 +1607,277 @@ func TestScanHorizonParamsStampsAccountName(t *testing.T) {
 	require.Empty(t, byAccount[9].AccountName)
 }
 
+// TestStoreScanHorizonsListAccounts verifies full scan horizon reads use the
+// store account list.
+func TestStoreScanHorizonsListAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with two scan accounts.
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	accounts := []db.AccountInfo{{
+		AccountNumber:        2,
+		AccountName:          "default",
+		ExternalKeyCount:     5,
+		InternalKeyCount:     3,
+		ImportedKeyCount:     1,
+		MasterKeyFingerprint: 9,
+		KeyScope:             db.KeyScopeBIP0084,
+		IsWatchOnly:          true,
+	}}
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	// Act: Load all scan horizons from the store.
+	props, err := s.storeScanHorizons(t.Context(), nil)
+
+	// Assert: The store account row was converted for RecoveryState.
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, accounts[0].AccountNumber, props[0].AccountNumber)
+	require.Equal(t, accounts[0].ExternalKeyCount, props[0].ExternalKeyCount)
+	require.Equal(t, accounts[0].InternalKeyCount, props[0].InternalKeyCount)
+	require.Equal(t, waddrmgr.KeyScopeBIP0084, props[0].KeyScope)
+	require.True(t, props[0].IsWatchOnly)
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsGetAccount verifies targeted scan horizon reads use the
+// store account lookup.
+func TestStoreScanHorizonsGetAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one targeted account.
+	const walletID uint32 = 14
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	target := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 7,
+	}
+	account := db.AccountInfo{
+		AccountNumber:    target.Account,
+		ExternalKeyCount: 8,
+		InternalKeyCount: 4,
+		KeyScope:         db.KeyScope(target.Scope),
+	}
+
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == walletID &&
+				query.Scope == db.KeyScope(target.Scope) &&
+				query.AccountNumber != nil &&
+				*query.AccountNumber == target.Account &&
+				query.SkipBalance
+		},
+	)).Return(&account, nil).Once()
+
+	// Act: Load targeted scan horizons from the store.
+	props, err := s.storeScanHorizons(
+		t.Context(), []waddrmgr.AccountScope{target},
+	)
+
+	// Assert: The targeted account row was converted for RecoveryState.
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, target.Account, props[0].AccountNumber)
+	require.Equal(t, account.ExternalKeyCount, props[0].ExternalKeyCount)
+	require.Equal(t, account.InternalKeyCount, props[0].InternalKeyCount)
+	require.Equal(t, target.Scope, props[0].KeyScope)
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsGetAccountSkipsImported verifies that targeted scan
+// horizon reads skip every imported account -- both the keyless
+// imported-address bucket and a true imported xpub account -- so an imported
+// account never seeds the recovery state. Crucially the imported xpub account
+// surfaces with the masked AccountNumber 0 that the store contract guarantees
+// for imported rows, in the same scope as a default derived account that
+// legitimately owns number 0. Withholding it proves the masked imported
+// account cannot collide with or clobber the default account at (scope, 0).
+func TestStoreScanHorizonsGetAccountSkipsImported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer with three targets: a default derived
+	// account at number 0, the keyless imported-address bucket, and a true
+	// imported xpub account that the store surfaces with the masked number 0
+	// -- the same (scope, number) as the default account.
+	const walletID uint32 = 22
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	derived := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+	}
+	bucket := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: waddrmgr.ImportedAddrAccount,
+	}
+	importedXpub := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+	}
+
+	// The default derived account legitimately owns number 0 and must be
+	// the only horizon emitted.
+	derivedInfo := db.AccountInfo{
+		AccountNumber:    derived.Account,
+		AccountName:      "default",
+		ExternalKeyCount: 8,
+		InternalKeyCount: 4,
+		KeyScope:         db.KeyScope(derived.Scope),
+		Origin:           db.DerivedAccount,
+	}
+
+	// The true imported xpub account carries an account public key and HD
+	// key counts, but the store masks its number to 0. It is still an
+	// imported account, so it must be skipped rather than collide with the
+	// default account at (scope, 0).
+	importedXpubInfo := db.AccountInfo{
+		AccountNumber:    importedXpub.Account,
+		AccountName:      "imported-xpub",
+		ExternalKeyCount: 6,
+		InternalKeyCount: 2,
+		KeyScope:         db.KeyScope(importedXpub.Scope),
+		Origin:           db.ImportedAccount,
+		PublicKey:        []byte("account-xpub"),
+	}
+
+	// The imported-address bucket target must be skipped before lookup. The
+	// remaining derived and imported-xpub targets both arrive as account 0 in
+	// this regression, so return those two rows in order and allow no lookup
+	// for waddrmgr.ImportedAddrAccount.
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.AccountNumber != nil &&
+				*query.AccountNumber == 0
+		},
+	)).
+		Return(&derivedInfo, nil).Once()
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.AccountNumber != nil &&
+				*query.AccountNumber == 0
+		},
+	)).
+		Return(&importedXpubInfo, nil).Once()
+
+	// Act: load targeted scan horizons.
+	props, err := s.storeScanHorizons(t.Context(), []waddrmgr.AccountScope{
+		derived, bucket, importedXpub,
+	})
+
+	// Assert: exactly one horizon is emitted -- the default derived account
+	// -- proving both imported accounts (including the masked-0 xpub) were
+	// withheld and did not clobber the default account at (scope, 0).
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, "default", props[0].AccountName)
+	require.Equal(t, uint32(0), props[0].AccountNumber)
+	require.Equal(
+		t, derivedInfo.ExternalKeyCount, props[0].ExternalKeyCount,
+	)
+	require.Equal(
+		t, derivedInfo.InternalKeyCount, props[0].InternalKeyCount,
+	)
+
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsListAccountsSkipsImported verifies that untargeted scan
+// horizon reads skip every imported account -- both the keyless
+// imported-address bucket and a true imported xpub account. Crucially the
+// imported xpub account surfaces with the masked AccountNumber 0 that the store
+// contract guarantees for imported rows, in the same scope as a default derived
+// account that legitimately owns number 0. Emitting exactly one horizon proves
+// the masked imported account does not collide with or clobber the default
+// account at (scope, 0).
+func TestStoreScanHorizonsListAccountsSkipsImported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer whose ListAccounts returns a default
+	// derived account at number 0, the keyless imported-address bucket, and
+	// a true imported xpub account that the store surfaces with the masked
+	// number 0 -- the same (scope, number) as the default account.
+	const walletID uint32 = 23
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	accounts := []db.AccountInfo{{
+		// The default derived account legitimately owns number 0.
+		AccountNumber:    0,
+		AccountName:      "default",
+		ExternalKeyCount: 8,
+		InternalKeyCount: 4,
+		KeyScope:         db.KeyScopeBIP0084,
+		Origin:           db.DerivedAccount,
+	}, {
+		// The keyless bucket is an imported account, so it must be
+		// skipped.
+		AccountNumber: waddrmgr.ImportedAddrAccount,
+		AccountName:   db.DefaultImportedAccountName,
+		KeyScope:      db.KeyScopeBIP0084,
+		Origin:        db.ImportedAccount,
+	}, {
+		// The true imported xpub account carries an account public key
+		// and HD key counts, but the store masks its number to 0. It is
+		// still an imported account, so it must be skipped rather than
+		// collide with the default account at (scope, 0).
+		AccountNumber:    0,
+		AccountName:      "imported-xpub",
+		ExternalKeyCount: 6,
+		InternalKeyCount: 2,
+		KeyScope:         db.KeyScopeBIP0084,
+		Origin:           db.ImportedAccount,
+		PublicKey:        []byte("account-xpub"),
+	}}
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	// Act: load all scan horizons from the store.
+	props, err := s.storeScanHorizons(t.Context(), nil)
+
+	// Assert: exactly one horizon is emitted -- the default derived account
+	// -- proving both imported accounts (including the masked-0 xpub) were
+	// withheld and did not clobber the default account at (scope, 0).
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, "default", props[0].AccountName)
+	require.Equal(t, uint32(0), props[0].AccountNumber)
+	require.Equal(t, uint32(8), props[0].ExternalKeyCount)
+	require.Equal(t, uint32(4), props[0].InternalKeyCount)
+
+	store.AssertExpectations(t)
+}
+
 // TestExtractAddrEntries verifies address extraction from outputs.
 func TestExtractAddrEntries(t *testing.T) {
 	t.Parallel()
