@@ -619,8 +619,8 @@ func TestManager_deriveRootKey(t *testing.T) {
 
 // TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
 // a non-watch-only wallet cannot ship with InitialAccounts. The validator
-// runs before DBCreateWallet so the failure is atomic and no half-created
-// wallet is left on disk.
+// runs before the kvdb wallet create so the failure is atomic and no
+// half-created wallet is left on disk.
 func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 	t.Parallel()
 

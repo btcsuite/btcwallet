@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -12,14 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDBCreateWallet verifies that the wallet database is correctly
+// TestCreateLegacyWallet verifies that the wallet database is correctly
 // initialized with the address and transaction manager buckets.
-func TestDBCreateWallet(t *testing.T) {
+func TestCreateLegacyWallet(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a test wallet with a fresh database.
 	// Note: createTestWalletWithMocks creates the top-level buckets, but
-	// they are empty. DBCreateWallet will populate them.
+	// they are empty. CreateLegacyWallet will populate them.
 	w, _ := createTestWalletWithMocks(t)
 
 	params := CreateWalletParams{
@@ -29,7 +30,12 @@ func TestDBCreateWallet(t *testing.T) {
 	}
 
 	// Act: Initialize the wallet database.
-	err := DBCreateWallet(w.cfg, params, nil)
+	err := kvdb.CreateLegacyWallet(w.cfg.DB, kvdb.CreateLegacyWalletParams{
+		PubPassphrase:     params.PubPassphrase,
+		PrivatePassphrase: params.PrivatePassphrase,
+		ChainParams:       w.cfg.ChainParams,
+		Birthday:          params.Birthday,
+	})
 
 	// Assert: Verify initialization success.
 	require.NoError(t, err)
@@ -57,9 +63,9 @@ func TestDBCreateWallet(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestDBLoadWallet verifies that the wallet database can be successfully loaded
-// and the address and transaction managers retrieved.
-func TestDBLoadWallet(t *testing.T) {
+// TestLoadLegacyWallet verifies that the wallet database can be successfully
+// loaded and the address and transaction managers retrieved.
+func TestLoadLegacyWallet(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a test wallet and initialize it.
@@ -74,11 +80,18 @@ func TestDBLoadWallet(t *testing.T) {
 		Birthday:          time.Now(),
 	}
 
-	err := DBCreateWallet(w.cfg, params, nil)
+	err := kvdb.CreateLegacyWallet(w.cfg.DB, kvdb.CreateLegacyWalletParams{
+		PubPassphrase:     params.PubPassphrase,
+		PrivatePassphrase: params.PrivatePassphrase,
+		ChainParams:       w.cfg.ChainParams,
+		Birthday:          params.Birthday,
+	})
 	require.NoError(t, err)
 
 	// Act: Load the wallet database.
-	addrMgr, txMgr, err := DBLoadWallet(w.cfg)
+	addrMgr, txMgr, err := kvdb.LoadLegacyWallet(
+		w.cfg.DB, w.cfg.PubPassphrase, w.cfg.ChainParams,
+	)
 
 	// Assert: Verify that both managers were loaded successfully.
 	require.NoError(t, err)
