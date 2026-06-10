@@ -4,9 +4,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -113,6 +115,88 @@ func TestCreateTxDuplicateReturnsStoreError(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
 }
 
+// TestCreateTxCreditAddrMismatch verifies that crediting an output with an
+// address that the output script does not pay to is rejected, so a caller
+// cannot corrupt UTXO ownership by mislabeling a credit.
+func TestCreateTxCreditAddrMismatch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	// The output pays to one address, but the credit claims otherAddr,
+	// which the output script does not contain.
+	_, script := newTestAddressScript(t)
+	otherAddr, _ := newTestAddressScript(t)
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{63},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 7_000, PkScript: script})
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003200, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]btcutil.Address{0: otherAddr},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+}
+
+// TestCreateTxCreditBareMultisigMember verifies that crediting a bare-multisig
+// output with one of its member pubkeys is accepted. Membership, not equality,
+// is required so a wallet that owns one key in a multisig script still records
+// the credit.
+func TestCreateTxCreditBareMultisigMember(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	// Build a 1-of-2 bare-multisig script and credit it with the first
+	// member's pubkey address.
+	memberAddr, multiSigScript := newMultisigScript(t)
+
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 5_000, PkScript: multiSigScript})
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003400, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]btcutil.Address{0: memberAddr},
+	})
+	require.NoError(t, err)
+
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+}
+
 // TestCreateTxCreditlessSucceeds verifies that a credit-less (sweep) tx is
 // recorded even without the address-manager namespace, since the namespace is
 // only consulted when recording credits.
@@ -154,6 +238,69 @@ func TestCreateTxCreditlessSucceeds(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+// TestCreateTxCreditNilFallback verifies that a nil credit address records the
+// credit via the output's own script, matching the documented
+// CreateTxParams.Credits fallback and the SQL backends. The nil path must not
+// consult the address manager (no Address/MarkUsed lookup) and must not panic.
+func TestCreateTxCreditNilFallback(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	// The addrmgr namespace is still required because the credit set is
+	// non-empty, even though the nil credit itself never reads an address.
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	_, script := newTestAddressScript(t)
+
+	// A non-nil addrStore is required by CreateTx whenever there are
+	// credits, but the nil-credit path must only read ChainParams and never
+	// resolve or mark an address. Register no Address/MarkUsed expectations
+	// so a regression that consults the address manager surfaces here.
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{66},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 4_000, PkScript: script})
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003500, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]btcutil.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	// The credit is recorded from the output index alone, with change
+	// cleared because there is no resolved derivation branch.
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+		require.Equal(t, uint32(0), details.Credits[0].Index)
+		require.False(t, details.Credits[0].Change)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// The address manager must not have been consulted for a nil credit.
+	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
+	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
 }
 
 // TestUpdateTxLabelOnlySuccess verifies that kvdb.Store can apply a label-only
@@ -685,4 +832,34 @@ func insertSpendChain(t *testing.T, dbConn walletdb.DB,
 	require.NoError(t, err)
 
 	return fundingRec, spendRec
+}
+
+// newMultisigScript builds a 1-of-2 bare-multisig output script and returns the
+// first member's pubkey address along with the script.
+func newMultisigScript(t *testing.T) (btcutil.Address, []byte) {
+	t.Helper()
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	memberAddr, err := btcutil.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddInt64(1)
+	builder.AddData(firstKey.PubKey().SerializeCompressed())
+	builder.AddData(secondKey.PubKey().SerializeCompressed())
+	builder.AddInt64(2)
+	builder.AddOp(txscript.OP_CHECKMULTISIG)
+
+	script, err := builder.Script()
+	require.NoError(t, err)
+
+	return memberAddr, script
 }
