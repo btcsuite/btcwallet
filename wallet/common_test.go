@@ -23,7 +23,6 @@ var (
 	errMock           = errors.New("mock error")
 	errChainMock      = errors.New("chain error")
 	errPutMock        = errors.New("put error")
-	errLockMock       = errors.New("lock fail")
 	errDBFail         = errors.New("db fail")
 	errDeriveFail     = errors.New("derive fail")
 	errLoadStateFail  = errors.New("load state fail")
