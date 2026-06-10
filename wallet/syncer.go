@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -35,6 +36,13 @@ var (
 	// ErrUnknownRescanJobType is returned when an unknown rescan job type
 	// is encountered.
 	ErrUnknownRescanJobType = errors.New("unknown rescan job type")
+
+	// errMissingLegacyAddressManager is returned when Store scan setup needs
+	// the legacy manager to resolve a masked imported-xpub account number but
+	// the syncer was built without it.
+	errMissingLegacyAddressManager = errors.New(
+		"missing legacy address manager",
+	)
 
 	// ErrInvalidStartHeight is returned when a resync or rescan is
 	// requested with an invalid start height (e.g., zero if not allowed).
@@ -1949,6 +1957,190 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	log.Infof("Targeted rescan complete")
 
 	return nil
+}
+
+// storeScanHorizons loads account horizon data through the store.
+func (s *syncer) storeScanHorizons(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties, error) {
+
+	if len(targets) == 0 {
+		return s.storeFullScanHorizons(ctx)
+	}
+
+	return s.storeTargetedScanHorizons(ctx, targets)
+}
+
+// storeFullScanHorizons loads full recovery horizon accounts from the Store,
+// skipping only the keyless raw-import bucket.
+func (s *syncer) storeFullScanHorizons(
+	ctx context.Context) ([]*waddrmgr.AccountProperties, error) {
+
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:    s.walletID,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
+	for i := range accounts {
+		// The keyless imported-address bucket has no xpub to derive
+		// lookahead addresses from. Its materialized addresses are still
+		// watched by storeScanAddresses.
+		if keylessImportedAccount(accounts[i]) {
+			continue
+		}
+
+		accountProps, err := s.storeAccountProperties(accounts[i], nil)
+		if err != nil {
+			return nil, err
+		}
+
+		props = append(props, accountProps)
+	}
+
+	return props, nil
+}
+
+// storeTargetedScanHorizons loads recovery horizon accounts for already
+// resolved scan targets.
+func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
+	targets []waddrmgr.AccountScope) ([]*waddrmgr.AccountProperties, error) {
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(targets))
+	for _, target := range targets {
+		// The legacy imported-address bucket is a keyless pseudo-account,
+		// not a numeric HD account. Its addresses are already watched via
+		// storeScanAddresses, so never resolve it through GetAccount where
+		// the backend may have no numeric row for it.
+		if target.Account == waddrmgr.ImportedAddrAccount {
+			continue
+		}
+
+		account := target.Account
+
+		info, err := s.store.GetAccount(ctx, db.GetAccountQuery{
+			WalletID:      s.walletID,
+			Scope:         db.KeyScope(target.Scope),
+			AccountNumber: &account,
+			SkipBalance:   true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("get scan account: %w", err)
+		}
+
+		// Targeted Store scan loading learns durable imported-account
+		// identity in a later stack commit. Until then, keep the helper
+		// conservative and let imported addresses be watched separately.
+		if info.IsImported {
+			continue
+		}
+
+		accountProps, err := s.storeAccountProperties(*info, &account)
+		if err != nil {
+			return nil, err
+		}
+
+		props = append(props, accountProps)
+	}
+
+	return props, nil
+}
+
+// storeAccountProperties converts store account metadata into the recovery
+// state horizon shape, preserving the non-masked account number used for
+// waddrmgr derivation when the Store public contract masks imported xpubs.
+func (s *syncer) storeAccountProperties(info db.AccountInfo,
+	fallbackNumber *uint32) (*waddrmgr.AccountProperties, error) {
+
+	accountNumber, err := s.storeAccountRecoveryNumber(
+		info, fallbackNumber,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &waddrmgr.AccountProperties{
+		AccountNumber:        accountNumber,
+		AccountName:          info.AccountName,
+		ExternalKeyCount:     info.ExternalKeyCount,
+		InternalKeyCount:     info.InternalKeyCount,
+		ImportedKeyCount:     info.ImportedKeyCount,
+		MasterKeyFingerprint: info.MasterKeyFingerprint,
+		KeyScope:             waddrmgr.KeyScope(info.KeyScope),
+		IsWatchOnly:          info.IsWatchOnly,
+	}, nil
+}
+
+// storeAccountRecoveryNumber returns the account number RecoveryState must use
+// for waddrmgr derivation. Store masks imported xpub account numbers, so
+// callers may pass a non-masked fallback from resolveScanTargets; untargeted
+// imported xpubs resolve the same identity from waddrmgr by account name.
+func (s *syncer) storeAccountRecoveryNumber(info db.AccountInfo,
+	fallbackNumber *uint32) (uint32, error) {
+
+	if fallbackNumber != nil {
+		return *fallbackNumber, nil
+	}
+
+	if info.AccountNumber != nil {
+		return *info.AccountNumber, nil
+	}
+
+	if !info.IsImported {
+		return 0, nil
+	}
+
+	account, err := s.lookupStoreAccountNumber(info)
+	if err != nil {
+		return 0, err
+	}
+
+	return account, nil
+}
+
+// lookupStoreAccountNumber resolves an imported xpub Store account back to its
+// non-masked waddrmgr account number so RecoveryState can derive lookahead
+// addresses without colliding with the default account at number 0.
+func (s *syncer) lookupStoreAccountNumber(info db.AccountInfo) (uint32, error) {
+	if s.cfg.DB == nil || s.addrStore == nil {
+		return 0, fmt.Errorf("lookup scan account %q: %w",
+			info.AccountName, errMissingLegacyAddressManager)
+	}
+
+	var account uint32
+
+	err := walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
+			waddrmgr.KeyScope(info.KeyScope),
+		)
+		if err != nil {
+			return fmt.Errorf("fetch scoped manager: %w", err)
+		}
+
+		account, err = scopedMgr.LookupAccount(ns, info.AccountName)
+		if err != nil {
+			return fmt.Errorf("lookup account %q: %w", info.AccountName,
+				err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("lookup store account number: %w", err)
+	}
+
+	return account, nil
+}
+
+// keylessImportedAccount reports whether an account is the reserved raw-import
+// alias. The bucket has no account xpub, so it cannot seed recovery horizons;
+// its materialized addresses are loaded separately by storeScanAddresses.
+func keylessImportedAccount(info db.AccountInfo) bool {
+	return info.IsImported && len(info.PublicKey) == 0
 }
 
 // loadTargetedScanState initializes a recovery state for a targeted rescan of
