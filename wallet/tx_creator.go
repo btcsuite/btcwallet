@@ -708,6 +708,16 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 	inputs *InputsManual) (
 	txauthor.InputSource, error) {
 
+	// Coinbase maturity is measured against the current chain tip, so we
+	// resolve the block stamp once for all selected UTXOs.
+	//
+	// TODO(yy): remove this block stamp check. The block stamp should be
+	// passed in as a parameter.
+	bs, err := w.cfg.Chain.BlockStamp()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create a slice to hold the eligible UTXOs.
 	eligibleSelectedUtxo := make(
 		[]db.UtxoInfo, 0, len(inputs.UTXOs),
@@ -731,6 +741,14 @@ func (w *Wallet) createManualInputSource(ctx context.Context,
 		// Trust the store's enriched lock state rather than scanning
 		// the full lease set ourselves.
 		if credit.IsLocked {
+			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
+				outpoint)
+		}
+
+		// Reject an immature coinbase, matching account-based
+		// selection: spending it before maturity would produce an
+		// invalid transaction.
+		if !w.txCreatorCoinbaseMature(credit, bs.Height) {
 			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
 				outpoint)
 		}
@@ -942,6 +960,18 @@ func (w *Wallet) getEligibleUTXOsFromList(ctx context.Context,
 			continue
 		}
 
+		// Coinbase outputs are only spendable once they reach maturity,
+		// matching account-based selection; skip an immature coinbase
+		// even when MinConfs is otherwise satisfied.
+		if !w.txCreatorCoinbaseMature(credit, bs.Height) {
+			log.Warnf("Skipping user-specified coinbase UTXO %v "+
+				"because it has not reached maturity (%d)",
+				credit.OutPoint,
+				w.cfg.ChainParams.CoinbaseMaturity)
+
+			continue
+		}
+
 		// If the UTXO is eligible, add it to the list.
 		eligible = append(eligible, *credit)
 	}
@@ -1111,11 +1141,8 @@ func (w *Wallet) filterEligibleOutputs(ctx context.Context,
 			continue
 		}
 
-		if output.FromCoinBase {
-			target := w.cfg.ChainParams.CoinbaseMaturity
-			if !txCreatorHasMinConfs(uint32(target), output.Height, bs.Height) {
-				continue
-			}
+		if !w.txCreatorCoinbaseMature(output, bs.Height) {
+			continue
 		}
 
 		// Locked unspent outputs are skipped.
@@ -1153,6 +1180,23 @@ func txCreatorHasMinConfs(minconf uint32, height uint32,
 	currentHeight int32) bool {
 
 	return int64(txCreatorConf(height, currentHeight)) >= int64(minconf)
+}
+
+// txCreatorCoinbaseMature reports whether a coinbase output has reached the
+// network's coinbase maturity at the current chain height. Non-coinbase
+// outputs are always mature. This is the same gate account-based selection
+// applies, shared so the selected/manual UTXO paths reject an immature
+// coinbase rather than producing an invalid spend.
+func (w *Wallet) txCreatorCoinbaseMature(utxo *db.UtxoInfo,
+	currentHeight int32) bool {
+
+	if !utxo.FromCoinBase {
+		return true
+	}
+
+	maturity := uint32(w.cfg.ChainParams.CoinbaseMaturity)
+
+	return txCreatorHasMinConfs(maturity, utxo.Height, currentHeight)
 }
 
 // txCreatorConf returns the number of confirmations for an output height.
