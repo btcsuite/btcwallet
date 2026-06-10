@@ -254,6 +254,178 @@ func TestLeaseOutputRejectsSpentByUnminedTx(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
 }
 
+// TestListUTXOsIncludesLockedOutputs verifies kvdb returns current UTXOs even
+// when they are actively leased.
+func TestListUTXOsIncludesLockedOutputs(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	// Credit two wallet-owned outputs so they resolve to an account and
+	// surface through the enriched listing path (unowned scripts are
+	// dropped, matching the SQL backends).
+	scope := waddrmgr.KeyScopeBIP0084
+	lockedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(3000),
+		balanceTestTipHeight, false,
+	)
+	unlockedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(4000),
+		balanceTestTipHeight, false,
+	)
+
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			ID:       db.LockID{3},
+			OutPoint: lockedPoint,
+			Duration: time.Hour,
+		},
+	)
+	require.NoError(t, err)
+
+	utxos, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: 0,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+	require.ElementsMatch(t, []wire.OutPoint{
+		lockedPoint, unlockedPoint,
+	}, []wire.OutPoint{
+		utxos[0].OutPoint, utxos[1].OutPoint,
+	})
+
+	// The leased output reports IsLocked; the other does not. This is the
+	// original intent of the test: a leased UTXO still appears in the
+	// listing, now distinguished by the enriched IsLocked flag.
+	byOutPoint := make(map[wire.OutPoint]db.UtxoInfo, len(utxos))
+	for _, u := range utxos {
+		byOutPoint[u.OutPoint] = u
+	}
+
+	require.True(t, byOutPoint[lockedPoint].IsLocked)
+	require.False(t, byOutPoint[unlockedPoint].IsLocked)
+}
+
+func TestUTXOEnrichmentFields(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	wantScope := db.KeyScopeBIP0084
+
+	lockedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(20000),
+		balanceTestTipHeight, false,
+	)
+	unlockedPoint := creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(30000),
+		balanceTestTipHeight, false,
+	)
+
+	// Lease only one output so IsLocked separates the two rows.
+	_, err := store.LeaseOutput(
+		t.Context(), db.LeaseOutputParams{
+			WalletID: 0,
+			OutPoint: lockedPoint,
+			ID:       db.LockID{1},
+			Duration: 30 * time.Minute,
+		},
+	)
+	require.NoError(t, err)
+
+	// ListUTXOs returns both rows with the derived-account enrichment.
+	utxos, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: 0,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+
+	byOutPoint := make(map[wire.OutPoint]db.UtxoInfo, len(utxos))
+	for _, u := range utxos {
+		byOutPoint[u.OutPoint] = u
+	}
+
+	locked, ok := byOutPoint[lockedPoint]
+	require.True(t, ok, "locked UTXO missing from ListUTXOs")
+	require.Equal(t, waddrmgr.DefaultAccountName, locked.AccountName)
+	require.Equal(t, db.DerivedAccount, locked.Origin)
+	require.Equal(t, db.WitnessPubKey, locked.AddrType)
+	require.False(t, locked.HasScript)
+	require.True(t, locked.IsLocked)
+	require.Equal(t, wantScope, locked.KeyScope)
+
+	unlocked, ok := byOutPoint[unlockedPoint]
+	require.True(t, ok, "unlocked UTXO missing from ListUTXOs")
+	require.Equal(t, waddrmgr.DefaultAccountName, unlocked.AccountName)
+	require.Equal(t, db.DerivedAccount, unlocked.Origin)
+	require.Equal(t, db.WitnessPubKey, unlocked.AddrType)
+	require.False(t, unlocked.HasScript)
+	require.False(t, unlocked.IsLocked)
+	require.Equal(t, wantScope, unlocked.KeyScope)
+
+	// GetUtxo surfaces the same enriched view as ListUTXOs, including the
+	// active-lease IsLocked flag and the owning account's KeyScope.
+	got, err := store.GetUtxo(
+		t.Context(), db.GetUtxoQuery{
+			WalletID: 0,
+			OutPoint: lockedPoint,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.DefaultAccountName, got.AccountName)
+	require.Equal(t, db.DerivedAccount, got.Origin)
+	require.Equal(t, db.WitnessPubKey, got.AddrType)
+	require.False(t, got.HasScript)
+	require.True(t, got.IsLocked)
+	require.Equal(t, wantScope, got.KeyScope)
+}
+
+// TestListUTXOsFiltersByConfirms verifies that kvdb.Store applies the
+// confirmation filters before returning db-native UTXO rows. The
+// account / scope / name filters are exercised end-to-end by the
+// cross-backend itests under wallet/internal/db/itest, where real
+// addrmgr fixtures populate the enrichment fields and the filter
+// semantics can be asserted across pg, sqlite, and kvdb together.
+func TestListUTXOsFiltersByConfirms(t *testing.T) {
+	t.Parallel()
+
+	store, mgr, txStore, cleanup := newCreditedFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(4000), 4,
+		false,
+	)
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(5000), 5,
+		false,
+	)
+	creditAccountAddressAtHeight(
+		t, store.db, mgr, txStore, scope, 0, btcutil.Amount(6000), 0,
+		false,
+	)
+
+	minConfs := int32(1)
+
+	utxos, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID: 0,
+			MinConfs: &minConfs,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+}
+
 // insertKnownCredit inserts one test credit and returns its outpoint.
 func insertKnownCredit(t *testing.T, dbConn walletdb.DB, txStore *wtxmgr.Store,
 	pkScript []byte, value int64, height int32) wire.OutPoint {
