@@ -243,34 +243,22 @@ type syncer struct {
 	publisher TxPublisher
 }
 
-// syncerStoreConfig contains store-backed runtime options for the syncer.
-type syncerStoreConfig struct {
-	// store is the transitional database store used by migrated runtime paths.
-	store db.Store
-
-	// walletID is the database wallet identifier used by store-backed paths.
-	walletID uint32
-}
-
-// newSyncer creates a new syncer instance.
+// newSyncer creates a new syncer instance. The Store and its wallet ID are
+// mandatory: every migrated runtime path reads and writes through the Store,
+// so there is no nil-store fallback.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher,
-	storeConfigs ...syncerStoreConfig) *syncer {
+	txStore wtxmgr.TxStore, publisher TxPublisher, store db.Store,
+	walletID uint32) *syncer {
 
-	s := &syncer{
+	return &syncer{
 		cfg:         cfg,
 		addrStore:   addrStore,
 		txStore:     txStore,
 		scanReqChan: make(chan *scanReq, 1),
 		publisher:   publisher,
+		store:       store,
+		walletID:    walletID,
 	}
-
-	if len(storeConfigs) > 0 {
-		s.store = storeConfigs[0].store
-		s.walletID = storeConfigs[0].walletID
-	}
-
-	return s
 }
 
 // syncState returns the current synchronization state of the wallet.
