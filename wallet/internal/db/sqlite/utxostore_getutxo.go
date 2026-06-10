@@ -23,6 +23,7 @@ func (s *Store) GetUtxo(ctx context.Context,
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetUtxoByOutpoint(
 			ctx, sqlc.GetUtxoByOutpointParams{
+				NowUtc:      time.Now().UTC(),
 				WalletID:    int64(query.WalletID),
 				TxHash:      query.OutPoint.Hash[:],
 				OutputIndex: int64(query.OutPoint.Index),
@@ -37,12 +38,37 @@ func (s *Store) GetUtxo(ctx context.Context,
 			return fmt.Errorf("get utxo: %w", err)
 		}
 
+		origin, err := db.IDToAccountOrigin[int64](row.OriginID)
+		if err != nil {
+			return fmt.Errorf("origin: %w", err)
+		}
+
+		addrType, err := db.IDToAddressType(row.TypeID)
+		if err != nil {
+			return fmt.Errorf("addr type: %w", err)
+		}
+
+		keyScope, err := db.KeyScopeFromIDs(row.Purpose, row.CoinType)
+		if err != nil {
+			return fmt.Errorf("key scope: %w", err)
+		}
+
 		utxo, err = utxoInfoFromRow(
 			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
 			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
 		)
+		if err != nil {
+			return err
+		}
 
-		return err
+		utxo.AccountName = row.AccountName
+		utxo.Origin = origin
+		utxo.AddrType = addrType
+		utxo.HasScript = row.HasScript
+		utxo.IsLocked = row.IsLocked != 0
+		utxo.KeyScope = keyScope
+
+		return nil
 	})
 	if err != nil {
 		return nil, err
