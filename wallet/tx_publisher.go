@@ -18,11 +18,13 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/davecgh/go-spew/spew"
@@ -468,6 +470,105 @@ func (w *Wallet) filterOwnedAddresses(
 	}
 
 	return ownedAddrs, nil
+}
+
+// spendsWalletOutput reports whether the transaction spends at least one output
+// owned by the wallet, so a sweep that pays no wallet-owned outputs is still
+// recognized as ours.
+//
+// Wallet relevance cannot rely on current-UTXO membership alone. GetUtxo only
+// sees the current unspent set, so a no-change tx that re-spends a wallet
+// output already consumed by another unmined wallet tx (a fee-bump / RBF /
+// sweep replacement) would miss on GetUtxo and be wrongly classified as
+// wallet-unrelated. Such a tx must still be treated as ours so it is recorded
+// and the store-level input-conflict path can arbitrate the double-spend before
+// it broadcasts unrecorded. We therefore also consult the parent transaction's
+// wallet-owned outputs, which persist in the store even after the output is
+// spent, instead of treating an absent current UTXO as proof of
+// non-ownership.
+func (w *Wallet) spendsWalletOutput(ctx context.Context,
+	tx *wire.MsgTx) (bool, error) {
+
+	// Cache parent-tx ownership lookups so several inputs spending the same
+	// parent only cost one GetTxDetail call.
+	ownedParents := make(map[chainhash.Hash]map[uint32]struct{})
+
+	for _, txIn := range tx.TxIn {
+		outPoint := txIn.PreviousOutPoint
+
+		_, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: outPoint,
+		})
+		if err == nil {
+			// The output is a current wallet UTXO, so the tx clearly
+			// spends our funds.
+			return true, nil
+		}
+
+		if !errors.Is(err, db.ErrUtxoNotFound) {
+			return false, err
+		}
+
+		// The output is not a current UTXO. It may still be a wallet
+		// output already spent by another unmined wallet tx, which the
+		// parent's recorded owned outputs reveal.
+		ownedOutputs, err := w.walletOwnedOutputs(
+			ctx, outPoint.Hash, ownedParents,
+		)
+		if err != nil {
+			return false, err
+		}
+
+		if _, ok := ownedOutputs[outPoint.Index]; ok {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// walletOwnedOutputs returns the set of output indexes that the wallet owns in
+// the transaction identified by txHash, memoizing the per-parent lookup in
+// cache. A parent the wallet does not record contributes an empty set, so its
+// outputs are treated as not wallet-owned.
+func (w *Wallet) walletOwnedOutputs(ctx context.Context,
+	txHash chainhash.Hash,
+	cache map[chainhash.Hash]map[uint32]struct{}) (map[uint32]struct{},
+	error) {
+
+	if owned, ok := cache[txHash]; ok {
+		return owned, nil
+	}
+
+	detail, err := w.store.GetTxDetail(ctx, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+
+	// A parent the wallet never recorded cannot have contributed a
+	// wallet-owned output, so it spends none of our funds. Memoize a
+	// non-nil empty set so a later cache hit returns the same value and the
+	// caller can index the result without a nil check.
+	if errors.Is(err, db.ErrTxNotFound) {
+		empty := make(map[uint32]struct{})
+		cache[txHash] = empty
+
+		return empty, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	owned := make(map[uint32]struct{}, len(detail.OwnedOutputs))
+	for _, output := range detail.OwnedOutputs {
+		owned[output.Index] = struct{}{}
+	}
+
+	cache[txHash] = owned
+
+	return owned, nil
 }
 
 // publishTx is a helper function that handles the process of broadcasting a
