@@ -1188,6 +1188,43 @@ type UtxoInfo struct {
 	//
 	// Unconfirmed UTXOs use the sentinel value UnminedHeight.
 	Height uint32
+
+	// AccountName is the name of the wallet account this UTXO belongs to.
+	// Populated by the SQL backends from accounts.account_name in the
+	// same query that returns the UTXO row; no follow-up store call is
+	// needed.
+	AccountName string
+
+	// Origin reports whether the UTXO belongs to a derived or imported
+	// account. The wallet's spendability rule combines this with the
+	// wallet-level Wallet.IsWatchOnly() to decide whether to surface
+	// imported-account outputs in coin selection (see Task 132).
+	Origin AccountOrigin
+
+	// AddrType is the address type of the UTXO's credited address (P2PKH,
+	// P2WKH, etc.). Sourced from addresses.type_id; lets coin selection
+	// reason about output type without a follow-up address read.
+	AddrType AddressType
+
+	// HasScript is true when the credited address has a persisted
+	// encrypted script (e.g. a P2WSH script-only import). Sourced from
+	// LEFT JOIN address_secrets so watch-only addresses without any
+	// secret row report false rather than dropping out of the result.
+	HasScript bool
+
+	// IsLocked is true when the UTXO has an active (non-expired) lease.
+	// Sourced from LEFT JOIN utxo_leases with the lease-expiration
+	// comparison done in SQL against a caller-supplied UTC timestamp; the
+	// API still models leases separately from UTXO existence, but the
+	// pre-computed flag lets the wallet skip a per-row lease lookup.
+	IsLocked bool
+
+	// KeyScope is the BIP-43 key scope (purpose + coin type) of the
+	// account that owns this UTXO, sourced from key_scopes. Callers use it
+	// instead of deriving a scope from AddrType, which is lossy (a P2WPKH
+	// change output under a BIP0049Plus account would misreport as
+	// BIP0084).
+	KeyScope KeyScope
 }
 
 // GetUtxoQuery contains the parameters for querying a UTXO.
