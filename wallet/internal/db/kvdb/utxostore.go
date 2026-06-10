@@ -18,6 +18,9 @@ import (
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
+// A compile-time assertion to ensure Store implements the UTXO store.
+var _ db.UTXOStore = (*Store)(nil)
+
 var (
 	// errNotImplemented is returned for unimplemented kvdb store methods.
 	errNotImplemented = errors.New("not implemented")
@@ -38,15 +41,117 @@ var (
 	wtxmgrNamespaceKey = []byte("wtxmgr")
 )
 
+// notImplemented returns a consistent error for kvdb methods that still need a
+// legacy-backed implementation.
 func notImplemented(_ context.Context, method string) error {
 	return fmt.Errorf("kvdb.Store.%s: %w", method, errNotImplemented)
 }
 
-// GetUtxo is not yet implemented for kvdb.
-func (s *Store) GetUtxo(ctx context.Context,
-	_ db.GetUtxoQuery) (*db.UtxoInfo, error) {
+// GetUtxo retrieves one current wallet-owned UTXO through the legacy wtxmgr
+// query path.
+func (s *Store) GetUtxo(_ context.Context,
+	query db.GetUtxoQuery) (*db.UtxoInfo, error) {
 
-	return nil, notImplemented(ctx, "GetUtxo")
+	var utxo *db.UtxoInfo
+
+	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		got, err := s.getUtxoInView(tx, query.OutPoint)
+		if err != nil {
+			return err
+		}
+
+		utxo = got
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kvdb.Store.GetUtxo: %w", err)
+	}
+
+	return utxo, nil
+}
+
+// getUtxoInView resolves one current wallet-owned UTXO inside an open
+// walletdb read transaction. It gates the outpoint through the current
+// UTXO set first, then emits the enriched wallet-owned row.
+func (s *Store) getUtxoInView(tx walletdb.ReadTx,
+	outPoint wire.OutPoint) (*db.UtxoInfo, error) {
+
+	txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	if txmgrNs == nil {
+		return nil, errMissingTxmgrNamespace
+	}
+
+	credit, leaseSet, err := s.loadCurrentCredit(txmgrNs, outPoint)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.enrichOwnedCredit(tx, credit, leaseSet)
+}
+
+// loadCurrentCredit fetches one credit by outpoint and gates it through the
+// current UTXO set, returning db.ErrUtxoNotFound for unknown or non-current
+// (spent-by-unmined) outputs. The active lease set is returned alongside so
+// the caller can mark IsLocked without re-reading the lease bucket.
+func (s *Store) loadCurrentCredit(txmgrNs walletdb.ReadBucket,
+	outPoint wire.OutPoint) (*wtxmgr.Credit, map[wire.OutPoint]struct{},
+	error) {
+
+	credit, err := s.txStore.GetUtxo(txmgrNs, outPoint)
+	if err != nil {
+		if errors.Is(err, wtxmgr.ErrUtxoNotFound) {
+			return nil, nil, db.ErrUtxoNotFound
+		}
+
+		return nil, nil, fmt.Errorf("get utxo: %w", err)
+	}
+
+	current, err := s.currentUTXOSet(txmgrNs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if _, ok := current[outPoint]; !ok {
+		return nil, nil, db.ErrUtxoNotFound
+	}
+
+	leaseSet, err := s.activeLeaseSet(txmgrNs, current)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return credit, leaseSet, nil
+}
+
+// enrichOwnedCredit resolves the owning account for one current credit and
+// produces its enriched db.UtxoInfo. A credit whose script does not join to a
+// wallet address is reported as not found, matching the SQL backends which
+// inner-join UTXO rows against owned addresses rather than surfacing an
+// unenriched row.
+func (s *Store) enrichOwnedCredit(tx walletdb.ReadTx,
+	credit *wtxmgr.Credit,
+	leaseSet map[wire.OutPoint]struct{}) (*db.UtxoInfo, error) {
+
+	addrmgrNs := tx.ReadBucket(waddrmgr.NamespaceKey)
+	if addrmgrNs == nil {
+		return nil, errMissingAddrmgrNamespace
+	}
+
+	chainParams := s.addrStore.ChainParams()
+
+	binding, addr, err := s.resolveAccountForCredit(
+		addrmgrNs, credit, chainParams,
+	)
+	if err != nil {
+		if errors.Is(err, errUnownedScript) {
+			return nil, db.ErrUtxoNotFound
+		}
+
+		return nil, err
+	}
+
+	return s.enrichCredit(addrmgrNs, credit, addr, binding, leaseSet)
 }
 
 // ListUTXOs is not yet implemented for kvdb.
