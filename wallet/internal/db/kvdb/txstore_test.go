@@ -5,13 +5,156 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCreateTxUnminedWithCreditSuccess verifies that kvdb.Store records an
+// unmined transaction, label, credit, and address-used state through wtxmgr.
+func TestCreateTxUnminedWithCreditSuccess(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(true).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{60},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 7_000, PkScript: script})
+
+	label := "published"
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003000, 0),
+		Status:   db.TxStatusPublished,
+		Label:    label,
+		Credits:  map[uint32]btcutil.Address{0: addr},
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, label, details.Label)
+		require.Len(t, details.Credits, 1)
+		require.Equal(t, uint32(0), details.Credits[0].Index)
+		require.True(t, details.Credits[0].Change)
+
+		return nil
+	})
+	require.NoError(t, err)
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+}
+
+// TestCreateTxDuplicateReturnsStoreError verifies that duplicate unmined tx
+// inserts are translated to db.ErrTxAlreadyExists.
+func TestCreateTxDuplicateReturnsStoreError(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{61},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 8_000, PkScript: []byte{0x51}})
+
+	params := db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003100, 0),
+		Status:   db.TxStatusPublished,
+	}
+	err := store.CreateTx(t.Context(), params)
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+}
+
+// TestCreateTxCreditlessSucceeds verifies that a credit-less (sweep) tx is
+// recorded even without the address-manager namespace, since the namespace is
+// only consulted when recording credits.
+func TestCreateTxCreditlessSucceeds(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	// Deliberately omit newAddrmgrNamespace: a credit-less tx must not
+	// require the address-manager bucket.
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{64},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 6_000, PkScript: []byte{0x51}})
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003300, 0),
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Empty(t, details.Credits)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
 
 // TestUpdateTxLabelOnlySuccess verifies that kvdb.Store can apply a label-only
 // UpdateTx patch through the legacy label path.
