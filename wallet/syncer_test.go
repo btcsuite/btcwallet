@@ -1072,6 +1072,96 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// matchConfirmedTxBatchNoSyncTip returns a matcher asserting a confirmed
+// relevant transaction is written as one store batch whose transaction carries
+// the confirming block, while SyncedTo stays nil so the standalone
+// notification does not advance the wallet sync tip.
+func matchConfirmedTxBatchNoSyncTip(walletID uint32, tx *wire.MsgTx,
+	addr address.Address, received time.Time, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo != nil {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block == nil ||
+			!matchStoreBlockFields(txParams.Block, block) {
+
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received,
+			db.TxStatusPublished, "",
+		)
+	})
+}
+
+// TestProcessRelevantTxUsesStoreConfirmedBlock verifies that a confirmed
+// relevant transaction notification (one carrying a block) builds an
+// ApplyTxBatch with the transaction's confirming block set but SyncedTo left
+// nil, so the standalone notification records the confirmed tx without
+// advancing the wallet sync tip. The Store block row is then ensured by the
+// SQL applyBatchTransaction path (covered separately on the Store-layer fix).
+func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A store-backed syncer and a transaction paying a
+	// wallet-owned address, confirmed in a block.
+	const walletID uint32 = 8
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0c},
+			Height: 222,
+		},
+		Time: time.Unix(789, 0).UTC(),
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchConfirmedTxBatchNoSyncTip(
+			walletID, tx, addr, received, block,
+		),
+	).Return(nil).Once()
+
+	// Act: Process a confirmed relevant transaction notification.
+	err = s.processChainUpdate(
+		t.Context(), chain.RelevantTx{TxRecord: rec, Block: block},
+	)
+
+	// Assert: The batch carries the confirming block but leaves the sync
+	// tip untouched. The mock registers only ApplyTxBatch (and address
+	// lookups), so any sync-tip write would fail AssertExpectations.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
 // matchStoreBlockFields reports whether a store block matches the wtxmgr block
 // metadata's hash, height, and timestamp.
 func matchStoreBlockFields(b *db.Block, block *wtxmgr.BlockMeta) bool {
@@ -1905,6 +1995,30 @@ func TestHandleScanReq(t *testing.T) {
 	scopedMgr.On(
 		"AccountProperties", mock.Anything, uint32(1),
 	).Return(props, nil).Twice()
+
+	accountID := uint32(7)
+	accountNumber := uint32(1)
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == 0 &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.AccountNumber != nil &&
+				*query.AccountNumber == accountNumber &&
+				query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{
+		AccountID:     &accountID,
+		AccountNumber: &accountNumber,
+		KeyScope:      db.KeyScopeBIP0084,
+	}, nil).Once()
+	store.On(
+		"ApplyScanBatch", mock.Anything, mock.MatchedBy(
+			func(params db.ScanBatchParams) bool {
+				return params.WalletID == 0
+			},
+		),
+	).Return(nil).Once()
+
 	// ActiveAccounts might not be called in targeted scan flow.
 	scopedMgr.On("ActiveAccounts").Return([]uint32{1}).Maybe()
 	mockAddrStore.On(
