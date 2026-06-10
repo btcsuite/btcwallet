@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
@@ -59,6 +62,161 @@ func TestCreateTxStoresWalletCredit(t *testing.T) {
 	_, ok := txIDByHash(t, store, walletID, tx.TxHash())
 	require.True(t, ok)
 	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+}
+
+// TestCreateTxCreditBareMultisigMember verifies that CreateTx records a
+// bare-multisig output that the wallet partly owns: the wallet holds one
+// member pubkey address, but not the full multisig output script.
+//
+// This is the SQL counterpart to the kvdb TestCreateTxCreditBareMultisigMember
+// and locks in parity between the two backends. The publisher's ownership
+// filter resolves such an output to the wallet-owned member address and passes
+// it as the credit address; the store must therefore key ownership on the
+// member's own script, not on the full multisig output script that no address
+// row would ever match.
+//
+// Scenario:
+//   - The wallet imports one P2PK member address (script-only on a watch-only
+//     wallet, which the ADR 0012 invariant allows).
+//   - A transaction pays a 1-of-2 bare-multisig output built from that member
+//     plus a foreign key. The full multisig script is NOT a wallet address.
+//
+// Action:
+//   - Insert the transaction through CreateTx with Credits[0] set to the
+//     member address.
+//
+// Assertions:
+//   - CreateTx succeeds (no ErrAddressNotFound) and the credited output exists.
+//   - GetUtxo resolves the UTXO to the imported member address (imported
+//     origin, raw-pubkey type) rather than the multisig output script.
+//
+// Without the fix, the store looks the credit up by the full multisig output
+// script, finds no address row, and CreateTx fails with ErrAddressNotFound.
+func TestCreateTxCreditBareMultisigMember(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	// A script-only import (no private key) requires a watch-only wallet per
+	// the ADR 0012 spendable-wallet invariant.
+	walletID := newWatchOnlyWallet(t, store, "wallet-bare-multisig-credit")
+
+	scope := db.KeyScopeBIP0084
+	importedName := db.DefaultImportedAccountName
+	CreateImportedAccount(t, store, walletID, scope, importedName, true)
+
+	// Build a 1-of-2 bare-multisig script. memberScript is the member's own
+	// P2PK script (what PayToAddrScript(memberAddr) yields), which the wallet
+	// imports as an address. multiSigScript is the full on-chain output script,
+	// which is deliberately never registered as a wallet address.
+	memberAddr, memberScript, multiSigScript := newMultisigScript(t)
+	require.NotEqual(t, memberScript, multiSigScript)
+
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			Scope:           scope,
+			AddressType:     db.RawPubKey,
+			PubKey:          memberAddr.ScriptAddress(),
+			ScriptPubKey:    memberScript,
+			EncryptedScript: RandomBytes(48),
+		},
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: multiSigScript}},
+	)
+
+	// Credits[0] carries the resolved member address, exactly as the publisher
+	// supplies it after filtering ownership by the member script.
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004000, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: memberAddr},
+	})
+	require.NoError(t, err)
+
+	outPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+	require.True(t, walletUtxoExists(t, store, walletID, outPoint))
+
+	// The credit must resolve to the imported member address, not the multisig
+	// output script. Origin and address type prove the resolved address row is
+	// the member import.
+	utxo, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: outPoint,
+	})
+	require.NoError(t, err)
+	require.Equal(t, importedName, utxo.AccountName)
+	require.Equal(t, db.ImportedAccount, utxo.Origin)
+	require.Equal(t, db.RawPubKey, utxo.AddrType)
+}
+
+// TestCreateTxCreditAddrMismatch verifies that CreateTx rejects a non-nil
+// credit address that the credited output does not pay to, instead of
+// recording a UTXO owned by an unrelated address.
+//
+// A non-nil Credits[index] is authoritative for ownership, so the store must
+// confirm the output actually pays that address before trusting it. This is
+// the SQL counterpart to the kvdb TestCreateTxCreditAddrMismatch and keeps the
+// two backends consistent: kvdb validates membership via its own
+// validateCreditAddr, and the SQL backends validate it through the shared
+// ValidateCreditAddrMembership before the credit lookup.
+//
+// Scenario:
+//   - The output pays a wallet-owned derived address.
+//   - Credits[0] instead names an unrelated address the output never pays.
+//
+// Assertions:
+//   - CreateTx fails with ErrInvalidParam and records nothing.
+func TestCreateTxCreditAddrMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-credit-addr-mismatch")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	// The output pays this wallet-owned address.
+	paidAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	// The credit names a different address that the output script does not
+	// pay to, simulating a caller mislabeling the credited output.
+	wrongKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wrongAddr, err := address.NewAddressPubKey(
+		wrongKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 6000, PkScript: paidAddr.ScriptPubKey}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004200, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: wrongAddr},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// The rejected insert must not have created the transaction row or a
+	// UTXO.
+	_, ok := txIDByHash(t, store, walletID, tx.TxHash())
+	require.False(t, ok)
+	require.False(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
 		Hash: tx.TxHash(), Index: 0,
 	}))
 }
@@ -2511,6 +2669,42 @@ func newRegularTx(inputs []wire.OutPoint, outputs []*wire.TxOut) *wire.MsgTx {
 // randomOutPoint returns one fixture outpoint backed by a random hash.
 func randomOutPoint() wire.OutPoint {
 	return wire.OutPoint{Hash: RandomHash(), Index: 0}
+}
+
+// newMultisigScript builds a 1-of-2 bare-multisig output script and returns the
+// first member's pubkey address, that member's own P2PK script, and the full
+// multisig output script. The member script is what PayToAddrScript(memberAddr)
+// yields and is what a wallet would register as an address; the multisig script
+// is the on-chain output script, which is never a wallet address by itself.
+func newMultisigScript(t *testing.T) (*address.AddressPubKey, []byte, []byte) {
+	t.Helper()
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	memberAddr, err := address.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	memberScript, err := txscript.PayToAddrScript(memberAddr)
+	require.NoError(t, err)
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddInt64(1)
+	builder.AddData(firstKey.PubKey().SerializeCompressed())
+	builder.AddData(secondKey.PubKey().SerializeCompressed())
+	builder.AddInt64(2)
+	builder.AddOp(txscript.OP_CHECKMULTISIG)
+
+	multiSigScript, err := builder.Script()
+	require.NoError(t, err)
+
+	return memberAddr, memberScript, multiSigScript
 }
 
 // txHashes returns transaction hashes in result order.
