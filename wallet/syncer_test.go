@@ -2271,6 +2271,102 @@ func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
 	return internalNumber
 }
 
+// TestStoreScanHorizonsTargetedImportedBucketSkipped verifies that a targeted
+// rescan for the keyless legacy imported-address bucket never issues a Store
+// number lookup and produces no horizon for the bucket. The real kvdb backend
+// rejects a by-number lookup of waddrmgr.ImportedAddrAccount with
+// ErrAccountNotFound, so a passing run (no error, no horizon) proves the bucket
+// was skipped before any lookup rather than mis-resolved.
+func TestStoreScanHorizonsTargetedImportedBucketSkipped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer over a real manager and a single target
+	// for the keyless imported-address bucket.
+	s, _ := newStoreScanSyncer(t)
+
+	targets := []waddrmgr.AccountScope{{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: waddrmgr.ImportedAddrAccount,
+	}}
+
+	// Act: resolve the targets and load their horizons through the Store.
+	resolved, err := s.resolveScanTargets(t.Context(), targets)
+	require.NoError(t, err)
+
+	props, err := s.storeScanHorizons(t.Context(), resolved)
+
+	// Assert: the bucket was skipped before any Store lookup -- a number
+	// lookup would have surfaced ErrAccountNotFound -- so no horizon is
+	// emitted and no error is returned.
+	require.NoError(t, err)
+	require.Empty(t, props)
+}
+
+// TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived verifies the core
+// fix: a targeted rescan setup containing both the default derived account
+// (number 0) and an imported-xpub account whose public number is masked to 0
+// does not resolve the imported target as the default derived account. The
+// imported target is addressed by its non-masked internal number and emitted as
+// its own recovery horizon.
+func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real-backend syncer with the auto-created default derived
+	// account at number 0 and an imported-xpub account masked to number 0.
+	s, mgr := newStoreScanSyncer(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	importedNumber := createImportedXpubAccount(
+		t, s, mgr, scope, "imported-xpub",
+	)
+
+	// The imported account's internal number must differ from the default
+	// derived account's number 0, yet the Store masks it back to 0.
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), importedNumber)
+
+	// Target both the default derived account (by its real number 0) and the
+	// imported-xpub account (by its non-masked internal number).
+	targets := []waddrmgr.AccountScope{
+		{Scope: scope, Account: waddrmgr.DefaultAccountNum},
+		{Scope: scope, Account: importedNumber},
+	}
+
+	// Act: resolve the targets and load their horizons through the Store.
+	resolved, err := s.resolveScanTargets(t.Context(), targets)
+	require.NoError(t, err)
+
+	// The imported target must resolve to its durable name through the
+	// identity-aware manager, the identity Store horizon loading keys on
+	// instead of the maskable number.
+	require.Len(t, resolved, 2)
+	require.Equal(t, waddrmgr.DefaultAccountName, resolved[0].AccountName)
+	require.Equal(t, "imported-xpub", resolved[1].AccountName)
+
+	props, err := s.storeScanHorizons(t.Context(), resolved)
+	require.NoError(t, err)
+
+	// Assert: both horizons are emitted under distinct derivation numbers,
+	// proving the imported target was resolved by name and not mis-resolved as
+	// the default derived account at the shared masked number 0.
+	require.Len(t, props, 2)
+
+	byName := make(map[string]*waddrmgr.AccountProperties, len(props))
+	for _, prop := range props {
+		byName[prop.AccountName] = prop
+	}
+
+	defaultProps := byName[waddrmgr.DefaultAccountName]
+	require.NotNil(t, defaultProps)
+	require.Equal(t, uint32(waddrmgr.DefaultAccountNum),
+		defaultProps.AccountNumber)
+	require.False(t, defaultProps.IsWatchOnly)
+
+	importedProps := byName["imported-xpub"]
+	require.NotNil(t, importedProps)
+	require.Equal(t, importedNumber, importedProps.AccountNumber)
+	require.True(t, importedProps.IsWatchOnly)
+}
+
 // expectImportedScanAddressPage expects the Store scan path to page raw imports
 // using the accountless imported-address query shape.
 func expectImportedScanAddressPage(store *walletmock.Store,
