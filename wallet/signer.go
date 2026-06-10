@@ -16,8 +16,8 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
-	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -499,12 +499,10 @@ func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
 //     database lookup to fetch the account's master key. N is the number of
 //     accounts in the wallet.
 //
-// Database Actions:
-//   - This method performs a single read-only database transaction
-//     (`walletdb.View`).
-//   - The transaction's only purpose is to call `DeriveFromKeyPath`, which
-//     performs at most one indexed database lookup for account information if
-//     that information is not already in the in-memory cache.
+// Legacy Database Actions:
+//   - The kvdb adapter performs one read-only transaction to call
+//     `DeriveFromKeyPath`, which performs at most one indexed database lookup
+//     for account information if it is not already in the in-memory cache.
 func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 	waddrmgr.ManagedPubKeyAddress, error) {
 
@@ -517,28 +515,11 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 			err)
 	}
 
-	// The derivation of the address is the only part that requires a
-	// database transaction.
-	var addr waddrmgr.ManagedAddress
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Derive the managed address from the derivation path.
-		derivedAddr, err := manager.DeriveFromKeyPath(
-			addrmgrNs, path.DerivationPath,
-		)
-		if err != nil {
-			return fmt.Errorf("cannot derive from key path: %w",
-				err)
-		}
-
-		addr = derivedAddr
-
-		return nil
-	})
+	addr, err := kvdb.DeriveManagedAddress(
+		w.cfg.DB, manager, path.DerivationPath,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("cannot view wallet database: %w", err)
+		return nil, fmt.Errorf("derive managed address: %w", err)
 	}
 
 	// The post-processing of the address can be done outside of the
@@ -817,28 +798,15 @@ func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
 func (w *Wallet) loadManagedPubKeyAddr(addr address.Address) (
 	waddrmgr.ManagedPubKeyAddress, error) {
 
-	var pubKeyAddr waddrmgr.ManagedPubKeyAddress
-
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		managedAddr, err := w.addrStore.Address(addrmgrNs, addr)
-		if err != nil {
-			return fmt.Errorf("fetch address: %w", err)
-		}
-
-		var ok bool
-
-		pubKeyAddr, ok = managedAddr.(waddrmgr.ManagedPubKeyAddress)
-		if !ok {
-			return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
-				managedAddr.Address())
-		}
-
-		return nil
-	})
+	managedAddr, err := kvdb.LoadManagedAddress(w.cfg.DB, w.addrStore, addr)
 	if err != nil {
-		return nil, fmt.Errorf("view signer address: %w", err)
+		return nil, fmt.Errorf("load managed address: %w", err)
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+			managedAddr.Address())
 	}
 
 	return pubKeyAddr, nil
@@ -940,33 +908,11 @@ func (w *Wallet) resolveDerivedPathPrivKey(ctx context.Context,
 func (w *Wallet) resolveDerivedPrivKey(accountManager waddrmgr.AccountStore,
 	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
-	var privKey *btcec.PrivateKey
-
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		managedAddr, err := accountManager.DeriveFromKeyPath(
-			addrmgrNs, derivationPath,
-		)
-		if err != nil {
-			return fmt.Errorf("derive private key from db: %w", err)
-		}
-
-		pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-		if !ok {
-			return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
-				managedAddr.Address())
-		}
-
-		privKey, err = pubKeyAddr.PrivKey()
-		if err != nil {
-			return fmt.Errorf("fetch derived private key: %w", err)
-		}
-
-		return nil
-	})
+	privKey, err := kvdb.ResolveDerivedPrivKey(
+		w.cfg.DB, accountManager, derivationPath,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("view signer derivation: %w", err)
+		return nil, fmt.Errorf("resolve derived priv key: %w", err)
 	}
 
 	return privKey, nil
@@ -1255,30 +1201,19 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 		return nil, err
 	}
 
-	var privKey *btcec.PrivateKey
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		addr, err := w.addrStore.Address(addrmgrNs, a)
-		if err != nil {
-			return fmt.Errorf("failed to get address: %w", err)
-		}
-
-		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
-		if !ok {
-			return ErrNoAssocPrivateKey
-		}
-
-		privKey, err = managedPubKeyAddr.PrivKey()
-		if err != nil {
-			return fmt.Errorf("failed to get private key: %w", err)
-		}
-
-		return nil
-	})
+	managedAddr, err := kvdb.LoadManagedAddress(w.cfg.DB, w.addrStore, a)
 	if err != nil {
-		return nil, fmt.Errorf("failed to view database: %w", err)
+		return nil, fmt.Errorf("load managed address: %w", err)
+	}
+
+	managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, ErrNoAssocPrivateKey
+	}
+
+	privKey, err := managedPubKeyAddr.PrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get private key: %w", err)
 	}
 
 	return privKey, nil
