@@ -371,6 +371,22 @@ func TestFilterOwnedAddresses(t *testing.T) {
 	require.True(t, ok)
 }
 
+// mustNewStandalonePubKeyAddr returns a fresh P2PK address on the test chain
+// without needing a wallet instance. It fails the test on error.
+func mustNewStandalonePubKeyAddr(t *testing.T) *btcutil.AddressPubKey {
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	addr, err := btcutil.NewAddressPubKey(
+		privKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	return addr
+}
+
 // TestRecordTxAndCredits tests the recordTxAndCredits method to ensure it
 // correctly records transactions and credits in the database.
 func TestRecordTxAndCredits(t *testing.T) {
@@ -598,6 +614,57 @@ func TestAddTxToWallet(t *testing.T) {
 		// transaction store.
 		require.Nil(t, ourAddrs)
 	})
+}
+
+// TestSpendsWalletOutputConflictingNoChangeSpend is the task-173 regression:
+// a no-change transaction re-spends a wallet output that is already consumed by
+// another unmined wallet transaction. That output is no longer in the current
+// UTXO set, so GetUtxo misses it, but it remains a wallet-owned output of its
+// recorded parent transaction.
+//
+// spendsWalletOutput must therefore derive wallet relevance from the parent's
+// owned outputs, not from current-UTXO membership, and report the spend as
+// ours. That is what keeps addTxToWallet from taking its wallet-unrelated
+// early-out: the tx is instead recorded, and for SQL backends the store-level
+// CreateTx / MarkInputsSpent path then arbitrates the double-spend before it
+// can broadcast unrecorded.
+func TestSpendsWalletOutputConflictingNoChangeSpend(t *testing.T) {
+	t.Parallel()
+
+	w, m := createStartedWalletWithMocks(t)
+
+	// The no-change tx pays a single output to an address the wallet does
+	// not own, and spends one prior outpoint O.
+	unownedAddr := mustNewStandalonePubKeyAddr(t)
+	unownedScript := mustPayToAddrScript(unownedAddr)
+
+	spentOutPoint := wire.OutPoint{Hash: chainhash.Hash{0xcc}, Index: 1}
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{PreviousOutPoint: spentOutPoint}},
+		TxOut: []*wire.TxOut{{Value: 10000, PkScript: unownedScript}},
+	}
+
+	// O is already spent by another unmined wallet tx, so it is not a
+	// current UTXO and GetUtxo misses it.
+	m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: spentOutPoint,
+	}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
+
+	// O's parent is a recorded wallet tx that owns output index 1, so the
+	// wallet still owns the now-spent output.
+	m.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     spentOutPoint.Hash,
+	}).Return(&db.TxDetailInfo{
+		OwnedOutputs: []db.TxOwnedOutput{{Index: 1, Amount: 5000}},
+	}, nil).Once()
+
+	spendsOurs, err := w.spendsWalletOutput(t.Context(), tx)
+	require.NoError(t, err)
+
+	// The conflicting spend must not be classified as wallet-unrelated.
+	require.True(t, spendsOurs)
 }
 
 // mustPayToAddrScript is a helper function to create a PkScript for a given
