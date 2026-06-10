@@ -23,7 +23,6 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -128,7 +127,7 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	// allow us to track the tx's confirmation status, and also
 	// re-broadcast it upon startup. If any of the subsequent steps fail,
 	// this tx must be removed.
-	ourAddrs, err := w.addTxToWallet(tx, label)
+	ourAddrs, err := w.addTxToWallet(ctx, tx, label)
 	if err != nil {
 		return err
 	}
@@ -168,6 +167,13 @@ var (
 	// ErrTxCannotBeNil is returned when a nil transaction is passed to a
 	// function.
 	ErrTxCannotBeNil = errors.New("tx cannot be nil")
+
+	// ErrTxRetainedInvalid is returned when a tx cannot be recorded for
+	// publishing because the store already retains a row for the same hash in
+	// a terminal invalid state (failed or replaced). The record-before-publish
+	// step refuses to report success in that case so the caller does not
+	// publish a tx whose only stored row is invalid and untracked.
+	ErrTxRetainedInvalid = errors.New("tx exists in a retained invalid state")
 )
 
 // checkMempool is a helper function that checks if a tx is acceptable to the
@@ -220,9 +226,6 @@ type creditInfo struct {
 	// index is the output index of the credit.
 	index uint32
 
-	// ma is the managed address of the credit.
-	ma waddrmgr.ManagedAddress
-
 	// addr is the address of the credit.
 	addr address.Address
 }
@@ -230,8 +233,8 @@ type creditInfo struct {
 // ownedAddrInfo holds information about a wallet-owned address and the
 // transaction output indices that pay to it.
 type ownedAddrInfo struct {
-	// managedAddr represents the managed address.
-	managedAddr waddrmgr.ManagedAddress
+	// addr is the wallet-owned address.
+	addr address.Address
 
 	// outputIndices contains the transaction output indices that contain
 	// this address. The indices are not guaranteed to be sorted in any
@@ -248,10 +251,9 @@ type ownedAddrInfo struct {
 // This is done outside of any database transaction to avoid holding locks
 // during computationally expensive work.
 //
-// 2. Filter: Second, it uses a fast, read-only database transaction to
-// filter the large list of potential addresses down to the small set that is
-// actually owned by the wallet. This minimizes the time spent in the final,
-// more expensive write transaction.
+// 2. Filter: Second, it uses Store address lookups to filter the large list of
+// potential addresses down to the small set that is actually owned by the
+// wallet. This minimizes the time spent in the final, more expensive write.
 //
 // 3. Plan: Third, it prepares a definitive "write plan" in memory. This plan
 // is a simple slice of structs that contains all the information needed to
@@ -262,13 +264,8 @@ type ownedAddrInfo struct {
 // transaction. This transaction contains no business logic and only performs
 // the necessary database writes, ensuring that the exclusive database lock is
 // held for the shortest possible time.
-func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
+func (w *Wallet) addTxToWallet(ctx context.Context, tx *wire.MsgTx,
 	label string) ([]address.Address, error) {
-
-	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	if err != nil {
-		return nil, err
-	}
 
 	// Stage 1: Extract potential addresses from all transaction outputs.
 	// This is a CPU-intensive operation that is performed entirely in
@@ -276,15 +273,34 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 	txOutAddrs := w.extractTxAddrs(tx)
 
 	// Stage 2: Filter the extracted addresses to find which ones are owned
-	// by the wallet. This is done in a fast, read-only database
-	// transaction to minimize contention.
-	ownedAddrs, err := w.filterOwnedAddresses(txOutAddrs)
+	// by the wallet.
+	ownedAddrs, err := w.filterOwnedAddresses(ctx, txOutAddrs)
 	if err != nil {
 		return nil, err
 	}
 
-	// If the transaction has no outputs relevant to us, we can exit early.
+	// If the transaction has no outputs relevant to us, it may still be a
+	// sweep that spends our own coins. We check the input side before
+	// giving up so the tx is still tracked (and can later be invalidated).
 	if len(ownedAddrs) == 0 {
+		spendsOurs, err := w.spendsWalletOutput(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+
+		// Neither outputs nor inputs are wallet-relevant, so we can
+		// safely exit without recording anything.
+		if !spendsOurs {
+			return nil, nil
+		}
+
+		// The tx spends a wallet output but credits none, so record it
+		// with an empty credit set.
+		err = w.recordTxAndCredits(ctx, tx, label, nil)
+		if err != nil {
+			return nil, err
+		}
+
 		return nil, nil
 	}
 
@@ -306,22 +322,21 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 	// Iterate directly over owned addresses and their pre-computed output
 	// indices. This correctly handles the edge case where a single
 	// transaction has multiple outputs paying to the same address.
-	for addr, info := range ownedAddrs {
+	for _, info := range ownedAddrs {
 		for _, index := range info.outputIndices {
 			creditsToWrite = append(creditsToWrite, creditInfo{
 				index: index,
-				ma:    info.managedAddr,
-				addr:  addr,
+				addr:  info.addr,
 			})
 		}
 
-		ourAddrs = append(ourAddrs, addr)
+		ourAddrs = append(ourAddrs, info.addr)
 	}
 
 	// Stage 4: Atomically execute the write plan. This is the only stage
 	// that takes an exclusive database lock, and it is designed to be as
 	// fast as possible, containing no business logic.
-	err = w.recordTxAndCredits(txRec, label, creditsToWrite)
+	err = w.recordTxAndCredits(ctx, tx, label, creditsToWrite)
 	if err != nil {
 		return nil, err
 	}
@@ -331,59 +346,113 @@ func (w *Wallet) addTxToWallet(tx *wire.MsgTx,
 
 // recordTxAndCredits performs a single atomic database transaction to execute a
 // pre-computed "write plan" for a transaction.
-func (w *Wallet) recordTxAndCredits(txRec *wtxmgr.TxRecord, label string,
-	creditsToWrite []creditInfo) error {
+func (w *Wallet) recordTxAndCredits(ctx context.Context, tx *wire.MsgTx,
+	label string, creditsToWrite []creditInfo) error {
 
-	return walletdb.Update(w.cfg.DB, func(dbTx walletdb.ReadWriteTx) error {
-		addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+	// The Store contract records exactly one credit per output index
+	// (CreateTxParams.Credits is keyed by index, so "duplicate credited
+	// outputs are impossible by construction"). A bare-multisig output the
+	// wallet partly owns can yield more than one owned member address for
+	// the same index, so the write plan may carry several creditInfo entries
+	// that collapse onto one key. Pick the lexicographically smallest
+	// EncodeAddress() as the canonical owner instead of letting whichever
+	// entry happens to be visited last win: a map-iteration-order-dependent
+	// choice would record a nondeterministic owner across runs. The only
+	// effect not captured for the dropped members is marking an imported
+	// multisig member's address used, which does not feed gap-limit
+	// derivation, so a single canonical owner is sufficient here.
+	credits := make(map[uint32]address.Address, len(creditsToWrite))
+	for _, credit := range creditsToWrite {
+		existing, ok := credits[credit.index]
+		if !ok ||
+			credit.addr.EncodeAddress() < existing.EncodeAddress() {
 
-		// If there is a label we should write, get the namespace key
-		// and record it in the tx store.
-		if len(label) != 0 {
-			txHash := txRec.MsgTx.TxHash()
-
-			err := w.txStore.PutTxLabel(txmgrNs, txHash, label)
-			if err != nil {
-				return err
-			}
+			credits[credit.index] = credit.addr
 		}
+	}
 
-		// At the moment all notified txs are assumed to actually be
-		// relevant. This assumption will not hold true when SPV
-		// support is added, but until then, simply insert the tx
-		// because there should either be one or more relevant inputs
-		// or outputs.
-		exists, err := w.txStore.InsertTxCheckIfExists(
-			txmgrNs, txRec, nil,
-		)
-		if err != nil {
-			return err
-		}
+	txHash := tx.TxHash()
 
-		// If the tx has already been recorded, we can return early.
-		if exists {
-			return nil
-		}
+	err := w.store.CreateTx(ctx, db.CreateTxParams{
+		WalletID: w.id,
+		Tx:       tx,
+		Received: time.Now(),
+		Status:   db.TxStatusPublished,
+		Label:    label,
+		Credits:  credits,
+	})
+	if err == nil {
+		return nil
+	}
 
-		// Now, execute the write plan.
-		for _, credit := range creditsToWrite {
-			err := w.txStore.AddCredit(
-				txmgrNs, txRec, nil, credit.index,
-				credit.ma.Internal(),
-			)
-			if err != nil {
-				return err
-			}
+	if !errors.Is(err, db.ErrTxAlreadyExists) {
+		return err
+	}
 
-			err = w.addrStore.MarkUsed(addrmgrNs, credit.addr)
-			if err != nil {
-				return err
-			}
+	// A row already exists for this tx hash; reconcile against its stored
+	// status instead of assuming the duplicate is a live, tracked tx.
+	return w.handleExistingTx(ctx, txHash, label)
+}
+
+// handleExistingTx reconciles a record-before-publish duplicate for txHash
+// against the stored row's status. Failed and replaced rows are now RETAINED
+// (not deleted) by InvalidateUnminedTx, so a hash collision here no longer
+// implies the stored row is still a live, tracked transaction. If a prior
+// Broadcast recorded this tx, publishTx failed, and cleanup invalidated the row
+// (now TxStatusFailed/TxStatusReplaced, with its wallet-owned spend edges
+// already cleared), treating the duplicate as an idempotent success would let
+// the caller publish a tx whose only stored row is invalid and untracked,
+// leaving the live tx unrebroadcast and its spend edges unclaimed. The
+// record-before-publish step is therefore authoritative: only treat the
+// duplicate as success when the row is still live for the publish flow.
+func (w *Wallet) handleExistingTx(ctx context.Context, txHash chainhash.Hash,
+	label string) error {
+
+	existing, err := w.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: w.id,
+		Txid:     txHash,
+	})
+	if err != nil {
+		return err
+	}
+
+	// A retained-invalid row cannot be safely revived through this path: the
+	// spend edges InvalidateUnminedTx cleared would need to be re-claimed as a
+	// graph-affecting lifecycle change. Return a clear error before publishing
+	// against a stale, untracked row.
+	if !db.IsUnminedStatus(existing.Status) {
+		return fmt.Errorf("%w: tx %v exists with status %v",
+			ErrTxRetainedInvalid, txHash, existing.Status)
+	}
+
+	// The existing row is still live, so recording is idempotent: its credits
+	// and spend edges are already claimed. If another workflow inserted the
+	// duplicate as pending, promote it to match the published state this
+	// record-before-publish path uses for new rows.
+	if len(label) == 0 {
+		if existing.Status == db.TxStatusPending {
+			state := db.UpdateTxState{Status: db.TxStatusPublished}
+
+			return w.store.UpdateTx(ctx, db.UpdateTxParams{
+				WalletID: w.id,
+				Txid:     txHash,
+				State:    &state,
+			})
 		}
 
 		return nil
-	})
+	}
+
+	params := db.UpdateTxParams{
+		WalletID: w.id,
+		Txid:     txHash,
+		Label:    &label,
+	}
+	if existing.Status == db.TxStatusPending {
+		params.State = &db.UpdateTxState{Status: db.TxStatusPublished}
+	}
+
+	return w.store.UpdateTx(ctx, params)
 }
 
 // extractTxAddrs extracts all potential addresses from a transaction's outputs.
@@ -419,54 +488,59 @@ func (w *Wallet) extractTxAddrs(tx *wire.MsgTx) map[uint32][]address.Address {
 // filters a potentially large set of addresses down to the small subset that
 // the wallet needs to act on.
 //
-// The function is optimized to handle transactions with multiple outputs
-// paying to the same address. It internally de-duplicates the addresses to
-// ensure that the expensive database lookup (`w.addrStore.Address`) is
-// performed only once for each unique address.
-func (w *Wallet) filterOwnedAddresses(
+// The function is optimized to handle transactions with multiple outputs paying
+// to the same address. It internally de-duplicates the addresses to ensure that
+// the expensive database lookup is performed only once for each unique address.
+func (w *Wallet) filterOwnedAddresses(ctx context.Context,
 	txOutAddrs map[uint32][]address.Address) (
-	map[address.Address]ownedAddrInfo, error) {
+	map[string]ownedAddrInfo, error) {
 
-	ownedAddrs := make(map[address.Address]ownedAddrInfo)
+	ownedAddrs := make(map[string]ownedAddrInfo)
 
-	// Pre-deduplicate addresses outside the DB transaction.
-	uniqueAddrs := make(map[address.Address][]uint32)
+	// Pre-deduplicate addresses outside the Store write path.
+	uniqueAddrs := make(map[string]ownedAddrInfo)
 	for index, addrs := range txOutAddrs {
 		for _, addr := range addrs {
-			uniqueAddrs[addr] = append(uniqueAddrs[addr], index)
+			key := addr.EncodeAddress()
+			info := uniqueAddrs[key]
+
+			if info.addr == nil {
+				info.addr = addr
+			}
+
+			info.outputIndices = append(info.outputIndices, index)
+			uniqueAddrs[key] = info
 		}
 	}
 
-	err := walletdb.View(w.cfg.DB, func(dbTx walletdb.ReadTx) error {
-		addrmgrNs := dbTx.ReadBucket(waddrmgrNamespaceKey)
-
-		for addr, indices := range uniqueAddrs {
-			ma, err := w.addrStore.Address(addrmgrNs, addr)
-
-			// If the address is not found, it simply means
-			// it does not belong to the wallet. This is
-			// the expected case for most addresses, so we
-			// can safely continue to the next one.
-			if waddrmgr.IsError(
-				err, waddrmgr.ErrAddressNotFound) {
-
-				continue
-			}
-
-			if err != nil {
-				return err
-			}
-
-			ownedAddrs[addr] = ownedAddrInfo{
-				managedAddr:   ma,
-				outputIndices: indices,
-			}
+	for key, info := range uniqueAddrs {
+		// Look the address up by its own script rather than the whole
+		// output script. For a single-address output these are
+		// identical, but for a bare-multisig output it correctly
+		// resolves the wallet-owned member, which the multisig script
+		// itself would never match.
+		ownScript, err := txscript.PayToAddrScript(info.addr)
+		if err != nil {
+			return nil, err
 		}
 
-		return nil
-	})
-	if err != nil {
-		return nil, err
+		_, err = w.store.GetAddress(ctx, db.GetAddressQuery{
+			WalletID:     w.id,
+			ScriptPubKey: ownScript,
+		})
+
+		// If the address is not found, it simply means it does not
+		// belong to the wallet. This is the expected case for most
+		// addresses, so we can safely continue to the next one.
+		if errors.Is(err, db.ErrAddressNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		ownedAddrs[key] = info
 	}
 
 	return ownedAddrs, nil
