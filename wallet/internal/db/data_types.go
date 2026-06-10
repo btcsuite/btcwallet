@@ -1019,15 +1019,33 @@ type CreateTxParams struct {
 	// Label is an optional label for the transaction.
 	Label string
 
-	// Credits maps wallet-owned output indexes to their display addresses.
+	// Credits maps wallet-owned output indexes to the resolved address that
+	// makes the output ours.
 	//
 	// The output index is the map key, so duplicate credited outputs are
 	// impossible by construction.
 	//
-	// NOTE: The address value is for display only. The database layer still
-	// matches ownership by the output's script_pub_key
-	// (`params.Tx.TxOut[index].PkScript`), which is the canonical key
-	// used by the address schema.
+	// A non-nil address is authoritative for ownership: the store resolves the
+	// owning address row by that address's own script (PayToAddrScript),
+	// not by the full output script. This lets a bare-multisig output the
+	// wallet partly owns resolve to the wallet-owned member, whose script the
+	// multisig output script itself would never match. For a single-address
+	// output the member script equals the output script, so the lookup is
+	// unchanged.
+	//
+	// Because that address is trusted as the owner, the store first validates
+	// that the credited output actually pays it. Membership (not strict script
+	// equality) is required so bare-multisig members pass, while an address the
+	// output does not pay is rejected with ErrInvalidParam rather than
+	// recording a UTXO owned by an unrelated address.
+	//
+	// A nil address means the caller has no resolved owner; the store then
+	// keys ownership on the output's own script_pub_key
+	// (`params.Tx.TxOut[index].PkScript`).
+	//
+	// NOTE: This only selects the address-ownership lookup key. The stored
+	// UTXO always records the on-chain output script, never the member
+	// script.
 	Credits map[uint32]btcutil.Address
 }
 

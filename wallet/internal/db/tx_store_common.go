@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -583,6 +585,93 @@ func validateCreateTxParams(params CreateTxParams) error {
 	}
 
 	return nil
+}
+
+// ValidateCreditAddrMembership verifies that a caller-supplied credit address
+// is actually paid by the output script it claims to credit. A bad caller
+// could otherwise label output N with any wallet address even when TxOut[N]
+// pays elsewhere, and the SQL backends would record the output as owned by
+// that unrelated address, corrupting UTXO ownership. The kvdb backend already
+// enforces the same rule via its own validateCreditAddr, so this keeps the
+// backends consistent.
+//
+// Membership, not strict equality, is required so bare-multisig outputs the
+// wallet partly owns still validate: such an output is credited to one of its
+// member pubkey addresses, whose own script never equals the full multisig
+// output script.
+//
+// The check is intentionally script-based and chain-parameter free. For a
+// single-address output the member's standard script equals the output script
+// outright. For a bare-multisig output the member's pubkey is one of the
+// script's member operands, and ScriptAddress() exposes that pubkey directly
+// without re-deriving a network-encoded address, so no chaincfg.Params is
+// needed (the SQL stores do not carry one).
+//
+// The bare-multisig fallback is gated on the output script actually being a
+// standard bare-multisig script (txscript.MultiSigTy). Without that gate any
+// script that merely pushes the same bytes - for example a non-paying
+// OP_RETURN <pubkey> - would pass, after which InsertUtxo would record that
+// unrelated script as wallet-owned. The gate is what distinguishes "a pubkey
+// appears somewhere in the script" from "the script pays through bare multisig
+// and this pubkey is a member": in a MultiSigTy script the only non-empty data
+// pushes are the member pubkey operands (the threshold and key-count small
+// integers and OP_CHECKMULTISIG carry no push data), so a data-push match
+// against a MultiSigTy script can only be a genuine member.
+func ValidateCreditAddrMembership(creditAddr btcutil.Address,
+	outputScript []byte) error {
+
+	creditScript, err := txscript.PayToAddrScript(creditAddr)
+	if err != nil {
+		return fmt.Errorf("%w: build credit address script: %w",
+			ErrInvalidParam, err)
+	}
+
+	// A single-address output is credited to the very address its script
+	// pays, so the member's standard script equals the output script.
+	if bytes.Equal(creditScript, outputScript) {
+		return nil
+	}
+
+	// Otherwise the only supported shape is a standard bare-multisig output
+	// the wallet partly owns, credited to one of its member pubkeys. Require
+	// the output script to classify as bare multisig before trusting any
+	// pushed-member match, so a non-multisig script that happens to push the
+	// pubkey bytes (such as OP_RETURN <pubkey>) is rejected rather than
+	// recorded as wallet-owned.
+	if txscript.GetScriptClass(outputScript) != txscript.MultiSigTy {
+		return fmt.Errorf("%w: credit address %s is not paid by the "+
+			"output script", ErrInvalidParam, creditAddr.EncodeAddress())
+	}
+
+	// The output is a bare-multisig script, whose only data pushes are its
+	// member pubkey operands, so the credited pubkey must appear as one of
+	// those pushes to be a member.
+	memberPubKey := creditAddr.ScriptAddress()
+	if len(memberPubKey) != 0 && scriptPushesData(outputScript, memberPubKey) {
+		return nil
+	}
+
+	return fmt.Errorf("%w: credit address %s is not a member of the "+
+		"bare-multisig output script", ErrInvalidParam,
+		creditAddr.EncodeAddress())
+}
+
+// scriptPushesData reports whether script contains a data push equal to want.
+// It is used to detect a bare-multisig member pubkey inside a multisig output
+// script without depending on chain parameters.
+func scriptPushesData(script, want []byte) bool {
+	const scriptVersion = 0
+
+	tokenizer := txscript.MakeScriptTokenizer(scriptVersion, script)
+	for tokenizer.Next() {
+		if bytes.Equal(tokenizer.Data(), want) {
+			return true
+		}
+	}
+
+	// A malformed or non-matching script yields no match; the caller then
+	// rejects the credit as a non-member rather than trusting it.
+	return false
 }
 
 // validateCreateTxStatus checks the status/block combinations that CreateTx may
