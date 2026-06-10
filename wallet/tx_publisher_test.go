@@ -1128,6 +1128,18 @@ func TestPublishTx(t *testing.T) {
 			sendErr:     chain.ErrTxAlreadyInMempool,
 			expectedErr: nil,
 		},
+		{
+			name:        "already known",
+			notifyErr:   nil,
+			sendErr:     chain.ErrTxAlreadyKnown,
+			expectedErr: nil,
+		},
+		{
+			name:        "already confirmed",
+			notifyErr:   nil,
+			sendErr:     chain.ErrTxAlreadyConfirmed,
+			expectedErr: nil,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1197,6 +1209,90 @@ func TestBroadcastSuccess(t *testing.T) {
 
 	err = w.Broadcast(t.Context(), tx, label)
 	require.NoError(t, err)
+}
+
+// TestBroadcastAlreadyBroadcastedAtPublish tests that Broadcast treats an
+// already-known or already-confirmed SendRawTransaction error as a successful
+// publish: it returns nil and must not invalidate the recorded tx. This guards
+// the path where mempool acceptance is unavailable, so the duplicate is only
+// detected at publish time.
+func TestBroadcastAlreadyBroadcastedAtPublish(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		sendErr error
+	}{
+		{
+			name:    "already known",
+			sendErr: chain.ErrTxAlreadyKnown,
+		},
+		{
+			name:    "already confirmed",
+			sendErr: chain.ErrTxAlreadyConfirmed,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			label := testTxLabel
+			w, m := createStartedWalletWithMocks(t)
+
+			// Create a tx with an owned output so it is recorded
+			// before publishing.
+			ownedPrivKey, err := btcec.NewPrivateKey()
+			require.NoError(t, err)
+			ownedAddr, err := btcutil.NewAddressPubKey(
+				ownedPrivKey.PubKey().SerializeCompressed(),
+				&chainParams,
+			)
+			require.NoError(t, err)
+			pkScript, err := txscript.PayToAddrScript(ownedAddr)
+			require.NoError(t, err)
+
+			tx := &wire.MsgTx{
+				TxIn: []*wire.TxIn{{}},
+				TxOut: []*wire.TxOut{
+					{Value: 10000, PkScript: pkScript},
+				},
+			}
+
+			// Mempool acceptance is unavailable, so checkMempool
+			// falls through to a direct publish.
+			m.chain.On("TestMempoolAccept",
+				mock.Anything, mock.Anything,
+			).Return(
+				[]*btcjson.TestMempoolAcceptResult(nil),
+				chain.ErrUnimplemented,
+			)
+
+			m.store.On("ResolveOwnedAddresses", mock.Anything,
+				matchResolveOwnedAddressesQuery(w.id, pkScript),
+			).Return(ownedAddrsResult(pkScript), nil).Once()
+			m.store.On("CreateTx", mock.Anything,
+				matchCreateTxParams(w.id, tx, label,
+					map[uint32]btcutil.Address{0: ownedAddr},
+				),
+			).Return(nil).Once()
+
+			// publishTx sees the duplicate only at send time.
+			m.chain.On("NotifyReceived",
+				mock.Anything).Return(nil)
+			m.chain.On("SendRawTransaction",
+				mock.Anything, mock.Anything,
+			).Return(nil, tc.sendErr)
+
+			err = w.Broadcast(t.Context(), tx, label)
+
+			// The already-broadcast tx must be treated as a
+			// success and kept tracked, never invalidated.
+			require.NoError(t, err)
+			m.store.AssertNotCalled(t, "InvalidateUnminedTx",
+				mock.Anything, mock.Anything)
+		})
+	}
 }
 
 // TestBroadcastAlreadyBroadcasted tests the Broadcast method when the
