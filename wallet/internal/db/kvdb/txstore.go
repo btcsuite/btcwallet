@@ -23,9 +23,94 @@ var _ db.TxStore = (*Store)(nil)
 // signed legacy wtxmgr height domain.
 var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
 
-// CreateTx is not yet implemented for kvdb.
-func (s *Store) CreateTx(ctx context.Context, _ db.CreateTxParams) error {
-	return notImplemented(ctx, "CreateTx")
+// CreateTx records an unmined transaction through the legacy wtxmgr path.
+//
+// Unlike the SQL backends, kvdb does NOT route through the shared
+// db.CreateTxWithOps orchestration, and this divergence is deliberate. That
+// shared flow owns the full CreateTx contract: confirmed-transaction inserts,
+// input-conflict discovery, invalidation/replacement of the displaced unmined
+// branch, and wallet-owned spent-input marking. The legacy wtxmgr data model
+// underneath kvdb is unmined-only and has no representation for that
+// confirmed-history, replacement, or spend-edge bookkeeping, so an adapter for
+// the shared ops would collapse most stages to notImplemented and add
+// boilerplate without sharing meaningful logic.
+//
+// kvdb therefore implements only the unmined-insertion path directly and
+// returns an explicit unsupported error for confirmed inserts (Block != nil)
+// below. It still reuses the shared, backend-independent request preparation
+// (db.NewCreateTxRequest) so parameter validation stays uniform across
+// backends; only the post-validation write sequencing is bespoke.
+func (s *Store) CreateTx(ctx context.Context,
+	params db.CreateTxParams) error {
+
+	req, err := db.NewCreateTxRequest(params)
+	if err != nil {
+		return fmt.Errorf("create tx request: %w", err)
+	}
+
+	if req.Params.Block != nil {
+		return notImplemented(ctx, "CreateTx confirmed")
+	}
+
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(req.Params.Tx, req.Received)
+	if err != nil {
+		return fmt.Errorf("build tx record: %w", err)
+	}
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		return s.createTxWithTx(tx, txRec, req.Params)
+	})
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.CreateTx: %w", err)
+	}
+
+	return nil
+}
+
+// createTxWithTx records a transaction within one legacy walletdb update.
+func (s *Store) createTxWithTx(tx walletdb.ReadWriteTx,
+	txRec *wtxmgr.TxRecord, params db.CreateTxParams) error {
+
+	// The waddrmgr namespace is only consulted when recording credits, so
+	// only require it then. This mirrors the credit-gated addrStore guard
+	// in CreateTx and lets a credit-less (sweep) tx be recorded without the
+	// address-manager bucket.
+	var addrmgrNs walletdb.ReadWriteBucket
+	if len(params.Credits) > 0 {
+		addrmgrNs = tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+	}
+
+	txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+	if txmgrNs == nil {
+		return errMissingTxmgrNamespace
+	}
+
+	exists, err := s.txStore.InsertTxCheckIfExists(
+		txmgrNs, txRec, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("insert transaction: %w", err)
+	}
+
+	if exists {
+		return db.ErrTxAlreadyExists
+	}
+
+	if len(params.Label) != 0 {
+		err := s.txStore.PutTxLabel(
+			txmgrNs, txRec.Hash, params.Label,
+		)
+		if err != nil {
+			return fmt.Errorf("put transaction label: %w", err)
+		}
+	}
+
+	return s.addCreateTxCredits(
+		addrmgrNs, txmgrNs, txRec, params.Credits,
+	)
 }
 
 // addCreateTxCredits records wallet-owned outputs for a legacy transaction.
