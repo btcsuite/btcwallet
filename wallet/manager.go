@@ -352,10 +352,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	}
 
 	w.sync = newSyncer(
-		cfg, w.addrStore, w.txStore, w, syncerStoreConfig{
-			store:    w.store,
-			walletID: w.id,
-		},
+		cfg, w.addrStore, w.txStore, w, w.store, w.id,
 	)
 	w.state = newWalletState(w.sync)
 
