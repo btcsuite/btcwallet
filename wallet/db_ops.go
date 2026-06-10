@@ -756,6 +756,13 @@ func (s *syncer) filterBranchScopes(_ context.Context, dbtx walletdb.ReadTx,
 // putAddrHorizons aggregates found address horizons from the scan
 // results and updates the address manager state (extends horizons) in the
 // database.
+//
+// Unlike the store path (scanHorizonParams), this legacy path does not need an
+// account name: it resolves each horizon directly against the live waddrmgr
+// ScopedKeyManager and extends by account number. The store-backend masking
+// of imported account numbers to 0 -- which forces name-based resolution
+// there -- does not apply to the in-memory waddrmgr, whose account numbers are
+// authoritative, so the BranchScope number is the correct identity here.
 func (s *syncer) putAddrHorizons(_ context.Context,
 	ns walletdb.ReadWriteBucket, results []scanResult) error {
 

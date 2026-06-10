@@ -808,14 +808,14 @@ func (s *syncer) addressOwned(ctx context.Context,
 
 // putSyncBatch records recovery scan results and synced blocks through the
 // store when configured, falling back to the legacy walletdb path otherwise.
-func (s *syncer) putSyncBatch(ctx context.Context,
+func (s *syncer) putSyncBatch(ctx context.Context, scanState *RecoveryState,
 	results []scanResult) error {
 
 	if s.store == nil {
 		return s.DBPutSyncBatch(ctx, results)
 	}
 
-	params, err := s.storeScanBatchParams(results, true)
+	params, err := s.storeScanBatchParams(scanState, results, true)
 	if err != nil {
 		return err
 	}
@@ -836,13 +836,13 @@ func (s *syncer) putSyncBatch(ctx context.Context,
 // putTargetedBatch records targeted recovery scan results through the store
 // when configured, falling back to the legacy walletdb path otherwise.
 func (s *syncer) putTargetedBatch(ctx context.Context,
-	results []scanResult) error {
+	scanState *RecoveryState, results []scanResult) error {
 
 	if s.store == nil {
 		return s.DBPutTargetedBatch(ctx, results)
 	}
 
-	params, err := s.storeScanBatchParams(results, false)
+	params, err := s.storeScanBatchParams(scanState, results, false)
 	if err != nil {
 		return err
 	}
@@ -868,17 +868,34 @@ func mergeScanHorizons(horizons map[waddrmgr.BranchScope]uint32,
 }
 
 // scanHorizonParams flattens the merged horizon map into store scan horizon
-// params.
-func scanHorizonParams(
+// params, stamping every horizon with its account name resolved from the
+// recovery state.
+//
+// AccountName is the durable, backend-agnostic identity a backend MUST prefer
+// when resolving the horizon's owning account: both store backends mask an
+// imported account's number to 0, so an imported-xpub horizon resolved by
+// number alone would mis-resolve to the default derived account or fail. We
+// emit the name uniformly (not only for imported accounts) so resolution
+// never has to guess whether Account is trustworthy.
+//
+// Fail-safe: if the recovery state has no name for a branch's account, we
+// leave AccountName empty and let the backend fall back to its number-based
+// behavior. The recovery state derives the horizon map from the same account
+// properties that seed accountNames, so a miss is not expected in practice;
+// emitting a wrong name would be worse than the number fallback.
+func scanHorizonParams(scanState *RecoveryState,
 	horizons map[waddrmgr.BranchScope]uint32) []db.ScanHorizon {
 
 	params := make([]db.ScanHorizon, 0, len(horizons))
 	for bs, index := range horizons {
+		name, _ := scanState.AccountName(bs.Scope, bs.Account)
+
 		params = append(params, db.ScanHorizon{
-			Scope:   db.KeyScope(bs.Scope),
-			Account: bs.Account,
-			Branch:  bs.Branch,
-			Index:   index,
+			Scope:       db.KeyScope(bs.Scope),
+			Account:     bs.Account,
+			AccountName: name,
+			Branch:      bs.Branch,
+			Index:       index,
 		})
 	}
 
@@ -919,8 +936,12 @@ func (s *syncer) appendScanTxParams(params *db.ScanBatchParams,
 }
 
 // storeScanBatchParams converts recovery scan results into store batch params.
-func (s *syncer) storeScanBatchParams(results []scanResult,
-	includeSyncedBlocks bool) (db.ScanBatchParams, error) {
+// scanState is the recovery state that produced the results; it carries the
+// account-name lookup used to stamp every emitted horizon (see
+// scanHorizonParams).
+func (s *syncer) storeScanBatchParams(scanState *RecoveryState,
+	results []scanResult, includeSyncedBlocks bool) (db.ScanBatchParams,
+	error) {
 
 	params := db.ScanBatchParams{WalletID: s.walletID}
 	horizons := make(map[waddrmgr.BranchScope]uint32)
@@ -959,7 +980,7 @@ func (s *syncer) storeScanBatchParams(results []scanResult,
 		}
 	}
 
-	params.Horizons = scanHorizonParams(horizons)
+	params.Horizons = scanHorizonParams(scanState, horizons)
 
 	return params, nil
 }
@@ -1595,7 +1616,7 @@ func (s *syncer) scanBatch(ctx context.Context, syncedTo waddrmgr.BlockStamp,
 		return fmt.Errorf("%w: scan batch empty", ErrScanBatchEmpty)
 	}
 	// Process Batch (Update). We do this in a single DB transaction.
-	return s.putSyncBatch(ctx, results)
+	return s.putSyncBatch(ctx, scanState, results)
 }
 
 // handleChainUpdate processes a notification immediately.
@@ -1817,7 +1838,7 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 		}
 
 		// Process results (update DB).
-		err = s.putTargetedBatch(ctx, results)
+		err = s.putTargetedBatch(ctx, scanState, results)
 		if err != nil {
 			return err
 		}

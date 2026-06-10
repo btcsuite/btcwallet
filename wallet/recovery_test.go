@@ -935,6 +935,54 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	require.NotContains(t, rs.addrFilters, "addr-1")
 }
 
+// TestInitializeRecordsAccountName verifies that initializing the recovery
+// state records every account's durable name keyed by scope and number, so an
+// emitted horizon can later be stamped with AccountName. It uses derived
+// accounts because those are the only accounts the scan path loads into the
+// recovery state; imported accounts are withheld from the scan horizons (see
+// withholdFromRecoveryHorizons) since their masked number 0 would collide with
+// the default derived account.
+func TestInitializeRecordsAccountName(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two derived accounts in one scope with zero key counts so no
+	// derivation (and thus no address manager) is needed; we only assert
+	// the name lookup is populated. Recovery window 0 derives no lookahead.
+	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
+
+	defaultAcct := &waddrmgr.AccountProperties{
+		KeyScope:      scope,
+		AccountNumber: 0,
+		AccountName:   "default",
+	}
+	savings := &waddrmgr.AccountProperties{
+		KeyScope:      scope,
+		AccountNumber: 3,
+		AccountName:   "savings",
+	}
+
+	rs := NewRecoveryState(0, &chainParams, nil)
+
+	// Act: Initialize the recovery state from both account properties.
+	err := rs.Initialize(
+		[]*waddrmgr.AccountProperties{defaultAcct, savings}, nil, nil,
+	)
+	require.NoError(t, err)
+
+	// Assert: Both names resolve by (scope, number), and an unknown account
+	// reports a miss so callers fall back to the number identity.
+	name, ok := rs.AccountName(scope, 0)
+	require.True(t, ok)
+	require.Equal(t, "default", name)
+
+	name, ok = rs.AccountName(scope, 3)
+	require.True(t, ok)
+	require.Equal(t, "savings", name)
+
+	_, ok = rs.AccountName(scope, 9)
+	require.False(t, ok)
+}
+
 // TestInitializeError verifies that Initialize propagates errors from
 // initAccountState (e.g. FetchScopedKeyManager failures).
 func TestInitializeError(t *testing.T) {

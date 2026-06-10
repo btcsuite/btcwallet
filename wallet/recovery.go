@@ -44,6 +44,15 @@ type RecoveryState struct {
 	// account + branch). This is the source of truth.
 	branchStates map[waddrmgr.BranchScope]*BranchRecoveryState
 
+	// accountNames maps every account loaded into the recovery state to its
+	// durable name. The horizon map is keyed only by branch scope (scope +
+	// account number + branch), but a backend resolving an emitted horizon
+	// must prefer the name: both store backends mask an imported account's
+	// number to 0, so resolving an imported-xpub horizon by number alone
+	// would mis-resolve to the default derived account or fail. This lookup
+	// lets the syncer stamp ScanHorizon.AccountName at emission.
+	accountNames map[waddrmgr.AccountScope]string
+
 	// watchedOutPoints contains the set of all outpoints known to the
 	// wallet. This is updated iteratively as new outpoints are found during
 	// a rescan.
@@ -88,6 +97,7 @@ func NewRecoveryState(recoveryWindow uint32,
 		branchStates: make(
 			map[waddrmgr.BranchScope]*BranchRecoveryState,
 		),
+		accountNames:     make(map[waddrmgr.AccountScope]string),
 		watchedOutPoints: make(map[wire.OutPoint]btcutil.Address),
 		chainParams:      chainParams,
 		addrMgr:          addrMgr,
@@ -147,6 +157,22 @@ func (rs *RecoveryState) Empty() bool {
 // in the current watchlist.
 func (rs *RecoveryState) WatchListSize() int {
 	return len(rs.addrFilters) + len(rs.outpoints)
+}
+
+// AccountName returns the durable name of the account at the given scope and
+// number, as loaded into the recovery state. The bool reports whether the
+// account was found; callers that fail to find a name MUST fall back to the
+// account-number identity rather than emitting an empty name, since an empty
+// name would resolve to no account at the backend.
+func (rs *RecoveryState) AccountName(scope waddrmgr.KeyScope,
+	account uint32) (string, bool) {
+
+	name, ok := rs.accountNames[waddrmgr.AccountScope{
+		Scope:   scope,
+		Account: account,
+	}]
+
+	return name, ok
 }
 
 // GetBranchState returns the recovery state for the provided branch scope.
@@ -365,6 +391,14 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 // derived addresses up to the recovery window.
 func (rs *RecoveryState) initAccountState(
 	props *waddrmgr.AccountProperties) error {
+
+	// Record the account name so emitted horizons can carry the durable,
+	// backend-agnostic identity rather than relying on the account number,
+	// which both store backends mask to 0 for imported accounts.
+	rs.accountNames[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = props.AccountName
 
 	initBranch := func(branch uint32, lastKnownIndex uint32) error {
 		bs := waddrmgr.BranchScope{
