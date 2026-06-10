@@ -64,7 +64,10 @@ func TestSyncerRequestScan(t *testing.T) {
 	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{}, mockAddrStore, mockTxStore, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{}, mockAddrStore, mockTxStore, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	req := &scanReq{
 		typ: scanTypeRewind,
@@ -97,7 +100,10 @@ func TestSyncerRequestScanBlocked(t *testing.T) {
 	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{}, mockAddrStore, mockTxStore, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{}, mockAddrStore, mockTxStore, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	// Fill the buffer (size 1).
 	s.scanReqChan <- &scanReq{}
@@ -152,7 +158,10 @@ func TestWaitUntilBackendSynced(t *testing.T) {
 	// Arrange: Initialize a syncer and mock its chain to simulate a
 	// delayed synchronization.
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	// Simulate the backend not being current on the first check, but
 	// becoming current on the second check.
@@ -170,28 +179,19 @@ func TestWaitUntilBackendSynced(t *testing.T) {
 func TestCheckRollbackNoReorg(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer with a test database and mock chain.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	mockAddrStore := &bwmock.AddrStore{}
+	// Arrange: Initialize a store-backed syncer and mock chain.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, mockAddrStore, nil, nil,
+		Config{Chain: mockChain}, nil, nil, nil,
 		store, 0,
 	)
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{
-			Hash:   tip.Hash,
-			Height: uint32(tip.Height),
-		},
-	}, nil).Once()
+	expectSyncedTip(store, tip)
 
-	// Mock retrieval of synced block hashes from the Store for the last 10
+	// Mock retrieval of synced block hashes from the store for the last 10
 	// blocks.
 	localBlocks := make([]db.Block, 0, 10)
 	for i := uint32(91); i <= 100; i++ {
@@ -200,6 +200,7 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 			Height: i,
 		})
 	}
+
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
 		StartHeight: 91,
 		EndHeight:   100,
@@ -219,39 +220,29 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	// and no rollback is triggered when hashes match.
 	err := s.checkRollback(t.Context())
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestCheckRollbackDetected verifies checkRollback when reorg is detected.
 func TestCheckRollbackDetected(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer with a test database and mocks to
-	// simulate a chain reorganization.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	mockAddrStore := &bwmock.AddrStore{}
+	// Arrange: Initialize a store-backed syncer and mocks to simulate a
+	// chain reorganization.
 	mockChain := &bwmock.Chain{}
-	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, mockAddrStore, mockTxStore,
-		mockPublisher,
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
 		store, 0,
 	)
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{
-			Hash:   tip.Hash,
-			Height: uint32(tip.Height),
-		},
-	}, nil).Once()
+	expectSyncedTip(store, tip)
 
-	// Mock retrieval of synced block hashes from the Store for blocks 91 to
-	// 100.
+	// Mock retrieval of synced block hashes from the store for blocks 91
+	// to 100.
 	localBlocks := make([]db.Block, 0, 10)
 	for i := uint32(91); i <= 100; i++ {
 		localBlocks = append(localBlocks, db.Block{
@@ -259,6 +250,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 			Height: i,
 		})
 	}
+
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
 		StartHeight: 91,
 		EndHeight:   100,
@@ -285,7 +277,9 @@ func TestCheckRollbackDetected(t *testing.T) {
 	header := &wire.BlockHeader{Timestamp: time.Now()}
 	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
 
-	// Expect a rollback to the common ancestor at height 95.
+	// Expect a single atomic rollback to the common ancestor: rewindToBlock
+	// rolls transaction state back and rewinds the sync tip together via
+	// RollbackToBlock for the rollback boundary (fork height 95 + 1).
 	store.On(
 		"RollbackToBlock", mock.Anything, uint32(96),
 	).Return(nil).Once()
@@ -294,21 +288,21 @@ func TestCheckRollbackDetected(t *testing.T) {
 	// fork and performs the rollback.
 	err := s.checkRollback(t.Context())
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestInitChainSync verifies the initial synchronization sequence.
 func TestInitChainSync(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and mock its dependencies for the
-	// initial synchronization sequence.
+	// Arrange: Initialize a store-backed syncer and mock its dependencies
+	// for the initial synchronization sequence.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockPublisher := &mockTxPublisher{}
 	store := &walletmock.Store{}
+	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
 		store, 0,
 	)
 
@@ -318,10 +312,10 @@ func TestInitChainSync(t *testing.T) {
 	// Mock block notification registration.
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
-	// Mock rollback check at the start of synchronization.
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{Height: 0},
-	}, nil).Once()
+	// Mock the synced tip read at the start of the rollback check. A height
+	// of 0 means checkRollback reads the tip and returns without scanning
+	// any block ranges.
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 	// Act & Assert: Verify that the initial chain synchronization
 	// sequence completes successfully.
@@ -337,7 +331,10 @@ func TestScanBatchHeadersOnly(t *testing.T) {
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	hashes := []chainhash.Hash{{0x01}, {0x02}}
 	mockChain.On(
@@ -365,59 +362,54 @@ func TestScanBatchHeadersOnly(t *testing.T) {
 func TestSyncerLoadScanState(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer with a test database and set up complex
-	// mock expectations for loading wallet scan data.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
+	// Arrange: Initialize a store-backed syncer and set up mock
+	// expectations for loading wallet scan data. Scan-data loading reads
+	// account horizons, addresses, and watch outputs through the store,
+	// while the recovery state still derives the lookahead window through
+	// the legacy address manager.
+	const walletID uint32 = 21
 
+	store := &walletmock.Store{}
 	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
 		Config{
-			DB:             dbConn,
 			RecoveryWindow: 10,
 			ChainParams:    &chainParams,
 		},
-		mockAddrStore, mockTxStore, mockPublisher,
-		&walletmock.Store{}, 0,
+		mockAddrStore, nil, mockPublisher,
+		store, walletID,
 	)
 
-	// Mock active scoped key managers.
+	// The store returns one derived BIP0084 account, used for both the
+	// horizon and address loads.
+	accountNumber0 := uint32(0)
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo{{
+		AccountNumber: &accountNumber0,
+		KeyScope:      db.KeyScopeBIP0084,
+	}}, nil).Twice()
+	expectRecoveryAccountIDLookups(store)
+
+	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
+		page.Result[db.AddressInfo, uint32]{}, nil,
+	).Maybe()
+
+	store.On(
+		"ListOutputsToWatch", mock.Anything, walletID,
+	).Return([]db.UtxoInfo(nil), nil).Once()
+
+	// The recovery state derives the lookahead window for the account's
+	// branches through the legacy address manager.
 	scopedMgr := &bwmock.AccountStore{}
 	mockAddrStore.On(
-		"ActiveScopedKeyManagers",
-	).Return([]waddrmgr.AccountStore{scopedMgr}).Once()
-
-	// Mock active accounts for the key manager scope.
-	scopedMgr.On("ActiveAccounts").Return([]uint32{0}).Once()
-	scopedMgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
-
-	// Mock database operations to fetch scan data, including key managers,
-	// account properties, active addresses, and outputs to watch.
-	mockAddrStore.On(
 		"FetchScopedKeyManager", mock.Anything,
-	).Return(scopedMgr, nil).Times(3)
+	).Return(scopedMgr, nil).Maybe()
 
-	props := &waddrmgr.AccountProperties{
-		AccountNumber: 0,
-		KeyScope:      waddrmgr.KeyScopeBIP0084,
-	}
-	scopedMgr.On(
-		"AccountProperties", mock.Anything, uint32(0),
-	).Return(props, nil).Twice()
-
-	mockAddrStore.On(
-		"ForEachRelevantActiveAddress", mock.Anything, mock.Anything,
-	).Return(nil).Once()
-
-	mockTxStore.On(
-		"OutputsToWatch", mock.Anything,
-	).Return([]wtxmgr.Credit(nil), nil).Once()
-
-	// Mock address derivation for the lookahead window (10 addresses for
-	// each branch).
 	mockAddr := &bwmock.Address{}
 	mockAddr.On("EncodeAddress").Return("addr")
 	mockAddr.On("ScriptAddress").Return([]byte{0x00})
@@ -427,12 +419,13 @@ func TestSyncerLoadScanState(t *testing.T) {
 		mockAddr, []byte{0x00}, nil,
 	).Maybe()
 
-	// Act: Load the full scan state from the database.
+	// Act: Load the full scan state.
 	state, err := s.loadFullScanState(t.Context())
 
 	// Assert: Verify that the scan state is correctly loaded and not nil.
 	require.NoError(t, err)
 	require.NotNil(t, state)
+	store.AssertExpectations(t)
 }
 
 // TestScanBatchWithFullBlocks verifies fallback scan logic.
@@ -443,7 +436,10 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	mockAddrStore := &bwmock.AddrStore{}
 	scanState := NewRecoveryState(
@@ -548,7 +544,10 @@ func TestDispatchScanStrategy(t *testing.T) {
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	scanState := NewRecoveryState(10, &chainParams, nil)
 	hashes := []chainhash.Hash{{0x01}}
@@ -672,7 +671,10 @@ func TestFetchAndFilterBlocks(t *testing.T) {
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	// Create an empty recovery state for testing.
 	scanState := NewRecoveryState(10, &chainParams, nil)
@@ -969,6 +971,34 @@ func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
 	return matchUnminedTxBatchState(
 		walletID, tx, addr, received, db.TxStatusPublished, "",
 	)
+}
+
+// expectSyncedTip mocks Store.GetWallet so syncedTip returns the given synced
+// tip for any wallet name. A height of -1 is encoded as a nil SyncedTo,
+// matching how an unsynced wallet is represented; any other height is encoded
+// as a stored block.
+func expectSyncedTip(store *walletmock.Store, tip waddrmgr.BlockStamp) {
+	var info db.WalletInfo
+	if tip.Height >= 0 {
+		info.SyncedTo = &db.Block{
+			Hash:      tip.Hash,
+			Height:    uint32(tip.Height),
+			Timestamp: tip.Timestamp,
+		}
+	}
+
+	store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&info, nil).Maybe()
+}
+
+// expectRecoveryAccountIDLookups allows scan-state fixtures to satisfy the
+// Store account ID lookup without asserting a specific backend row identity.
+func expectRecoveryAccountIDLookups(store *walletmock.Store) {
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{}, nil).Maybe()
 }
 
 // TestProcessRelevantTxUsesStore verifies that relevant transaction
@@ -1799,8 +1829,7 @@ func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
 
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, &mockTxPublisher{},
-		store, walletID,
+		Config{}, nil, nil, &mockTxPublisher{}, store, walletID,
 	)
 	scanState := NewRecoveryState(0, &chainParams, nil)
 
@@ -2991,45 +3020,38 @@ func TestHandleScanReq(t *testing.T) {
 func TestWaitForEvent(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and mock its dependencies for testing
-	// the event loop.
+	// Arrange: Initialize a store-backed syncer for testing the event loop.
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
-	mockAddrStore := &bwmock.AddrStore{}
-
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{
-			Chain: mockChain,
-			DB:    db,
-		},
-		mockAddrStore, nil, mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		store, uint32(0),
 	)
 
 	// Mock chain notifications channel.
 	notificationChan := make(chan any, 1)
 	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
 
-	// Case 1: Test event handling when a chain notification arrives.
+	// Case 1: Test event handling when a chain notification arrives, which
+	// advances the synced tip through the store.
 	notificationChan <- chain.BlockConnected{}
 
-	// Mock sync progress update resulting from the chain notification.
-	mockAddrStore.On(
-		"SetSyncedTo", mock.Anything, mock.Anything,
-	).Return(nil).Once()
+	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
+		nil).Once()
 
 	// Act & Assert: Call waitForEvent and verify it correctly processes
 	// the arriving notification.
 	err := s.waitForEvent(t.Context())
 	require.NoError(t, err)
 
-	// Case 2: Test event handling when a scan request arrives.
+	// Case 2: Test event handling when a scan request arrives. The
+	// requested rewind start is at or beyond the current synced tip, so the
+	// rewind is a no-op.
 	s.scanReqChan <- &scanReq{typ: scanTypeRewind}
 
-	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{})
 
 	// Act & Assert: Call waitForEvent and verify it correctly processes
 	// the arriving scan request.
@@ -3041,32 +3063,34 @@ func TestWaitForEvent(t *testing.T) {
 func TestSyncerFullRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer with a test database and set up
-	// extensive mocks to simulate a full run loop execution.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Initialize a store-backed syncer and set up extensive mocks
+	// to simulate a full run loop execution. The synced tip and unmined
+	// transactions are read through the store; the legacy address manager
+	// only supplies the backend birthday.
 	mockChain := &bwmock.Chain{}
 	mockAddrStore := &bwmock.AddrStore{}
 	mockPublisher := &mockTxPublisher{}
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, mockAddrStore, nil,
-		mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, mockAddrStore, nil, mockPublisher,
+		store, uint32(0),
 	)
 
 	// Mock initial chain sync sequence.
 	mockAddrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100},
-	).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	// Mock rollback check dependencies.
-	mockAddrStore.On(
-		"BlockHash", mock.Anything, mock.Anything,
-	).Return(&chainhash.Hash{}, nil).Maybe()
+	// Mock rollback check dependencies. The store and the remote chain
+	// agree, so no rollback occurs.
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{Height: i})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		localBlocks, nil).Maybe()
 
 	// Mock remote hashes for rollback check (batch size 10).
 	remoteHashes := make([]chainhash.Hash, 10)
@@ -3080,16 +3104,9 @@ func TestSyncerFullRun(t *testing.T) {
 		"GetBestBlock",
 	).Return(&chainhash.Hash{}, int32(100), nil).Once()
 
-	// Mock synced state retrieval.
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100},
-	).Once()
-
-	// Mock retrieval of unmined transactions from the store.
-	mockTxStore := &bwmock.TxStore{}
-	s.txStore = mockTxStore
-	mockTxStore.On("UnminedTxs", mock.Anything).Return(
-		[]*wire.MsgTx(nil), nil,
+	// Mock retrieval of unmined transactions through the store.
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		[]db.TxInfo(nil), nil,
 	).Once()
 
 	// Set up for the event waiting phase of the run loop.
@@ -3167,7 +3184,10 @@ func TestBroadcastUnminedTxns_Error(t *testing.T) {
 	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{DB: db}, nil, mockTxStore, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	mockTxStore.On("UnminedTxs", mock.Anything).Return(
 		([]*wire.MsgTx)(nil), errDBMockSync,
@@ -3446,23 +3466,21 @@ func TestInitChainSync_Errors(t *testing.T) {
 	t.Run("CheckRollback_Failure", func(t *testing.T) {
 		t.Parallel()
 
-		dbConn, cleanup := setupTestDB(t)
-		defer cleanup()
-
-		// Arrange: Setup a syncer where DB operations fail during
-		// rollback check.
+		// Arrange: Setup a store-backed syncer where the synced-block
+		// read fails during the rollback check.
 		mockChain := &bwmock.Chain{}
 		store := &walletmock.Store{}
 
 		s := newSyncer(
-			Config{Chain: mockChain, DB: dbConn}, nil, nil, nil,
+			Config{Chain: mockChain}, nil, nil, nil,
 			store, 0,
 		)
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
-		store.On("GetWallet", mock.Anything, "").Return(
-			(*db.WalletInfo)(nil), errDBMock,
-		).Once()
+		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+		store.On(
+			"ListSyncedBlocks", mock.Anything, mock.Anything,
+		).Return(([]db.Block)(nil), errDBMock).Once()
 
 		// Act: Attempt initialization.
 		err := s.initChainSync(t.Context())
@@ -3474,21 +3492,17 @@ func TestInitChainSync_Errors(t *testing.T) {
 	t.Run("NotifyBlocks_Failure", func(t *testing.T) {
 		t.Parallel()
 
-		dbConn, cleanup := setupTestDB(t)
-		defer cleanup()
-
-		// Arrange: Setup a syncer where block notifications fail.
+		// Arrange: Setup a store-backed syncer where block notifications
+		// fail.
 		mockChain := &bwmock.Chain{}
 		store := &walletmock.Store{}
 		s := newSyncer(
-			Config{Chain: mockChain, DB: dbConn}, nil, nil, nil,
+			Config{Chain: mockChain}, nil, nil, nil,
 			store, 0,
 		)
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
-		store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-			SyncedTo: &db.Block{Height: 0},
-		}, nil).Once()
+		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 		mockChain.On("NotifyBlocks").Return(errNotify).Once()
 
 		// Act: Attempt initialization.
@@ -3518,21 +3532,23 @@ func TestHandleScanReq_Errors(t *testing.T) {
 func TestSyncerRun_InitError(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	// Arrange: Setup a syncer where initialization fails.
+	// Arrange: Setup a store-backed syncer where initialization fails
+	// because the synced-block read errors during the rollback check.
 	mockChain := &bwmock.Chain{}
 	addrStore := &bwmock.AddrStore{}
+	store := &walletmock.Store{}
 
-	s := newSyncer(Config{Chain: mockChain, DB: db}, addrStore, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, addrStore, nil, nil,
+		store, uint32(0),
+	)
 
 	addrStore.On("Birthday").Return(time.Now()).Once()
 	mockChain.On("IsCurrent").Return(true).Once()
 
-	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{Height: 100})
-	addrStore.On("BlockHash", mock.Anything, mock.Anything).Return(
-		&chainhash.Hash{}, errDBMock).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		([]db.Block)(nil), errDBMock).Once()
 
 	// Act: Run the syncer.
 	err := s.run(t.Context())
@@ -3654,7 +3670,10 @@ func TestBroadcastUnminedTxns_Success(t *testing.T) {
 	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
 
-	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{DB: db}, nil, mockTxStore, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	tx := wire.NewMsgTx(1)
 	mockTxStore.On("UnminedTxs", mock.Anything).Return(
@@ -3719,7 +3738,10 @@ func TestWaitForEvent_NotificationsClosed(t *testing.T) {
 
 	// Arrange: Setup a syncer with a closed notification channel.
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	closedChan := make(chan any)
 	close(closedChan)
@@ -3740,7 +3762,10 @@ func TestWaitForEvent_ContextCancelled(t *testing.T) {
 	// Arrange: Setup a syncer with a blocking notification channel and a
 	// cancelled context.
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	blockChan := make(chan any)
 	mockChain.On("Notifications").Return((<-chan any)(blockChan)).Once()
@@ -3838,7 +3863,10 @@ func TestInitChainSync_WaitUntilSyncedError(t *testing.T) {
 	// Arrange: Setup mock expectations where the backend is not current,
 	// then cancel the context.
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	mockChain.On("IsCurrent").Return(false).Maybe()
 
@@ -3886,7 +3914,10 @@ func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	s := newSyncer(Config{DB: db}, nil, mockTxStore, mockPublisher, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{DB: db}, nil, mockTxStore, mockPublisher,
+		&walletmock.Store{}, 0,
+	)
 
 	tx := wire.NewMsgTx(1)
 	mockTxStore.On("UnminedTxs", mock.Anything).Return(
@@ -3905,23 +3936,16 @@ func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 func TestCheckRollback_DBError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where local Store block lookup fails
-	// during a rollback check.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Setup a store-backed syncer where the synced-block read
+	// fails during a rollback check.
 	store := &walletmock.Store{}
-	s := newSyncer(Config{DB: dbConn}, nil, nil, nil, store, 0)
+	s := newSyncer(
+		Config{}, nil, nil, nil, store, 0,
+	)
 
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{Height: 100},
-	}, nil).Once()
-	store.On(
-		"ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-			StartHeight: 91,
-			EndHeight:   100,
-		},
-	).Return(nil, errBlockHash).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		([]db.Block)(nil), errBlockHash).Once()
 
 	// Act: Perform a rollback check.
 	err := s.checkRollback(t.Context())
@@ -3935,32 +3959,18 @@ func TestCheckRollback_DBError(t *testing.T) {
 func TestCheckRollback_RemoteError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where remote hash lookup fails
-	// during a rollback check.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Setup a store-backed syncer where the remote hash lookup
+	// fails during a rollback check.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, nil, nil, nil, store, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, 0,
 	)
 
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{Height: 100},
-	}, nil).Once()
-
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
-	}
-	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-		StartHeight: 91,
-		EndHeight:   100,
-	}).Return(localBlocks, nil).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		[]db.Block{}, nil).Maybe()
 	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
 		([]chainhash.Hash)(nil), errRemote).Once()
 
@@ -4000,24 +4010,18 @@ func TestFilterBatch_NilFilter(t *testing.T) {
 func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	t.Parallel()
 
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	// Arrange: Setup mock expectations where block notification fails.
+	// Arrange: Setup a store-backed syncer where block notification fails.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, nil, nil, nil, store, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, 0,
 	)
 
 	mockChain.On("IsCurrent").Return(true).Once()
-	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
-		[]chainhash.Hash{}, nil).Once()
 	mockChain.On("NotifyBlocks").Return(errNotify).Once()
 
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{Height: 0},
-	}, nil).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 	// Act: Attempt chain sync initialization.
 	err := s.initChainSync(t.Context())
@@ -4035,7 +4039,10 @@ func TestScanBatchHeadersOnly_Errors(t *testing.T) {
 
 		// Arrange: Setup mock expectations where GetBlockHashes fails.
 		mockChain := &bwmock.Chain{}
-		s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+		s := newSyncer(
+			Config{Chain: mockChain}, nil, nil, nil,
+			&walletmock.Store{}, 0,
+		)
 
 		mockChain.On("GetBlockHashes", mock.Anything,
 			mock.Anything).Return(([]chainhash.Hash)(nil),
@@ -4054,7 +4061,10 @@ func TestScanBatchHeadersOnly_Errors(t *testing.T) {
 
 		// Arrange: Setup mock expectations where GetBlockHeaders fails.
 		mockChain := &bwmock.Chain{}
-		s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, &walletmock.Store{}, 0)
+		s := newSyncer(
+			Config{Chain: mockChain}, nil, nil, nil,
+			&walletmock.Store{}, 0,
+		)
 
 		mockChain.On("GetBlockHashes", mock.Anything,
 			mock.Anything).Return([]chainhash.Hash{{}}, nil).Once()
@@ -4074,47 +4084,51 @@ func TestScanBatchHeadersOnly_Errors(t *testing.T) {
 func TestCheckRollback_HeaderError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations for a rollback check where a
+	// Arrange: Setup a store-backed syncer for a rollback check where a
 	// header fetch failure occurs at the fork point.
-	dbConn, cleanup := setupTestDB(t)
-	defer cleanup()
-
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, nil, nil, nil, store, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, 0,
 	)
 
-	hashA := &chainhash.Hash{0x0A}
-	hashB := &chainhash.Hash{0x0B}
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 101})
+
+	hashA := chainhash.Hash{0x0A}
+	hashB := chainhash.Hash{0x0B}
 	hashC := chainhash.Hash{0x0C}
 
-	store.On("GetWallet", mock.Anything, "").Return(&db.WalletInfo{
-		SyncedTo: &db.Block{Hash: *hashB, Height: 101},
-	}, nil).Once()
-
+	// The store returns the local synced blocks for the range [92, 101]
+	// ascending: heights 92..99 are unique fillers, height 100 is hashA and
+	// height 101 is hashB.
 	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(92); i <= 99; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
+	for h := uint32(92); h <= 101; h++ {
+		block := db.Block{Hash: chainhash.Hash{byte(h)}, Height: h}
+		switch h {
+		case 100:
+			block.Hash = hashA
+		case 101:
+			block.Hash = hashB
+		}
+
+		localBlocks = append(localBlocks, block)
 	}
-	localBlocks = append(localBlocks,
-		db.Block{Hash: *hashA, Height: 100},
-		db.Block{Hash: *hashB, Height: 101},
-	)
+
 	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
 		StartHeight: 92,
 		EndHeight:   101,
 	}).Return(localBlocks, nil).Once()
 
+	// The remote chain agrees up to height 100 (hashA at index 8) but
+	// diverges at the tip (hashC at index 9), so the fork point is height
+	// 100 and the syncer fetches that block's header.
 	remoteHashes := make([]chainhash.Hash, 10)
-	remoteHashes[8] = *hashA
+	remoteHashes[8] = hashA
 	remoteHashes[9] = hashC
 	mockChain.On("GetBlockHashes", int64(92), int64(101)).Return(
 		remoteHashes, nil).Once()
-	mockChain.On("GetBlockHeader", hashA).Return(
+	mockChain.On("GetBlockHeader", &hashA).Return(
 		(*wire.BlockHeader)(nil), errHeader).Once()
 
 	// Act: Perform the rollback check.
@@ -4236,7 +4250,10 @@ func TestInitChainSync_Neutrino(t *testing.T) {
 	// Birthday called by SetStartTime.
 	mockAddrStore.On("Birthday").Return(time.Time{}).Once()
 
-	s := newSyncer(Config{Chain: nc}, mockAddrStore, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: nc}, mockAddrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	// Cancel context immediately to abort waitUntilBackendSynced.
 	ctx, cancel := context.WithCancel(t.Context())
@@ -4290,7 +4307,10 @@ func TestScanBatchWithFullBlocks_ProcessError(t *testing.T) {
 	defer cleanup()
 
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain, DB: db}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	addrStore := &bwmock.AccountStore{}
 	rs := NewRecoveryState(10, &chainParams, nil)
@@ -4539,7 +4559,10 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		defer cleanup()
 
 		mockAddrStore := &bwmock.AddrStore{}
-		s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil, &walletmock.Store{}, 0)
+		s := newSyncer(
+			Config{DB: db}, mockAddrStore, nil, nil,
+			&walletmock.Store{}, 0,
+		)
 
 		mockAddrStore.On("FetchScopedKeyManager", mock.Anything).Return(
 			nil, errFetchFail).Once()
@@ -5057,40 +5080,33 @@ func TestFetchAndFilterBlocks_BatchCapping(t *testing.T) {
 func TestRunSyncStep_Unfinished(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a syncer and mock an incomplete sync state.
+	// Arrange: Setup a store-backed syncer with an incomplete sync state.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
-
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{
-			Chain: mockChain,
-			DB:    db,
-		}, mockAddrStore, mockTxStore, nil,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, uint32(0),
 	)
 
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 90}).Maybe()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 90})
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
 
-	mockAddrStore.On("ActiveScopedKeyManagers").Return(
-		[]waddrmgr.AccountStore(nil)).Maybe()
-	mockAddrStore.On("ForEachRelevantActiveAddress", mock.Anything,
-		mock.Anything).Return(nil).Maybe()
-
-	mockTxStore.On("OutputsToWatch", mock.Anything).Return(
-		[]wtxmgr.Credit(nil), nil).Maybe()
+	// The scan over the gap reads empty scan data through the store and
+	// advances the synced tip through the store batch.
+	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
+		([]db.AccountInfo)(nil), nil).Maybe()
+	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
+		page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
+	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
+		([]db.UtxoInfo)(nil), nil).Maybe()
 	mockChain.On("GetBlockHashes", int64(91), int64(100)).Return(
 		[]chainhash.Hash{{0x01}}, nil).Once()
 	mockChain.On("GetBlockHeaders", mock.Anything).Return(
 		[]*wire.BlockHeader{{}}, nil).Once()
-	mockAddrStore.On("SetSyncedTo", mock.Anything,
-		mock.Anything).Return(nil).Maybe()
+	store.On("ApplyScanBatch", mock.Anything, mock.Anything).Return(
+		nil).Maybe()
 
 	// Act: Execute a sync step.
 	err := s.runSyncStep(t.Context())
@@ -5225,36 +5241,30 @@ func TestHandleChainUpdate_Error(t *testing.T) {
 func TestRunSyncStep_Success(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a syncer and mock a notification arrival to trigger
-	// the idle processing path.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Setup a store-backed syncer and mock a notification arrival
+	// to trigger the idle processing path.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
+	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{
-			Chain: mockChain,
-			DB:    db,
-		}, mockAddrStore, mockTxStore, nil,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, uint32(0),
 	)
 
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100}).Maybe()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
-	mockTxStore.On("UnminedTxs", mock.Anything).Return([]*wire.MsgTx{},
-		nil).Once()
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		[]db.TxInfo{}, nil).Once()
 
 	notifChan := make(chan any, 1)
 	mockChain.On("Notifications").Return((<-chan any)(notifChan)).Maybe()
 
 	notifChan <- chain.BlockConnected{Block: wtxmgr.Block{Height: 101}}
 
-	mockAddrStore.On("SetSyncedTo", mock.Anything,
-		mock.Anything).Return(nil).Once()
+	// The queued BlockConnected notification advances the synced tip
+	// through the store.
+	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
+		nil).Once()
 
 	// Act: Execute a sync step.
 	err := s.runSyncStep(t.Context())
@@ -5278,7 +5288,10 @@ func TestScanBatchWithCFilters_HorizonExpansion(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	s := newSyncer(Config{Chain: mockChain, DB: db}, addrStore, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain, DB: db}, addrStore, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	hashes := []chainhash.Hash{{0x01}, {0x02}}
 
@@ -5347,33 +5360,22 @@ func TestScanBatchWithCFilters_HorizonExpansion(t *testing.T) {
 func TestRunSyncStep_AdvanceError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations to simulate a failure during
-	// loadFullScanState within runSyncStep.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Setup a store-backed syncer where loading the scan state
+	// fails within runSyncStep.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
+	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db},
-		mockAddrStore, nil, nil,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, uint32(0),
 	)
 
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100}).Maybe()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
 	mockChain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(101), nil).Once()
 
-	mgr := &bwmock.AccountStore{}
-	mockAddrStore.On("ActiveScopedKeyManagers").Return(
-		[]waddrmgr.AccountStore{mgr}).Once()
-	mgr.On("ActiveAccounts").Return([]uint32{0}).Once()
-	mgr.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Once()
-
-	mockAddrStore.On("FetchScopedKeyManager",
-		waddrmgr.KeyScopeBIP0084).Return(nil, errLoadStateFail).Once()
+	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
+		([]db.AccountInfo)(nil), errLoadStateFail).Once()
 
 	// Act: Execute a single sync step.
 	err := s.runSyncStep(t.Context())
@@ -5635,27 +5637,21 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 func TestRunSyncStep_BroadcastError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where a broadcast-related failure
-	// occurs during a sync step.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Setup a store-backed syncer where the unmined-transaction
+	// read fails during a sync step.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db},
-		mockAddrStore, mockTxStore, nil,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, nil,
+		store, uint32(0),
 	)
 
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100}).Maybe()
-	mockTxStore.On("UnminedTxs", mock.Anything).Return([]*wire.MsgTx(nil),
-		errBroadcast).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		([]db.TxInfo)(nil), errBroadcast).Once()
 
 	// Act: Execute a sync step.
 	err := s.runSyncStep(t.Context())
@@ -5672,7 +5668,10 @@ func TestFetchAndFilterBlocks_DispatchError(t *testing.T) {
 	// Arrange: Setup mock expectations where an invalid sync method is
 	// encountered during block filtering.
 	mockChain := &bwmock.Chain{}
-	s := newSyncer(Config{Chain: mockChain, SyncMethod: 99}, nil, nil, nil, &walletmock.Store{}, 0)
+	s := newSyncer(
+		Config{Chain: mockChain, SyncMethod: 99}, nil, nil, nil,
+		&walletmock.Store{}, 0,
+	)
 
 	hashes := []chainhash.Hash{{0x01}}
 	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
