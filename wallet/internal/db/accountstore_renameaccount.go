@@ -19,7 +19,7 @@ func (params RenameAccountParams) Validate() error {
 		return ErrInvalidAccountQuery
 	}
 
-	return nil
+	return requireUnreservedAccountName(params.NewName)
 }
 
 // RenameAccountOps is the backend adapter the shared RenameAccount workflow
