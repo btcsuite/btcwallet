@@ -98,6 +98,10 @@ func (m *AddrStore) AddrAccount(ns walletdb.ReadBucket,
 
 	args := m.Called(ns, address)
 
+	if args.Get(0) == nil {
+		return nil, args.Get(1).(uint32), args.Error(2)
+	}
+
 	return args.Get(0).(waddrmgr.AccountStore),
 		args.Get(1).(uint32), args.Error(2)
 }
