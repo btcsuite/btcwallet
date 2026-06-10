@@ -708,19 +708,29 @@ func (w *Wallet) publishTx(tx *wire.MsgTx, ourAddrs []address.Address) error {
 	// If the tx was rejected, we need to determine why and act
 	// accordingly.
 	//
-	// NOTE: This check for ErrTxAlreadyInMempool should only be triggered
-	// if the wallet is running without mempool acceptance checks (e.g.,
-	// with an older version of the chain backend or with Neutrino).
-	// Otherwise, this condition should have been caught earlier by the
-	// `checkMempool` function.
-	if errors.Is(rpcErr, chain.ErrTxAlreadyInMempool) {
-		log.Infof("%v: tx already in mempool", txid)
+	// NOTE: These already-broadcast checks should only be triggered if the
+	// wallet is running without mempool acceptance checks (e.g., with an
+	// older version of the chain backend or with Neutrino). Otherwise, this
+	// condition should have been caught earlier by the `checkMempool`
+	// function, which treats the same set of errors as already broadcast.
+	switch {
+	case errors.Is(rpcErr, chain.ErrTxAlreadyInMempool),
+		errors.Is(rpcErr, chain.ErrTxAlreadyKnown),
+		errors.Is(rpcErr, chain.ErrTxAlreadyConfirmed):
+
+		// The tx is already known, confirmed, or in the mempool, so it
+		// was accepted by the network. Treat this as a successful
+		// publish so the recorded tx keeps being tracked rather than
+		// invalidated by the caller.
+		log.Infof("%v: tx already known/confirmed/in mempool", txid)
+
 		return nil
-	}
 
 	// If the tx was rejected for any other reason, then we'll return the
 	// error and let the caller handle the cleanup.
-	return rpcErr
+	default:
+		return rpcErr
+	}
 }
 
 // invalidateUnminedTx marks a tx as failed in the unconfirmed store.
