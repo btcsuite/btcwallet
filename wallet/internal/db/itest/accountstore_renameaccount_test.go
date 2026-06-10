@@ -74,6 +74,66 @@ func TestRenameAccount(t *testing.T) {
 	})
 }
 
+// TestRenameAccountRejectsReservedName verifies that accounts cannot be
+// renamed to the wallet-level imported bucket name.
+func TestRenameAccountRejectsReservedName(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-rename-reserved")
+	scope := db.KeyScopeBIP0084
+	accountName := "reserved-rename-source"
+	accountNumber := uint32(0)
+
+	createDerivedAccount(t, store, walletID, scope, accountName)
+
+	tests := []struct {
+		name   string
+		params db.RenameAccountParams
+	}{
+		{
+			name: "by name",
+			params: db.RenameAccountParams{
+				WalletID: walletID,
+				Scope:    scope,
+				OldName:  accountName,
+				NewName:  db.DefaultImportedAccountName,
+			},
+		},
+		{
+			name: "by number",
+			params: db.RenameAccountParams{
+				WalletID:      walletID,
+				Scope:         scope,
+				AccountNumber: &accountNumber,
+				NewName:       db.DefaultImportedAccountName,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := store.RenameAccount(t.Context(), tc.params)
+			require.ErrorIs(t, err, db.ErrReservedAccountName)
+
+			info, err := store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, scope, accountName,
+				),
+			)
+			require.NoError(t, err)
+			require.Equal(t, accountName, info.AccountName)
+
+			_, err = store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, scope, db.DefaultImportedAccountName,
+				),
+			)
+			require.ErrorIs(t, err, db.ErrAccountNotFound)
+		})
+	}
+}
+
 // TestRenameAccountRejectsImported verifies that imported accounts cannot be
 // renamed through the account store.
 func TestRenameAccountRejectsImported(t *testing.T) {
