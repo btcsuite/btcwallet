@@ -622,7 +622,7 @@ func TestScanBatch(t *testing.T) {
 	expectRecoveryAccountIDLookups(store)
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
-	).Twice()
+	).Maybe()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
 		[]db.UtxoInfo(nil), nil,
 	).Once()
@@ -821,47 +821,49 @@ func TestAdvanceChainSync(t *testing.T) {
 func TestHandleChainUpdate(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and mock its dependencies for
-	// handling chain updates.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	// Arrange: Initialize a store-backed syncer for handling chain
+	// updates.
+	const walletID uint32 = 23
 
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
+		Config{Chain: mockChain, ChainParams: &chainParams}, nil, nil,
 		mockPublisher,
-		&walletmock.Store{}, 0,
+		store, walletID,
 	)
 
-	// Case 1: Test handling of a BlockConnected notification.
+	// Case 1: Test handling of a BlockConnected notification, which
+	// advances the synced tip through the store.
 	meta := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 100}}
 
-	mockAddrStore.On(
-		"SetSyncedTo", mock.Anything, mock.Anything,
-	).Return(nil).Once()
+	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
+		nil).Once()
 
 	// Act & Assert: Verify that a BlockConnected notification is
 	// correctly processed.
 	err := s.handleChainUpdate(t.Context(), chain.BlockConnected(meta))
 	require.NoError(t, err)
 
-	// Case 2: Test handling of a RelevantTx notification.
+	// Case 2: Test handling of a RelevantTx notification, which records the
+	// transaction through the store batch path.
 	tx := wire.NewMsgTx(1)
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
 	require.NoError(t, err)
-	mockTxStore.On(
-		"InsertUnconfirmedTx", mock.Anything, mock.Anything,
-		mock.Anything,
-	).Return(nil).Once()
+	store.On("GetTx", mock.Anything, db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     rec.Hash,
+	}).Return(nil, db.ErrTxNotFound).Once()
+	store.On("ApplyTxBatch", mock.Anything, mock.Anything).Return(
+		nil).Once()
 
 	// Act & Assert: Verify that a RelevantTx notification is correctly
 	// processed.
 	err = s.handleChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // newBareMultisigCreditScript returns one member address, that member's own
@@ -988,6 +990,18 @@ func expectRecoveryAccountIDLookups(store *walletmock.Store) {
 			return query.SkipBalance
 		},
 	)).Return(&db.AccountInfo{}, nil).Maybe()
+}
+
+// serializeTx returns the wire encoding of tx, for stubbing TxInfo.SerializedTx
+// in store-backed unmined-transaction reads.
+func serializeTx(t *testing.T, tx *wire.MsgTx) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	require.NoError(t, tx.Serialize(&buf))
+
+	return buf.Bytes()
 }
 
 // TestProcessRelevantTxUsesStore verifies that relevant transaction
@@ -3066,29 +3080,28 @@ var (
 func TestProcessChainUpdate_Disconnect(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and mock its dependencies for handling
-	// a block disconnect.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
+	// Arrange: Initialize a store-backed syncer for handling a block
+	// disconnect.
 	mockChain := &bwmock.Chain{}
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
 	mockPublisher := &mockTxPublisher{}
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
-		mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{Chain: mockChain}, nil, nil, mockPublisher,
+		store, uint32(0),
 	)
 
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100},
-	).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	mockAddrStore.On(
-		"BlockHash", mock.Anything, mock.Anything,
-	).Return(&chainhash.Hash{}, nil).Maybe()
+	// The store and the remote chain agree (all-zero hashes), so the
+	// rollback check finds no reorg.
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{Height: i})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		localBlocks, nil).Once()
 
 	remoteHashes := make([]chainhash.Hash, 10)
 	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
@@ -3099,27 +3112,25 @@ func TestProcessChainUpdate_Disconnect(t *testing.T) {
 	// that it triggers a rollback check.
 	err := s.processChainUpdate(t.Context(), chain.BlockDisconnected{})
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestBroadcastUnminedTxns_Error verifies error handling.
 func TestBroadcastUnminedTxns_Error(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Initialize a syncer and mock an error during unmined
-	// transactions retrieval.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	mockTxStore := &bwmock.TxStore{}
+	// Arrange: Initialize a store-backed syncer and mock an error during
+	// unmined transaction retrieval.
+	store := &walletmock.Store{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{DB: db}, nil, mockTxStore, mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{}, nil, nil, mockPublisher,
+		store, uint32(0),
 	)
 
-	mockTxStore.On("UnminedTxs", mock.Anything).Return(
-		([]*wire.MsgTx)(nil), errDBMockSync,
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		([]db.TxInfo)(nil), errDBMockSync,
 	).Once()
 
 	// Act & Assert: Verify that broadcasting unmined transactions
@@ -3494,34 +3505,34 @@ func TestSyncerRun_InitError(t *testing.T) {
 func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a syncer and dependencies for handling updates.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	mockAddrStore := &bwmock.AddrStore{}
-	mockTxStore := &bwmock.TxStore{}
+	// Arrange: Setup a store-backed syncer for handling updates.
 	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
 	s := newSyncer(
 		Config{
 			Chain:       mockChain,
 			ChainParams: &chainParams,
-			DB:          db,
 		},
-		mockAddrStore, mockTxStore, nil,
-		&walletmock.Store{}, 0,
+		nil, nil, nil,
+		store, uint32(0),
 	)
 
-	// 1. BlockDisconnected.
-	mockTxStore.On("Rollback", mock.Anything, int32(100)).Return(nil).Once()
-	mockAddrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(
-		nil).Once()
-	mockAddrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{Height: 100})
+	// 1. BlockDisconnected. The store and the remote chain agree on blocks
+	// 91..100, so the rollback check finds no reorg.
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	for i := int32(91); i <= 100; i++ {
-		hash := chainhash.Hash{byte(i)}
-		mockAddrStore.On("BlockHash", mock.Anything, i).Return(
-			&hash, nil).Maybe()
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{
+			Hash:   chainhash.Hash{byte(i)},
+			Height: i,
+		})
 	}
+
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   100,
+	}).Return(localBlocks, nil).Once()
 
 	remoteHashes := make([]chainhash.Hash, 10)
 	for i := range 10 {
@@ -3540,6 +3551,7 @@ func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
 
 	// Assert: Verify success.
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestDispatchScanStrategy_AutoFallback verifies fallback to full blocks
@@ -3594,30 +3606,37 @@ func TestDispatchScanStrategy_AutoFallback(t *testing.T) {
 func TestBroadcastUnminedTxns_Success(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a syncer and mock successful transaction retrieval
-	// and broadcast.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	mockTxStore := &bwmock.TxStore{}
+	// Arrange: Setup a store-backed syncer and mock successful unmined
+	// transaction retrieval and broadcast.
+	store := &walletmock.Store{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{DB: db}, nil, mockTxStore, mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{}, nil, nil, mockPublisher,
+		store, uint32(0),
 	)
 
 	tx := wire.NewMsgTx(1)
-	mockTxStore.On("UnminedTxs", mock.Anything).Return(
-		[]*wire.MsgTx{tx}, nil,
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{0x10},
+	}})
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		[]db.TxInfo{{
+			Status:       db.TxStatusPublished,
+			SerializedTx: serializeTx(t, tx),
+		}}, nil,
 	).Once()
-	mockPublisher.On("Broadcast", mock.Anything, tx, "").Return(nil).Once()
+	mockPublisher.On(
+		"Broadcast", mock.Anything, mock.Anything, "",
+	).Return(nil).Once()
 
 	// Act: Broadcast unmined transactions.
 	err := s.broadcastUnminedTxns(t.Context())
 
 	// Assert: Verify success.
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestFilterBatch_EmptyFilter verifies that empty filters force download.
@@ -3845,23 +3864,29 @@ func TestScanBatchHeadersOnly_ContextCancelled(t *testing.T) {
 func TestBroadcastUnminedTxns_BroadcastError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations where a transaction broadcast fails.
+	// Arrange: Setup a store-backed syncer where a transaction broadcast
+	// fails.
 	mockPublisher := &mockTxPublisher{}
-	mockTxStore := &bwmock.TxStore{}
-
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{DB: db}, nil, mockTxStore, mockPublisher,
-		&walletmock.Store{}, 0,
+		Config{}, nil, nil, mockPublisher,
+		store, uint32(0),
 	)
 
 	tx := wire.NewMsgTx(1)
-	mockTxStore.On("UnminedTxs", mock.Anything).Return(
-		[]*wire.MsgTx{tx}, nil).Once()
-	mockPublisher.On("Broadcast", mock.Anything, tx, "").Return(
-		errBroadcast).Once()
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{0x10},
+	}})
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+	store.On("ListTxns", mock.Anything, mock.Anything).Return(
+		[]db.TxInfo{{
+			Status:       db.TxStatusPublished,
+			SerializedTx: serializeTx(t, tx),
+		}}, nil).Once()
+	mockPublisher.On(
+		"Broadcast", mock.Anything, mock.Anything, "",
+	).Return(errBroadcast).Once()
 
 	// Act: Broadcast unmined transactions.
 	err := s.broadcastUnminedTxns(t.Context())
@@ -4358,16 +4383,14 @@ func TestDispatchScanStrategy_AutoFallback_Final(t *testing.T) {
 func TestProcessChainUpdate_Disconnected(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a syncer with a database and verify initial sync
-	// state.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	// Arrange: Create a store-backed syncer reporting an unsynced tip, so
+	// the rollback check returns without scanning any block ranges.
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, nil, store, uint32(0),
+	)
 
-	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil, &walletmock.Store{}, 0)
-
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 0}).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
 
 	// Act: Process a BlockDisconnected update.
 	err := s.processChainUpdate(
@@ -4376,6 +4399,7 @@ func TestProcessChainUpdate_Disconnected(t *testing.T) {
 
 	// Assert: Verify success.
 	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestScanWithTargets_Errors verifies error paths in scanWithTargets.
@@ -4510,25 +4534,21 @@ func TestScanBatchWithCFilters_InitResultsError(t *testing.T) {
 func TestProcessChainUpdate(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
 	tests := []struct {
 		name   string
 		update interface{}
-		setup  func(*bwmock.AddrStore, *bwmock.TxStore, *bwmock.Chain)
+		setup  func(*walletmock.Store, *bwmock.Chain)
 	}{
 		{
 			name: "BlockConnected",
 			update: chain.BlockConnected{
 				Block: wtxmgr.Block{Height: 100},
 			},
-			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
-				c *bwmock.Chain) {
-
-				as.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
-					func(bs *waddrmgr.BlockStamp) bool {
-						return bs.Height == 100
+			setup: func(store *walletmock.Store, c *bwmock.Chain) {
+				store.On("UpdateWallet", mock.Anything, mock.MatchedBy(
+					func(params db.UpdateWalletParams) bool {
+						return params.SyncedTo != nil &&
+							params.SyncedTo.Height == 100
 					})).Return(nil).Once()
 			},
 		},
@@ -4537,10 +4557,11 @@ func TestProcessChainUpdate(t *testing.T) {
 			update: chain.RelevantTx{
 				TxRecord: &wtxmgr.TxRecord{MsgTx: *wire.NewMsgTx(1)},
 			},
-			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
-				c *bwmock.Chain) {
-
-				ts.On("InsertUnconfirmedTx", mock.Anything, mock.Anything,
+			setup: func(store *walletmock.Store, c *bwmock.Chain) {
+				store.On("GetTx", mock.Anything, db.GetTxQuery{
+					WalletID: 0,
+				}).Return(nil, db.ErrTxNotFound).Once()
+				store.On("ApplyTxBatch", mock.Anything,
 					mock.Anything).Return(nil).Once()
 			},
 		},
@@ -4551,12 +4572,11 @@ func TestProcessChainUpdate(t *testing.T) {
 					Block: wtxmgr.Block{Height: 102},
 				},
 			},
-			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
-				c *bwmock.Chain) {
-
-				as.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
-					func(bs *waddrmgr.BlockStamp) bool {
-						return bs.Height == 102
+			setup: func(store *walletmock.Store, c *bwmock.Chain) {
+				store.On("ApplyTxBatch", mock.Anything, mock.MatchedBy(
+					func(params db.TxBatchParams) bool {
+						return params.SyncedTo != nil &&
+							params.SyncedTo.Height == 102
 					})).Return(nil).Once()
 			},
 		},
@@ -4565,15 +4585,20 @@ func TestProcessChainUpdate(t *testing.T) {
 			update: chain.BlockDisconnected{
 				Block: wtxmgr.Block{Height: 100, Hash: chainhash.Hash{0x01}},
 			},
-			setup: func(as *bwmock.AddrStore, ts *bwmock.TxStore,
-				c *bwmock.Chain) {
+			setup: func(store *walletmock.Store, c *bwmock.Chain) {
+				expectSyncedTip(
+					store, waddrmgr.BlockStamp{Height: 100},
+				)
 
-				as.On("SyncedTo").Return(
-					waddrmgr.BlockStamp{Height: 100},
-				).Once()
-				as.On(
-					"BlockHash", mock.Anything, mock.Anything,
-				).Return(&chainhash.Hash{}, nil).Maybe()
+				localBlocks := make([]db.Block, 0, 10)
+				for i := uint32(91); i <= 100; i++ {
+					localBlocks = append(localBlocks, db.Block{
+						Height: i,
+					})
+				}
+				store.On(
+					"ListSyncedBlocks", mock.Anything, mock.Anything,
+				).Return(localBlocks, nil).Once()
 
 				remoteHashes := make([]chainhash.Hash, 10)
 				c.On(
@@ -4588,20 +4613,18 @@ func TestProcessChainUpdate(t *testing.T) {
 			t.Parallel()
 
 			// Arrange
-			mockAddrStore := &bwmock.AddrStore{}
-			mockTxStore := &bwmock.TxStore{}
+			store := &walletmock.Store{}
 			mockChain := &bwmock.Chain{}
 			s := newSyncer(
 				Config{
 					Chain:       mockChain,
 					ChainParams: &chainParams,
-					DB:          db,
 				},
-				mockAddrStore, mockTxStore, nil,
-				&walletmock.Store{}, 0,
+				nil, nil, nil,
+				store, uint32(0),
 			)
 
-			tc.setup(mockAddrStore, mockTxStore, mockChain)
+			tc.setup(store, mockChain)
 
 			// Act
 			err := s.processChainUpdate(t.Context(), tc.update)
@@ -5109,18 +5132,16 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 func TestHandleChainUpdate_Error(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	// Arrange: Setup a store-backed syncer where chain update processing
+	// fails because the synced-block read errors.
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, nil, store, uint32(0),
+	)
 
-	// Arrange: Setup a syncer where chain update processing will fail due
-	// to a database error.
-	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil, &walletmock.Store{}, 0)
-
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100}).Maybe()
-	mockAddrStore.On("BlockHash", mock.Anything, mock.Anything).Return(
-		(*chainhash.Hash)(nil), errDBFail).Once()
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
+		([]db.Block)(nil), errDBFail).Once()
 
 	// Act: Attempt to handle a BlockDisconnected update.
 	err := s.handleChainUpdate(
