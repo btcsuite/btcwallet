@@ -229,18 +229,24 @@ func (m *Manager) Create(cfg Config,
 
 	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
 	// spendable. Validate the params.InitialAccounts list upfront so a
-	// mismatched-mode create fails before DBCreateWallet runs (otherwise
-	// the wallet row exists on disk while importInitialAccounts later
-	// rejects an entry, leaving a half-created wallet).
+	// mismatched-mode create fails before the kvdb wallet create runs
+	// (otherwise the wallet row exists on disk while importInitialAccounts
+	// later rejects an entry, leaving a half-created wallet).
 	err = validateInitialAccountsMode(params)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create the underlying database structure.
-	err = DBCreateWallet(cfg, params, rootKey)
+	err = kvdb.CreateLegacyWallet(cfg.DB, kvdb.CreateLegacyWalletParams{
+		RootKey:           rootKey,
+		PubPassphrase:     params.PubPassphrase,
+		PrivatePassphrase: params.PrivatePassphrase,
+		ChainParams:       cfg.ChainParams,
+		Birthday:          params.Birthday,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
 	// Load the newly created wallet.
@@ -299,9 +305,11 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return existingW, nil
 	}
 
-	addrMgr, txMgr, err := DBLoadWallet(cfg)
+	addrMgr, txMgr, err := kvdb.LoadLegacyWallet(
+		cfg.DB, cfg.PubPassphrase, cfg.ChainParams,
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load legacy wallet: %w", err)
 	}
 
 	// TODO(yy): Once Wallet.store includes wallet metadata accessors such as
