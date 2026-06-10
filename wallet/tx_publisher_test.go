@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
@@ -20,9 +19,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/chain"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -73,16 +70,37 @@ func addressCreditsEqual(a, b map[uint32]btcutil.Address) bool {
 	return true
 }
 
-// matchUpdateTxLabelParams returns a matcher for Store label updates.
-func matchUpdateTxLabelParams(walletID uint32, txid chainhash.Hash,
-	label string) any {
+// matchUpdateTxParams returns a matcher for Store tx metadata updates. The
+// nil-handling branches for the optional label and state fields are inherent to
+// the matcher and read clearer inline than split across helpers.
+//
+//nolint:cyclop // Inline nil-handling for optional matcher fields.
+func matchUpdateTxParams(walletID uint32, txid chainhash.Hash,
+	label *string, state *db.UpdateTxState) any {
 
 	return mock.MatchedBy(func(params db.UpdateTxParams) bool {
-		return params.WalletID == walletID &&
-			params.Txid == txid &&
-			params.Label != nil &&
-			*params.Label == label &&
-			params.State == nil
+		if params.WalletID != walletID || params.Txid != txid {
+			return false
+		}
+
+		if label == nil {
+			if params.Label != nil {
+				return false
+			}
+		} else if params.Label == nil || *params.Label != *label {
+			return false
+		}
+
+		if state == nil {
+			return params.State == nil
+		}
+
+		if params.State == nil {
+			return false
+		}
+
+		return params.State.Status == state.Status &&
+			params.State.Block == nil && state.Block == nil
 	})
 }
 
@@ -319,56 +337,110 @@ func TestExtractTxAddrs(t *testing.T) {
 }
 
 // TestFilterOwnedAddresses tests the filterOwnedAddresses method to ensure it
-// correctly identifies owned addresses and handles de-duplication.
+// correctly identifies owned addresses, handles de-duplication, and recognizes
+// a wallet-owned member of a bare-multisig output.
 func TestFilterOwnedAddresses(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
-	w, mocks := createStartedWalletWithMocks(t)
+	t.Run("dedup single-address outputs", func(t *testing.T) {
+		t.Parallel()
 
-	// Create two addresses, one owned and one not.
-	ownedPrivKey, err := btcec.NewPrivateKey()
+		w, mocks := createStartedWalletWithMocks(t)
+
+		// Create two addresses, one owned and one not.
+		ownedAddr := mustNewPubKeyAddr(t, w)
+		unownedAddr := mustNewPubKeyAddr(t, w)
+
+		ownedScript := mustPayToAddrScript(ownedAddr)
+		unownedScript := mustPayToAddrScript(unownedAddr)
+
+		// Create an input map with both addresses, with the owned
+		// address appearing twice.
+		txOutAddrs := map[uint32][]btcutil.Address{
+			0: {ownedAddr},
+			1: {unownedAddr},
+			2: {ownedAddr}, // Duplicate
+		}
+
+		// Each address is looked up by its own script, which for a
+		// single-address output equals the output script.
+		mocks.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, ownedScript),
+		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
+		mocks.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, unownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+
+		// Filter the addresses.
+		ownedAddrs, err := w.filterOwnedAddresses(
+			t.Context(), txOutAddrs,
+		)
+		require.NoError(t, err)
+
+		// Check that the result contains only the owned address.
+		require.Len(t, ownedAddrs, 1)
+		info, ok := ownedAddrs[ownedAddr.EncodeAddress()]
+		require.True(t, ok)
+		require.ElementsMatch(t, []uint32{uint32(0), uint32(2)},
+			info.outputIndices)
+	})
+
+	t.Run("bare multisig owned member", func(t *testing.T) {
+		t.Parallel()
+
+		w, mocks := createStartedWalletWithMocks(t)
+
+		// A bare 1-of-2 multisig output yields two pubkey addresses;
+		// the wallet owns only the first one.
+		ownedAddr := mustNewPubKeyAddr(t, w)
+		otherAddr := mustNewPubKeyAddr(t, w)
+
+		// The extractor surfaces both members for the same output.
+		txOutAddrs := map[uint32][]btcutil.Address{
+			0: {ownedAddr, otherAddr},
+		}
+
+		// Ownership is resolved by each member's own script, never the
+		// whole multisig output script, which would match no address
+		// row.
+		ownedScript := mustPayToAddrScript(ownedAddr)
+		otherScript := mustPayToAddrScript(otherAddr)
+
+		mocks.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, ownedScript),
+		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
+		mocks.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, otherScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+
+		ownedAddrs, err := w.filterOwnedAddresses(
+			t.Context(), txOutAddrs,
+		)
+		require.NoError(t, err)
+
+		// Only the owned member is recognized, mapped to output 0.
+		require.Len(t, ownedAddrs, 1)
+		info, ok := ownedAddrs[ownedAddr.EncodeAddress()]
+		require.True(t, ok)
+		require.ElementsMatch(t, []uint32{uint32(0)},
+			info.outputIndices)
+	})
+}
+
+// mustNewPubKeyAddr returns a fresh P2PK address on the wallet's chain. It
+// fails the test on error.
+func mustNewPubKeyAddr(t *testing.T, w *Wallet) *btcutil.AddressPubKey {
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
-	ownedAddr, err := btcutil.NewAddressPubKey(
-		ownedPrivKey.PubKey().SerializeCompressed(), w.cfg.ChainParams,
+
+	addr, err := btcutil.NewAddressPubKey(
+		privKey.PubKey().SerializeCompressed(), w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 
-	unownedPrivKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-	unownedAddr, err := btcutil.NewAddressPubKey(
-		unownedPrivKey.PubKey().SerializeCompressed(),
-		w.cfg.ChainParams,
-	)
-	require.NoError(t, err)
-
-	// Create an input map with both addresses, with the owned address
-	// appearing twice.
-	txOutAddrs := map[uint32][]btcutil.Address{
-		0: {ownedAddr},
-		1: {unownedAddr},
-		2: {ownedAddr}, // Duplicate
-	}
-
-	// Set up the mock for the address store.
-	mockManagedAddr := &bwmock.ManagedAddress{}
-	errAddrNotFound := waddrmgr.ManagerError{
-		ErrorCode: waddrmgr.ErrAddressNotFound,
-	}
-
-	mocks.addrStore.On("Address", mock.Anything, ownedAddr).
-		Return(mockManagedAddr, nil).Once()
-	mocks.addrStore.On("Address", mock.Anything, unownedAddr).
-		Return(nil, errAddrNotFound).Once()
-
-	// Filter the addresses.
-	ownedAddrs, err := w.filterOwnedAddresses(txOutAddrs)
-	require.NoError(t, err)
-
-	// Check that the result contains only the owned address.
-	require.Len(t, ownedAddrs, 1)
-	_, ok := ownedAddrs[ownedAddr]
-	require.True(t, ok)
+	return addr
 }
 
 // mustNewStandalonePubKeyAddr returns a fresh P2PK address on the test chain
@@ -392,14 +464,12 @@ func mustNewStandalonePubKeyAddr(t *testing.T) *btcutil.AddressPubKey {
 func TestRecordTxAndCredits(t *testing.T) {
 	t.Parallel()
 
-	// Create a sample TxRecord from a transaction with one input and one
-	// output with a value of 10000.
+	// Create a sample transaction with one input and one output with a value
+	// of 10000.
 	tx := &wire.MsgTx{
 		TxIn:  []*wire.TxIn{{}},
 		TxOut: []*wire.TxOut{{Value: 10000}},
 	}
-	txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	require.NoError(t, err)
 
 	// Create a sample credit for a P2PK address.
 	privKey, err := btcec.NewPrivateKey()
@@ -411,31 +481,70 @@ func TestRecordTxAndCredits(t *testing.T) {
 
 	mockManagedAddr := &bwmock.ManagedAddress{}
 	mockManagedAddr.On("Internal").Return(false)
+
 	credits := []creditInfo{{
 		index: 0,
-		ma:    mockManagedAddr,
 		addr:  addr,
 	}}
+	expectedCredits := map[uint32]btcutil.Address{0: addr}
 
 	testCases := []struct {
-		name      string
-		withLabel bool
-		txExists  bool
+		name        string
+		withLabel   bool
+		createErr   error
+		updateLabel bool
+		updateState bool
+
+		// existingStatus, when set via existingSet, is the status the
+		// store reports for the colliding row on ErrTxAlreadyExists.
+		existingStatus db.TxStatus
+		existingSet    bool
+
+		// wantErr is the sentinel the call must return, if any.
+		wantErr error
 	}{
 		{
 			name:      "new tx with label",
 			withLabel: true,
-			txExists:  false,
 		},
 		{
-			name:      "existing tx",
+			name:        "existing live tx",
+			withLabel:   true,
+			createErr:   db.ErrTxAlreadyExists,
+			updateLabel: true,
+
+			existingStatus: db.TxStatusPublished,
+			existingSet:    true,
+		},
+		{
+			name:        "existing pending tx",
+			withLabel:   true,
+			createErr:   db.ErrTxAlreadyExists,
+			updateLabel: true,
+			updateState: true,
+
+			existingStatus: db.TxStatusPending,
+			existingSet:    true,
+		},
+		{
+			name:      "existing failed tx",
 			withLabel: true,
-			txExists:  true,
+			createErr: db.ErrTxAlreadyExists,
+
+			existingStatus: db.TxStatusFailed,
+			existingSet:    true,
+			wantErr:        ErrTxRetainedInvalid,
 		},
 		{
-			name:      "no label",
-			withLabel: false,
-			txExists:  false,
+			name:      "existing replaced tx",
+			createErr: db.ErrTxAlreadyExists,
+
+			existingStatus: db.TxStatusReplaced,
+			existingSet:    true,
+			wantErr:        ErrTxRetainedInvalid,
+		},
+		{
+			name: "no label",
 		},
 	}
 
@@ -451,27 +560,116 @@ func TestRecordTxAndCredits(t *testing.T) {
 				label = testTxLabel
 			}
 
-			mocks.txStore.On("InsertTxCheckIfExists",
-				mock.Anything, txRec, mock.Anything,
-			).Return(tc.txExists, nil).Once()
+			mocks.store.On("CreateTx", mock.Anything,
+				matchCreateTxParams(
+					w.id, tx, label, expectedCredits,
+				),
+			).Return(tc.createErr).Once()
 
-			if tc.withLabel {
-				mocks.txStore.On("PutTxLabel",
-					mock.Anything, txid, label,
+			// On a duplicate, recordTxAndCredits reads the
+			// existing row's status to decide whether the
+			// collision is a live idempotent duplicate or a
+			// retained-invalid row it must refuse.
+			if tc.existingSet {
+				mocks.store.On("GetTx", mock.Anything,
+					db.GetTxQuery{WalletID: w.id, Txid: txid},
+				).Return(&db.TxInfo{
+					Hash:   txid,
+					Status: tc.existingStatus,
+				}, nil).Once()
+			}
+
+			if tc.updateLabel || tc.updateState {
+				var labelPtr *string
+				if tc.updateLabel {
+					labelPtr = &label
+				}
+
+				var state *db.UpdateTxState
+				if tc.updateState {
+					state = &db.UpdateTxState{
+						Status: db.TxStatusPublished,
+					}
+				}
+
+				mocks.store.On("UpdateTx", mock.Anything,
+					matchUpdateTxParams(w.id, txid, labelPtr, state),
 				).Return(nil).Once()
 			}
 
-			if !tc.txExists {
-				mocks.txStore.On("AddCredit",
-					mock.Anything, txRec, mock.Anything,
-					uint32(0), false,
-				).Return(nil).Once()
-				mocks.addrStore.On("MarkUsed",
-					mock.Anything, addr,
-				).Return(nil).Once()
+			err := w.recordTxAndCredits(
+				t.Context(), tx, label, credits,
+			)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
 			}
 
-			err := w.recordTxAndCredits(txRec, label, credits)
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestRecordTxAndCreditsDeterministicMultiOwned verifies that when a single
+// output index carries more than one wallet-owned credit address (as a
+// bare-multisig output the wallet partly owns can), recordTxAndCredits records
+// the lexicographically smallest EncodeAddress() as the canonical owner. The
+// selection must not depend on credit slice or map iteration order.
+func TestRecordTxAndCreditsDeterministicMultiOwned(t *testing.T) {
+	t.Parallel()
+
+	tx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 10000}},
+	}
+
+	// Build two distinct wallet-owned addresses and order them by encoded
+	// form so the expected canonical (smallest) owner is unambiguous.
+	addrA := mustNewStandalonePubKeyAddr(t)
+	addrB := mustNewStandalonePubKeyAddr(t)
+
+	smaller, larger := addrA, addrB
+	if larger.EncodeAddress() < smaller.EncodeAddress() {
+		smaller, larger = larger, smaller
+	}
+
+	expectedCredits := map[uint32]btcutil.Address{0: smaller}
+
+	// Feed the two owned members for the same output index in both orders;
+	// the canonical pick must be the smaller-encoded address either way.
+	testCases := []struct {
+		name    string
+		credits []creditInfo
+	}{
+		{
+			name: "smaller first",
+			credits: []creditInfo{
+				{index: 0, addr: smaller},
+				{index: 0, addr: larger},
+			},
+		},
+		{
+			name: "larger first",
+			credits: []creditInfo{
+				{index: 0, addr: larger},
+				{index: 0, addr: smaller},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+
+			mocks.store.On("CreateTx", mock.Anything,
+				matchCreateTxParams(w.id, tx, "", expectedCredits),
+			).Return(nil).Once()
+
+			err := w.recordTxAndCredits(
+				t.Context(), tx, "", tc.credits,
+			)
 			require.NoError(t, err)
 		})
 	}
@@ -497,6 +695,8 @@ func TestAddTxToWallet(t *testing.T) {
 		unownedPrivKey.PubKey().SerializeCompressed(), &chainParams,
 	)
 	require.NoError(t, err)
+	ownedScript := mustPayToAddrScript(ownedAddr)
+	unownedScript := mustPayToAddrScript(unownedAddr)
 
 	// Create a transaction with outputs to both owned and unowned
 	// addresses.
@@ -505,19 +705,18 @@ func TestAddTxToWallet(t *testing.T) {
 		TxOut: []*wire.TxOut{
 			{
 				Value:    10000,
-				PkScript: mustPayToAddrScript(ownedAddr),
+				PkScript: ownedScript,
 			},
 			{
 				Value:    20000,
-				PkScript: mustPayToAddrScript(unownedAddr),
+				PkScript: unownedScript,
 			},
 			{
 				Value:    30000,
-				PkScript: mustPayToAddrScript(ownedAddr),
+				PkScript: ownedScript,
 			},
 		},
 	}
-	txid := tx.TxHash()
 	label := testTxLabel
 
 	t.Run("tx with owned outputs", func(t *testing.T) {
@@ -530,57 +729,30 @@ func TestAddTxToWallet(t *testing.T) {
 		// the wallet to identify these outputs, record the
 		// transaction, and credit the wallet with the new UTXOs.
 		//
-		// Set up the mock for the address store.
-		mockManagedAddr := &bwmock.ManagedAddress{}
-		mockManagedAddr.On("Internal").Return(false)
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, ownedScript),
+		).Return(&db.AddressInfo{ScriptPubKey: ownedScript}, nil).Once()
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, unownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
 
-		errAddrNotFound := waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAddressNotFound,
+		expectedCredits := map[uint32]btcutil.Address{
+			0: ownedAddr,
+			2: ownedAddr,
 		}
-
-		m.addrStore.On("Address",
-			mock.Anything, ownedAddr,
-		).Return(mockManagedAddr, nil)
-		m.addrStore.On("Address",
-			mock.Anything, unownedAddr,
-		).Return(nil, errAddrNotFound)
-
-		// Set up the mocks for the transaction store.
-		m.txStore.On("PutTxLabel",
-			mock.Anything, txid, label,
+		m.store.On("CreateTx", mock.Anything,
+			matchCreateTxParams(w.id, tx, label, expectedCredits),
 		).Return(nil).Once()
-		m.txStore.On("InsertTxCheckIfExists",
-			mock.Anything, mock.Anything,
-			mock.Anything,
-		).Return(false, nil).Once()
-
-		// We expect two credits to be added for the two owned
-		// outputs.
-		m.txStore.On("AddCredit",
-			mock.Anything, mock.Anything,
-			mock.Anything, uint32(0), false,
-		).Return(nil).Once()
-		m.txStore.On("AddCredit",
-			mock.Anything, mock.Anything,
-			mock.Anything, uint32(2), false,
-		).Return(nil).Once()
-		m.addrStore.On("MarkUsed",
-			mock.Anything, ownedAddr,
-		).Return(nil).Twice()
 
 		// Add the transaction to the wallet.
-		ourAddrs, err := w.addTxToWallet(tx, label)
+		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
 		require.NoError(t, err)
 
 		// Check that the returned addresses are correct.
-		require.Len(t, ourAddrs, 2)
+		require.Len(t, ourAddrs, 1)
 		require.Equal(
 			t, ownedAddr.String(),
 			ourAddrs[0].String(),
-		)
-		require.Equal(
-			t, ownedAddr.String(),
-			ourAddrs[1].String(),
 		)
 	})
 
@@ -590,28 +762,81 @@ func TestAddTxToWallet(t *testing.T) {
 		w, m := createStartedWalletWithMocks(t)
 
 		// This test case simulates the scenario where the
-		// transaction has no outputs owned by the wallet. We
-		// expect the wallet to identify this and exit early
-		// without recording the transaction.
+		// transaction has neither outputs nor inputs owned by the
+		// wallet. We expect the wallet to identify this and exit
+		// early without recording the transaction.
 		//
-		// Set up the mock for the address store to own no
+		// Set up the mock for the Store to own no
 		// addresses.
-		errAddrNotFound := waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrAddressNotFound,
-		}
-		m.addrStore.On("Address",
-			mock.Anything, ownedAddr,
-		).Return(nil, errAddrNotFound)
-		m.addrStore.On("Address",
-			mock.Anything, unownedAddr,
-		).Return(nil, errAddrNotFound)
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, ownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, unownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+
+		// With no owned outputs, addTxToWallet falls back to checking
+		// the input side. The single input does not spend a current
+		// wallet UTXO, so GetUtxo reports not-found.
+		m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: tx.TxIn[0].PreviousOutPoint,
+		}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
+
+		// The input's parent is not a wallet transaction either, so it
+		// spends no already-spent wallet output and the tx is genuinely
+		// wallet-unrelated.
+		m.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+			WalletID: w.id,
+			Txid:     tx.TxIn[0].PreviousOutPoint.Hash,
+		}).Return((*db.TxDetailInfo)(nil), db.ErrTxNotFound).Once()
 
 		// Add the transaction to the wallet.
-		ourAddrs, err := w.addTxToWallet(tx, label)
+		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
 		require.NoError(t, err)
 
 		// We expect no addresses to be returned and no calls to the
 		// transaction store.
+		require.Nil(t, ourAddrs)
+	})
+
+	t.Run("sweep tx (owned input, no owned outputs)", func(t *testing.T) {
+		t.Parallel()
+
+		w, m := createStartedWalletWithMocks(t)
+
+		// A sweep pays no wallet-owned outputs but spends a wallet
+		// UTXO, so it must still be recorded (with an empty credit
+		// set) so it can be tracked and later invalidated.
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, ownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+		m.store.On("GetAddress", mock.Anything,
+			matchGetAddressQuery(w.id, unownedScript),
+		).Return(nil, db.ErrAddressNotFound).Once()
+
+		// The single input spends a wallet output, so GetUtxo returns
+		// a UTXO.
+		m.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+			WalletID: w.id,
+			OutPoint: tx.TxIn[0].PreviousOutPoint,
+		}).Return(&db.UtxoInfo{
+			OutPoint: tx.TxIn[0].PreviousOutPoint,
+		}, nil).Once()
+
+		// The tx is recorded with an empty credit map.
+		m.store.On("CreateTx", mock.Anything,
+			matchCreateTxParams(
+				w.id, tx, label,
+				map[uint32]btcutil.Address{},
+			),
+		).Return(nil).Once()
+
+		ourAddrs, err := w.addTxToWallet(t.Context(), tx, label)
+		require.NoError(t, err)
+
+		// A debit-only sweep credits no wallet outputs, so no
+		// addresses are returned even though the tx was recorded.
 		require.Nil(t, ourAddrs)
 	})
 }
@@ -869,23 +1094,13 @@ func TestBroadcastSuccess(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &bwmock.ManagedAddress{}
-	mockManagedAddr.On("Internal").Return(false)
-	m.addrStore.On("Address",
-		mock.Anything, ownedAddr,
-	).Return(mockManagedAddr, nil).Once()
-	m.txStore.On("PutTxLabel",
-		mock.Anything, tx.TxHash(), label,
-	).Return(nil).Once()
-	m.txStore.On("InsertTxCheckIfExists",
-		mock.Anything, mock.Anything, mock.Anything,
-	).Return(false, nil).Once()
-	m.txStore.On("AddCredit",
-		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
-	).Return(nil).Once()
-	m.addrStore.On("MarkUsed",
-		mock.Anything, ownedAddr,
+	m.store.On("GetAddress", mock.Anything,
+		matchGetAddressQuery(w.id, pkScript),
+	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(w.id, tx, label, map[uint32]btcutil.Address{
+			0: ownedAddr,
+		}),
 	).Return(nil).Once()
 
 	// Mock publishTx to succeed.
@@ -947,23 +1162,13 @@ func TestBroadcastPublishFailsRemoveSucceeds(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &bwmock.ManagedAddress{}
-	mockManagedAddr.On("Internal").Return(false)
-	m.addrStore.On("Address",
-		mock.Anything, ownedAddr,
-	).Return(mockManagedAddr, nil).Once()
-	m.txStore.On("PutTxLabel",
-		mock.Anything, tx.TxHash(), label,
-	).Return(nil).Once()
-	m.txStore.On("InsertTxCheckIfExists",
-		mock.Anything, mock.Anything, mock.Anything,
-	).Return(false, nil).Once()
-	m.txStore.On("AddCredit",
-		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
-	).Return(nil).Once()
-	m.addrStore.On("MarkUsed",
-		mock.Anything, ownedAddr,
+	m.store.On("GetAddress", mock.Anything,
+		matchGetAddressQuery(w.id, pkScript),
+	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(w.id, tx, label, map[uint32]btcutil.Address{
+			0: ownedAddr,
+		}),
 	).Return(nil).Once()
 
 	// Mock publishTx to fail.
@@ -1009,27 +1214,13 @@ func TestBroadcastPublishFailsRemoveFails(t *testing.T) {
 		mock.Anything, mock.Anything,
 	).Return([]*btcjson.TestMempoolAcceptResult{{Allowed: true}}, nil)
 
-	// Mock addTxToWallet to succeed.
-	mockManagedAddr := &bwmock.ManagedAddress{}
-	mockManagedAddr.On("Internal").Return(false)
-
-	// Mock addrStore to succeed.
-	m.addrStore.On("Address",
-		mock.Anything, ownedAddr,
-	).Return(mockManagedAddr, nil).Once()
-	m.addrStore.On("MarkUsed",
-		mock.Anything, ownedAddr,
-	).Return(nil).Once()
-
-	// Mock txStore to succeed.
-	m.txStore.On("PutTxLabel",
-		mock.Anything, tx.TxHash(), label,
-	).Return(nil).Once()
-	m.txStore.On("InsertTxCheckIfExists",
-		mock.Anything, mock.Anything, mock.Anything,
-	).Return(false, nil).Once()
-	m.txStore.On("AddCredit",
-		mock.Anything, mock.Anything, mock.Anything, uint32(0), false,
+	m.store.On("GetAddress", mock.Anything,
+		matchGetAddressQuery(w.id, pkScript),
+	).Return(&db.AddressInfo{ScriptPubKey: pkScript}, nil).Once()
+	m.store.On("CreateTx", mock.Anything,
+		matchCreateTxParams(w.id, tx, label, map[uint32]btcutil.Address{
+			0: ownedAddr,
+		}),
 	).Return(nil).Once()
 
 	// Mock publishTx to fail.
