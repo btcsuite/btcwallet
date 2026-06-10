@@ -1727,6 +1727,129 @@ func TestListUTXOsReturnsCurrentWalletOutputs(t *testing.T) {
 	require.Equal(t, txOne.TxHash(), utxos[1].OutPoint.Hash)
 }
 
+// TestUTXOEnrichmentFields verifies that ListUTXOs and GetUtxo populate the
+// UtxoInfo enrichment fields (AccountName, Origin, AddrType, HasScript,
+// IsLocked, KeyScope) from the backing account/address/lease joins. It pairs a
+// positive case (an imported script address with an active lease) against a
+// negative case (a derived address with neither a script nor a lease) so a
+// regression in any join or row-to-UtxoInfo conversion fails the assertions.
+func TestUTXOEnrichmentFields(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	// A watch-only wallet can host an imported script-only address: such an
+	// address carries a persisted encrypted script (so HasScript is true)
+	// but no private key, which the ADR 0012 invariant only permits on a
+	// watch-only wallet.
+	walletID := newWatchOnlyWallet(t, store, "wallet-utxo-enrichment")
+
+	const derivedName = "derived"
+
+	importedName := db.DefaultImportedAccountName
+	scope := db.KeyScopeBIP0084
+
+	// Imported script address: the encrypted script secret drives HasScript,
+	// and its account drives Origin == ImportedAccount.
+	CreateImportedAccount(t, store, walletID, scope, importedName, true)
+
+	importedScript := RandomBytes(32)
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			Scope:           scope,
+			AddressType:     db.WitnessScript,
+			PubKey:          RandomBytes(33),
+			ScriptPubKey:    importedScript,
+			EncryptedScript: RandomBytes(48),
+		},
+	)
+	require.NoError(t, err)
+
+	// Derived address: no script secret, so HasScript stays false and
+	// Origin == DerivedAccount.
+	createDerivedAccount(t, store, walletID, scope, derivedName)
+	derivedAddr := newDerivedAddress(
+		t, store, walletID, scope, derivedName, false,
+	)
+
+	// Record one UTXO under each address.
+	importedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 20000, PkScript: importedScript}},
+	)
+	derivedTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 30000, PkScript: derivedAddr.ScriptPubKey}},
+	)
+
+	for _, tx := range []*wire.MsgTx{importedTx, derivedTx} {
+		err = store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710002000, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		})
+		require.NoError(t, err)
+	}
+
+	importedOutPoint := wire.OutPoint{Hash: importedTx.TxHash(), Index: 0}
+	derivedOutPoint := wire.OutPoint{Hash: derivedTx.TxHash(), Index: 0}
+
+	// Lease only the imported UTXO so IsLocked distinguishes the two rows.
+	_, err = store.LeaseOutput(t.Context(), db.LeaseOutputParams{
+		WalletID: walletID,
+		OutPoint: importedOutPoint,
+		ID:       db.LockID{1},
+		Duration: 30 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	// Index ListUTXOs results by outpoint so assertions don't depend on the
+	// result ordering.
+	utxos, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+	})
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+
+	byOutPoint := make(map[wire.OutPoint]db.UtxoInfo, len(utxos))
+	for _, u := range utxos {
+		byOutPoint[u.OutPoint] = u
+	}
+
+	imported, ok := byOutPoint[importedOutPoint]
+	require.True(t, ok, "imported UTXO missing from ListUTXOs")
+	require.Equal(t, importedName, imported.AccountName)
+	require.Equal(t, db.ImportedAccount, imported.Origin)
+	require.Equal(t, db.WitnessScript, imported.AddrType)
+	require.True(t, imported.HasScript)
+	require.True(t, imported.IsLocked)
+	require.Equal(t, scope, imported.KeyScope)
+
+	derived, ok := byOutPoint[derivedOutPoint]
+	require.True(t, ok, "derived UTXO missing from ListUTXOs")
+	require.Equal(t, derivedName, derived.AccountName)
+	require.Equal(t, db.DerivedAccount, derived.Origin)
+	require.Equal(t, db.WitnessPubKey, derived.AddrType)
+	require.False(t, derived.HasScript)
+	require.False(t, derived.IsLocked)
+	require.Equal(t, scope, derived.KeyScope)
+
+	// GetUtxo surfaces the same enriched view as ListUTXOs.
+	got, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: importedOutPoint,
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.ImportedAccount, got.Origin)
+	require.Equal(t, db.WitnessScript, got.AddrType)
+	require.True(t, got.HasScript)
+	require.True(t, got.IsLocked)
+	require.Equal(t, scope, got.KeyScope)
+}
+
 // TestListUTXOsFiltersByAccount verifies that ListUTXOs applies the optional
 // account filter without affecting the underlying wallet ownership checks.
 func TestListUTXOsFiltersByAccount(t *testing.T) {
