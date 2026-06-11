@@ -29,6 +29,7 @@ import (
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -7207,10 +7208,14 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		syncRetryInterval:   syncRetryInterval,
 	}
 
+	walletID := uint32(0)
+	store := kvdb.NewStore(db, txMgr, addrMgr)
+
 	w := &Wallet{
+		id:               walletID,
 		addrStore:        addrMgr,
-		store:            kvdb.NewStore(db, txMgr, addrMgr),
-		keyVault:         addrMgr,
+		store:            store,
+		keyVault:         keyvault.NewDBVault(store, walletID),
 		txStore:          txMgr,
 		walletDeprecated: deprecated,
 	}

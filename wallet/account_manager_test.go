@@ -68,7 +68,7 @@ func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
 
 	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
 		Return(append([]byte(nil), stub.encryptedSeed...), nil).Once()
-	deps.addrStore.On("Decrypt", waddrmgr.CKTPrivate,
+	deps.vault.On("Decrypt", waddrmgr.CKTPrivate,
 		mock.Anything).Return(
 		append([]byte(nil), stub.plaintextMasterKey...), nil,
 	).Once()
