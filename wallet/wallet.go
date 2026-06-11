@@ -23,8 +23,8 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -169,8 +169,8 @@ const (
 // Config holds the configuration options for creating a new
 // WalletController.
 type Config struct {
-	// DB is the underlying database for the wallet.
-	DB walletdb.DB
+	// DB selects the database backend used by wallet runtime managers.
+	DB DBConfig
 
 	// Chain is the interface to the blockchain (e.g. bitcoind,
 	// neutrino). If set, the wallet will automatically synchronize with
@@ -214,10 +214,6 @@ type Config struct {
 
 // validate checks the configuration for consistency and completeness.
 func (c *Config) validate() error {
-	if c.DB == nil {
-		return fmt.Errorf("%w: DB", ErrMissingParam)
-	}
-
 	if c.Chain == nil {
 		return fmt.Errorf("%w: Chain", ErrMissingParam)
 	}
@@ -233,6 +229,20 @@ func (c *Config) validate() error {
 	if c.RecoveryWindow < MinRecoveryWindow {
 		return fmt.Errorf("%w: RecoveryWindow must be at least %d",
 			ErrInvalidParam, MinRecoveryWindow)
+	}
+
+	// The legacy kvdb compatibility store is always opened for
+	// manager/key paths, so its path is required for every backend.
+	// Validate it first because the default SQLite path is derived from
+	// it: without a kvdb path there is no SQLite path to validate either.
+	err := c.DB.validateLegacyKVDB()
+	if err != nil {
+		return err
+	}
+
+	err = c.DB.Validate()
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -340,6 +350,11 @@ type Wallet struct {
 	// querying the wallet's transaction history and unspent outputs.
 	txStore wtxmgr.TxStore
 
+	// legacyStore is the kvdb compatibility adapter for legacy manager paths.
+	// New wallet code must not open walletdb transactions directly; use
+	// db.Store, keyvault, or kvdb adapter methods instead.
+	legacyStore *kvdb.Store
+
 	// keyVault provides encryption and decryption for wallet key material.
 	keyVault keyvault.Vault
 
@@ -347,6 +362,10 @@ type Wallet struct {
 	//
 	// TODO(yy): Migrate UTXO-related callers behind db.UTXOStore.
 	store db.Store
+
+	// runtimeStoreClose closes stores owned by the modern manager load path.
+	// It is nil for wallets constructed by legacy loader paths.
+	runtimeStoreClose func() error
 
 	// cache is the wallet-private runtime seam between wallet managers and
 	// the durable db.Store. It exposes pass-through reads and absorbs

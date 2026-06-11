@@ -99,6 +99,16 @@ func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore,
 	}
 }
 
+// DB returns the walletdb handle backing the store. It is exposed for the
+// legacy compatibility paths that still need a raw walletdb transaction (e.g.
+// the deprecated passphrase shim), which run identically for kvdb and SQL
+// wallets because the legacy address manager is always kvdb-backed.
+//
+// TODO(yy): Remove once those paths move behind the Store interface.
+func (s *Store) DB() walletdb.DB {
+	return s.db
+}
+
 // CreateStore creates, initializes, and opens a kvdb-backed wallet store.
 func CreateStore(cfg Config, createParams CreateLegacyWalletParams) (
 	*StoreHandle, error) {

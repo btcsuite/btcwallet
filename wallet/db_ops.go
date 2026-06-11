@@ -19,7 +19,9 @@ import (
 func (w *Wallet) DBPutPassphrase(_ context.Context,
 	req ChangePassphraseRequest) error {
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	db := w.legacyStore.DB()
+
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		if req.ChangePublic {

@@ -24,8 +24,6 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/chain/port"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -414,7 +412,7 @@ func setupNewWallet(tb testing.TB, seed []byte, cfg Config) *Wallet {
 	// the database handle after the benchmark subtest.
 	tb.Cleanup(func() {
 		_ = w.Stop(tb.Context())
-		require.NoError(tb, w.cfg.DB.Close())
+		require.NoError(tb, w.closeRuntimeStore())
 	})
 
 	return w
@@ -500,7 +498,7 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 	// Close the template wallet now that we are done with it. This releases
 	// the database lock and resources.
 	_ = templateW.Stop(tb.Context())
-	require.NoError(tb, templateW.cfg.DB.Close())
+	require.NoError(tb, templateW.closeRuntimeStore())
 
 	// Ensure we selected the correct number of targets.
 	require.Len(tb, targetAddrs, numUTXOs,
@@ -794,13 +792,18 @@ func setupChainClient(tb testing.TB, miner *rpctest.Harness) chain.Interface {
 func defaultWalletConfig(tb testing.TB) Config {
 	tb.Helper()
 
-	dir := tb.TempDir()
-	dbPath := filepath.Join(dir, "wallet.db")
-	db, err := walletdb.Create("bdb", dbPath, true, 10*time.Second, false)
-	require.NoError(tb, err)
-
 	return Config{
-		DB:                      db,
+		DB: DBConfig{
+			// Pin the kvdb backend: these benchmarks exercise the
+			// legacy kvdb runtime store, while the default backend
+			// is now SQLite.
+			Backend: DBBackendKVDB,
+			KVDB: KVDBConfig{
+				DBPath:         filepath.Join(tb.TempDir(), "wallet.db"),
+				NoFreelistSync: true,
+				Timeout:        10 * time.Second,
+			},
+		},
 		ChainParams:             &chaincfg.RegressionNetParams,
 		Name:                    "bench-wallet",
 		PubPassphrase:           []byte("public"),

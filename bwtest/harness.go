@@ -11,7 +11,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,8 +39,8 @@ type HarnessTest struct {
 	// passed to wallets under test.
 	ChainClient chain.Interface
 
-	// WalletDB is a wallet database instance created for the current subtest.
-	WalletDB walletdb.DB
+	// WalletDBPath is the wallet database path created for the current subtest.
+	WalletDBPath string
 
 	// dbType is the configured wallet database backend.
 	dbType string
@@ -296,17 +295,10 @@ func (h *HarnessTest) setUpChainClient() {
 	h.ChainClient = chainClient
 }
 
-// setUpWalletDB opens a wallet database for the configured test backend.
+// setUpWalletDB prepares a wallet database path for the configured test backend.
 func (h *HarnessTest) setUpWalletDB() {
 	h.Helper()
 
 	dbDir := h.TempDir()
-	db, cleanup, err := OpenWalletDB(h.dbType, dbDir)
-	require.NoError(h, err, "unable to create wallet db")
-
-	h.Cleanup(func() {
-		require.NoError(h, cleanup(), "failed to close database")
-	})
-
-	h.WalletDB = db
+	h.WalletDBPath = filepath.Join(dbDir, wallet.WalletDBName)
 }

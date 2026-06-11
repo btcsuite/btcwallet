@@ -353,7 +353,24 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 		return err
 	}
 
+	err = w.closeRuntimeStore()
+	if err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// closeRuntimeStore closes the owned runtime store, if one exists.
+func (w *Wallet) closeRuntimeStore() error {
+	if w.runtimeStoreClose == nil {
+		return nil
+	}
+
+	closeFn := w.runtimeStoreClose
+	w.runtimeStoreClose = nil
+
+	return closeFn()
 }
 
 // Unlock unlocks the wallet with a passphrase.
@@ -439,11 +456,12 @@ func (w *Wallet) Info(_ context.Context) (*Info, error) {
 	}
 
 	info := &Info{
-		BirthdayBlock:    w.birthdayBlock,
-		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      w.cfg.ChainParams,
-		Locked:           !w.state.isUnlocked(),
-		Synced:           w.state.isSynced(),
+		BirthdayBlock: w.birthdayBlock,
+		Backend:       w.cfg.Chain.BackEnd(),
+		ChainParams:   w.cfg.ChainParams,
+		Locked:        !w.state.isUnlocked(),
+		Synced:        w.state.isSynced(),
+		//nolint:contextcheck // SyncedTo takes no context.
 		SyncedTo:         w.SyncedTo(),
 		IsRecoveryMode:   w.state.isRecoveryMode(),
 		RecoveryProgress: 0,

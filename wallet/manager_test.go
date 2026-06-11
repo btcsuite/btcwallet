@@ -7,7 +7,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,15 +103,9 @@ func TestManagerCreateSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a fresh test database for this run. We use setupTestDB
-			// which ensures we have a clean slate (empty buckets) to verify
-			// that Create correctly initializes the schema.
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
-
 			m := NewManager()
 			cfg := Config{
-				DB:             db,
+				DB:             testKVDBConfig(t),
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -139,25 +133,20 @@ func TestManagerCreateSuccess(t *testing.T) {
 
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
-				// We can't use w.GetAccount here because the wallet is not
-				// started. We'll verify directly against the address manager.
-				err := walletdb.View(db, func(tx walletdb.ReadTx) error {
-					ns := tx.ReadBucket(waddrmgrNamespaceKey)
-
-					scopeMgr, err := w.addrStore.FetchScopedKeyManager(
-						tc.params.InitialAccounts[0].Scope,
-					)
-					if err != nil {
-						return err
-					}
-
-					_, err = scopeMgr.LookupAccount(
-						ns, tc.params.InitialAccounts[0].Name,
-					)
-
-					return err
-				})
+				info, err := w.cache.GetAccount(
+					t.Context(), db.GetAccountQuery{
+						WalletID: w.id,
+						Scope: db.KeyScope(
+							tc.params.InitialAccounts[0].Scope,
+						),
+						Name: &tc.params.InitialAccounts[0].Name,
+					},
+				)
 				require.NoError(t, err)
+				require.Equal(
+					t, tc.params.InitialAccounts[0].Name,
+					info.AccountName,
+				)
 			}
 		})
 	}
@@ -223,12 +212,9 @@ func TestManagerCreateError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
-
 			m := NewManager()
 			cfg := Config{
-				DB:             db,
+				DB:             testKVDBConfig(t),
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -344,11 +330,11 @@ func TestManagerCreate_InvalidConfig(t *testing.T) {
 	m := NewManager()
 
 	// Call Create with an empty Config struct. This should fail because
-	// required fields like DB and ChainParams are missing.
+	// required fields like Chain and ChainParams are missing.
 	w, err := m.Create(Config{}, CreateWalletParams{})
 
 	require.ErrorIs(t, err, ErrMissingParam)
-	require.ErrorContains(t, err, "DB")
+	require.ErrorContains(t, err, "Chain")
 	require.Nil(t, w)
 }
 
@@ -357,14 +343,9 @@ func TestManagerCreate_InvalidConfig(t *testing.T) {
 func TestManagerLoadSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Initialize a database and create a wallet to serve as our existing
-	// state.
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
 	m := NewManager()
 	cfg := Config{
-		DB:             db,
+		DB:             testKVDBConfig(t),
 		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
@@ -411,12 +392,9 @@ func TestManagerLoadSuccess(t *testing.T) {
 func TestManagerLoad_ExistingWallet(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
 	m := NewManager()
 	cfg := Config{
-		DB:             db,
+		DB:             testKVDBConfig(t),
 		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
@@ -462,12 +440,9 @@ func TestManagerLoadError(t *testing.T) {
 	t.Run("Uninitialized DB", func(t *testing.T) {
 		t.Parallel()
 
-		db, cleanup := setupTestDB(t)
-		t.Cleanup(cleanup)
-
 		m := NewManager()
 		cfg := Config{
-			DB:          db,
+			DB:          testKVDBConfig(t),
 			Chain:       &bwmock.Chain{},
 			ChainParams: &chainParams,
 			Name:        "test",

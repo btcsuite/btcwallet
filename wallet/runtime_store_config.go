@@ -74,6 +74,8 @@ type DBConfig struct {
 
 // Validate checks that the runtime store configuration is internally
 // consistent. It does not open any database connections.
+//
+//nolint:cyclop // One validation switch over the backend enum is clearest here.
 func (c DBConfig) Validate() error {
 	c = c.withDefaults()
 

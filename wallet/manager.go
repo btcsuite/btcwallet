@@ -10,7 +10,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 )
 
@@ -201,6 +200,76 @@ func NewManager() *Manager {
 	}
 }
 
+// createLegacyStore creates the legacy kvdb compatibility store for a new
+// wallet.
+func createLegacyStore(cfg Config, params CreateWalletParams,
+	rootKey *hdkeychain.ExtendedKey) error {
+
+	createParams := kvdb.CreateLegacyWalletParams{
+		RootKey:           rootKey,
+		PubPassphrase:     params.PubPassphrase,
+		PrivatePassphrase: params.PrivatePassphrase,
+		ChainParams:       cfg.ChainParams,
+		Birthday:          params.Birthday,
+	}
+
+	legacyStore, err := kvdb.CreateStore(
+		legacyKVDBConfig(cfg), createParams,
+	)
+	if err != nil {
+		return fmt.Errorf("create legacy store: %w", err)
+	}
+
+	err = legacyStore.Close()
+	if err != nil {
+		return fmt.Errorf("close legacy store: %w", err)
+	}
+
+	return nil
+}
+
+// openLegacyStore opens the legacy kvdb compatibility store for an existing
+// wallet.
+func openLegacyStore(cfg Config) (*kvdb.StoreHandle, error) {
+	openParams := kvdb.OpenStoreParams{
+		PubPassphrase: cfg.PubPassphrase,
+		ChainParams:   cfg.ChainParams,
+	}
+
+	store, err := kvdb.OpenStore(legacyKVDBConfig(cfg), openParams)
+	if err != nil {
+		return nil, fmt.Errorf("open legacy store: %w", err)
+	}
+
+	return store, nil
+}
+
+// closeRuntimeStores returns a closer for all stores owned by a loaded wallet.
+func closeRuntimeStores(runtimeStore *runtimeStoreHandle,
+	legacyStore *kvdb.StoreHandle) func() error {
+
+	return func() error {
+		return errors.Join(runtimeStore.close(), legacyStore.Close())
+	}
+}
+
+// closeStoresAfterError closes stores opened during wallet load while
+// preserving err as the primary failure.
+func closeStoresAfterError(err error, runtimeStore *runtimeStoreHandle,
+	legacyStore *kvdb.StoreHandle) error {
+
+	var closeErr error
+	if runtimeStore != nil {
+		closeErr = errors.Join(closeErr, runtimeStore.close())
+	}
+
+	if legacyStore != nil {
+		closeErr = errors.Join(closeErr, legacyStore.Close())
+	}
+
+	return errors.Join(err, closeErr)
+}
+
 // String returns a summary of the active wallets managed by the Manager.
 func (m *Manager) String() string {
 	m.RLock()
@@ -237,16 +306,17 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	// Create the underlying database structure.
-	err = kvdb.CreateLegacyWallet(cfg.DB, kvdb.CreateLegacyWalletParams{
-		RootKey:           rootKey,
-		PubPassphrase:     params.PubPassphrase,
-		PrivatePassphrase: params.PrivatePassphrase,
-		ChainParams:       cfg.ChainParams,
-		Birthday:          params.Birthday,
-	})
+	// Create the underlying legacy compatibility store structure.
+	err = createLegacyStore(cfg, params, rootKey)
 	if err != nil {
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
+	}
+
+	err = createRuntimeWallet(
+		context.Background(), cfg, params, rootKey,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	// Load the newly created wallet.
@@ -305,17 +375,10 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return existingW, nil
 	}
 
-	addrMgr, txMgr, err := kvdb.LoadLegacyWallet(
-		cfg.DB, cfg.PubPassphrase, cfg.ChainParams,
-	)
+	legacyStore, err := openLegacyStore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("load legacy wallet: %w", err)
 	}
-
-	// TODO(yy): Once Wallet.store includes wallet metadata accessors such as
-	// WalletStore.GetWallet, load the runtime wallet ID from that store
-	// instead of using the legacy single-wallet default.
-	walletID := uint32(0)
 
 	// Apply the safe default for auto-lock duration if not specified.
 	if cfg.AutoLockDuration == 0 {
@@ -330,42 +393,60 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		<-lockTimer.C
 	}
 
-	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
-	vault := kvdb.NewLegacyManagerVault(cfg.DB, addrMgr)
-
-	// Cache the wallet's master HD fingerprint up-front, before any
-	// context/cancel is set up so an error here doesn't leak a
-	// cancellable context. The master public key is public wallet metadata,
-	// so it is read through the Store rather than a direct database
-	// transaction.
-	masterFingerprint, err := resolveMasterFingerprint(
-		context.Background(), store, cfg.Name,
+	runtimeStore, err := runtimeStoreFactory(
+		context.Background(), cfg, legacyStore,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("cache master fingerprint: %w", err)
+		return nil, closeStoresAfterError(err, nil, legacyStore)
 	}
+
+	store := runtimeStore.store
+	vault := kvdb.NewLegacyManagerVault(
+		legacyStore.DB, legacyStore.AddrStore,
+	)
+
+	// Cache the wallet's master HD fingerprint up-front, before any
+	// context/cancel is set up so an error here doesn't leak a cancellable
+	// context. The master public key is public wallet metadata from the
+	// selected runtime store.
+	masterFingerprint, err := runtimeStore.masterFingerprint()
+	if err != nil {
+		err = fmt.Errorf("cache master fingerprint: %w", err)
+		return nil, closeStoresAfterError(err, runtimeStore, legacyStore)
+	}
+
+	walletID := runtimeStore.walletInfo.ID
+	isWatchOnly := legacyStore.AddrStore.WatchOnly()
+
+	if cfg.DB.withDefaults().Backend != DBBackendKVDB {
+		isWatchOnly = runtimeStore.walletInfo.IsWatchOnly
+	}
+
+	runtimeStoreClose := closeRuntimeStores(runtimeStore, legacyStore)
 
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
 	w := &Wallet{
 		cfg:               cfg,
 		id:                walletID,
-		addrStore:         addrMgr,
+		addrStore:         legacyStore.AddrStore,
+		legacyStore:       legacyStore.Store,
 		store:             store,
+		runtimeStoreClose: runtimeStoreClose,
 		cache:             newStoreRuntimeCache(store),
 		keyVault:          vault,
-		txStore:           txMgr,
+		txStore:           legacyStore.TxStore,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,
 		cancel:            cancel,
 		lockTimer:         lockTimer,
 		masterFingerprint: masterFingerprint,
-		isWatchOnly:       addrMgr.WatchOnly(),
+		isWatchOnly:       isWatchOnly,
 	}
 
-	w.sync = newSyncer(
-		cfg, w.addrStore, w.txStore, w, w.store, w.id,
-	)
+	syncer := newSyncer(cfg, w.addrStore, w.txStore, w, w.store, w.id)
+	syncer.legacyStore = legacyStore.Store
+	w.sync = syncer
 	w.state = newWalletState(w.sync)
 
 	// Register the wallet.
@@ -374,37 +455,6 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	m.Unlock()
 
 	return w, nil
-}
-
-// resolveMasterFingerprint reads the wallet's persisted master HD public key
-// through the Store, parses it, and returns its BIP32 fingerprint. Shell,
-// watch-only, and pre-master-key wallets have no pubkey persisted, so the
-// fingerprint is zero.
-func resolveMasterFingerprint(ctx context.Context, store db.Store,
-	name string) (uint32, error) {
-
-	info, err := store.GetWallet(ctx, name)
-	if err != nil {
-		return 0, fmt.Errorf("get wallet: %w", err)
-	}
-
-	// Shell / watch-only / pre-master-key wallets persist no master HD
-	// public key, so the fingerprint stays zero.
-	if len(info.MasterPubKey) == 0 {
-		return 0, nil
-	}
-
-	extKey, err := hdkeychain.NewKeyFromString(string(info.MasterPubKey))
-	if err != nil {
-		return 0, fmt.Errorf("parse master HD pubkey: %w", err)
-	}
-
-	mfp, err := masterKeyFingerprint(extKey)
-	if err != nil {
-		return 0, fmt.Errorf("master fingerprint: %w", err)
-	}
-
-	return mfp, nil
 }
 
 // prepareWalletCreation validates the configuration and parameters, and derives

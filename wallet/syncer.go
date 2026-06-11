@@ -65,6 +65,12 @@ var (
 	// ErrNoScanTargets is returned when a targeted rescan is requested with
 	// no targets.
 	ErrNoScanTargets = errors.New("at least one target must be specified")
+
+	// errUnexpectedScanTargetCount is returned when the legacy manager
+	// resolves a single scan target to a number of results other than one.
+	errUnexpectedScanTargetCount = errors.New(
+		"unexpected resolved scan target count",
+	)
 )
 
 const (
@@ -230,6 +236,9 @@ type syncer struct {
 
 	// txStore is the transaction manager.
 	txStore wtxmgr.TxStore
+
+	// legacyStore is the kvdb adapter for legacy identity lookups.
+	legacyStore *kvdb.Store
 
 	// store is the transitional database store used by migrated runtime paths.
 	store db.Store
@@ -2113,14 +2122,14 @@ func (s *syncer) storeAccountRecoveryNumber(info db.AccountInfo,
 // non-masked waddrmgr account number so RecoveryState can derive lookahead
 // addresses without colliding with the default account at number 0.
 func (s *syncer) lookupStoreAccountNumber(info db.AccountInfo) (uint32, error) {
-	if s.cfg.DB == nil || s.addrStore == nil {
+	if s.legacyStore == nil || s.addrStore == nil {
 		return 0, fmt.Errorf("lookup scan account %q: %w",
 			info.AccountName, errMissingLegacyAddressManager)
 	}
 
 	var account uint32
 
-	err := walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
+	err := walletdb.View(s.legacyStore.DB(), func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
@@ -2415,35 +2424,104 @@ func (s *syncer) loadTargetedScanData(ctx context.Context,
 
 // resolveScanTargets converts the public AccountScope rescan targets into the
 // internal, identity-aware scanTargets used by the Store path. It resolves each
-// target once through the legacy address manager, which still keys accounts by
-// their non-masked number and is therefore the only backend that can
-// disambiguate an imported-xpub account from the default derived account before
-// the Store (which masks imported numbers to 0) is consulted.
+// target's durable account name through the Store so an account that exists
+// only in the Store -- a derived account created through CreateDerivedAccount
+// but never written to the legacy address manager -- still resolves, where the
+// legacy-only resolution returned ErrAccountNotFound.
 //
 // The keyless legacy imported-address bucket is carried through with an empty
 // AccountName so storeScanHorizons skips it before any lookup; every other
 // target carries the durable AccountName resolved here so Store horizon loading
 // can key on the name instead of the maskable number.
-func (s *syncer) resolveScanTargets(_ context.Context,
+func (s *syncer) resolveScanTargets(ctx context.Context,
 	targets []waddrmgr.AccountScope) ([]scanTarget, error) {
 
-	legacyTargets, err := kvdb.ResolveScanTargets(
-		s.cfg.DB, s.addrStore, targets,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("resolve scan targets: %w", err)
-	}
+	resolved := make([]scanTarget, 0, len(targets))
+	for _, target := range targets {
+		t, err := s.resolveScanTarget(ctx, target)
+		if err != nil {
+			return nil, fmt.Errorf("resolve scan targets: %w", err)
+		}
 
-	resolved := make([]scanTarget, 0, len(legacyTargets))
-	for _, target := range legacyTargets {
-		resolved = append(resolved, scanTarget{
-			Scope:       target.Scope,
-			Account:     target.Account,
-			AccountName: target.AccountName,
-		})
+		resolved = append(resolved, t)
 	}
 
 	return resolved, nil
+}
+
+// resolveScanTarget resolves a single public rescan target into its
+// identity-aware scanTarget through the Store.
+func (s *syncer) resolveScanTarget(ctx context.Context,
+	target waddrmgr.AccountScope) (scanTarget, error) {
+
+	// The keyless legacy imported-address bucket has no account row and no
+	// durable name, so it is carried through unresolved; storeScanHorizons
+	// skips it before issuing any lookup.
+	if target.Account == waddrmgr.ImportedAddrAccount {
+		return scanTarget{
+			Scope:   target.Scope,
+			Account: target.Account,
+		}, nil
+	}
+
+	account := target.Account
+
+	info, err := s.store.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:      s.walletID,
+		Scope:         db.KeyScope(target.Scope),
+		AccountNumber: &account,
+		SkipBalance:   true,
+	})
+	if err == nil {
+		return scanTarget{
+			Scope:       target.Scope,
+			Account:     target.Account,
+			AccountName: info.AccountName,
+		}, nil
+	}
+
+	// The Store rejects a by-number lookup of an imported account because it
+	// masks every imported account's number to 0; an imported-xpub target
+	// addressed by its non-masked number therefore surfaces as not-found.
+	// Such a target is, by construction, present in the identity-aware
+	// address manager (it has a non-masked number to be addressed by), so
+	// fall back to resolving its durable name there. Any other failure --
+	// including a genuinely unknown account in both backends -- is returned.
+	if !errors.Is(err, db.ErrAccountNotFound) {
+		return scanTarget{}, fmt.Errorf("resolve scan target "+
+			"account: %w", err)
+	}
+
+	return s.resolveScanTargetByManager(target)
+}
+
+// resolveScanTargetByManager resolves a target's durable name through the
+// identity-aware address manager. It is the fallback for an imported-xpub
+// target addressed by its non-masked number, which the Store cannot resolve by
+// number because it masks imported account numbers to 0. The manager keys every
+// account by its non-masked number, so it disambiguates the imported account
+// from the default derived account that shares the masked number 0.
+func (s *syncer) resolveScanTargetByManager(
+	target waddrmgr.AccountScope) (scanTarget, error) {
+
+	managerTargets, err := s.legacyStore.ResolveScanTargets(
+		s.addrStore, []waddrmgr.AccountScope{target},
+	)
+	if err != nil {
+		return scanTarget{}, fmt.Errorf("resolve scan target via "+
+			"manager: %w", err)
+	}
+
+	if len(managerTargets) != 1 {
+		return scanTarget{}, fmt.Errorf("%w: got %d, want 1",
+			errUnexpectedScanTargetCount, len(managerTargets))
+	}
+
+	return scanTarget{
+		Scope:       managerTargets[0].Scope,
+		Account:     managerTargets[0].Account,
+		AccountName: managerTargets[0].AccountName,
+	}, nil
 }
 
 // loadWalletScanData retrieves all necessary data from the database to
