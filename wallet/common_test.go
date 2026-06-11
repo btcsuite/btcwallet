@@ -97,6 +97,7 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
 	addrStore      *bwmock.AddrStore
+	vault          *walletmock.Vault
 	store          *walletmock.Store
 	txStore        *bwmock.TxStore
 	syncer         *mockChainSyncer
@@ -117,6 +118,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Cleanup(cleanup)
 
 	mockAddrStore := &bwmock.AddrStore{}
+	mockVault := &walletmock.Vault{}
 	mockStore := &walletmock.Store{}
 	mockTxStore := &bwmock.TxStore{}
 	mockSyncer := &mockChainSyncer{}
@@ -132,7 +134,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		addrStore:   mockAddrStore,
 		store:       mockStore,
 		txStore:     mockTxStore,
-		keyVault:    mockAddrStore,
+		keyVault:    mockVault,
 		sync:        mockSyncer,
 		state:       newWalletState(mockSyncer),
 		lifetimeCtx: ctx,
@@ -155,6 +157,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 
 	deps := &mockWalletDeps{
 		addrStore:      mockAddrStore,
+		vault:          mockVault,
 		store:          mockStore,
 		txStore:        mockTxStore,
 		syncer:         mockSyncer,
@@ -167,11 +170,13 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 
 	t.Cleanup(func() {
 		mockAddrStore.AssertExpectations(t)
+		mockVault.AssertExpectations(t)
 		mockStore.AssertExpectations(t)
 		mockTxStore.AssertExpectations(t)
 		mockSyncer.AssertExpectations(t)
 		mockChain.AssertExpectations(t)
 		mockAddr.AssertExpectations(t)
+		mockVault.AssertExpectations(t)
 		mockAccountManager.AssertExpectations(t)
 		mockPubKeyAddr.AssertExpectations(t)
 		mockTaprootAddr.AssertExpectations(t)
