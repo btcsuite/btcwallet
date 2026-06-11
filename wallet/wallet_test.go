@@ -54,7 +54,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				DB:             db,
+				DB:             testDBConfig(db),
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -64,7 +64,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "invalid RecoveryWindow",
 			config: Config{
-				DB:             db,
+				DB:             testDBConfig(db),
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -73,19 +73,19 @@ func TestConfigValidate(t *testing.T) {
 			expectedErr: "RecoveryWindow",
 		},
 		{
-			name: "missing DB",
+			name: "missing KVDB DBPath",
 			config: Config{
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
 			},
-			expectedErr: "DB",
+			expectedErr: "DB.KVDB.DBPath",
 		},
 		{
 			name: "missing Chain",
 			config: Config{
-				DB:             db,
+				DB:             testDBConfig(db),
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -95,7 +95,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing ChainParams",
 			config: Config{
-				DB:             db,
+				DB:             testDBConfig(db),
 				Chain:          &bwmock.Chain{},
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -105,7 +105,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing Name",
 			config: Config{
-				DB:             db,
+				DB:             testDBConfig(db),
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				RecoveryWindow: MinRecoveryWindow,

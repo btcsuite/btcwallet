@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -300,16 +301,21 @@ func setupBenchmarkWallet(tb testing.TB,
 
 	// Backfill Config and State for benchmarks comparing new APIs.
 	// Legacy testWallet does not populate these.
-	if w.cfg.DB == nil {
+	if w.legacyStore == nil {
+		w.legacyStore = kvdb.NewStore(w.db, w.txStore, w.addrStore)
 		w.cfg = Config{
-			DB:          w.db,
+			DB:          testDBConfig(w.db),
 			ChainParams: w.chainParams,
 			Chain:       w.chainClient,
 		}
 	}
 
 	if w.sync == nil {
-		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w, w.store, w.id)
+		syncer := newSyncer(
+			w.cfg, w.addrStore, w.txStore, w, w.store, w.id,
+		)
+		syncer.legacyStore = w.legacyStore
+		w.sync = syncer
 	}
 
 	require.NotNil(tb, w.store)
@@ -378,7 +384,7 @@ func setSyncedToHeight(tb testing.TB, w *Wallet, height int32,
 
 	tb.Helper()
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		return w.addrStore.SetSyncedTo(addrmgrNs, &waddrmgr.BlockStamp{
@@ -398,7 +404,7 @@ func createTestAccounts(tb testing.TB, w *Wallet, scopes []waddrmgr.KeyScope,
 
 	var allAddresses []waddrmgr.ManagedAddress
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		// Distribute accounts across the specified key scopes.
 		accountsPerScope := numAccounts / len(scopes)
 		remainder := numAccounts % len(scopes)
@@ -499,7 +505,7 @@ func createTestWalletTxs(tb testing.TB, w *Wallet,
 		highestBlockMeta wtxmgr.BlockMeta
 	)
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 		msgTx := TstTx.MsgTx()
@@ -803,7 +809,7 @@ func getTestAddress(tb testing.TB, w *Wallet, numAccounts int) address.Address {
 func markAddressAsUsed(b *testing.B, w *Wallet, addr address.Address) {
 	b.Helper()
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		manager, err := w.addrStore.FetchScopedKeyManager(
@@ -1080,7 +1086,7 @@ func getUtxoDeprecated(w *Wallet, prevOut wire.OutPoint) (*Utxo, error) {
 		addrType  waddrmgr.AddressType
 	)
 
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		spendable, account, addrType = w.addrStore.AddressDetails(
 			addrmgrNs, addr,

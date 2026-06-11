@@ -391,7 +391,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 			if dbtx == nil {
 				var err error
 
-				dbtx, err = w.cfg.DB.BeginReadTx()
+				dbtx, err = w.db.BeginReadTx()
 				if err != nil {
 					return nil, err
 				}
@@ -424,7 +424,7 @@ func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*address.AddressScriptHa
 
 	var p2shAddr *address.AddressScriptHash
 
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
+	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// TODO(oga) blockstamp current block?
@@ -7208,15 +7208,25 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	walletID := uint32(0)
-	store := kvdb.NewStore(db, txMgr, addrMgr)
+	legacyStore := kvdb.NewStore(db, txMgr, addrMgr)
 
 	w := &Wallet{
 		id:               walletID,
 		addrStore:        addrMgr,
-		store:            store,
+		legacyStore:      legacyStore,
+		store:            legacyStore,
 		keyVault:         kvdb.NewLegacyManagerVault(db, addrMgr),
 		txStore:          txMgr,
 		walletDeprecated: deprecated,
+
+		// This deprecated constructor wires the kvdb store directly, so
+		// pin the kvdb backend explicitly. The runtime store now
+		// defaults to SQLite, and the backend-dependent legacy paths
+		// (e.g. storeSyncedTo, import mirroring) must keep treating a
+		// wallet opened here as kvdb.
+		cfg: Config{
+			DB: DBConfig{Backend: DBBackendKVDB},
+		},
 	}
 
 	w.NtfnServer = newNotificationServer(w)

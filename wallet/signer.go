@@ -16,7 +16,6 @@ import (
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
@@ -515,8 +514,8 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 			err)
 	}
 
-	addr, err := kvdb.DeriveManagedAddress(
-		w.cfg.DB, manager, path.DerivationPath,
+	addr, err := w.legacyStore.DeriveManagedAddress(
+		manager, path.DerivationPath,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("derive managed address: %w", err)
@@ -798,7 +797,7 @@ func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
 func (w *Wallet) loadManagedPubKeyAddr(addr address.Address) (
 	waddrmgr.ManagedPubKeyAddress, error) {
 
-	managedAddr, err := kvdb.LoadManagedAddress(w.cfg.DB, w.addrStore, addr)
+	managedAddr, err := w.legacyStore.LoadManagedAddress(w.addrStore, addr)
 	if err != nil {
 		return nil, fmt.Errorf("load managed address: %w", err)
 	}
@@ -908,8 +907,8 @@ func (w *Wallet) resolveDerivedPathPrivKey(ctx context.Context,
 func (w *Wallet) resolveDerivedPrivKey(accountManager waddrmgr.AccountStore,
 	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
-	privKey, err := kvdb.ResolveDerivedPrivKey(
-		w.cfg.DB, accountManager, derivationPath,
+	privKey, err := w.legacyStore.ResolveDerivedPrivKey(
+		accountManager, derivationPath,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve derived priv key: %w", err)
@@ -1201,7 +1200,7 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 		return nil, err
 	}
 
-	managedAddr, err := kvdb.LoadManagedAddress(w.cfg.DB, w.addrStore, a)
+	managedAddr, err := w.legacyStore.LoadManagedAddress(w.addrStore, a)
 	if err != nil {
 		return nil, fmt.Errorf("load managed address: %w", err)
 	}

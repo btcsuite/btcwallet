@@ -483,7 +483,8 @@ func TestScanBatchWithCFilters(t *testing.T) {
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, nil, nil, mockPublisher,
+		Config{Chain: mockChain, DB: testDBConfig(dbConn)}, nil, nil,
+		mockPublisher,
 		&walletmock.Store{}, 0,
 	)
 
@@ -2045,11 +2046,11 @@ func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
 	// Arrange: a real store-backed syncer with the default derived account at
 	// number 0 and an imported-xpub account whose Store AccountNumber is
 	// masked but whose waddrmgr account number is distinct.
-	s, mgr := newStoreScanSyncer(t)
+	s, mgr, dbConn := newStoreScanSyncer(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
 	importedNumber := createImportedXpubAccount(
-		t, s, mgr, scope, "imported-xpub",
+		t, s, mgr, dbConn, scope, "imported-xpub",
 	)
 
 	// Act: load all scan horizons from the store.
@@ -2082,7 +2083,9 @@ func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
 // the same way production identity resolution does. The legacy manager is the
 // identity-aware backend the Store path consults before its own masked
 // lookups, so a real one is required to exercise resolveScanTargets.
-func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
+func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager,
+	walletdb.DB) {
+
 	t.Helper()
 
 	dbConn, cleanup := setupTestDB(t)
@@ -2152,11 +2155,15 @@ func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
 
 	store := kvdb.NewStore(dbConn, txStore, mgr)
 	s := newSyncer(
-		Config{DB: dbConn, ChainParams: &chaincfg.SimNetParams}, mgr,
+		Config{
+			DB:          testDBConfig(dbConn),
+			ChainParams: &chaincfg.SimNetParams,
+		}, mgr,
 		txStore, &mockTxPublisher{}, store, 0,
 	)
+	s.legacyStore = store
 
-	return s, mgr
+	return s, mgr, dbConn
 }
 
 // createImportedXpubAccount imports a watch-only xpub account into the real
@@ -2165,7 +2172,7 @@ func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
 // tests need the internal number to address the imported account distinctly
 // from the default derived account that also owns number 0.
 func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
-	scope waddrmgr.KeyScope, name string) uint32 {
+	dbConn walletdb.DB, scope waddrmgr.KeyScope, name string) uint32 {
 
 	t.Helper()
 
@@ -2190,7 +2197,7 @@ func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
 
 	var internalNumber uint32
 
-	err = walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		internalNumber, err = scopedMgr.LookupAccount(ns, name)
@@ -2213,7 +2220,7 @@ func TestStoreScanHorizonsTargetedImportedBucketSkipped(t *testing.T) {
 
 	// Arrange: a store-backed syncer over a real manager and a single target
 	// for the keyless imported-address bucket.
-	s, _ := newStoreScanSyncer(t)
+	s, _, _ := newStoreScanSyncer(t)
 
 	targets := []waddrmgr.AccountScope{{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -2244,11 +2251,11 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 
 	// Arrange: a real-backend syncer with the auto-created default derived
 	// account at number 0 and an imported-xpub account masked to number 0.
-	s, mgr := newStoreScanSyncer(t)
+	s, mgr, dbConn := newStoreScanSyncer(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
 	importedNumber := createImportedXpubAccount(
-		t, s, mgr, scope, "imported-xpub",
+		t, s, mgr, dbConn, scope, "imported-xpub",
 	)
 
 	// The imported account's internal number must differ from the default
@@ -2324,6 +2331,61 @@ func expectImportedScanAddressPages(store *walletmock.Store, walletID uint32,
 			store, walletID, scope, results[scope],
 		)
 	}
+}
+
+// TestResolveScanTargetsStoreOnlyAccount verifies that a targeted rescan
+// resolves an account that exists only in the Store. Such an account is created
+// through the Store (CreateDerivedAccount) but is absent from the legacy
+// address manager, so the legacy-only resolution returned ErrAccountNotFound.
+// Resolving through the Store keys on the account's durable name reported by
+// the Store.
+func TestResolveScanTargetsStoreOnlyAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real-backend syncer whose legacy manager holds only the
+	// auto-created default account, then swap in a Store that reports an
+	// additional derived account the manager never received.
+	s, _, _ := newStoreScanSyncer(t)
+
+	store := &walletmock.Store{}
+	s.store = store
+
+	const (
+		storeOnlyNumber uint32 = 7
+		storeOnlyName          = "store-only"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// The Store resolves the by-number lookup to the durable name; the legacy
+	// manager has no such account, so the pre-fix legacy-only resolution would
+	// fail here.
+	number := storeOnlyNumber
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == 0 &&
+				query.Scope == db.KeyScope(scope) &&
+				query.AccountNumber != nil &&
+				*query.AccountNumber == storeOnlyNumber &&
+				query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{
+		AccountNumber: &number,
+		AccountName:   storeOnlyName,
+	}, nil).Once()
+
+	// Act: resolve a target for the Store-only account.
+	resolved, err := s.resolveScanTargets(t.Context(),
+		[]waddrmgr.AccountScope{{Scope: scope, Account: storeOnlyNumber}},
+	)
+
+	// Assert: the target resolves to its durable Store name and number.
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, scope, resolved[0].Scope)
+	require.Equal(t, storeOnlyNumber, resolved[0].Account)
+	require.Equal(t, storeOnlyName, resolved[0].AccountName)
+	store.AssertExpectations(t)
 }
 
 // TestStoreScanAddresses verifies scan address reads use paginated store
@@ -2506,9 +2568,10 @@ func TestStoreScanAddressesIncludesActiveRawImportScope(t *testing.T) {
 	defer cleanup()
 
 	s := newSyncer(
-		Config{DB: dbConn, ChainParams: &chainParams}, mockAddrStore,
-		nil, &mockTxPublisher{}, store, walletID,
+		Config{DB: testDBConfig(dbConn), ChainParams: &chainParams},
+		mockAddrStore, nil, &mockTxPublisher{}, store, walletID,
 	)
+	s.legacyStore = kvdb.NewStore(dbConn, nil, mockAddrStore)
 
 	customScope := db.KeyScope{Purpose: 1018, Coin: 0}
 	scopedMgr.On("Scope").Return(waddrmgr.KeyScope(customScope)).Once()
@@ -2843,9 +2906,6 @@ func TestHandleScanReq(t *testing.T) {
 
 	// Arrange: Initialize a store-backed syncer and mocks to test handling
 	// of different scan request types.
-	dbConn, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
 	mockAddrStore := &bwmock.AddrStore{}
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
@@ -2853,7 +2913,7 @@ func TestHandleScanReq(t *testing.T) {
 	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{DB: dbConn, Chain: mockChain}, mockAddrStore,
+		Config{Chain: mockChain}, mockAddrStore,
 		mockTxStore, mockPublisher,
 		store, 0,
 	)
@@ -2898,7 +2958,7 @@ func TestHandleScanReq(t *testing.T) {
 	// syncer is used so resolveScanTargets resolves the target to its
 	// durable name through the manager and the targeted scan reads and
 	// writes through the real Store.
-	sTargeted, _ := newStoreScanSyncer(t)
+	sTargeted, _, _ := newStoreScanSyncer(t)
 
 	mockChain = &bwmock.Chain{}
 	sTargeted.cfg.Chain = mockChain
@@ -4131,7 +4191,7 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	// targeted default account to its durable name through the manager, and
 	// storeScanHorizons loads its horizon by that name. The targeted scan
 	// then returns an empty block batch.
-	s, _ := newStoreScanSyncer(t)
+	s, _, _ := newStoreScanSyncer(t)
 
 	mockChain := &bwmock.Chain{}
 	defer mockChain.AssertExpectations(t)
@@ -4248,7 +4308,7 @@ func TestScanBatchWithFullBlocks_ProcessError(t *testing.T) {
 
 	mockChain := &bwmock.Chain{}
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, nil, nil, nil,
+		Config{Chain: mockChain, DB: testDBConfig(db)}, nil, nil, nil,
 		&walletmock.Store{}, 0,
 	)
 
@@ -4400,7 +4460,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		// Arrange: a real-backend syncer where GetBestBlock fails after
 		// the targeted scan state has loaded through the Store.
-		s, _ := newStoreScanSyncer(t)
+		s, _, _ := newStoreScanSyncer(t)
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4429,7 +4489,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		// Arrange: a real-backend syncer where GetBlockHashes fails after
 		// the targeted scan state has loaded through the Store.
-		s, _ := newStoreScanSyncer(t)
+		s, _, _ := newStoreScanSyncer(t)
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4464,7 +4524,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		// every non-imported target's durable name up front through the
 		// manager, so the unknown scope fails there -- before any Store
 		// horizon lookup.
-		s, _ := newStoreScanSyncer(t)
+		s, _, _ := newStoreScanSyncer(t)
 
 		targets := []waddrmgr.AccountScope{{
 			Scope:   waddrmgr.KeyScope{Purpose: 99, Coin: 0},
@@ -5193,7 +5253,7 @@ func TestScanBatchWithCFilters_HorizonExpansion(t *testing.T) {
 	defer cleanup()
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, addrStore, nil, nil,
+		Config{Chain: mockChain, DB: testDBConfig(db)}, addrStore, nil, nil,
 		&walletmock.Store{}, 0,
 	)
 

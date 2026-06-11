@@ -18,10 +18,9 @@ import (
 func TestCreateLegacyWallet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet with a fresh database.
-	// Note: createTestWalletWithMocks creates the top-level buckets, but
-	// they are empty. CreateLegacyWallet will populate them.
-	w, _ := createTestWalletWithMocks(t)
+	// Arrange: Create a fresh database with empty top-level buckets.
+	dbConn, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
 
 	params := CreateWalletParams{
 		PubPassphrase:     []byte("public"),
@@ -30,10 +29,10 @@ func TestCreateLegacyWallet(t *testing.T) {
 	}
 
 	// Act: Initialize the wallet database.
-	err := kvdb.CreateLegacyWallet(w.cfg.DB, kvdb.CreateLegacyWalletParams{
+	err := kvdb.CreateLegacyWallet(dbConn, kvdb.CreateLegacyWalletParams{
 		PubPassphrase:     params.PubPassphrase,
 		PrivatePassphrase: params.PrivatePassphrase,
-		ChainParams:       w.cfg.ChainParams,
+		ChainParams:       &chainParams,
 		Birthday:          params.Birthday,
 	})
 
@@ -42,12 +41,12 @@ func TestCreateLegacyWallet(t *testing.T) {
 
 	// Verify that the address manager and transaction manager can be
 	// opened, indicating successful initialization.
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		require.NotNil(t, addrmgrNs)
 
 		_, err := waddrmgr.Open(
-			addrmgrNs, params.PubPassphrase, w.cfg.ChainParams,
+			addrmgrNs, params.PubPassphrase, &chainParams,
 		)
 		if err != nil {
 			return err
@@ -56,7 +55,7 @@ func TestCreateLegacyWallet(t *testing.T) {
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
 		require.NotNil(t, txmgrNs)
 
-		_, err = wtxmgr.Open(txmgrNs, w.cfg.ChainParams)
+		_, err = wtxmgr.Open(txmgrNs, &chainParams)
 
 		return err
 	})
@@ -68,11 +67,11 @@ func TestCreateLegacyWallet(t *testing.T) {
 func TestLoadLegacyWallet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet and initialize it.
-	w, _ := createTestWalletWithMocks(t)
+	// Arrange: Create a test database and initialize it.
+	dbConn, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
 
 	pubPass := []byte("public")
-	w.cfg.PubPassphrase = pubPass
 
 	params := CreateWalletParams{
 		PubPassphrase:     pubPass,
@@ -80,17 +79,17 @@ func TestLoadLegacyWallet(t *testing.T) {
 		Birthday:          time.Now(),
 	}
 
-	err := kvdb.CreateLegacyWallet(w.cfg.DB, kvdb.CreateLegacyWalletParams{
+	err := kvdb.CreateLegacyWallet(dbConn, kvdb.CreateLegacyWalletParams{
 		PubPassphrase:     params.PubPassphrase,
 		PrivatePassphrase: params.PrivatePassphrase,
-		ChainParams:       w.cfg.ChainParams,
+		ChainParams:       &chainParams,
 		Birthday:          params.Birthday,
 	})
 	require.NoError(t, err)
 
 	// Act: Load the wallet database.
 	addrMgr, txMgr, err := kvdb.LoadLegacyWallet(
-		w.cfg.DB, w.cfg.PubPassphrase, w.cfg.ChainParams,
+		dbConn, pubPass, &chainParams,
 	)
 
 	// Assert: Verify that both managers were loaded successfully.
