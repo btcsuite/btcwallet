@@ -5,6 +5,9 @@
 package mock
 
 import (
+	"context"
+	"time"
+
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
 )
@@ -30,6 +33,31 @@ func (m *Vault) Decrypt(keyType waddrmgr.CryptoKeyType,
 	args := m.Called(keyType, ciphertext)
 
 	return returnBytes(args, keyType, ciphertext), args.Error(1)
+}
+
+// Unlock forwards to the configured testify expectations.
+func (m *Vault) Unlock(ctx context.Context, passphrase []byte,
+	timeout time.Duration) error {
+
+	args := m.Called(ctx, passphrase, timeout)
+	return args.Error(0)
+}
+
+// Lock forwards to the configured testify expectations.
+func (m *Vault) Lock() {
+	m.Called()
+}
+
+// IsLocked forwards to the configured testify expectations.
+func (m *Vault) IsLocked() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+// RefreshPrivatePassphrase forwards to the configured testify expectations.
+func (m *Vault) RefreshPrivatePassphrase(passphrase []byte) error {
+	args := m.Called(passphrase)
+	return args.Error(0)
 }
 
 // returnBytes resolves the first programmed Return arg into a byte slice.
