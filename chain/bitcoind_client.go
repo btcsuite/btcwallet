@@ -1,9 +1,11 @@
 package chain
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -255,6 +258,91 @@ func (c *BitcoindClient) TestMempoolAccept(txns []*wire.MsgTx,
 
 	return c.chainConn.client.TestMempoolAccept(txns, maxFeeRate)
 }
+
+// SubmitPackage submits a package of related transactions (topologically
+// sorted, parents first and child last) to bitcoind's mempool for atomic
+// validation and acceptance via the submitpackage RPC. This is what allows a
+// zero-fee v3/TRUC parent to be accepted when paired with a fee-paying CPFP
+// child, which sendrawtransaction (single-tx) rejects.
+//
+// maxFeeRate is the optional per-tx fee-rate ceiling in BTC/kvB (pass a
+// pointer to 0 to disable the limit for high-feerate CPFP children).
+//
+// NOTE: on master this forwards to rpcclient's typed SubmitPackage. That
+// method only exists in btcd v0.26.0 and later, which moved wire, txscript,
+// btcutil and chaincfg into separate /v2 modules. This release branch tracks
+// the pre-v2 btcd layout, so the command is issued here instead, over the same
+// rpcclient primitives (SendCmd/ReceiveFuture) and against the same btcjson
+// types the typed method uses. The on-wire request and the decoded result are
+// identical.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (c *BitcoindClient) SubmitPackage(txns []*wire.MsgTx,
+	maxFeeRate *float64) (*btcjson.SubmitPackageResult, error) {
+
+	// Gate on the backend version so an unsupported backend returns a
+	// typed ErrBackendVersion rather than a raw method-not-found error the
+	// caller would have to string-match. submitpackage and
+	// gettxspendingprevout both landed in Bitcoin Core v24.0.0, so the
+	// existing v24 predicate is the correct gate here.
+	version, err := c.chainConn.client.BackendVersion()
+	if err != nil {
+		return nil, err
+	}
+
+	if !version.SupportGetTxSpendingPrevOut() {
+		return nil, fmt.Errorf("%w: %v", rpcclient.ErrBackendVersion,
+			version)
+	}
+
+	// A package must contain at least one transaction (the child) and at
+	// most maxPackageTxns.
+	if len(txns) == 0 {
+		return nil, fmt.Errorf("%w: no transactions provided",
+			rpcclient.ErrInvalidParam)
+	}
+
+	if len(txns) > maxPackageTxns {
+		return nil, fmt.Errorf("%w: too many transactions provided",
+			rpcclient.ErrInvalidParam)
+	}
+
+	// Serialize each transaction to a hex string, preserving the
+	// topological order (parents first, child last) the caller provides.
+	rawTxns := make([]string, 0, len(txns))
+	for _, tx := range txns {
+		buf := bytes.NewBuffer(make([]byte, 0, tx.SerializeSize()))
+		if err := tx.Serialize(buf); err != nil {
+			return nil, fmt.Errorf("%w: %v",
+				rpcclient.ErrInvalidParam, err)
+		}
+
+		rawTxns = append(rawTxns, hex.EncodeToString(buf.Bytes()))
+	}
+
+	// The submitpackage RPC exposes a maxburnamount limit too, which we
+	// don't surface on chain.Interface; pass nil to use the node default.
+	cmd := btcjson.NewJsonSubmitPackageCmd(rawTxns, maxFeeRate, nil)
+
+	resp, err := rpcclient.ReceiveFuture(c.chainConn.client.SendCmd(cmd))
+	if err != nil {
+		return nil, c.MapRPCErr(err)
+	}
+
+	// btcjson.SubmitPackageResult implements a custom UnmarshalJSON that
+	// maps the raw submitpackage response into higher-level types.
+	var result btcjson.SubmitPackageResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// maxPackageTxns is the maximum number of transactions a single submitpackage
+// call may contain. It mirrors bitcoind's MAX_PACKAGE_COUNT (see
+// src/policy/packages.h), which caps a package at 25 transactions.
+const maxPackageTxns = 25
 
 // Notifications returns a channel to retrieve notifications from.
 //
