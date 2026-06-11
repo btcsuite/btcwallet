@@ -24,6 +24,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -899,7 +900,9 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	w, chain := newSQLAddressSigningWallet(t)
+	w, chain, vault := newSQLAddressSigningWallet(t)
+	require.NotNil(t, vault)
+
 	chain.On(
 		"NotifyReceived",
 		mock.MatchedBy(func(addrs []btcutil.Address) bool {
@@ -951,7 +954,7 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	w, chain := newSQLAddressSigningWallet(t)
+	w, chain, _ := newSQLAddressSigningWallet(t)
 	chain.On(
 		"NotifyReceived",
 		mock.MatchedBy(func(addrs []btcutil.Address) bool {
@@ -988,7 +991,7 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	t.Parallel()
 
-	w, chain := newSQLAddressSigningWallet(t)
+	w, chain, _ := newSQLAddressSigningWallet(t)
 
 	_, err := w.store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
@@ -1329,7 +1332,9 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 
 // newSQLAddressSigningWallet returns a started, unlocked wallet whose address
 // records are stored in SQLite while signing keys come from legacy waddrmgr.
-func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
+func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
+	*walletmock.Vault) {
+
 	t.Helper()
 
 	legacyDB, cleanup := setupTestDB(t)
@@ -1380,10 +1385,12 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 	require.NoError(t, err)
 
 	chain := &bwmock.Chain{}
+	vault := &walletmock.Vault{}
+
 	w = &Wallet{
 		addrStore: addrStore,
 		store:     store,
-		keyVault:  addrStore,
+		keyVault:  vault,
 		state:     newWalletState(nil),
 		cfg: Config{
 			DB:          legacyDB,
@@ -1399,9 +1406,10 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 
 	t.Cleanup(func() {
 		chain.AssertExpectations(t)
+		vault.AssertExpectations(t)
 	})
 
-	return w, chain
+	return w, chain, vault
 }
 
 // newSpendableAddressManager creates and unlocks a deterministic legacy

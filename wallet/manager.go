@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -340,7 +341,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		addrStore:         addrMgr,
 		store:             store,
 		cache:             newStoreRuntimeCache(store),
-		keyVault:          addrMgr,
+		keyVault:          keyvault.NewDBVault(store, walletID),
 		txStore:           txMgr,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,

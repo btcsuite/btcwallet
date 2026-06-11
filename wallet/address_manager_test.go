@@ -770,7 +770,7 @@ func TestImportTaprootScript(t *testing.T) {
 	require.NoError(t, err)
 
 	encryptedScript := []byte("encrypted tapscript")
-	deps.addrStore.On(
+	deps.vault.On(
 		"Encrypt", waddrmgr.CKTPublic, encodedScript,
 	).Return(encryptedScript, nil).Once()
 	deps.store.On("NewImportedAddress", mock.Anything,
