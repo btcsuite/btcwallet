@@ -103,6 +103,13 @@ func (m *mockChainClient) TestMempoolAccept(txns []*wire.MsgTx,
 	return nil, nil
 }
 
+// SubmitPackage is part of the chain.Interface interface.
+func (m *mockChainClient) SubmitPackage(txns []*wire.MsgTx,
+	maxFeeRate *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return &btcjson.SubmitPackageResult{}, nil
+}
+
 func (m *mockChainClient) MapRPCErr(err error) error {
 	return nil
 }

@@ -204,6 +204,19 @@ func (c *RPCClient) BackEnd() string {
 	return "btcd"
 }
 
+// SubmitPackage is unimplemented for the btcd backend. btcd defines the
+// submitpackage JSON-RPC command type but its RPC server registers no handler
+// for it, so a RawRequest would fail with a method-not-found error. Returning
+// ErrUnimplemented avoids advertising support that does not exist; a btcd
+// server-side submitpackage handler must land before this can do anything.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (c *RPCClient) SubmitPackage(_ []*wire.MsgTx,
+	_ *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return nil, ErrUnimplemented
+}
+
 // Start attempts to establish a client connection with the remote server.
 // If successful, handler goroutines are started to process notifications
 // sent by the server.  After a limited number of connection attempts, this

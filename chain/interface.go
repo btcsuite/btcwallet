@@ -54,6 +54,8 @@ type Interface interface {
 	Notifications() <-chan interface{}
 	BackEnd() string
 	TestMempoolAccept([]*wire.MsgTx, float64) ([]*btcjson.TestMempoolAcceptResult, error)
+	SubmitPackage(txns []*wire.MsgTx,
+		maxFeeRate *float64) (*btcjson.SubmitPackageResult, error)
 	MapRPCErr(err error) error
 }
 

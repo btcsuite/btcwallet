@@ -239,6 +239,25 @@ func (s *NeutrinoClient) TestMempoolAccept(txns []*wire.MsgTx,
 	return nil, ErrUnimplemented
 }
 
+// SubmitPackage is unimplemented for the neutrino backend, mirroring
+// TestMempoolAccept: a light client has no mempool and cannot run the
+// submitpackage RPC, so it can neither validate nor atomically accept a
+// package, nor report whether one was accepted.
+//
+// A zero-fee parent paired with a fee-paying CPFP child can still reach the
+// network over neutrino by broadcasting each transaction individually (parents
+// first) via SendRawTransaction and relying on a peer's P2P 1p1c package
+// relay. That is a best-effort propagation step with no acceptance signal,
+// distinct from submitpackage's submit-for-acceptance contract, so it is left
+// to the caller rather than conflated with this method.
+//
+// NOTE: This is part of the chain.Interface interface.
+func (s *NeutrinoClient) SubmitPackage(_ []*wire.MsgTx,
+	_ *float64) (*btcjson.SubmitPackageResult, error) {
+
+	return nil, ErrUnimplemented
+}
+
 // FilterBlocks scans the blocks contained in the FilterBlocksRequest for any
 // addresses of interest. For each requested block, the corresponding compact
 // filter will first be checked for matches, skipping those that do not report
