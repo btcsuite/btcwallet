@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet/wtxmgr
 
 require (
-	github.com/btcsuite/btcd v0.26.0-beta.rc1
+	github.com/btcsuite/btcd v0.26.0
 	github.com/btcsuite/btcd/btcutil/v2 v2.0.0
 	github.com/btcsuite/btcd/chaincfg/v2 v2.0.0
 	github.com/btcsuite/btcd/chainhash/v2 v2.0.0
@@ -28,7 +28,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.25
+go 1.25.11
 
 replace github.com/btcsuite/btcwallet/walletdb => ../walletdb
 

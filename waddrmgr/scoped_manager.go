@@ -944,14 +944,14 @@ func (s *ScopedKeyManager) existsAddress(ns walletdb.ReadBucket, addressID []byt
 // pay-to-pubkey-hash addresses and the script associated with
 // pay-to-script-hash addresses.
 func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
-	address address.Address) (ManagedAddress, error) {
+	addr address.Address) (ManagedAddress, error) {
 
 	// ScriptAddress will only return a script hash if we're accessing an
 	// address that is either PKH or SH. In the event we're passed a PK
 	// address, convert the PK to PKH address so that we can access it from
 	// the addrs map and database.
-	if pka, ok := address.(*address.AddressPubKey); ok {
-		address = pka.AddressPubKeyHash()
+	if pka, ok := addr.(*address.AddressPubKey); ok {
+		addr = pka.AddressPubKeyHash()
 	}
 
 	// Return the address from cache if it's available.
@@ -959,7 +959,7 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 	// NOTE: Not using a defer on the lock here since a write lock is
 	// needed if the lookup fails.
 	s.mtx.RLock()
-	if ma, ok := s.addrs[addrKey(address.ScriptAddress())]; ok {
+	if ma, ok := s.addrs[addrKey(addr.ScriptAddress())]; ok {
 		s.mtx.RUnlock()
 		return ma, nil
 	}
@@ -969,7 +969,7 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 	defer s.mtx.Unlock()
 
 	// Attempt to load the address from the database.
-	return s.loadAndCacheAddress(ns, address)
+	return s.loadAndCacheAddress(ns, addr)
 }
 
 // AddrAccount returns the account to which the given address belongs.

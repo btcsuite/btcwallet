@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.26.0-beta.rc1
+	github.com/btcsuite/btcd v0.26.0
 	github.com/btcsuite/btcd/address/v2 v2.0.0
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
 	github.com/btcsuite/btcd/btcutil/v2 v2.0.0
@@ -27,7 +27,7 @@ require (
 	github.com/lightninglabs/neutrino/cache v1.1.3
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.8
 	github.com/lightningnetwork/lnd/ticker v1.1.1
-	github.com/lightningnetwork/lnd/tlv v1.3.2
+	github.com/lightningnetwork/lnd/tlv v1.3.3-0.20260615022959-a067468f0f45
 	github.com/stretchr/testify v1.10.0
 	golang.org/x/crypto v0.41.0
 	golang.org/x/net v0.43.0
@@ -39,8 +39,6 @@ require (
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect
-	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
-	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
 	github.com/btcsuite/btcd/v2transport v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
@@ -65,14 +63,14 @@ require (
 
 // If you change this please run `make lint` to see where else it needs to be
 // updated as well.
-go 1.25
+go 1.25.11
 
-replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
-
-replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
-
-replace github.com/btcsuite/btcwallet/wallet/txrules => ./wallet/txrules
-
-replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
-
-replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+// TODO(guggero): Remove once new versions have been tagged.
+replace (
+	github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
+	github.com/btcsuite/btcwallet/wallet/txrules => ./wallet/txrules
+	github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
+	github.com/btcsuite/btcwallet/walletdb => ./walletdb
+	github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+	github.com/lightninglabs/neutrino => github.com/guggero/neutrino v0.11.1-0.20260619073835-e49be6c9c0ef
+)

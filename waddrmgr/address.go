@@ -547,7 +547,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		pubKeyHash = address.Hash160(pubKey.SerializeUncompressed())
 	}
 
-	var address address.Address
+	var newAddress address.Address
 	var err error
 
 	switch addrType {
@@ -577,7 +577,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		// to a p2sh address. In order to spend, we first use the
 		// witnessProgram as the sigScript, then present the proper
 		// <sig, pubkey> pair as the witness.
-		address, err = address.NewAddressScriptHash(
+		newAddress, err = address.NewAddressScriptHash(
 			witnessProgram, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -585,7 +585,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		}
 
 	case PubKeyHash:
-		address, err = address.NewAddressPubKeyHash(
+		newAddress, err = address.NewAddressPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -593,7 +593,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		}
 
 	case WitnessPubKey:
-		address, err = address.NewAddressWitnessPubKeyHash(
+		newAddress, err = address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -602,7 +602,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	case TaprootPubKey:
 		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
-		address, err = address.NewAddressTaproot(
+		newAddress, err = address.NewAddressTaproot(
 			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -612,7 +612,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	return &managedAddress{
 		manager:          m,
-		address:          address,
+		address:          newAddress,
 		derivationPath:   derivationPath,
 		imported:         false,
 		internal:         false,
