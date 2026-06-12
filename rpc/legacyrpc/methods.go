@@ -15,14 +15,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
@@ -286,7 +287,7 @@ func jsonError(err error) *btcjson.RPCError {
 // makeMultiSigScript is a helper function to combine common logic for
 // AddMultiSig and CreateMultiSig.
 func makeMultiSigScript(w *wallet.Wallet, keys []string, nRequired int) ([]byte, error) {
-	keysesPrecious := make([]*btcutil.AddressPubKey, len(keys))
+	keysesPrecious := make([]*address.AddressPubKey, len(keys))
 
 	// The address list will made up either of addreseses (pubkey hash), for
 	// which we need to look up the keys in wallet, straight pubkeys, or a
@@ -299,14 +300,14 @@ func makeMultiSigScript(w *wallet.Wallet, keys []string, nRequired int) ([]byte,
 		}
 
 		switch addr := a.(type) {
-		case *btcutil.AddressPubKey:
+		case *address.AddressPubKey:
 			keysesPrecious[i] = addr
 		default:
 			pubKey, err := w.PubKeyForAddress(addr)
 			if err != nil {
 				return nil, err
 			}
-			pubKeyAddr, err := btcutil.NewAddressPubKey(
+			pubKeyAddr, err := address.NewAddressPubKey(
 				pubKey.SerializeCompressed(), w.ChainParams())
 			if err != nil {
 				return nil, err
@@ -328,7 +329,7 @@ func addMultiSigAddress(icmd interface{}, w *wallet.Wallet) (interface{}, error)
 		return nil, &ErrNotImportedAccount
 	}
 
-	secp256k1Addrs := make([]btcutil.Address, len(cmd.Keys))
+	secp256k1Addrs := make([]address.Address, len(cmd.Keys))
 	for i, k := range cmd.Keys {
 		addr, err := decodeAddress(k, w.ChainParams())
 		if err != nil {
@@ -360,7 +361,7 @@ func createMultiSig(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 		return nil, ParseError{err}
 	}
 
-	address, err := btcutil.NewAddressScriptHash(script, w.ChainParams())
+	address, err := address.NewAddressScriptHash(script, w.ChainParams())
 	if err != nil {
 		// above is a valid script, shouldn't happen.
 		return nil, err
@@ -501,8 +502,8 @@ func getInfo(icmd interface{}, w *wallet.Wallet, chainClient *chain.RPCClient) (
 	return info, nil
 }
 
-func decodeAddress(s string, params *chaincfg.Params) (btcutil.Address, error) {
-	addr, err := btcutil.DecodeAddress(s, params)
+func decodeAddress(s string, params *chaincfg.Params) (address.Address, error) {
+	addr, err := address.DecodeAddress(s, params)
 	if err != nil {
 		msg := fmt.Sprintf("Invalid address %q: decode failed with %#q", s, err)
 		return nil, &btcjson.RPCError{
@@ -1364,7 +1365,7 @@ func lockUnspent(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 func makeOutputs(pairs map[string]btcutil.Amount, chainParams *chaincfg.Params) ([]*wire.TxOut, error) {
 	outputs := make([]*wire.TxOut, 0, len(pairs))
 	for addrStr, amt := range pairs {
-		addr, err := btcutil.DecodeAddress(addrStr, chainParams)
+		addr, err := address.DecodeAddress(addrStr, chainParams)
 		if err != nil {
 			return nil, fmt.Errorf("cannot decode address: %w", err)
 		}
@@ -1645,7 +1646,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 				return nil, err
 			}
 
-			addr, err := btcutil.NewAddressScriptHash(redeemScript,
+			addr, err := address.NewAddressScriptHash(redeemScript,
 				w.ChainParams())
 			if err != nil {
 				return nil, DeserializationError{err}
@@ -1693,7 +1694,7 @@ func signRawTransaction(icmd interface{}, w *wallet.Wallet, chainClient *chain.R
 				return nil, DeserializationError{errors.New(s)}
 			}
 
-			addr, err := btcutil.NewAddressPubKey(wif.SerializePubKey(),
+			addr, err := address.NewAddressPubKey(wif.SerializePubKey(),
 				w.ChainParams())
 			if err != nil {
 				return nil, DeserializationError{err}
@@ -1876,9 +1877,9 @@ func verifyMessage(icmd interface{}, w *wallet.Wallet) (interface{}, error) {
 	}
 	// Verify that the signed-by address matches the given address
 	switch checkAddr := addr.(type) {
-	case *btcutil.AddressPubKeyHash: // ok
-		return bytes.Equal(btcutil.Hash160(serializedPubKey), checkAddr.Hash160()[:]), nil
-	case *btcutil.AddressPubKey: // ok
+	case *address.AddressPubKeyHash: // ok
+		return bytes.Equal(address.Hash160(serializedPubKey), checkAddr.Hash160()[:]), nil
+	case *address.AddressPubKey: // ok
 		return string(serializedPubKey) == checkAddr.String(), nil
 	default:
 		return nil, errors.New("address type not supported")

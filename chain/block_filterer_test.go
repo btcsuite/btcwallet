@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 )
 
@@ -273,9 +273,9 @@ func TestBlockFiltererOneInOneOut(t *testing.T) {
 
 	// Add each of their single previous outpoints to the set of watched
 	// outpoints to filter for.
-	watchedOutPoints := make(map[wire.OutPoint]btcutil.Address)
-	watchedOutPoints[firstTx.TxIn[0].PreviousOutPoint] = &btcutil.AddressWitnessPubKeyHash{}
-	watchedOutPoints[lastTx.TxIn[0].PreviousOutPoint] = &btcutil.AddressWitnessPubKeyHash{}
+	watchedOutPoints := make(map[wire.OutPoint]address.Address)
+	watchedOutPoints[firstTx.TxIn[0].PreviousOutPoint] = &address.AddressWitnessPubKeyHash{}
+	watchedOutPoints[lastTx.TxIn[0].PreviousOutPoint] = &address.AddressWitnessPubKeyHash{}
 
 	// Construct a filter request, watching only for the outpoints above,
 	// and construct a block filterer.

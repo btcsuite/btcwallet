@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -429,7 +430,7 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 
 	log.Infof("Imported address %v", addr.Address())
 
-	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
+	err = w.chainClient.NotifyReceived([]address.Address{addr.Address()})
 	if err != nil {
 		return fmt.Errorf("unable to subscribe for address "+
 			"notifications: %w", err)
@@ -482,7 +483,7 @@ func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
 
 	log.Infof("Imported address %v", addr.Address())
 
-	err = w.chainClient.NotifyReceived([]btcutil.Address{addr.Address()})
+	err = w.chainClient.NotifyReceived([]address.Address{addr.Address()})
 	if err != nil {
 		return nil, fmt.Errorf("unable to subscribe for address "+
 			"notifications: %w", err)
@@ -522,7 +523,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	}
 
 	// Attempt to import private key into wallet.
-	var addr btcutil.Address
+	var addr address.Address
 	var props *waddrmgr.AccountProperties
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
@@ -568,7 +569,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	// imported address.
 	if rescan {
 		job := &RescanJob{
-			Addrs:      []btcutil.Address{addr},
+			Addrs:      []address.Address{addr},
 			OutPoints:  nil,
 			BlockStamp: *bs,
 		}
@@ -579,7 +580,7 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 		// required to be read, so discard the return value.
 		_ = w.SubmitRescan(job)
 	} else {
-		err := w.chainClient.NotifyReceived([]btcutil.Address{addr})
+		err := w.chainClient.NotifyReceived([]address.Address{addr})
 		if err != nil {
 			return "", fmt.Errorf("failed to subscribe for address ntfns for "+
 				"address %s: %w", addr.EncodeAddress(), err)

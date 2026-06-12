@@ -8,9 +8,10 @@ package wallet
 import (
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 )
 
 // Note: The following common types should never reference the Wallet type.
@@ -81,7 +82,7 @@ type P2SHMultiSigOutput struct {
 	OutputAmount    btcutil.Amount
 	ContainingBlock BlockIdentity
 
-	P2SHAddress  *btcutil.AddressScriptHash
+	P2SHAddress  *address.AddressScriptHash
 	RedeemScript []byte
 	M, N         uint8           // M of N signatures required to redeem
 	Redeemer     *OutputRedeemer // nil unless spent

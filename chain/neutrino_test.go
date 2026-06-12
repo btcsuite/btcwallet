@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,7 +76,7 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 		go func() {
 			defer close(done)
 
-			var addrs []btcutil.Address
+			var addrs []address.Address
 			for i := 0; i < n; i++ {
 				err := nc.NotifyReceived(addrs)
 				require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestNeutrinoClientNotifyReceived(t *testing.T) {
 // expected (i.e., wantMsgs == gotMsgs).
 func TestNeutrinoClientNotifyReceivedRescan(t *testing.T) {
 	var (
-		addrs     []btcutil.Address
+		addrs     []address.Address
 		nc        = newMockNeutrinoClient()
 		wantMsgs  = 100
 		gotMsgs   = 0

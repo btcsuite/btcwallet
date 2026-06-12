@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -701,7 +701,7 @@ func (m *Manager) NeuterRootKey(ns walletdb.ReadWriteBucket) error {
 // pay-to-pubkey-hash addresses and the script associated with
 // pay-to-script-hash addresses.
 func (m *Manager) Address(ns walletdb.ReadBucket,
-	address btcutil.Address) (ManagedAddress, error) {
+	address address.Address) (ManagedAddress, error) {
 
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
@@ -724,7 +724,7 @@ func (m *Manager) Address(ns walletdb.ReadBucket,
 }
 
 // MarkUsed updates the used flag for the provided address.
-func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address) error {
+func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address address.Address) error {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
@@ -751,7 +751,7 @@ func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address btcutil.Address)
 // AddrAccount returns the account to which the given address belongs. We also
 // return the scoped manager that owns the addr+account combo.
 func (m *Manager) AddrAccount(ns walletdb.ReadBucket,
-	address btcutil.Address) (*ScopedKeyManager, uint32, error) {
+	address address.Address) (*ScopedKeyManager, uint32, error) {
 
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
@@ -801,7 +801,7 @@ func (m *Manager) ForEachActiveAccountAddress(ns walletdb.ReadBucket,
 
 // ForEachActiveAddress calls the given function with each active address
 // stored in the manager, breaking early on error.
-func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr btcutil.Address) error) error {
+func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr address.Address) error) error {
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
@@ -821,7 +821,7 @@ func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr btcu
 // addresses could be created outside of the default key scopes, we now need to
 // check for those as well.
 func (m *Manager) ForEachRelevantActiveAddress(ns walletdb.ReadBucket,
-	fn func(addr btcutil.Address) error) error {
+	fn func(addr address.Address) error) error {
 
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()

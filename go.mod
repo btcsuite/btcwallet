@@ -1,11 +1,15 @@
 module github.com/btcsuite/btcwallet
 
 require (
-	github.com/btcsuite/btcd v0.24.3-0.20250318170759-4f4ea81776d6
-	github.com/btcsuite/btcd/btcec/v2 v2.3.5
-	github.com/btcsuite/btcd/btcutil v1.1.6
-	github.com/btcsuite/btcd/btcutil/psbt v1.1.10
-	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
+	github.com/btcsuite/btcd v0.26.0-beta.rc1
+	github.com/btcsuite/btcd/address/v2 v2.0.0
+	github.com/btcsuite/btcd/btcec/v2 v2.5.0
+	github.com/btcsuite/btcd/btcutil/v2 v2.0.0
+	github.com/btcsuite/btcd/chaincfg/v2 v2.0.0
+	github.com/btcsuite/btcd/chainhash/v2 v2.0.0
+	github.com/btcsuite/btcd/psbt/v2 v2.0.0
+	github.com/btcsuite/btcd/txscript/v2 v2.0.0
+	github.com/btcsuite/btcd/wire/v2 v2.0.0
 	github.com/btcsuite/btclog v1.0.0
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2
@@ -35,10 +39,14 @@ require (
 
 require (
 	github.com/aead/siphash v1.0.1 // indirect
+	github.com/btcsuite/btcd/btcutil v1.1.6 // indirect
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
+	github.com/btcsuite/btcd/v2transport v1.0.1 // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
-	github.com/decred/dcrd/lru v1.1.2 // indirect
+	github.com/decred/dcrd/lru v1.1.3 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
@@ -57,4 +65,14 @@ require (
 
 // If you change this please run `make lint` to see where else it needs to be
 // updated as well.
-go 1.24.6
+go 1.25
+
+replace github.com/btcsuite/btcwallet/walletdb => ./walletdb
+
+replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
+
+replace github.com/btcsuite/btcwallet/wallet/txrules => ./wallet/txrules
+
+replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
+
+replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr

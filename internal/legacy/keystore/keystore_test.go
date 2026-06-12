@@ -10,12 +10,13 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/davecgh/go-spew/spew"
 )
 
@@ -543,7 +544,7 @@ func TestWatchingWalletExport(t *testing.T) {
 
 	// Test that ExtendActiveAddresses for the watching wallet match
 	// manually requested addresses of the original wallet.
-	var newAddrs []btcutil.Address
+	var newAddrs []address.Address
 	for i := 0; i < 10; i++ {
 		addr, err := w.NextChainedAddress(createdAt)
 		if err != nil {
