@@ -277,6 +277,18 @@ func (m *Store) GetAddressSecret(ctx context.Context,
 	return args.Get(0).(*db.AddressSecret), args.Error(1)
 }
 
+// GetAccountSecret implements the db.AccountStore interface.
+func (m *Store) GetAccountSecret(ctx context.Context,
+	query db.GetAccountSecretQuery) (*db.AccountSecret, error) {
+
+	args := m.Called(ctx, query)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	return args.Get(0).(*db.AccountSecret), args.Error(1)
+}
+
 // ListAddressTypes implements the db.AddressStore interface.
 func (m *Store) ListAddressTypes(ctx context.Context) (
 	[]db.AddressTypeInfo, error) {
