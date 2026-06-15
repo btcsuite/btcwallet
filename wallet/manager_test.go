@@ -1,13 +1,18 @@
 package wallet
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -646,4 +651,64 @@ func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestManagerCreateDiscardsWalletOnSeedError verifies that when default-account
+// seeding fails after Load has already registered the wallet and opened its
+// stores, Create tears the wallet down: it closes the runtime stores and
+// removes the wallet from the manager cache instead of leaving a partial
+// wallet behind. Without this cleanup a corrected retry would be blocked and
+// the store handles would leak.
+//
+//nolint:paralleltest // Mutates the package-level runtimeStoreFactory.
+func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
+	// Arrange: a spendable SQLite-backed create so the SQL path runs
+	// default-account seeding after Load.
+	cfg, params := sqliteCreateConfig(t)
+
+	oldFactory := runtimeStoreFactory
+	t.Cleanup(func() {
+		runtimeStoreFactory = oldFactory
+	})
+
+	// The factory returns a mock store whose default-account seeding fails,
+	// plus a close hook we can observe to confirm the stores were released.
+	errSeed := errors.New("seed boom")
+	store := &walletmock.Store{}
+	store.On(
+		"CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything,
+	).Return(nil, errSeed)
+
+	closed := 0
+	runtimeStoreFactory = func(context.Context, Config,
+		*kvdb.StoreHandle) (*runtimeStoreHandle, error) {
+
+		return &runtimeStoreHandle{
+			store:      store,
+			walletInfo: &db.WalletInfo{ID: 7},
+			closeFn: func() error {
+				closed++
+				return nil
+			},
+		}, nil
+	}
+
+	// Act: create the wallet; seeding fails on the post-Load path.
+	m := NewManager()
+	w, err := m.Create(cfg, params)
+
+	// Assert: the create fails with the seeding error, no wallet is
+	// returned, the wallet is not left registered, and its runtime store
+	// was closed exactly once.
+	require.ErrorIs(t, err, errSeed)
+	require.ErrorContains(t, err, "seed default accounts")
+	require.Nil(t, w)
+
+	m.RLock()
+	_, ok := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.False(t, ok, "wallet must not be left in the manager cache")
+
+	require.Equal(t, 1, closed, "runtime store must be closed once")
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
@@ -293,4 +294,75 @@ func TestCreateRecoversSeedAfterPartialCreate(t *testing.T) {
 	got, err := w.store.GetEncryptedHDSeed(t.Context(), w.id)
 	require.NoError(t, err)
 	require.Equal(t, encSeed, got)
+}
+
+// TestRuntimeCreateWalletParamsBirthdaySafetyMargin verifies that the SQL
+// runtime create params back a requested birthday off by the legacy address
+// manager's safety margin, matching the kvdb backend, while leaving a zero
+// "no birthday" untouched so it is still persisted as NULL.
+func TestRuntimeCreateWalletParamsBirthdaySafetyMargin(t *testing.T) {
+	t.Parallel()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	requested := time.Date(2026, time.June, 16, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		birthday time.Time
+		want     time.Time
+	}{
+		{
+			name:     "non-zero birthday is backed off by the margin",
+			birthday: requested,
+			want:     requested.Add(-waddrmgr.BirthdaySafetyMargin),
+		},
+		{
+			name:     "zero birthday is left untouched",
+			birthday: time.Time{},
+			want:     time.Time{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a spendable seed-import create carrying the
+			// requested birthday.
+			cfg := Config{Name: "test-wallet"}
+			params := CreateWalletParams{
+				Mode:     ModeImportSeed,
+				Birthday: tc.birthday,
+			}
+
+			// Act: build the SQL runtime create params.
+			got, err := runtimeCreateWalletParams(
+				cfg, params, rootKey, []byte("enc-seed"),
+			)
+			require.NoError(t, err)
+
+			// Assert: the stored birthday carries the safety
+			// margin (or stays zero), matching legacy behavior.
+			require.Equal(t, tc.want, got.Birthday)
+		})
+	}
+}
+
+// TestBirthdayWithSafetyMargin verifies the helper subtracts exactly the legacy
+// safety margin from a real birthday and passes a zero birthday through.
+func TestBirthdayWithSafetyMargin(t *testing.T) {
+	t.Parallel()
+
+	birthday := time.Date(2026, time.June, 16, 0, 0, 0, 0, time.UTC)
+
+	require.Equal(
+		t, birthday.Add(-waddrmgr.BirthdaySafetyMargin),
+		birthdayWithSafetyMargin(birthday),
+	)
+	require.True(t, birthdayWithSafetyMargin(time.Time{}).IsZero())
 }
