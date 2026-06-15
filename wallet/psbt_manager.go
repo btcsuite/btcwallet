@@ -1052,9 +1052,16 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	bip32Path := BIP32Path{
 		KeyScope: scope,
 		DerivationPath: waddrmgr.DerivationPath{
-			Account: account,
-			Branch:  branch,
-			Index:   index,
+			// InternalAccount is the wallet's database account
+			// number that both the legacy DeriveFromKeyPath and
+			// the SQL account-secret lookup key on. Leaving it
+			// unset always resolves account 0, so a PSBT for a
+			// non-zero account would otherwise sign with the wrong
+			// key or fail to find one.
+			InternalAccount: account,
+			Account:         account,
+			Branch:          branch,
+			Index:           index,
 		},
 	}
 

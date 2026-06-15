@@ -1057,6 +1057,67 @@ func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	require.NotNil(t, addr)
 }
 
+// TestDerivePubKeySQLOnlyAccount verifies that DerivePubKey resolves a public
+// key for an account that lives only in the SQL store, mirroring the
+// private-key fallback. A non-zero account is used so the regression also
+// covers InternalAccount being threaded into the store lookup.
+func TestDerivePubKeySQLOnlyAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a second SQL-only account (number 1) and derive a
+	// receive address from it.
+	w, chain := newSQLAddressSigningWallet(t)
+
+	_, err := w.store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Name:     "secondary",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+
+	chain.On(
+		"NotifyReceived",
+		mock.MatchedBy(func(addrs []address.Address) bool {
+			return len(addrs) == 1
+		}),
+	).Return(nil).Once()
+
+	addr, err := w.NewAddress(
+		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+
+	info, err := w.GetAddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+	require.NotNil(t, info.Derivation)
+	require.NotZero(t, info.Derivation.Account)
+
+	path := BIP32Path{
+		KeyScope: info.Derivation.KeyScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: info.Derivation.Account,
+			Branch:          info.Derivation.Branch,
+			Index:           info.Derivation.Index,
+		},
+	}
+
+	// The legacy managed-address lookup must miss for a SQL-only account,
+	// confirming the test exercises the store fallback rather than the kvdb
+	// path.
+	_, err = w.fetchManagedPubKeyAddress(path)
+	require.Error(t, err)
+
+	// Act: derive the public key through the store fallback.
+	pubKey, err := w.DerivePubKey(t.Context(), path)
+	require.NoError(t, err, "DerivePubKey must succeed for SQL-only accounts")
+
+	// Assert: the derived key matches the address's recorded public key.
+	require.NotNil(t, pubKey)
+	require.True(t, pubKey.IsEqual(info.PubKey))
+}
+
 // TestComputeUnlockingScriptFail_ScriptForOutput tests failure when
 // ScriptForOutput returns an error.
 func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
@@ -1429,12 +1490,27 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain) {
 			legacyDB, nil, addrStore,
 		),
 		store:    store,
+		cache:    newStoreRuntimeCache(store),
 		keyVault: kvdb.NewLegacyManagerVault(legacyDB, addrStore),
 		state:    newWalletState(nil),
 		cfg: Config{
-			DB:          testDBConfig(legacyDB),
+			// Select the SQL backend so store-backed paths (e.g.
+			// the deprecated import mirror) are exercised rather
+			// than treated as kvdb.
+			DB: DBConfig{
+				Backend: DBBackendSQLite,
+				SQLite:  SQLiteDBConfig{DBPath: "test.sqlite"},
+			},
 			Chain:       chain,
 			ChainParams: &chainParams,
+		},
+		// walletDeprecated carries the legacy waddrmgr handle and chain
+		// client the deprecated import methods write through before
+		// mirroring into the SQL store.
+		walletDeprecated: &walletDeprecated{
+			db:          legacyDB,
+			chainParams: &chainParams,
+			chainClient: chain,
 		},
 		id: walletInfo.ID,
 	}
