@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -199,4 +200,97 @@ func TestCloseRuntimeStoreError(t *testing.T) {
 	err := w.closeRuntimeStore()
 	require.ErrorIs(t, err, errFakeStoreClose)
 	require.NoError(t, w.closeRuntimeStore())
+}
+
+// sqliteCreateConfig returns a SQLite-backed create config and a spendable
+// seed-import params pair sharing fresh temp paths, for tests that exercise
+// the SQL create path end to end.
+func sqliteCreateConfig(t *testing.T) (Config, CreateWalletParams) {
+	t.Helper()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	cfg := Config{
+		DB: DBConfig{
+			KVDB:    KVDBConfig{DBPath: filepath.Join(dir, "wallet.db")},
+			Backend: DBBackendSQLite,
+			SQLite: SQLiteDBConfig{
+				DBPath: filepath.Join(dir, "runtime.sqlite"),
+			},
+		},
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           "test-wallet",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	params := CreateWalletParams{
+		Mode:              ModeImportSeed,
+		Seed:              seed,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	return cfg, params
+}
+
+// TestCreateRuntimeWalletSpendableRequiresSeed verifies that a spendable SQL
+// wallet create fails fast when the encrypted master HD key is missing, rather
+// than committing a wallet row whose later GetEncryptedHDSeed would fail and
+// break account/key derivation.
+func TestCreateRuntimeWalletSpendableRequiresSeed(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	// Act: create the runtime row for a spendable wallet with a nil seed,
+	// the state a retry-after-partial-create previously produced.
+	err = createRuntimeWallet(
+		context.Background(), cfg, params, rootKey, nil,
+	)
+
+	// Assert: the create is rejected before the row is written.
+	require.ErrorIs(t, err, db.ErrSpendableWalletNeedsMasterPrivKey)
+}
+
+// TestCreateRecoversSeedAfterPartialCreate verifies that when a prior Create
+// left the legacy wallet behind but no SQL runtime row, a retry reopens the
+// legacy store, recovers its encrypted master HD key, and commits it to the
+// SQL runtime row so GetEncryptedHDSeed succeeds.
+func TestCreateRecoversSeedAfterPartialCreate(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	// Arrange: simulate the partial-create state by creating only the
+	// legacy store, capturing the encrypted master HD key it persisted.
+	encSeed, err := createLegacyStore(
+		context.Background(), cfg, params, rootKey,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, encSeed)
+
+	// Act: retry the full create. It must tolerate the existing legacy
+	// wallet and recover its seed rather than committing a nil one.
+	w, err := NewManager().Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	t.Cleanup(func() {
+		require.NoError(t, w.closeRuntimeStore())
+	})
+
+	// Assert: the SQL runtime row holds the same encrypted master HD key,
+	// so SQL-backed key derivation can read it back.
+	got, err := w.store.GetEncryptedHDSeed(t.Context(), w.id)
+	require.NoError(t, err)
+	require.Equal(t, encSeed, got)
 }

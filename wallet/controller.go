@@ -36,6 +36,14 @@ var (
 	// the wallet when it is already started.
 	ErrWalletAlreadyStarted = errors.New("wallet already started")
 
+	// ErrWalletStopped is returned when Start is called on a wallet
+	// instance that has already been stopped. Stop closes the instance's
+	// runtime, legacy, and cache stores and does not reopen them, so the
+	// pointer cannot be restarted. Obtain a fresh wallet via Manager.Load
+	// instead.
+	ErrWalletStopped = errors.New("wallet instance stopped; load a fresh " +
+		"instance to start again")
+
 	// ErrStateChanged is returned when the wallet state changes
 	// unexpectedly during an operation, such as a rescan setup.
 	ErrStateChanged = errors.New("wallet state changed unexpectedly")
@@ -149,6 +157,22 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	err := w.state.toStarting()
 	if err != nil {
 		return err
+	}
+
+	// Refuse to restart a stopped instance. Stop closes w.store, w.cache,
+	// w.addrStore, w.txStore, and the legacy store, and finishStop does not
+	// reopen them; proceeding would run performRuntimeSetup against closed
+	// stores. Revert the state we just claimed and fail with a typed error
+	// so the caller knows to obtain a fresh wallet via Manager.Load. This
+	// is checked while holding the Starting state so it cannot race a
+	// concurrent finishStop into a half-open wallet.
+	if w.stopped.Load() {
+		if stopErr := w.state.toStopped(); stopErr != nil {
+			log.Warnf("Failed to revert state to stopped: %v",
+				stopErr)
+		}
+
+		return ErrWalletStopped
 	}
 
 	// Clear any stop request left from a prior lifecycle so it cannot abort
@@ -387,6 +411,12 @@ func (w *Wallet) finishStop() {
 	if err := w.closeRuntimeStore(); err != nil {
 		log.Errorf("Failed to close runtime store on stop: %v", err)
 	}
+
+	// Mark the instance terminal once its stores are closed so a later
+	// Start on the same pointer fails fast instead of running against
+	// closed stores. The toStopped CAS above admits exactly one caller, so
+	// this is set once.
+	w.stopped.Store(true)
 
 	if w.onStopped != nil {
 		w.onStopped()

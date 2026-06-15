@@ -431,6 +431,13 @@ type Wallet struct {
 	// caller already cancelled.
 	stopRequested atomic.Bool
 
+	// stopped records that finishStop has closed this instance's stores.
+	// Stop is terminal for the pointer: once the runtime, legacy, and
+	// cache stores are closed they are not reopened, so Start refuses to
+	// restart onto them. Callers that want a running wallet again must
+	// obtain a fresh instance via Manager.Load.
+	stopped atomic.Bool
+
 	// requestChan is the central communication channel for incoming
 	// lifecycle and authentication requests.
 	requestChan chan any

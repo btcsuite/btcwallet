@@ -289,8 +289,14 @@ func createLegacyStore(ctx context.Context, cfg Config,
 	// create. waddrmgr.Create wraps the sentinel in a ManagerError several
 	// layers down and waddrmgr.IsError does not unwrap %w, so match with
 	// errors.As.
+	//
+	// Reopen the existing legacy store to recover its encrypted master HD
+	// key rather than returning a nil seed: a nil seed would let the SQL
+	// runtime row be created with no EncryptedMasterPrivKey for a spendable
+	// wallet, so its later GetEncryptedHDSeed would fail and break SQL
+	// account/key derivation.
 	case isLegacyWalletAlreadyExists(err):
-		return nil, nil
+		return readExistingLegacyEncryptedSeed(ctx, cfg, params, rootKey)
 
 	case err != nil:
 		return nil, fmt.Errorf("create legacy store: %w", err)
@@ -299,21 +305,66 @@ func createLegacyStore(ctx context.Context, cfg Config,
 	// Capture the encrypted master HD private key the legacy create just
 	// persisted, so the runtime store can persist the same blob (the runtime
 	// key vault is backed by this legacy manager, so it decrypts unchanged).
-	// Watch-only wallets hold no such secret.
-	var encryptedSeed []byte
-	if !params.WatchOnly && rootKey != nil && rootKey.IsPrivate() {
-		encryptedSeed, err = legacyStore.Store.GetEncryptedHDSeed(ctx, 0)
-		if err != nil {
-			return nil, errors.Join(
-				fmt.Errorf("read legacy master HD key: %w", err),
-				legacyStore.Close(),
-			)
-		}
+	encryptedSeed, err := legacyEncryptedSeed(
+		ctx, legacyStore, params, rootKey,
+	)
+	if err != nil {
+		return nil, errors.Join(err, legacyStore.Close())
 	}
 
 	err = legacyStore.Close()
 	if err != nil {
 		return nil, fmt.Errorf("close legacy store: %w", err)
+	}
+
+	return encryptedSeed, nil
+}
+
+// readExistingLegacyEncryptedSeed reopens an already-created legacy store and
+// reads its encrypted master HD key. It is used on the Create retry path,
+// where the legacy wallet exists from an earlier attempt that failed before
+// the runtime row was committed.
+func readExistingLegacyEncryptedSeed(ctx context.Context, cfg Config,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
+	error) {
+
+	legacyStore, err := openLegacyStore(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedSeed, err := legacyEncryptedSeed(
+		ctx, legacyStore, params, rootKey,
+	)
+	if err != nil {
+		return nil, errors.Join(err, legacyStore.Close())
+	}
+
+	err = legacyStore.Close()
+	if err != nil {
+		return nil, fmt.Errorf("close legacy store: %w", err)
+	}
+
+	return encryptedSeed, nil
+}
+
+// legacyEncryptedSeed reads the encrypted master HD private key from an open
+// legacy store for spendable wallets. Watch-only, shell, and xpub-only wallets
+// hold no master secret, so it returns a nil seed for them.
+func legacyEncryptedSeed(ctx context.Context, legacyStore *kvdb.StoreHandle,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
+	error) {
+
+	// Only a spendable wallet backed by a private root key holds an
+	// encrypted master HD key; otherwise the legacy manager was created
+	// watch-only and has no such secret to read.
+	if params.WatchOnly || rootKey == nil || !rootKey.IsPrivate() {
+		return nil, nil
+	}
+
+	encryptedSeed, err := legacyStore.Store.GetEncryptedHDSeed(ctx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("read legacy master HD key: %w", err)
 	}
 
 	return encryptedSeed, nil

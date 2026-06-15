@@ -69,6 +69,76 @@ func (m *mockCreateWalletOps) GetWalletByID(ctx context.Context,
 	return info, args.Error(1)
 }
 
+// TestCreateWalletParamsValidate verifies the store-level invariants on
+// wallet creation params: a spendable wallet must carry an encrypted master
+// HD private key, while a watch-only wallet must not carry private secret
+// material.
+func TestCreateWalletParamsValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		params     CreateWalletParams
+		wantErr    error
+		wantErrStr string
+	}{
+		{
+			name: "spendable with master priv key",
+			params: CreateWalletParams{
+				Name:                   "spendable",
+				IsWatchOnly:            false,
+				EncryptedMasterPrivKey: []byte{0x01},
+			},
+		},
+		{
+			// The regression: a spendable wallet without the master
+			// secret must be rejected before the row is written, so a
+			// retry that lost the seed cannot commit a keyless wallet.
+			name: "spendable without master priv key",
+			params: CreateWalletParams{
+				Name:        "spendable",
+				IsWatchOnly: false,
+			},
+			wantErr:    ErrSpendableWalletNeedsMasterPrivKey,
+			wantErrStr: "spendable",
+		},
+		{
+			name: "watch-only without secrets",
+			params: CreateWalletParams{
+				Name:        "watch-only",
+				IsWatchOnly: true,
+			},
+		},
+		{
+			name: "watch-only with master priv key",
+			params: CreateWalletParams{
+				Name:                   "watch-only",
+				IsWatchOnly:            true,
+				EncryptedMasterPrivKey: []byte{0x01},
+			},
+			wantErr:    ErrWatchOnlyViolation,
+			wantErrStr: "watch-only",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tc.params.Validate()
+
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.ErrorContains(t, err, tc.wantErrStr)
+		})
+	}
+}
+
 // TestCreateWalletWithOps verifies that the shared helper performs the
 // post-validation transactional stages and returns the fetched wallet info.
 func TestCreateWalletWithOps(t *testing.T) {
