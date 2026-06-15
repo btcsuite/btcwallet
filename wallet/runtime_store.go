@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -232,7 +233,7 @@ func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
 		//nolint:gosec // LatestMgrVersion is a small constant that fits int32.
 		ManagerVersion: int32(waddrmgr.LatestMgrVersion),
 		IsWatchOnly:    params.WatchOnly,
-		Birthday:       params.Birthday,
+		Birthday:       birthdayWithSafetyMargin(params.Birthday),
 	}
 
 	// A wallet created without a private root key (a rootless shell or
@@ -266,6 +267,21 @@ func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
 	}
 
 	return createParams, nil
+}
+
+// birthdayWithSafetyMargin backs a requested birthday off by the legacy
+// address manager's safety margin so the SQL runtime store persists the
+// same timestamp the kvdb backend does. The stored birthday later drives
+// both the birthday block and the initial SyncedTo tip, so without this
+// margin a SQL-backed wallet could skip deposits made in the window just
+// before the requested birthday. A zero birthday means "no birthday"
+// (stored as NULL), so it is left untouched.
+func birthdayWithSafetyMargin(birthday time.Time) time.Time {
+	if birthday.IsZero() {
+		return birthday
+	}
+
+	return birthday.Add(-waddrmgr.BirthdaySafetyMargin)
 }
 
 // loadRuntimeWallet loads the named wallet from store and closes owned stores

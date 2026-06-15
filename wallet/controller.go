@@ -423,6 +423,28 @@ func (w *Wallet) finishStop() {
 	}
 }
 
+// discardUnstarted tears down a wallet that was loaded but never started,
+// for use on a Manager.Create error path that fails after Load has already
+// registered the wallet and opened its stores. It cancels the load-time
+// context, releases the store handles, and runs the deregister hook so the
+// manager cache is not left holding a partial wallet with live stores.
+//
+// Unlike finishStop this skips the Started->Stopping->Stopped lifecycle
+// transition, which does not apply to a wallet whose main loop never ran.
+// It marks the instance terminal so a later Start on the same pointer fails
+// fast instead of running against closed stores.
+func (w *Wallet) discardUnstarted() error {
+	w.stopped.Store(true)
+	w.cancel()
+	err := w.closeRuntimeStore()
+
+	if w.onStopped != nil {
+		w.onStopped()
+	}
+
+	return err
+}
+
 // closeRuntimeStore closes the owned runtime store, if one exists.
 func (w *Wallet) closeRuntimeStore() error {
 	if w.runtimeStoreClose == nil {

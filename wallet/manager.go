@@ -489,6 +489,14 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
+	// Any failure past this point has already registered w in the manager
+	// cache with open stores, so it must tear w down before returning;
+	// otherwise the cache is left holding a partial wallet whose stores
+	// stay open and whose name blocks a corrected retry.
+	discardOnErr := func(err error) error {
+		return errors.Join(err, w.discardUnstarted())
+	}
+
 	// Seed the default accounts for spendable SQL wallets (F1). The kvdb
 	// backend already seeds account 0 per scope during legacy create; the
 	// SQL create path does not, so a fresh SQL wallet would otherwise fail
@@ -500,7 +508,9 @@ func (m *Manager) Create(cfg Config,
 			context.Background(), w, rootKey, params.PrivatePassphrase,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("seed default accounts: %w", err)
+			return nil, discardOnErr(
+				fmt.Errorf("seed default accounts: %w", err),
+			)
 		}
 	}
 
@@ -510,7 +520,7 @@ func (m *Manager) Create(cfg Config,
 			context.Background(), params.InitialAccounts,
 		)
 		if err != nil {
-			return nil, err
+			return nil, discardOnErr(err)
 		}
 	}
 
