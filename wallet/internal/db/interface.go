@@ -45,6 +45,17 @@ var (
 			"private-key material",
 	)
 
+	// ErrSpendableWalletNeedsMasterPrivKey is returned when a non-watch-only
+	// wallet is created without an encrypted master HD private key. A
+	// spendable wallet must persist this secret so store-backed account/key
+	// derivation (GetEncryptedHDSeed) works; otherwise the wallet row would
+	// commit with no signing material. Symmetric counterpart of
+	// ErrWatchOnlyViolation for the wallet-creation surface.
+	ErrSpendableWalletNeedsMasterPrivKey = errors.New(
+		"spendable wallet must not be created without an encrypted " +
+			"master private key",
+	)
+
 	// ErrNilDB is returned when a nil database connection pointer is
 	// provided to the wallet.
 	ErrNilDB = errors.New("wallet requires a non-nil database connection")

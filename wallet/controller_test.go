@@ -569,6 +569,53 @@ func TestControllerStop(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestControllerStartAfterStop verifies that restarting the same wallet
+// pointer after Stop fails cleanly. Stop closes the instance's runtime,
+// legacy, and cache stores, so a second Start must return ErrWalletStopped
+// instead of running setup against closed stores. The mock expectations for
+// the startup sequence are registered Once(); their satisfaction after the
+// first Start (and the absence of any second round of calls) confirms the
+// second Start never touched the stores.
+func TestControllerStartAfterStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create and start a test wallet whose syncer blocks until
+	// the lifetime context is cancelled, mirroring a real run loop.
+	w, deps := createTestWalletWithMocks(t)
+
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
+	deps.syncer.On("run", mock.Anything).Run(func(args mock.Arguments) {
+		ctx, ok := args.Get(0).(context.Context)
+		if !ok {
+			return
+		}
+		<-ctx.Done()
+	}).Return(nil).Once()
+
+	require.NoError(t, w.Start(t.Context()))
+	require.True(t, w.state.isStarted())
+
+	// Stop the wallet, which closes its stores and marks it terminal.
+	require.NoError(t, w.Stop(t.Context()))
+	require.False(t, w.state.isStarted())
+
+	// Act: attempt to restart the same pointer.
+	err := w.Start(t.Context())
+
+	// Assert: the restart is refused with a typed error and the wallet
+	// stays stopped. No panic, and no second round of store calls (the
+	// Once() expectations above remain satisfied).
+	require.ErrorIs(t, err, ErrWalletStopped)
+	require.False(t, w.state.isStarted())
+	require.False(t, w.state.isRunning())
+}
+
 // TestControllerLock verifies the Lock method. It ensures that the wallet
 // can only be locked when it is started and currently unlocked.
 func TestControllerLock(t *testing.T) {

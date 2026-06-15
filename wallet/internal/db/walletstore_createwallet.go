@@ -10,7 +10,17 @@ import (
 // Watch-only wallets may keep the script crypto key so they can still encrypt
 // imported scripts, but they must not include private wallet secret material.
 func (p *CreateWalletParams) Validate() error {
+	// A spendable wallet must persist the encrypted master HD private key:
+	// store-backed account/key derivation reads it via GetEncryptedHDSeed,
+	// so committing a spendable wallet row without it would leave a wallet
+	// that cannot derive its own keys. Reject it here, before the row is
+	// written, rather than failing later at first derivation.
 	if !p.IsWatchOnly {
+		if len(p.EncryptedMasterPrivKey) == 0 {
+			return fmt.Errorf("wallet %q: %w", p.Name,
+				ErrSpendableWalletNeedsMasterPrivKey)
+		}
+
 		return nil
 	}
 
