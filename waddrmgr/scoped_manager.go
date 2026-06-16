@@ -139,27 +139,49 @@ func (k KeyScope) String() string {
 }
 
 // AccountScope uniquely identifies a specific account within a key scope.
+//
+// Name disambiguates accounts that share an account number. Both store
+// backends mask an imported account's number to 0, the same number the
+// default derived account owns, so the number alone is not a unique account
+// identity. Name is scope-unique and stable, so (Scope, Account, Name) keys
+// every account distinctly: the default derived account keys on its real
+// number while each imported-xpub account keys on its name at the masked 0.
 type AccountScope struct {
 	// Scope is the BIP44 account' used to derive the child key.
 	Scope KeyScope
 
 	// Account is the account number.
 	Account uint32
+
+	// Name is the durable, scope-unique account name. It breaks the
+	// (Scope, Account) collision between the default derived account and
+	// imported-xpub accounts, which both surface account number 0.
+	Name string
 }
 
 // String returns a human readable version describing the account scope.
 func (as AccountScope) String() string {
-	return fmt.Sprintf("%s/%d'", as.Scope, as.Account)
+	return fmt.Sprintf("%s/%d'(%s)", as.Scope, as.Account, as.Name)
 }
 
 // BranchScope uniquely identifies a specific derivation branch within an
 // account.
+//
+// Like AccountScope, Name disambiguates branches whose owning accounts share
+// account number 0 (the default derived account and any imported-xpub
+// account), so the branch recovery-state map never collides them.
 type BranchScope struct {
 	// Scope is the key scope of the branch.
 	Scope KeyScope
 
 	// Account is the account number of the branch.
 	Account uint32
+
+	// Name is the durable, scope-unique name of the branch's owning
+	// account. It breaks the (Scope, Account) collision between the
+	// default derived account and imported-xpub accounts at the masked
+	// account number 0.
+	Name string
 
 	// Branch is the branch number (e.g. waddrmgr.ExternalBranch or
 	// waddrmgr.InternalBranch).
@@ -168,7 +190,8 @@ type BranchScope struct {
 
 // String returns a human readable version describing the branch scope.
 func (bs BranchScope) String() string {
-	return fmt.Sprintf("%s/%d/%d'", bs.Scope, bs.Account, bs.Branch)
+	return fmt.Sprintf("%s/%d/%d'(%s)", bs.Scope, bs.Account, bs.Branch,
+		bs.Name)
 }
 
 // IsChange returns true if the branch matches the internal (change) branch.

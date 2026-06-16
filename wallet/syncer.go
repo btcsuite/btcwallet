@@ -2573,11 +2573,13 @@ func (s *syncer) loadTargetedScanData(ctx context.Context,
 }
 
 // resolveScanTargets converts the public AccountScope rescan targets into the
-// internal, identity-aware scanTargets used by the Store path. It resolves each
-// target's durable account name through the Store so an account that exists
-// only in the Store -- a derived account created through CreateDerivedAccount
-// but never written to the legacy address manager -- still resolves, where the
-// legacy-only resolution returned ErrAccountNotFound.
+// internal, identity-aware scanTargets used by the Store path. It prefers each
+// target's durable AccountScope.Name whenever the caller set one, falling back
+// to the account number otherwise, and resolves the durable account name
+// through the Store so an account that exists only in the Store -- a derived
+// account created through CreateDerivedAccount but never written to the legacy
+// address manager -- still resolves, where the legacy-only resolution returned
+// ErrAccountNotFound.
 //
 // The keyless legacy imported-address bucket is carried through with an empty
 // AccountName so storeScanHorizons skips it before any lookup; every other
@@ -2600,17 +2602,51 @@ func (s *syncer) resolveScanTargets(ctx context.Context,
 }
 
 // resolveScanTarget resolves a single public rescan target into its
-// identity-aware scanTarget through the Store.
+// identity-aware scanTarget through the Store. AccountScope.Name is the
+// durable, scope-unique identity, so it is always preferred over the maskable
+// account number: when Name is set the Store is queried by name and the number
+// is ignored, which is the only way a named imported-xpub target addressed at
+// the masked account number 0 can avoid resolving to the default derived
+// account.
 func (s *syncer) resolveScanTarget(ctx context.Context,
 	target waddrmgr.AccountScope) (scanTarget, error) {
 
 	// The keyless legacy imported-address bucket has no account row and no
 	// durable name, so it is carried through unresolved; storeScanHorizons
-	// skips it before issuing any lookup.
+	// skips it before issuing any lookup. It is keyed by a reserved sentinel
+	// number that no named account ever owns, so this sentinel check stays
+	// ahead of the name preference below.
 	if target.Account == waddrmgr.ImportedAddrAccount {
 		return scanTarget{
 			Scope:   target.Scope,
 			Account: target.Account,
+		}, nil
+	}
+
+	// Prefer the durable name when the caller supplied one. The name is more
+	// specific than the masked account number, so a named imported-xpub
+	// target with account number 0 resolves the imported account rather than
+	// colliding with the default derived account at the shared masked 0. A
+	// non-empty but unknown name is a genuine not-found and must surface as
+	// such, never fall back to a number lookup of account 0.
+	if target.Name != "" {
+		name := target.Name
+
+		info, err := s.store.GetAccount(ctx, db.GetAccountQuery{
+			WalletID:    s.walletID,
+			Scope:       db.KeyScope(target.Scope),
+			Name:        &name,
+			SkipBalance: true,
+		})
+		if err != nil {
+			return scanTarget{}, fmt.Errorf("resolve scan target "+
+				"by name: %w", err)
+		}
+
+		return scanTarget{
+			Scope:       target.Scope,
+			Account:     target.Account,
+			AccountName: info.AccountName,
 		}, nil
 	}
 
@@ -2632,11 +2668,12 @@ func (s *syncer) resolveScanTarget(ctx context.Context,
 
 	// The Store rejects a by-number lookup of an imported account because it
 	// masks every imported account's number to 0; an imported-xpub target
-	// addressed by its non-masked number therefore surfaces as not-found.
-	// Such a target is, by construction, present in the identity-aware
-	// address manager (it has a non-masked number to be addressed by), so
-	// fall back to resolving its durable name there. Any other failure --
-	// including a genuinely unknown account in both backends -- is returned.
+	// addressed by its non-masked number and no name therefore surfaces as
+	// not-found. Such a target is, by construction, present in the
+	// identity-aware address manager (it has a non-masked number to be
+	// addressed by), so fall back to resolving its durable name there. Any
+	// other failure -- including a genuinely unknown account in both
+	// backends -- is returned.
 	if !errors.Is(err, db.ErrAccountNotFound) {
 		return scanTarget{}, fmt.Errorf("resolve scan target "+
 			"account: %w", err)

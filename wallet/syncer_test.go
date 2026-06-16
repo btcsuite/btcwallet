@@ -2451,6 +2451,72 @@ func expectImportedScanAddressPage(store *walletmock.Store,
 	)).Return(result, nil).Once()
 }
 
+// TestResolveScanTargetsPrefersName verifies the public-API collision case: a
+// target that carries the durable AccountScope.Name "imported-xpub" with the
+// masked account number 0 resolves the imported-xpub account, not the default
+// derived account that also owns number 0. The number alone is ambiguous, so a
+// number-first lookup would resolve the default account; preferring the name
+// makes the imported account unambiguous.
+func TestResolveScanTargetsPrefersName(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real-backend syncer with the auto-created default derived
+	// account at number 0 and an imported-xpub account the Store masks to 0.
+	s, mgr, dbConn := newStoreScanSyncer(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	createImportedXpubAccount(t, s, mgr, dbConn, scope, "imported-xpub")
+
+	// Target the imported account by its durable name while leaving the
+	// account number at the masked, ambiguous default 0.
+	targets := []waddrmgr.AccountScope{{
+		Scope:   scope,
+		Account: waddrmgr.DefaultAccountNum,
+		Name:    "imported-xpub",
+	}}
+
+	// Act: resolve the named target through the Store.
+	resolved, err := s.resolveScanTargets(t.Context(), targets)
+
+	// Assert: the name wins, so the target resolves the imported-xpub
+	// account rather than the default derived account at the shared masked 0.
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	require.Equal(t, scope, resolved[0].Scope)
+	require.Equal(t, "imported-xpub", resolved[0].AccountName)
+	require.NotEqual(
+		t, waddrmgr.DefaultAccountName, resolved[0].AccountName,
+	)
+}
+
+// TestResolveScanTargetsUnknownName verifies that a target with a non-empty but
+// unknown durable name surfaces a clear account-not-found error rather than
+// falling back to a number lookup of account 0 and silently scanning the
+// default derived account.
+func TestResolveScanTargetsUnknownName(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real-backend syncer holding only the auto-created default
+	// derived account at number 0.
+	s, _, _ := newStoreScanSyncer(t)
+
+	// Target a name no account owns, with the account number left at the
+	// default 0 a fallback would otherwise resolve.
+	targets := []waddrmgr.AccountScope{{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: waddrmgr.DefaultAccountNum,
+		Name:    "does-not-exist",
+	}}
+
+	// Act: resolve the unknown named target through the Store.
+	resolved, err := s.resolveScanTargets(t.Context(), targets)
+
+	// Assert: the unknown name is a genuine not-found; the resolver does not
+	// fall back to the default account at number 0.
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, resolved)
+}
+
 // TestResolveScanTargetsStoreOnlyAccount verifies that a targeted rescan
 // resolves an account that exists only in the Store. Such an account is created
 // through the Store (CreateDerivedAccount) but is absent from the legacy
