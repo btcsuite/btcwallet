@@ -7,6 +7,7 @@ package wallet
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 )
 
@@ -91,6 +92,18 @@ type walletState struct {
 	// (false). The zero value is false (Locked), which is secure by
 	// default.
 	unlocked atomic.Bool
+
+	// startStopMu serializes the narrow Start/Stop handshake when a Stop
+	// arrives while the wallet is still Starting. finalizeStart (run by
+	// Start once its workers are launched) and requestStop (run by a
+	// concurrent Stop) both take it, so the Starting->Started transition
+	// and the stop-request read happen under a single total order. Without
+	// it the two could interleave so that Stop observes Starting (and
+	// returns having only recorded the request) while Start observes no
+	// request and completes, leaving a running wallet that the caller was
+	// told had stopped. A pointer is used so walletState stays copyable by
+	// value at construction (a value Mutex would trip go vet copylocks).
+	startStopMu *sync.Mutex
 }
 
 // newWalletState creates a new walletState initialized with the provided
@@ -100,7 +113,8 @@ type walletState struct {
 //   - Authentication: Locked (secure by default).
 func newWalletState(syncer chainSyncer) walletState {
 	return walletState{
-		syncer: syncer,
+		syncer:      syncer,
+		startStopMu: &sync.Mutex{},
 	}
 }
 
@@ -111,6 +125,28 @@ func (s *walletState) String() string {
 	unlocked := s.unlocked.Load()
 
 	return fmt.Sprintf("status=%v, sync=%v, locked=%v", lc, sync, !unlocked)
+}
+
+// beginStart claims the Stopped->Starting transition and clears any stale stop
+// request in the same critical section, so a fresh Start cannot run with a
+// stop intent left by a prior lifecycle. The clear is serialized with
+// requestStop via startStopMu: requestStop can only record a stop request once
+// the wallet is observably Starting, and it must take startStopMu to do so, so
+// it always runs after beginStart has released the lock. The clear therefore
+// never erases a stop request meant for this start (that is what finalizeStart
+// later observes); it only erases a leftover from a previous run.
+func (s *walletState) beginStart(stopRequested *atomic.Bool) error {
+	s.startStopMu.Lock()
+	defer s.startStopMu.Unlock()
+
+	err := s.toStarting()
+	if err != nil {
+		return err
+	}
+
+	stopRequested.Store(false)
+
+	return nil
 }
 
 // toStarting transitions the wallet state from Stopped to Starting.
@@ -145,6 +181,58 @@ func (s *walletState) toStarted() error {
 	}
 
 	return nil
+}
+
+// finalizeStart commits the Starting->Started transition and, in the same
+// critical section, reports whether a concurrent Stop requested cancellation
+// while the start was in flight. Start calls it after launching its workers.
+//
+// Holding startStopMu across both the transition and the stopRequested read
+// serializes finalizeStart with requestStop: the two run in some total order,
+// and in either order the outcome is consistent. If requestStop ran first it
+// recorded the request (because the state was still Starting), so the aborted
+// return here is true and Start tears the wallet down. If finalizeStart ran
+// first the state is already Started, so a subsequent requestStop transitions
+// it to Stopping and performs the teardown itself. The wallet can therefore
+// never settle into a running-Started state that a returned-successful Stop
+// believed it had stopped.
+func (s *walletState) finalizeStart(stopRequested *atomic.Bool) (bool, error) {
+	s.startStopMu.Lock()
+	defer s.startStopMu.Unlock()
+
+	err := s.toStarted()
+	if err != nil {
+		return false, err
+	}
+
+	return stopRequested.Load(), nil
+}
+
+// requestStop attempts the Started->Stopping transition on behalf of Stop. It
+// reports transitioned=true when Stop owns the teardown. When the wallet is
+// still Starting it cannot transition, so it records the stop request under
+// startStopMu (serializing with finalizeStart) and reports deferred=true, so
+// the in-flight Start observes the request and performs the teardown instead.
+// A false/false return means the wallet was already stopping or stopped and
+// the caller should treat the stop as a no-op.
+func (s *walletState) requestStop(stopRequested *atomic.Bool) (bool, bool) {
+	s.startStopMu.Lock()
+	defer s.startStopMu.Unlock()
+
+	if s.toStopping() == nil {
+		return true, false
+	}
+
+	// We could not move out of the current state. Only a Starting wallet
+	// can still resolve into a teardown the in-flight Start must honor;
+	// any other state (already Stopping/Stopped) is a genuine no-op.
+	if lifecycle(s.lifecycle.Load()) == lifecycleStarting {
+		stopRequested.Store(true)
+
+		return false, true
+	}
+
+	return false, false
 }
 
 // toStopping transitions the wallet from Started to Stopping.
@@ -236,6 +324,12 @@ func (s *walletState) isUnlocked() bool {
 // isStarted returns true if the wallet is in the Started state.
 func (s *walletState) isStarted() bool {
 	return lifecycle(s.lifecycle.Load()) == lifecycleStarted
+}
+
+// isStopped returns true if the wallet is in the Stopped state, i.e. its
+// teardown has fully completed.
+func (s *walletState) isStopped() bool {
+	return lifecycle(s.lifecycle.Load()) == lifecycleStopped
 }
 
 // isRunning returns true if the wallet is in any active state (not stopped

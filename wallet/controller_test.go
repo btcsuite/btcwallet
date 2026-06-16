@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"math"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -614,6 +616,211 @@ func TestControllerStartAfterStop(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletStopped)
 	require.False(t, w.state.isStarted())
 	require.False(t, w.state.isRunning())
+}
+
+// newRaceTestWallet builds a minimal wallet whose mocked store and syncer
+// accept an unbounded number of startup/run calls, so the same construction
+// can drive many overlapping Start/Stop iterations without tripping the strict
+// per-call expectations used elsewhere. The syncer's run returns immediately,
+// matching a syncer that exits as soon as it is launched.
+func newRaceTestWallet(t *testing.T) *Wallet {
+	t.Helper()
+
+	store := &walletmock.Store{}
+	store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Maybe()
+	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
+		[]db.AccountInfo(nil), nil,
+	).Maybe()
+	store.On("DeleteExpiredLeases", mock.Anything, mock.Anything).Return(
+		nil,
+	).Maybe()
+
+	syncer := &mockChainSyncer{}
+	syncer.On("run", mock.Anything).Return(nil).Maybe()
+	syncer.On("syncState").Return(syncStateSynced).Maybe()
+
+	lockTimer := time.NewTimer(time.Hour)
+	lockTimer.Stop()
+
+	w := &Wallet{
+		store:       store,
+		cache:       newStoreRuntimeCache(store),
+		sync:        syncer,
+		state:       newWalletState(syncer),
+		requestChan: make(chan any, 1),
+		lockTimer:   lockTimer,
+	}
+
+	return w
+}
+
+// TestControllerStartStopRace asserts the Start/Stop lifecycle invariant under
+// concurrency: a Stop that reports success must never leave the wallet running.
+// It interleaves a Start and a Stop on the same pointer across many iterations
+// (run with -race). For each iteration it drains the worker goroutines and
+// then requires the wallet to have settled out of the Started state, so a
+// successful Stop that silently lost the race to a completing Start (leaving
+// mainLoop running forever) is caught as a settle timeout rather than passing
+// unnoticed.
+func TestControllerStartStopRace(t *testing.T) {
+	t.Parallel()
+
+	const iterations = 200
+
+	for i := range iterations {
+		w := newRaceTestWallet(t)
+
+		var (
+			wgRun    sync.WaitGroup
+			startErr error
+			stopErr  error
+		)
+
+		wgRun.Add(2)
+
+		// Start the wallet.
+		go func() {
+			defer wgRun.Done()
+
+			startErr = w.Start(context.Background())
+		}()
+
+		// Concurrently stop it the moment it leaves the Stopped state,
+		// biasing the Stop to land while Start is still in flight.
+		go func() {
+			defer wgRun.Done()
+
+			for !w.state.isRunning() {
+				runtime.Gosched()
+			}
+
+			stopErr = w.Stop(context.Background())
+		}()
+
+		wgRun.Wait()
+
+		// Both calls must return without a hard error. A start aborted
+		// by a concurrent stop is the expected, benign outcome.
+		if startErr != nil {
+			require.ErrorIs(t, startErr, ErrStateForbidden)
+		}
+
+		require.NoError(t, stopErr)
+
+		// The wallet's background workers must have been told to exit.
+		// If a successful Stop lost the race to a completing Start
+		// before the fix, mainLoop would run forever and this wait
+		// would block; bound it and fail loudly instead of hanging.
+		drained := make(chan struct{})
+		go func() {
+			w.wg.Wait()
+			close(drained)
+		}()
+
+		select {
+		case <-drained:
+		case <-time.After(5 * time.Second):
+			// Release the leaked goroutines so the process can exit,
+			// then fail: a successful Stop left the wallet running.
+			w.cancel()
+
+			t.Fatalf("iteration %d: workers never stopped after a "+
+				"successful Stop; wallet left running", i)
+		}
+
+		// Once settled, the wallet must not be Started: either Stop or
+		// the aborting Start drove it through the stopping path.
+		require.False(t, w.state.isStarted(),
+			"iteration %d: wallet Started after a successful Stop",
+			i)
+	}
+}
+
+// TestControllerStopBlocksWhileStarting verifies that a Stop landing while the
+// wallet is still Starting honors the documented contract that Stop blocks
+// until the wallet has fully exited. In that race requestStop cannot transition
+// out of Starting, so it only records the stop intent and defers the teardown
+// to the in-flight Start. Stop must therefore wait for that Start to drive the
+// lifecycle to Stopped instead of reporting completion immediately while
+// teardown is still pending. Before the fix Stop returned nil as soon as it
+// observed the deferred request, so this test would see Stop return while the
+// wallet was still Starting.
+func TestControllerStopBlocksWhileStarting(t *testing.T) {
+	t.Parallel()
+
+	w := newRaceTestWallet(t)
+
+	// Drive the wallet into Starting, mirroring an in-flight Start that has
+	// claimed the lifecycle but not yet finalized.
+	require.NoError(t, w.state.toStarting())
+
+	// Call Stop concurrently. requestStop will record the stop intent and
+	// defer, so Stop must block until the (simulated) in-flight Start
+	// completes the teardown.
+	stopErr := make(chan error, 1)
+	go func() {
+		stopErr <- w.Stop(context.Background())
+	}()
+
+	// Stop must NOT return while the wallet is still Starting. A short wait
+	// without a return confirms it is blocking on the lifecycle rather than
+	// reporting a premature completion.
+	select {
+	case err := <-stopErr:
+		t.Fatalf("Stop returned (err=%v) while wallet still Starting; "+
+			"it must block until the wallet has fully stopped", err)
+
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The stop intent must have been recorded for the in-flight Start to
+	// honor, matching the deferred handshake.
+	require.True(t, w.stopRequested.Load())
+
+	// Simulate the in-flight Start finishing the deferred teardown: it
+	// drives the lifecycle Starting->Stopped via finishStop.
+	require.NoError(t, w.state.toStopped())
+
+	// Stop must now observe the Stopped lifecycle and return without error.
+	select {
+	case err := <-stopErr:
+		require.NoError(t, err)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the wallet reached Stopped")
+	}
+}
+
+// TestControllerStopDeferredContextCancel verifies that a Stop deferred to an
+// in-flight Start respects its context: if the in-flight Start never completes
+// the teardown and the caller's context is cancelled, Stop returns a
+// context-aware error rather than blocking forever.
+func TestControllerStopDeferredContextCancel(t *testing.T) {
+	t.Parallel()
+
+	w := newRaceTestWallet(t)
+	require.NoError(t, w.state.toStarting())
+
+	stopCtx, cancel := context.WithCancel(context.Background())
+
+	stopErr := make(chan error, 1)
+	go func() {
+		stopErr <- w.Stop(stopCtx)
+	}()
+
+	// Stop is blocking on the still-Starting lifecycle; cancel its context
+	// to unblock it.
+	cancel()
+
+	select {
+	case err := <-stopErr:
+		require.ErrorIs(t, err, context.Canceled)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after its context was cancelled")
+	}
 }
 
 // TestControllerLock verifies the Lock method. It ensures that the wallet
