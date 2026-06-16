@@ -160,7 +160,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 		},
 	}
 	_, _, err = conflictOps.ListConflictTxns(ctx, req)
-	require.ErrorContains(t, err, "list unmined txns")
+	require.ErrorContains(t, err, "lookup input spenders")
 }
 
 // TestPgUpdateTxOpsAdditionalBranches covers the remaining postgres UpdateTx

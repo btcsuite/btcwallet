@@ -72,7 +72,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 		},
 	}
 	_, _, err = conflictOps.ListConflictTxns(ctx, req)
-	require.ErrorContains(t, err, "list unmined txns")
+	require.ErrorContains(t, err, "lookup input spenders")
 }
 
 // TestReleaseOutputOpsAdditionalBranches covers remaining sqlite Release paths.

@@ -698,9 +698,10 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 	req := testCreateTxRequest(t)
 
 	var (
-		insertReq CreateTxRequest
-		creditsID int64
-		inputsID  int64
+		insertReq        CreateTxRequest
+		creditsID        int64
+		spentID          int64
+		recordedInputsID int64
 	)
 
 	ops := &mockCreateTxOps{}
@@ -736,7 +737,16 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 			txID, ok := args.Get(2).(int64)
 			require.True(t, ok)
 
-			inputsID = txID
+			spentID = txID
+		},
+	).Once()
+
+	ops.On("InsertInputs", mock.Anything, req, int64(11)).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+
+			recordedInputsID = txID
 		},
 	).Once()
 
@@ -746,7 +756,8 @@ func TestCreateTxWithOpsInsert(t *testing.T) {
 
 	// Assert: The shared flow uses the inserted tx ID consistently.
 	require.Equal(t, int64(11), creditsID)
-	require.Equal(t, int64(11), inputsID)
+	require.Equal(t, int64(11), spentID)
+	require.Equal(t, int64(11), recordedInputsID)
 	require.Equal(t, req.TxHash, insertReq.TxHash)
 }
 
@@ -793,6 +804,7 @@ func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
 	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
+	ops.On("InsertInputs", mock.Anything, req, int64(4)).Return(nil).Once()
 
 	err := CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -952,8 +964,89 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
+	ops.On("InsertInputs", mock.Anything, req, existing.ID).
+		Return(nil).Once()
+
 	err = CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
+}
+
+// TestCreateTxWithOpsConfirmReuseReplaysMissingEdges is a regression test for a
+// confirm-reuse that returned before replaying missing edges. A transaction
+// first recorded unmined without its full credit and spent-input detail, then
+// later confirmed through the batch path, must have those edges filled in
+// against the existing row rather than left half-recorded.
+func TestCreateTxWithOpsConfirmReuseReplaysMissingEdges(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the confirmed observation carries a credit and a wallet-owned
+	// input that the existing unmined row never recorded.
+	req, err := NewCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	existing := CreateTxExistingTarget{
+		ID:       7,
+		Status:   TxStatusPending,
+		HasBlock: false,
+	}
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+
+	ops.On("ConfirmExisting", mock.Anything, req, existing).Return(nil).Once()
+
+	ops.On("ListConflictTxns", mock.Anything, req).Return(
+		[]int64(nil), []chainhash.Hash(nil), nil,
+	).Once()
+
+	// Assert intent: every edge write must target the existing row ID, proving
+	// the flow no longer returns early after ConfirmExisting.
+	var creditsID, spentID, recordedInputsID int64
+	ops.On("InsertCredits", mock.Anything, req, existing.ID).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+
+			creditsID = txID
+		},
+	).Once()
+
+	ops.On("MarkInputsSpent", mock.Anything, req, existing.ID).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+
+			spentID = txID
+		},
+	).Once()
+
+	ops.On("InsertInputs", mock.Anything, req, existing.ID).Return(nil).Run(
+		func(args mock.Arguments) {
+			txID, ok := args.Get(2).(int64)
+			require.True(t, ok)
+
+			recordedInputsID = txID
+		},
+	).Once()
+
+	// Act.
+	err = CreateTxWithOps(context.Background(), req, ops)
+	require.NoError(t, err)
+
+	// Assert: the missing edges were replayed against the existing row.
+	require.Equal(t, existing.ID, creditsID)
+	require.Equal(t, existing.ID, spentID)
+	require.Equal(t, existing.ID, recordedInputsID)
 }
 
 // TestCreateTxWithOpsReplaceConflicts verifies that the shared CreateTx flow
@@ -1005,6 +1098,8 @@ func TestCreateTxWithOpsReplaceConflicts(t *testing.T) {
 	ops.On("InsertCredits", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	ops.On("MarkInputsSpent", mock.Anything, req, int64(11)).Return(nil).Once()
+
+	ops.On("InsertInputs", mock.Anything, req, int64(11)).Return(nil).Once()
 
 	err = CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -1252,6 +1347,15 @@ func (m *mockCreateTxOps) InsertCredits(ctx context.Context,
 
 // MarkInputsSpent implements CreateTxOps.
 func (m *mockCreateTxOps) MarkInputsSpent(ctx context.Context,
+	req CreateTxRequest, txID int64) error {
+
+	args := m.Called(ctx, req, txID)
+
+	return args.Error(0)
+}
+
+// InsertInputs implements CreateTxOps.
+func (m *mockCreateTxOps) InsertInputs(ctx context.Context,
 	req CreateTxRequest, txID int64) error {
 
 	args := m.Called(ctx, req, txID)

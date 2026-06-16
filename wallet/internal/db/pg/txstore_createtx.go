@@ -177,8 +177,14 @@ func (o *createTxOps) ListConflictTxns(ctx context.Context,
 	return buildConflictRoots(rows, rootIDs)
 }
 
-// collectConflictRootIDs returns the active unmined spender row IDs
-// that currently own any wallet-controlled input spent by the incoming tx.
+// collectConflictRootIDs returns the active unmined spender row IDs that share
+// any input with the incoming tx.
+//
+// Two spend edges are consulted for each input. The wallet-owned UTXO spend
+// edge finds a conflict root that spends a wallet-owned parent output, while
+// the durable input table finds a conflict root that shares the input even when
+// its parent outpoint is not wallet-owned. The two are merged so an unmined
+// wallet tx is displaced whenever it spends the same input, external or not.
 func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 	req db.CreateTxRequest) (map[int64]struct{}, error) {
 
@@ -202,19 +208,29 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 			},
 		)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("lookup input conflict %d: %w",
+					inputIndex, err)
 			}
+		} else if spend.SpentByTxID.Valid {
+			rootIDs[spend.SpentByTxID.Int64] = struct{}{}
+		}
 
-			return nil, fmt.Errorf("lookup input conflict %d: %w", inputIndex,
+		spenders, err := qtx.ListActiveUnminedInputSpenders(
+			ctx, sqlc.ListActiveUnminedInputSpendersParams{
+				WalletID:        int64(req.Params.WalletID),
+				PrevTxHash:      txIn.PreviousOutPoint.Hash[:],
+				PrevOutputIndex: outputIndex,
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("lookup input spenders %d: %w", inputIndex,
 				err)
 		}
 
-		if !spend.SpentByTxID.Valid {
-			continue
+		for _, spenderTxID := range spenders {
+			rootIDs[spenderTxID] = struct{}{}
 		}
-
-		rootIDs[spend.SpentByTxID.Int64] = struct{}{}
 	}
 
 	return rootIDs, nil
@@ -279,6 +295,56 @@ func (o *createTxOps) MarkInputsSpent(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {
 
 	return markInputsSpent(ctx, o.qtx, req.Params, txID)
+}
+
+// InsertInputs records the previous outpoint of every input of the transaction.
+func (o *createTxOps) InsertInputs(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	return insertInputs(ctx, o.qtx, req.Params, txID)
+}
+
+// insertInputs durably records the previous outpoint of every input of the
+// stored transaction, including inputs over outpoints the wallet does not own.
+//
+// Conflict discovery for a later confirmed transaction matches the confirming
+// tx's inputs against these rows, so they must be recorded for every input
+// rather than only inputs that spend wallet-owned UTXOs. The insert is
+// idempotent, so replaying it for an existing row during confirm-reuse is safe.
+func insertInputs(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams, txID int64) error {
+
+	// Coinbase inputs reference a null outpoint that no other transaction can
+	// share, so there is no conflict edge to record for them.
+	if blockchain.IsCoinBaseTx(params.Tx) {
+		return nil
+	}
+
+	for inputIndex, txIn := range params.Tx.TxIn {
+		index, err := db.Int64ToInt32(int64(inputIndex))
+		if err != nil {
+			return fmt.Errorf("convert input index %d: %w", inputIndex, err)
+		}
+
+		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
+		if err != nil {
+			return fmt.Errorf("convert input outpoint index %d: %w", inputIndex,
+				err)
+		}
+
+		_, err = qtx.InsertTxInput(ctx, sqlc.InsertTxInputParams{
+			WalletID:        int64(params.WalletID),
+			TxID:            txID,
+			InputIndex:      index,
+			PrevTxHash:      txIn.PreviousOutPoint.Hash[:],
+			PrevOutputIndex: outputIndex,
+		})
+		if err != nil {
+			return fmt.Errorf("insert tx input %d: %w", inputIndex, err)
+		}
+	}
+
+	return nil
 }
 
 // MarkTxnsReplaced marks the provided direct conflict roots replaced in one
