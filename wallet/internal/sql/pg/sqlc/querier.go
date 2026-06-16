@@ -292,6 +292,19 @@ type Querier interface {
 	// - Single-row insert. The cost is dominated by the wallet/hash uniqueness
 	//   checks and any optional block foreign-key validation.
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
+	// Records the previous outpoint spent by one input of a wallet-scoped
+	// transaction.
+	//
+	// How:
+	// - Writes directly to tx_inputs using the already-resolved spending
+	//   transaction ID plus the input's previous outpoint.
+	// - Stores every input, including inputs that spend outpoints the wallet does
+	//   not own, so conflict discovery can match shared external inputs.
+	// - Uses an explicit conflict target so confirm-reuse replays of the same input
+	//   are ignored without masking other constraint failures.
+	// Performance:
+	// - Single-row insert with cheap duplicate suppression via `ON CONFLICT`.
+	InsertTxInput(ctx context.Context, arg InsertTxInputParams) (int64, error)
 	// Records a replacement edge between two wallet-scoped transactions.
 	//
 	// How:
@@ -347,6 +360,23 @@ type Querier interface {
 	// Performance:
 	// - Matches the wallet/status index used by active wallet history paths.
 	ListActiveTransactionRaws(ctx context.Context, walletID int64) ([]ListActiveTransactionRawsRow, error)
+	// Lists the active unmined wallet transactions that spend a given previous
+	// outpoint.
+	//
+	// How:
+	// - Matches input rows on the wallet-scoped previous outpoint lookup index.
+	// - Joins transactions on the wallet-scoped `(wallet_id, id)` key and keeps
+	//   only spenders whose transaction is still in the active unmined set
+	//   (`block_height IS NULL` and `pending`/`published` status). The status
+	//   predicate stays in the query because the spending transaction's status
+	//   lives on transactions, not on the input row.
+	// - Returns distinct spender transaction IDs so a transaction that spends the
+	//   same outpoint through more than one input is reported once.
+	// Performance:
+	// - Uses the `(wallet_id, prev_tx_hash, prev_output_index)` index to bound the
+	//   scan to the matching previous outpoint, then the live-only transaction
+	//   index for the status filter.
+	ListActiveUnminedInputSpenders(ctx context.Context, arg ListActiveUnminedInputSpendersParams) ([]int64, error)
 	// Lists all currently active leases for a wallet.
 	//
 	// How:

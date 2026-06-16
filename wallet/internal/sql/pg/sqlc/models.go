@@ -92,6 +92,15 @@ type Transaction struct {
 	TxLabel        string
 }
 
+type TxInput struct {
+	WalletID        int64
+	ID              int64
+	TxID            int64
+	InputIndex      int32
+	PrevTxHash      []byte
+	PrevOutputIndex int32
+}
+
 type TxReplacement struct {
 	WalletID        int64
 	ID              int64
