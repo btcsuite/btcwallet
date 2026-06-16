@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -1122,6 +1123,254 @@ func TestCreateTxConfirmedWinnerInvalidatesConflictBranch(t *testing.T) {
 		OutPoint: spentOutPoint,
 	})
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestCreateTxConfirmedWinnerInvalidatesExternalInputConflict verifies that a
+// confirmed transaction displaces an unmined wallet transaction that shares a
+// non-wallet (external) input with it, even though no wallet-owned UTXO spend
+// edge connects them.
+//
+// Scenario:
+//   - An unmined wallet transaction spends one external outpoint the wallet
+//     does not own and credits the wallet, so it is relevant but its shared
+//     input is not tracked as a wallet UTXO.
+//   - An unmined descendant spends that wallet credit.
+//   - A confirmed wallet transaction later spends the same external outpoint.
+//
+// Setup:
+//   - Create one wallet, account, and address.
+//   - Insert the unmined root crediting the wallet, then its unmined
+//     descendant, then the confirmed winner over the same external outpoint.
+//
+// Action:
+//   - Record the confirmed winner through CreateTx.
+//
+// Assertions:
+//   - The unmined root is marked replaced and a replacement edge points from it
+//     to the winner.
+//   - The unmined descendant is marked failed.
+//   - The confirmed winner stays published with its block.
+func TestCreateTxConfirmedWinnerInvalidatesExternalInputConflict(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-external-input-conflict")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	// The shared input is an outpoint the wallet does not own, so no wallet
+	// UTXO spend edge can connect the two transactions that spend it.
+	sharedExternalOutPoint := randomOutPoint()
+
+	// The unmined root spends the external outpoint and credits the wallet, so
+	// it is a relevant wallet transaction whose conflict can only be discovered
+	// through the shared input rather than a wallet-owned parent.
+	unminedRoot := newRegularTx(
+		[]wire.OutPoint{sharedExternalOutPoint},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       unminedRoot,
+		Received: time.Unix(1710002500, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	// The descendant spends the wallet credit created by the root, so it must
+	// fall to the failed state once the root is displaced.
+	descendant := newRegularTx(
+		[]wire.OutPoint{{Hash: unminedRoot.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x52}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       descendant,
+		Received: time.Unix(1710002510, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 261)
+	confirmedWinner := newRegularTx(
+		[]wire.OutPoint{sharedExternalOutPoint},
+		[]*wire.TxOut{{Value: 3500, PkScript: []byte{0x53}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedWinner,
+		Received: time.Unix(1710002520, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	rootInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     unminedRoot.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, rootInfo.Block)
+	require.Equal(t, db.TxStatusReplaced, rootInfo.Status)
+
+	descendantInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     descendant.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, descendantInfo.Block)
+	require.Equal(t, db.TxStatusFailed, descendantInfo.Status)
+
+	winnerInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     confirmedWinner.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, winnerInfo.Block)
+	require.Equal(t, db.TxStatusPublished, winnerInfo.Status)
+
+	// The displaced root must record a replacement edge to the confirmed
+	// winner, proving the conflict was reconciled and not merely left active.
+	unminedRootHash := unminedRoot.TxHash()
+	rootReplacedBy := ReplacementTxHashesByReplaced(
+		t, store.Queries(), walletID, unminedRootHash[:],
+	)
+	requireReplacementEdge(t, rootReplacedBy, confirmedWinner)
+}
+
+// TestCreateTxConfirmReuseRepairsExternalInputConflict verifies that confirming
+// a transaction row that already exists in the unmined set still discovers and
+// repairs the external-input conflict it now wins.
+//
+// Scenario:
+//   - Two unmined wallet transactions share one external outpoint; neither
+//     displaces the other while both are unmined.
+//   - The winner row is later re-recorded with a confirming block, reusing the
+//     existing unmined row instead of inserting a duplicate.
+//
+// Setup:
+//   - Create one wallet, account, and address.
+//   - Insert the winner and the loser as unmined transactions that both credit
+//     the wallet and spend the same external outpoint.
+//
+// Action:
+//   - Re-record the winner through CreateTx with a confirming block.
+//
+// Assertions:
+//   - The loser is marked replaced and a replacement edge points from it to the
+//     reused winner row.
+//   - The reused winner row is published with its block.
+func TestCreateTxConfirmReuseRepairsExternalInputConflict(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-confirm-reuse-external-input")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	sharedExternalOutPoint := randomOutPoint()
+
+	// The winner is first recorded unmined, before any conflict exists, so its
+	// row carries no replacement edge to the loser yet.
+	winner := newRegularTx(
+		[]wire.OutPoint{sharedExternalOutPoint},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       winner,
+		Received: time.Unix(1710003500, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	loser := newRegularTx(
+		[]wire.OutPoint{sharedExternalOutPoint},
+		[]*wire.TxOut{{Value: 4500, PkScript: addr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       loser,
+		Received: time.Unix(1710003510, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	// While both are unmined neither displaces the other.
+	loserInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     loser.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPending, loserInfo.Status)
+
+	// Re-record the winner with a confirming block. This reuses the existing
+	// unmined row and must still reconcile the conflict it now wins.
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 262)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       winner,
+		Received: time.Unix(1710003520, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	loserInfo, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     loser.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, loserInfo.Block)
+	require.Equal(t, db.TxStatusReplaced, loserInfo.Status)
+
+	winnerInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     winner.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, winnerInfo.Block)
+	require.Equal(t, db.TxStatusPublished, winnerInfo.Status)
+
+	// The repaired replacement edge must point from the loser to the reused
+	// winner row.
+	loserHash := loser.TxHash()
+	loserReplacedBy := ReplacementTxHashesByReplaced(
+		t, store.Queries(), walletID, loserHash[:],
+	)
+	requireReplacementEdge(t, loserReplacedBy, winner)
+}
+
+// requireReplacementEdge asserts that the store recorded a replacement edge
+// from the replaced transaction to the replacement transaction. The backend
+// query is resolved through a per-backend fixture so this shared assertion does
+// not name backend-specific generated types.
+func requireReplacementEdge(t *testing.T, replacementHashes [][]byte,
+	replacement *wire.MsgTx) {
+
+	t.Helper()
+
+	replacementHash := replacement.TxHash()
+
+	found := false
+	for _, hash := range replacementHashes {
+		if bytes.Equal(hash, replacementHash[:]) {
+			found = true
+
+			break
+		}
+	}
+
+	require.True(t, found, "missing replacement edge to winning tx")
 }
 
 // TestGetTxReturnsStoredPendingTx verifies that GetTx rebuilds the public
