@@ -140,7 +140,7 @@ func legacyKVDBConfig(cfg Config) kvdb.Config {
 // row, so it always reports false.
 func createRuntimeWallet(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey,
-	encryptedSeed []byte) (bool, error) {
+	encryptedSeed []byte, birthday time.Time) (bool, error) {
 
 	runtimeCfg := cfg.DB.withDefaults()
 
@@ -169,7 +169,7 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 		}()
 
 		return createRuntimeWalletWithStore(
-			ctx, store, cfg, params, rootKey, encryptedSeed,
+			ctx, store, cfg, params, rootKey, encryptedSeed, birthday,
 		)
 
 	case DBBackendPostgres:
@@ -188,7 +188,7 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 		}()
 
 		return createRuntimeWalletWithStore(
-			ctx, store, cfg, params, rootKey, encryptedSeed,
+			ctx, store, cfg, params, rootKey, encryptedSeed, birthday,
 		)
 
 	default:
@@ -202,7 +202,8 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 // already existed.
 func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 	cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) (bool, error) {
+	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte,
+	birthday time.Time) (bool, error) {
 
 	_, err := store.GetWallet(ctx, cfg.Name)
 	if err == nil {
@@ -214,7 +215,7 @@ func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 	}
 
 	createParams, err := runtimeCreateWalletParams(
-		cfg, params, rootKey, encryptedSeed,
+		cfg, params, rootKey, encryptedSeed, birthday,
 	)
 	if err != nil {
 		return false, err
@@ -229,10 +230,13 @@ func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 }
 
 // runtimeCreateWalletParams converts wallet creation inputs into the SQL
-// runtime wallet metadata row.
+// runtime wallet metadata row. birthday is the final timestamp to persist (the
+// caller has already applied the safety margin or, on a partial-create retry,
+// resolved it to the existing legacy wallet's original birthday), so it is
+// stored verbatim.
 func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey,
-	encryptedSeed []byte) (db.CreateWalletParams, error) {
+	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte,
+	birthday time.Time) (db.CreateWalletParams, error) {
 
 	createParams := db.CreateWalletParams{
 		Name: cfg.Name,
@@ -241,7 +245,7 @@ func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
 		//nolint:gosec // LatestMgrVersion is a small constant that fits int32.
 		ManagerVersion: int32(waddrmgr.LatestMgrVersion),
 		IsWatchOnly:    params.WatchOnly,
-		Birthday:       birthdayWithSafetyMargin(params.Birthday),
+		Birthday:       birthday,
 	}
 
 	// A wallet created without a private root key (a rootless shell or
