@@ -189,6 +189,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertTransactionStmt, err = db.PrepareContext(ctx, InsertTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTransaction: %w", err)
 	}
+	if q.insertTxInputStmt, err = db.PrepareContext(ctx, InsertTxInput); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertTxInput: %w", err)
+	}
 	if q.insertTxReplacementEdgeStmt, err = db.PrepareContext(ctx, InsertTxReplacementEdge); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTxReplacementEdge: %w", err)
 	}
@@ -218,6 +221,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listActiveTransactionRawsStmt, err = db.PrepareContext(ctx, ListActiveTransactionRaws); err != nil {
 		return nil, fmt.Errorf("error preparing query ListActiveTransactionRaws: %w", err)
+	}
+	if q.listActiveUnminedInputSpendersStmt, err = db.PrepareContext(ctx, ListActiveUnminedInputSpenders); err != nil {
+		return nil, fmt.Errorf("error preparing query ListActiveUnminedInputSpenders: %w", err)
 	}
 	if q.listActiveUtxoLeasesStmt, err = db.PrepareContext(ctx, ListActiveUtxoLeases); err != nil {
 		return nil, fmt.Errorf("error preparing query ListActiveUtxoLeases: %w", err)
@@ -589,6 +595,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertTransactionStmt: %w", cerr)
 		}
 	}
+	if q.insertTxInputStmt != nil {
+		if cerr := q.insertTxInputStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertTxInputStmt: %w", cerr)
+		}
+	}
 	if q.insertTxReplacementEdgeStmt != nil {
 		if cerr := q.insertTxReplacementEdgeStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertTxReplacementEdgeStmt: %w", cerr)
@@ -637,6 +648,11 @@ func (q *Queries) Close() error {
 	if q.listActiveTransactionRawsStmt != nil {
 		if cerr := q.listActiveTransactionRawsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listActiveTransactionRawsStmt: %w", cerr)
+		}
+	}
+	if q.listActiveUnminedInputSpendersStmt != nil {
+		if cerr := q.listActiveUnminedInputSpendersStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listActiveUnminedInputSpendersStmt: %w", cerr)
 		}
 	}
 	if q.listActiveUtxoLeasesStmt != nil {
@@ -883,6 +899,7 @@ type Queries struct {
 	insertBlockStmt                             *sql.Stmt
 	insertKeyScopeSecretsStmt                   *sql.Stmt
 	insertTransactionStmt                       *sql.Stmt
+	insertTxInputStmt                           *sql.Stmt
 	insertTxReplacementEdgeStmt                 *sql.Stmt
 	insertTxReplacementEdgeByHashStmt           *sql.Stmt
 	insertUtxoStmt                              *sql.Stmt
@@ -893,6 +910,7 @@ type Queries struct {
 	listAccountsByWalletAndNameStmt             *sql.Stmt
 	listAccountsByWalletScopeStmt               *sql.Stmt
 	listActiveTransactionRawsStmt               *sql.Stmt
+	listActiveUnminedInputSpendersStmt          *sql.Stmt
 	listActiveUtxoLeasesStmt                    *sql.Stmt
 	listAddressTypesStmt                        *sql.Stmt
 	listAddressesByAccountStmt                  *sql.Stmt
@@ -984,6 +1002,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertBlockStmt:                             q.insertBlockStmt,
 		insertKeyScopeSecretsStmt:                   q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                       q.insertTransactionStmt,
+		insertTxInputStmt:                           q.insertTxInputStmt,
 		insertTxReplacementEdgeStmt:                 q.insertTxReplacementEdgeStmt,
 		insertTxReplacementEdgeByHashStmt:           q.insertTxReplacementEdgeByHashStmt,
 		insertUtxoStmt:                              q.insertUtxoStmt,
@@ -994,6 +1013,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,
 		listAccountsByWalletScopeStmt:               q.listAccountsByWalletScopeStmt,
 		listActiveTransactionRawsStmt:               q.listActiveTransactionRawsStmt,
+		listActiveUnminedInputSpendersStmt:          q.listActiveUnminedInputSpendersStmt,
 		listActiveUtxoLeasesStmt:                    q.listActiveUtxoLeasesStmt,
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listAddressesByAccountStmt:                  q.listAddressesByAccountStmt,
