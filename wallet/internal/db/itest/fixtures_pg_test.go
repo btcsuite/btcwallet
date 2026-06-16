@@ -68,6 +68,31 @@ func CreateBlockFixture(t *testing.T, queries *sqlc.Queries,
 	return block
 }
 
+// ReplacementTxHashesByReplaced returns the replacement transaction hashes
+// recorded for one replaced transaction hash. It exists so shared itests can
+// assert replacement edges without naming the backend-specific generated query
+// types.
+func ReplacementTxHashesByReplaced(t *testing.T, queries *sqlc.Queries,
+	walletID uint32, replacedHash []byte) [][]byte {
+
+	t.Helper()
+
+	rows, err := queries.ListReplacementTxHashesByReplacedTxHash(
+		t.Context(), sqlc.ListReplacementTxHashesByReplacedTxHashParams{
+			WalletID: int64(walletID),
+			TxHash:   replacedHash,
+		},
+	)
+	require.NoError(t, err)
+
+	hashes := make([][]byte, 0, len(rows))
+	for _, row := range rows {
+		hashes = append(hashes, row.ReplacementTxHash)
+	}
+
+	return hashes
+}
+
 // CreateAccountWithNumber creates an account with a specific account number.
 // Used to test account number overflow without creating billions of accounts.
 func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
