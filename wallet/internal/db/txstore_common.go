@@ -820,6 +820,8 @@ var ErrCreateTxExistingNotFound = errors.New("create tx existing target not " +
 //     row claims their wallet-owned inputs
 //   - Insert every wallet-owned credited output as a UTXO
 //   - attach any wallet-owned spent inputs to that final transaction row
+//   - record every input's previous outpoint so a later confirmed tx can detect
+//     a conflict on a shared input even when that input is not wallet-owned
 //
 // Each backend implements those steps with its own sqlc-generated query types
 // while CreateTxWithOps keeps the high-level sequencing in one place.
@@ -867,6 +869,12 @@ type CreateTxOps interface {
 	// MarkInputsSpent attaches wallet-owned parent outpoints to this
 	// transaction row and rejects conflicts or invalid wallet parents.
 	MarkInputsSpent(ctx context.Context, req CreateTxRequest, txID int64) error
+
+	// InsertInputs records the previous outpoint of every input of this
+	// transaction, including inputs over outpoints the wallet does not own,
+	// so a later confirmed transaction can discover a conflict on any shared
+	// input. It is idempotent so confirm-reuse replays do not duplicate rows.
+	InsertInputs(ctx context.Context, req CreateTxRequest, txID int64) error
 }
 
 // checkReuseCreateTx reports whether CreateTx should reuse an existing wallet-
@@ -1258,6 +1266,15 @@ func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
 	err = ops.MarkInputsSpent(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx spends: %w", err)
+	}
+
+	// Record this tx's own input fingerprint last. These rows describe the
+	// outpoints this tx spends, so they only ever feed conflict discovery for a
+	// future confirmed tx; recording them here cannot displace the branch this
+	// tx is itself replacing.
+	err = ops.InsertInputs(ctx, req, txID)
+	if err != nil {
+		return fmt.Errorf("create tx inputs: %w", err)
 	}
 
 	return nil
