@@ -454,6 +454,11 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 		return nil, err
 	}
 
+	dbAddrSchema, err := dbScopeAddrSchema(addrSchema)
+	if err != nil {
+		return nil, err
+	}
+
 	info, err := w.store.CreateImportedAccount(ctx,
 		db.CreateImportedAccountParams{
 			WalletID:          w.id,
@@ -462,7 +467,7 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 			MasterFingerprint: masterKeyFingerprint,
 			PublicKey:         []byte(accountKey.String()),
 			DryRun:            dryRun,
-			AddrSchema:        dbScopeAddrSchema(addrSchema),
+			AddrSchema:        dbAddrSchema,
 		},
 	)
 	if err != nil {
@@ -482,17 +487,29 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 
 // dbScopeAddrSchema converts a waddrmgr per-account address schema override
 // into the account-store contract type.
+//
+// The waddrmgr and db AddressType enums share names but not ordinals (e.g.
+// waddrmgr.PubKeyHash is 0 while db.RawPubKey is 0), so a direct cast would
+// silently corrupt the stored schema. The explicit wallet->store mapping is
+// used instead, matching propertiesToAccountInfo's derived-account schema
+// conversion.
 func dbScopeAddrSchema(
-	schema *waddrmgr.ScopeAddrSchema) *db.ScopeAddrSchema {
+	schema *waddrmgr.ScopeAddrSchema) (*db.ScopeAddrSchema, error) {
 
 	if schema == nil {
-		return nil
+		// A nil schema means the account opts into the scope's default
+		// address schema; nil value with a nil error is the intended
+		// "no override" signal, not a missing-value bug.
+		//nolint:nilnil
+		return nil, nil
 	}
 
-	return &db.ScopeAddrSchema{
-		ExternalAddrType: db.AddressType(schema.ExternalAddrType),
-		InternalAddrType: db.AddressType(schema.InternalAddrType),
+	converted, err := db.ScopeAddrSchemaFromWaddrmgr(*schema)
+	if err != nil {
+		return nil, err
 	}
+
+	return &converted, nil
 }
 
 // validateExtendedPubKey ensures a sane derived public key is provided.
