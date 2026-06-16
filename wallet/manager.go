@@ -197,17 +197,55 @@ func seedDefaultAccounts(ctx context.Context, w *Wallet,
 	deriveFn := newAccountDeriveFn(rootKey, w.keyVault, w.masterFingerprint)
 
 	for _, scope := range waddrmgr.DefaultKeyScopes {
-		_, err := w.store.CreateDerivedAccount(
-			ctx, db.CreateDerivedAccountParams{
-				WalletID: w.id,
-				Scope:    db.KeyScope(scope),
-				Name:     waddrmgr.DefaultAccountName,
-			}, deriveFn,
-		)
+		err := seedDefaultAccountForScope(ctx, w, scope, deriveFn)
 		if err != nil {
 			return fmt.Errorf("create default account for scope "+
 				"%v: %w", scope, err)
 		}
+	}
+
+	return nil
+}
+
+// seedDefaultAccountForScope creates the default account for a single scope,
+// skipping the insert when it already exists. Seeding must be idempotent
+// because a Create that failed partway through (after seeding only some of the
+// default scopes) is retried against the same wallet; replaying the insert for
+// an already-seeded scope would otherwise hit the unique (wallet, scope, name)
+// constraint and wedge the retry.
+func seedDefaultAccountForScope(ctx context.Context, w *Wallet,
+	scope waddrmgr.KeyScope, deriveFn db.AccountDerivationFunc) error {
+
+	defaultName := waddrmgr.DefaultAccountName
+
+	_, err := w.store.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(scope),
+		Name:        &defaultName,
+		SkipBalance: true,
+	})
+	switch {
+	// Already seeded by an earlier attempt; nothing to do.
+	case err == nil:
+		return nil
+
+	// Not seeded yet (the scope or the account is absent); fall through to
+	// create it below.
+	case errors.Is(err, db.ErrAccountNotFound):
+
+	default:
+		return fmt.Errorf("check default account: %w", err)
+	}
+
+	_, err = w.store.CreateDerivedAccount(
+		ctx, db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     defaultName,
+		}, deriveFn,
+	)
+	if err != nil {
+		return err
 	}
 
 	return nil

@@ -883,6 +883,13 @@ func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
 	// plus a close hook we can observe to confirm the stores were released.
 	errSeed := errors.New("seed boom")
 	store := &walletmock.Store{}
+
+	// Default-account seeding first checks whether each scope's default
+	// account already exists; report not-found so it proceeds to the
+	// create, which fails.
+	store.On(
+		"GetAccount", mock.Anything, mock.Anything,
+	).Return(nil, db.ErrAccountNotFound)
 	store.On(
 		"CreateDerivedAccount", mock.Anything, mock.Anything,
 		mock.Anything,

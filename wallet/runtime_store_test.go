@@ -366,3 +366,48 @@ func TestBirthdayWithSafetyMargin(t *testing.T) {
 	)
 	require.True(t, birthdayWithSafetyMargin(time.Time{}).IsZero())
 }
+
+// TestSeedDefaultAccountsIdempotent verifies that re-running default-account
+// seeding on a wallet whose default accounts already exist is a no-op rather
+// than an error. A Create that failed after seeding only some scopes is
+// retried against the same wallet, so replaying the seed for an already-seeded
+// scope must not wedge on the unique (wallet, scope, name) constraint.
+func TestSeedDefaultAccountsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	// Create the spendable SQL wallet; this seeds the default accounts once.
+	w, err := NewManager().Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	t.Cleanup(func() {
+		require.NoError(t, w.closeRuntimeStore())
+	})
+
+	// Re-running the seed (the retry path) must succeed without recreating
+	// the already-present default accounts.
+	err = seedDefaultAccounts(
+		t.Context(), w, rootKey, params.PrivatePassphrase,
+	)
+	require.NoError(t, err)
+
+	// Each default scope must still hold exactly one default account, so
+	// the idempotent re-run did not duplicate or renumber anything.
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		name := waddrmgr.DefaultAccountName
+		info, err := w.store.GetAccount(t.Context(), db.GetAccountQuery{
+			WalletID:    w.id,
+			Scope:       db.KeyScope(scope),
+			Name:        &name,
+			SkipBalance: true,
+		})
+		require.NoError(t, err)
+		require.Equal(t, waddrmgr.DefaultAccountName, info.AccountName)
+		require.NotNil(t, info.AccountNumber)
+		require.Equal(t, uint32(0), *info.AccountNumber)
+	}
+}
