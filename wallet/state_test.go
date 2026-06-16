@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -436,4 +437,73 @@ func TestStateAuxiliaryMethods(t *testing.T) {
 	require.NoError(t, s.canUnlock())
 	require.NoError(t, s.canLock())
 	require.NoError(t, s.canChangePassphrase())
+}
+
+// TestRequestStopThenFinalizeStart covers the ordering where a Stop reaches
+// the lifecycle while the wallet is still Starting (Stop wins the handshake):
+// requestStop cannot transition, so it records the request and defers, and the
+// in-flight Start's finalizeStart then observes the request and reports the
+// start aborted. This is the interleaving that, before the fix, let a
+// successful Stop coexist with a completing Start.
+func TestRequestStopThenFinalizeStart(t *testing.T) {
+	t.Parallel()
+
+	s := newWalletState(&mockChainSyncer{})
+	require.NoError(t, s.toStarting())
+
+	var stopRequested atomic.Bool
+
+	// Stop arrives first: it cannot leave Starting, so it defers.
+	transitioned, deferred := s.requestStop(&stopRequested)
+	require.False(t, transitioned)
+	require.True(t, deferred)
+	require.True(t, stopRequested.Load())
+
+	// Start then finalizes and must learn the start was aborted.
+	aborted, err := s.finalizeStart(&stopRequested)
+	require.NoError(t, err)
+	require.True(t, aborted)
+}
+
+// TestFinalizeStartThenRequestStop covers the opposite ordering where Start
+// commits the Started transition before Stop reaches the lifecycle:
+// finalizeStart sees no pending request, and the subsequent requestStop
+// transitions the now Started wallet to Stopping and owns the teardown.
+func TestFinalizeStartThenRequestStop(t *testing.T) {
+	t.Parallel()
+
+	s := newWalletState(&mockChainSyncer{})
+	require.NoError(t, s.toStarting())
+
+	var stopRequested atomic.Bool
+
+	// Start finalizes first: no stop was requested, so the start stands.
+	aborted, err := s.finalizeStart(&stopRequested)
+	require.NoError(t, err)
+	require.False(t, aborted)
+	require.True(t, s.isStarted())
+
+	// Stop then transitions the started wallet and owns the teardown.
+	transitioned, deferred := s.requestStop(&stopRequested)
+	require.True(t, transitioned)
+	require.False(t, deferred)
+	require.False(t, stopRequested.Load())
+}
+
+// TestRequestStopNoOpWhenNotStarting verifies requestStop treats an already
+// stopped (or stopping) wallet as a no-op: it neither transitions nor defers
+// and leaves the stop-request flag clear, so Stop returns without claiming a
+// teardown it does not own.
+func TestRequestStopNoOpWhenNotStarting(t *testing.T) {
+	t.Parallel()
+
+	s := newWalletState(&mockChainSyncer{})
+
+	var stopRequested atomic.Bool
+
+	// Stopped: requestStop is a no-op.
+	transitioned, deferred := s.requestStop(&stopRequested)
+	require.False(t, transitioned)
+	require.False(t, deferred)
+	require.False(t, stopRequested.Load())
 }
