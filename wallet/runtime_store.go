@@ -133,20 +133,25 @@ func legacyKVDBConfig(cfg Config) kvdb.Config {
 // createRuntimeWallet creates the wallet row in the selected runtime database
 // when the selected backend is SQL. The legacy kvdb backend reads wallet
 // metadata directly from walletdb and does not need a separate row.
+//
+// It reports whether a runtime row with this name already existed, so Create
+// can tell a recoverable partial create (legacy present, runtime row missing)
+// from a fully created wallet (both present). The kvdb backend has no separate
+// row, so it always reports false.
 func createRuntimeWallet(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey,
-	encryptedSeed []byte) error {
+	encryptedSeed []byte) (bool, error) {
 
 	runtimeCfg := cfg.DB.withDefaults()
 
 	err := runtimeCfg.Validate()
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	switch runtimeCfg.Backend {
 	case DBBackendKVDB:
-		return nil
+		return false, nil
 
 	case DBBackendSQLite:
 		store, err := sqlite.NewStore(ctx, sqlite.Config{
@@ -155,7 +160,8 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 			DeriveAddress:  newRuntimeAddressDeriver(cfg),
 		})
 		if err != nil {
-			return fmt.Errorf("open sqlite runtime store: %w", err)
+			return false, fmt.Errorf("open sqlite runtime store: %w",
+				err)
 		}
 
 		defer func() {
@@ -173,7 +179,8 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 			DeriveAddress:  newRuntimeAddressDeriver(cfg),
 		})
 		if err != nil {
-			return fmt.Errorf("open postgres runtime store: %w", err)
+			return false, fmt.Errorf("open postgres runtime "+
+				"store: %w", err)
 		}
 
 		defer func() {
@@ -185,46 +192,47 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 		)
 
 	default:
-		return fmt.Errorf("%w: DB.Backend %q", ErrInvalidParam,
+		return false, fmt.Errorf("%w: DB.Backend %q", ErrInvalidParam,
 			runtimeCfg.Backend)
 	}
 }
 
 // createRuntimeWalletWithStore creates a runtime wallet row unless an existing
-// row with the same name is already present.
+// row with the same name is already present. It reports whether the row
+// already existed.
 func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 	cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) error {
+	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) (bool, error) {
 
 	_, err := store.GetWallet(ctx, cfg.Name)
 	if err == nil {
-		return nil
+		return true, nil
 	}
 
 	if !errors.Is(err, db.ErrWalletNotFound) {
-		return fmt.Errorf("get runtime wallet: %w", err)
+		return false, fmt.Errorf("get runtime wallet: %w", err)
 	}
 
 	createParams, err := runtimeCreateWalletParams(
 		cfg, params, rootKey, encryptedSeed,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	_, err = store.CreateWallet(ctx, createParams)
 	if err != nil {
-		return fmt.Errorf("create runtime wallet: %w", err)
+		return false, fmt.Errorf("create runtime wallet: %w", err)
 	}
 
-	return nil
+	return false, nil
 }
 
 // runtimeCreateWalletParams converts wallet creation inputs into the SQL
 // runtime wallet metadata row.
 func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) (db.CreateWalletParams,
-	error) {
+	rootKey *hdkeychain.ExtendedKey,
+	encryptedSeed []byte) (db.CreateWalletParams, error) {
 
 	createParams := db.CreateWalletParams{
 		Name: cfg.Name,
