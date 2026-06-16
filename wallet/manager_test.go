@@ -653,6 +653,214 @@ func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 	}
 }
 
+// deriveTestAccountXPub derives the account-level extended public key for
+// m/purpose'/coin'/index' from rootKey, for building initial-account imports.
+func deriveTestAccountXPub(t *testing.T, rootKey *hdkeychain.ExtendedKey,
+	purpose, coin, index uint32) *hdkeychain.ExtendedKey {
+
+	t.Helper()
+
+	key, err := rootKey.Derive(hdkeychain.HardenedKeyStart + purpose)
+	require.NoError(t, err)
+	key, err = key.Derive(hdkeychain.HardenedKeyStart + coin)
+	require.NoError(t, err)
+	key, err = key.Derive(hdkeychain.HardenedKeyStart + index)
+	require.NoError(t, err)
+	xpub, err := key.Neuter()
+	require.NoError(t, err)
+
+	return xpub
+}
+
+// TestValidateInitialAccountsDuplicate verifies that validateInitialAccounts
+// rejects two initial accounts sharing the same (scope, name) before any store
+// is written, while still accepting the same name under different scopes and a
+// well-formed unique set. Duplicates must fail here because the durable
+// per-account import would otherwise reject the second copy only after the
+// wallet had already been committed.
+func TestValidateInitialAccountsDuplicate(t *testing.T) {
+	t.Parallel()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	xpub49 := deriveTestAccountXPub(t, rootKey, 49, 0, 0)
+	xpub84 := deriveTestAccountXPub(t, rootKey, 84, 0, 0)
+
+	cfg := Config{ChainParams: &chainParams}
+
+	tests := []struct {
+		name     string
+		accounts []WatchOnlyAccount
+		wantErr  bool
+	}{
+		{
+			name: "duplicate scope and name rejected",
+			accounts: []WatchOnlyAccount{
+				{
+					Scope:    waddrmgr.KeyScopeBIP0049Plus,
+					Name:     "dup",
+					XPub:     xpub49,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+				{
+					Scope:    waddrmgr.KeyScopeBIP0049Plus,
+					Name:     "dup",
+					XPub:     xpub49,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "same name different scope allowed",
+			accounts: []WatchOnlyAccount{
+				{
+					Scope:    waddrmgr.KeyScopeBIP0049Plus,
+					Name:     "shared",
+					XPub:     xpub49,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+				{
+					Scope:    waddrmgr.KeyScopeBIP0084,
+					Name:     "shared",
+					XPub:     xpub84,
+					AddrType: waddrmgr.WitnessPubKey,
+				},
+			},
+		},
+		{
+			// Two entries that collide on the xpub-derived effective
+			// scope and name yet declare different Scope fields must
+			// be rejected up front: the import keys off the effective
+			// scope (here both NestedWitnessPubKey -> m/49'/0'), so
+			// the declared scopes are irrelevant to the real conflict
+			// (T4). This fails before the fix, which deduped on the
+			// declared Scope and let the pair through to collide
+			// mid-import.
+			name: "duplicate effective scope different declared scope " +
+				"rejected",
+			accounts: []WatchOnlyAccount{
+				{
+					Scope:    waddrmgr.KeyScopeBIP0049Plus,
+					Name:     "collide",
+					XPub:     xpub49,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+				{
+					Scope:    waddrmgr.KeyScopeBIP0084,
+					Name:     "collide",
+					XPub:     xpub84,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unique set allowed",
+			accounts: []WatchOnlyAccount{
+				{
+					Scope:    waddrmgr.KeyScopeBIP0049Plus,
+					Name:     "one",
+					XPub:     xpub49,
+					AddrType: waddrmgr.NestedWitnessPubKey,
+				},
+				{
+					Scope:    waddrmgr.KeyScopeBIP0084,
+					Name:     "two",
+					XPub:     xpub84,
+					AddrType: waddrmgr.WitnessPubKey,
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateInitialAccounts(cfg, CreateWalletParams{
+				InitialAccounts: tc.accounts,
+			})
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrWalletParams)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestManagerCreateDuplicateInitialAccounts verifies that Create rejects a
+// shell wallet whose InitialAccounts contain a duplicate (scope, name) before
+// any store is written, and leaves nothing durable behind: the wallet is not
+// registered and a subsequent corrected create with the same name succeeds.
+func TestManagerCreateDuplicateInitialAccounts(t *testing.T) {
+	t.Parallel()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+	xpub := deriveTestAccountXPub(t, rootKey, 49, 0, 0)
+
+	m := NewManager()
+	cfg := Config{
+		DB:             testKVDBConfig(t),
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           "dup-wallet",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	dupParams := CreateWalletParams{
+		Mode:      ModeShell,
+		WatchOnly: true,
+		InitialAccounts: []WatchOnlyAccount{
+			{
+				Scope:    waddrmgr.KeyScopeBIP0049Plus,
+				Name:     "dup",
+				XPub:     xpub,
+				AddrType: waddrmgr.NestedWitnessPubKey,
+			},
+			{
+				Scope:    waddrmgr.KeyScopeBIP0049Plus,
+				Name:     "dup",
+				XPub:     xpub,
+				AddrType: waddrmgr.NestedWitnessPubKey,
+			},
+		},
+		PubPassphrase: []byte("public"),
+		Birthday:      time.Now(),
+	}
+
+	// Act: the duplicate must be rejected before any store write.
+	w, err := m.Create(cfg, dupParams)
+	require.ErrorIs(t, err, ErrWalletParams)
+	require.Nil(t, w)
+
+	// Assert: nothing durable was left behind. The wallet is not cached,
+	// and a corrected create reusing the same name (single account) works,
+	// which it could not if a partial wallet row or legacy wallet remained.
+	m.RLock()
+	_, ok := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.False(t, ok)
+
+	okParams := dupParams
+	okParams.InitialAccounts = dupParams.InitialAccounts[:1]
+	w, err = m.Create(cfg, okParams)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	t.Cleanup(func() {
+		require.NoError(t, w.closeRuntimeStore())
+	})
+}
+
 // TestManagerCreateDiscardsWalletOnSeedError verifies that when default-account
 // seeding fails after Load has already registered the wallet and opened its
 // stores, Create tears the wallet down: it closes the runtime stores and

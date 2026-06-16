@@ -120,16 +120,55 @@ func validateInitialAccountsMode(params CreateWalletParams) error {
 }
 
 // validateInitialAccounts checks every initial account's extended public key
-// against the same rules importInitialAccounts later enforces, so a malformed
-// xpub fails the create before any store is written rather than after, where
-// it would leave a half-created wallet.
+// against the same rules importInitialAccounts later enforces, and rejects
+// duplicate (effective scope, name) entries, so both failure classes fail the
+// create before any store is written rather than after, where they would leave
+// a half-created wallet that a corrected retry could not get past.
+//
+// Duplicates must be caught up front because importInitialAccounts inserts the
+// accounts one by one: the unique (wallet, scope, name) constraint would only
+// reject the second copy after the wallet row, legacy wallet, and earlier
+// accounts had already been committed durably. The dedup uses the xpub-derived
+// effective scope rather than the caller-declared one because that is the
+// scope the import persists under.
 func validateInitialAccounts(cfg Config, params CreateWalletParams) error {
+	type scopeName struct {
+		scope waddrmgr.KeyScope
+		name  string
+	}
+
+	seen := make(map[scopeName]struct{}, len(params.InitialAccounts))
 	for _, account := range params.InitialAccounts {
 		err := validateExtendedPubKey(account.XPub, true, cfg.ChainParams)
 		if err != nil {
 			return fmt.Errorf("invalid initial account %q: %w",
 				account.Name, err)
 		}
+
+		// Dedup on the effective scope the import actually persists under,
+		// not the caller-declared account.Scope. importInitialAccounts looks
+		// the account up by the scope derived from the xpub (see
+		// initialAccountAlreadyImported / importAccountInternal), so two
+		// entries with the same name and the same xpub-derived scope but
+		// different declared scopes would pass this prevalidation yet collide
+		// on the unique (wallet, scope, name) constraint mid-import, after the
+		// wallet row and earlier accounts were already committed.
+		addrType := account.AddrType
+
+		scope, _, err := keyScopeFromPubKey(account.XPub, &addrType)
+		if err != nil {
+			return fmt.Errorf("invalid initial account %q: %w",
+				account.Name, err)
+		}
+
+		key := scopeName{scope: scope, name: account.Name}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("%w: duplicate initial account %q in "+
+				"scope %d'/%d'", ErrWalletParams, account.Name,
+				scope.Purpose, scope.Coin)
+		}
+
+		seen[key] = struct{}{}
 	}
 
 	return nil
