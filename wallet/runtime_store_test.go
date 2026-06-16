@@ -252,7 +252,7 @@ func TestCreateRuntimeWalletSpendableRequiresSeed(t *testing.T) {
 
 	// Act: create the runtime row for a spendable wallet with a nil seed,
 	// the state a retry-after-partial-create previously produced.
-	err = createRuntimeWallet(
+	_, err = createRuntimeWallet(
 		context.Background(), cfg, params, rootKey, nil,
 	)
 
@@ -274,11 +274,12 @@ func TestCreateRecoversSeedAfterPartialCreate(t *testing.T) {
 
 	// Arrange: simulate the partial-create state by creating only the
 	// legacy store, capturing the encrypted master HD key it persisted.
-	encSeed, err := createLegacyStore(
+	encSeed, legacyExisted, err := createLegacyStore(
 		context.Background(), cfg, params, rootKey,
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, encSeed)
+	require.False(t, legacyExisted)
 
 	// Act: retry the full create. It must tolerate the existing legacy
 	// wallet and recover its seed rather than committing a nil one.
@@ -410,4 +411,29 @@ func TestSeedDefaultAccountsIdempotent(t *testing.T) {
 		require.NotNil(t, info.AccountNumber)
 		require.Equal(t, uint32(0), *info.AccountNumber)
 	}
+}
+
+// TestManagerCreateRejectsExistingSQLWallet verifies that Create returns
+// ErrWalletExists, rather than silently returning the existing wallet, when
+// both the legacy wallet and the SQL runtime row are already present. The
+// recoverable partial-create path (legacy present, runtime row missing) stays
+// tolerated and is covered separately.
+func TestManagerCreateRejectsExistingSQLWallet(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	// Create the wallet end to end, then release its store handles so a
+	// fresh manager can reopen the same on-disk databases.
+	w, err := NewManager().Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.NoError(t, w.closeRuntimeStore())
+
+	// Act: a second create against the now fully created wallet.
+	w2, err := NewManager().Create(cfg, params)
+
+	// Assert: it is rejected as an existing wallet, not silently returned.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, w2)
 }

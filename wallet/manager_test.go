@@ -861,6 +861,43 @@ func TestManagerCreateDuplicateInitialAccounts(t *testing.T) {
 	})
 }
 
+// TestManagerCreateRejectsExistingKVDBWallet verifies that on the kvdb backend
+// (where the legacy wallet is the whole wallet) a second Create against an
+// already created wallet returns ErrWalletExists instead of silently handing
+// back the existing wallet.
+func TestManagerCreateRejectsExistingKVDBWallet(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		DB:             testKVDBConfig(t),
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           "exists-wallet",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	params := CreateWalletParams{
+		Mode:              ModeGenSeed,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	// Create the wallet, then release its store handles so a fresh manager
+	// can reopen the same on-disk database.
+	w, err := NewManager().Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.NoError(t, w.closeRuntimeStore())
+
+	// Act: a second create against the now fully created wallet.
+	w2, err := NewManager().Create(cfg, params)
+
+	// Assert: it is rejected as an existing wallet.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, w2)
+}
+
 // TestManagerCreateDiscardsWalletOnSeedError verifies that when default-account
 // seeding fails after Load has already registered the wallet and opened its
 // stores, Create tears the wallet down: it closes the runtime stores and

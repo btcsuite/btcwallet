@@ -17,6 +17,11 @@ import (
 var (
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
+
+	// ErrWalletExists is returned by Create when a wallet with the
+	// requested name already exists end to end. A partial wallet left by an
+	// earlier failed create is recoverable and does not trigger this error.
+	ErrWalletExists = errors.New("wallet already exists")
 )
 
 // CreateMode determines how a new wallet is initialized.
@@ -342,10 +347,11 @@ func NewManager() *Manager {
 }
 
 // createLegacyStore creates the legacy kvdb compatibility store for a new
-// wallet.
+// wallet. It reports whether a legacy wallet already existed at this path so
+// Create can distinguish a fresh create from a retry over a partial one.
 func createLegacyStore(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
-	error) {
+	bool, error) {
 
 	createParams := kvdb.CreateLegacyWalletParams{
 		RootKey:           rootKey,
@@ -371,12 +377,18 @@ func createLegacyStore(ctx context.Context, cfg Config,
 	// key rather than returning a nil seed: a nil seed would let the SQL
 	// runtime row be created with no EncryptedMasterPrivKey for a spendable
 	// wallet, so its later GetEncryptedHDSeed would fail and break SQL
-	// account/key derivation.
+	// account/key derivation. Reports legacyExisted=true so Create can
+	// decide whether this is a recoverable partial create or a fully
+	// created wallet that must be rejected.
 	case isLegacyWalletAlreadyExists(err):
-		return readExistingLegacyEncryptedSeed(ctx, cfg, params, rootKey)
+		encryptedSeed, err := readExistingLegacyEncryptedSeed(
+			ctx, cfg, params, rootKey,
+		)
+
+		return encryptedSeed, true, err
 
 	case err != nil:
-		return nil, fmt.Errorf("create legacy store: %w", err)
+		return nil, false, fmt.Errorf("create legacy store: %w", err)
 	}
 
 	// Capture the encrypted master HD private key the legacy create just
@@ -386,15 +398,15 @@ func createLegacyStore(ctx context.Context, cfg Config,
 		ctx, legacyStore, params, rootKey,
 	)
 	if err != nil {
-		return nil, errors.Join(err, legacyStore.Close())
+		return nil, false, errors.Join(err, legacyStore.Close())
 	}
 
 	err = legacyStore.Close()
 	if err != nil {
-		return nil, fmt.Errorf("close legacy store: %w", err)
+		return nil, false, fmt.Errorf("close legacy store: %w", err)
 	}
 
-	return encryptedSeed, nil
+	return encryptedSeed, false, nil
 }
 
 // readExistingLegacyEncryptedSeed reopens an already-created legacy store and
@@ -545,19 +557,34 @@ func (m *Manager) Create(cfg Config,
 
 	// Create the underlying legacy compatibility store structure, capturing
 	// the encrypted master HD key it persisted so the runtime store can
-	// persist the same blob (F2).
-	encryptedSeed, err := createLegacyStore(
+	// persist the same blob (F2). legacyExisted reports whether a legacy
+	// wallet was already present (a fresh create vs a retry over a partial
+	// one).
+	encryptedSeed, legacyExisted, err := createLegacyStore(
 		context.Background(), cfg, params, rootKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
-	err = createRuntimeWallet(
+	runtimeExisted, err := createRuntimeWallet(
 		context.Background(), cfg, params, rootKey, encryptedSeed,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	// Reject a create that targets an already fully created wallet. A
+	// partial create from an earlier failed attempt is recoverable and must
+	// stay tolerated, so only fail when the wallet exists end to end: for
+	// SQL backends that means both the legacy wallet and the runtime row
+	// are present; for kvdb the legacy wallet alone is the whole wallet.
+	// Without this an over-create would silently return the existing wallet
+	// instead of an exists error.
+	isKVDB := cfg.DB.withDefaults().Backend == DBBackendKVDB
+	fullyCreated := legacyExisted && (isKVDB || runtimeExisted)
+	if fullyCreated {
+		return nil, fmt.Errorf("%w: %q", ErrWalletExists, cfg.Name)
 	}
 
 	// Load the newly created wallet.
@@ -578,7 +605,6 @@ func (m *Manager) Create(cfg Config,
 	// backend already seeds account 0 per scope during legacy create; the
 	// SQL create path does not, so a fresh SQL wallet would otherwise fail
 	// to derive its first receiving address.
-	isKVDB := cfg.DB.withDefaults().Backend == DBBackendKVDB
 	spendable := !params.WatchOnly && rootKey != nil && rootKey.IsPrivate()
 	if !isKVDB && spendable {
 		err = seedDefaultAccounts(
