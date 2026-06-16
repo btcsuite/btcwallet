@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -552,7 +553,9 @@ func TestManager_genRootKey(t *testing.T) {
 	m := NewManager()
 	cfg := Config{ChainParams: &chainParams}
 
-	key, err := m.genRootKey(cfg)
+	// With no configured kvdb path there is no legacy wallet to recover, so
+	// genRootKey takes the fresh-generation branch.
+	key, err := m.genRootKey(cfg, CreateWalletParams{Mode: ModeGenSeed})
 
 	// Verify we got a valid private extended key.
 	require.NoError(t, err)
@@ -876,8 +879,16 @@ func TestManagerCreateRejectsExistingKVDBWallet(t *testing.T) {
 		PubPassphrase:  []byte("public"),
 		RecoveryWindow: MinRecoveryWindow,
 	}
+
+	// Use a fixed seed so both creates derive the same master key; this
+	// isolates the already-exists rejection from the separate retry
+	// seed-mismatch guard.
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
 	params := CreateWalletParams{
-		Mode:              ModeGenSeed,
+		Mode:              ModeImportSeed,
+		Seed:              seed,
 		PubPassphrase:     []byte("public"),
 		PrivatePassphrase: []byte("private"),
 		Birthday:          time.Now(),
@@ -897,6 +908,10 @@ func TestManagerCreateRejectsExistingKVDBWallet(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletExists)
 	require.Nil(t, w2)
 }
+
+// errSeedBoom is the static default-account seeding failure injected by
+// TestManagerCreateDiscardsWalletOnSeedError.
+var errSeedBoom = errors.New("seed boom")
 
 // TestManagerCreateDiscardsWalletOnSeedError verifies that when default-account
 // seeding fails after Load has already registered the wallet and opened its
@@ -918,7 +933,6 @@ func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
 
 	// The factory returns a mock store whose default-account seeding fails,
 	// plus a close hook we can observe to confirm the stores were released.
-	errSeed := errors.New("seed boom")
 	store := &walletmock.Store{}
 
 	// Default-account seeding first checks whether each scope's default
@@ -930,7 +944,7 @@ func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
 	store.On(
 		"CreateDerivedAccount", mock.Anything, mock.Anything,
 		mock.Anything,
-	).Return(nil, errSeed)
+	).Return(nil, errSeedBoom)
 
 	closed := 0
 	runtimeStoreFactory = func(context.Context, Config,
@@ -953,7 +967,7 @@ func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
 	// Assert: the create fails with the seeding error, no wallet is
 	// returned, the wallet is not left registered, and its runtime store
 	// was closed exactly once.
-	require.ErrorIs(t, err, errSeed)
+	require.ErrorIs(t, err, errSeedBoom)
 	require.ErrorContains(t, err, "seed default accounts")
 	require.Nil(t, w)
 
@@ -963,4 +977,298 @@ func TestManagerCreateDiscardsWalletOnSeedError(t *testing.T) {
 	require.False(t, ok, "wallet must not be left in the manager cache")
 
 	require.Equal(t, 1, closed, "runtime store must be closed once")
+}
+
+// TestManagerCreateHoldsWalletUntilSeeded verifies that Create does not expose
+// a wallet through the manager cache until its post-load default-account
+// seeding has completed (task 284). It blocks the SQL seeding path with a test
+// hook after the wallet has been built but before initialization finishes and
+// asserts that, during that window, the wallet is not in m.wallets and a
+// concurrent Load does not return it. Once seeding is released the create
+// publishes the wallet and the waiting Load observes the same instance.
+//
+//nolint:paralleltest // Mutates the package-level runtimeStoreFactory.
+func TestManagerCreateHoldsWalletUntilSeeded(t *testing.T) {
+	// Arrange: a spendable SQLite-backed create so the SQL path runs
+	// default-account seeding after the wallet is built.
+	cfg, params := sqliteCreateConfig(t)
+
+	oldFactory := runtimeStoreFactory
+	t.Cleanup(func() {
+		runtimeStoreFactory = oldFactory
+	})
+
+	// seedingStarted is closed once the seeding path has begun, so the test
+	// can observe the wallet mid-create. releaseSeeding gates seeding until
+	// the test has made its mid-create assertions.
+	seedingStarted := make(chan struct{})
+	releaseSeeding := make(chan struct{})
+
+	store := &walletmock.Store{}
+
+	// Seeding first checks whether each default account exists; report
+	// not-found so it proceeds to create it.
+	store.On(
+		"GetAccount", mock.Anything, mock.Anything,
+	).Return(nil, db.ErrAccountNotFound)
+
+	// Block the first CreateDerivedAccount call until the test releases it,
+	// signaling that seeding (hence the post-build init) is underway. Every
+	// call then succeeds, so the create completes once released.
+	var startedOnce sync.Once
+	store.On(
+		"CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything,
+	).Run(func(mock.Arguments) {
+		startedOnce.Do(func() {
+			close(seedingStarted)
+		})
+		<-releaseSeeding
+	}).Return(&db.AccountInfo{}, nil)
+
+	runtimeStoreFactory = func(context.Context, Config,
+		*kvdb.StoreHandle) (*runtimeStoreHandle, error) {
+
+		return &runtimeStoreHandle{
+			store:      store,
+			walletInfo: &db.WalletInfo{ID: 7},
+			closeFn:    func() error { return nil },
+		}, nil
+	}
+
+	// Act: run Create in the background; it will block in seeding.
+	m := NewManager()
+
+	type createResult struct {
+		w   *Wallet
+		err error
+	}
+
+	createDone := make(chan createResult, 1)
+	go func() {
+		w, err := m.Create(cfg, params)
+		createDone <- createResult{w: w, err: err}
+	}()
+
+	// Wait until seeding has started, so the wallet has been built but its
+	// initialization has not completed.
+	select {
+	case <-seedingStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("seeding did not start")
+	}
+
+	// Assert: the wallet is not yet published in the manager cache.
+	m.RLock()
+	_, cached := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.False(t, cached, "wallet must not be cached while seeding")
+
+	// Assert: a concurrent Load does not return the wallet while the create
+	// is still seeding; it must block on the create guard.
+	type loadResult struct {
+		w   *Wallet
+		err error
+	}
+
+	loadDone := make(chan loadResult, 1)
+	go func() {
+		w, err := m.Load(cfg)
+		loadDone <- loadResult{w: w, err: err}
+	}()
+
+	select {
+	case <-loadDone:
+		t.Fatal("Load returned a wallet while Create was still seeding")
+	case <-createDone:
+		t.Fatal("Create completed before seeding was released")
+	case <-time.After(250 * time.Millisecond):
+		// Expected: both Load and Create are still blocked.
+	}
+
+	// Release seeding so the create can finish and publish the wallet.
+	close(releaseSeeding)
+
+	res := <-createDone
+	require.NoError(t, res.err)
+	require.NotNil(t, res.w)
+	t.Cleanup(func() {
+		require.NoError(t, res.w.discardUnstarted())
+	})
+
+	// Assert: the previously blocked Load now observes the same published
+	// wallet, and the cache holds it.
+	select {
+	case loaded := <-loadDone:
+		require.NoError(t, loaded.err)
+		require.Same(t, res.w, loaded.w,
+			"Load must return the published create wallet")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load did not return after create completed")
+	}
+
+	m.RLock()
+	cachedW := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.Same(t, res.w, cachedW)
+}
+
+// TestManagerCreateRejectsLoadedWallet verifies that a duplicate Create against
+// a wallet the same manager already has loaded returns ErrWalletExists before
+// any store is opened, and leaves the original live wallet untouched (task
+// 285). Without the early cache check the over-create would reopen the legacy
+// bbolt store the live wallet still holds and block on its file lock.
+func TestManagerCreateRejectsLoadedWallet(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	// Use a short kvdb open timeout so that, if the early cache check were
+	// missing, the duplicate create would fail fast on the bbolt lock rather
+	// than hang the test for the full default timeout.
+	cfg.DB.KVDB.Timeout = 2 * time.Second
+
+	m := NewManager()
+
+	// Create and keep the wallet loaded (but not started) in this manager.
+	w, err := m.Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	t.Cleanup(func() {
+		require.NoError(t, w.discardUnstarted())
+	})
+
+	// Act: a second create on the same manager with matching params.
+	w2, err := m.Create(cfg, params)
+
+	// Assert: it is rejected as an existing wallet, fast and without a
+	// backend lock/open error.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, w2)
+
+	// Assert: the original wallet is still the cached instance, was not
+	// deregistered, and its stores were not closed (its lifetime context is
+	// still live and its runtime store still answers).
+	m.RLock()
+	cachedW := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.Same(t, w, cachedW, "original wallet must stay registered")
+	require.NoError(t, w.lifetimeCtx.Err(),
+		"original wallet context must not be cancelled")
+
+	_, err = w.store.GetWallet(t.Context(), cfg.Name)
+	require.NoError(t, err, "original wallet store must stay open")
+}
+
+// TestManagerCreateRejectsStartedWallet verifies that a duplicate Create
+// against a started wallet the same manager already manages returns
+// ErrWalletExists without closing the started wallet's stores or moving it out
+// of the started state (task 285).
+func TestManagerCreateRejectsStartedWallet(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+	cfg.DB.KVDB.Timeout = 2 * time.Second
+
+	m := NewManager()
+
+	w, err := m.Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	t.Cleanup(func() {
+		require.NoError(t, w.discardUnstarted())
+	})
+
+	// Mark the wallet started without launching the real chain loop: the
+	// over-create rejection depends only on the wallet being cached, so
+	// flipping the lifecycle state is enough to exercise the started case
+	// deterministically.
+	require.NoError(t, w.state.beginStart(&w.stopRequested))
+	require.NoError(t, w.state.toStarted())
+	require.True(t, w.state.isStarted())
+
+	// Act: a second create on the same manager.
+	w2, err := m.Create(cfg, params)
+
+	// Assert: rejected as existing, the started wallet survives, and its
+	// stores stay open.
+	require.ErrorIs(t, err, ErrWalletExists)
+	require.Nil(t, w2)
+	require.True(t, w.state.isStarted(),
+		"started wallet must stay started after a failed over-create")
+
+	m.RLock()
+	cachedW := m.wallets[cfg.Name]
+	m.RUnlock()
+	require.Same(t, w, cachedW)
+
+	_, err = w.store.GetWallet(t.Context(), cfg.Name)
+	require.NoError(t, err, "started wallet store must stay open")
+}
+
+// TestManagerCreateReleasesGuardOnFailure verifies that a Create whose
+// post-load seeding fails releases the create-in-progress guard and leaves
+// nothing in the manager cache, so the name is not wedged and a corrected
+// retry can run rather than block on a stuck guard (task 284). A second
+// attempt after the failure must proceed (here it fails again with the same
+// injected error, the point being that it is not blocked by the guard the
+// failed create held).
+//
+//nolint:paralleltest // Mutates the package-level runtimeStoreFactory.
+func TestManagerCreateReleasesGuardOnFailure(t *testing.T) {
+	cfg, params := sqliteCreateConfig(t)
+
+	oldFactory := runtimeStoreFactory
+	t.Cleanup(func() {
+		runtimeStoreFactory = oldFactory
+	})
+
+	store := &walletmock.Store{}
+	store.On(
+		"GetAccount", mock.Anything, mock.Anything,
+	).Return(nil, db.ErrAccountNotFound)
+	store.On(
+		"CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything,
+	).Return(nil, errSeedBoom)
+
+	runtimeStoreFactory = func(context.Context, Config,
+		*kvdb.StoreHandle) (*runtimeStoreHandle, error) {
+
+		return &runtimeStoreHandle{
+			store:      store,
+			walletInfo: &db.WalletInfo{ID: 7},
+			closeFn:    func() error { return nil },
+		}, nil
+	}
+
+	m := NewManager()
+
+	// First attempt: seeding fails.
+	w, err := m.Create(cfg, params)
+	require.ErrorIs(t, err, errSeedBoom)
+	require.Nil(t, w)
+
+	// Assert: nothing left cached and the create guard was released.
+	m.RLock()
+	_, cached := m.wallets[cfg.Name]
+	_, creating := m.creating[cfg.Name]
+	m.RUnlock()
+	require.False(t, cached, "failed create must not leave a cached wallet")
+	require.False(t, creating, "failed create must release the guard")
+
+	// Act + Assert: a second attempt is not blocked by a stuck guard; it
+	// runs the create path again and returns within a deterministic window.
+	retryDone := make(chan error, 1)
+	go func() {
+		_, err := m.Create(cfg, params)
+		retryDone <- err
+	}()
+
+	select {
+	case err := <-retryDone:
+		require.ErrorIs(t, err, errSeedBoom)
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry blocked: create guard was not released")
+	}
 }

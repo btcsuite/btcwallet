@@ -496,6 +496,8 @@ func dbScopeAddrSchema(
 }
 
 // validateExtendedPubKey ensures a sane derived public key is provided.
+//
+//nolint:unparam // Preserve address-key validation for legacy call sites.
 func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	isAccountKey bool, chainParams *chaincfg.Params) error {
 

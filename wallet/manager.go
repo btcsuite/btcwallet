@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -183,8 +185,12 @@ func validateInitialAccounts(cfg Config, params CreateWalletParams) error {
 // created spendable SQL wallet. The legacy kvdb backend seeds these during
 // waddrmgr.Create, but the SQL create path inserts only wallet and secret
 // rows, so without this a SQL wallet cannot derive a normal receiving address.
+//
+// It returns the number of default accounts it actually created. A retry over
+// a partial create skips the scopes an earlier attempt already seeded, so a
+// zero count means every default account was already present.
 func seedDefaultAccounts(ctx context.Context, w *Wallet,
-	rootKey *hdkeychain.ExtendedKey, privatePassphrase []byte) error {
+	rootKey *hdkeychain.ExtendedKey, privatePassphrase []byte) (int, error) {
 
 	// Deriving and encrypting account keys requires the key vault's private
 	// crypto key, which is locked after load. We pass a negative timeout to
@@ -192,7 +198,7 @@ func seedDefaultAccounts(ctx context.Context, w *Wallet,
 	// the deferred Lock below.
 	err := w.keyVault.Unlock(ctx, privatePassphrase, -1)
 	if err != nil {
-		return fmt.Errorf("unlock key vault: %w", err)
+		return 0, fmt.Errorf("unlock key vault: %w", err)
 	}
 
 	// Lock is void and idempotent: the vault swallows an already-locked
@@ -201,15 +207,22 @@ func seedDefaultAccounts(ctx context.Context, w *Wallet,
 
 	deriveFn := newAccountDeriveFn(rootKey, w.keyVault, w.masterFingerprint)
 
+	created := 0
 	for _, scope := range waddrmgr.DefaultKeyScopes {
-		err := seedDefaultAccountForScope(ctx, w, scope, deriveFn)
+		seeded, err := seedDefaultAccountForScope(
+			ctx, w, scope, deriveFn,
+		)
 		if err != nil {
-			return fmt.Errorf("create default account for scope "+
+			return 0, fmt.Errorf("create default account for scope "+
 				"%v: %w", scope, err)
+		}
+
+		if seeded {
+			created++
 		}
 	}
 
-	return nil
+	return created, nil
 }
 
 // seedDefaultAccountForScope creates the default account for a single scope,
@@ -218,8 +231,11 @@ func seedDefaultAccounts(ctx context.Context, w *Wallet,
 // default scopes) is retried against the same wallet; replaying the insert for
 // an already-seeded scope would otherwise hit the unique (wallet, scope, name)
 // constraint and wedge the retry.
+//
+// It reports whether it created the account (true) or found it already seeded
+// (false), so the caller can tell a fresh create from a no-op retry.
 func seedDefaultAccountForScope(ctx context.Context, w *Wallet,
-	scope waddrmgr.KeyScope, deriveFn db.AccountDerivationFunc) error {
+	scope waddrmgr.KeyScope, deriveFn db.AccountDerivationFunc) (bool, error) {
 
 	defaultName := waddrmgr.DefaultAccountName
 
@@ -232,14 +248,14 @@ func seedDefaultAccountForScope(ctx context.Context, w *Wallet,
 	switch {
 	// Already seeded by an earlier attempt; nothing to do.
 	case err == nil:
-		return nil
+		return false, nil
 
 	// Not seeded yet (the scope or the account is absent); fall through to
 	// create it below.
 	case errors.Is(err, db.ErrAccountNotFound):
 
 	default:
-		return fmt.Errorf("check default account: %w", err)
+		return false, fmt.Errorf("check default account: %w", err)
 	}
 
 	_, err = w.store.CreateDerivedAccount(
@@ -250,10 +266,10 @@ func seedDefaultAccountForScope(ctx context.Context, w *Wallet,
 		}, deriveFn,
 	)
 	if err != nil {
-		return err
+		return false, fmt.Errorf("create default account: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // validate ensures that the parameters are consistent with the chosen
@@ -335,14 +351,29 @@ func (p *CreateWalletParams) validate() error {
 type Manager struct {
 	sync.RWMutex
 
-	// wallets holds the active wallets keyed by their unique name.
+	// wallets holds the active wallets keyed by their unique name. A wallet
+	// is published here only once it is ready for normal runtime use: for a
+	// Create that means after its post-load initialization (default-account
+	// seeding and initial-account import) has completed.
 	wallets map[string]*Wallet
+
+	// creating tracks the wallet names whose Create is in progress, keyed by
+	// name to a channel that is closed when the create completes (whether it
+	// published a wallet or failed and cleaned up). It guards the window
+	// between a wallet's durable rows being written and its post-load
+	// initialization finishing, during which the wallet is in a create-only
+	// state and must not be exposed through the cache. A concurrent Load or
+	// Create for the same name waits on the channel and then re-checks the
+	// cache, so no caller can observe or open a wallet that Create is still
+	// initializing.
+	creating map[string]chan struct{}
 }
 
 // NewManager creates a new Wallet Manager.
 func NewManager() *Manager {
 	return &Manager{
-		wallets: make(map[string]*Wallet),
+		wallets:  make(map[string]*Wallet),
+		creating: make(map[string]chan struct{}),
 	}
 }
 
@@ -351,7 +382,7 @@ func NewManager() *Manager {
 // Create can distinguish a fresh create from a retry over a partial one.
 func createLegacyStore(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
-	bool, error) {
+	bool, time.Time, error) {
 
 	createParams := kvdb.CreateLegacyWalletParams{
 		RootKey:           rootKey,
@@ -381,14 +412,15 @@ func createLegacyStore(ctx context.Context, cfg Config,
 	// decide whether this is a recoverable partial create or a fully
 	// created wallet that must be rejected.
 	case isLegacyWalletAlreadyExists(err):
-		encryptedSeed, err := readExistingLegacyEncryptedSeed(
-			ctx, cfg, params, rootKey,
-		)
+		encryptedSeed, legacyBirthday, err :=
+			readExistingLegacyEncryptedSeed(ctx, cfg, params, rootKey)
 
-		return encryptedSeed, true, err
+		return encryptedSeed, true, legacyBirthday, err
 
 	case err != nil:
-		return nil, false, fmt.Errorf("create legacy store: %w", err)
+		return nil, false, time.Time{}, fmt.Errorf(
+			"create legacy store: %w", err,
+		)
 	}
 
 	// Capture the encrypted master HD private key the legacy create just
@@ -398,43 +430,134 @@ func createLegacyStore(ctx context.Context, cfg Config,
 		ctx, legacyStore, params, rootKey,
 	)
 	if err != nil {
-		return nil, false, errors.Join(err, legacyStore.Close())
+		return nil, false, time.Time{}, errors.Join(
+			err, legacyStore.Close(),
+		)
 	}
 
 	err = legacyStore.Close()
 	if err != nil {
-		return nil, false, fmt.Errorf("close legacy store: %w", err)
+		return nil, false, time.Time{}, fmt.Errorf(
+			"close legacy store: %w", err,
+		)
 	}
 
-	return encryptedSeed, false, nil
+	// A fresh create has no pre-existing legacy birthday to reuse; the
+	// runtime row uses the requested birthday with the safety margin
+	// applied. Report a zero time to signal that.
+	return encryptedSeed, false, time.Time{}, nil
 }
 
-// readExistingLegacyEncryptedSeed reopens an already-created legacy store and
-// reads its encrypted master HD key. It is used on the Create retry path,
+// readExistingLegacyEncryptedSeed reopens an already-created legacy store,
+// verifies the retry root key matches the wallet that was originally created,
+// and reads its encrypted master HD key. It is used on the Create retry path,
 // where the legacy wallet exists from an earlier attempt that failed before
 // the runtime row was committed.
+//
+// It also returns the legacy wallet's original (safety-margin-applied)
+// birthday so the runtime row reuses it instead of the retry's birthday:
+// callers commonly pass a fresh time.Now() per attempt, and the runtime
+// birthday drives the initial SyncedTo tip, so persisting a later retry
+// birthday would make the wallet skip deposits made before it.
 func readExistingLegacyEncryptedSeed(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
-	error) {
+	time.Time, error) {
 
 	legacyStore, err := openLegacyStore(cfg)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
+	}
+
+	// Guard against a retry that supplies different key material from the
+	// original create, or that would downgrade a spendable wallet to
+	// watch-only, before we read the seed and derive any runtime metadata
+	// from rootKey.
+	err = verifyRootKeyMatchesLegacy(
+		ctx, legacyStore, cfg.Name, rootKey, params.WatchOnly,
+	)
+	if err != nil {
+		return nil, time.Time{}, errors.Join(err, legacyStore.Close())
+	}
+
+	info, err := legacyStore.Store.GetWallet(ctx, cfg.Name)
+	if err != nil {
+		return nil, time.Time{}, errors.Join(
+			fmt.Errorf("read existing legacy wallet: %w", err),
+			legacyStore.Close(),
+		)
 	}
 
 	encryptedSeed, err := legacyEncryptedSeed(
 		ctx, legacyStore, params, rootKey,
 	)
 	if err != nil {
-		return nil, errors.Join(err, legacyStore.Close())
+		return nil, time.Time{}, errors.Join(err, legacyStore.Close())
 	}
 
 	err = legacyStore.Close()
 	if err != nil {
-		return nil, fmt.Errorf("close legacy store: %w", err)
+		return nil, time.Time{}, fmt.Errorf(
+			"close legacy store: %w", err,
+		)
 	}
 
-	return encryptedSeed, nil
+	return encryptedSeed, info.Birthday, nil
+}
+
+// verifyRootKeyMatchesLegacy guards the Create retry path against a root key
+// that differs from the one the legacy wallet was originally created with.
+// The legacy wallet persists the master HD public key derived from its root;
+// a retry that supplies a different seed or extended key would otherwise
+// derive the SQL runtime row's master pubkey and the default accounts from key
+// material that does not match the legacy store, silently committing an
+// inconsistent wallet. Compare the neutered retry root against the stored
+// master public key and reject a mismatch.
+//
+// Wallets that persist no master public key (shell, and watch-only with no
+// root key) have nothing to compare against, so they are accepted.
+//
+// watchOnly is the retry's requested watch-only flag, needed because a retry
+// can request a watch-only downgrade even while supplying a matching root key.
+func verifyRootKeyMatchesLegacy(ctx context.Context,
+	legacyStore *kvdb.StoreHandle, name string,
+	rootKey *hdkeychain.ExtendedKey, watchOnly bool) error {
+
+	info, err := legacyStore.Store.GetWallet(ctx, name)
+	if err != nil {
+		return fmt.Errorf("read existing legacy wallet: %w", err)
+	}
+
+	if len(info.MasterPubKey) == 0 {
+		return nil
+	}
+
+	// The existing legacy wallet persisted a master public key, so it is not
+	// rootless/watch-only and holds spendable root material (only a private
+	// root persists a master HD key in waddrmgr; a rootless shell persists
+	// none). A retry that would have the SQL runtime row recorded watch-only
+	// for this spendable wallet is a silent downgrade, so reject it. This
+	// covers a retry with no root key (a rootless shell), one whose root is a
+	// neutered xpub (it cannot sign), and one that asks for WatchOnly even with
+	// a matching private root: each would persist a watch-only row with no
+	// master private key for a wallet that can in fact sign (F2).
+	if rootKey == nil || !rootKey.IsPrivate() || watchOnly {
+		return fmt.Errorf("%w: retry cannot downgrade the existing "+
+			"spendable wallet %q to watch-only; it requires a "+
+			"matching private root key and WatchOnly=false",
+			ErrWalletParams, name)
+	}
+
+	retryPub, err := rootKey.Neuter()
+	if err != nil {
+		return fmt.Errorf("neuter retry root key: %w", err)
+	}
+
+	if retryPub.String() != string(info.MasterPubKey) {
+		return fmt.Errorf("%w: retry root key does not match the "+
+			"existing wallet %q", ErrWalletParams, name)
+	}
+
+	return nil
 }
 
 // legacyEncryptedSeed reads the encrypted master HD private key from an open
@@ -529,8 +652,38 @@ func (m *Manager) String() string {
 // Create creates a new wallet based on the provided configuration and
 // initialization parameters. It initializes the database structure and then
 // loads the wallet.
+//
+//nolint:cyclop,funlen // Keep create/retry cleanup ordering explicit.
 func (m *Manager) Create(cfg Config,
 	params CreateWalletParams) (*Wallet, error) {
+
+	// Validate the configuration and parameters before touching the cache or
+	// any store, so a malformed request fails on its own merits rather than
+	// on a name collision or store error.
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	// Claim the create-in-progress guard for this name before opening or
+	// creating any store. If this manager already has the wallet loaded,
+	// beginCreate rejects the over-create with ErrWalletExists immediately,
+	// without touching the stores and without disturbing the live wallet
+	// (task 285). If another Create for the same name is in flight, it waits
+	// for that one to finish rather than opening the stores concurrently
+	// (task 284). A name that merely has durable rows on disk but no live
+	// cache entry is not rejected here, so the partial-create retry path
+	// below still runs.
+	release, err := m.beginCreate(cfg.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	rootKey, err := m.prepareWalletCreation(cfg, params)
 	if err != nil {
@@ -559,47 +712,74 @@ func (m *Manager) Create(cfg Config,
 	// the encrypted master HD key it persisted so the runtime store can
 	// persist the same blob (F2). legacyExisted reports whether a legacy
 	// wallet was already present (a fresh create vs a retry over a partial
-	// one).
-	encryptedSeed, legacyExisted, err := createLegacyStore(
+	// one); legacyBirthday carries that earlier wallet's original birthday.
+	encryptedSeed, legacyExisted, legacyBirthday, err := createLegacyStore(
 		context.Background(), cfg, params, rootKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
+	// Resolve the birthday to persist in the SQL runtime row. A fresh create
+	// uses the requested birthday backed off by the safety margin; a retry
+	// that reuses an existing legacy wallet must reuse that wallet's original
+	// birthday instead. Callers commonly pass a fresh time.Now() per attempt
+	// and the runtime birthday drives the initial SyncedTo tip, so persisting
+	// a later retry birthday would make the wallet skip deposits made before
+	// it.
+	birthday := birthdayWithSafetyMargin(params.Birthday)
+	if legacyExisted {
+		birthday = legacyBirthday
+	}
+
 	runtimeExisted, err := createRuntimeWallet(
-		context.Background(), cfg, params, rootKey, encryptedSeed,
+		context.Background(), cfg, params, rootKey, encryptedSeed, birthday,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Reject a create that targets an already fully created wallet. A
-	// partial create from an earlier failed attempt is recoverable and must
-	// stay tolerated, so only fail when the wallet exists end to end: for
-	// SQL backends that means both the legacy wallet and the runtime row
-	// are present; for kvdb the legacy wallet alone is the whole wallet.
-	// Without this an over-create would silently return the existing wallet
-	// instead of an exists error.
+	// preCreated reports whether the wallet's durable rows were already
+	// present before this call: for SQL backends both the legacy wallet and
+	// the runtime row, for kvdb the legacy wallet alone (kvdb has no separate
+	// row). It is not sufficient on its own to reject the create as existing:
+	// an earlier attempt may have committed the rows but failed before its
+	// post-load init (default-account seeding or initial-account import)
+	// finished. discardUnstarted only cleans in-memory state, not the durable
+	// rows, so such a partial create must be allowed to replay its init
+	// rather than be wedged. We classify it as fully created only after the
+	// replay below reports it had nothing left to do.
 	isKVDB := cfg.DB.withDefaults().Backend == DBBackendKVDB
-	fullyCreated := legacyExisted && (isKVDB || runtimeExisted)
-	if fullyCreated {
-		return nil, fmt.Errorf("%w: %q", ErrWalletExists, cfg.Name)
-	}
+	preCreated := legacyExisted && (isKVDB || runtimeExisted)
 
-	// Load the newly created wallet.
-	w, err := m.Load(cfg)
+	// Build the wallet without publishing it into the manager cache. The
+	// create-in-progress guard guarantees no other caller holds this name, so
+	// w is unconditionally owned by this create until it is published below.
+	// Holding w back until its post-load initialization completes is what
+	// keeps a concurrent Load, Start, or Unlock from observing a wallet whose
+	// key vault seeding is still in flight (task 284).
+	w, err := m.buildWallet(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// Any failure past this point has already registered w in the manager
-	// cache with open stores, so it must tear w down before returning;
-	// otherwise the cache is left holding a partial wallet whose stores
-	// stay open and whose name blocks a corrected retry.
+	// Any failure past this point owns w with open stores but has not
+	// published it, so it must tear w down before returning; otherwise its
+	// stores stay open and its name would block a corrected retry. The guard
+	// guarantees w is the freshly built create-owned wallet and never a live
+	// instance a prior Load is handing out, so discarding it here is always
+	// safe (task 285 ensures an already-cached wallet was rejected before any
+	// store was opened).
 	discardOnErr := func(err error) error {
 		return errors.Join(err, w.discardUnstarted())
 	}
+
+	// Replay the post-load initialization. Both steps are idempotent and
+	// report how many rows they actually created, so a fresh create completes
+	// its init while a retry over a partial create finishes only the rows the
+	// earlier attempt left undone. created accumulates that work across both
+	// steps; a non-zero total means this call advanced an incomplete wallet.
+	created := 0
 
 	// Seed the default accounts for spendable SQL wallets (F1). The kvdb
 	// backend already seeds account 0 per scope during legacy create; the
@@ -607,7 +787,7 @@ func (m *Manager) Create(cfg Config,
 	// to derive its first receiving address.
 	spendable := !params.WatchOnly && rootKey != nil && rootKey.IsPrivate()
 	if !isKVDB && spendable {
-		err = seedDefaultAccounts(
+		seeded, err := seedDefaultAccounts(
 			context.Background(), w, rootKey, params.PrivatePassphrase,
 		)
 		if err != nil {
@@ -615,38 +795,135 @@ func (m *Manager) Create(cfg Config,
 				fmt.Errorf("seed default accounts: %w", err),
 			)
 		}
+
+		created += seeded
 	}
 
 	// If we are in shell mode and have initial accounts, we import them now.
 	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
+		imported, err := w.importInitialAccounts(
 			context.Background(), params.InitialAccounts,
 		)
 		if err != nil {
 			return nil, discardOnErr(err)
 		}
+
+		created += imported
 	}
+
+	// Reject a create that targets an already fully created wallet. The rows
+	// existed before this call and the idempotent init replay had nothing
+	// left to create, so the wallet is complete end to end. Without this an
+	// over-create would silently return the existing wallet instead of an
+	// exists error. A wallet whose rows existed but whose init the replay
+	// just completed (created > 0) falls through and is returned as the
+	// now-finished wallet.
+	if preCreated && created == 0 {
+		return nil, discardOnErr(
+			fmt.Errorf("%w: %q", ErrWalletExists, cfg.Name),
+		)
+	}
+
+	// Post-load initialization succeeded, so the wallet is now ready for
+	// normal runtime use. Publish it into the manager cache while the create
+	// guard still prevents any other caller from racing in, making the
+	// transition from create-only to live atomic (task 284). The deferred
+	// release then lets waiting Load/Create callers observe the published
+	// wallet.
+	m.publish(cfg.Name, w)
 
 	return w, nil
 }
 
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
 // This is typically used during wallet initialization in shell mode.
+//
+// It is replayable: a Create that failed after importing only some of the
+// initial accounts is retried against the same wallet, so an account that an
+// earlier attempt already imported is verified to match and then skipped
+// rather than re-inserted (which would hit the unique (wallet, scope, name)
+// constraint and wedge the retry). It returns the number of accounts it
+// actually imported, so a zero count means every initial account was already
+// present.
 func (w *Wallet) importInitialAccounts(ctx context.Context,
-	accounts []WatchOnlyAccount) error {
+	accounts []WatchOnlyAccount) (int, error) {
 
+	created := 0
 	for _, account := range accounts {
-		_, err := w.importAccountInternal(
+		exists, err := w.initialAccountAlreadyImported(ctx, account)
+		if err != nil {
+			return 0, fmt.Errorf("failed to import account %s: %w",
+				account.Name, err)
+		}
+
+		if exists {
+			continue
+		}
+
+		_, err = w.importAccountInternal(
 			ctx, account.Name, account.XPub, account.MasterKeyFingerprint,
 			account.AddrType, false,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to import account %s: %w", account.Name,
-				err)
+			return 0, fmt.Errorf("failed to import account %s: %w",
+				account.Name, err)
 		}
+
+		created++
 	}
 
-	return nil
+	return created, nil
+}
+
+// initialAccountAlreadyImported reports whether the given initial account is
+// already present from an earlier create attempt, verifying that the stored
+// account matches the retry's key material. It resolves the scope from the
+// xpub exactly as importAccountInternal does, so the lookup targets the scope
+// the account was originally stored under (which need not equal the caller's
+// declared account.Scope). A stored account whose public key differs from the
+// retry's is rejected so a retry cannot silently rebind an existing name to
+// new key material.
+func (w *Wallet) initialAccountAlreadyImported(ctx context.Context,
+	account WatchOnlyAccount) (bool, error) {
+
+	err := validateExtendedPubKey(account.XPub, true, w.cfg.ChainParams)
+	if err != nil {
+		return false, err
+	}
+
+	addrType := account.AddrType
+
+	scope, _, err := keyScopeFromPubKey(account.XPub, &addrType)
+	if err != nil {
+		return false, err
+	}
+
+	name := account.Name
+
+	info, err := w.store.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(scope),
+		Name:        &name,
+		SkipBalance: true,
+	})
+	switch {
+	case err == nil:
+
+	// Not imported yet by an earlier attempt.
+	case errors.Is(err, db.ErrAccountNotFound):
+		return false, nil
+
+	default:
+		return false, fmt.Errorf("check imported account: %w", err)
+	}
+
+	if string(info.PublicKey) != account.XPub.String() {
+		return false, fmt.Errorf("%w: initial account %q already "+
+			"exists with different key material", ErrWalletParams,
+			account.Name)
+	}
+
+	return true, nil
 }
 
 // Load loads an existing wallet from the provided configuration. It opens the
@@ -658,23 +935,42 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
-	// Check if the wallet is already loaded.
-	m.RLock()
-	existingW, ok := m.wallets[cfg.Name]
-	m.RUnlock()
-
+	// Wait out any in-progress Create for this name before checking the
+	// cache, so Load never returns a wallet that Create is still
+	// initializing. awaitCreate returns the cached wallet if one is now
+	// published, or signals that we must build it ourselves (no live wallet
+	// and no create in flight).
+	existingW, ok := m.awaitCreate(cfg.Name)
 	if ok {
 		return existingW, nil
+	}
+
+	w, err := m.buildWallet(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Register the wallet. A wallet built here is immediately ready for
+	// runtime use, so it is published as soon as it is constructed.
+	m.publish(cfg.Name, w)
+
+	return w, nil
+}
+
+// buildWallet opens the wallet's stores and constructs the in-memory Wallet
+// without publishing it into the manager cache. Manager.Load publishes the
+// result immediately, while Manager.Create holds it back until its post-load
+// initialization completes, so the cache never exposes a wallet that is still
+// being created (task 284).
+func (m *Manager) buildWallet(cfg Config) (*Wallet, error) {
+	// Apply the safe default for auto-lock duration if not specified.
+	if cfg.AutoLockDuration == 0 {
+		cfg.AutoLockDuration = defaultLockDuration
 	}
 
 	legacyStore, err := openLegacyStore(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("load legacy wallet: %w", err)
-	}
-
-	// Apply the safe default for auto-lock duration if not specified.
-	if cfg.AutoLockDuration == 0 {
-		cfg.AutoLockDuration = defaultLockDuration
 	}
 
 	// Initialize the auto-lock timer in a stopped state. We perform a
@@ -752,15 +1048,105 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		if m.wallets[name] == w {
 			delete(m.wallets, name)
 		}
+
 		m.Unlock()
 	}
 
-	// Register the wallet.
-	m.Lock()
-	m.wallets[cfg.Name] = w
-	m.Unlock()
-
 	return w, nil
+}
+
+// publish registers a fully constructed wallet in the manager cache under
+// name, making it available to subsequent Load callers.
+func (m *Manager) publish(name string, w *Wallet) {
+	m.Lock()
+	m.wallets[name] = w
+	m.Unlock()
+}
+
+// beginCreate claims the create-in-progress guard for name before any store is
+// opened or created. It coordinates a Create against both a wallet this
+// manager already has loaded and a concurrent Create of the same name:
+//
+//   - if the name is already published in the cache, the wallet is a live
+//     managed wallet and this is an over-create, so it returns ErrWalletExists
+//     immediately without touching any store (task 285);
+//   - if another Create for the same name holds the guard, it waits for that
+//     create to finish and then re-checks rather than opening the stores
+//     concurrently. The earlier create either published the wallet (now a
+//     cache hit, so ErrWalletExists) or failed before publishing (the durable
+//     rows may remain, so this call proceeds into the partial-create retry
+//     path);
+//   - otherwise it installs the guard channel and returns a release func the
+//     caller must invoke once the create publishes or fails.
+//
+// The returned release func is idempotent.
+func (m *Manager) beginCreate(name string) (func(), error) {
+	m.Lock()
+	defer m.Unlock()
+
+	for {
+		// A wallet already published under this name is a live managed
+		// wallet, never a partial create to recover. Reject the
+		// over-create before opening any store and without disturbing the
+		// live instance (task 285).
+		if _, ok := m.wallets[name]; ok {
+			return nil, fmt.Errorf("%w: %q", ErrWalletExists, name)
+		}
+
+		// Another Create for this name is mid-flight. Wait for it to
+		// finish, then loop to re-evaluate: it may have published the
+		// wallet (cache hit above) or failed before publishing (proceed).
+		ch, ok := m.creating[name]
+		if !ok {
+			break
+		}
+
+		m.Unlock()
+		<-ch
+		m.Lock()
+	}
+
+	ch := make(chan struct{})
+	m.creating[name] = ch
+
+	var once sync.Once
+
+	release := func() {
+		once.Do(func() {
+			m.Lock()
+			delete(m.creating, name)
+			close(ch)
+			m.Unlock()
+		})
+	}
+
+	return release, nil
+}
+
+// awaitCreate blocks until any in-progress Create for name has finished, so a
+// Load never races a Create's publish. It returns the cached wallet if one is
+// present once no create is in flight; ok is false when the name is neither
+// cached nor being created, signaling the caller to build the wallet itself.
+func (m *Manager) awaitCreate(name string) (*Wallet, bool) {
+	m.Lock()
+	defer m.Unlock()
+
+	for {
+		if w, ok := m.wallets[name]; ok {
+			return w, true
+		}
+
+		ch, ok := m.creating[name]
+		if !ok {
+			return nil, false
+		}
+
+		// A Create for this name is initializing the wallet. Wait for it
+		// to publish or fail before re-checking the cache.
+		m.Unlock()
+		<-ch
+		m.Lock()
+	}
 }
 
 // prepareWalletCreation validates the configuration and parameters, and derives
@@ -812,7 +1198,7 @@ func (m *Manager) deriveRootKey(cfg Config,
 
 	switch params.Mode {
 	case ModeGenSeed:
-		return m.genRootKey(cfg)
+		return m.genRootKey(cfg, params)
 
 	case ModeImportSeed:
 		return m.deriveFromSeed(cfg, params.Seed)
@@ -841,16 +1227,153 @@ func (m *Manager) deriveRootKey(cfg Config,
 	}
 }
 
-// genRootKey generates a fresh random seed and derives the master extended
-// private key from it.
-func (m *Manager) genRootKey(cfg Config) (*hdkeychain.ExtendedKey, error) {
-	// Generate a fresh random seed using the recommended length.
+// genRootKey resolves the master extended private key for a ModeGenSeed
+// create. A fresh create mints a new random seed and derives its master key. A
+// retry over a partial create instead reuses the master key the earlier
+// attempt already persisted in the legacy store: ModeGenSeed minting a new
+// random root on every call would derive key material that no longer matches
+// the persisted legacy wallet, so verifyRootKeyMatchesLegacy would reject the
+// retry and a partial ModeGenSeed wallet could never be completed (T2).
+func (m *Manager) genRootKey(cfg Config,
+	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
+
+	// Reuse the persisted master key if a prior attempt already created the
+	// legacy wallet, so the retry derives the same material it committed.
+	rootKey, err := m.recoverLegacyMasterRoot(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	if rootKey != nil {
+		return rootKey, nil
+	}
+
+	// No legacy wallet exists yet, so this is a fresh create: generate a new
+	// random seed using the recommended length and derive its master key.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate seed: %w", err)
 	}
 
 	return m.deriveFromSeed(cfg, seed)
+}
+
+// recoverLegacyMasterRoot returns the decrypted master HD private key of an
+// already-created legacy wallet, or a nil key when none exists yet. It backs
+// the ModeGenSeed retry path: a partial create leaves the spendable legacy
+// wallet behind, and the retry must reuse its persisted master key rather than
+// mint a fresh random one that would no longer match the stored wallet.
+//
+// A nil key with a nil error means no legacy wallet is present (a fresh
+// create) or it is a rootless/watch-only wallet with no master private key to
+// recover; the caller then falls back to generating a new random seed.
+func (m *Manager) recoverLegacyMasterRoot(cfg Config,
+	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
+
+	ctx := context.Background()
+
+	// With no configured kvdb path there is no on-disk legacy wallet to
+	// recover from, so this is a fresh create. The full Create path validates
+	// the path before reaching here; this guard also lets genRootKey be
+	// exercised in isolation without a backing store.
+	if cfg.DB.KVDB.DBPath == "" {
+		return nil, nil //nolint:nilnil
+	}
+
+	legacyStore, err := openLegacyStore(cfg)
+	switch {
+	// No legacy wallet exists yet: this is a fresh create, so there is
+	// nothing to recover and the caller generates a new random seed.
+	case errors.Is(err, walletdb.ErrDbDoesNotExist):
+		return nil, nil //nolint:nilnil
+
+	case err != nil:
+		return nil, err
+	}
+
+	info, err := legacyStore.Store.GetWallet(ctx, cfg.Name)
+	if err != nil {
+		return nil, closeStoresAfterError(
+			fmt.Errorf("read existing legacy wallet: %w", err),
+			nil, legacyStore,
+		)
+	}
+
+	// A rootless/watch-only legacy wallet persists no master private key, so
+	// there is nothing to reuse; let the caller generate a fresh seed.
+	if len(info.MasterPubKey) == 0 {
+		err = legacyStore.Close()
+		if err != nil {
+			return nil, fmt.Errorf("close legacy store: %w", err)
+		}
+
+		return nil, nil //nolint:nilnil
+	}
+
+	rootKey, err := m.decryptLegacyMasterRoot(ctx, params, legacyStore)
+	if err != nil {
+		return nil, err
+	}
+
+	err = legacyStore.Close()
+	if err != nil {
+		return nil, fmt.Errorf("close legacy store: %w", err)
+	}
+
+	return rootKey, nil
+}
+
+// decryptLegacyMasterRoot unlocks the legacy manager vault and decrypts the
+// stored encrypted master HD private key into an extended key. On any failure
+// it closes legacyStore before returning the wrapped error, mirroring the
+// cleanup the caller performs on success.
+func (m *Manager) decryptLegacyMasterRoot(ctx context.Context,
+	params CreateWalletParams, legacyStore *kvdb.StoreHandle) (
+	*hdkeychain.ExtendedKey, error) {
+
+	// Unlock the legacy manager so its vault can decrypt the encrypted master
+	// HD private key. A negative timeout disables the vault's auto-lock; the
+	// deferred Lock re-locks it before this store handle is closed.
+	vault := kvdb.NewLegacyManagerVault(
+		legacyStore.DB, legacyStore.AddrStore,
+	)
+
+	err := vault.Unlock(ctx, params.PrivatePassphrase, -1)
+	if err != nil {
+		return nil, closeStoresAfterError(
+			fmt.Errorf("unlock legacy vault: %w", err), nil,
+			legacyStore,
+		)
+	}
+	defer vault.Lock()
+
+	encrypted, err := legacyStore.Store.GetEncryptedHDSeed(ctx, 0)
+	if err != nil {
+		return nil, closeStoresAfterError(
+			fmt.Errorf("read legacy master HD key: %w", err), nil,
+			legacyStore,
+		)
+	}
+
+	plaintext, err := vault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+	if err != nil {
+		return nil, closeStoresAfterError(
+			fmt.Errorf("decrypt legacy master HD key: %w", err), nil,
+			legacyStore,
+		)
+	}
+
+	rootKey, err := hdkeychain.NewKeyFromString(string(plaintext))
+	zero.Bytes(plaintext)
+
+	if err != nil {
+		return nil, closeStoresAfterError(
+			fmt.Errorf("parse legacy master HD key: %w", err), nil,
+			legacyStore,
+		)
+	}
+
+	return rootKey, nil
 }
 
 // deriveFromSeed derives the master extended private key from the provided
