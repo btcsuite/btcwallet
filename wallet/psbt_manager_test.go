@@ -408,6 +408,9 @@ func TestDecorateInputTaproot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, utxo, pInput.WitnessUtxo)
 	require.Equal(t, txscript.SigHashDefault, pInput.SighashType)
+	// Taproot inputs carry only the taproot derivation (no Bip32Derivation),
+	// otherwise the wallet's own signer rejects them as ambiguous.
+	require.Empty(t, pInput.Bip32Derivation)
 	require.Len(t, pInput.TaprootBip32Derivation, 1)
 	require.Equal(
 		t, schnorr.SerializePubKey(pubKey),
@@ -3687,7 +3690,7 @@ func TestAddInputInfoSegWitV1(t *testing.T) {
 	// Assert: Verify fields are populated correctly.
 	require.Equal(t, utxo.Value, in.WitnessUtxo.Value)
 	require.Equal(t, txscript.SigHashDefault, in.SighashType)
-	require.Equal(t, derivation, in.Bip32Derivation[0])
+	require.Empty(t, in.Bip32Derivation)
 	require.Equal(t, pubKey[1:], in.TaprootBip32Derivation[0].XOnlyPubKey)
 }
 
