@@ -145,6 +145,57 @@ func TestAccountWalletIDImmutable(t *testing.T) {
 	)
 }
 
+// TestAccountIDImmutable verifies that raw account primary-key updates cannot
+// change account identity after insert.
+func TestAccountIDImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "account-id-immutable")
+
+	accountName := "immutable-id-account"
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+	)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+
+	err := updateAccountIDRaw(t, store.DB(), accountID, accountID+1000)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	accountInfo, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, db.KeyScopeBIP0084, accountName,
+		),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, accountInfo.AccountID)
+	require.Equal(t, uint32(accountID), *accountInfo.AccountID)
+}
+
+// TestDerivedAccountRowImmutable verifies that derived account child rows are
+// insert-only because their account number is structural identity.
+func TestDerivedAccountRowImmutable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "derived-account-row-immutable")
+
+	accountName := "derived-identity-account"
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+
+	err := updateDerivedAccountNumberRaw(t, store.DB(), accountID, 99)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+}
+
 // TestCreateDerivedAccountIgnoresImportedAccounts verifies that imported
 // accounts do not consume the persisted next derived-account number.
 func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
@@ -162,7 +213,7 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint32(0), first.AccountNumber)
+	require.Equal(t, uint32(0), accountNumberValue(t, first.AccountNumber))
 
 	props, err := store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
@@ -174,7 +225,7 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint32(0), props.AccountNumber)
+	require.Nil(t, props.AccountNumber)
 
 	second, err := store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
@@ -185,7 +236,7 @@ func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
 		SpendableDeriveFn(),
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint32(1), second.AccountNumber)
+	require.Equal(t, uint32(1), accountNumberValue(t, second.AccountNumber))
 }
 
 // TestWatchOnlyHierarchyAccountRules is the canonical wallet-to-account
@@ -367,20 +418,19 @@ func TestWatchOnlyHierarchyAccountRules(t *testing.T) {
 	}
 }
 
-// TestReservedImportedBucketNameRejected verifies that the wallet-level
-// imported bucket name (db.DefaultImportedAccountName) is reserved: neither a
+// TestReservedImportedAliasNameRejected verifies that the wallet-level raw
+// import alias name (db.DefaultImportedAccountName) is reserved: neither a
 // caller-initiated derived account nor a caller-initiated imported (xpub)
-// account may occupy that slot. The bucket is materialized only by the import
-// auto-create path, so both public account-creation APIs must reject it with
-// db.ErrReservedAccountName.
-func TestReservedImportedBucketNameRejected(t *testing.T) {
+// account may occupy that slot. Both public account-creation APIs must reject
+// it with db.ErrReservedAccountName.
+func TestReservedImportedAliasNameRejected(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
-	walletID := newWallet(t, store, "wallet-reserved-bucket-name")
+	walletID := newWallet(t, store, "wallet-reserved-alias-name")
 	scope := db.KeyScopeBIP0084
 
-	// A derived account cannot claim the reserved bucket name.
+	// A derived account cannot claim the reserved alias name.
 	_, err := store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
 			WalletID: walletID,
@@ -391,7 +441,7 @@ func TestReservedImportedBucketNameRejected(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrReservedAccountName)
 
-	// An imported (xpub) account cannot claim the reserved bucket name
+	// An imported (xpub) account cannot claim the reserved alias name
 	// either, even with otherwise-valid spendable key material.
 	_, err = store.CreateImportedAccount(
 		t.Context(), db.CreateImportedAccountParams{
@@ -404,8 +454,7 @@ func TestReservedImportedBucketNameRejected(t *testing.T) {
 	)
 	require.ErrorIs(t, err, db.ErrReservedAccountName)
 
-	// The reserved name remains free for the auto-create path: importing an
-	// address materializes the bucket under that exact name.
+	// The reserved name remains available for the raw-import address alias.
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:            walletID,
