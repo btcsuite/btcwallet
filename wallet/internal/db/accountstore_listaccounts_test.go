@@ -20,12 +20,14 @@ func TestListAccountsWithOpsDispatchesByScope(t *testing.T) {
 	query := ListAccountsQuery{WalletID: 7, Scope: &scope}
 	infos := []AccountInfo{{
 		AccountName:   "default",
-		AccountNumber: 0,
+		AccountNumber: testUint32Ptr(0),
+		IsImported:    false,
 		KeyScope:      scope,
 	}}
 	accounts := []AccountInfo{{
 		AccountName:        "default",
-		AccountNumber:      0,
+		AccountNumber:      testUint32Ptr(0),
+		IsImported:         false,
 		KeyScope:           scope,
 		ConfirmedBalance:   btcutil.Amount(12),
 		UnconfirmedBalance: btcutil.Amount(34),

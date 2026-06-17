@@ -494,51 +494,25 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 	accountName := changeAccount.AccountName
 
-	accountInfo, err := w.cache.GetAccount(
-		ctx, db.GetAccountQuery{
-			WalletID: w.id,
-			Scope:    db.KeyScope(changeAccount.KeyScope),
-			Name:     &accountName,
-		},
+	// storeAddrType is the effective internal (change branch) address type
+	// used to build the change script; derivationAccount is the account the
+	// change address is derived under. Both are resolved per branch below.
+	var (
+		storeAddrType     db.AddressType
+		derivationAccount string
 	)
-	if errors.Is(err, db.ErrAccountNotFound) {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountName)
-	}
 
-	if err != nil {
-		return nil, fmt.Errorf("get account %q: %w", accountName, err)
-	}
-
-	// Use the account's effective AddrSchema instead of the scope
-	// default so strict BIP49 imports (and any other per-account
-	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
-	// produce change scripts the external signer expects. SQL backends
-	// currently store schema at the key-scope level only and surface
-	// the effective scope schema here; per-account-only overrides
-	// under a shared scope still fall through to the scope default and
-	// are tracked as a known limitation in the AddrSchema docstring.
-	storeAddrType := accountInfo.AddrSchema.InternalAddrType
-
-	addrType, err := addresstype.ToWallet(storeAddrType, false)
-	if err != nil {
-		return nil, err
-	}
-
-	scriptSize, err := addrType.ScriptPubKeySize()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-	}
-
-	// The default imported bucket cannot derive its own change, so we
+	switch accountName {
+	// The reserved imported alias cannot derive its own change and, unlike
+	// kvdb, has no account row on the SQL/runtime store, so a by-name
+	// lookup here would always fail with ErrAccountNotFound. Skip it and
 	// redirect change to derived account 0 in the same scope, matching the
 	// legacy behaviour. Account 0 may have been renamed, so we resolve it
 	// by number rather than assuming the literal "default" name; looking it
-	// up by name would break change derivation after a rename.
-	derivationAccount := accountName
-	if accountInfo.Origin == db.ImportedAccount &&
-		accountInfo.AccountName == db.DefaultImportedAccountName {
-
+	// up by name would break change derivation after a rename. Account 0's
+	// effective AddrSchema then drives the change script, which is what the
+	// post-redirect change script derived under it would use anyway.
+	case db.DefaultImportedAccountName:
 		derivedAccount := uint32(waddrmgr.DefaultAccountNum)
 
 		derivedInfo, err := w.cache.GetAccount(
@@ -558,7 +532,50 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 				derivedAccount, err)
 		}
 
+		storeAddrType = derivedInfo.AddrSchema.InternalAddrType
 		derivationAccount = derivedInfo.AccountName
+
+	// For a named account (including non-default imported xpub accounts) the
+	// by-name lookup both rejects an unknown account up front and supplies
+	// the account's effective AddrSchema. Use that schema instead of the
+	// scope default so strict BIP49 imports (and any other per-account
+	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
+	// produce change scripts the external signer expects. SQL backends
+	// currently store schema at the key-scope level only and surface the
+	// effective scope schema here; per-account-only overrides under a shared
+	// scope still fall through to the scope default and are tracked as a
+	// known limitation in the AddrSchema docstring.
+	default:
+		accountInfo, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(changeAccount.KeyScope),
+				Name:     &accountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				accountName)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w",
+				accountName, err)
+		}
+
+		storeAddrType = accountInfo.AddrSchema.InternalAddrType
+		derivationAccount = accountName
+	}
+
+	addrType, err := addresstype.ToWallet(storeAddrType, false)
+	if err != nil {
+		return nil, err
+	}
+
+	scriptSize, err := addrType.ScriptPubKeySize()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
 	}
 
 	newChangeScript := func() ([]byte, error) {
@@ -900,7 +917,7 @@ func (w *Wallet) getEligibleUTXOsFromDefaultAccount(ctx context.Context,
 
 	return w.filterEligibleOutputs(
 		ctx, &waddrmgr.KeyScopeBIP0086, info.AccountName,
-		info.AccountNumber, minconf, bs,
+		account, minconf, bs,
 	)
 }
 
@@ -910,25 +927,34 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
 	[]db.UtxoInfo, error) {
 
-	info, err := w.cache.GetAccount(
-		ctx, db.GetAccountQuery{
-			WalletID: w.id,
-			Scope:    db.KeyScope(source.KeyScope),
-			Name:     &source.AccountName,
-		},
-	)
-	if errors.Is(err, db.ErrAccountNotFound) {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			source.AccountName)
-	}
+	// The GetAccount call below exists only to reject an unknown account
+	// name up front; for the reserved imported alias it would always fail.
+	// Raw imported addresses deliberately use this alias with no account
+	// row (db.DefaultImportedAccountName), yet ListUTXOs supports listing
+	// their UTXOs by that name. So skip the existence check for the alias
+	// and select from it directly, otherwise coin selection from the
+	// imported account would always return ErrAccountNotFound.
+	if source.AccountName != db.DefaultImportedAccountName {
+		_, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(source.KeyScope),
+				Name:     &source.AccountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				source.AccountName)
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("get account %q: %w",
-			source.AccountName, err)
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w",
+				source.AccountName, err)
+		}
 	}
 
 	return w.filterEligibleOutputs(
-		ctx, &source.KeyScope, source.AccountName, info.AccountNumber,
+		ctx, &source.KeyScope, source.AccountName, 0,
 		minconf, bs,
 	)
 }
@@ -1122,10 +1148,9 @@ func nonNegativeHeightToUint32(height int32) (uint32, error) {
 
 // filterEligibleOutputs finds eligible outputs for the given key scope and
 // account name. The numeric account argument is retained for caller-side
-// symmetry but the store-facing filter uses the (Scope, AccountName) pair
-// because the numeric account number collapses to 0 for imported accounts
-// (NULL → zero on SQL read) and would silently scan the default
-// account instead.
+// symmetry but the store-facing filter uses the (Scope, AccountName) pair so
+// imported-xpub accounts and raw-import aliases do not need a wallet-derived
+// BIP44 account number.
 func (w *Wallet) filterEligibleOutputs(ctx context.Context,
 	keyScope *waddrmgr.KeyScope, accountName string, _ uint32,
 	minconf uint32, bs *waddrmgr.BlockStamp) ([]db.UtxoInfo, error) {

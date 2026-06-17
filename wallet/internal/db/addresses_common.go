@@ -14,11 +14,9 @@ import (
 const DefaultImportedAccountName = "imported"
 
 // requireUnreservedAccountName rejects caller-initiated account operations
-// that target the reserved imported-bucket name. The bucket slot is owned
-// exclusively by the keyless wallet-level imported bucket, which is created
-// only via the auto-create path in NewImportedAddressWithTx; the public
-// derived, imported-xpub, and rename APIs must not occupy it. Centralized here
-// so all account paths share one definition of "reserved".
+// that target the reserved imported alias. Raw imported addresses use this
+// alias for compatibility, but SQL must not materialize it as an account row.
+// Centralized here so all account paths share one definition of "reserved".
 func requireUnreservedAccountName(name string) error {
 	if name == DefaultImportedAccountName {
 		return fmt.Errorf("%q: %w", name, ErrReservedAccountName)
@@ -38,18 +36,59 @@ var (
 	// success but does not return any derived address data.
 	errNilDerivedAddressData = errors.New("derived address data is nil")
 
-	// errInvalidOriginID is returned when an origin ID from the database is
-	// outside the valid range [DerivedAccount, ImportedAccount]. In practice,
-	// this should never happen, but it's possible if the database is modified
-	// incorrectly or the query is incorrect.
-	errInvalidOriginID = errors.New("invalid origin ID: must be 0 or 1")
-
 	// errInvalidDerivationPath is returned when the database contains an
 	// invalid derivation path, such as a missing index or branch for a
 	// derived address. This should never happen, but it's possible if the
 	// database is modified incorrectly or the query is incorrect.
 	errInvalidDerivationPath = errors.New("invalid derivation path")
+
+	// errAddressShapeCorruption is returned when an address parent row and its
+	// derived_addresses child row disagree about the structural shape.
+	errAddressShapeCorruption = errors.New("address subtype invariant violated")
 )
+
+// ValidateAddressShape checks that the persisted address shape and
+// derived_addresses child row agree with the nullable branch/index path columns
+// selected from that row.
+func ValidateAddressShape(isDerived bool, derivedAddressID sql.NullInt64,
+	branch, index sql.NullInt64) error {
+
+	hasChild := derivedAddressID.Valid
+
+	switch {
+	case isDerived && !hasChild:
+		return fmt.Errorf("%w: derived address missing path row",
+			errAddressShapeCorruption)
+
+	case !isDerived && hasChild:
+		return fmt.Errorf("%w: raw imported address has path row",
+			errAddressShapeCorruption)
+
+	default:
+		return validateAddressPathColumns(hasChild, branch, index)
+	}
+}
+
+// validateAddressPathColumns checks the branch/index path columns are
+// consistent with whether the address has a derived_addresses child row.
+func validateAddressPathColumns(hasChild bool, branch,
+	index sql.NullInt64) error {
+
+	hasPath := branch.Valid || index.Valid
+
+	switch {
+	case hasChild && (!branch.Valid || !index.Valid):
+		return fmt.Errorf("%w: derived address missing path row",
+			errAddressShapeCorruption)
+
+	case !hasChild && hasPath:
+		return fmt.Errorf("%w: raw imported address has path columns",
+			errAddressShapeCorruption)
+
+	default:
+		return nil
+	}
+}
 
 // AccountLookupKey contains the fields needed to look up an account.
 type AccountLookupKey struct {
@@ -66,19 +105,6 @@ func AccountKeyFromParams(params NewDerivedAddressParams) AccountLookupKey {
 		Purpose:     int64(params.Scope.Purpose),
 		CoinType:    int64(params.Scope.Coin),
 		AccountName: params.AccountName,
-	}
-}
-
-// AccountKeyFromImportedParams extracts account lookup fields from imported
-// params using DefaultImportedAccountName.
-func AccountKeyFromImportedParams(
-	params NewImportedAddressParams) AccountLookupKey {
-
-	return AccountLookupKey{
-		WalletID:    int64(params.WalletID),
-		Purpose:     int64(params.Scope.Purpose),
-		CoinType:    int64(params.Scope.Coin),
-		AccountName: DefaultImportedAccountName,
 	}
 }
 
@@ -133,13 +159,13 @@ func (p NewImportedAddressParams) ValidateWatchOnly(
 	return nil
 }
 
-// requireAddressPrivKeyOnSpendable enforces the ADR 0012 symmetric
+// RequireAddressPrivKeyOnSpendable enforces the ADR 0012 symmetric
 // invariant for SQL backends: a spendable wallet must not receive an
 // imported address without encrypted private-key material. Public-only
 // and script-only imports are both rejected (HasPrivateKey covers both
 // — script-only imports have material in EncryptedScript but no priv
 // key).
-func requireAddressPrivKeyOnSpendable(walletID uint32,
+func RequireAddressPrivKeyOnSpendable(walletID uint32,
 	walletIsWatchOnly bool, hasPrivKey bool) error {
 
 	if walletIsWatchOnly || hasPrivKey {
@@ -171,25 +197,20 @@ func (p NewImportedAddressParams) HasScript() bool {
 	return len(p.EncryptedScript) > 0
 }
 
-// IDToOrigin safely converts an integer to AccountOrigin. It returns an error
-// if the value is outside [DerivedAccount, ImportedAccount].
-func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
-	if v < 0 || v > T(ImportedAccount) {
-		return 0, fmt.Errorf("address origin: %d: %w", v, errInvalidOriginID)
-	}
-
-	return AccountOrigin(uint8(v)), nil
-}
-
 // AddressInfoRow captures common fields from all address row types across
 // PostgreSQL and SQLite backends. Uses generic type parameters to handle
 // different ID types (int16 for PostgreSQL, int64 for SQLite).
-type AddressInfoRow[TypeID, OriginIDType any] struct {
+type AddressInfoRow[TypeID any] struct {
 	// ID is the database unique identifier for the address.
 	ID int64
 
-	// AccountID is the database unique identifier for the account.
-	AccountID int64
+	// DerivedAddressID is the derived_addresses row ID when the address is an
+	// HD child. Raw imported addresses leave this NULL.
+	DerivedAddressID sql.NullInt64
+
+	// AccountID is the database unique identifier for the account when the
+	// address is an HD child. Raw imported addresses leave this NULL.
+	AccountID sql.NullInt64
 
 	// AccountNumber is the BIP44 account index of the owning account when the
 	// account is derived. Imported accounts leave this NULL.
@@ -214,9 +235,13 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// TypeID is the database identifier for the address type.
 	TypeID TypeID
 
-	// OriginID is the database identifier for address origin (derived=0,
-	// imported=1).
-	OriginID OriginIDType
+	// IsDerived reports whether the address should have path/account data in
+	// derived_addresses.
+	IsDerived bool
+
+	// AccountIsDerived reports the owning account's structural shape when the
+	// address is derived. Raw imported addresses leave this NULL.
+	AccountIsDerived sql.NullBool
 
 	// WalletIsWatchOnly indicates whether the wallet is watch-only.
 	WalletIsWatchOnly bool
@@ -247,9 +272,6 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 
 	// IDToAddrType converts TypeID to AddressType with validation.
 	IDToAddrType func(TypeID) (AddressType, error)
-
-	// IDToOrigin converts OriginIDType to AccountOrigin with validation.
-	IDToOrigin func(OriginIDType) (AccountOrigin, error)
 }
 
 // AddressSecretRow captures fields shared by address secret row types across
@@ -288,43 +310,33 @@ func AddressSecretRowToSecret(row AddressSecretRow) (*AddressSecret, error) {
 	}, nil
 }
 
-// convertAddressIDs converts database IDs to their respective uint32 values
-// with error handling.
-func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
+// convertAddressID converts a database address ID to uint32 with error
+// handling.
+func convertAddressID(id int64) (uint32, error) {
 	addrID, err := Int64ToUint32(id)
 	if err != nil {
-		return 0, 0, fmt.Errorf("address ID: %w", err)
+		return 0, fmt.Errorf("address ID: %w", err)
 	}
 
-	acctID, err := Int64ToUint32(accountID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("account ID: %w", err)
-	}
-
-	return addrID, acctID, nil
+	return addrID, nil
 }
 
 // convertAccountMetadata converts account-level row data into wallet-facing
 // fields on AddressInfo.
 func convertAccountMetadata(accountNumber sql.NullInt64,
-	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (uint32,
+	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (*uint32,
 	uint32, KeyScope, error) {
 
-	var account uint32
-	if accountNumber.Valid {
-		converted, err := Int64ToUint32(accountNumber.Int64)
-		if err != nil {
-			return 0, 0, KeyScope{}, fmt.Errorf("account number: %w", err)
-		}
-
-		account = converted
+	account, err := optionalAccountNumber(accountNumber)
+	if err != nil {
+		return nil, 0, KeyScope{}, err
 	}
 
 	var fingerprint uint32
 	if masterFingerprint.Valid {
 		converted, err := Int64ToUint32(masterFingerprint.Int64)
 		if err != nil {
-			return 0, 0, KeyScope{},
+			return nil, 0, KeyScope{},
 				fmt.Errorf("master fingerprint: %w", err)
 		}
 
@@ -333,12 +345,12 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 
 	convertedPurpose, err := Int64ToUint32(purpose)
 	if err != nil {
-		return 0, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
+		return nil, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
 	}
 
 	convertedCoin, err := Int64ToUint32(coinType)
 	if err != nil {
-		return 0, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
+		return nil, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
 	}
 
 	return account, fingerprint, KeyScope{
@@ -350,8 +362,8 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 // convertAddressAccountMetadata converts the owning account metadata for an
 // address row. SQL backends may fetch account properties separately to avoid
 // widening address queries.
-func convertAddressAccountMetadata[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (uint32, string, uint32,
+func convertAddressAccountMetadata[TypeID any](
+	row AddressInfoRow[TypeID]) (*uint32, string, uint32,
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
@@ -366,105 +378,93 @@ func convertAddressAccountMetadata[TypeID, OriginIDType any](
 			row.CoinType,
 		)
 	if err != nil {
-		return 0, "", 0, KeyScope{}, err
+		return nil, "", 0, KeyScope{}, err
 	}
 
 	return accountNumber, row.AccountName, masterFingerprint, keyScope, nil
+}
+
+// validateAddressAccountShape checks that derived address rows expose account
+// metadata consistent with the owning account's importedness.
+func validateAddressAccountShape[TypeID any](
+	row AddressInfoRow[TypeID]) error {
+
+	if !row.IsDerived {
+		if row.AccountID.Valid || row.AccountIsDerived.Valid ||
+			row.AccountNumber.Valid {
+
+			return fmt.Errorf("%w: raw imported address has account metadata",
+				errAddressShapeCorruption)
+		}
+
+		return nil
+	}
+
+	if !row.AccountID.Valid || !row.AccountIsDerived.Valid {
+		return fmt.Errorf("%w: derived address missing account metadata",
+			errAddressShapeCorruption)
+	}
+
+	if !row.AccountIsDerived.Bool {
+		if row.AccountNumber.Valid {
+			return fmt.Errorf("%w: non-derived account has derived "+
+				"account number",
+				errAccountShapeCorruption)
+		}
+
+		return nil
+	}
+
+	if !row.AccountNumber.Valid {
+		return fmt.Errorf("%w: derived account missing account number",
+			errAccountShapeCorruption)
+	}
+
+	return nil
 }
 
 // ApplyAddressAccountMetadata converts and copies raw account metadata onto an
 // address info returned by a create path.
 func ApplyAddressAccountMetadata(info *AddressInfo,
 	accountNumber sql.NullInt64, accountName string,
-	masterFingerprint sql.NullInt64, purpose, coinType int64) error {
+	masterFingerprint sql.NullInt64, purpose, coinType int64,
+	isImported bool) error {
 
-	acctNum, fingerprint, keyScope, err := convertAccountMetadata(
+	accountNum, fingerprint, keyScope, err := convertAccountMetadata(
 		accountNumber, masterFingerprint, purpose, coinType,
 	)
 	if err != nil {
 		return err
 	}
 
-	info.AccountNumber = acctNum
+	info.AccountNumber = accountNum
 	info.AccountName = accountName
 	info.KeyScope = keyScope
 	info.MasterKeyFingerprint = fingerprint
+	info.IsImported = isImported
 
 	return nil
 }
 
-// newImportedAddressTx handles the shared transaction flow for creating an
-// imported address across database backends. It creates the address row and
-// conditionally inserts the address_secrets row when any encrypted private key
-// or encrypted script material is present. Imported addresses copy the
-// parent wallet's watch-only mode; private-key presence is a signing-capability
-// detail, not an address-level watch-only signal.
-func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
-	ctx context.Context, create func(context.Context, CreateArgs) (Row, error),
-	createArgs CreateArgs,
-	insertFn func(QTX) func(context.Context, InsertArgs) error, qtx QTX,
-	insertArgs func(int64, NewImportedAddressParams) InsertArgs,
-	params NewImportedAddressParams, accountID int64, walletIsWatchOnly bool,
-	rowID func(Row) int64, rowCreatedAt func(Row) time.Time) (*AddressInfo,
-	error) {
-
-	addrRow, err := create(ctx, createArgs)
-	if err != nil {
-		return nil, fmt.Errorf("create imported address: %w", err)
-	}
-
-	addrID := rowID(addrRow)
-	if params.HasSecretMaterial() {
-		err = insertFn(qtx)(ctx, insertArgs(addrID, params))
-		if err != nil {
-			return nil, fmt.Errorf("insert address secret: %w", err)
-		}
-	}
-
-	id, acctID, err := convertAddressIDs(addrID, accountID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &AddressInfo{
-		ID:           id,
-		AccountID:    acctID,
-		AddrType:     params.AddressType,
-		CreatedAt:    rowCreatedAt(addrRow),
-		Origin:       ImportedAccount,
-		ScriptPubKey: params.ScriptPubKey,
-		PubKey:       params.PubKey,
-		HasScript:    params.HasScript(),
-		IsWatchOnly:  walletIsWatchOnly,
-	}, nil
-}
-
-// convertAddressMetadata converts address type and origin IDs with error
-// handling.
-func convertAddressMetadata[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (AddressType, AccountOrigin,
-	error) {
+// convertAddressMetadata converts address type IDs with error handling.
+func convertAddressMetadata[TypeID any](
+	row AddressInfoRow[TypeID]) (AddressType, error) {
 
 	addrType, err := row.IDToAddrType(row.TypeID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("address type: %w", err)
+		return 0, fmt.Errorf("address type: %w", err)
 	}
 
-	origin, err := row.IDToOrigin(row.OriginID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("address origin: %w", err)
-	}
-
-	return addrType, origin, nil
+	return addrType, nil
 }
 
 // convertAddressPath converts BIP44 branch/index values into uint32 fields.
 // Imported addresses must have both branch/index unset and return zero values.
 // Derived addresses must have both fields set and convertible to uint32.
-func convertAddressPath(origin AccountOrigin, branch,
+func convertAddressPath(hasDerivedPath bool, branch,
 	index sql.NullInt64) (uint32, uint32, error) {
 
-	if origin == ImportedAccount {
+	if !hasDerivedPath {
 		if branch.Valid || index.Valid {
 			return 0, 0, errInvalidDerivationPath
 		}
@@ -494,12 +494,33 @@ func convertAddressPath(origin AccountOrigin, branch,
 //
 // Watch-only state is copied directly from the wallet-level flag. Address
 // secret presence is not used to infer public watch-only state.
-func AddressRowToInfo[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
+func AddressRowToInfo[TypeID any](
+	row AddressInfoRow[TypeID]) (*AddressInfo, error) {
 
-	id, accountID, err := convertAddressIDs(row.ID, row.AccountID)
+	id, err := convertAddressID(row.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	err = ValidateAddressShape(
+		row.IsDerived, row.DerivedAddressID, row.AddressBranch,
+		row.AddressIndex,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateAddressAccountShape(row)
+	if err != nil {
+		return nil, err
+	}
+
+	var accountID *uint32
+	if row.AccountID.Valid {
+		accountID, err = optionalAccountID(row.AccountID.Int64)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	accountNumber, accountName, masterFingerprint, keyScope, err :=
@@ -508,16 +529,21 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
-	addrType, origin, err := convertAddressMetadata(row)
+	addrType, err := convertAddressMetadata(row)
 	if err != nil {
 		return nil, err
 	}
 
 	addrBranch, addrIndex, err := convertAddressPath(
-		origin, row.AddressBranch, row.AddressIndex,
+		row.IsDerived, row.AddressBranch, row.AddressIndex,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	isImported := !row.IsDerived
+	if row.IsDerived {
+		isImported = !row.AccountIsDerived.Bool
 	}
 
 	return &AddressInfo{
@@ -529,7 +555,8 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		MasterKeyFingerprint: masterFingerprint,
 		AddrType:             addrType,
 		CreatedAt:            row.CreatedAt,
-		Origin:               origin,
+		IsImported:           isImported,
+		HasDerivationPath:    row.IsDerived,
 		Branch:               addrBranch,
 		Index:                addrIndex,
 		ScriptPubKey:         row.ScriptPubKey,
@@ -574,8 +601,9 @@ func NextListAddressesQuery(q ListAddressesQuery,
 type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	AddrRow any] struct {
 
-	// GetAccount retrieves an account by the provided parameters.
-	GetAccount func(context.Context, AccountParams) (AccountRow, error)
+	// GetAccount returns a transaction-scoped account lookup helper.
+	GetAccount func(QTX) func(context.Context, AccountParams) (AccountRow,
+		error)
 
 	// AccountParams converts params to account lookup parameters.
 	AccountParams func(NewDerivedAddressParams) AccountParams
@@ -585,6 +613,9 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 
 	// GetAccountNumber extracts the BIP44 account number from an account row.
 	GetAccountNumber func(AccountRow) (uint32, error)
+
+	// GetAccountIsDerived reports whether the account row is wallet-derived.
+	GetAccountIsDerived func(AccountRow) bool
 
 	// GetWalletWatchOnly extracts the wallet watch-only state from an account
 	// row.
@@ -609,65 +640,6 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 	// CreateAddr returns a function to create an address row.
 	CreateAddr func(QTX) func(context.Context, int64, int64, AddressType,
 		uint32, uint32, []byte, []byte) (AddrRow, error)
-
-	// RowID extracts the ID from an address row.
-	RowID func(AddrRow) int64
-
-	// RowCreatedAt extracts the creation time from an address row.
-	RowCreatedAt func(AddrRow) time.Time
-
-	// ApplyAccountMetadata copies account metadata from the account row
-	// onto the address result inside the create transaction.
-	ApplyAccountMetadata func(*AddressInfo, AccountRow) error
-}
-
-// ImportedAddressAdapters groups the functions needed to create an
-// imported address across different database backends.
-type ImportedAddressAdapters[QTX any, AccountRow any,
-	AccountParams any, CreateArgs any, AddrRow any,
-	SecretParams any] struct {
-
-	// GetAccount retrieves an account by the provided parameters.
-	GetAccount func(context.Context, AccountParams) (AccountRow, error)
-
-	// AccountParams converts params to account lookup parameters.
-	AccountParams func(NewImportedAddressParams) AccountParams
-
-	// CreateBucketAccount materializes the wallet-level imported "bucket"
-	// account inside the supplied write transaction and returns the freshly
-	// looked-up account row. The bucket is intentionally keyless: it carries
-	// no account-level key material and no account_secrets row, because the
-	// spend-capability invariant for imported single addresses is enforced
-	// per-address via requireAddressPrivKeyOnSpendable. It is materialized on
-	// the first import into a scope (the GetAccount sql.ErrNoRows branch) as
-	// an idempotent get-or-create: implementations must tolerate a concurrent
-	// first-import that already inserted the bucket and return that existing
-	// row rather than erroring on the (scope_id, account_name) unique index.
-	// Returning the same row type as GetAccount lets the caller reuse one
-	// downstream creation path for both the existing-bucket and
-	// just-created-bucket cases.
-	CreateBucketAccount func(context.Context, QTX,
-		NewImportedAddressParams) (AccountRow, error)
-
-	// GetAccountID extracts the account ID from an account row.
-	GetAccountID func(AccountRow) int64
-
-	// GetWalletWatchOnly extracts the wallet-derived watch-only state from an
-	// account row.
-	GetWalletWatchOnly func(AccountRow) bool
-
-	// CreateAddr returns a function to create an address row.
-	CreateAddr func(QTX) func(context.Context, CreateArgs) (AddrRow, error)
-
-	// CreateParams converts wallet/account IDs and params to address creation
-	// parameters.
-	CreateParams func(int64, int64, NewImportedAddressParams) CreateArgs
-
-	// InsertSecret returns a function to insert address secret.
-	InsertSecret func(QTX) func(context.Context, SecretParams) error
-
-	// SecretParams converts address ID and params to secret parameters.
-	SecretParams func(int64, NewImportedAddressParams) SecretParams
 
 	// RowID extracts the ID from an address row.
 	RowID func(AddrRow) int64
@@ -727,7 +699,7 @@ func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
 // the scope default).
 func createDerivedAddress[T any](ctx context.Context,
 	params NewDerivedAddressParams, walletID int64, accountID int64,
-	accountNumber uint32, walletIsWatchOnly bool, addrSchema ScopeAddrSchema,
+	accountNumber *uint32, walletIsWatchOnly bool, addrSchema ScopeAddrSchema,
 	accountPubKey []byte,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
@@ -755,22 +727,28 @@ func createDerivedAddress[T any](ctx context.Context,
 
 	rowIDVal := rowID(row)
 
-	id, convertedAcctID, err := convertAddressIDs(rowIDVal, accountID)
+	id, err := convertAddressID(rowIDVal)
+	if err != nil {
+		return nil, err
+	}
+
+	convertedAcctID, err := optionalAccountID(accountID)
 	if err != nil {
 		return nil, err
 	}
 
 	return &AddressInfo{
-		ID:           id,
-		AccountID:    convertedAcctID,
-		AddrType:     addrType,
-		CreatedAt:    rowCreatedAt(row),
-		Origin:       DerivedAccount,
-		Branch:       branch,
-		Index:        index,
-		ScriptPubKey: scriptPubKey,
-		PubKey:       pubKey,
-		IsWatchOnly:  walletIsWatchOnly,
+		ID:                id,
+		AccountID:         convertedAcctID,
+		AccountNumber:     accountNumber,
+		AddrType:          addrType,
+		CreatedAt:         rowCreatedAt(row),
+		HasDerivationPath: true,
+		Branch:            branch,
+		Index:             index,
+		ScriptPubKey:      scriptPubKey,
+		PubKey:            pubKey,
+		IsWatchOnly:       walletIsWatchOnly,
 	}, nil
 }
 
@@ -780,7 +758,7 @@ func createDerivedAddress[T any](ctx context.Context,
 // the account's effective schema and must already account for any per-account
 // override; this function does not consult the scope default itself.
 func derivedAddressInput(ctx context.Context,
-	params NewDerivedAddressParams, accountID int64, accountNumber uint32,
+	params NewDerivedAddressParams, accountID int64, accountNumber *uint32,
 	addrSchema ScopeAddrSchema, accountPubKey []byte,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
@@ -818,12 +796,17 @@ func derivedAddressInput(ctx context.Context,
 	}
 
 	deriveParams := AddressDerivationParams{
-		Scope:         params.Scope,
-		AccountNumber: accountNumber,
-		Branch:        branch,
-		Index:         index,
-		AddrType:      addrType,
-		AccountPubKey: accountPubKey,
+		Scope:                params.Scope,
+		DerivedAccountNumber: accountNumber,
+		Branch:               branch,
+		Index:                index,
+		AddrType:             addrType,
+		AccountPubKey:        accountPubKey,
+	}
+
+	deriveParams.AccountID, err = optionalAccountID(accountID)
+	if err != nil {
+		return 0, 0, 0, nil, nil, err
 	}
 
 	derivedData, err := deriveFn(ctx, deriveParams)
@@ -838,6 +821,35 @@ func derivedAddressInput(ctx context.Context,
 
 	return addrType, branch, index, derivedData.ScriptPubKey,
 		derivedData.PubKey, nil
+}
+
+// resolveAccountNumber maps the account-number lookup result to the optional
+// BIP44 account number, enforcing the wallet-derived/imported shape invariant.
+func resolveAccountNumber(accountIsDerived bool, accountNumValue uint32,
+	errAccount error) (*uint32, error) {
+
+	var accountNumber *uint32
+
+	switch {
+	case errAccount == nil:
+		if !accountIsDerived {
+			return nil, fmt.Errorf("%w: non-derived account has "+
+				"derived account number", errAccountShapeCorruption)
+		}
+
+		accountNumber = &accountNumValue
+
+	case errors.Is(errAccount, ErrNilDBAccountNumber):
+		if accountIsDerived {
+			return nil, fmt.Errorf("%w: derived account missing "+
+				"account number", errAccountShapeCorruption)
+		}
+
+	default:
+		return nil, fmt.Errorf("account number: %w", errAccount)
+	}
+
+	return accountNumber, nil
 }
 
 // NewDerivedAddressWithTx combines transaction execution, account lookup,
@@ -857,124 +869,59 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 	var result *AddressInfo
 
 	err := executeTx(ctx, func(qtx QTX) error {
-		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
-		if err == nil {
-			accountID := adapters.GetAccountID(row)
-
-			// Imported accounts have NULL account_number; their derivation
-			// uses AccountPubKey directly so a BIP44 number is not
-			// available. Tolerate ErrNilDBAccountNumber and pass 0
-			// through to the callback — the callback uses AccountPubKey
-			// plus Branch/Index to derive imported xpub addresses.
-			accountNumber, errAccount := adapters.GetAccountNumber(row)
-			if errAccount != nil &&
-				!errors.Is(errAccount, ErrNilDBAccountNumber) {
-
-				return fmt.Errorf("account number: %w", errAccount)
-			}
-
-			addrSchema, errSchema := adapters.GetAccountAddrSchema(row)
-			if errSchema != nil {
-				return fmt.Errorf("account addr schema: %w",
-					errSchema)
-			}
-
-			accountPubKey := adapters.GetAccountPubKey(row)
-
-			info, errAddr := createDerivedAddress(
-				ctx, params, int64(params.WalletID), accountID,
-				accountNumber, adapters.GetWalletWatchOnly(row), addrSchema,
-				accountPubKey,
-				adapters.GetExtIndex(qtx),
-				adapters.GetIntIndex(qtx),
-				adapters.CreateAddr(qtx),
-				adapters.RowID,
-				adapters.RowCreatedAt, deriveFn)
-			if errAddr != nil {
-				return errAddr
-			}
-
-			errMeta := adapters.ApplyAccountMetadata(info, row)
-			if errMeta != nil {
-				return fmt.Errorf("apply address account metadata: %w",
-					errMeta)
-			}
-
-			result = info
-
-			return nil
-		}
-
-		if errors.Is(err, sql.ErrNoRows) {
-			key := AccountKeyFromParams(params)
-
-			return fmt.Errorf("account %q in scope %d/%d: %w",
-				key.AccountName, key.Purpose, key.CoinType,
-				ErrAccountNotFound)
-		}
-
-		return fmt.Errorf("get account: %w", err)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// NewImportedAddressWithTx combines transaction execution, bucket-account
-// resolution, and imported address creation in one helper.
-//
-// The owning account is the wallet-level imported "bucket": a single keyless
-// account per scope that holds individually-imported address rows. On the
-// first import into a scope the bucket does not yet exist, so this helper
-// auto-creates it (keyless, origin=imported) inside the same write
-// transaction rather than failing; subsequent imports reuse it. Because both
-// the pre-existing and just-created cases yield the same account row, the
-// address is then created through one shared path for both.
-func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
-	CreateArgs any, AddrRow any, SecretParams any](
-	ctx context.Context, params NewImportedAddressParams,
-	executeTx func(context.Context, func(QTX) error) error,
-	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
-		AddrRow, SecretParams]) (*AddressInfo, error) {
-
-	validationErr := params.ValidateBasic()
-	if validationErr != nil {
-		return nil, validationErr
-	}
-
-	var result *AddressInfo
-
-	err := executeTx(ctx, func(qtx QTX) error {
-		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
-
-		// First import into this scope: the bucket does not exist
-		// yet, so materialize the keyless bucket in the same write
-		// transaction and use the row it returns. A pre-existing
-		// bucket (err == nil) is reused as-is.
-		//
-		// CreateBucketAccount is an idempotent get-or-create (its
-		// insert uses ON CONFLICT DO NOTHING and then re-reads), so
-		// two first-imports racing into the same empty scope both
-		// succeed: one inserts the bucket, the other observes the
-		// conflict as a no-op and re-reads the same row, rather than
-		// failing on the (scope_id, account_name) unique index.
-		if errors.Is(err, sql.ErrNoRows) {
-			row, err = adapters.CreateBucketAccount(ctx, qtx, params)
-		}
-
-		// This guards both a non-ErrNoRows GetAccount failure and any
-		// bucket-creation failure above.
-		if err != nil {
-			return fmt.Errorf("resolve imported bucket: %w", err)
-		}
-
-		info, errAddr := importAddressIntoResolvedAccount(
-			ctx, qtx, params, row, adapters,
+		row, err := adapters.GetAccount(qtx)(
+			ctx, adapters.AccountParams(params),
 		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				key := AccountKeyFromParams(params)
+
+				return fmt.Errorf("account %q in scope %d/%d: %w",
+					key.AccountName, key.Purpose, key.CoinType,
+					ErrAccountNotFound)
+			}
+
+			return fmt.Errorf("get account: %w", err)
+		}
+
+		accountID := adapters.GetAccountID(row)
+		accountIsDerived := adapters.GetAccountIsDerived(row)
+
+		// Non-derived accounts have NULL account_number; their derivation
+		// uses AccountPubKey directly so a BIP44 number is not available.
+		accountNumValue, errAccount := adapters.GetAccountNumber(row)
+
+		accountNumber, errNumber := resolveAccountNumber(
+			accountIsDerived, accountNumValue, errAccount,
+		)
+		if errNumber != nil {
+			return errNumber
+		}
+
+		addrSchema, errSchema := adapters.GetAccountAddrSchema(row)
+		if errSchema != nil {
+			return fmt.Errorf("account addr schema: %w", errSchema)
+		}
+
+		accountPubKey := adapters.GetAccountPubKey(row)
+
+		info, errAddr := createDerivedAddress(
+			ctx, params, int64(params.WalletID), accountID,
+			accountNumber, adapters.GetWalletWatchOnly(row), addrSchema,
+			accountPubKey,
+			adapters.GetExtIndex(qtx),
+			adapters.GetIntIndex(qtx),
+			adapters.CreateAddr(qtx),
+			adapters.RowID,
+			adapters.RowCreatedAt, deriveFn)
 		if errAddr != nil {
 			return errAddr
+		}
+
+		errMeta := adapters.ApplyAccountMetadata(info, row)
+		if errMeta != nil {
+			return fmt.Errorf("apply address account metadata: %w",
+				errMeta)
 		}
 
 		result = info
@@ -986,54 +933,4 @@ func NewImportedAddressWithTx[QTX any, AccountRow any, AccountParams any,
 	}
 
 	return result, nil
-}
-
-// importAddressIntoResolvedAccount creates an imported address row in the
-// already-resolved owning bucket account. It enforces the wallet-level
-// watch-only invariants for the imported address, inserts the address (and
-// any secret material) on the supplied transaction, and copies the owning
-// account metadata onto the result. Both the existing-bucket and
-// just-created-bucket cases funnel through here so the per-address spendable
-// invariant (requireAddressPrivKeyOnSpendable) always runs regardless of how
-// the bucket was resolved.
-func importAddressIntoResolvedAccount[QTX any, AccountRow any,
-	AccountParams any, CreateArgs any, AddrRow any, SecretParams any](
-	ctx context.Context, qtx QTX, params NewImportedAddressParams,
-	row AccountRow,
-	adapters ImportedAddressAdapters[QTX, AccountRow, AccountParams, CreateArgs,
-		AddrRow, SecretParams]) (*AddressInfo, error) {
-
-	walletIsWatchOnly := adapters.GetWalletWatchOnly(row)
-
-	errWatchOnly := params.ValidateWatchOnly(walletIsWatchOnly)
-	if errWatchOnly != nil {
-		return nil, errWatchOnly
-	}
-
-	errSpendable := requireAddressPrivKeyOnSpendable(
-		params.WalletID, walletIsWatchOnly, params.HasPrivateKey(),
-	)
-	if errSpendable != nil {
-		return nil, errSpendable
-	}
-
-	acctID := adapters.GetAccountID(row)
-
-	info, err := newImportedAddressTx(
-		ctx, adapters.CreateAddr(qtx),
-		adapters.CreateParams(int64(params.WalletID), acctID, params),
-		adapters.InsertSecret, qtx,
-		adapters.SecretParams, params, acctID, walletIsWatchOnly,
-		adapters.RowID, adapters.RowCreatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	err = adapters.ApplyAccountMetadata(info, row)
-	if err != nil {
-		return nil, fmt.Errorf("apply address account metadata: %w", err)
-	}
-
-	return info, nil
 }

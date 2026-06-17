@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -271,13 +272,12 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			storeAddr.AddrType)
 	}
 
-	internal := storeAddr.Origin == db.DerivedAccount &&
-		storeAddr.Branch == 1
+	internal := storeAddr.HasDerivationPath && storeAddr.Branch == 1
 
 	info := AddressInfo{
 		Addr:       addr,
 		AddrType:   addrType,
-		Imported:   storeAddr.Origin == db.ImportedAccount,
+		Imported:   !storeAddr.HasDerivationPath,
 		Internal:   internal,
 		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
 	}
@@ -293,7 +293,10 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	if info.Imported {
+	// Imported-xpub children have a real branch/index but no wallet-derived
+	// account number. Do not fabricate account 0; without a BIP44 account
+	// number the public BIP32 derivation shape is intentionally absent.
+	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}
 
@@ -302,7 +305,7 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			Purpose: storeAddr.KeyScope.Purpose,
 			Coin:    storeAddr.KeyScope.Coin,
 		},
-		Account:              storeAddr.AccountNumber,
+		Account:              *storeAddr.AccountNumber,
 		Branch:               storeAddr.Branch,
 		Index:                storeAddr.Index,
 		MasterKeyFingerprint: storeAddr.MasterKeyFingerprint,
@@ -316,8 +319,15 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 	if len(params.AccountPubKey) == 0 {
-		return nil, fmt.Errorf("%w: scope=%v account=%d",
-			errMissingAccountPubKey, params.Scope, params.AccountNumber)
+		account := "none"
+		if params.DerivedAccountNumber != nil {
+			account = strconv.FormatUint(
+				uint64(*params.DerivedAccountNumber), 10,
+			)
+		}
+
+		return nil, fmt.Errorf("%w: scope=%v account=%s",
+			errMissingAccountPubKey, params.Scope, account)
 	}
 
 	accountPubKey, err := hdkeychain.NewKeyFromString(
@@ -597,7 +607,7 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 	change bool,
 	chainParams *chaincfg.Params) (address.Address, bool, error) {
 
-	if storeAddr.Origin != db.DerivedAccount {
+	if !storeAddr.HasDerivationPath {
 		return nil, false, nil
 	}
 

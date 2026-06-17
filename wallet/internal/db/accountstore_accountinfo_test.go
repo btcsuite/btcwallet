@@ -19,16 +19,14 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 		RowID:            42,
 		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
 		AccountName:      "strict",
-		OriginID:         int16(ImportedAccount),
+		IsDerived:        true,
 		ExternalKeyCount: 1,
 		InternalKeyCount: 2,
-		ImportedKeyCount: 3,
 		CreatedAt:        time.Unix(123, 0).UTC(),
 		Purpose:          49,
 		CoinType:         0,
 		InternalTypeID:   int16(NestedWitnessPubKey),
 		ExternalTypeID:   int16(NestedWitnessPubKey),
-		IDToOriginType:   IDToAccountOrigin[int16],
 	}
 
 	info, err := AccountRowToInfo(row)

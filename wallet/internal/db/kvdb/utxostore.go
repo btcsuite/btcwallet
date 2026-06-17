@@ -11,7 +11,6 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
@@ -553,19 +552,14 @@ func (s *Store) classifyBalanceUTXO(addrmgrNs walletdb.ReadBucket,
 	output *wtxmgr.Credit,
 	chainParams *chaincfg.Params) (waddrmgr.AccountStore, uint32, bool) {
 
-	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-		output.PkScript, chainParams,
+	binding, _, err := s.resolveAccountForCredit(
+		addrmgrNs, output, chainParams,
 	)
-	if err != nil || len(addrs) == 0 {
-		return nil, 0, false
-	}
-
-	owner, account, err := s.addrStore.AddrAccount(addrmgrNs, addrs[0])
 	if err != nil {
 		return nil, 0, false
 	}
 
-	return owner, account, true
+	return binding.acctStore, binding.acctNum, true
 }
 
 // balanceFilterAllows reports whether an output's owning address and account
@@ -720,7 +714,7 @@ func (s *Store) resolveAccountForCredit(addrmgrNs walletdb.ReadBucket,
 	credit *wtxmgr.Credit, chainParams *chaincfg.Params) (
 	*utxoAccountBinding, address.Address, error) {
 
-	addr, err := addressFromPkScript(credit.PkScript, chainParams)
+	addrs, err := addressesFromPkScript(credit.PkScript, chainParams)
 	if err != nil {
 		if errors.Is(err, errNoAddressInPkScript) {
 			return nil, nil, errUnownedScript
@@ -729,22 +723,26 @@ func (s *Store) resolveAccountForCredit(addrmgrNs walletdb.ReadBucket,
 		return nil, nil, fmt.Errorf("extract address: %w", err)
 	}
 
-	acctStore, acctNum, err := s.addrStore.AddrAccount(addrmgrNs, addr)
-	if err != nil {
-		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-			return nil, nil, errUnownedScript
+	for _, addr := range addrs {
+		acctStore, acctNum, err := s.addrStore.AddrAccount(addrmgrNs, addr)
+		if err != nil {
+			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+				continue
+			}
+
+			return nil, nil, fmt.Errorf("lookup account: %w", err)
 		}
 
-		return nil, nil, fmt.Errorf("lookup account: %w", err)
+		binding := &utxoAccountBinding{
+			acctStore: acctStore,
+			acctNum:   acctNum,
+			scope:     db.KeyScope(acctStore.Scope()),
+		}
+
+		return binding, addr, nil
 	}
 
-	binding := &utxoAccountBinding{
-		acctStore: acctStore,
-		acctNum:   acctNum,
-		scope:     db.KeyScope(acctStore.Scope()),
-	}
-
-	return binding, addr, nil
+	return nil, nil, errUnownedScript
 }
 
 // enrichCredit produces an enriched db.UtxoInfo from one legacy credit
@@ -765,18 +763,6 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 		return nil, fmt.Errorf("account properties: %w", err)
 	}
 
-	imported, err := binding.acctStore.IsImportedAccount(
-		addrmgrNs, binding.acctNum,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("classify account origin: %w", err)
-	}
-
-	origin := db.DerivedAccount
-	if imported {
-		origin = db.ImportedAccount
-	}
-
 	managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
 	if err != nil {
 		return nil, fmt.Errorf("managed address: %w", err)
@@ -788,10 +774,25 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	}
 
 	info.AccountName = props.AccountName
-	info.Origin = origin
 	info.AddrType = storeType.Type
 	info.HasScript = storeType.HasScript
 	info.KeyScope = binding.scope
+
+	addrWatchOnly, err := managedAddressIsWatchOnly(
+		s.addrStore.WatchOnly(), managedAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// The raw-imported pseudo-account can hold imported private-key rows,
+	// so let address-level key material decide spendability there. Ordinary
+	// imported xpub accounts are account-level watch-only rows and must stay
+	// non-spendable when adapted through the new db UTXO contract.
+	accountWatchOnly := props.IsWatchOnly &&
+		binding.acctNum != waddrmgr.ImportedAddrAccount
+	spendable := !addrWatchOnly && !accountWatchOnly
+	info.Spendable = &spendable
 
 	if _, ok := leaseSet[credit.OutPoint]; ok {
 		info.IsLocked = true
@@ -801,8 +802,8 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 }
 
 // listUTXOsInView performs the legacy UTXO scan using one walletdb view
-// and populates the enriched per-row metadata (AccountName, Origin,
-// AddrType, HasScript, IsLocked).
+// and populates the enriched per-row metadata (AccountName, AddrType,
+// HasScript, IsLocked).
 func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
 	query db.ListUtxosQuery, utxos *[]db.UtxoInfo) error {
 
@@ -956,13 +957,11 @@ func accountMatchesQuery(addrmgrNs walletdb.ReadBucket,
 	), nil
 }
 
-// accountIsImported reports whether the owning account is imported,
-// using the same on-disk classifier (AccountStore.IsImportedAccount)
-// that the enrichment path uses for db.UtxoInfo.Origin. This keeps the
-// numeric Account filter aligned with the SQL backends, where imported
-// accounts have a NULL account_number and so are never numerically
-// selectable, including imported xpub/watch-only accounts that carry
-// ordinary kvdb account numbers.
+// accountIsImported reports whether the owning account is imported. This keeps
+// the numeric Account filter aligned with the SQL backends, where imported
+// accounts have a NULL account_number and so are never numerically selectable,
+// including imported xpub/watch-only accounts that carry ordinary kvdb account
+// numbers.
 //
 // A nil acctStore only occurs for narrow test doubles that pre-date the
 // enrichment contract; production AddrStore always resolves a non-nil

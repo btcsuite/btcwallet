@@ -43,11 +43,6 @@ func (s *Store) GetUtxo(ctx context.Context,
 			return fmt.Errorf("get utxo: %w", err)
 		}
 
-		origin, err := db.IDToAccountOrigin[int16](row.OriginID)
-		if err != nil {
-			return fmt.Errorf("origin: %w", err)
-		}
-
 		addrType, err := db.IDToAddressType(row.TypeID)
 		if err != nil {
 			return fmt.Errorf("addr type: %w", err)
@@ -56,6 +51,17 @@ func (s *Store) GetUtxo(ctx context.Context,
 		keyScope, err := db.KeyScopeFromIDs(row.Purpose, row.CoinType)
 		if err != nil {
 			return fmt.Errorf("key scope: %w", err)
+		}
+
+		err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
+			IsDerived:        row.AddressIsDerived,
+			DerivedAddressID: row.DerivedAddressID,
+			AccountID:        row.AccountID,
+			AccountIsDerived: row.AccountIsDerived,
+			AccountNumber:    row.AccountNumber,
+		})
+		if err != nil {
+			return err
 		}
 
 		utxo, err = utxoInfoFromRow(
@@ -67,7 +73,6 @@ func (s *Store) GetUtxo(ctx context.Context,
 		}
 
 		utxo.AccountName = row.AccountName
-		utxo.Origin = origin
 		utxo.AddrType = addrType
 		utxo.HasScript = row.HasScript
 		utxo.IsLocked = row.IsLocked

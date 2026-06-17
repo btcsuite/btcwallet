@@ -34,7 +34,7 @@ func (s accountRenameOps) RenameByNumber(ctx context.Context,
 			WalletID:      int64(params.WalletID),
 			Purpose:       int64(params.Scope.Purpose),
 			CoinType:      int64(params.Scope.Coin),
-			AccountNumber: db.NullableUint32ToSQLInt64(params.AccountNumber),
+			AccountNumber: int64(*params.AccountNumber),
 		},
 	)
 }

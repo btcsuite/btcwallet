@@ -16,22 +16,20 @@ var (
 	// database is modified incorrectly or the query is incorrect.
 	ErrNilDBAccountNumber = errors.New("database returned nil account number")
 
-	// errInvalidAccountOrigin is returned when an account origin ID from the
-	// database does not correspond to a known AccountOrigin value. In practice,
-	// this should never happen, but it's possible if the database is modified
-	// incorrectly or the query is incorrect.
-	errInvalidAccountOrigin = errors.New("invalid account origin")
+	// errAccountShapeCorruption is returned when an account parent row and its
+	// derived_accounts child row disagree about the account's structural shape.
+	errAccountShapeCorruption = errors.New("account subtype invariant violated")
 )
 
 // AccountPropsRow represents the raw database fields needed to construct
 // AccountInfo.
-type AccountPropsRow[AddrTypeId ~int16 | ~int64, AccOriginId any] struct {
+type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
+	RowID             int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          AccOriginId
+	IsDerived         bool
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	IsWatchOnly       bool
@@ -40,7 +38,6 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64, AccOriginId any] struct {
 	CoinType          int64
 	InternalTypeID    AddrTypeId
 	ExternalTypeID    AddrTypeId
-	IDToOriginType    func(AccOriginId) (AccountOrigin, error)
 }
 
 // validateAccountNumber converts a database account number to uint32 while
@@ -52,6 +49,36 @@ func validateAccountNumber(accountNumber int64) (uint32, error) {
 	}
 
 	return Int64ToUint32(accountNumber)
+}
+
+// optionalAccountID converts a positive SQL account row ID to a pointer.
+func optionalAccountID(rowID int64) (*uint32, error) {
+	var accountID *uint32
+	if rowID != 0 {
+		converted, err := Int64ToUint32(rowID)
+		if err != nil {
+			return nil, fmt.Errorf("account ID: %w", err)
+		}
+
+		accountID = &converted
+	}
+
+	return accountID, nil
+}
+
+// optionalAccountNumber converts a nullable SQL account number to a pointer.
+func optionalAccountNumber(accountNumber sql.NullInt64) (*uint32, error) {
+	var result *uint32
+	if accountNumber.Valid {
+		converted, err := validateAccountNumber(accountNumber.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("account number: %w", err)
+		}
+
+		result = &converted
+	}
+
+	return result, nil
 }
 
 // getKeyCounts converts external, internal, and imported key counts from
@@ -75,6 +102,25 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 	}
 
 	return externalKeyCount, internalKeyCount, importedKeyCount, nil
+}
+
+// validateAccountShape checks that account shape agrees with the presence or
+// absence of the derived_accounts child row.
+func validateAccountShape(isDerived bool,
+	accountNumber sql.NullInt64) error {
+
+	switch {
+	case isDerived && !accountNumber.Valid:
+		return fmt.Errorf("%w: derived account missing account number",
+			errAccountShapeCorruption)
+
+	case !isDerived && accountNumber.Valid:
+		return fmt.Errorf("%w: non-derived account has derived account number",
+			errAccountShapeCorruption)
+
+	default:
+		return nil
+	}
 }
 
 // DerivedAddressAccountNumber converts a derived account number from an
@@ -113,22 +159,22 @@ func DerivedAddressAccountSchema[AddrTypeID ~int16 | ~int64](
 
 // AccountPropsRowToInfo converts a database row containing full account
 // properties into an AccountInfo struct.
-func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
-	row AccountPropsRow[AddrTypeId, AccOriginId]) (*AccountInfo, error) {
+func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
+	row AccountPropsRow[AddrTypeId]) (*AccountInfo, error) {
 
-	var accountNum uint32
-	if row.AccountNumber.Valid {
-		var err error
-
-		accountNum, err = validateAccountNumber(row.AccountNumber.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("account number: %w", err)
-		}
+	err := validateAccountShape(row.IsDerived, row.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
-	origin, err := row.IDToOriginType(row.OriginID)
+	accountID, err := optionalAccountID(row.RowID)
 	if err != nil {
-		return nil, fmt.Errorf("origin: %w", err)
+		return nil, err
+	}
+
+	accountNum, err := optionalAccountNumber(row.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
 	purposeNum, err := Int64ToUint32(row.Purpose)
@@ -149,8 +195,10 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
 		}
 	}
 
+	// Normalized SQL account rows track HD branch counters only. Individually
+	// imported address counts are a legacy kvdb/waddrmgr account property.
 	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
-		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+		row.ExternalKeyCount, row.InternalKeyCount, 0,
 	)
 	if err != nil {
 		return nil, err
@@ -164,9 +212,10 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64, AccOriginId any](
 	}
 
 	return &AccountInfo{
+		AccountID:            accountID,
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
-		Origin:               origin,
+		IsImported:           !row.IsDerived,
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
 		ImportedKeyCount:     importedKeyCount,
@@ -249,17 +298,19 @@ func ScopeAddrSchemaFromWaddrmgr(
 // the caller; create paths pass zero (a fresh account has no UTXOs)
 // while the read paths feed real values from the dedicated
 // AccountBalance / AccountBalances queries.
-func BuildAccountInfo(accountNum uint32, accountName string,
-	origin AccountOrigin, externalKeyCount, internalKeyCount,
+func BuildAccountInfo(accountID *uint32, accountNum *uint32,
+	accountName string,
+	isImported bool, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
 	scope KeyScope, addrSchema ScopeAddrSchema, publicKey []byte,
 	masterKeyFingerprint uint32,
 	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
 
 	return &AccountInfo{
+		AccountID:            accountID,
 		AccountNumber:        accountNum,
 		AccountName:          accountName,
-		Origin:               origin,
+		IsImported:           isImported,
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
 		ImportedKeyCount:     importedKeyCount,
@@ -274,26 +325,15 @@ func BuildAccountInfo(accountNum uint32, accountName string,
 	}
 }
 
-// IDToAccountOrigin safely converts an integer to AccountOrigin. It returns an
-// error if the value does not correspond to a known AccountOrigin value.
-func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
-	if v < 0 || v > T(ImportedAccount) {
-		return 0, fmt.Errorf("%w: %d", errInvalidAccountOrigin, v)
-	}
-
-	return AccountOrigin(v), nil
-}
-
 // AccountInfoRow represents the raw database fields needed to construct
 // AccountInfo.
 type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	RowID              int64
 	AccountNumber      sql.NullInt64
 	AccountName        string
-	OriginID           AccOriginId
+	IsDerived          bool
 	ExternalKeyCount   int64
 	InternalKeyCount   int64
-	ImportedKeyCount   int64
 	PublicKey          []byte
 	MasterFingerprint  sql.NullInt64
 	IsWatchOnly        bool
@@ -304,7 +344,6 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	ExternalTypeID     AccOriginId
 	ConfirmedBalance   int64
 	UnconfirmedBalance int64
-	IDToOriginType     func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -312,19 +351,19 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	row AccountInfoRow[AccOriginId]) (*AccountInfo, error) {
 
-	var accountNum uint32
-	if row.AccountNumber.Valid {
-		var err error
-
-		accountNum, err = validateAccountNumber(row.AccountNumber.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("account number: %w", err)
-		}
+	err := validateAccountShape(row.IsDerived, row.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
-	origin, err := row.IDToOriginType(row.OriginID)
+	accountID, err := optionalAccountID(row.RowID)
 	if err != nil {
-		return nil, fmt.Errorf("origin: %w", err)
+		return nil, err
+	}
+
+	accountNum, err := optionalAccountNumber(row.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
 	purposeNum, err := Int64ToUint32(row.Purpose)
@@ -337,8 +376,10 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
+	// Normalized SQL account rows track HD branch counters only. Individually
+	// imported address counts are a legacy kvdb/waddrmgr account property.
 	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
-		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+		row.ExternalKeyCount, row.InternalKeyCount, 0,
 	)
 	if err != nil {
 		return nil, err
@@ -360,8 +401,10 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	}
 
 	info := BuildAccountInfo(
-		accountNum, row.AccountName, origin, externalKeyCount, internalKeyCount,
-		importedKeyCount, row.IsWatchOnly, row.CreatedAt,
+		accountID, accountNum, row.AccountName, !row.IsDerived,
+		externalKeyCount,
+		internalKeyCount, importedKeyCount, row.IsWatchOnly,
+		row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum}, addrSchema,
 		row.PublicKey, fingerprint,
 		btcutil.Amount(row.ConfirmedBalance),

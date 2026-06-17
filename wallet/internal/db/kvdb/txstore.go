@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -22,6 +23,11 @@ var _ db.TxStore = (*Store)(nil)
 // errLegacyHeightOverflow reports that one db height cannot fit into the
 // signed legacy wtxmgr height domain.
 var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
+
+// legacyTxLabelsBucketKey is the private wtxmgr tx-label bucket name. The
+// legacy module exposes label writes but not deletes, while the db.Store
+// contract treats an empty label as clearing the label.
+var legacyTxLabelsBucketKey = []byte("l")
 
 // CreateTx records an unmined transaction through the legacy wtxmgr path.
 //
@@ -50,6 +56,10 @@ func (s *Store) CreateTx(ctx context.Context,
 
 	if req.Params.Block != nil {
 		return notImplemented(ctx, "CreateTx confirmed")
+	}
+
+	if len(req.Params.Credits) > 0 && s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.CreateTx: %w", errMissingAddrStore)
 	}
 
 	txRec, err := wtxmgr.NewTxRecordFromMsgTx(req.Params.Tx, req.Received)
@@ -241,8 +251,9 @@ func validateCreditAddr(msgTx wire.MsgTx, index uint32, addr address.Address,
 // UpdateTx re-implements the legacy kvdb label update path through the
 // transitional Store interface.
 //
-// This preserves the existing kvdb behavior: only label-only updates are
-// supported here, and label validation remains owned by wtxmgr.PutTxLabel.
+// This preserves the existing kvdb scope: only label-only updates are supported
+// here. Non-empty label validation remains owned by wtxmgr.PutTxLabel, while an
+// empty label clears the legacy label bucket entry to match the Store contract.
 //
 // NOTE: The legacy kvdb backend only supports a single wallet instance, so the
 // WalletID field is ignored.
@@ -269,9 +280,9 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 			return db.ErrTxNotFound
 		}
 
-		err = s.txStore.PutTxLabel(ns, params.Txid, *label)
+		err = s.updateLegacyTxLabel(ns, params.Txid, *label)
 		if err != nil {
-			return fmt.Errorf("put transaction label: %w", err)
+			return fmt.Errorf("update transaction label: %w", err)
 		}
 
 		return nil
@@ -281,6 +292,23 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	}
 
 	return nil
+}
+
+// updateLegacyTxLabel writes or clears one transaction label through the legacy
+// wtxmgr label bucket.
+func (s *Store) updateLegacyTxLabel(txmgrNs walletdb.ReadWriteBucket,
+	txid chainhash.Hash, label string) error {
+
+	if len(label) != 0 {
+		return s.txStore.PutTxLabel(txmgrNs, txid, label)
+	}
+
+	labelBucket := txmgrNs.NestedReadWriteBucket(legacyTxLabelsBucketKey)
+	if labelBucket == nil {
+		return nil
+	}
+
+	return labelBucket.Delete(txid[:])
 }
 
 // GetTx retrieves one wallet-scoped transaction snapshot through the legacy
