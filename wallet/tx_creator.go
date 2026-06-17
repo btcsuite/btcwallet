@@ -309,6 +309,11 @@ func (i *InputsPolicy) validate() error {
 	switch source := i.Source.(type) {
 	// If the source is a scoped account, it must have a non-empty account
 	// name.
+	case ScopedAccount:
+		if source.AccountName == "" {
+			return ErrMissingAccountName
+		}
+
 	case *ScopedAccount:
 		if source.AccountName == "" {
 			return ErrMissingAccountName
@@ -316,6 +321,9 @@ func (i *InputsPolicy) validate() error {
 
 	// If the source is a list of UTXOs, it must not be empty and must not
 	// contain duplicates.
+	case CoinSourceUTXOs:
+		return validateOutPoints(source.UTXOs)
+
 	case *CoinSourceUTXOs:
 		return validateOutPoints(source.UTXOs)
 
@@ -657,7 +665,11 @@ func (w *Wallet) determineChangeSource(intent *TxIntent) *ScopedAccount {
 
 	// If the inputs are from a specific account, use that for change.
 	if policy, ok := intent.Inputs.(*InputsPolicy); ok {
-		if account, ok := policy.Source.(*ScopedAccount); ok {
+		switch account := policy.Source.(type) {
+		case ScopedAccount:
+			return &account
+
+		case *ScopedAccount:
 			return account
 		}
 	}
@@ -840,11 +852,17 @@ func (w *Wallet) getEligibleUTXOs(ctx context.Context,
 
 	// If the source is a scoped account, we find all eligible outputs for
 	// that specific account and key scope.
+	case ScopedAccount:
+		return w.getEligibleUTXOsFromAccount(ctx, &source, minconf, bs)
+
 	case *ScopedAccount:
 		return w.getEligibleUTXOsFromAccount(ctx, source, minconf, bs)
 
 	// If the source is a list of UTXOs, we validate and fetch each UTXO
 	// from the provided list.
+	case CoinSourceUTXOs:
+		return w.getEligibleUTXOsFromList(ctx, &source, minconf, bs)
+
 	case *CoinSourceUTXOs:
 		return w.getEligibleUTXOsFromList(ctx, source, minconf, bs)
 

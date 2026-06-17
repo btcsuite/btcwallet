@@ -312,6 +312,61 @@ func TestValidateTxIntent(t *testing.T) {
 	}
 }
 
+// TestInputsPolicyValidateValueSources verifies value-form coin sources follow
+// the same validation rules as their pointer forms.
+func TestInputsPolicyValidateValueSources(t *testing.T) {
+	t.Parallel()
+
+	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	testCases := []struct {
+		name        string
+		source      CoinSource
+		expectedErr error
+	}{
+		{
+			name: "valid scoped account value",
+			source: ScopedAccount{
+				AccountName: defaultAccountName,
+				KeyScope:    waddrmgr.KeyScopeBIP0086,
+			},
+		},
+		{
+			name:        "empty scoped account value",
+			source:      ScopedAccount{},
+			expectedErr: ErrMissingAccountName,
+		},
+		{
+			name: "valid utxo source value",
+			source: CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{validUTXO},
+			},
+		},
+		{
+			name:        "empty utxo source value",
+			source:      CoinSourceUTXOs{},
+			expectedErr: ErrManualInputsEmpty,
+		},
+		{
+			name: "duplicate utxo source value",
+			source: CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{
+					validUTXO, validUTXO,
+				},
+			},
+			expectedErr: ErrDuplicatedUtxo,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := (&InputsPolicy{Source: tc.source}).validate()
+			require.ErrorIs(t, err, tc.expectedErr)
+		})
+	}
+}
+
 // unsupportedInputs is a mock implementation of the Inputs interface used for
 // testing purposes.
 type unsupportedInputs struct{}
@@ -328,6 +383,26 @@ type unsupportedCoinSource struct{}
 
 // isCoinSource marks unsupportedCoinSource as a CoinSource implementation.
 func (u *unsupportedCoinSource) isCoinSource() {}
+
+// TestDetermineChangeSourceValueScopedAccount verifies a value-form scoped
+// account is used as the change source for policy-selected inputs.
+func TestDetermineChangeSourceValueScopedAccount(t *testing.T) {
+	t.Parallel()
+
+	w, _ := createStartedWalletWithMocks(t)
+	policyAccountSource := ScopedAccount{
+		AccountName: "policy",
+		KeyScope:    waddrmgr.KeyScopeBIP0049Plus,
+	}
+	intent := &TxIntent{
+		Inputs: &InputsPolicy{
+			Source: policyAccountSource,
+		},
+	}
+
+	source := w.determineChangeSource(intent)
+	require.Equal(t, &policyAccountSource, source)
+}
 
 // TestDetermineChangeSource tests the behavior of the determineChangeSource
 // method, ensuring that it correctly selects a change source based on the
@@ -878,6 +953,81 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 	eligible, err := w.getEligibleUTXOs(t.Context(), nil, 1)
 
 	// Assert: the renamed default account still yields its spendable UTXO.
+	require.NoError(t, err)
+	require.Len(t, eligible, 1)
+	require.Equal(t, outPoint, eligible[0].OutPoint)
+}
+
+// TestGetEligibleUTXOsScopedAccountValue verifies value-form scoped account
+// sources dispatch to the account selection path.
+func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	accountName := "value-account"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
+	outPoint := wire.OutPoint{Hash: [32]byte{5}, Index: 0}
+	unspent := []db.UtxoInfo{{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(10000),
+		PkScript: singleAddrPkScript(t),
+		Height:   100,
+	}}
+
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    scope,
+		Name:     &accountName,
+	}).Return(&db.AccountInfo{AccountName: accountName}, nil).Once()
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID:    w.id,
+		Scope:       &scope,
+		AccountName: &accountName,
+	}).Return(unspent, nil).Once()
+
+	eligible, err := w.getEligibleUTXOs(
+		t.Context(), ScopedAccount{
+			AccountName: accountName,
+			KeyScope:    waddrmgr.KeyScopeBIP0084,
+		}, 1,
+	)
+	require.NoError(t, err)
+	require.Len(t, eligible, 1)
+	require.Equal(t, outPoint, eligible[0].OutPoint)
+}
+
+// TestGetEligibleUTXOsSourceUTXOsValue verifies value-form explicit UTXO
+// sources dispatch to the list selection path.
+func TestGetEligibleUTXOsSourceUTXOsValue(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	outPoint := wire.OutPoint{Hash: [32]byte{6}, Index: 0}
+	credit := &db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(10000),
+		PkScript: singleAddrPkScript(t),
+		Height:   100,
+	}
+
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint,
+	}).Return(credit, nil).Once()
+
+	eligible, err := w.getEligibleUTXOs(
+		t.Context(), CoinSourceUTXOs{
+			UTXOs: []wire.OutPoint{outPoint},
+		}, 1,
+	)
 	require.NoError(t, err)
 	require.Len(t, eligible, 1)
 	require.Equal(t, outPoint, eligible[0].OutPoint)
