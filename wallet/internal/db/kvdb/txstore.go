@@ -1856,67 +1856,93 @@ func (s *Store) applyLegacyScanHorizons(ns walletdb.ReadWriteBucket,
 	horizons []db.ScanHorizon, rollbacks *[]scanHorizonRollback) error {
 
 	for _, horizon := range horizons {
-		internal, err := classifyLegacyHorizonBranch(horizon.Branch)
+		err := s.applyLegacyScanHorizon(ns, horizon, rollbacks)
 		if err != nil {
 			return err
 		}
-
-		scopedMgr, err := s.addrStore.FetchScopedKeyManager(
-			waddrmgr.KeyScope(horizon.Scope),
-		)
-		if err != nil {
-			return fmt.Errorf("fetch scoped manager: %w", err)
-		}
-
-		account, err := resolveLegacyHorizonAccount(ns, scopedMgr, horizon)
-		if err != nil {
-			return err
-		}
-
-		// Capture the branch's next index before extending so a
-		// rollback knows the first child this extension may have
-		// derived. Read it now, while the cache still mirrors the
-		// persisted state, since ExtendAddresses advances it in place.
-		props, err := scopedMgr.AccountProperties(ns, account)
-		if err != nil {
-			return fmt.Errorf("account properties: %w", err)
-		}
-
-		fromIndex := props.ExternalKeyCount
-		if internal {
-			fromIndex = props.InternalKeyCount
-		}
-
-		err = scopedMgr.ExtendAddresses(
-			ns, account, horizon.Index, horizon.Branch,
-		)
-		if err != nil {
-			return fmt.Errorf("extend addresses: %w", err)
-		}
-
-		// ExtendAddresses derives at least through horizon.Index, but it
-		// skips HD-invalid children, so the branch's next index can land
-		// past horizon.Index+1. Re-read the post-extension next index so
-		// the rollback range covers every child this extension may have
-		// cached, not just the requested one.
-		props, err = scopedMgr.AccountProperties(ns, account)
-		if err != nil {
-			return fmt.Errorf("account properties: %w", err)
-		}
-
-		toIndex := props.ExternalKeyCount
-		if internal {
-			toIndex = props.InternalKeyCount
-		}
-
-		*rollbacks = append(*rollbacks, scanHorizonRollback{
-			scope:     horizon.Scope,
-			account:   account,
-			branch:    horizon.Branch,
-			fromIndex: fromIndex,
-			toIndex:   toIndex,
-		})
 	}
+
+	return nil
+}
+
+// applyLegacyScanHorizon extends one legacy address branch and records the
+// rollback range needed to undo its live cache side effects if the batch fails.
+func (s *Store) applyLegacyScanHorizon(ns walletdb.ReadWriteBucket,
+	horizon db.ScanHorizon, rollbacks *[]scanHorizonRollback) error {
+
+	internal, err := classifyLegacyHorizonBranch(horizon.Branch)
+	if err != nil {
+		return err
+	}
+
+	scopedMgr, err := s.addrStore.FetchScopedKeyManager(
+		waddrmgr.KeyScope(horizon.Scope),
+	)
+	if err != nil {
+		return fmt.Errorf("fetch scoped manager: %w", err)
+	}
+
+	account, err := resolveLegacyHorizonAccount(ns, scopedMgr, horizon)
+	if err != nil {
+		return err
+	}
+
+	// Capture the branch's next index before extending so a rollback knows
+	// the first child this extension may have derived. Read it now, while the
+	// cache still mirrors the persisted state, since ExtendAddresses advances
+	// it in place.
+	props, err := scopedMgr.AccountProperties(ns, account)
+	if err != nil {
+		return fmt.Errorf("account properties: %w", err)
+	}
+
+	fromIndex := props.ExternalKeyCount
+	if internal {
+		fromIndex = props.InternalKeyCount
+	}
+
+	err = scopedMgr.ExtendAddresses(
+		ns, account, horizon.Index, horizon.Branch,
+	)
+	if err != nil {
+		return fmt.Errorf("extend addresses: %w", err)
+	}
+
+	// ExtendAddresses derives at least through horizon.Index, but it skips
+	// HD-invalid children, so the branch's next index can land past
+	// horizon.Index+1. Re-read the post-extension next index so the rollback
+	// range covers every child this extension may have cached, not just the
+	// requested one.
+	props, err = scopedMgr.AccountProperties(ns, account)
+	if err != nil {
+		// ExtendAddresses mutates live caches before this read. If the read
+		// fails, the rollback list has no entry for this extension, so evict a
+		// conservative range immediately. The extension can skip HD-invalid
+		// children and cache valid children past horizon.Index.
+		if horizon.Index >= fromIndex {
+			scopedMgr.EvictDerivedAddresses(
+				account, horizon.Branch, fromIndex,
+				waddrmgr.MaxAddressesPerAccount+1,
+			)
+		}
+
+		scopedMgr.InvalidateAccountCache(account)
+
+		return fmt.Errorf("account properties: %w", err)
+	}
+
+	toIndex := props.ExternalKeyCount
+	if internal {
+		toIndex = props.InternalKeyCount
+	}
+
+	*rollbacks = append(*rollbacks, scanHorizonRollback{
+		scope:     horizon.Scope,
+		account:   account,
+		branch:    horizon.Branch,
+		fromIndex: fromIndex,
+		toIndex:   toIndex,
+	})
 
 	return nil
 }
