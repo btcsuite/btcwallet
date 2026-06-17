@@ -329,7 +329,18 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 		foundHorizons   map[waddrmgr.BranchScope]uint32
 	)
 
+	// A same-block lookahead rerun happens when this block pays to an
+	// already-watched lookahead address and expandHorizons derives more
+	// addresses before the block is filtered again. filterTx mutates
+	// rs.outpoints in place during each pass, so restore the pre-block set
+	// before every pass. Otherwise a spent watched outpoint deleted during
+	// the first pass would be missing from the second pass, and a spend-only
+	// transaction could be dropped from the final overwritten result.
+	outpointsSnapshot := copyOutpointMap(rs.outpoints)
+
 	for {
+		rs.outpoints = copyOutpointMap(outpointsSnapshot)
+
 		relevantTxs, foundScopes, relevantOutputs = rs.filterBlock(
 			block,
 		)
@@ -357,6 +368,16 @@ func (rs *RecoveryState) ProcessBlock(block *wire.MsgBlock) (
 		RelevantOutputs: relevantOutputs,
 		Expanded:        expanded,
 	}, nil
+}
+
+// copyOutpointMap returns a shallow copy of the watched outpoint set.
+func copyOutpointMap(src map[wire.OutPoint][]byte) map[wire.OutPoint][]byte {
+	dst := make(map[wire.OutPoint][]byte, len(src))
+	for op, script := range src {
+		dst[op] = script
+	}
+
+	return dst
 }
 
 // initAccountState initializes the recovery state for a specific account by
