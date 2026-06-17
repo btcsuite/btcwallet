@@ -567,6 +567,143 @@ func TestProcessBlock(t *testing.T) {
 	require.Equal(t, uint32(12), res.FoundHorizons[bs])
 }
 
+// TestProcessBlockKeepsSameBlockSpendOnExpansion verifies that a spend-only
+// transaction is retained in the final result when a credit in the same block
+// triggers a horizon expansion, forcing the filter loop to re-run. filterTx
+// deletes a watched outpoint as soon as it sees a spend of it, so a naive
+// re-run of filterBlock over the same block would no longer recognize that
+// spend on the second pass and silently drop the spend-only transaction from
+// the overwritten result. The block here pairs a spend of a pre-watched
+// outpoint (with no other relevance) with a credit to a lookahead address that
+// triggers expansion; the spend transaction must still appear in the final
+// RelevantTxs.
+func TestProcessBlockKeepsSameBlockSpendOnExpansion(t *testing.T) {
+	t.Parallel()
+
+	addrMgr := &bwmock.AddrStore{}
+	defer addrMgr.AssertExpectations(t)
+
+	accountStore := &bwmock.AccountStore{}
+	defer accountStore.AssertExpectations(t)
+
+	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
+	props := &waddrmgr.AccountProperties{
+		KeyScope:      scope,
+		AccountNumber: 0,
+
+		// Start fresh so the lookahead window is derived from scratch.
+		ExternalKeyCount: 0,
+		InternalKeyCount: 0,
+	}
+
+	addrMgr.On("FetchScopedKeyManager", scope).Return(
+		accountStore, nil,
+	).Maybe()
+
+	// Store generated addresses to construct block data.
+	addrs := make(map[int]btcutil.Address)
+
+	// Helper to mock DeriveAddr and store the generated address.
+	setupDerive := func(branch, idx uint32) {
+		id := int(branch)*1000 + int(idx)
+
+		hash := make([]byte, 20)
+		hash[0] = byte(id >> 8)
+		hash[1] = byte(id)
+		addr, _ := btcutil.NewAddressPubKeyHash(hash, &chainParams)
+		addrs[id] = addr
+
+		script, _ := txscript.PayToAddrScript(addr)
+		accountStore.On(
+			"DeriveAddr", uint32(0), branch, idx,
+		).Return(addr, script, nil).Maybe()
+	}
+
+	// Initial lookahead (0-9 for both branches) plus the external addresses
+	// (10-15) derived once finding index 5 expands the horizon to 6+10=16.
+	for i := range uint32(10) {
+		setupDerive(0, i)
+		setupDerive(1, i)
+	}
+
+	for i := uint32(10); i < 16; i++ {
+		setupDerive(0, i)
+	}
+
+	// Pre-watch an outpoint, mirroring a UTXO the wallet already owns and
+	// monitors for spends. This is the outpoint whose spend must survive
+	// the same-block expansion re-run.
+	watchedOp := wire.OutPoint{Hash: chainhash.Hash{0xaa}, Index: 0}
+	unspent := []wtxmgr.Credit{{
+		OutPoint: watchedOp,
+		PkScript: []byte{0x00},
+	}}
+
+	rs := NewRecoveryState(10, &chainParams, addrMgr)
+	err := rs.Initialize(
+		[]*waddrmgr.AccountProperties{props}, nil, unspent,
+	)
+	require.NoError(t, err)
+
+	// Construct the block.
+	block := wire.NewMsgBlock(wire.NewBlockHeader(
+		0, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+
+	// txSpend spends the watched outpoint and pays to an unrelated address,
+	// so its only relevance is the spend. It is placed first so the spend
+	// (and the outpoint deletion in filterTx) happens before the credit
+	// that triggers the expansion.
+	unrelatedHash := make([]byte, 20)
+	for i := range unrelatedHash {
+		unrelatedHash[i] = 0xff
+	}
+
+	unrelatedAddr, _ := btcutil.NewAddressPubKeyHash(
+		unrelatedHash, &chainParams,
+	)
+	unrelatedScript, _ := txscript.PayToAddrScript(unrelatedAddr)
+	txSpend := wire.NewMsgTx(2)
+	txSpend.AddTxIn(wire.NewTxIn(&watchedOp, nil, nil))
+	txSpend.AddTxOut(wire.NewTxOut(900, unrelatedScript))
+	_ = block.AddTransaction(txSpend)
+	spendHash := txSpend.TxHash()
+
+	// txCredit pays to addr 5 (within the initial lookahead), which marks
+	// the address found and triggers a horizon expansion, forcing the
+	// filter loop to run a second pass over the block.
+	addr5 := addrs[5]
+	script5, _ := txscript.PayToAddrScript(addr5)
+	txCredit := wire.NewMsgTx(2)
+	txCredit.AddTxOut(wire.NewTxOut(1000, script5))
+	_ = block.AddTransaction(txCredit)
+	creditHash := txCredit.TxHash()
+
+	// Process the block.
+	res, err := rs.ProcessBlock(block)
+	require.NoError(t, err)
+
+	// The credit must have triggered a lookahead expansion, which is what
+	// forces the second filter pass that exposes the bug.
+	require.True(t, res.Expanded,
+		"credit to lookahead address should expand the horizon")
+
+	// Both the spend and the credit must be reported as relevant. Before
+	// the fix, the spend-only transaction was dropped on the second pass
+	// because its outpoint had already been deleted.
+	relevant := make(map[chainhash.Hash]struct{}, len(res.RelevantTxs))
+	for _, tx := range res.RelevantTxs {
+		relevant[*tx.Hash()] = struct{}{}
+	}
+
+	require.Contains(t, relevant, spendHash,
+		"spend of a pre-watched outpoint must survive the same-block "+
+			"expansion re-run")
+	require.Contains(t, relevant, creditHash,
+		"credit to a watched address must be reported as relevant")
+	require.Len(t, res.RelevantTxs, 2)
+}
+
 // TestBuildCFilterData verifies the BuildCFilterData method of RecoveryState.
 // It ensures that the method correctly aggregates all relevant scripts from
 // both the transient address filters and the watched outpoints into a single
