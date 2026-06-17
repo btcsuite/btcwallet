@@ -2767,12 +2767,14 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 	t.Parallel()
 
 	hashes := []chainhash.Hash{{0x01}}
-	scanState := NewRecoveryState(10, nil, nil)
 
 	t.Run("FullBlocks", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: Setup a syncer for FullBlocks strategy.
+		// Arrange: Setup a syncer for FullBlocks strategy. Each subtest
+		// owns its RecoveryState so the parallel dispatches do not race
+		// on its shared mutable state.
+		scanState := NewRecoveryState(10, nil, nil)
 		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
@@ -2796,7 +2798,10 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 	t.Run("CFilters", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: Setup a syncer for CFilters strategy.
+		// Arrange: Setup a syncer for CFilters strategy. Each subtest
+		// owns its RecoveryState so the parallel dispatches do not race
+		// on its shared mutable state.
+		scanState := NewRecoveryState(10, nil, nil)
 		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
@@ -2825,7 +2830,10 @@ func TestDispatchScanStrategy_OtherMethods(t *testing.T) {
 	t.Run("Default_Unknown", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: Setup a syncer with an unknown method.
+		// Arrange: Setup a syncer with an unknown method. Each subtest
+		// owns its RecoveryState so the parallel dispatches do not race
+		// on its shared mutable state.
+		scanState := NewRecoveryState(10, nil, nil)
 		mockChain := &bwmock.Chain{}
 		s := newSyncer(
 			Config{
