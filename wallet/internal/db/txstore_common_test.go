@@ -2457,7 +2457,11 @@ func TestCanSkipCreateTxDuplicate(t *testing.T) {
 		name        string
 		reqBlock    *Block
 		reqStatus   TxStatus
+		reqLabel    string
 		rowStatus   TxStatus
+		rowLabel    string
+		reqCoinbase bool
+		rowCoinbase bool
 		rowBlock    *Block
 		wantCanSkip bool
 	}{
@@ -2477,6 +2481,21 @@ func TestCanSkipCreateTxDuplicate(t *testing.T) {
 			name:        "unmined status mismatch",
 			reqStatus:   TxStatusPending,
 			rowStatus:   TxStatusPublished,
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined label mismatch",
+			reqStatus:   TxStatusPending,
+			reqLabel:    "request label",
+			rowStatus:   TxStatusPending,
+			rowLabel:    "stored label",
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined coinbase mismatch",
+			reqStatus:   TxStatusPending,
+			reqCoinbase: true,
+			rowStatus:   TxStatusPending,
 			wantCanSkip: false,
 		},
 		{
@@ -2525,6 +2544,25 @@ func TestCanSkipCreateTxDuplicate(t *testing.T) {
 			wantCanSkip: false,
 		},
 		{
+			name:        "confirmed label mismatch",
+			reqBlock:    testBlock(104),
+			reqStatus:   TxStatusPublished,
+			reqLabel:    "request label",
+			rowStatus:   TxStatusPublished,
+			rowLabel:    "stored label",
+			rowBlock:    testBlock(104),
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed coinbase mismatch",
+			reqBlock:    testBlock(105),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			rowCoinbase: true,
+			rowBlock:    testBlock(105),
+			wantCanSkip: false,
+		},
+		{
 			name:        "confirmed request status not published",
 			reqBlock:    testBlock(106),
 			reqStatus:   TxStatusPending,
@@ -2546,12 +2584,15 @@ func TestCanSkipCreateTxDuplicate(t *testing.T) {
 				Params: CreateTxParams{
 					Block:  tc.reqBlock,
 					Status: tc.reqStatus,
+					Label:  tc.reqLabel,
 				},
+				IsCoinbase: tc.reqCoinbase,
 			}
 
 			// Act: Ask whether the stored row is a skippable duplicate.
 			canSkip := CanSkipCreateTxDuplicate(
-				req, tc.rowStatus, tc.rowBlock,
+				req, tc.rowStatus, tc.rowLabel, tc.rowCoinbase,
+				tc.rowBlock,
 			)
 
 			// Assert: The predicate matches the expected decision.
@@ -2582,7 +2623,9 @@ func TestConfirmedBlockHashMismatchNotSkippable(t *testing.T) {
 	}
 
 	// Act: Ask whether the differing-hash row is skippable.
-	canSkip := CanSkipCreateTxDuplicate(req, TxStatusPublished, storedBlock)
+	canSkip := CanSkipCreateTxDuplicate(
+		req, TxStatusPublished, "", false, storedBlock,
+	)
 
 	// Assert: A hash mismatch must not be skipped.
 	require.False(t, canSkip)

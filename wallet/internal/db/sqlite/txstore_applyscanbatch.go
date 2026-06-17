@@ -31,6 +31,14 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 		return err
 	}
 
+	// Reject a nil-Tx member before the parents-first sort below dereferences
+	// each transaction; the per-tx NewCreateTxRequest check in
+	// applyBatchTransaction runs only after the sort.
+	err = db.ValidateBatchTransactionsTx(params.Transactions)
+	if err != nil {
+		return err
+	}
+
 	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
 		ops := scanHorizonOps{qtx: qtx, walletID: params.WalletID}
 		for i := range params.Horizons {
@@ -52,8 +60,15 @@ func (s *Store) ApplyScanBatch(ctx context.Context,
 			return err
 		}
 
-		for i := range params.Transactions {
-			err = applyBatchTransaction(ctx, qtx, params.Transactions[i])
+		// Record any in-batch parent before its children. Each tx claims
+		// its spent parent inputs by updating the parent credit's UTXO row,
+		// so a child applied before its in-batch parent would update no row
+		// and silently drop the spend edge. Sorting parents first makes the
+		// batch order-independent.
+		txs := db.SortTxBatchParentsFirst(params.Transactions)
+
+		for i := range txs {
+			err = applyBatchTransaction(ctx, qtx, txs[i])
 			if err != nil {
 				return fmt.Errorf("create tx %d: %w", i, err)
 			}
