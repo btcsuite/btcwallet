@@ -87,7 +87,7 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	err = db.CreateTxWithOps(ctx, req, ops)
-	if !errors.Is(err, db.ErrTxAlreadyExists) {
+	if err != nil && !errors.Is(err, db.ErrTxAlreadyExists) {
 		return err
 	}
 
@@ -106,12 +106,12 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 // replayBatchDuplicateEdges fills in any credit or wallet-input-spend edges a
 // duplicate batch tx is missing.
 //
-// CreateTxWithOps returns ErrTxAlreadyExists before it writes credits or marks
-// wallet-input spends, so a partial first insert can leave the row in place
-// without those edges. A matching row shape is therefore not enough to skip
-// on its own; the edges are replayed idempotently. InsertCredits skips outputs
-// already recorded and MarkInputsSpent treats a spend already attached to this
-// same row as a no-op, while either still rejects a genuinely conflicting edge.
+// CreateTxWithOps can return nil for an idempotent duplicate before writing
+// credits or marking wallet-input spends, so a matching row shape is not enough
+// to skip on its own. The edges are replayed idempotently: InsertCredits skips
+// outputs already recorded and MarkInputsSpent treats a spend already attached
+// to this same row as a no-op, while either still rejects a genuinely
+// conflicting edge.
 func replayBatchDuplicateEdges(ctx context.Context, req db.CreateTxRequest,
 	txID int64, ops db.CreateTxOps) error {
 
@@ -165,7 +165,9 @@ func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 		}
 	}
 
-	return db.CanSkipCreateTxDuplicate(req, status, block), row.ID, nil
+	return db.CanSkipCreateTxDuplicate(
+		req, status, row.TxLabel, row.IsCoinbase, block,
+	), row.ID, nil
 }
 
 // applyBatchSyncTip applies the optional sync-tip update within a batch.

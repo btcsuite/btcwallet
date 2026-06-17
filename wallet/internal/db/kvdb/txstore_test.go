@@ -1471,7 +1471,10 @@ func TestListTxDetailsCopiesMsgTx(t *testing.T) {
 	require.Equal(t, secondRec.Hash, msgHashByDetailHash[secondRec.Hash])
 }
 
-var errInjectedCommit = errors.New("injected commit failure")
+var (
+	errInjectedCommit    = errors.New("injected commit failure")
+	errAccountProperties = errors.New("account properties")
+)
 
 // commitFailDB wraps a walletdb.DB and makes its next Update fail after the
 // write closure succeeds, simulating a commit failure without persisting the
@@ -2487,6 +2490,52 @@ func TestApplyScanBatchRejectsNilTx(t *testing.T) {
 		},
 	})
 	require.ErrorIs(t, err, db.ErrInvalidParam)
+}
+
+// TestApplyScanBatchEvictsHorizonOnPostExtensionReadError verifies that kvdb
+// evicts live derived-address state if an account-state read fails after a scan
+// horizon extension mutates the address manager cache.
+func TestApplyScanBatchEvictsHorizonOnPostExtensionReadError(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addrStore := &bwmock.AddrStore{}
+	scopedMgr := &bwmock.AccountStore{}
+	addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084).
+		Return(scopedMgr, nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, uint32(0)).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 4}, nil,
+	).Once()
+	scopedMgr.On("ExtendAddresses", mock.Anything, uint32(0), uint32(10),
+		waddrmgr.ExternalBranch).Return(nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, uint32(0)).Return(
+		(*waddrmgr.AccountProperties)(nil), errAccountProperties,
+	).Once()
+	scopedMgr.On(
+		"EvictDerivedAddresses", uint32(0), waddrmgr.ExternalBranch,
+		uint32(4), uint32(waddrmgr.MaxAddressesPerAccount+1),
+	).Once()
+	scopedMgr.On("InvalidateAccountCache", uint32(0)).Once()
+
+	store := NewStore(dbConn, txStore, addrStore)
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:   db.KeyScopeBIP0084,
+			Account: 0,
+			Branch:  waddrmgr.ExternalBranch,
+			Index:   10,
+		}},
+	})
+	require.ErrorIs(t, err, errAccountProperties)
+
+	addrStore.AssertExpectations(t)
+	scopedMgr.AssertExpectations(t)
 }
 
 // TestApplyTxBatchRejectsNilTx verifies that a multi-transaction batch
