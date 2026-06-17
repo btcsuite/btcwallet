@@ -536,17 +536,17 @@ type Querier interface {
 	// about to be deleted during RollbackToBlock.
 	//
 	// How:
-	// - Updates wallet_sync_states directly without joining other tables.
+	// - Computes the greatest stored block below the rollback boundary.
 	// - Rewrites both synced_height and birthday_height in one statement so the
 	//   subsequent block delete does not violate `ON DELETE RESTRICT`.
-	// - Example: if `rollback_height = 195`, then any `synced_height` or
-	//   `birthday_height` at 195 or above rewinds to `new_height = 194`.
-	// - If rollback starts from height 0, callers pass `new_height = NULL` so the
-	//   sync state no longer points at any surviving block row.
+	// - Example: if `rollback_height = 195`, affected sync heights rewind to the
+	//   greatest stored block below 195, not necessarily 194 on sparse block tables.
+	// - If there is no stored block below the boundary, the sync state no longer
+	//   points at any surviving block row.
 	// Performance:
 	// - Touches only wallet_sync_states rows whose heights are at or above the
 	//   rollback boundary.
-	RewindWalletSyncStateHeightsForRollback(ctx context.Context, arg RewindWalletSyncStateHeightsForRollbackParams) (int64, error)
+	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and current account name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
 	// Renames an account identified by wallet id, scope tuple, and account number.
