@@ -508,6 +508,13 @@ func dbScopeAddrSchema(
 func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	isAccountKey bool, chainParams *chaincfg.Params) error {
 
+	// A nil key cannot be validated and would otherwise panic on the
+	// IsPrivate call below.
+	if pubKey == nil {
+		return fmt.Errorf("%w: account key cannot be nil",
+			ErrInvalidAccountKey)
+	}
+
 	// Private keys are not allowed.
 	if pubKey.IsPrivate() {
 		return fmt.Errorf("%w: private keys cannot be imported",
