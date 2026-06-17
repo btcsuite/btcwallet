@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
@@ -20,6 +23,23 @@ type DBVault struct {
 
 	// walletID is the wallet row id that this vault is scoped to.
 	walletID uint32
+
+	// unlockedState holds sensitive runtime secret material that is only
+	// available when the vault is unlocked.
+	unlockedState *unlockedState
+}
+
+// unlockedState holds sensitive runtime secret material.
+type unlockedState struct {
+	// cryptoKeyPrivate is the key used to encrypt and decrypt private material.
+	cryptoKeyPrivate snacl.CryptoKey
+
+	// cryptoKeyScript is the key used to encrypt and decrypt script material.
+	cryptoKeyScript snacl.CryptoKey
+
+	// hdRootKey is the master HD extended key for the wallet, which can derive
+	// all sub scopes, accounts, addresses, and keys.
+	hdRootKey *hdkeychain.ExtendedKey
 }
 
 // Ensure DBVault implements keyvault.Vault.
@@ -65,6 +85,21 @@ func (v *DBVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
 // TODO(gus): implement it.
 func (v *DBVault) RefreshPrivatePassphrase(_ []byte) error {
 	return v.notImplemented("RefreshPrivatePassphrase")
+}
+
+// zero clears the runtime secret material held by the unlocked state.
+func (s *unlockedState) zero() {
+	if s == nil {
+		return
+	}
+
+	s.cryptoKeyPrivate.Zero()
+	s.cryptoKeyScript.Zero()
+
+	if s.hdRootKey != nil {
+		s.hdRootKey.Zero()
+		s.hdRootKey = nil
+	}
 }
 
 // notImplemented returns a scoped error for db vault methods that are still
