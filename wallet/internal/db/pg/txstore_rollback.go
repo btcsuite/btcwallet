@@ -66,19 +66,8 @@ func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 		return fmt.Errorf("convert rollback height: %w", err)
 	}
 
-	newHeight := sql.NullInt32{}
-	if height > 0 {
-		newHeight, err = db.Uint32ToNullInt32(height - 1)
-		if err != nil {
-			return fmt.Errorf("convert new height: %w", err)
-		}
-	}
-
 	_, err = o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, sqlc.RewindWalletSyncStateHeightsForRollbackParams{
-			RollbackHeight: rollbackHeight,
-			NewHeight:      newHeight,
-		},
+		ctx, rollbackHeight,
 	)
 	if err != nil {
 		return fmt.Errorf("rewind wallet sync state heights query: %w", err)

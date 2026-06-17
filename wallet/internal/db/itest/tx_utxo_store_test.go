@@ -1700,6 +1700,42 @@ func TestRollbackToBlockFailsCoinbaseDescendants(t *testing.T) {
 	require.Empty(t, childSpendingTxIDs(t, store, walletID, childTx.TxHash()))
 }
 
+// TestRollbackToBlockRewindsSyncToStoredLowerBlock verifies rollback rewinds
+// wallet sync references to the greatest stored block below the rollback
+// boundary instead of assuming height-1 exists in sparse block tables.
+func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletName := "wallet-rollback-sparse-sync"
+	walletID := newWallet(t, store, walletName)
+
+	forkBlock := CreateBlockFixture(t, queries, 5)
+	rollbackBlock := CreateBlockFixture(t, queries, 10)
+
+	err := store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: walletID,
+		SyncedTo: &forkBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID: walletID,
+		SyncedTo: &rollbackBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.RollbackToBlock(t.Context(), rollbackBlock.Height)
+	require.NoError(t, err)
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, forkBlock.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, forkBlock.Hash, walletInfo.SyncedTo.Hash)
+}
+
 // TestCreateTxReconfirmsOrphanedCoinbase verifies that CreateTx can restore an
 // orphaned coinbase row to confirmed history when the same coinbase hash later
 // re-enters the best chain.

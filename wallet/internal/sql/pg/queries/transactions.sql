@@ -330,13 +330,13 @@ ORDER BY wallet_id, id;
 -- about to be deleted during RollbackToBlock.
 --
 -- How:
--- - Updates wallet_sync_states directly without joining other tables.
+-- - Computes the greatest stored block below the rollback boundary.
 -- - Rewrites both synced_height and birthday_height in one statement so the
 --   subsequent block delete does not violate `ON DELETE RESTRICT`.
--- - Example: if `rollback_height = 195`, then any `synced_height` or
---   `birthday_height` at 195 or above rewinds to `new_height = 194`.
--- - If rollback starts from height 0, callers pass `new_height = NULL` so the
---   sync state no longer points at any surviving block row.
+-- - Example: if `rollback_height = 195`, affected sync heights rewind to the
+--   greatest stored block below 195, not necessarily 194 on sparse block tables.
+-- - If there is no stored block below the boundary, the sync state no longer
+--   points at any surviving block row.
 -- Performance:
 -- - Touches only wallet_sync_states rows whose heights are at or above the
 --   rollback boundary.
@@ -346,14 +346,22 @@ SET
         WHEN
             synced_height IS NOT NULL
             AND synced_height >= sqlc.arg('rollback_height')::INTEGER
-            THEN sqlc.narg('new_height')
+            THEN (
+                SELECT max(block_height)::INTEGER
+                FROM blocks
+                WHERE block_height < sqlc.arg('rollback_height')::INTEGER
+            )
         ELSE synced_height
     END,
     birthday_height = CASE
         WHEN
             birthday_height IS NOT NULL
             AND birthday_height >= sqlc.arg('rollback_height')::INTEGER
-            THEN sqlc.narg('new_height')
+            THEN (
+                SELECT max(block_height)::INTEGER
+                FROM blocks
+                WHERE block_height < sqlc.arg('rollback_height')::INTEGER
+            )
         ELSE birthday_height
     END,
     updated_at = current_timestamp AT TIME ZONE 'UTC'

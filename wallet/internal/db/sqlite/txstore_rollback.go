@@ -48,16 +48,8 @@ func (o rollbackToBlockOps) ListRollbackRootHashes(ctx context.Context,
 func (o rollbackToBlockOps) RewindWalletSyncStateHeights(
 	ctx context.Context, height uint32) error {
 
-	newHeight := sql.NullInt64{}
-	if height > 0 {
-		newHeight = sql.NullInt64{Int64: int64(height - 1), Valid: true}
-	}
-
 	_, err := o.qtx.RewindWalletSyncStateHeightsForRollback(
-		ctx, sqlc.RewindWalletSyncStateHeightsForRollbackParams{
-			RollbackHeight: int64(height),
-			NewHeight:      newHeight,
-		},
+		ctx, int64(height),
 	)
 	if err != nil {
 		return fmt.Errorf("rewind wallet sync state heights query: %w", err)
