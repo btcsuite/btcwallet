@@ -1210,6 +1210,25 @@ func TestListAccountsSkipBalanceZeros(t *testing.T) {
 	}
 }
 
+// TestListAccountsMissingScopeReturnsEmpty verifies that a ListAccounts query
+// for a scope with no registered scoped key manager returns an empty result
+// with a nil error, preserving parity with the SQL backend rather than
+// surfacing ErrScopeNotFound/ErrAccountNotFound.
+func TestListAccountsMissingScopeReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	scope := db.KeyScope{Purpose: 1234, Coin: 0}
+	accounts, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Scope:       &scope,
+		SkipBalance: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, accounts)
+}
+
 // TestCreateImportedAccountAllowsMultipleInScope verifies kvdb retains the
 // legacy watch-only account behavior: imported accounts share the normal
 // per-scope account counter, so multiple imported accounts can exist in the
