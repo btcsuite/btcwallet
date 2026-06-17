@@ -198,6 +198,13 @@ func selectScopedManagers(mgr waddrmgr.AddrStore, filter *db.KeyScope) (
 	}
 
 	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	if waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		// List queries return an empty result for an unknown scope,
+		// matching the Store contract and the SQL backend, rather than
+		// surfacing ErrAccountNotFound.
+		return nil, nil
+	}
+
 	if err != nil {
 		return nil, translateAccountErr(err, db.ErrAccountNotFound)
 	}
