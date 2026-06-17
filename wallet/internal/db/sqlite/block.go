@@ -46,6 +46,11 @@ func ensureBlockExists(ctx context.Context, qtx *sqlc.Queries,
 		return fmt.Errorf("insert block: %w", err)
 	}
 
+	_, err = requireBlockMatches(ctx, qtx, block)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
