@@ -2272,13 +2272,9 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	}
 	in.SighashType = txscript.SigHashDefault
 
-	// Include the derivation path for each input in addition to the
-	// taproot specific info we have below.
-	in.Bip32Derivation = []*psbt.Bip32Derivation{
-		derivationInfo,
-	}
-
-	// Include the derivation path for each input.
+	// Taproot inputs carry only the taproot-specific derivation. Emitting a
+	// parallel Bip32Derivation would make the input ambiguous for the
+	// wallet's own signer (see validateDerivation), so it is omitted here.
 	in.TaprootBip32Derivation = []*psbt.TaprootBip32Derivation{{
 		XOnlyPubKey:          derivationInfo.PubKey[1:],
 		MasterKeyFingerprint: derivationInfo.MasterKeyFingerprint,
