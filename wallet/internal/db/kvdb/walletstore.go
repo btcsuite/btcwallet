@@ -83,6 +83,7 @@ func (s *Store) GetWallet(_ context.Context,
 		Birthday:      addrStore.Birthday().UTC(),
 		BirthdayBlock: birthdayBlock,
 		SyncedTo:      syncedTo,
+		IsWatchOnly:   addrStore.WatchOnly(),
 	}, nil
 }
 

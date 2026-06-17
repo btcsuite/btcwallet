@@ -166,6 +166,24 @@ func TestGetWalletReadsLegacyMetadata(t *testing.T) {
 	require.Equal(t, "default", info.Name)
 	require.Equal(t, addrStore.Birthday().UTC(), info.Birthday)
 	require.Nil(t, info.BirthdayBlock)
+	require.False(t, info.IsWatchOnly)
+}
+
+// TestGetWalletReportsWatchOnly verifies kvdb.Store reports legacy wallet-level
+// watch-only state.
+func TestGetWalletReportsWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	convertAddrStoreToWatchOnly(t, dbConn, addrStore)
+	store := NewStore(dbConn, nil, addrStore)
+
+	info, err := store.GetWallet(t.Context(), "default")
+	require.NoError(t, err)
+	require.True(t, info.IsWatchOnly)
 }
 
 // TestGetWalletKvdbIgnoresName documents that kvdb echoes the requested
