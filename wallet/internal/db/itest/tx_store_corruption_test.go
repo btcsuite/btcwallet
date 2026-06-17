@@ -501,17 +501,9 @@ func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	err := store.RollbackToBlock(t.Context(), 1)
 	require.Error(t, err)
 
-	// SQLite still fails while rewinding wallet sync-state heights because
-	// wallet_sync_states keeps direct block references with ON DELETE RESTRICT.
-	// PostgreSQL drops those dependent rows with CASCADE when the blocks table
-	// is removed, so rollback gets far enough to fail on the block delete
-	// instead.
-	_, ok := any(store).(*pg.Store)
-	if ok {
-		require.ErrorContains(t, err, "delete blocks at or above height")
-		return
-	}
-
+	// Rollback rewinds sync-state references by querying the greatest stored
+	// block below the rollback boundary, so both SQL backends now touch the
+	// blocks table before the delete step.
 	require.ErrorContains(t, err, "rewind wallet sync state heights")
 }
 
