@@ -154,6 +154,15 @@ func TestPropertiesToAccountInfoLockedDerivedNotMisclassified(t *testing.T) {
 	require.Equal(t, masterFingerprint, info.MasterKeyFingerprint)
 }
 
+// TestValidateExtendedPubKeyNil verifies that a nil account key is rejected
+// with an error instead of panicking.
+func TestValidateExtendedPubKeyNil(t *testing.T) {
+	t.Parallel()
+
+	err := validateExtendedPubKey(nil, true, &chaincfg.MainNetParams)
+	require.ErrorIs(t, err, ErrInvalidAccountKey)
+}
+
 // TestPropertiesToAccountInfoImportedClassifiedAndMasked verifies that an
 // imported account keeps imported-only account-info semantics.
 func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
