@@ -16,6 +16,10 @@ const defaultVaultUnlockTimeout = 10 * time.Minute
 // ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
 var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
 
+// ErrVaultLocked reports that an operation requiring unlocked runtime state
+// was attempted while the vault was locked.
+var ErrVaultLocked = errors.New("vault is locked")
+
 // Vault manages the lock lifecycle and cryptographic operations for wallet key
 // material.
 type Vault interface {
@@ -45,10 +49,8 @@ type Vault interface {
 	// type.
 	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
 
-	// RefreshPrivatePassphrase refreshes vault owned runtime passphrase and
-	// crypto state after a successful private passphrase rotation.
-	//
-	// The vault must still be unlocked with the new passphrase when this method
-	// is called.
+	// RefreshPrivatePassphrase rotates persisted wallet secrets to the provided
+	// new private passphrase. The vault must already be unlocked when this
+	// method is called.
 	RefreshPrivatePassphrase(ctx context.Context, passphrase []byte) error
 }
