@@ -1,7 +1,6 @@
 package keyvault
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -74,12 +73,6 @@ func (v *DBVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
 // TODO(gus): implement it.
 func (v *DBVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
 	return nil, v.notImplemented("Decrypt")
-}
-
-// RefreshPrivatePassphrase is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) RefreshPrivatePassphrase(_ context.Context, _ []byte) error {
-	return v.notImplemented("RefreshPrivatePassphrase")
 }
 
 // zero clears the runtime secret material held by the unlocked state.
