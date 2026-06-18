@@ -1,12 +1,25 @@
 package keyvault
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/stretchr/testify/require"
+)
+
+// errStoreUnavailable is a sentinel error for simulating store failures in
+// tests.
+var errStoreUnavailable = errors.New("store unavailable")
+
+var (
+	// correctPassphrase is used to assert correct passphrase usage.
+	correctPassphrase = []byte("correct-passphrase")
+
+	// wrongPassphrase is used to assert wrong passphrase usage.
+	wrongPassphrase = []byte("wrong-passphrase")
 )
 
 // TestUnlockedStateZero verifies that zero clears runtime secret material.

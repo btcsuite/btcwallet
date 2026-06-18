@@ -3,6 +3,7 @@ package keyvault
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -11,6 +12,9 @@ import (
 // defaultVaultUnlockTimeout is the default duration that a vault remains
 // unlocked after a successful Unlock.
 const defaultVaultUnlockTimeout = 10 * time.Minute
+
+// ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
+var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
 
 // Vault manages the lock lifecycle and cryptographic operations for wallet key
 // material.
