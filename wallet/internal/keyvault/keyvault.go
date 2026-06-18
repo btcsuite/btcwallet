@@ -42,5 +42,5 @@ type Vault interface {
 	//
 	// The vault must still be unlocked with the new passphrase when this method
 	// is called.
-	RefreshPrivatePassphrase(passphrase []byte) error
+	RefreshPrivatePassphrase(ctx context.Context, passphrase []byte) error
 }

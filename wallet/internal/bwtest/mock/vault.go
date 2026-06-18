@@ -52,8 +52,10 @@ func (m *Vault) IsLocked() bool {
 }
 
 // RefreshPrivatePassphrase forwards to the configured testify expectations.
-func (m *Vault) RefreshPrivatePassphrase(passphrase []byte) error {
-	args := m.Called(passphrase)
+func (m *Vault) RefreshPrivatePassphrase(ctx context.Context,
+	passphrase []byte) error {
+
+	args := m.Called(ctx, passphrase)
 	return args.Error(0)
 }
 
