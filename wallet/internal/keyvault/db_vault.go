@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/snacl"
@@ -23,6 +24,9 @@ type DBVault struct {
 
 	// walletID is the wallet row id that this vault is scoped to.
 	walletID uint32
+
+	// mtx guards concurrent access.
+	mtx sync.Mutex
 
 	// unlockedState holds sensitive runtime secret material that is only
 	// available when the vault is unlocked.
@@ -62,12 +66,6 @@ func (v *DBVault) Unlock(_ context.Context, _ []byte) error {
 // Lock is not implemented yet.
 // TODO(gus): implement it.
 func (v *DBVault) Lock() {}
-
-// IsLocked is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) IsLocked() bool {
-	return true
-}
 
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.
