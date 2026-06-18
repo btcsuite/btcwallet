@@ -32,6 +32,9 @@ type DBVault struct {
 	// unlockedState holds sensitive runtime secret material that is only
 	// available when the vault is unlocked.
 	unlockedState *unlockedState
+
+	// timer automatically locks the vault after a successful unlock timeout.
+	timer autoLockTimer
 }
 
 // unlockedState holds sensitive runtime secret material.
@@ -63,10 +66,6 @@ func NewDBVault(store db.Store, walletID uint32) *DBVault {
 func (v *DBVault) Unlock(_ context.Context, _ []byte, _ time.Duration) error {
 	return v.notImplemented("Unlock")
 }
-
-// Lock is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Lock() {}
 
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.

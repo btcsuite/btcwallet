@@ -8,6 +8,10 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
+// defaultVaultUnlockTimeout is the default duration that a vault remains
+// unlocked after a successful Unlock.
+const defaultVaultUnlockTimeout = 10 * time.Minute
+
 // Vault manages the lock lifecycle and cryptographic operations for wallet key
 // material.
 type Vault interface {
