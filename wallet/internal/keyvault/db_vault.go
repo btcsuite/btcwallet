@@ -1,18 +1,20 @@
 package keyvault
 
 import (
-	"context"
 	"errors"
-	"fmt"
-	"time"
+	"sync"
 
-	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
+	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
-// errDBVaultNotImplemented marks db vault methods whose runtime state is not
-// available through db.Store yet.
-var errDBVaultNotImplemented = errors.New("db vault method not implemented")
+var (
+	// errUnexpectedState reports that the vault is in an unexpected state,
+	// which may indicate a programming error or data corruption. Normal
+	// operation should not return this error, and that's why it's unexported.
+	errUnexpectedState = errors.New("unexpected state")
+)
 
 // DBVault adapts db.Store wallet secret storage to the wallet key-vault
 // boundary.
@@ -22,6 +24,29 @@ type DBVault struct {
 
 	// walletID is the wallet row id that this vault is scoped to.
 	walletID uint32
+
+	// mtx guards concurrent access.
+	mtx sync.Mutex
+
+	// unlockedState holds sensitive runtime secret material that is only
+	// available when the vault is unlocked.
+	unlockedState *unlockedState
+
+	// timer automatically locks the vault after a successful unlock timeout.
+	timer autoLockTimer
+}
+
+// unlockedState holds sensitive runtime secret material.
+type unlockedState struct {
+	// cryptoKeyPrivate is the key used to encrypt and decrypt private material.
+	cryptoKeyPrivate snacl.CryptoKey
+
+	// cryptoKeyScript is the key used to encrypt and decrypt script material.
+	cryptoKeyScript snacl.CryptoKey
+
+	// hdRootKey is the master HD extended key for the wallet, which can derive
+	// all sub scopes, accounts, addresses, and keys.
+	hdRootKey *hdkeychain.ExtendedKey
 }
 
 // Ensure DBVault implements keyvault.Vault.
@@ -35,43 +60,17 @@ func NewDBVault(store db.Store, walletID uint32) *DBVault {
 	}
 }
 
-// Unlock is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Unlock(_ context.Context, _ []byte, _ time.Duration) error {
-	return v.notImplemented("Unlock")
-}
+// zero clears the runtime secret material held by the unlocked state.
+func (s *unlockedState) zero() {
+	if s == nil {
+		return
+	}
 
-// Lock is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Lock() {}
+	s.cryptoKeyPrivate.Zero()
+	s.cryptoKeyScript.Zero()
 
-// IsLocked is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) IsLocked() bool {
-	return true
-}
-
-// Encrypt is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
-	return nil, v.notImplemented("Encrypt")
-}
-
-// Decrypt  is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
-	return nil, v.notImplemented("Decrypt")
-}
-
-// RefreshPrivatePassphrase is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) RefreshPrivatePassphrase(_ []byte) error {
-	return v.notImplemented("RefreshPrivatePassphrase")
-}
-
-// notImplemented returns a scoped error for db vault methods that are still
-// awaiting DB-backed runtime crypto support.
-func (v *DBVault) notImplemented(method string) error {
-	return fmt.Errorf("wallet %d db vault %s: %w", v.walletID, method,
-		errDBVaultNotImplemented)
+	if s.hdRootKey != nil {
+		s.hdRootKey.Zero()
+		s.hdRootKey = nil
+	}
 }
