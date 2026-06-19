@@ -63,12 +63,6 @@ func NewDBVault(store db.Store, walletID uint32) *DBVault {
 	}
 }
 
-// Encrypt is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
-	return nil, v.notImplemented("Encrypt")
-}
-
 // Decrypt  is not implemented yet.
 // TODO(gus): implement it.
 func (v *DBVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
