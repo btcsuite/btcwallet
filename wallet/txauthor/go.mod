@@ -29,7 +29,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.25
+go 1.25.11
 
 replace github.com/btcsuite/btcwallet/wallet/txrules => ../txrules
 

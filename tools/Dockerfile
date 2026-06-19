@@ -1,4 +1,4 @@
-FROM golang:1.24.6-alpine
+FROM golang:1.25.11-alpine
 
 ENV GOFLAGS="-buildvcs=false"
 
