@@ -33,6 +33,8 @@ func BackEnds() []string {
 // Interface allows more than one backing blockchain source, such as a
 // btcd RPC chain server, or an SPV library, as long as we write a driver for
 // it.
+//
+//nolint:inamedparam
 type Interface interface {
 	Start(ctx context.Context) error
 	Stop()
@@ -45,7 +47,8 @@ type Interface interface {
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
-	Rescan(*chainhash.Hash, []address.Address, map[wire.OutPoint]address.Address) error
+	Rescan(*chainhash.Hash, []address.Address,
+		map[wire.OutPoint]address.Address) error
 	NotifyReceived([]address.Address) error
 	NotifyBlocks() error
 	Notifications() <-chan interface{}

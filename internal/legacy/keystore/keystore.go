@@ -75,8 +75,13 @@ const (
 // the number of bytes actually written or read.  We need to return
 // this value to correctly support the io.ReaderFrom and io.WriterTo
 // interfaces.
-func binaryRead(r io.Reader, order binary.ByteOrder, data interface{}) (n int64, err error) {
-	var read int
+func binaryRead(r io.Reader, order binary.ByteOrder,
+	data interface{}) (int64, error) {
+
+	var (
+		read int
+		err  error
+	)
 	buf := make([]byte, binary.Size(data))
 	if read, err = io.ReadFull(r, buf); err != nil {
 		return int64(read), err
@@ -85,9 +90,13 @@ func binaryRead(r io.Reader, order binary.ByteOrder, data interface{}) (n int64,
 }
 
 // See comment for binaryRead().
-func binaryWrite(w io.Writer, order binary.ByteOrder, data interface{}) (n int64, err error) {
+func binaryWrite(w io.Writer, order binary.ByteOrder,
+	data interface{}) (int64, error) {
+
 	buf := bytes.Buffer{}
-	if err = binary.Write(&buf, order, data); err != nil {
+
+	err := binary.Write(&buf, order, data)
+	if err != nil {
 		return 0, err
 	}
 
@@ -290,7 +299,8 @@ func (v version) String() string {
 }
 
 func (v version) Uint32() uint32 {
-	return uint32(v.major)<<6 | uint32(v.minor)<<4 | uint32(v.bugfix)<<2 | uint32(v.autoincrement)
+	return uint32(v.major)<<6 | uint32(v.minor)<<4 | uint32(v.bugfix)<<2 |
+		uint32(v.autoincrement)
 }
 
 func (v *version) ReadFrom(r io.Reader) (int64, error) {
@@ -1241,7 +1251,9 @@ func (s *Store) createMissingPrivateKeys() error {
 		addr.privKeyCT = ithPrivKey
 		if err := addr.encrypt(s.secret); err != nil {
 			// Avoid bug: see comment for VersUnsetNeedsPrivkeyFlag.
-			if err != ErrAlreadyEncrypted || s.vers.LT(VersUnsetNeedsPrivkeyFlag) {
+			if !errors.Is(err, ErrAlreadyEncrypted) ||
+				s.vers.LT(VersUnsetNeedsPrivkeyFlag) {
+
 				return err
 			}
 		}
@@ -1408,7 +1420,9 @@ func (s *Store) NewIterateRecentBlocks() *BlockIterator {
 // ImportPrivateKey imports a WIF private key into the keystore.  The imported
 // address is created using either a compressed or uncompressed serialized
 // public key, depending on the CompressPubKey bool of the WIF.
-func (s *Store) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (address.Address, error) {
+func (s *Store) ImportPrivateKey(wif *btcutil.WIF,
+	bs *BlockStamp) (address.Address, error) {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -1460,7 +1474,9 @@ func (s *Store) ImportPrivateKey(wif *btcutil.WIF, bs *BlockStamp) (address.Addr
 
 // ImportScript creates a new scriptAddress with a user-provided script
 // and adds it to the key store.
-func (s *Store) ImportScript(script []byte, bs *BlockStamp) (address.Address, error) {
+func (s *Store) ImportScript(script []byte,
+	bs *BlockStamp) (address.Address, error) {
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -2151,13 +2167,16 @@ type PubKeyAddress interface {
 // newBtcAddress initializes and returns a new address.  privkey must
 // be 32 bytes.  iv must be 16 bytes, or nil (in which case it is
 // randomly generated).
-func newBtcAddress(wallet *Store, privkey, iv []byte, bs *BlockStamp, compressed bool) (addr *btcAddress, err error) {
+func newBtcAddress(wallet *Store, privkey, iv []byte, bs *BlockStamp,
+	compressed bool) (*btcAddress, error) {
+
 	if len(privkey) != 32 {
 		return nil, errors.New("private key is not 32 bytes")
 	}
 
-	addr, err = newBtcAddressWithoutPrivkey(wallet,
-		pubkeyFromPrivkey(privkey, compressed), iv, bs)
+	addr, err := newBtcAddressWithoutPrivkey(
+		wallet, pubkeyFromPrivkey(privkey, compressed), iv, bs,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -2173,7 +2192,9 @@ func newBtcAddress(wallet *Store, privkey, iv []byte, bs *BlockStamp, compressed
 // unknown (at the time) private key that must be found later.  pubkey must be
 // 33 or 65 bytes, and iv must be 16 bytes or empty (in which case it is
 // randomly generated).
-func newBtcAddressWithoutPrivkey(s *Store, pubkey, iv []byte, bs *BlockStamp) (addr *btcAddress, err error) {
+func newBtcAddressWithoutPrivkey(s *Store, pubkey, iv []byte,
+	bs *BlockStamp) (*btcAddress, error) {
+
 	var compressed bool
 	switch n := len(pubkey); n {
 	case secp.PubKeyBytesLenCompressed:
@@ -2197,12 +2218,14 @@ func newBtcAddressWithoutPrivkey(s *Store, pubkey, iv []byte, bs *BlockStamp) (a
 		return nil, err
 	}
 
-	address, err := address.NewAddressPubKeyHash(address.Hash160(pubkey), s.netParams())
+	address, err := address.NewAddressPubKeyHash(
+		address.Hash160(pubkey), s.netParams(),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	addr = &btcAddress{
+	addr := &btcAddress{
 		flags: addrFlags{
 			hasPrivKey:              false,
 			hasPubKey:               true,
@@ -2340,7 +2363,9 @@ func (a *btcAddress) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 	a.pubKey = pk
 
-	addr, err := address.NewAddressPubKeyHash(pubKeyHash[:], a.store.netParams())
+	addr, err := address.NewAddressPubKeyHash(
+		pubKeyHash[:], a.store.netParams(),
+	)
 	if err != nil {
 		return n, err
 	}
@@ -2788,7 +2813,9 @@ type ScriptAddress interface {
 
 // newScriptAddress initializes and returns a new P2SH address.
 // iv must be 16 bytes, or nil (in which case it is randomly generated).
-func newScriptAddress(s *Store, script []byte, bs *BlockStamp) (addr *scriptAddress, err error) {
+func newScriptAddress(s *Store, script []byte,
+	bs *BlockStamp) (*scriptAddress, error) {
+
 	class, addresses, reqSigs, err :=
 		txscript.ExtractPkScriptAddrs(script, s.netParams())
 	if err != nil {
@@ -2797,12 +2824,14 @@ func newScriptAddress(s *Store, script []byte, bs *BlockStamp) (addr *scriptAddr
 
 	scriptHash := address.Hash160(script)
 
-	address, err := address.NewAddressScriptHashFromHash(scriptHash, s.netParams())
+	address, err := address.NewAddressScriptHashFromHash(
+		scriptHash, s.netParams(),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	addr = &scriptAddress{
+	addr := &scriptAddress{
 		store:     s,
 		address:   address,
 		addresses: addresses,
@@ -3057,7 +3086,9 @@ type kdfParameters struct {
 // computeKdfParameters returns best guess parameters to the
 // memory-hard key derivation function to make the computation last
 // targetSec seconds, while using no more than maxMem bytes of memory.
-func computeKdfParameters(targetSec float64, maxMem uint64) (*kdfParameters, error) {
+func computeKdfParameters(targetSec float64,
+	maxMem uint64) (*kdfParameters, error) {
+
 	params := &kdfParameters{}
 	if _, err := rand.Read(params.salt[:]); err != nil {
 		return nil, err

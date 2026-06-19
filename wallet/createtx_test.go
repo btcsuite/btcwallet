@@ -259,7 +259,9 @@ func addTxAndCredit(t *testing.T, w *Wallet, tx *wire.MsgTx,
 func TestInputYield(t *testing.T) {
 	t.Parallel()
 
-	addr, _ := address.DecodeAddress("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &chaincfg.MainNetParams)
+	addr, _ := address.DecodeAddress(
+		"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", &chaincfg.MainNetParams,
+	)
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 

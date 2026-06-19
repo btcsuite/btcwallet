@@ -959,6 +959,7 @@ func (s *ScopedKeyManager) Address(ns walletdb.ReadBucket,
 	// NOTE: Not using a defer on the lock here since a write lock is
 	// needed if the lookup fails.
 	s.mtx.RLock()
+
 	if ma, ok := s.addrs[addrKey(addr.ScriptAddress())]; ok {
 		s.mtx.RUnlock()
 		return ma, nil
@@ -1994,6 +1995,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 
 	case NestedWitnessPubKey:
 		pubKeyHash := address.Hash160(serializedPubKey)
+
 		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, s.rootManager.chainParams,
 		)
@@ -2004,6 +2006,7 @@ func (s *ScopedKeyManager) importPublicKey(ns walletdb.ReadWriteBucket,
 		if err != nil {
 			return err
 		}
+
 		addressID = address.Hash160(witnessScript)
 
 	case TaprootPubKey:

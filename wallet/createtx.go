@@ -92,7 +92,9 @@ type secretSource struct {
 	addrmgrNs walletdb.ReadBucket
 }
 
-func (s secretSource) GetKey(addr address.Address) (*btcec.PrivateKey, bool, error) {
+func (s secretSource) GetKey(
+	addr address.Address) (*btcec.PrivateKey, bool, error) {
+
 	ma, err := s.Address(s.addrmgrNs, addr)
 	if err != nil {
 		return nil, false, err

@@ -412,6 +412,7 @@ func testExternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedExternalAddrs); i++ {
 			pkHash := expectedExternalAddrs[i].addressHash
+
 			utilAddr, err := address.NewAddressPubKeyHash(
 				pkHash, chainParams,
 			)
@@ -568,6 +569,7 @@ func testInternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedInternalAddrs); i++ {
 			pkHash := expectedInternalAddrs[i].addressHash
+
 			utilAddr, err := address.NewAddressPubKeyHash(
 				pkHash, chainParams,
 			)
@@ -1206,7 +1208,9 @@ func testMarkUsed(tc *testContext, doScript bool) bool {
 		case addrPubKeyHash:
 			addr, err = address.NewAddressPubKeyHash(addrHash, chainParams)
 		case addrScriptHash:
-			addr, err = address.NewAddressScriptHashFromHash(addrHash, chainParams)
+			addr, err = address.NewAddressScriptHashFromHash(
+				addrHash, chainParams,
+			)
 		default:
 			panic("unreachable")
 		}
@@ -2476,6 +2480,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		t.Fatalf("addr type mismatch: expected %v, got %v",
 			NestedWitnessPubKey, externalAddr[0].AddrType())
 	}
+
 	_, ok := externalAddr[0].Address().(*address.AddressScriptHash)
 	if !ok {
 		t.Fatalf("wrong type: %T", externalAddr[0].Address())
@@ -2487,6 +2492,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		t.Fatalf("addr type mismatch: expected %v, got %v",
 			WitnessPubKey, internalAddr[0].AddrType())
 	}
+
 	_, ok = internalAddr[0].Address().(*address.AddressWitnessPubKeyHash)
 	if !ok {
 		t.Fatalf("wrong type: %T", externalAddr[0].Address())

@@ -73,6 +73,7 @@ func (m *mockChainClient) SendRawTransaction(*wire.MsgTx, bool) (
 
 func (m *mockChainClient) Rescan(*chainhash.Hash, []address.Address,
 	map[wire.OutPoint]address.Address) error {
+
 	return nil
 }
 

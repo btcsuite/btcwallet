@@ -38,6 +38,17 @@ linters:
     # Deprecated - this is replaced by wsl_v5.
     - wsl
 
+    # Would cause a huge churn in many files.
+    - err113
+    - funcorder
+
+    # We can't always wrap our errors as long as we're checking with err == xyz
+    # in some places.
+    - wrapcheck
+
+    # TODO(guggero): remove again after new submodules have been tagged!
+    - gomoddirectives
+
   # All available settings of specific linters.
   settings:
     nlreturn:
@@ -133,6 +144,12 @@ linters:
       - path: config\.go
         linters:
           - forbidigo
+
+      # Skip function order and interface return in legacy code.
+      - path: internal/legacy/keystore/*|wallet/wallet.go|waddrmgr/*
+        linters:
+          - funcorder
+          - ireturn
 
 issues:
   # Show only new issues created after git revision `REV`.

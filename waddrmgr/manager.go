@@ -724,7 +724,9 @@ func (m *Manager) Address(ns walletdb.ReadBucket,
 }
 
 // MarkUsed updates the used flag for the provided address.
-func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket, address address.Address) error {
+func (m *Manager) MarkUsed(ns walletdb.ReadWriteBucket,
+	address address.Address) error {
+
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 
@@ -801,7 +803,9 @@ func (m *Manager) ForEachActiveAccountAddress(ns walletdb.ReadBucket,
 
 // ForEachActiveAddress calls the given function with each active address
 // stored in the manager, breaking early on error.
-func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket, fn func(addr address.Address) error) error {
+func (m *Manager) ForEachActiveAddress(ns walletdb.ReadBucket,
+	fn func(addr address.Address) error) error {
+
 	m.mtx.RLock()
 	defer m.mtx.RUnlock()
 

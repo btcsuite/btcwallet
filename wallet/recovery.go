@@ -351,6 +351,8 @@ func (brs *BranchRecoveryState) AddAddr(index uint32, addr address.Address) {
 }
 
 // GetAddr returns the address derived from a given child index.
+//
+//nolint:ireturn
 func (brs *BranchRecoveryState) GetAddr(index uint32) address.Address {
 	return brs.addresses[index]
 }

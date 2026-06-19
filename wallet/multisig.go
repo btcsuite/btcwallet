@@ -7,6 +7,7 @@ package wallet
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -20,7 +21,9 @@ import (
 // otherwise an error is returned for a missing pubkey.
 //
 // This function only works with pubkeys and P2PKH addresses derived from them.
-func (w *Wallet) MakeMultiSigScript(addrs []address.Address, nRequired int) ([]byte, error) {
+func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
+	nRequired int) ([]byte, error) {
+
 	pubKeys := make([]*address.AddressPubKey, len(addrs))
 
 	var dbtx walletdb.ReadTx
@@ -72,7 +75,9 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address, nRequired int) ([]b
 }
 
 // ImportP2SHRedeemScript adds a P2SH redeem script to the wallet.
-func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*address.AddressScriptHash, error) {
+func (w *Wallet) ImportP2SHRedeemScript(
+	script []byte) (*address.AddressScriptHash, error) {
+
 	var p2shAddr *address.AddressScriptHash
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
@@ -107,7 +112,13 @@ func (w *Wallet) ImportP2SHRedeemScript(script []byte) (*address.AddressScriptHa
 			return err
 		}
 
-		p2shAddr = addrInfo.Address().(*address.AddressScriptHash)
+		castAddr, ok := addrInfo.Address().(*address.AddressScriptHash)
+		if !ok {
+			return fmt.Errorf("unexpected address type: %T", addrInfo.Address())
+		}
+
+		p2shAddr = castAddr
+
 		return nil
 	})
 	return p2shAddr, err

@@ -276,7 +276,9 @@ out:
 // a wallet.  This is intended to be used to sync a wallet back up to the
 // current best block in the main chain, and is considered an initial sync
 // rescan.
-func (w *Wallet) Rescan(addrs []address.Address, unspent []wtxmgr.Credit) error {
+func (w *Wallet) Rescan(addrs []address.Address,
+	unspent []wtxmgr.Credit) error {
+
 	return w.rescanWithTarget(addrs, unspent, nil)
 }
 

@@ -396,7 +396,10 @@ func (s *NeutrinoClient) pollCFilter(hash *chainhash.Hash) (*gcs.Filter, error) 
 }
 
 // Rescan replicates the RPC client's Rescan command.
-func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []address.Address,
+//
+//nolint:cyclop
+func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash,
+	addrs []address.Address,
 	outPoints map[wire.OutPoint]address.Address) error {
 
 	// Obtain and hold the rescan mutex lock for the duration of the call.

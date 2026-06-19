@@ -542,6 +542,7 @@ func randPubKeyHashScript() ([]byte, *btcec.PrivateKey, error) {
 	}
 
 	pubKeyHash := address.Hash160(privKey.PubKey().SerializeCompressed())
+
 	addrScript, err := address.NewAddressPubKeyHash(
 		pubKeyHash, &chaincfg.RegressionNetParams,
 	)
