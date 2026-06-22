@@ -152,6 +152,109 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 	require.Equal(t, db.RawPubKey, utxo.AddrType)
 }
 
+// TestCreateTxDuplicateCreditBareMultisigMemberMismatch verifies that an
+// idempotent duplicate cannot change the wallet-owned member address recorded
+// for a bare-multisig credit.
+//
+// Scenario:
+//   - The wallet imports both members of a 1-of-2 bare-multisig output.
+//   - The first CreateTx records the output as owned by the first member.
+//   - A duplicate CreateTx call reports the same transaction and output, but
+//     claims ownership through the second member.
+//
+// Assertions:
+//   - The duplicate is rejected with ErrTxAlreadyExists because it is not an
+//     exact replay of the stored ownership metadata.
+func TestCreateTxDuplicateCreditBareMultisigMemberMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-bare-multisig-duplicate-mismatch",
+	)
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	firstAddr, err := address.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	secondAddr, err := address.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	firstScript, err := txscript.PayToAddrScript(firstAddr)
+	require.NoError(t, err)
+
+	secondScript, err := txscript.PayToAddrScript(secondAddr)
+	require.NoError(t, err)
+
+	for _, member := range []struct {
+		addr   *address.AddressPubKey
+		script []byte
+	}{
+		{
+			addr:   firstAddr,
+			script: firstScript,
+		},
+		{
+			addr:   secondAddr,
+			script: secondScript,
+		},
+	} {
+		_, err := store.NewImportedAddress(
+			t.Context(), db.NewImportedAddressParams{
+				WalletID:        walletID,
+				AddressType:     db.RawPubKey,
+				PubKey:          member.addr.ScriptAddress(),
+				ScriptPubKey:    member.script,
+				EncryptedScript: RandomBytes(48),
+			},
+		)
+		require.NoError(t, err)
+	}
+
+	multiSigScript, err := txscript.NewScriptBuilder().
+		AddInt64(1).
+		AddData(firstKey.PubKey().SerializeCompressed()).
+		AddData(secondKey.PubKey().SerializeCompressed()).
+		AddInt64(2).
+		AddOp(txscript.OP_CHECKMULTISIG).
+		Script()
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: multiSigScript}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004400, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: firstAddr},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004401, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: secondAddr},
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+}
+
 // TestCreateTxCreditAddrMismatch verifies that CreateTx rejects a non-nil
 // credit address that the credited output does not pay to, instead of
 // recording a UTXO owned by an unrelated address.
@@ -408,8 +511,8 @@ func TestCreateTxRejectsSecondPendingSpend(t *testing.T) {
 	require.False(t, ok)
 }
 
-// TestCreateTxRejectsDuplicateTx verifies that CreateTx inserts one wallet-
-// scoped transaction row only once.
+// TestCreateTxSkipsDuplicateTx verifies that CreateTx inserts one wallet-
+// scoped transaction row only once for an idempotent duplicate.
 //
 // Scenario:
 //   - One wallet transaction hash is already present in the store.
@@ -421,9 +524,9 @@ func TestCreateTxRejectsSecondPendingSpend(t *testing.T) {
 //   - Attempt to insert the same transaction hash again.
 //
 // Assertions:
-//   - CreateTx returns ErrTxAlreadyExists.
+//   - CreateTx treats the duplicate as a no-op.
 //   - The original row remains stored once.
-func TestCreateTxRejectsDuplicateTx(t *testing.T) {
+func TestCreateTxSkipsDuplicateTx(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -448,10 +551,376 @@ func TestCreateTxRejectsDuplicateTx(t *testing.T) {
 		Received: time.Unix(1710000590, 0),
 		Status:   db.TxStatusPending,
 	})
-	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+	require.NoError(t, err)
 
 	_, ok := txIDByHash(t, store, walletID, tx.TxHash())
 	require.True(t, ok)
+}
+
+// TestCreateTxReplaysDuplicateCredit verifies that an idempotent duplicate
+// transaction observation still records newly supplied wallet credit edges.
+func TestCreateTxReplaysDuplicateCredit(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-create-tx-replay-credit")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: addr.ScriptPubKey}},
+	)
+	params := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000580, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), params)
+	require.NoError(t, err)
+
+	outPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+	require.False(t, walletUtxoExists(t, store, walletID, outPoint))
+
+	params.Credits = map[uint32]address.Address{0: nil}
+	err = store.CreateTx(t.Context(), params)
+	require.NoError(t, err)
+	require.True(t, walletUtxoExists(t, store, walletID, outPoint))
+}
+
+// TestCreateTxReplayedCreditMarksExistingChildSpent verifies that replaying a
+// parent credit also reconciles an already-stored child that spends it.
+func TestCreateTxReplayedCreditMarksExistingChildSpent(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-create-tx-replay-spent")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	childAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: parentAddr.ScriptPubKey}},
+	)
+	parentParams := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710000580, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	parentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	require.False(t, walletUtxoExists(t, store, walletID, parentOutPoint))
+
+	childTx := newRegularTx(
+		[]wire.OutPoint{parentOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: childAddr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       childTx,
+		Received: time.Unix(1710000590, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+	require.False(t, walletUtxoExists(t, store, walletID, parentOutPoint))
+
+	parentParams.Credits = map[uint32]address.Address{0: nil}
+	err = store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+	require.True(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
+}
+
+// TestCreateTxReplayedCreditConfirmedChildReplacesUnmined verifies that a
+// late-discovered parent credit reconciles already-stored conflicting children
+// before recording the parent spend edge.
+func TestCreateTxReplayedCreditConfirmedChildReplacesUnmined(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-create-tx-replay-replace")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	unminedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	confirmedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 5000, PkScript: parentAddr.ScriptPubKey}},
+	)
+	parentParams := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710000600, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	parentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	require.False(t, walletUtxoExists(t, store, walletID, parentOutPoint))
+
+	unminedChild := newRegularTx(
+		[]wire.OutPoint{parentOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: unminedAddr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       unminedChild,
+		Received: time.Unix(1710000610, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	confirmedChild := newRegularTx(
+		[]wire.OutPoint{parentOutPoint},
+		[]*wire.TxOut{{Value: 3000, PkScript: confirmedAddr.ScriptPubKey}},
+	)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 262)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedChild,
+		Received: time.Unix(1710000620, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	parentParams.Credits = map[uint32]address.Address{0: nil}
+	err = store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	confirmedID, ok := txIDByHash(
+		t, store, walletID, confirmedChild.TxHash(),
+	)
+	require.True(t, ok)
+	require.Equal(
+		t, []int64{confirmedID},
+		childSpendingTxIDs(t, store, walletID, parentTx.TxHash()),
+	)
+
+	unminedInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     unminedChild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, unminedInfo.Status)
+
+	confirmedInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     confirmedChild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, confirmedInfo.Status)
+	require.NotNil(t, confirmedInfo.Block)
+	require.Equal(t, confirmedBlock.Height, confirmedInfo.Block.Height)
+}
+
+// TestCreateTxReplayedCreditSkipsReplacedChildSnapshot verifies that replaying
+// a parent credit does not reattach a child spend from a stale active-child
+// snapshot after that child has already been replaced.
+func TestCreateTxReplayedCreditSkipsReplacedChildSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-create-tx-replay-stale-child")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	unminedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	confirmedAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{Value: 5000, PkScript: parentAddr.ScriptPubKey},
+			{Value: 6000, PkScript: parentAddr.ScriptPubKey},
+		},
+	)
+	parentParams := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710000630, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	firstOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	secondOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 1}
+	unminedChild := newRegularTx(
+		[]wire.OutPoint{firstOutPoint, secondOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: unminedAddr.ScriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       unminedChild,
+		Received: time.Unix(1710000640, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	confirmedChild := newRegularTx(
+		[]wire.OutPoint{firstOutPoint},
+		[]*wire.TxOut{{Value: 3000, PkScript: confirmedAddr.ScriptPubKey}},
+	)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 263)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedChild,
+		Received: time.Unix(1710000650, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	parentParams.Credits = map[uint32]address.Address{0: nil, 1: nil}
+	err = store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	confirmedID, ok := txIDByHash(
+		t, store, walletID, confirmedChild.TxHash(),
+	)
+	require.True(t, ok)
+	require.Equal(
+		t, []int64{confirmedID},
+		childSpendingTxIDs(t, store, walletID, parentTx.TxHash()),
+	)
+	require.True(t, walletUtxoSpent(t, store, walletID, firstOutPoint))
+	require.False(t, walletUtxoSpent(t, store, walletID, secondOutPoint))
+
+	unminedInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     unminedChild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, unminedInfo.Status)
+}
+
+// TestCreateTxReplayedCreditPreplansConfirmedReplacements verifies that late
+// parent-credit replay computes confirmed child replacements across all newly
+// discovered credits before enforcing the single-unmined-spender rule.
+func TestCreateTxReplayedCreditPreplansConfirmedReplacements(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-create-tx-replay-preplan")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{
+			{Value: 5000, PkScript: parentAddr.ScriptPubKey},
+			{Value: 6000, PkScript: parentAddr.ScriptPubKey},
+		},
+	)
+	parentParams := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       parentTx,
+		Received: time.Unix(1710000660, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	firstOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+	secondOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 1}
+	staleChild := newRegularTx(
+		[]wire.OutPoint{firstOutPoint, secondOutPoint},
+		[]*wire.TxOut{{Value: 4000, PkScript: []byte{0x51}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       staleChild,
+		Received: time.Unix(1710000670, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	activeChild := newRegularTx(
+		[]wire.OutPoint{firstOutPoint},
+		[]*wire.TxOut{{Value: 3000, PkScript: []byte{0x52}}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       activeChild,
+		Received: time.Unix(1710000680, 0),
+		Status:   db.TxStatusPending,
+	})
+	require.NoError(t, err)
+
+	confirmedChild := newRegularTx(
+		[]wire.OutPoint{secondOutPoint},
+		[]*wire.TxOut{{Value: 2000, PkScript: []byte{0x53}}},
+	)
+	confirmedBlock := CreateBlockFixture(t, store.Queries(), 264)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       confirmedChild,
+		Received: time.Unix(1710000690, 0),
+		Block:    &confirmedBlock,
+		Status:   db.TxStatusPublished,
+	})
+	require.NoError(t, err)
+
+	parentParams.Credits = map[uint32]address.Address{0: nil, 1: nil}
+	err = store.CreateTx(t.Context(), parentParams)
+	require.NoError(t, err)
+
+	activeID, ok := txIDByHash(t, store, walletID, activeChild.TxHash())
+	require.True(t, ok)
+	confirmedID, ok := txIDByHash(t, store, walletID, confirmedChild.TxHash())
+	require.True(t, ok)
+	require.ElementsMatch(
+		t, []int64{activeID, confirmedID},
+		childSpendingTxIDs(t, store, walletID, parentTx.TxHash()),
+	)
+	require.True(t, walletUtxoSpent(t, store, walletID, firstOutPoint))
+	require.True(t, walletUtxoSpent(t, store, walletID, secondOutPoint))
+
+	staleInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     staleChild.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusReplaced, staleInfo.Status)
 }
 
 // TestCreateTxConfirmsExistingUnminedRow verifies that CreateTx reuses one live
@@ -3171,6 +3640,279 @@ func TestApplyTxBatchConfirmsTxInSameBlock(t *testing.T) {
 	require.NotNil(t, walletInfo.SyncedTo)
 	require.Equal(t, block.Height, walletInfo.SyncedTo.Height)
 	require.Equal(t, block.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyTxBatchConfirmsTxBeforeSyncTip verifies that a batch can record a
+// transaction confirmed before the same batch's final synced block. The
+// transaction's confirming block row does not exist before the batch, so the
+// batch must create it independently of the synced-to block.
+func TestApplyTxBatchConfirmsTxBeforeSyncTip(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-confirm-before-tip"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	block := NewBlockFixture(212)
+	syncedTo := NewBlockFixture(213)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000160, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &syncedTo,
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, syncedTo.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, syncedTo.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyTxBatchConfirmsExistingTx verifies that ApplyTxBatch reconciles a
+// pending transaction when the same transaction is later observed confirmed.
+func TestApplyTxBatchConfirmsExistingTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-confirm-existing"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000161, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+	})
+	require.NoError(t, err)
+
+	block := NewBlockFixture(216)
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000162, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &block,
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, block.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, block.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyTxBatchDuplicateUnminedKeepsConfirmed verifies that an unmined batch
+// notification for an already-confirmed transaction is a no-op, matching the
+// legacy kvdb behavior for rescan observations.
+func TestApplyTxBatchDuplicateUnminedKeepsConfirmed(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-tx-batch-unmined-dupe")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+	)
+	block := NewBlockFixture(217)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000163, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &block,
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000164, 0),
+			Status:   db.TxStatusPending,
+		}},
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+}
+
+// TestApplyTxBatchDuplicateConfirmedChecksTimestamp verifies that an otherwise
+// idempotent confirmed duplicate still validates the caller's block timestamp.
+func TestApplyTxBatchDuplicateConfirmedChecksTimestamp(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-tx-batch-ts-dupe")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+	)
+	block := NewBlockFixture(218)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000165, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &block,
+	})
+	require.NoError(t, err)
+
+	mismatchedBlock := block
+	mismatchedBlock.Timestamp = block.Timestamp.Add(time.Second)
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000166, 0),
+			Block:    &mismatchedBlock,
+			Status:   db.TxStatusPublished,
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrBlockMismatch)
+}
+
+// TestApplyTxBatchRejectsDuplicateStateMismatch verifies that a non-idempotent
+// duplicate does not let the batch advance the sync tip.
+func TestApplyTxBatchRejectsDuplicateStateMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-duplicate-mismatch"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	firstBlock := NewBlockFixture(217)
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000163, 0),
+			Block:    &firstBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &firstBlock,
+	})
+	require.NoError(t, err)
+
+	secondBlock := NewBlockFixture(218)
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000164, 0),
+			Block:    &secondBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedTo: &secondBlock,
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, firstBlock.Height, txInfo.Block.Height)
+	require.Equal(t, firstBlock.Hash, txInfo.Block.Hash)
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, firstBlock.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, firstBlock.Hash, walletInfo.SyncedTo.Hash)
 }
 
 // TestApplyTxBatchRejectsMismatchedWalletID verifies that a batch is rejected

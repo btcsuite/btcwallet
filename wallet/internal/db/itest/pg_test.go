@@ -432,5 +432,5 @@ func walletUtxoSpent(t *testing.T, store *pg.Store,
 		require.NoError(t, err)
 	}
 
-	return spentBy.Valid
+	return spentBy.SpentByTxID.Valid
 }

@@ -177,5 +177,5 @@ func walletUtxoSpent(t *testing.T, store *sqlite.Store,
 		require.NoError(t, err)
 	}
 
-	return spentBy.Valid
+	return spentBy.SpentByTxID.Valid
 }
