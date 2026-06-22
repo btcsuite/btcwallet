@@ -450,20 +450,33 @@ func TestPutAddrHorizons(t *testing.T) {
 	mocks.addrStore.On("FetchScopedKeyManager", bs.Scope).Return(
 		scopedMgr, nil,
 	).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 4}, nil,
+	).Once()
 
 	scopedMgr.On("ExtendAddresses", mock.Anything, bs.Account, uint32(10),
 		bs.Branch,
 	).Return(nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 11}, nil,
+	).Once()
 
 	// Act: Trigger the horizon expansion within a database transaction.
+	var rollback addrHorizonRollback
+
 	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		return s.putAddrHorizons(t.Context(), ns, res)
+		var err error
+
+		rollback, err = s.putAddrHorizons(t.Context(), ns, res)
+
+		return err
 	})
 
 	// Assert: Verify that the horizons were extended without error.
 	require.NoError(t, err)
+	require.Len(t, rollback, 1)
 }
 
 // TestDBGetScanData verifies that the wallet can successfully retrieve all
@@ -980,7 +993,7 @@ func TestPutAddrHorizons_Error(t *testing.T) {
 		mock.Anything).Return(nil, errManager).Once()
 
 	// Act: Attempt to persist address horizons.
-	err := s.putAddrHorizons(t.Context(), nil, results)
+	_, err := s.putAddrHorizons(t.Context(), nil, results)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errManager)
