@@ -17,11 +17,7 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 
 	// Create a wallet using the Manager API.
 	cfg := wallet.Config{
-		DB: wallet.DBConfig{
-			KVDB: wallet.KVDBConfig{
-				DBPath: h.WalletDBPath,
-			},
-		},
+		DB:                      h.WalletDBConfig(),
 		Chain:                   h.ChainClient,
 		ChainParams:             h.NetParams(),
 		RecoveryWindow:          20,

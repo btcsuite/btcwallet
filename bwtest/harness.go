@@ -42,8 +42,19 @@ type HarnessTest struct {
 	// WalletDBPath is the wallet database path created for the current subtest.
 	WalletDBPath string
 
+	// walletSQLitePath is the SQLite runtime database path for the current
+	// subtest when the sqlite backend is selected.
+	walletSQLitePath string
+
+	// walletPostgresDSN is the PostgreSQL runtime database DSN for the current
+	// subtest when the postgres backend is selected.
+	walletPostgresDSN string
+
 	// dbType is the configured wallet database backend.
 	dbType string
+
+	// postgres is the shared PostgreSQL container used by postgres itests.
+	postgres *postgresHarness
 
 	// mu protects harness state that can be accessed across the main test and
 	// subtests. This includes the wallet registry and idempotent shutdown.
@@ -62,6 +73,9 @@ type HarnessTest struct {
 // SetupHarness creates a new HarnessTest.
 func SetupHarness(t *testing.T, chainBackendType, dbType string) *HarnessTest {
 	t.Helper()
+
+	dbType = normalizeDBType(dbType)
+	validateDBType(t, dbType)
 
 	logDir := createTestLogDir(t, chainBackendType, dbType)
 
@@ -97,6 +111,8 @@ func SetupHarness(t *testing.T, chainBackendType, dbType string) *HarnessTest {
 	// Ensure the harness is cleaned up when the test finishes.
 	t.Cleanup(ht.Stop)
 
+	ht.setUpSharedWalletDB()
+
 	return ht
 }
 
@@ -109,11 +125,12 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 	h.Helper()
 
 	st := &HarnessTest{
-		T:       t,
-		logDir:  h.logDir,
-		miner:   h.miner,
-		Backend: h.Backend,
-		dbType:  h.dbType,
+		T:        t,
+		logDir:   h.logDir,
+		miner:    h.miner,
+		Backend:  h.Backend,
+		dbType:   h.dbType,
+		postgres: h.postgres,
 	}
 
 	// Use the subtest's testing context for miner assertions.
@@ -247,6 +264,8 @@ func (h *HarnessTest) Stop() {
 	// the miner is being torn down.
 	require.NoError(h, h.Backend.Stop(), "failed to stop chain backend")
 
+	h.stopSharedWalletDB()
+
 	// Finally, stop the miner.
 	h.miner.Stop()
 
@@ -295,10 +314,24 @@ func (h *HarnessTest) setUpChainClient() {
 	h.ChainClient = chainClient
 }
 
-// setUpWalletDB prepares a wallet database path for the configured test backend.
+// setUpWalletDB prepares a wallet db path for the configured backend.
 func (h *HarnessTest) setUpWalletDB() {
 	h.Helper()
 
 	dbDir := h.TempDir()
 	h.WalletDBPath = filepath.Join(dbDir, wallet.WalletDBName)
+
+	switch h.dbType {
+	case dbNameKvdb:
+		return
+
+	case dbNameSQLite:
+		h.walletSQLitePath = filepath.Join(dbDir, sqliteDBFilename)
+
+	case dbNamePostgres:
+		h.walletPostgresDSN = h.createPostgresDatabase()
+
+	default:
+		h.Fatalf("unknown wallet database backend %q", h.dbType)
+	}
 }

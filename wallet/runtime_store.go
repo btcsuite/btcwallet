@@ -133,7 +133,8 @@ func legacyKVDBConfig(cfg Config) kvdb.Config {
 // when the selected backend is SQL. The legacy kvdb backend reads wallet
 // metadata directly from walletdb and does not need a separate row.
 func createRuntimeWallet(ctx context.Context, cfg Config,
-	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) error {
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey,
+	encryptedSeed []byte) error {
 
 	runtimeCfg := cfg.DB.withDefaults()
 
@@ -160,7 +161,9 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 			_ = store.Close()
 		}()
 
-		return createRuntimeWalletWithStore(ctx, store, cfg, params, rootKey)
+		return createRuntimeWalletWithStore(
+			ctx, store, cfg, params, rootKey, encryptedSeed,
+		)
 
 	case DBBackendPostgres:
 		store, err := pg.NewStore(ctx, pg.Config{
@@ -176,7 +179,9 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 			_ = store.Close()
 		}()
 
-		return createRuntimeWalletWithStore(ctx, store, cfg, params, rootKey)
+		return createRuntimeWalletWithStore(
+			ctx, store, cfg, params, rootKey, encryptedSeed,
+		)
 
 	default:
 		return fmt.Errorf("%w: DB.Backend %q", ErrInvalidParam,
@@ -188,7 +193,7 @@ func createRuntimeWallet(ctx context.Context, cfg Config,
 // row with the same name is already present.
 func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 	cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey) error {
+	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) error {
 
 	_, err := store.GetWallet(ctx, cfg.Name)
 	if err == nil {
@@ -199,7 +204,9 @@ func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 		return fmt.Errorf("get runtime wallet: %w", err)
 	}
 
-	createParams, err := runtimeCreateWalletParams(cfg, params, rootKey)
+	createParams, err := runtimeCreateWalletParams(
+		cfg, params, rootKey, encryptedSeed,
+	)
 	if err != nil {
 		return err
 	}
@@ -215,7 +222,8 @@ func createRuntimeWalletWithStore(ctx context.Context, store db.Store,
 // runtimeCreateWalletParams converts wallet creation inputs into the SQL
 // runtime wallet metadata row.
 func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey) (db.CreateWalletParams, error) {
+	rootKey *hdkeychain.ExtendedKey, encryptedSeed []byte) (db.CreateWalletParams,
+	error) {
 
 	createParams := db.CreateWalletParams{
 		Name: cfg.Name,
@@ -227,7 +235,13 @@ func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
 		Birthday:       params.Birthday,
 	}
 
+	// A wallet created without a private root key (a rootless shell or
+	// xpub-only mode) cannot sign, so it must be recorded as watch-only
+	// regardless of the requested flag; otherwise a SQL load would mark its
+	// UTXOs spendable even though the wallet holds no signing key.
 	if rootKey == nil {
+		createParams.IsWatchOnly = true
+
 		return createParams, nil
 	}
 
@@ -244,6 +258,12 @@ func runtimeCreateWalletParams(cfg Config, params CreateWalletParams,
 	}
 
 	createParams.MasterPubKey = []byte(masterPubKey.String())
+
+	// Persist the encrypted master HD private key for spendable wallets so
+	// SQL-backed account derivation (GetEncryptedHDSeed) works.
+	if rootKey.IsPrivate() {
+		createParams.EncryptedMasterPrivKey = encryptedSeed
+	}
 
 	return createParams, nil
 }

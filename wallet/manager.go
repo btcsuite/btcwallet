@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 )
 
@@ -78,10 +79,18 @@ type CreateWalletParams struct {
 	// currently has no effect during wallet creation.
 	InitialAccounts []WatchOnlyAccount
 
-	// WatchOnly controls whether the resulting wallet is watch-only.
-	// - If true with Seed/XPrv input: Derives Master XPub, then discards
-	//   the private material.
-	// - If true with XPub/Shell input: No-op (already watch-only).
+	// WatchOnly controls whether the resulting wallet is watch-only. A
+	// watch-only wallet must be created from public-only key material, so
+	// WatchOnly=true is only valid with an XPub root (ModeImportExtKey) or a
+	// rootless shell (ModeShell).
+	// - If true with XPub/Shell input: the wallet is watch-only (the XPub case
+	//   simply records the wallet watch-only; the shell case holds no root).
+	// - If true with Seed/GenSeed or an XPrv root (ModeImportSeed,
+	//   ModeGenSeed, or ModeImportExtKey with a private key): rejected with
+	//   ErrWalletParams. These modes always yield a private master key, and
+	//   silently discarding it would build a spendable legacy manager while
+	//   recording the wallet watch-only. Neuter the key to an XPub and pass it
+	//   via ModeImportExtKey to create a watch-only wallet from such material.
 	WatchOnly bool
 
 	// Birthday is the wallet's birthday.
@@ -108,6 +117,61 @@ func validateInitialAccountsMode(params CreateWalletParams) error {
 	return fmt.Errorf("%w: cannot create a non-watch-only wallet with "+
 		"InitialAccounts; xpub-only imports require WatchOnly=true",
 		ErrWalletParams)
+}
+
+// validateInitialAccounts checks every initial account's extended public key
+// against the same rules importInitialAccounts later enforces, so a malformed
+// xpub fails the create before any store is written rather than after, where
+// it would leave a half-created wallet.
+func validateInitialAccounts(cfg Config, params CreateWalletParams) error {
+	for _, account := range params.InitialAccounts {
+		err := validateExtendedPubKey(account.XPub, true, cfg.ChainParams)
+		if err != nil {
+			return fmt.Errorf("invalid initial account %q: %w",
+				account.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// seedDefaultAccounts seeds account 0 for each default key scope of a freshly
+// created spendable SQL wallet. The legacy kvdb backend seeds these during
+// waddrmgr.Create, but the SQL create path inserts only wallet and secret
+// rows, so without this a SQL wallet cannot derive a normal receiving address.
+func seedDefaultAccounts(ctx context.Context, w *Wallet,
+	rootKey *hdkeychain.ExtendedKey, privatePassphrase []byte) error {
+
+	// Deriving and encrypting account keys requires the key vault's private
+	// crypto key, which is locked after load. We pass a negative timeout to
+	// disable the vault's auto-lock: this transient unlock is re-locked by
+	// the deferred Lock below.
+	err := w.keyVault.Unlock(ctx, privatePassphrase, -1)
+	if err != nil {
+		return fmt.Errorf("unlock key vault: %w", err)
+	}
+
+	// Lock is void and idempotent: the vault swallows an already-locked
+	// condition and logs any other failure internally.
+	defer w.keyVault.Lock()
+
+	deriveFn := newAccountDeriveFn(rootKey, w.keyVault, w.masterFingerprint)
+
+	for _, scope := range waddrmgr.DefaultKeyScopes {
+		_, err := w.store.CreateDerivedAccount(
+			ctx, db.CreateDerivedAccountParams{
+				WalletID: w.id,
+				Scope:    db.KeyScope(scope),
+				Name:     waddrmgr.DefaultAccountName,
+			}, deriveFn,
+		)
+		if err != nil {
+			return fmt.Errorf("create default account for scope "+
+				"%v: %w", scope, err)
+		}
+	}
+
+	return nil
 }
 
 // validate ensures that the parameters are consistent with the chosen
@@ -202,8 +266,9 @@ func NewManager() *Manager {
 
 // createLegacyStore creates the legacy kvdb compatibility store for a new
 // wallet.
-func createLegacyStore(cfg Config, params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey) error {
+func createLegacyStore(ctx context.Context, cfg Config,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) ([]byte,
+	error) {
 
 	createParams := kvdb.CreateLegacyWalletParams{
 		RootKey:           rootKey,
@@ -216,16 +281,52 @@ func createLegacyStore(cfg Config, params CreateWalletParams,
 	legacyStore, err := kvdb.CreateStore(
 		legacyKVDBConfig(cfg), createParams,
 	)
-	if err != nil {
-		return fmt.Errorf("create legacy store: %w", err)
+	switch {
+	// A legacy wallet already exists at this path. A previous Create that
+	// failed after this step (runtime create or initial-account import)
+	// leaves it behind; tolerate it so Create can be retried instead of
+	// being wedged by ErrAlreadyExists, mirroring the idempotent runtime
+	// create. waddrmgr.Create wraps the sentinel in a ManagerError several
+	// layers down and waddrmgr.IsError does not unwrap %w, so match with
+	// errors.As.
+	case isLegacyWalletAlreadyExists(err):
+		return nil, nil
+
+	case err != nil:
+		return nil, fmt.Errorf("create legacy store: %w", err)
+	}
+
+	// Capture the encrypted master HD private key the legacy create just
+	// persisted, so the runtime store can persist the same blob (the runtime
+	// key vault is backed by this legacy manager, so it decrypts unchanged).
+	// Watch-only wallets hold no such secret.
+	var encryptedSeed []byte
+	if !params.WatchOnly && rootKey != nil && rootKey.IsPrivate() {
+		encryptedSeed, err = legacyStore.Store.GetEncryptedHDSeed(ctx, 0)
+		if err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("read legacy master HD key: %w", err),
+				legacyStore.Close(),
+			)
+		}
 	}
 
 	err = legacyStore.Close()
 	if err != nil {
-		return fmt.Errorf("close legacy store: %w", err)
+		return nil, fmt.Errorf("close legacy store: %w", err)
 	}
 
-	return nil
+	return encryptedSeed, nil
+}
+
+// isLegacyWalletAlreadyExists reports whether err indicates the legacy
+// waddrmgr namespace was already initialized. The sentinel is wrapped in a
+// ManagerError several fmt layers down, so it must be matched with errors.As
+// rather than waddrmgr.IsError (which does not unwrap).
+func isLegacyWalletAlreadyExists(err error) bool {
+	var mErr waddrmgr.ManagerError
+
+	return errors.As(err, &mErr) && mErr.ErrorCode == waddrmgr.ErrAlreadyExists
 }
 
 // openLegacyStore opens the legacy kvdb compatibility store for an existing
@@ -306,14 +407,26 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	// Create the underlying legacy compatibility store structure.
-	err = createLegacyStore(cfg, params, rootKey)
+	// Prevalidate every initial account's extended key before any store is
+	// written, so a malformed xpub fails the create up front instead of
+	// leaving a half-created wallet that blocks a corrected retry.
+	err = validateInitialAccounts(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the underlying legacy compatibility store structure, capturing
+	// the encrypted master HD key it persisted so the runtime store can
+	// persist the same blob (F2).
+	encryptedSeed, err := createLegacyStore(
+		context.Background(), cfg, params, rootKey,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
 	err = createRuntimeWallet(
-		context.Background(), cfg, params, rootKey,
+		context.Background(), cfg, params, rootKey, encryptedSeed,
 	)
 	if err != nil {
 		return nil, err
@@ -323,6 +436,21 @@ func (m *Manager) Create(cfg Config,
 	w, err := m.Load(cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	// Seed the default accounts for spendable SQL wallets (F1). The kvdb
+	// backend already seeds account 0 per scope during legacy create; the
+	// SQL create path does not, so a fresh SQL wallet would otherwise fail
+	// to derive its first receiving address.
+	isKVDB := cfg.DB.withDefaults().Backend == DBBackendKVDB
+	spendable := !params.WatchOnly && rootKey != nil && rootKey.IsPrivate()
+	if !isKVDB && spendable {
+		err = seedDefaultAccounts(
+			context.Background(), w, rootKey, params.PrivatePassphrase,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("seed default accounts: %w", err)
+		}
 	}
 
 	// If we are in shell mode and have initial accounts, we import them now.
@@ -449,6 +577,20 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	w.sync = syncer
 	w.state = newWalletState(w.sync)
 
+	// Deregister the wallet from the cache once it stops, so a later Load
+	// rebuilds it with fresh stores instead of handing back a stopped
+	// wallet whose runtime stores are closed.
+	name := cfg.Name
+	w.onStopped = func() {
+		m.Lock()
+		// Only evict this exact instance; a concurrent Load may have
+		// already replaced it with a fresh wallet of the same name.
+		if m.wallets[name] == w {
+			delete(m.wallets, name)
+		}
+		m.Unlock()
+	}
+
 	// Register the wallet.
 	m.Lock()
 	m.wallets[cfg.Name] = w
@@ -482,6 +624,19 @@ func (m *Manager) prepareWalletCreation(cfg Config,
 	if !params.WatchOnly && rootKey != nil && !rootKey.IsPrivate() {
 		return nil, fmt.Errorf("%w: private key required for "+
 			"non-watch-only wallet", ErrWalletParams)
+	}
+
+	// Conversely, a watch-only wallet must not be backed by a private root
+	// key: legacy creation infers watch-only from a nil root key, so a
+	// private root would build a spendable legacy manager while the runtime
+	// store records the wallet as watch-only. ModeImportSeed and ModeGenSeed
+	// always derive a private master key, so WatchOnly=true is rejected for
+	// them too; create a watch-only wallet from an XPub (ModeImportExtKey) or
+	// a rootless shell (ModeShell) instead.
+	if params.WatchOnly && rootKey != nil && rootKey.IsPrivate() {
+		return nil, fmt.Errorf("%w: watch-only wallet requires an xpub "+
+			"or shell input; a seed or private root key is not "+
+			"allowed", ErrWalletParams)
 	}
 
 	return rootKey, nil

@@ -39,13 +39,9 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 	name := "itest-" + strings.ReplaceAll(h.Name(), "/", "_")
 
 	cfg := wallet.Config{
-		// Use the subtest-scoped DB path and chain client prepared by the
-		// harness.
-		DB: wallet.DBConfig{
-			KVDB: wallet.KVDBConfig{
-				DBPath: h.WalletDBPath,
-			},
-		},
+		// Use the subtest-scoped database config and chain client prepared by
+		// the harness.
+		DB:    h.WalletDBConfig(),
 		Chain: h.ChainClient,
 
 		// Keep network and startup behavior deterministic across tests.

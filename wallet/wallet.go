@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -419,6 +420,17 @@ type Wallet struct {
 	// cancel is the cancellation function for lifetimeCtx.
 	cancel context.CancelFunc
 
+	// onStopped, if set, is invoked once the wallet has fully stopped. The
+	// manager uses it to deregister a stopped wallet so a later Load
+	// rebuilds it with fresh stores rather than returning a closed one.
+	onStopped func()
+
+	// stopRequested records that Stop was called while the wallet was still
+	// Starting (and so could not be transitioned out of Starting). Start
+	// checks it after setup to abort instead of completing a start the
+	// caller already cancelled.
+	stopRequested atomic.Bool
+
 	// requestChan is the central communication channel for incoming
 	// lifecycle and authentication requests.
 	requestChan chan any
@@ -465,9 +477,43 @@ func (w *Wallet) ID() uint32 {
 	return w.id
 }
 
-// SyncedTo calls the `SyncedTo` method on the wallet's manager.
+// SyncedTo returns the wallet's current synced-to block.
 func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
+	stamp, ok := w.storeSyncedTo()
+	if ok {
+		return stamp
+	}
+
+	if w.addrStore == nil {
+		return waddrmgr.BlockStamp{Height: -1}
+	}
+
 	return w.addrStore.SyncedTo()
+}
+
+// storeSyncedTo returns the synced tip read from the runtime Store on non-kvdb
+// backends. The bool is false when the kvdb backend is selected or the Store
+// has no usable synced tip, so the caller falls back to the legacy manager.
+func (w *Wallet) storeSyncedTo() (waddrmgr.BlockStamp, bool) {
+	if w.store == nil || w.cfg.DB.withDefaults().Backend == DBBackendKVDB {
+		return waddrmgr.BlockStamp{}, false
+	}
+
+	info, err := w.store.GetWallet(context.Background(), w.cfg.Name)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, false
+	}
+
+	if info.SyncedTo == nil {
+		return waddrmgr.BlockStamp{Height: -1}, true
+	}
+
+	stamp, err := db.BlockStampFromBlock(info.SyncedTo)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, false
+	}
+
+	return stamp, true
 }
 
 // hasMinConfs checks whether a transaction at height txHeight has met minconf

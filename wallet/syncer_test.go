@@ -191,30 +191,12 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 	expectSyncedTip(store, tip)
 
-	// Mock retrieval of synced block hashes from the store for the last 10
-	// blocks.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-		StartHeight: 91,
-		EndHeight:   100,
-	}).Return(localBlocks, nil).Once()
-
-	// Mock retrieval of matching block hashes from the remote chain.
-	remoteHashes := make([]chainhash.Hash, 10)
-	for i := range 10 {
-		remoteHashes[i] = chainhash.Hash{byte(91 + i)}
-	}
-
+	// Mock retrieval of a matching synced tip from the remote chain. A current
+	// tip match proves its ancestors are also on the main chain, so no local
+	// history range read is necessary.
 	mockChain.On(
-		"GetBlockHashes", int64(91), int64(100),
-	).Return(remoteHashes, nil).Once()
+		"GetBlockHashes", int64(100), int64(100),
+	).Return([]chainhash.Hash{tip.Hash}, nil).Once()
 
 	// Act & Assert: Verify that checkRollback completes without error
 	// and no rollback is triggered when hashes match.
@@ -240,6 +222,9 @@ func TestCheckRollbackDetected(t *testing.T) {
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 	expectSyncedTip(store, tip)
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{0xff}}, nil,
+	).Once()
 
 	// Mock retrieval of synced block hashes from the store for blocks 91
 	// to 100.
@@ -309,7 +294,10 @@ func TestInitChainSync(t *testing.T) {
 	// Mock backend synchronization check.
 	mockChain.On("IsCurrent").Return(true).Once()
 
-	// Mock block notification registration.
+	// Registration loads the wallet's existing scan targets, then registers
+	// them with the backend while enabling block notifications.
+	expectEmptyScanData(store)
+	mockChain.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
 	// Mock the synced tip read at the start of the rollback check. A height
@@ -969,6 +957,18 @@ func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
 // tip for any wallet name. A height of -1 is encoded as a nil SyncedTo,
 // matching how an unsynced wallet is represented; any other height is encoded
 // as a stored block.
+// expectEmptyScanData stubs the store reads loadWalletScanData performs so an
+// init-focused test can exercise initChainSync's pre-sync address registration
+// without seeding real scan targets.
+func expectEmptyScanData(store *walletmock.Store) {
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo{}, nil).Maybe()
+	store.On("ListAddresses", mock.Anything, mock.Anything).
+		Return(page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
+	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).
+		Return([]db.UtxoInfo{}, nil).Maybe()
+}
+
 func expectSyncedTip(store *walletmock.Store, tip waddrmgr.BlockStamp) {
 	var info db.WalletInfo
 	if tip.Height >= 0 {
@@ -2788,6 +2788,92 @@ func TestStoreScanUnspent(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestInitChainSyncWatchesUnspentForSpends verifies that initChainSync seeds
+// the backend watch list with the wallet's existing unspent outpoints, not
+// only its addresses. The live notification path inspects transaction outputs
+// only, so without registering the outpoints a live spend of an existing UTXO
+// would be filtered out by the backend and missed. The store-backed startup
+// therefore registers the outpoints through Rescan, mirroring the legacy
+// initial-sync rescan.
+func TestInitChainSyncWatchesUnspentForSpends(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a store-backed syncer whose store reports one existing
+	// unspent output paying a standard address.
+	const walletID uint32 = 18
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Chain: mockChain, ChainParams: &chainParams}, nil, nil,
+		&mockTxPublisher{}, store, walletID,
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x18}, Index: 7}
+
+	// The scan-data reads return no accounts or addresses but one watched
+	// output, so the registration path must carry that outpoint to the
+	// backend.
+	store.On("ListAccounts", mock.Anything, mock.Anything).
+		Return([]db.AccountInfo{}, nil).Maybe()
+	store.On("ListAddresses", mock.Anything, mock.Anything).
+		Return(page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
+	store.On("ListOutputsToWatch", mock.Anything, walletID).Return(
+		[]db.UtxoInfo{{
+			OutPoint: outpoint,
+			Amount:   btcutil.Amount(1000),
+			PkScript: pkScript,
+			Height:   42,
+		}}, nil,
+	).Once()
+
+	tip := waddrmgr.BlockStamp{
+		Hash:   chainhash.Hash{0xab},
+		Height: 100,
+	}
+	expectSyncedTip(store, tip)
+
+	mockChain.On("IsCurrent").Return(true).Once()
+
+	// The rollback check reads the remote hash at the synced height; a match
+	// keeps the tip on the main chain so initChainSync proceeds to register
+	// the scan targets.
+	mockChain.On(
+		"GetBlockHashes", int64(100), int64(100),
+	).Return([]chainhash.Hash{tip.Hash}, nil).Once()
+
+	// Assert the registration goes through Rescan with the existing outpoint
+	// watched from the synced tip. NotifyReceived is deliberately not stubbed
+	// so the address-only path (which drops the outpoint) fails the test.
+	mockChain.On(
+		"Rescan", &tip.Hash, mock.Anything,
+		mock.MatchedBy(func(ops map[wire.OutPoint]address.Address) bool {
+			watched, ok := ops[outpoint]
+
+			return ok && watched.String() == addr.String() &&
+				len(ops) == 1
+		}),
+	).Return(nil).Once()
+	mockChain.On("NotifyBlocks").Return(nil).Once()
+
+	// Act: Run the initial chain synchronization setup.
+	err = s.initChainSync(t.Context())
+
+	// Assert: Setup succeeds and the outpoint was registered for spend
+	// watching.
+	require.NoError(t, err)
+	mockChain.AssertExpectations(t)
+	store.AssertExpectations(t)
+}
+
 // TestLoadWalletScanDataStore verifies wallet scan-data loading uses the store
 // when store wiring is available.
 func TestLoadWalletScanDataStore(t *testing.T) {
@@ -3084,21 +3170,13 @@ func TestSyncerFullRun(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	// Mock rollback check dependencies. The store and the remote chain
-	// agree, so no rollback occurs.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{Height: i})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		localBlocks, nil).Maybe()
-
-	// Mock remote hashes for rollback check (batch size 10).
-	remoteHashes := make([]chainhash.Hash, 10)
-	mockChain.On(
-		"GetBlockHashes", mock.Anything, mock.Anything,
-	).Return(remoteHashes, nil).Maybe()
+	// Mock rollback check dependencies. The store and the remote chain agree
+	// on the synced tip, so no rollback occurs.
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{}}, nil,
+	).Once()
+	expectEmptyScanData(store)
+	mockChain.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
 	// Mock advancement to the current best block.
@@ -3152,19 +3230,10 @@ func TestProcessChainUpdate_Disconnect(t *testing.T) {
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	// The store and the remote chain agree (all-zero hashes), so the
-	// rollback check finds no reorg.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{Height: i})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		localBlocks, nil).Once()
-
-	remoteHashes := make([]chainhash.Hash, 10)
-	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
-		remoteHashes, nil,
+	// The store and the remote chain agree on the synced tip, so the rollback
+	// check finds no reorg.
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{}}, nil,
 	).Once()
 
 	// Act & Assert: Process a BlockDisconnected notification and verify
@@ -3479,7 +3548,13 @@ func TestInitChainSync_Errors(t *testing.T) {
 		)
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
-		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+		expectSyncedTip(store, waddrmgr.BlockStamp{
+			Hash:   chainhash.Hash{0x01},
+			Height: 100,
+		})
+		mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+			[]chainhash.Hash{{0xff}}, nil,
+		).Once()
 		store.On(
 			"ListSyncedBlocks", mock.Anything, mock.Anything,
 		).Return(([]db.Block)(nil), errDBMock).Once()
@@ -3505,7 +3580,9 @@ func TestInitChainSync_Errors(t *testing.T) {
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
 		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
-		mockChain.On("NotifyBlocks").Return(errNotify).Once()
+		expectEmptyScanData(store)
+		mockChain.On("NotifyReceived", mock.Anything).
+			Return(errNotify).Once()
 
 		// Act: Attempt initialization.
 		err := s.initChainSync(t.Context())
@@ -3549,6 +3626,9 @@ func TestSyncerRun_InitError(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{0xff}}, nil,
+	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errDBMock).Once()
 
@@ -3576,30 +3656,12 @@ func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
 		store, uint32(0),
 	)
 
-	// 1. BlockDisconnected. The store and the remote chain agree on blocks
-	// 91..100, so the rollback check finds no reorg.
+	// 1. BlockDisconnected. The store and the remote chain agree on the
+	// synced tip, so the rollback check finds no reorg.
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-		StartHeight: 91,
-		EndHeight:   100,
-	}).Return(localBlocks, nil).Once()
-
-	remoteHashes := make([]chainhash.Hash, 10)
-	for i := range 10 {
-		remoteHashes[i] = chainhash.Hash{byte(91 + i)}
-	}
-
-	mockChain.On("GetBlockHashes", int64(91), int64(100)).Return(
-		remoteHashes, nil).Once()
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{}}, nil,
+	).Once()
 
 	// Act: Handle BlockDisconnected.
 	err := s.handleChainUpdate(
@@ -3960,12 +4022,19 @@ func TestCheckRollback_DBError(t *testing.T) {
 
 	// Arrange: Setup a store-backed syncer where the synced-block read
 	// fails during a rollback check.
+	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, nil, store, 0,
+		Config{Chain: mockChain}, nil, nil, nil, store, 0,
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   chainhash.Hash{0x01},
+		Height: 100,
+	})
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{0xff}}, nil,
+	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errBlockHash).Once()
 
@@ -3991,9 +4060,7 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	)
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		[]db.Block{}, nil).Maybe()
-	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
 		([]chainhash.Hash)(nil), errRemote).Once()
 
 	// Act: Perform a rollback check.
@@ -4032,7 +4099,8 @@ func TestFilterBatch_NilFilter(t *testing.T) {
 func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer where block notification fails.
+	// Arrange: Setup a store-backed syncer where address registration
+	// succeeds but the subsequent block-notification request fails.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
@@ -4041,15 +4109,18 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	)
 
 	mockChain.On("IsCurrent").Return(true).Once()
+	mockChain.On("NotifyReceived", mock.Anything).Return(nil).Once()
 	mockChain.On("NotifyBlocks").Return(errNotify).Once()
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
+	expectEmptyScanData(store)
 
 	// Act: Attempt chain sync initialization.
 	err := s.initChainSync(t.Context())
 
-	// Assert: Verify failure.
+	// Assert: Verify failure surfaces the block-notification error.
 	require.ErrorContains(t, err, "unable to start block notifications")
+	mockChain.AssertExpectations(t)
 }
 
 // TestScanBatchHeadersOnly_Errors verifies error paths.
@@ -4115,11 +4186,16 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 		store, 0,
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 101})
-
 	hashA := chainhash.Hash{0x0A}
 	hashB := chainhash.Hash{0x0B}
 	hashC := chainhash.Hash{0x0C}
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   hashB,
+		Height: 101,
+	})
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
+		[]chainhash.Hash{hashC}, nil,
+	).Once()
 
 	// The store returns the local synced blocks for the range [92, 101]
 	// ascending: heights 92..99 are unique fillers, height 100 is hashA and
@@ -4648,21 +4724,9 @@ func TestProcessChainUpdate(t *testing.T) {
 				expectSyncedTip(
 					store, waddrmgr.BlockStamp{Height: 100},
 				)
-
-				localBlocks := make([]db.Block, 0, 10)
-				for i := uint32(91); i <= 100; i++ {
-					localBlocks = append(localBlocks, db.Block{
-						Height: i,
-					})
-				}
-				store.On(
-					"ListSyncedBlocks", mock.Anything, mock.Anything,
-				).Return(localBlocks, nil).Once()
-
-				remoteHashes := make([]chainhash.Hash, 10)
-				c.On(
-					"GetBlockHashes", mock.Anything, mock.Anything,
-				).Return(remoteHashes, nil).Once()
+				c.On("GetBlockHashes", int64(100), int64(100)).Return(
+					[]chainhash.Hash{{}}, nil,
+				).Once()
 			},
 		},
 	}
@@ -5193,12 +5257,19 @@ func TestHandleChainUpdate_Error(t *testing.T) {
 
 	// Arrange: Setup a store-backed syncer where chain update processing
 	// fails because the synced-block read errors.
+	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, nil, store, uint32(0),
+		Config{Chain: mockChain}, nil, nil, nil, store, uint32(0),
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   chainhash.Hash{0x01},
+		Height: 100,
+	})
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{0xff}}, nil,
+	).Once()
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errDBFail).Once()
 
@@ -5923,6 +5994,9 @@ func TestCheckRollbackStoreSyncedTip(t *testing.T) {
 				Height: 100,
 			},
 		}, nil,
+	).Once()
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		[]chainhash.Hash{{0xff}}, nil,
 	).Once()
 
 	// Local hashes for heights 91..100 come from the Store, ascending.
