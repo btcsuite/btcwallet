@@ -238,10 +238,13 @@ type Querier interface {
 	//   considers outputs whose parent status is `pending` or `published`.
 	// - Returns the nullable `spent_by_tx_id` column so callers can distinguish
 	//   between an external/unknown parent and a wallet-owned conflict.
+	// - Returns the owner address script so duplicate credit replay can verify it
+	//   matches the already-recorded UTXO rather than only checking outpoint
+	//   existence.
 	// Performance:
 	// - Targets one wallet-scoped outpoint through the unique `(tx_id,
 	//   output_index)` key after the parent hash lookup.
-	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (sql.NullInt64, error)
+	GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error)
 	GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error)
 	GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error)
@@ -321,6 +324,17 @@ type Querier interface {
 	ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error)
 	// Lists all accounts for a wallet and scope tuple.
 	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
+	// Lists active wallet transaction rows and their raw transaction bytes.
+	//
+	// How:
+	// - Reads from transactions only and filters to rows that may currently spend
+	//   wallet-owned outputs (`pending` and `published`).
+	// - Returns the primary key, transaction hash, block assignment, and raw
+	//   transaction bytes so callers can rebuild input outpoints not normalized in
+	//   the SQL schema.
+	// Performance:
+	// - Matches the wallet/status index used by active wallet history paths.
+	ListActiveTransactionRaws(ctx context.Context, walletID int64) ([]ListActiveTransactionRawsRow, error)
 	// Lists all currently active leases for a wallet.
 	//
 	// How:

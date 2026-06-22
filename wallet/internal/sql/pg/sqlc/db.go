@@ -204,6 +204,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listAccountsByWalletScopeStmt, err = db.PrepareContext(ctx, ListAccountsByWalletScope); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAccountsByWalletScope: %w", err)
 	}
+	if q.listActiveTransactionRawsStmt, err = db.PrepareContext(ctx, ListActiveTransactionRaws); err != nil {
+		return nil, fmt.Errorf("error preparing query ListActiveTransactionRaws: %w", err)
+	}
 	if q.listActiveUtxoLeasesStmt, err = db.PrepareContext(ctx, ListActiveUtxoLeases); err != nil {
 		return nil, fmt.Errorf("error preparing query ListActiveUtxoLeases: %w", err)
 	}
@@ -599,6 +602,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listAccountsByWalletScopeStmt: %w", cerr)
 		}
 	}
+	if q.listActiveTransactionRawsStmt != nil {
+		if cerr := q.listActiveTransactionRawsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listActiveTransactionRawsStmt: %w", cerr)
+		}
+	}
 	if q.listActiveUtxoLeasesStmt != nil {
 		if cerr := q.listActiveUtxoLeasesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listActiveUtxoLeasesStmt: %w", cerr)
@@ -848,6 +856,7 @@ type Queries struct {
 	listAccountsByWalletStmt                    *sql.Stmt
 	listAccountsByWalletAndNameStmt             *sql.Stmt
 	listAccountsByWalletScopeStmt               *sql.Stmt
+	listActiveTransactionRawsStmt               *sql.Stmt
 	listActiveUtxoLeasesStmt                    *sql.Stmt
 	listAddressTypesStmt                        *sql.Stmt
 	listAddressesByAccountStmt                  *sql.Stmt
@@ -944,6 +953,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAccountsByWalletStmt:                    q.listAccountsByWalletStmt,
 		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,
 		listAccountsByWalletScopeStmt:               q.listAccountsByWalletScopeStmt,
+		listActiveTransactionRawsStmt:               q.listActiveTransactionRawsStmt,
 		listActiveUtxoLeasesStmt:                    q.listActiveUtxoLeasesStmt,
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listAddressesByAccountStmt:                  q.listAddressesByAccountStmt,

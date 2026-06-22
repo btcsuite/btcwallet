@@ -145,6 +145,28 @@ WHERE
     AND t.tx_status IN (0, 1)
 ORDER BY t.received_time DESC, t.id DESC;
 
+-- name: ListActiveTransactionRaws :many
+-- Lists active wallet transaction rows and their raw transaction bytes.
+--
+-- How:
+-- - Reads from transactions only and filters to rows that may currently spend
+--   wallet-owned outputs (`pending` and `published`).
+-- - Returns the primary key, transaction hash, block assignment, and raw
+--   transaction bytes so callers can rebuild input outpoints not normalized in
+--   the SQL schema.
+-- Performance:
+-- - Matches the wallet/status index used by active wallet history paths.
+SELECT
+    t.id,
+    t.tx_hash,
+    t.block_height,
+    t.raw_tx
+FROM transactions AS t
+WHERE
+    t.wallet_id = ?
+    AND t.tx_status IN (0, 1)
+ORDER BY t.id;
+
 -- name: ListTransactionsByHeightRange :many
 -- Lists all confirmed transactions for a wallet in the provided height range.
 --
