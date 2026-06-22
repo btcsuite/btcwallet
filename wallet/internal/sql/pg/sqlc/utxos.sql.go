@@ -398,11 +398,13 @@ func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpoi
 }
 
 const GetUtxoSpendByOutpoint = `-- name: GetUtxoSpendByOutpoint :one
-SELECT u.spent_by_tx_id
+SELECT u.spent_by_tx_id, a.script_pub_key
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id
 WHERE
     t.wallet_id = $1
+    AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
     AND t.tx_status IN (0, 1)
@@ -414,6 +416,11 @@ type GetUtxoSpendByOutpointParams struct {
 	OutputIndex int32
 }
 
+type GetUtxoSpendByOutpointRow struct {
+	SpentByTxID  sql.NullInt64
+	ScriptPubKey []byte
+}
+
 // Returns the current spend edge for one wallet-owned outpoint.
 //
 // How:
@@ -421,15 +428,18 @@ type GetUtxoSpendByOutpointParams struct {
 //     considers outputs whose parent status is `pending` or `published`.
 //   - Returns the nullable `spent_by_tx_id` column so callers can distinguish
 //     between an external/unknown parent and a wallet-owned conflict.
+//   - Returns the owner address script so duplicate credit replay can verify it
+//     matches the already-recorded UTXO rather than only checking outpoint
+//     existence.
 //
 // Performance:
 //   - Targets one wallet-scoped outpoint through the unique `(tx_id,
 //     output_index)` key after the parent hash lookup.
-func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (sql.NullInt64, error) {
+func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error) {
 	row := q.queryRow(ctx, q.getUtxoSpendByOutpointStmt, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
-	var spent_by_tx_id sql.NullInt64
-	err := row.Scan(&spent_by_tx_id)
-	return spent_by_tx_id, err
+	var i GetUtxoSpendByOutpointRow
+	err := row.Scan(&i.SpentByTxID, &i.ScriptPubKey)
+	return i, err
 }
 
 const HasInvalidWalletUtxoByOutpoint = `-- name: HasInvalidWalletUtxoByOutpoint :one
