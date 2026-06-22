@@ -780,8 +780,17 @@ type CreateTxExistingTarget struct {
 	// HasBlock reports whether the row already has confirming block metadata.
 	HasBlock bool
 
+	// BlockHeight is the confirmed block height when HasBlock is true.
+	BlockHeight *uint32
+
+	// BlockHash is the confirmed block hash when HasBlock is true.
+	BlockHash *chainhash.Hash
+
 	// IsCoinbase reports whether the row records coinbase history.
 	IsCoinbase bool
+
+	// Label is the stored user-visible transaction label.
+	Label string
 }
 
 // ErrCreateTxExistingNotFound reports that CreateTx found no existing row.
@@ -896,6 +905,72 @@ func checkReuseCreateTx(req CreateTxRequest,
 	}
 
 	return true
+}
+
+// createTxBlockMatches reports whether a stored row carries the same block
+// assignment as the incoming CreateTx observation.
+func createTxBlockMatches(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Block == nil {
+		return !existing.HasBlock
+	}
+
+	if !existing.HasBlock || existing.BlockHeight == nil ||
+		existing.BlockHash == nil {
+
+		return false
+	}
+
+	return *existing.BlockHeight == req.Params.Block.Height &&
+		*existing.BlockHash == req.Params.Block.Hash
+}
+
+// checkIdempotentCreateTx reports whether the incoming CreateTx observation is
+// already fully reflected by the stored row.
+func checkIdempotentCreateTx(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Status != existing.Status {
+		return false
+	}
+
+	if req.IsCoinbase != existing.IsCoinbase {
+		return false
+	}
+
+	if req.Params.Label != existing.Label {
+		return false
+	}
+
+	return createTxBlockMatches(req, existing)
+}
+
+// validateCreateTxCreditRequests validates every caller-supplied credit before
+// an existing tx row is treated as an idempotent duplicate.
+func validateCreateTxCreditRequests(req CreateTxRequest) error {
+	for index, addr := range req.Params.Credits {
+		if addr == nil {
+			continue
+		}
+
+		err := ValidateCreditAddrMembership(
+			addr, req.Params.Tx.TxOut[index].PkScript,
+		)
+		if err != nil {
+			return fmt.Errorf("credit output %d: %w", index, err)
+		}
+	}
+
+	return nil
+}
+
+// canIgnoreUnminedConfirmedDuplicate reports whether an unmined observation may
+// be ignored because the same transaction is already recorded as confirmed.
+func canIgnoreUnminedConfirmedDuplicate(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	return req.Params.Block == nil && existing.HasBlock
 }
 
 // loadCreateTxExisting resolves any wallet-scoped row already stored for the
@@ -1047,6 +1122,48 @@ func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	return nil
 }
 
+// ReplaceUnminedTxConflicts rewrites direct unmined conflict roots displaced by
+// the provided replacement transaction.
+//
+// Callers use this when the direct conflict roots were discovered outside the
+// normal spend-edge lookup path, such as when a parent credit is learned after
+// its children have already been stored as external-input spends. The function
+// preserves the standard replacement ordering: discover descendants from a
+// stable graph snapshot, mark direct roots replaced, then mark dependent
+// descendants failed.
+func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
+	rootIDs []int64, rootHashes []chainhash.Hash, replacementTxID int64,
+	ops CreateTxOps) error {
+
+	if len(rootIDs) == 0 {
+		return nil
+	}
+
+	if len(rootIDs) != len(rootHashes) {
+		return fmt.Errorf("%w: conflict roots and hashes differ",
+			ErrInvalidParam)
+	}
+
+	descendantIDs, err := collectConflictDescendants(
+		ctx, walletID, rootHashes, rootIDs, ops,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = handleRootTxns(ctx, walletID, rootIDs, replacementTxID, ops)
+	if err != nil {
+		return err
+	}
+
+	err = handleTxDescendants(ctx, walletID, descendantIDs, ops)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // insertCreateTx completes the fresh-Insert CreateTx path.
 //
 // The order is important:
@@ -1075,21 +1192,93 @@ func insertCreateTx(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	// Credits only describe outputs created by the new tx itself, so they do
-	// not interfere with conflict discovery. Keep them after replacement
-	// handling so the branch rewrite stays grouped with the shared-input
-	// reconciliation.
-	err = ops.InsertCredits(ctx, req, txID)
+	err = recordCreateTxEdges(ctx, req, txID, ops)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// recordCreateTxEdges records wallet-owned credits and spent-input edges for a
+// transaction row that already exists in the backend.
+func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
+	ops CreateTxOps) error {
+
+	// Credits only describe outputs created by the tx itself, so they do not
+	// interfere with conflict discovery. Keep them after replacement handling
+	// so the branch rewrite stays grouped with the shared-input reconciliation.
+	err := ops.InsertCredits(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx credits: %w", err)
 	}
 
-	// Claim wallet-owned parent inputs last. This is the write that makes the
-	// new tx the recorded spender of the shared parents, so doing it earlier
-	// would hide the displaced unmined branch from the replacement walk.
+	// Claim wallet-owned parent inputs last. This is the write that makes this
+	// tx the recorded spender of the shared parents, so doing it earlier would
+	// hide a displaced unmined branch from the replacement walk.
 	err = ops.MarkInputsSpent(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx spends: %w", err)
+	}
+
+	return nil
+}
+
+// handleExistingCreateTx handles a CreateTx request for a transaction hash that
+// already has a wallet-scoped row.
+func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	if canIgnoreUnminedConfirmedDuplicate(req, existing) {
+		return nil
+	}
+
+	if checkIdempotentCreateTx(req, existing) {
+		return replayIdempotentCreateTx(ctx, req, existing, ops)
+	}
+
+	if !checkReuseCreateTx(req, existing) {
+		return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxAlreadyExists)
+	}
+
+	err := ops.ConfirmExisting(ctx, req, existing)
+	if err != nil {
+		return fmt.Errorf("confirm existing tx: %w", err)
+	}
+
+	err = handleTxConflicts(ctx, req, existing.ID, ops)
+	if err != nil {
+		return err
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay confirmed tx edges: %w", err)
+	}
+
+	return nil
+}
+
+// replayIdempotentCreateTx validates and records any edge writes that an
+// idempotent duplicate transaction notification may still need.
+func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	err := validateCreateTxCreditRequests(req)
+	if err != nil {
+		return err
+	}
+
+	if req.Params.Block != nil {
+		err = ops.PrepareBlock(ctx, req)
+		if err != nil {
+			return fmt.Errorf("prepare duplicate block assignment: %w", err)
+		}
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay duplicate tx edges: %w", err)
 	}
 
 	return nil
@@ -1110,25 +1299,16 @@ func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	if foundExisting {
-		if !checkReuseCreateTx(req, *existing) {
-			return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxAlreadyExists)
-		}
-
-		err = ops.ConfirmExisting(ctx, req, *existing)
+	if !foundExisting {
+		err = ops.PrepareBlock(ctx, req)
 		if err != nil {
-			return fmt.Errorf("confirm existing tx: %w", err)
+			return fmt.Errorf("prepare create block assignment: %w", err)
 		}
 
-		return nil
+		return insertCreateTx(ctx, req, ops)
 	}
 
-	err = ops.PrepareBlock(ctx, req)
-	if err != nil {
-		return fmt.Errorf("prepare create block assignment: %w", err)
-	}
-
-	return insertCreateTx(ctx, req, ops)
+	return handleExistingCreateTx(ctx, req, *existing, ops)
 }
 
 // validateUpdateTxParams checks that UpdateTx received at least one mutable
