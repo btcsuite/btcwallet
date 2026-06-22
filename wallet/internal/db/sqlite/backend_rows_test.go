@@ -66,7 +66,7 @@ func TestCreateTxOpsAdditionalBranches(t *testing.T) {
 	conflictOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlc.New(rowDBTX{
-				row:      newRow(t, "SELECT ?", int64(5)),
+				row:      newRow(t, "SELECT ?, ?", int64(5), []byte{1}),
 				queryErr: errDummy,
 			}),
 		},
