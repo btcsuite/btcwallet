@@ -635,6 +635,7 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE a.id = $1
+FOR UPDATE OF a
 `
 
 type GetAccountPropsByIdRow struct {
@@ -657,6 +658,71 @@ type GetAccountPropsByIdRow struct {
 func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error) {
 	row := q.queryRow(ctx, q.getAccountPropsByIdStmt, GetAccountPropsById, id)
 	var i GetAccountPropsByIdRow
+	err := row.Scan(
+		&i.AccountNumber,
+		&i.AccountName,
+		&i.IsDerived,
+		&i.PublicKey,
+		&i.MasterFingerprint,
+		&i.CreatedAt,
+		&i.Purpose,
+		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.WalletIsWatchOnly,
+	)
+	return i, err
+}
+
+const GetAccountPropsByWalletAndId = `-- name: GetAccountPropsByWalletAndId :one
+SELECT
+    a.account_number,
+    a.account_name,
+    a.is_derived,
+    a.public_key,
+    a.master_fingerprint,
+    a.created_at,
+    ks.purpose,
+    ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    w.is_watch_only AS wallet_is_watch_only
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+WHERE a.wallet_id = $1 AND a.id = $2
+FOR UPDATE OF a
+`
+
+type GetAccountPropsByWalletAndIdParams struct {
+	WalletID int64
+	ID       int64
+}
+
+type GetAccountPropsByWalletAndIdRow struct {
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	IsDerived         bool
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	InternalTypeID    int16
+	ExternalTypeID    int16
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	WalletIsWatchOnly bool
+}
+
+// Returns full account properties by wallet id and account id.
+func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccountPropsByWalletAndIdParams) (GetAccountPropsByWalletAndIdRow, error) {
+	row := q.queryRow(ctx, q.getAccountPropsByWalletAndIdStmt, GetAccountPropsByWalletAndId, arg.WalletID, arg.ID)
+	var i GetAccountPropsByWalletAndIdRow
 	err := row.Scan(
 		&i.AccountNumber,
 		&i.AccountName,
