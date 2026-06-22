@@ -1,6 +1,7 @@
 package kvdb
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -399,6 +400,474 @@ func TestInvalidateUnminedTxRejectsConfirmed(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, db.ErrInvalidateTx)
+}
+
+// TestRollbackToBlockMovesConfirmedTxToUnmined verifies that kvdb.Store rolls
+// back legacy transaction records from the requested height.
+func TestRollbackToBlockMovesConfirmedTxToUnmined(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	rec := insertConfirmedTx(t, dbConn, txStore, 144)
+
+	err := store.RollbackToBlock(t.Context(), 144)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &rec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, int32(-1), details.Block.Height)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockHeightZeroResetsSyncTip verifies that a rollback to height
+// zero resets the wallet sync tip back to the stored start block instead of
+// leaving a stale tip after the transaction block records are removed. There
+// is no fork block at height-1 to rewind to, so the store must call
+// SetSyncedTo(nil), matching the SQL backends, which clamp the synced height to
+// NULL for a rollback to zero.
+func TestRollbackToBlockHeightZeroResetsSyncTip(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	// The address manager reports a synced tip above genesis so the rollback
+	// to zero has a stale tip to clear. SetSyncedTo(nil) is the reset to the
+	// start block; the rollback must invoke it rather than skip the rewind.
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	})
+	addrStore.On("SetSyncedTo", mock.Anything, (*waddrmgr.BlockStamp)(nil)).
+		Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 0)
+	require.NoError(t, err)
+
+	// The reset to the start block ran with a nil blockstamp, so no stale
+	// live sync tip survives the rollback.
+	addrStore.AssertCalled(
+		t, "SetSyncedTo", mock.Anything, (*waddrmgr.BlockStamp)(nil),
+	)
+}
+
+// TestRollbackToBlockRewindsSyncTipWithForkTimestamp verifies non-zero
+// rollbacks use the surviving fork block's timestamp when wtxmgr has metadata
+// for that block.
+func TestRollbackToBlockRewindsSyncTipWithForkTimestamp(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	forkHeight := int32(9)
+	forkHash := chainhash.Hash{31, byte(forkHeight)}
+	forkTimestamp := time.Unix(1710002000, 0)
+
+	insertConfirmedTx(t, dbConn, txStore, forkHeight)
+
+	currentTimestamp := time.Unix(1710004100, 0)
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: currentTimestamp,
+	})
+	addrStore.On("BlockHash", mock.Anything, int32(9)).Return(
+		&forkHash, nil,
+	)
+	addrStore.On(
+		"SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs != nil && bs.Height == 9 &&
+				bs.Hash == forkHash &&
+				bs.Timestamp.Equal(forkTimestamp)
+		}),
+	).Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockRewindsSyncTipToSparseFork verifies that rollback finds
+// the greatest retained block below the rollback boundary for sync metadata
+// without lowering the transaction rollback boundary.
+func TestRollbackToBlockRewindsSyncTipToSparseFork(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	forkHeight := int32(7)
+	forkHash := chainhash.Hash{31, byte(forkHeight)}
+	forkTimestamp := time.Unix(1710002000, 0)
+
+	insertConfirmedTx(t, dbConn, txStore, forkHeight)
+	retainedRec := insertConfirmedTxWithSeed(t, dbConn, txStore, 8, 80)
+	rolledBackRec := insertConfirmedTxWithSeed(t, dbConn, txStore, 10, 100)
+
+	currentTimestamp := time.Unix(1710004100, 0)
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	t.Cleanup(func() {
+		addrStore.AssertExpectations(t)
+	})
+
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: currentTimestamp,
+	}).Once()
+
+	missingHash := &chainhash.Hash{}
+	missingErr := waddrmgr.ManagerError{
+		ErrorCode:   waddrmgr.ErrBlockNotFound,
+		Description: "block not found",
+	}
+	addrStore.On("BlockHash", mock.Anything, int32(9)).Return(
+		missingHash, missingErr,
+	).Once()
+	addrStore.On("BlockHash", mock.Anything, int32(8)).Return(
+		missingHash, missingErr,
+	).Once()
+	addrStore.On("BlockHash", mock.Anything, forkHeight).Return(
+		&forkHash, nil,
+	).Once()
+	addrStore.On(
+		"SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs != nil && bs.Height == forkHeight &&
+				bs.Hash == forkHash &&
+				bs.Timestamp.Equal(forkTimestamp)
+		}),
+	).Return(nil).Once()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &retainedRec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, int32(8), details.Block.Height)
+
+		details, err = txStore.TxDetails(ns, &rolledBackRec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, int32(-1), details.Block.Height)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockRewindsSyncTipWithoutForkTimestamp verifies that a sparse
+// fork block with no tx-store metadata does not inherit the disconnected tip's
+// timestamp.
+func TestRollbackToBlockRewindsSyncTipWithoutForkTimestamp(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	forkHeight := int32(9)
+	forkHash := chainhash.Hash{90}
+	currentTimestamp := time.Unix(1710004100, 0)
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: currentTimestamp,
+	})
+	addrStore.On("BlockHash", mock.Anything, forkHeight).Return(
+		&forkHash, nil,
+	)
+	addrStore.On(
+		"SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs != nil && bs.Height == forkHeight &&
+				bs.Hash == forkHash &&
+				bs.Timestamp.Equal(time.Unix(0, 0).UTC())
+		}),
+	).Return(nil)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockRewindsBirthdayBlock verifies that rollback rewrites a
+// birthday block at the disconnected height to the retained fork block.
+func TestRollbackToBlockRewindsBirthdayBlock(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	t.Cleanup(addrStore.Close)
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	forkHeight := int32(9)
+	forkHash := chainhash.Hash{31, byte(forkHeight)}
+	forkTimestamp := time.Unix(1710002000, 0)
+
+	insertConfirmedTx(t, dbConn, txStore, forkHeight)
+
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	birthdayBlock := waddrmgr.BlockStamp{
+		Hash:      currentTip.Hash,
+		Height:    currentTip.Height,
+		Timestamp: currentTip.Timestamp,
+	}
+	writeSyncedTo(t, dbConn, addrStore, waddrmgr.BlockStamp{
+		Hash:      forkHash,
+		Height:    forkHeight,
+		Timestamp: forkTimestamp,
+	})
+	writeSyncedTo(t, dbConn, addrStore, currentTip)
+	writeBirthdayBlock(t, dbConn, addrStore, birthdayBlock, true)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.NoError(t, err)
+
+	rewoundBlock, verified := readBirthdayBlock(t, dbConn, addrStore)
+	require.True(t, verified)
+	require.Equal(t, forkHeight, rewoundBlock.Height)
+	require.Equal(t, forkHash, rewoundBlock.Hash)
+	require.True(t, rewoundBlock.Timestamp.Equal(forkTimestamp))
+}
+
+// TestRollbackToBlockHeightZeroClearsBirthdayBlock verifies that a full
+// rollback clears a birthday block that would otherwise reference a
+// disconnected block.
+func TestRollbackToBlockHeightZeroClearsBirthdayBlock(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	t.Cleanup(addrStore.Close)
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	birthdayBlock := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	writeSyncedTo(t, dbConn, addrStore, birthdayBlock)
+	writeBirthdayBlock(t, dbConn, addrStore, birthdayBlock, true)
+
+	err := store.RollbackToBlock(t.Context(), 0)
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		_, _, err := addrStore.BirthdayBlock(addrmgrNs)
+		require.True(t, waddrmgr.IsError(
+			err, waddrmgr.ErrBirthdayBlockNotSet,
+		))
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockRestoresBirthdayBlockOnCommitFailure verifies that a
+// failed rollback commit leaves the previous birthday block visible.
+func TestRollbackToBlockRestoresBirthdayBlockOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newAddrStore(t, dbConn)
+	t.Cleanup(addrStore.Close)
+	txStore := newTxStore(t, dbConn)
+
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	birthdayBlock := currentTip
+	// Store the birthday block after the synced tip so the sparse history has
+	// no predecessor hash for height 9. The failed walletdb transaction should
+	// roll this DB-only state back without a second write transaction.
+	writeSyncedTo(t, dbConn, addrStore, currentTip)
+	writeBirthdayBlock(t, dbConn, addrStore, birthdayBlock, true)
+
+	failDB := &commitFailDB{DB: dbConn, failNext: true}
+	store := NewStore(failDB, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.ErrorIs(t, err, errInjectedCommit)
+
+	restoredBlock, verified := readBirthdayBlock(t, dbConn, addrStore)
+	require.True(t, verified)
+	require.Equal(t, birthdayBlock.Height, restoredBlock.Height)
+	require.Equal(t, birthdayBlock.Hash, restoredBlock.Hash)
+	require.True(t, restoredBlock.Timestamp.Equal(birthdayBlock.Timestamp))
+
+	restoredTip := addrStore.SyncedTo()
+	require.Equal(t, currentTip.Height, restoredTip.Height)
+	require.Equal(t, currentTip.Hash, restoredTip.Hash)
+	require.True(t, restoredTip.Timestamp.Equal(currentTip.Timestamp))
+}
+
+// TestRollbackToBlockRestoresSyncTipOnCommitFailure verifies that a failed
+// rollback commit restores the live address-manager tip that SetSyncedTo
+// changed before walletdb rejected the transaction.
+func TestRollbackToBlockRestoresSyncTipOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	forkHeight := int32(9)
+	forkHash := chainhash.Hash{31, byte(forkHeight)}
+	forkTimestamp := time.Unix(1710002000, 0)
+
+	insertConfirmedTx(t, dbConn, txStore, forkHeight)
+	rolledBackRec := insertConfirmedTxWithSeed(t, dbConn, txStore, 10, 90)
+
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	t.Cleanup(func() {
+		addrStore.AssertExpectations(t)
+	})
+
+	addrStore.On("SyncedTo").Return(currentTip).Once()
+	addrStore.On("BlockHash", mock.Anything, forkHeight).Return(
+		&forkHash, nil,
+	).Once()
+	addrStore.On(
+		"SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs != nil && bs.Height == forkHeight &&
+				bs.Hash == forkHash &&
+				bs.Timestamp.Equal(forkTimestamp)
+		}),
+	).Return(nil).Once()
+	addrStore.On("RestoreSyncedToIfCurrent", currentTip,
+		waddrmgr.BlockStamp{
+			Hash:      forkHash,
+			Height:    forkHeight,
+			Timestamp: forkTimestamp,
+		},
+	).Return(true).Once()
+
+	failDB := &commitFailDB{DB: dbConn, failNext: true}
+	store := NewStore(failDB, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 10)
+	require.ErrorIs(t, err, errInjectedCommit)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &rolledBackRec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, int32(10), details.Block.Height)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestRollbackToBlockRestoresResetSyncTipOnCommitFailure verifies that a failed
+// height-zero rollback restores the live tip after SetSyncedTo(nil) resets it.
+func TestRollbackToBlockRestoresResetSyncTipOnCommitFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	currentTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{10},
+		Height:    10,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	startTip := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{1},
+		Height:    1,
+		Timestamp: time.Unix(1710000000, 0),
+	}
+	addrStore := &bwmock.AddrStore{}
+	mockNoBirthdayBlock(addrStore)
+	t.Cleanup(func() {
+		addrStore.AssertExpectations(t)
+	})
+
+	addrStore.On("SyncedTo").Return(currentTip).Once()
+	addrStore.On("SetSyncedTo", mock.Anything,
+		(*waddrmgr.BlockStamp)(nil)).Return(nil).Once()
+	addrStore.On("SyncedTo").Return(startTip).Once()
+	addrStore.On("RestoreSyncedToIfCurrent", currentTip,
+		startTip).Return(true).Once()
+
+	failDB := &commitFailDB{DB: dbConn, failNext: true}
+	store := NewStore(failDB, txStore, addrStore)
+
+	err := store.RollbackToBlock(t.Context(), 0)
+	require.ErrorIs(t, err, errInjectedCommit)
 }
 
 // TestUpdateTxLabelOnlySuccess verifies that kvdb.Store can apply a label-only
@@ -841,6 +1310,123 @@ func TestListTxDetailsCopiesMsgTx(t *testing.T) {
 
 	require.Equal(t, firstRec.Hash, msgHashByDetailHash[firstRec.Hash])
 	require.Equal(t, secondRec.Hash, msgHashByDetailHash[secondRec.Hash])
+}
+
+var errInjectedCommit = errors.New("injected commit failure")
+
+// commitFailDB wraps a walletdb.DB and makes its next Update fail after the
+// write closure succeeds, simulating a commit failure without persisting the
+// transaction.
+type commitFailDB struct {
+	walletdb.DB
+
+	failNext bool
+}
+
+// Update executes a write transaction and injects one commit failure when
+// failNext is set.
+func (db *commitFailDB) Update(f func(walletdb.ReadWriteTx) error,
+	reset func()) error {
+
+	if reset != nil {
+		reset()
+	}
+
+	tx, err := db.DB.BeginReadWriteTx()
+	if err != nil {
+		return err
+	}
+
+	err = f(tx)
+	if err != nil {
+		_ = tx.Rollback()
+
+		return err
+	}
+
+	if db.failNext {
+		db.failNext = false
+		_ = tx.Rollback()
+
+		return errInjectedCommit
+	}
+
+	return tx.Commit()
+}
+
+// birthdayBlockNotSetErr returns the legacy manager error used when no birthday
+// block is stored.
+func birthdayBlockNotSetErr() error {
+	return waddrmgr.ManagerError{
+		ErrorCode:   waddrmgr.ErrBirthdayBlockNotSet,
+		Description: "birthday block not set",
+	}
+}
+
+// mockNoBirthdayBlock makes a mock address store report that no birthday block
+// is stored.
+func mockNoBirthdayBlock(addrStore *bwmock.AddrStore) {
+	addrStore.On("BirthdayBlock", mock.Anything).Return(
+		waddrmgr.BlockStamp{}, false, birthdayBlockNotSetErr(),
+	).Maybe()
+}
+
+// writeSyncedTo persists a sync tip through the real address manager.
+func writeSyncedTo(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, tip waddrmgr.BlockStamp) {
+
+	t.Helper()
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		return mgr.SetSyncedTo(addrmgrNs, &tip)
+	})
+	require.NoError(t, err)
+}
+
+// writeBirthdayBlock persists a verified or unverified birthday block through
+// the real address manager.
+func writeBirthdayBlock(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, block waddrmgr.BlockStamp, verified bool) {
+
+	t.Helper()
+
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		return mgr.SetBirthdayBlock(addrmgrNs, block, verified)
+	})
+	require.NoError(t, err)
+}
+
+// readBirthdayBlock loads the current birthday block from the real address
+// manager.
+func readBirthdayBlock(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager) (waddrmgr.BlockStamp, bool) {
+
+	t.Helper()
+
+	var (
+		block    waddrmgr.BlockStamp
+		verified bool
+	)
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		var err error
+
+		block, verified, err = mgr.BirthdayBlock(addrmgrNs)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return block, verified
 }
 
 // insertConfirmedTx inserts one mined transaction into the legacy tx store so
