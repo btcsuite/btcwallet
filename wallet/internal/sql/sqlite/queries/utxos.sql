@@ -385,14 +385,19 @@ ORDER BY u.spent_by_tx_id;
 --   considers outputs whose parent status is `pending` or `published`.
 -- - Returns the nullable `spent_by_tx_id` column so callers can distinguish
 --   between an external/unknown parent and a wallet-owned conflict.
+-- - Returns the owner address script so duplicate credit replay can verify it
+--   matches the already-recorded UTXO rather than only checking outpoint
+--   existence.
 -- Performance:
 -- - Targets one wallet-scoped outpoint through the unique `(tx_id,
 --   output_index)` key after the parent hash lookup.
-SELECT utxos.spent_by_tx_id
+SELECT utxos.spent_by_tx_id, a.script_pub_key
 FROM transactions AS t
 INNER JOIN utxos ON t.id = utxos.tx_id
+INNER JOIN addresses AS a ON utxos.address_id = a.id
 WHERE
     t.wallet_id = ?1
+    AND a.wallet_id = ?1
     AND t.tx_hash = ?2
     AND utxos.output_index = ?3
     AND t.tx_status IN (0, 1);
