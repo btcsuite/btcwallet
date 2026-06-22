@@ -36,6 +36,43 @@ func (f failingRollbackTxStore) Rollback(walletdb.ReadWriteBucket,
 	return f.err
 }
 
+// succeedThenFailSyncedAddrStore writes the synced-to block through the real
+// manager, then reports an induced failure so the walletdb transaction rolls
+// back after the manager's in-memory tip has already advanced.
+type succeedThenFailSyncedAddrStore struct {
+	*waddrmgr.Manager
+
+	beforeRestore func()
+}
+
+// SetSyncedTo writes the synced-to block before injecting the configured
+// post-write failure.
+func (s *succeedThenFailSyncedAddrStore) SetSyncedTo(
+	ns walletdb.ReadWriteBucket, bs *waddrmgr.BlockStamp) error {
+
+	err := s.Manager.SetSyncedTo(ns, bs)
+	if err != nil {
+		return err
+	}
+
+	return errInducedFailure
+}
+
+// RestoreSyncedToIfCurrent runs an optional hook before delegating the
+// conditional restore to the wrapped manager.
+func (s *succeedThenFailSyncedAddrStore) RestoreSyncedToIfCurrent(
+	previous, current waddrmgr.BlockStamp) bool {
+
+	if s.beforeRestore != nil {
+		beforeRestore := s.beforeRestore
+		s.beforeRestore = nil
+
+		beforeRestore()
+	}
+
+	return s.Manager.RestoreSyncedToIfCurrent(previous, current)
+}
+
 // TestCreateTxUnminedWithCreditSuccess verifies that kvdb.Store records an
 // unmined transaction, label, credit, and address-used state through wtxmgr.
 func TestCreateTxUnminedWithCreditSuccess(t *testing.T) {
@@ -1493,6 +1530,29 @@ func mockNoBirthdayBlock(addrStore *bwmock.AddrStore) {
 	).Maybe()
 }
 
+// beforeUpdateDB wraps a walletdb.DB and runs one hook immediately before the
+// next Update starts its underlying write transaction.
+type beforeUpdateDB struct {
+	walletdb.DB
+
+	before func()
+}
+
+// Update runs the configured pre-update hook before delegating to the embedded
+// DB implementation.
+func (db *beforeUpdateDB) Update(f func(walletdb.ReadWriteTx) error,
+	reset func()) error {
+
+	if db.before != nil {
+		before := db.before
+		db.before = nil
+
+		before()
+	}
+
+	return db.DB.Update(f, reset)
+}
+
 // writeSyncedTo persists a sync tip through the real address manager.
 func writeSyncedTo(t *testing.T, dbConn walletdb.DB,
 	mgr *waddrmgr.Manager, tip waddrmgr.BlockStamp) {
@@ -1793,6 +1853,206 @@ func TestApplyTxBatchDuplicateUnminedKeepsConfirmed(t *testing.T) {
 	require.Equal(t, db.TxStatusPublished, txInfo.Status)
 }
 
+// TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel verifies that a
+// confirmed notification for an already-stored unmined transaction preserves
+// the existing user label instead of replacing it with the batch label.
+func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{69},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+
+	const originalLabel = "original"
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003800, 0),
+			Status:   db.TxStatusPending,
+			Label:    originalLabel,
+		}},
+	})
+	require.NoError(t, err)
+
+	block := &db.Block{
+		Hash:      chainhash.Hash{70},
+		Height:    147,
+		Timestamp: time.Unix(1710003900, 0),
+	}
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710004000, 0),
+			Block:    block,
+			Status:   db.TxStatusPublished,
+			Label:    "ignored",
+		}},
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.Equal(t, originalLabel, txInfo.Label)
+}
+
+// TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch verifies that a
+// confirmed duplicate for the same transaction hash cannot be recorded in a
+// second block.
+func TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+
+	firstBlock := &db.Block{
+		Hash:      chainhash.Hash{66},
+		Height:    145,
+		Timestamp: time.Unix(1710003400, 0),
+	}
+	secondBlock := &db.Block{
+		Hash:      chainhash.Hash{67},
+		Height:    146,
+		Timestamp: time.Unix(1710003500, 0),
+	}
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003300, 0),
+			Block:    firstBlock,
+			Status:   db.TxStatusPublished,
+		}},
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003600, 0),
+			Block:    secondBlock,
+			Status:   db.TxStatusPublished,
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, firstBlock.Height, txInfo.Block.Height)
+	require.Equal(t, firstBlock.Hash, txInfo.Block.Hash)
+}
+
+// TestApplyTxBatchDuplicateUnminedRejectsMutation verifies that a duplicate
+// unconfirmed batch member cannot mutate status, label, or credit metadata for
+// a transaction already stored as unconfirmed.
+func TestApplyTxBatchDuplicateUnminedRejectsMutation(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+
+	const originalLabel = "original"
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003400, 0),
+			Status:   db.TxStatusPending,
+			Label:    originalLabel,
+		}},
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003500, 0),
+			Status:   db.TxStatusPublished,
+			Label:    "mutated",
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003600, 0),
+			Status:   db.TxStatusPending,
+			Label:    originalLabel,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, txInfo.Block)
+	require.Equal(t, db.TxStatusPending, txInfo.Status)
+	require.Equal(t, originalLabel, txInfo.Label)
+}
+
 // TestApplyTxBatchRecordsTxAndSyncedTo verifies that kvdb.Store applies
 // transaction notifications and sync-tip updates atomically.
 func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
@@ -1820,6 +2080,7 @@ func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
 	addrStore.On("Address", mock.Anything, mock.Anything).
 		Return(managedAddr, nil)
 	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
 	store := NewStore(dbConn, txStore, addrStore)
 
@@ -1873,6 +2134,164 @@ func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
 	)
 }
 
+// TestApplyTxBatchRestoresSyncedToOnFailure verifies that a batch failure after
+// SetSyncedTo restores the address manager's in-memory synced tip to match the
+// rolled-back walletdb state.
+func TestApplyTxBatchRestoresSyncedToOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	preBatchTip := waddrmgr.BlockStamp{
+		Height:    100,
+		Hash:      chainhash.Hash{71},
+		Timestamp: time.Unix(1710004100, 0),
+	}
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		return mgr.SetSyncedTo(addrmgrNs, &preBatchTip)
+	})
+	require.NoError(t, err)
+	require.Equal(t, preBatchTip, mgr.SyncedTo())
+
+	addrStore := &succeedThenFailSyncedAddrStore{Manager: mgr}
+	store := NewStore(dbConn, nil, addrStore)
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{72},
+		Height:    101,
+		Timestamp: time.Unix(1710004200, 0),
+	}
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		SyncedTo: syncedTo,
+	})
+	require.ErrorIs(t, err, errInducedFailure)
+	require.Equal(t, preBatchTip, mgr.SyncedTo())
+
+	var reopenedTip waddrmgr.BlockStamp
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, addrmgrNs)
+
+		reopened, err := waddrmgr.Open(
+			addrmgrNs, []byte("pub"), &chaincfg.SimNetParams,
+		)
+		if err != nil {
+			return err
+		}
+		defer reopened.Close()
+
+		reopenedTip = reopened.SyncedTo()
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, preBatchTip.Height, reopenedTip.Height)
+	require.Equal(t, preBatchTip.Hash, reopenedTip.Hash)
+}
+
+// TestApplyTxBatchRestoresWriteLockedSyncedToOnFailure verifies that a failed
+// batch restores the sync tip snapshot captured inside the walletdb write
+// transaction, not a stale tip observed before another writer commits.
+func TestApplyTxBatchRestoresWriteLockedSyncedToOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	preBatchTip := waddrmgr.BlockStamp{
+		Height:    100,
+		Hash:      chainhash.Hash{81},
+		Timestamp: time.Unix(1710004300, 0),
+	}
+	writeSyncedTo(t, dbConn, mgr, preBatchTip)
+	require.Equal(t, preBatchTip, mgr.SyncedTo())
+
+	writeLockedTip := waddrmgr.BlockStamp{
+		Height:    101,
+		Hash:      chainhash.Hash{82},
+		Timestamp: time.Unix(1710004400, 0),
+	}
+	failDB := &beforeUpdateDB{
+		DB: dbConn,
+		before: func() {
+			writeSyncedTo(t, dbConn, mgr, writeLockedTip)
+		},
+	}
+
+	addrStore := &succeedThenFailSyncedAddrStore{Manager: mgr}
+	store := NewStore(failDB, nil, addrStore)
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{83},
+		Height:    102,
+		Timestamp: time.Unix(1710004500, 0),
+	}
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		SyncedTo: syncedTo,
+	})
+	require.ErrorIs(t, err, errInducedFailure)
+	require.Equal(t, writeLockedTip, mgr.SyncedTo())
+}
+
+// TestApplyTxBatchSkipsStaleSyncedToRestore verifies that the failed-batch
+// restore path does not overwrite a newer live tip committed after the failed
+// update has returned.
+func TestApplyTxBatchSkipsStaleSyncedToRestore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	preBatchTip := waddrmgr.BlockStamp{
+		Height:    100,
+		Hash:      chainhash.Hash{84},
+		Timestamp: time.Unix(1710004600, 0),
+	}
+	writeSyncedTo(t, dbConn, mgr, preBatchTip)
+	require.Equal(t, preBatchTip, mgr.SyncedTo())
+
+	newerTip := waddrmgr.BlockStamp{
+		Height:    101,
+		Hash:      chainhash.Hash{85},
+		Timestamp: time.Unix(1710004700, 0),
+	}
+	addrStore := &succeedThenFailSyncedAddrStore{
+		Manager: mgr,
+		beforeRestore: func() {
+			writeSyncedTo(t, dbConn, mgr, newerTip)
+		},
+	}
+	store := NewStore(dbConn, nil, addrStore)
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{86},
+		Height:    102,
+		Timestamp: time.Unix(1710004800, 0),
+	}
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		SyncedTo: syncedTo,
+	})
+	require.ErrorIs(t, err, errInducedFailure)
+	require.Equal(t, newerTip, mgr.SyncedTo())
+}
+
 // TestApplyTxBatchEmptyNoAddrStore verifies that a batch with no transactions
 // and no sync-tip update returns nil without an address manager and without
 // opening a write transaction. The store is built with a nil addrStore and the
@@ -1893,6 +2312,50 @@ func TestApplyTxBatchEmptyNoAddrStore(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestApplyTxBatchCreditlessNoAddrStore verifies that a transaction-only batch
+// with no credits records through wtxmgr without an address manager or addrmgr
+// namespace.
+func TestApplyTxBatchCreditlessNoAddrStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{87},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 1_000, PkScript: []byte{0x51}})
+	txHash := txMsg.TxHash()
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710004900, 0),
+			Status:   db.TxStatusPublished,
+		}},
+	})
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, txmgrNs)
+
+		details, err := txStore.TxDetails(txmgrNs, &txHash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Empty(t, details.Credits)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 // TestApplyTxBatchSyncTipOnlyDoesNotRequireTxStore verifies a sync-tip-only
 // batch does not require the legacy wtxmgr namespace.
 func TestApplyTxBatchSyncTipOnlyDoesNotRequireTxStore(t *testing.T) {
@@ -1909,6 +2372,7 @@ func TestApplyTxBatchSyncTipOnlyDoesNotRequireTxStore(t *testing.T) {
 		Timestamp: time.Unix(1710004400, 0),
 	}
 	addrStore := &bwmock.AddrStore{}
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
 	addrStore.On("SetSyncedTo", mock.Anything, mock.MatchedBy(
 		func(bs *waddrmgr.BlockStamp) bool {
 			return bs.Height == int32(syncedTo.Height) &&
