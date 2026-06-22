@@ -755,6 +755,100 @@ func TestEvictDerivedAddressesLockedDropsPending(t *testing.T) {
 	}
 }
 
+// TestEvictDerivedAddressesMultipleBranches verifies that a second branch
+// eviction for the same account still removes branch-specific cached and
+// pending state after the first eviction invalidates the account cache.
+func TestEvictDerivedAddressesMultipleBranches(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	t.Cleanup(teardown)
+
+	acctStore, err := mgr.FetchScopedKeyManager(KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	scopedMgr, ok := acctStore.(*ScopedKeyManager)
+	require.True(t, ok)
+	require.True(t, mgr.IsLocked())
+
+	const lastIndex = 2
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, ExternalBranch,
+		)
+		if err != nil {
+			return err
+		}
+
+		return scopedMgr.ExtendAddresses(
+			ns, DefaultAccountNum, lastIndex, InternalBranch,
+		)
+	})
+	require.NoError(t, err)
+
+	countPending := func(branch uint32) int {
+		count := 0
+		for _, info := range scopedMgr.deriveOnUnlock {
+			match := pendingDeriveMatches(
+				info, DefaultAccountNum, branch, 0, lastIndex+1,
+			)
+			if match {
+				count++
+			}
+		}
+
+		return count
+	}
+
+	countCached := func(branch uint32) int {
+		count := 0
+		scopedMgr.addrs.Range(func(_ addrKey, cachedAddr *cachedAddr) bool {
+			if cachedAddr == nil {
+				return true
+			}
+
+			match := derivedAddressMatches(
+				cachedAddr.addr, DefaultAccountNum, branch, 0,
+				lastIndex+1,
+			)
+			if match {
+				count++
+			}
+
+			return true
+		})
+
+		return count
+	}
+
+	require.GreaterOrEqual(t, countPending(ExternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countPending(InternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(ExternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(InternalBranch), int(lastIndex+1))
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, ExternalBranch, 0, lastIndex+1,
+	)
+	require.Zero(t, countPending(ExternalBranch))
+	require.Zero(t, countCached(ExternalBranch))
+	require.GreaterOrEqual(t, countPending(InternalBranch), int(lastIndex+1))
+	require.GreaterOrEqual(t, countCached(InternalBranch), int(lastIndex+1))
+
+	scopedMgr.mtx.RLock()
+	_, cached := scopedMgr.acctInfo[DefaultAccountNum]
+	scopedMgr.mtx.RUnlock()
+	require.False(t, cached)
+
+	scopedMgr.EvictDerivedAddresses(
+		DefaultAccountNum, InternalBranch, 0, lastIndex+1,
+	)
+	require.Zero(t, countPending(InternalBranch))
+	require.Zero(t, countCached(InternalBranch))
+}
+
 // TestEvictDerivedAddressesLockedKeepsOtherAccountsPending verifies that
 // EvictDerivedAddresses only removes pending unlock-derivation entries for the
 // requested account. A rolled-back scan batch for one account must not discard
