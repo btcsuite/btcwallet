@@ -180,7 +180,7 @@ func TestPgBackendHelpersRejectOverflow(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "convert input outpoint index 0")
 
-	_, err = creditExists(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
+	_, _, err = creditExists(t.Context(), nil, 1, chainhash.Hash{1}, ^uint32(0))
 	require.ErrorContains(t, err, "convert credit index")
 
 	err = markInputsSpent(t.Context(), nil, db.CreateTxParams{
