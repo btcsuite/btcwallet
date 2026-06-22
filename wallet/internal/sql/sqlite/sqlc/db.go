@@ -105,6 +105,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAccountPropsByIdStmt, err = db.PrepareContext(ctx, GetAccountPropsById); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccountPropsById: %w", err)
 	}
+	if q.getAccountPropsByWalletAndIdStmt, err = db.PrepareContext(ctx, GetAccountPropsByWalletAndId); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccountPropsByWalletAndId: %w", err)
+	}
 	if q.getActiveUtxoLeaseLockIDStmt, err = db.PrepareContext(ctx, GetActiveUtxoLeaseLockID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetActiveUtxoLeaseLockID: %w", err)
 	}
@@ -438,6 +441,11 @@ func (q *Queries) Close() error {
 	if q.getAccountPropsByIdStmt != nil {
 		if cerr := q.getAccountPropsByIdStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAccountPropsByIdStmt: %w", cerr)
+		}
+	}
+	if q.getAccountPropsByWalletAndIdStmt != nil {
+		if cerr := q.getAccountPropsByWalletAndIdStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountPropsByWalletAndIdStmt: %w", cerr)
 		}
 	}
 	if q.getActiveUtxoLeaseLockIDStmt != nil {
@@ -831,6 +839,7 @@ type Queries struct {
 	getAccountByWalletScopeAndNameStmt          *sql.Stmt
 	getAccountByWalletScopeAndNumberStmt        *sql.Stmt
 	getAccountPropsByIdStmt                     *sql.Stmt
+	getAccountPropsByWalletAndIdStmt            *sql.Stmt
 	getActiveUtxoLeaseLockIDStmt                *sql.Stmt
 	getAddressByScriptPubKeyStmt                *sql.Stmt
 	getAddressSecretStmt                        *sql.Stmt
@@ -929,6 +938,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAccountByWalletScopeAndNameStmt:          q.getAccountByWalletScopeAndNameStmt,
 		getAccountByWalletScopeAndNumberStmt:        q.getAccountByWalletScopeAndNumberStmt,
 		getAccountPropsByIdStmt:                     q.getAccountPropsByIdStmt,
+		getAccountPropsByWalletAndIdStmt:            q.getAccountPropsByWalletAndIdStmt,
 		getActiveUtxoLeaseLockIDStmt:                q.getActiveUtxoLeaseLockIDStmt,
 		getAddressByScriptPubKeyStmt:                q.getAddressByScriptPubKeyStmt,
 		getAddressSecretStmt:                        q.getAddressSecretStmt,
