@@ -180,11 +180,11 @@ func collectConflictRootIDs(ctx context.Context,
 				err)
 		}
 
-		if !spentByTxID.Valid {
+		if !spentByTxID.SpentByTxID.Valid {
 			continue
 		}
 
-		rootIDs[spentByTxID.Int64] = struct{}{}
+		rootIDs[spentByTxID.SpentByTxID.Int64] = struct{}{}
 	}
 
 	return rootIDs, nil
@@ -489,7 +489,8 @@ func ensureSpendConflict(ctx context.Context,
 		return fmt.Errorf("check spend conflict: %w", err)
 	}
 
-	if spendByTxID.Valid && spendByTxID.Int64 != txID {
+	if spendByTxID.SpentByTxID.Valid &&
+		spendByTxID.SpentByTxID.Int64 != txID {
 		return db.ErrTxInputConflict
 	}
 
