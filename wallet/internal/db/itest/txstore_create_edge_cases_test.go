@@ -66,9 +66,9 @@ func TestCreateTxRejectsInvalidParams(t *testing.T) {
 	require.ErrorContains(t, err, "tx is required")
 }
 
-// TestCreateTxRejectsDuplicateConfirmedTransaction verifies that duplicate
-// confirmed inserts fail instead of silently creating a second row.
-func TestCreateTxRejectsDuplicateConfirmedTransaction(t *testing.T) {
+// TestCreateTxSkipsDuplicateConfirmedTransaction verifies that an exact
+// duplicate confirmed insert is idempotent instead of creating a second row.
+func TestCreateTxSkipsDuplicateConfirmedTransaction(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -98,7 +98,7 @@ func TestCreateTxRejectsDuplicateConfirmedTransaction(t *testing.T) {
 	require.NoError(t, err)
 
 	err = store.CreateTx(t.Context(), params)
-	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+	require.NoError(t, err)
 }
 
 // TestCreateTxRejectsMissingConfirmingBlockForExistingUnminedRow verifies that
