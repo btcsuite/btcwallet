@@ -27,6 +27,8 @@ var (
 	// ErrMissingTxManager is returned when the transaction manager namespace is
 	// missing from the database.
 	ErrMissingTxManager = errors.New("missing transaction manager namespace")
+
+	errUnknownBranch = errors.New("unknown branch")
 )
 
 // DBCreateWallet initializes the database structure for a new wallet.
@@ -525,12 +527,16 @@ func (s *syncer) DBPutRewind(_ context.Context,
 func (s *syncer) DBPutSyncBatch(ctx context.Context,
 	results []scanResult) error {
 
+	var horizonRollback addrHorizonRollback
+
 	// TODO(yy): build a single SQL query for this.
 	err := walletdb.Update(s.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// 1. Update Address State (Horizons).
-		err := s.putAddrHorizons(ctx, addrmgrNs, results)
+		var err error
+
+		horizonRollback, err = s.putAddrHorizons(ctx, addrmgrNs, results)
 		if err != nil {
 			return err
 		}
@@ -559,6 +565,8 @@ func (s *syncer) DBPutSyncBatch(ctx context.Context,
 		return nil
 	})
 	if err != nil {
+		horizonRollback.evict()
+
 		return fmt.Errorf("process scan batch: %w", err)
 	}
 
@@ -574,11 +582,15 @@ func (s *syncer) DBPutSyncBatch(ctx context.Context,
 func (s *syncer) DBPutTargetedBatch(ctx context.Context,
 	results []scanResult) error {
 
+	var horizonRollback addrHorizonRollback
+
 	err := walletdb.Update(s.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
 		addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// 1. Update Address State (Horizons).
-		err := s.putAddrHorizons(ctx, addrmgrNs, results)
+		var err error
+
+		horizonRollback, err = s.putAddrHorizons(ctx, addrmgrNs, results)
 		if err != nil {
 			return err
 		}
@@ -592,6 +604,8 @@ func (s *syncer) DBPutTargetedBatch(ctx context.Context,
 		return nil
 	})
 	if err != nil {
+		horizonRollback.evict()
+
 		return fmt.Errorf("process rescan batch: %w", err)
 	}
 
@@ -740,13 +754,56 @@ func (s *syncer) filterBranchScopes(_ context.Context, dbtx walletdb.ReadTx,
 	return scopes, nil
 }
 
-// putAddrHorizons aggregates found address horizons from the scan
-// results and updates the address manager state (extends horizons) in the
-// database.
-func (s *syncer) putAddrHorizons(_ context.Context,
-	ns walletdb.ReadWriteBucket, results []scanResult) error {
+// addrHorizonExtension records one in-memory horizon extension that should be
+// evicted if the surrounding walletdb transaction rolls back.
+type addrHorizonExtension struct {
+	scopedMgr waddrmgr.AccountStore
+	account   uint32
+	branch    uint32
+	fromIndex uint32
+	toIndex   uint32
+}
 
-	// Aggregate Horizon Expansion.
+// addrHorizonRollback records successful in-memory horizon extensions that
+// still depend on the surrounding walletdb transaction committing.
+type addrHorizonRollback []addrHorizonExtension
+
+// evict removes all in-memory horizon extensions tracked for a failed batch.
+func (r addrHorizonRollback) evict() {
+	for _, extension := range r {
+		extension.scopedMgr.EvictDerivedAddresses(
+			extension.account,
+			extension.branch,
+			extension.fromIndex,
+			extension.toIndex,
+		)
+	}
+}
+
+// branchNextIndex returns the next child index for an account branch.
+func branchNextIndex(scopedMgr waddrmgr.AccountStore,
+	ns walletdb.ReadBucket, account, branch uint32) (uint32, error) {
+
+	props, err := scopedMgr.AccountProperties(ns, account)
+	if err != nil {
+		return 0, fmt.Errorf("account properties: %w", err)
+	}
+
+	switch branch {
+	case waddrmgr.ExternalBranch:
+		return props.ExternalKeyCount, nil
+
+	case waddrmgr.InternalBranch:
+		return props.InternalKeyCount, nil
+
+	default:
+		return 0, fmt.Errorf("%w: %d", errUnknownBranch, branch)
+	}
+}
+
+// scanBatchHorizons returns the greatest child index discovered for each branch
+// across a scan batch.
+func scanBatchHorizons(results []scanResult) map[waddrmgr.BranchScope]uint32 {
 	batchHorizons := make(map[waddrmgr.BranchScope]uint32)
 	for _, res := range results {
 		for bs, idx := range res.FoundHorizons {
@@ -758,25 +815,74 @@ func (s *syncer) putAddrHorizons(_ context.Context,
 		}
 	}
 
+	return batchHorizons
+}
+
+// putAddrHorizons aggregates found address horizons from the scan results,
+// updates the address manager state, and records rollback cleanup for
+// successful in-memory horizon extensions.
+func (s *syncer) putAddrHorizons(_ context.Context,
+	ns walletdb.ReadWriteBucket,
+	results []scanResult) (addrHorizonRollback, error) {
+
+	batchHorizons := scanBatchHorizons(results)
 	if len(batchHorizons) == 0 {
-		return nil
+		return nil, nil
 	}
+
+	var rollback addrHorizonRollback
+
 	// Update the database.
 	for bs, maxFoundIndex := range batchHorizons {
 		scopedMgr, err := s.addrStore.FetchScopedKeyManager(bs.Scope)
 		if err != nil {
-			return fmt.Errorf("fetch scoped manager: %w", err)
+			return rollback, fmt.Errorf("fetch scoped manager: %w", err)
+		}
+
+		fromIndex, err := branchNextIndex(
+			scopedMgr, ns, bs.Account, bs.Branch,
+		)
+		if err != nil {
+			return rollback, err
 		}
 
 		err = scopedMgr.ExtendAddresses(
 			ns, bs.Account, maxFoundIndex, bs.Branch,
 		)
 		if err != nil {
-			return fmt.Errorf("extend addresses: %w", err)
+			return rollback, fmt.Errorf("extend addresses: %w", err)
+		}
+
+		toIndex, err := branchNextIndex(
+			scopedMgr, ns, bs.Account, bs.Branch,
+		)
+		if err != nil {
+			// ExtendAddresses mutates live caches before this read. If the
+			// read fails, the caller will not get a rollback entry, so evict
+			// a conservative range immediately. The extension can skip
+			// HD-invalid children and cache valid children past maxFoundIndex.
+			if maxFoundIndex >= fromIndex {
+				scopedMgr.EvictDerivedAddresses(
+					bs.Account, bs.Branch, fromIndex,
+					waddrmgr.MaxAddressesPerAccount+1,
+				)
+			}
+
+			return rollback, err
+		}
+
+		if toIndex > fromIndex {
+			rollback = append(rollback, addrHorizonExtension{
+				scopedMgr: scopedMgr,
+				account:   bs.Account,
+				branch:    bs.Branch,
+				fromIndex: fromIndex,
+				toIndex:   toIndex,
+			})
 		}
 	}
 
-	return nil
+	return rollback, nil
 }
 
 // putScanTxns processes relevant transactions found during the scan
