@@ -90,6 +90,11 @@ type AddrStore interface {
 	// address manager is synced through at the very least.
 	SyncedTo() BlockStamp
 
+	// RestoreSyncedToIfCurrent restores the in-memory synced-to block after a
+	// failed write transaction rolls back the matching database update, but
+	// only if the live tip still equals the expected current tip.
+	RestoreSyncedToIfCurrent(previous, current BlockStamp) bool
+
 	// BlockHash returns the block hash at a particular block height.
 	BlockHash(ns walletdb.ReadBucket, height int32) (*chainhash.Hash, error)
 
