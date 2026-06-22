@@ -170,6 +170,27 @@ INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE a.id = ?;
 
+-- name: GetAccountPropsByWalletAndId :one
+-- Returns full account properties by wallet id and account id.
+SELECT
+    a.account_number,
+    a.account_name,
+    a.is_derived,
+    a.public_key,
+    a.master_fingerprint,
+    a.created_at,
+    ks.purpose,
+    ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    w.is_watch_only AS wallet_is_watch_only
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+WHERE a.wallet_id = ? AND a.id = ?;
+
 -- name: ListAccountsByScope :many
 -- Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 SELECT
@@ -412,7 +433,10 @@ GROUP BY da.account_id;
 -- recovery horizon extension. The MAX guard keeps the counter monotonic so a
 -- slower concurrent writer cannot regress it below an already-recorded index.
 UPDATE accounts
-SET next_external_index = max(next_external_index, sqlc.arg('next_index'))
+SET
+    next_external_index = max(
+        next_external_index, cast(sqlc.arg('next_index') AS INTEGER)
+    )
 WHERE id = sqlc.arg('id');
 
 -- name: AdvanceNextInternalIndex :exec
@@ -421,5 +445,8 @@ WHERE id = sqlc.arg('id');
 -- so a slower concurrent writer cannot regress it below an already-recorded
 -- index.
 UPDATE accounts
-SET next_internal_index = max(next_internal_index, sqlc.arg('next_index'))
+SET
+    next_internal_index = max(
+        next_internal_index, cast(sqlc.arg('next_index') AS INTEGER)
+    )
 WHERE id = sqlc.arg('id');
