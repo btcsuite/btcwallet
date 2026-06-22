@@ -1,6 +1,8 @@
 package kvdb
 
 import (
+	"sync"
+
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
@@ -16,6 +18,11 @@ type Store struct {
 	db        walletdb.DB
 	txStore   wtxmgr.TxStore
 	addrStore waddrmgr.AddrStore
+
+	// writeMu serializes write paths that mutate the live address-manager cache
+	// before walletdb commit, keeping commit-failure restores ordered with the
+	// next Store write.
+	writeMu sync.Mutex
 }
 
 // A compile-time assertion to ensure that Store implements the db.Store

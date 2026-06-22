@@ -194,6 +194,9 @@ func (s *Store) UpdateWallet(_ context.Context,
 
 	addrStore := s.addrStore
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	err := walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
 		if ns == nil {
