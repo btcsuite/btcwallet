@@ -154,7 +154,7 @@ func TestPgCreateTxOpsAdditionalBranches(t *testing.T) {
 	conflictOps := &createTxOps{
 		invalidateUnminedTxOps: invalidateUnminedTxOps{
 			qtx: sqlc.New(rowDBTX{
-				row:      newSQLiteRow(t, "SELECT ?", int64(5)),
+				row:      newSQLiteRow(t, "SELECT ?, ?", int64(5), []byte{1}),
 				queryErr: errDummy,
 			}),
 		},
