@@ -35,6 +35,12 @@ var (
 	// ErrScanBatchEmpty is returned when a scan batch contains no blocks.
 	ErrScanBatchEmpty = errors.New("scan batch empty")
 
+	// errUnexpectedTipHashCount is returned when the chain backend returns
+	// a number of hashes other than one for a single-height tip query.
+	errUnexpectedTipHashCount = errors.New(
+		"unexpected synced tip hash count",
+	)
+
 	// ErrUnknownRescanJobType is returned when an unknown rescan job type
 	// is encountered.
 	ErrUnknownRescanJobType = errors.New("unknown rescan job type")
@@ -323,14 +329,115 @@ func (s *syncer) initChainSync(ctx context.Context) error {
 		return fmt.Errorf("unable to check for rollback: %w", err)
 	}
 
-	// Enable block notifications from the chain backend.
-	err = s.cfg.Chain.NotifyBlocks()
+	// Register the wallet's existing addresses and unspent outputs with the
+	// backend before enabling live block notifications. The catch-up scan
+	// matches blocks client-side, but once synced the backend filters live
+	// blocks against its own watch list; without seeding that list with the
+	// wallet's existing addresses, a live block paying an existing address
+	// is filtered out as irrelevant while the sync tip still advances past
+	// it, permanently missing the deposit. The same applies to the wallet's
+	// existing unspent outputs: the live notification path only inspects
+	// transaction outputs (receives), so a live block spending an existing
+	// UTXO is filtered out unless that outpoint is on the backend watch
+	// list, permanently missing the spend.
+	_, addrs, unspent, err := s.loadWalletScanData(ctx)
 	if err != nil {
-		return fmt.Errorf("unable to start block notifications: %w",
+		return fmt.Errorf("unable to load existing scan targets: %w",
 			err)
 	}
 
+	err = s.registerScanTargets(ctx, addrs, unspent)
+	if err != nil {
+		return err
+	}
+
+	// Explicitly request connected/disconnected block notifications. Only
+	// the bitcoind and neutrino wrappers enable block notifications as a
+	// side effect of NotifyReceived; btcd's NotifyReceived (the embedded
+	// rpcclient method) registers only address notifications, so without
+	// this call a btcd-backed wallet would stop receiving live block
+	// connect/disconnect events. The call is idempotent on the wrappers
+	// that already enabled notifications, so it is safe for all backends.
+	err = s.cfg.Chain.NotifyBlocks()
+	if err != nil {
+		return fmt.Errorf("unable to start block notifications: %w", err)
+	}
+
 	return nil
+}
+
+// registerScanTargets seeds the backend watch list with the wallet's existing
+// addresses and unspent outputs before the sync tip advances over live blocks.
+//
+// When there are no outputs to watch the cheaper NotifyReceived path is used:
+// it registers only the address filter and avoids a backend rescan, which also
+// sidesteps the empty-wallet case where there is no synced tip to start a
+// rescan from. When there are outputs to watch, the outpoints must be added to
+// the backend watch list so live spends are reported, and the only chain
+// interface method that accepts outpoints is Rescan. The startup rescan mirrors
+// the legacy initial-sync RescanJob: it registers both the addresses and the
+// unspent outpoints from the synced tip, so the backend reports both live
+// receives and live spends of existing UTXOs.
+func (s *syncer) registerScanTargets(ctx context.Context,
+	addrs []address.Address, unspent []wtxmgr.Credit) error {
+
+	outpoints, err := s.outpointsToWatch(unspent)
+	if err != nil {
+		return fmt.Errorf("unable to collect watched outpoints: %w", err)
+	}
+
+	if len(outpoints) == 0 {
+		err = s.cfg.Chain.NotifyReceived(addrs)
+		if err != nil {
+			return fmt.Errorf("unable to register addresses: %w",
+				err)
+		}
+
+		return nil
+	}
+
+	syncedTo, err := s.syncedTo(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to read synced tip: %w", err)
+	}
+
+	err = s.cfg.Chain.Rescan(&syncedTo.Hash, addrs, outpoints)
+	if err != nil {
+		return fmt.Errorf("unable to register addresses and "+
+			"outpoints: %w", err)
+	}
+
+	return nil
+}
+
+// outpointsToWatch converts the wallet's unspent credits into the outpoint set
+// the backend watches for spends, keyed by the first address recovered from
+// each output script. It mirrors the legacy rescan target construction so the
+// store-backed startup rescan watches the same outpoints the legacy wallet did.
+func (s *syncer) outpointsToWatch(
+	unspent []wtxmgr.Credit) (map[wire.OutPoint]address.Address, error) {
+
+	outpoints := make(map[wire.OutPoint]address.Address, len(unspent))
+	for _, output := range unspent {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, s.cfg.ChainParams,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("extract outpoint %v script: %w",
+				output.OutPoint, err)
+		}
+
+		// A standard credit always yields at least one address; a
+		// script that yields none cannot be watched by address, so skip
+		// it rather than index into an empty slice.
+		if len(addrs) == 0 {
+			continue
+		}
+
+		outpoints[output.OutPoint] = addrs[0]
+	}
+
+	return outpoints, nil
 }
 
 // waitUntilBackendSynced blocks until the chain backend considers itself
@@ -362,6 +469,8 @@ func (s *syncer) waitUntilBackendSynced(ctx context.Context) error {
 // checkRollback ensures the wallet is synchronized with the current chain tip.
 // It checks if the wallet's synced tip is still on the main chain, and if not,
 // rewinds the wallet state to the common ancestor.
+//
+//nolint:cyclop // Sequential reorg detection reads clearest as one function.
 func (s *syncer) checkRollback(ctx context.Context) error {
 	// batchSize is the number of blocks to fetch from the chain backend in
 	// a single batch when checking for a rollback. A value of 10 is chosen
@@ -378,6 +487,20 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	syncedHeight := syncedTo.Height
+	if syncedHeight <= 0 {
+		return nil
+	}
+
+	// If the current synced tip is still on the main chain, then all of its
+	// ancestors are also on the main chain and no rollback is needed.
+	onMainChain, err := s.syncedTipOnMainChain(syncedTo)
+	if err != nil {
+		return err
+	}
+
+	if onMainChain {
+		return nil
+	}
 
 	var (
 		localHashes  []*chainhash.Hash
@@ -455,6 +578,33 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// syncedTipOnMainChain reports whether the wallet's synced tip is still on the
+// chain backend's main chain. When it is, every ancestor is also on the main
+// chain, so no rollback is needed. This avoids requiring SQL backends to hold
+// a contiguous pre-birthday local block range before the first recovery scan
+// has populated one.
+func (s *syncer) syncedTipOnMainChain(syncedTo waddrmgr.BlockStamp) (bool,
+	error) {
+
+	if s.cfg.Chain == nil {
+		return false, fmt.Errorf("%w: Chain", ErrMissingParam)
+	}
+
+	height := int64(syncedTo.Height)
+
+	tipHashes, err := s.cfg.Chain.GetBlockHashes(height, height)
+	if err != nil {
+		return false, fmt.Errorf("remote get synced tip hash: %w", err)
+	}
+
+	if len(tipHashes) != 1 {
+		return false, fmt.Errorf("%w: got %d, want 1",
+			errUnexpectedTipHashCount, len(tipHashes))
+	}
+
+	return syncedTo.Hash.IsEqual(&tipHashes[0]), nil
 }
 
 // rewindToBlock rewinds wallet sync and transaction state to the given fork

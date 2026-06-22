@@ -40,6 +40,7 @@ func createRuntimeStoreTestWallet(t *testing.T) Config {
 	w, err := NewManager().Create(cfg, params)
 	require.NoError(t, err)
 	require.NotNil(t, w)
+	require.NoError(t, w.closeRuntimeStore())
 
 	return cfg
 }

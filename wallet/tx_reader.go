@@ -139,6 +139,12 @@ type TxDetail struct {
 
 	// Label is an optional tx label.
 	Label string
+
+	// Status is the wallet-relative validity state of the transaction
+	// (published, pending, failed, replaced, or orphaned). Retained
+	// invalid transactions surface their state here so callers can
+	// distinguish them from ordinary unconfirmed transactions.
+	Status db.TxStatus
 }
 
 // GetTx returns a detailed description of a tx given its tx hash.
@@ -237,6 +243,11 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 		txDetails.Hash, txDetails.SerializedTx, txDetails.Label,
 		txDetails.Received, msgTx,
 	)
+
+	// Carry the wallet-relative validity state through so retained
+	// failed/replaced/orphaned transactions are not surfaced as ordinary
+	// unconfirmed transactions.
+	details.Status = txDetails.Status
 
 	w.populateBlockDetails(details, txDetails.Block, currentHeight)
 	w.calculateValueAndFeeFromStore(details, txDetails, msgTx)

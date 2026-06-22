@@ -362,6 +362,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 	wCreated, err := m.Create(cfg, params)
 	require.NoError(t, err)
 	require.NotNil(t, wCreated)
+	require.NoError(t, wCreated.closeRuntimeStore())
 
 	// Create a new Manager instance to simulate a fresh start (e.g., daemon
 	// restart) and attempt to load the wallet from the existing database.

@@ -151,6 +151,10 @@ func (w *Wallet) Start(startCtx context.Context) error {
 		return err
 	}
 
+	// Clear any stop request left from a prior lifecycle so it cannot abort
+	// this fresh start.
+	w.stopRequested.Store(false)
+
 	// 2. Setup background resources.
 	//
 	// w.lifetimeCtx governs the lifecycle of all background goroutines.
@@ -177,6 +181,18 @@ func (w *Wallet) Start(startCtx context.Context) error {
 		return err
 	}
 
+	// A Stop that arrived while we were Starting could not move the state
+	// out of Starting, so it recorded its intent. Honor it here before
+	// launching workers or marking the wallet started, so a stopped wallet
+	// is never observed as started.
+	if w.stopRequested.Load() {
+		w.cancel()
+		w.finishStop()
+
+		return fmt.Errorf("%w: start aborted by concurrent stop",
+			ErrStateForbidden)
+	}
+
 	// 4. Start background goroutines.
 	w.wg.Add(1)
 
@@ -193,6 +209,12 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	// 5. Mark the wallet as fully started.
 	err = w.state.toStarted()
 	if err != nil {
+		// A concurrent stop moved us out of Starting after we launched
+		// the workers; cancel, wait for them to exit, and finalize.
+		w.cancel()
+		w.wg.Wait()
+		w.finishStop()
+
 		return err
 	}
 
@@ -317,48 +339,58 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 	// Attempt to transition from Started to Stopping.
 	err := w.state.toStopping()
 	if err != nil {
-		// If the wallet is not started, we can consider it stopped.
-		log.Warnf("Wallet already stopped: %v", err)
+		// We are not in the Started state. If a start is in flight
+		// (Starting), record the stop intent so Start aborts instead of
+		// completing; otherwise the wallet is already stopping or stopped.
+		w.stopRequested.Store(true)
+		log.Warnf("Stop requested while not started: %v", err)
+
 		return nil
 	}
 
-	// Signal all background processes to stop.
-	//
-	// It is safe to call w.cancel() here because the successful transition
-	// to Stopping guarantees that we were previously in the Started state,
-	// which in turn guarantees that start() has completed initialization
-	// of w.lifetimeCtx and w.cancel.
-	//
-	// Additionally, w.cancel() is idempotent, so it is safe to call even
-	// if it has effectively already been called (though the state machine
-	// guarantees we only reach this point once).
+	// Signal all background processes to stop. Safe and idempotent: the
+	// successful Started->Stopping transition guarantees Start finished
+	// initializing w.lifetimeCtx and w.cancel.
 	w.cancel()
 
-	// Wait for all goroutines to finish.
+	// Finalize the shutdown in the background so a cancelled stopCtx cannot
+	// abandon the transition to Stopped, which would otherwise wedge a
+	// later restart.
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()
+		w.finishStop()
+
 		close(done)
 	}()
 
 	select {
 	case <-done:
+		return nil
+
 	case <-stopCtx.Done():
 		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
 	}
+}
 
-	// Mark the wallet as stopped.
-	err = w.state.toStopped()
-	if err != nil {
-		return err
+// finishStop completes a shutdown: it marks the wallet stopped, closes owned
+// stores, and runs the deregister hook. The toStopped CAS succeeds for exactly
+// one caller (from Stopping or Starting), so the teardown runs at most once
+// even if Stop's waiter and Start's abort path both reach here.
+func (w *Wallet) finishStop() {
+	if err := w.state.toStopped(); err != nil {
+		log.Warnf("Failed to mark wallet stopped: %v", err)
+
+		return
 	}
 
-	err = w.closeRuntimeStore()
-	if err != nil {
-		return err
+	if err := w.closeRuntimeStore(); err != nil {
+		log.Errorf("Failed to close runtime store on stop: %v", err)
 	}
 
-	return nil
+	if w.onStopped != nil {
+		w.onStopped()
+	}
 }
 
 // closeRuntimeStore closes the owned runtime store, if one exists.

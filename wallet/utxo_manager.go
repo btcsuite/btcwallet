@@ -148,7 +148,8 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 
 	log.Debugf("ListUnspent using query: %v", query)
 
-	currentHeight := w.addrStore.SyncedTo().Height
+	//nolint:contextcheck // SyncedTo takes no context.
+	currentHeight := w.SyncedTo().Height
 	minConfs := query.MinConfs
 	maxConfs := query.MaxConfs
 
@@ -283,7 +284,8 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 		return nil, err
 	}
 
-	currentHeight := w.addrStore.SyncedTo().Height
+	//nolint:contextcheck // SyncedTo takes no context.
+	currentHeight := w.SyncedTo().Height
 
 	info, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
 		WalletID: w.id,

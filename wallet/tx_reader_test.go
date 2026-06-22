@@ -331,6 +331,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 		btcutil.NewTx(&rec.MsgTx),
 	)))
 	unminedTxDetail := &TxDetail{
+		Status:        db.TxStatusPublished,
 		Hash:          *TstTxHash,
 		RawTx:         TstSerializedTx,
 		Label:         testLabel,
