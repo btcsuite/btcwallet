@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -2477,48 +2478,20 @@ func (s *syncer) loadTargetedScanData(ctx context.Context,
 func (s *syncer) resolveScanTargets(_ context.Context,
 	targets []waddrmgr.AccountScope) ([]scanTarget, error) {
 
-	resolved := make([]scanTarget, 0, len(targets))
-
-	err := walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		for _, target := range targets {
-			// The keyless imported-address bucket has no resolvable
-			// name; carry it verbatim so the Store path skips it
-			// before any lookup.
-			if target.Account == waddrmgr.ImportedAddrAccount {
-				resolved = append(resolved, scanTarget{
-					Scope:   target.Scope,
-					Account: target.Account,
-				})
-
-				continue
-			}
-
-			scopedMgr, err := s.addrStore.FetchScopedKeyManager(
-				target.Scope,
-			)
-			if err != nil {
-				return fmt.Errorf("fetch scoped manager: %w",
-					err)
-			}
-
-			name, err := scopedMgr.AccountName(ns, target.Account)
-			if err != nil {
-				return fmt.Errorf("scan target name: %w", err)
-			}
-
-			resolved = append(resolved, scanTarget{
-				Scope:       target.Scope,
-				Account:     target.Account,
-				AccountName: name,
-			})
-		}
-
-		return nil
-	})
+	legacyTargets, err := kvdb.ResolveScanTargets(
+		s.cfg.DB, s.addrStore, targets,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve scan targets: %w", err)
+	}
+
+	resolved := make([]scanTarget, 0, len(legacyTargets))
+	for _, target := range legacyTargets {
+		resolved = append(resolved, scanTarget{
+			Scope:       target.Scope,
+			Account:     target.Account,
+			AccountName: target.AccountName,
+		})
 	}
 
 	return resolved, nil
