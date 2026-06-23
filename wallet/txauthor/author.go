@@ -8,10 +8,11 @@ package txauthor
 import (
 	"errors"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
 )
@@ -297,11 +298,11 @@ func spendWitnessKeyHash(txIn *wire.TxIn, pkScript []byte,
 	// the compression type of the generated key.
 	var pubKeyHash []byte
 	if compressed {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeCompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeCompressed())
 	} else {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeUncompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeUncompressed())
 	}
-	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, chainParams)
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(pubKeyHash, chainParams)
 	if err != nil {
 		return err
 	}
@@ -386,16 +387,16 @@ func spendNestedWitnessPubKeyHash(txIn *wire.TxIn, pkScript []byte,
 
 	var pubKeyHash []byte
 	if compressed {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeCompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeCompressed())
 	} else {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeUncompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeUncompressed())
 	}
 
 	// Next, we'll generate a valid sigScript that'll allow us to spend
 	// the p2sh output. The sigScript will contain only a single push of
 	// the p2wkh witness program corresponding to the matching public key
 	// of this address.
-	p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(pubKeyHash, chainParams)
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(pubKeyHash, chainParams)
 	if err != nil {
 		return err
 	}

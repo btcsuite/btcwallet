@@ -10,12 +10,13 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -125,8 +126,8 @@ type ManagedAddress interface {
 	// associated with.
 	InternalAccount() uint32
 
-	// Address returns a btcutil.Address for the backing address.
-	Address() btcutil.Address
+	// Address returns a address.Address for the backing address.
+	Address() address.Address
 
 	// AddrHash returns the key or script hash related to the address
 	AddrHash() []byte
@@ -223,7 +224,7 @@ type ManagedTaprootScriptAddress interface {
 type managedAddress struct {
 	manager          *ScopedKeyManager
 	derivationPath   DerivationPath
-	address          btcutil.Address
+	address          address.Address
 	imported         bool
 	internal         bool
 	compressed       bool
@@ -295,11 +296,11 @@ func (a *managedAddress) AddrType() AddressType {
 	return a.addrType
 }
 
-// Address returns the btcutil.Address which represents the managed address.
+// Address returns the address.Address which represents the managed address.
 // This will be a pay-to-pubkey-hash address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *managedAddress) Address() btcutil.Address {
+func (a *managedAddress) Address() address.Address {
 	return a.address
 }
 
@@ -310,13 +311,13 @@ func (a *managedAddress) AddrHash() []byte {
 	var hash []byte
 
 	switch n := a.address.(type) {
-	case *btcutil.AddressPubKeyHash:
+	case *address.AddressPubKeyHash:
 		hash = n.Hash160()[:]
-	case *btcutil.AddressScriptHash:
+	case *address.AddressScriptHash:
 		hash = n.Hash160()[:]
-	case *btcutil.AddressWitnessPubKeyHash:
+	case *address.AddressWitnessPubKeyHash:
 		hash = n.Hash160()[:]
-	case *btcutil.AddressTaproot:
+	case *address.AddressTaproot:
 		hash = n.WitnessProgram()
 	}
 
@@ -541,12 +542,12 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	// Create a pay-to-pubkey-hash address from the public key.
 	var pubKeyHash []byte
 	if compressed {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeCompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeCompressed())
 	} else {
-		pubKeyHash = btcutil.Hash160(pubKey.SerializeUncompressed())
+		pubKeyHash = address.Hash160(pubKey.SerializeUncompressed())
 	}
 
-	var address btcutil.Address
+	var newAddress address.Address
 	var err error
 
 	switch addrType {
@@ -558,7 +559,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		// and malleability fixes.
 
 		// First, we'll generate a normal p2wkh address from the pubkey hash.
-		witAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		witAddr, err := address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -576,7 +577,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		// to a p2sh address. In order to spend, we first use the
 		// witnessProgram as the sigScript, then present the proper
 		// <sig, pubkey> pair as the witness.
-		address, err = btcutil.NewAddressScriptHash(
+		newAddress, err = address.NewAddressScriptHash(
 			witnessProgram, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -584,7 +585,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		}
 
 	case PubKeyHash:
-		address, err = btcutil.NewAddressPubKeyHash(
+		newAddress, err = address.NewAddressPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -592,7 +593,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 		}
 
 	case WitnessPubKey:
-		address, err = btcutil.NewAddressWitnessPubKeyHash(
+		newAddress, err = address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -601,7 +602,8 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	case TaprootPubKey:
 		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
-		address, err = btcutil.NewAddressTaproot(
+
+		newAddress, err = address.NewAddressTaproot(
 			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -611,7 +613,7 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 
 	return &managedAddress{
 		manager:          m,
-		address:          address,
+		address:          newAddress,
 		derivationPath:   derivationPath,
 		imported:         false,
 		internal:         false,
@@ -758,7 +760,7 @@ type clearTextScriptSetter interface {
 type baseScriptAddress struct {
 	manager         *ScopedKeyManager
 	account         uint32
-	address         *btcutil.AddressScriptHash
+	address         *address.AddressScriptHash
 	scriptEncrypted []byte
 	scriptClearText []byte
 	scriptMutex     sync.Mutex
@@ -834,7 +836,7 @@ func (a *baseScriptAddress) setClearTextScript(script []byte) {
 // scriptAddress represents a pay-to-script-hash address.
 type scriptAddress struct {
 	baseScriptAddress
-	address *btcutil.AddressScriptHash
+	address *address.AddressScriptHash
 }
 
 // AddrType returns the address type of the managed address. This can be used
@@ -845,11 +847,11 @@ func (a *scriptAddress) AddrType() AddressType {
 	return Script
 }
 
-// Address returns the btcutil.Address which represents the managed address.
+// Address returns the address.Address which represents the managed address.
 // This will be a pay-to-script-hash address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *scriptAddress) Address() btcutil.Address {
+func (a *scriptAddress) Address() address.Address {
 	return a.address
 }
 
@@ -904,7 +906,7 @@ var _ ManagedScriptAddress = (*scriptAddress)(nil)
 func newScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
 	scriptEncrypted []byte) (*scriptAddress, error) {
 
-	address, err := btcutil.NewAddressScriptHashFromHash(
+	address, err := address.NewAddressScriptHashFromHash(
 		scriptHash, m.rootManager.chainParams,
 	)
 	if err != nil {
@@ -924,7 +926,7 @@ func newScriptAddress(m *ScopedKeyManager, account uint32, scriptHash,
 // witnessScriptAddress represents a pay-to-witness-script-hash address.
 type witnessScriptAddress struct {
 	baseScriptAddress
-	address btcutil.Address
+	address address.Address
 
 	// witnessVersion is the version of the witness script.
 	witnessVersion byte
@@ -943,11 +945,11 @@ func (a *witnessScriptAddress) AddrType() AddressType {
 	return WitnessScript
 }
 
-// Address returns the btcutil.Address which represents the managed address.
+// Address returns the address.Address which represents the managed address.
 // This will be a pay-to-witness-script-hash address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *witnessScriptAddress) Address() btcutil.Address {
+func (a *witnessScriptAddress) Address() address.Address {
 	return a.address
 }
 
@@ -1011,7 +1013,7 @@ func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 
 	switch witnessVersion {
 	case witnessVersionV0:
-		address, err := btcutil.NewAddressWitnessScriptHash(
+		address, err := address.NewAddressWitnessScriptHash(
 			scriptIdent, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -1030,7 +1032,7 @@ func newWitnessScriptAddress(m *ScopedKeyManager, account uint32, scriptIdent,
 		}, nil
 
 	case witnessVersionV1:
-		address, err := btcutil.NewAddressTaproot(
+		address, err := address.NewAddressTaproot(
 			scriptIdent, m.rootManager.chainParams,
 		)
 		if err != nil {
@@ -1084,11 +1086,11 @@ func (a *taprootScriptAddress) AddrType() AddressType {
 	return TaprootScript
 }
 
-// Address returns the btcutil.Address which represents the managed address.
+// Address returns the address.Address which represents the managed address.
 // This will be a pay-to-taproot address.
 //
 // This is part of the ManagedAddress interface implementation.
-func (a *taprootScriptAddress) Address() btcutil.Address {
+func (a *taprootScriptAddress) Address() address.Address {
 	return a.address
 }
 

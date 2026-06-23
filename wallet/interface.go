@@ -3,15 +3,16 @@ package wallet
 import (
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/btcutil/psbt"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
@@ -144,23 +145,23 @@ type Interface interface {
 	// for a given account and scope. If the current address has been used,
 	// a new one is derived and returned.
 	CurrentAddress(account uint32, scope waddrmgr.KeyScope) (
-		btcutil.Address, error)
+		address.Address, error)
 
 	// NewAddress returns a new address for a given account and scope.
 	NewAddress(account uint32, scope waddrmgr.KeyScope) (
-		btcutil.Address, error)
+		address.Address, error)
 
 	// NewChangeAddress returns a new change address for a given account
 	// and scope.
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
-		btcutil.Address, error)
+		address.Address, error)
 
 	// AddressInfo returns detailed information about a managed address,
 	// including its derivation path and whether it's compressed.
-	AddressInfo(a btcutil.Address) (waddrmgr.ManagedAddress, error)
+	AddressInfo(a address.Address) (waddrmgr.ManagedAddress, error)
 
 	// HaveAddress returns whether the wallet is the owner of the address.
-	HaveAddress(a btcutil.Address) (bool, error)
+	HaveAddress(a address.Address) (bool, error)
 
 	// ImportPublicKey imports a public key as a watch-only address.
 	ImportPublicKey(pubKey *btcec.PublicKey,
@@ -294,7 +295,7 @@ type Interface interface {
 	RemoveDescendants(tx *wire.MsgTx) error
 
 	// PrivKeyForAddress returns the private key for a given address.
-	PrivKeyForAddress(a btcutil.Address) (*btcec.PrivateKey, error)
+	PrivKeyForAddress(a address.Address) (*btcec.PrivateKey, error)
 
 	// DeriveFromKeyPath derives a key from the wallet's root key.
 	DeriveFromKeyPath(scope waddrmgr.KeyScope,

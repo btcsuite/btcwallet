@@ -7,10 +7,10 @@ package wallet
 import (
 	"fmt"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -43,13 +43,13 @@ func (w *Wallet) ScriptForOutput(output *wire.TxOut) (
 	// we'll need to attach a sigScript in addition to witness data.
 	case walletAddr.AddrType() == waddrmgr.NestedWitnessPubKey:
 		pubKey := pubKeyAddr.PubKey()
-		pubKeyHash := btcutil.Hash160(pubKey.SerializeCompressed())
+		pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
 
 		// Next, we'll generate a valid sigScript that will allow us to
 		// spend the p2sh output. The sigScript will contain only a
 		// single push of the p2wkh witness program corresponding to
 		// the matching public key of this address.
-		p2wkhAddr, err := btcutil.NewAddressWitnessPubKeyHash(
+		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
 			pubKeyHash, w.chainParams,
 		)
 		if err != nil {

@@ -1,10 +1,11 @@
 package chain
 
 import (
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
@@ -42,7 +43,7 @@ type BlockFilterer struct {
 	// WathcedOutPoints is a global set of outpoints being tracked by the
 	// wallet. This allows the block filterer to check for spends from an
 	// outpoint we own.
-	WatchedOutPoints map[wire.OutPoint]btcutil.Address
+	WatchedOutPoints map[wire.OutPoint]address.Address
 
 	// FoundExternal is a two-layer map recording the scope and index of
 	// external addresses found in a single block.
@@ -54,7 +55,7 @@ type BlockFilterer struct {
 
 	// FoundOutPoints is a set of outpoints found in a single block whose
 	// address belongs to the wallet.
-	FoundOutPoints map[wire.OutPoint]btcutil.Address
+	FoundOutPoints map[wire.OutPoint]address.Address
 
 	// RelevantTxns records the transactions found in a particular block
 	// that contained matches from an address in either ExReverseFilter or
@@ -87,7 +88,7 @@ func NewBlockFilterer(params *chaincfg.Params,
 
 	foundExternal := make(map[waddrmgr.KeyScope]map[uint32]struct{})
 	foundInternal := make(map[waddrmgr.KeyScope]map[uint32]struct{})
-	foundOutPoints := make(map[wire.OutPoint]btcutil.Address)
+	foundOutPoints := make(map[wire.OutPoint]address.Address)
 
 	return &BlockFilterer{
 		Params:           params,
@@ -179,7 +180,7 @@ func (bf *BlockFilterer) FilterTx(tx *wire.MsgTx) bool {
 // added to set of external and internal found addresses, respectively. This
 // method returns true iff a non-zero number of the provided addresses are of
 // interest.
-func (bf *BlockFilterer) FilterOutputAddrs(addrs []btcutil.Address) bool {
+func (bf *BlockFilterer) FilterOutputAddrs(addrs []address.Address) bool {
 	var isRelevant bool
 	for _, addr := range addrs {
 		addrStr := addr.EncodeAddress()

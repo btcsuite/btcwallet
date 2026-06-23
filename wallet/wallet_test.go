@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -497,7 +498,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 
 	var (
 		m           sync.Mutex
-		globalAddrs = make(map[string]btcutil.Address)
+		globalAddrs = make(map[string]address.Address)
 	)
 
 	for o := 0; o < 10; o++ {
@@ -505,7 +506,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 
 		for n := 0; n < 10; n++ {
 			eg.Go(func() error {
-				addrs := make([]btcutil.Address, 10)
+				addrs := make([]address.Address, 10)
 				for i := 0; i < 10; i++ {
 					addr, err := w.NewAddress(
 						0, waddrmgr.KeyScopeBIP0084,

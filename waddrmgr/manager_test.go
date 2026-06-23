@@ -15,12 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/davecgh/go-spew/spew"
@@ -411,7 +412,8 @@ func testExternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedExternalAddrs); i++ {
 			pkHash := expectedExternalAddrs[i].addressHash
-			utilAddr, err := btcutil.NewAddressPubKeyHash(
+
+			utilAddr, err := address.NewAddressPubKeyHash(
 				pkHash, chainParams,
 			)
 			if err != nil {
@@ -567,7 +569,8 @@ func testInternalAddresses(tc *testContext) bool {
 		chainParams := tc.manager.ChainParams()
 		for i := 0; i < len(expectedInternalAddrs); i++ {
 			pkHash := expectedInternalAddrs[i].addressHash
-			utilAddr, err := btcutil.NewAddressPubKeyHash(
+
+			utilAddr, err := address.NewAddressPubKeyHash(
 				pkHash, chainParams,
 			)
 			if err != nil {
@@ -821,7 +824,7 @@ func testImportPrivateKey(tc *testContext) bool {
 
 			// Use the Address API to retrieve each of the expected
 			// new addresses and ensure they're accurate.
-			utilAddr, err := btcutil.NewAddressPubKeyHash(
+			utilAddr, err := address.NewAddressPubKeyHash(
 				test.expected.addressHash, chainParams)
 			if err != nil {
 				tc.t.Errorf("%s NewAddressPubKeyHash #%d (%s): "+
@@ -1079,13 +1082,13 @@ func testImportScript(tc *testContext) bool {
 			// Use the Address API to retrieve each of the expected
 			// new addresses and ensure they're accurate.
 			var (
-				utilAddr btcutil.Address
+				utilAddr address.Address
 				err      error
 			)
 			switch {
 			case test.isWitness && test.witnessVersion == 0:
 				scriptHash := sha256.Sum256(test.in)
-				utilAddr, err = btcutil.NewAddressWitnessScriptHash(
+				utilAddr, err = address.NewAddressWitnessScriptHash(
 					scriptHash[:], chainParams,
 				)
 
@@ -1101,13 +1104,13 @@ func testImportScript(tc *testContext) bool {
 				taprootKey, err = script.TaprootKey()
 				require.NoError(tc.t, err)
 
-				utilAddr, err = btcutil.NewAddressTaproot(
+				utilAddr, err = address.NewAddressTaproot(
 					schnorr.SerializePubKey(taprootKey),
 					chainParams,
 				)
 
 			default:
-				utilAddr, err = btcutil.NewAddressScriptHash(
+				utilAddr, err = address.NewAddressScriptHash(
 					test.in, chainParams,
 				)
 			}
@@ -1199,13 +1202,15 @@ func testMarkUsed(tc *testContext, doScript bool) bool {
 		}
 		addrHash := test.in
 
-		var addr btcutil.Address
+		var addr address.Address
 		var err error
 		switch test.typ {
 		case addrPubKeyHash:
-			addr, err = btcutil.NewAddressPubKeyHash(addrHash, chainParams)
+			addr, err = address.NewAddressPubKeyHash(addrHash, chainParams)
 		case addrScriptHash:
-			addr, err = btcutil.NewAddressScriptHashFromHash(addrHash, chainParams)
+			addr, err = address.NewAddressScriptHashFromHash(
+				addrHash, chainParams,
+			)
 		default:
 			panic("unreachable")
 		}
@@ -1572,7 +1577,7 @@ func testLookupExpectedAccount(tc *testContext, expectedAccounts map[string]uint
 	// Test account lookup for default account adddress
 	var expectedAccount uint32
 	for i, addr := range expectedAddrs {
-		addr, err := btcutil.NewAddressPubKeyHash(addr.addressHash,
+		addr, err := address.NewAddressPubKeyHash(addr.addressHash,
 			tc.manager.ChainParams())
 		if err != nil {
 			tc.t.Errorf("AddrAccount #%d: unexpected error: %v", i, err)
@@ -2475,7 +2480,8 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		t.Fatalf("addr type mismatch: expected %v, got %v",
 			NestedWitnessPubKey, externalAddr[0].AddrType())
 	}
-	_, ok := externalAddr[0].Address().(*btcutil.AddressScriptHash)
+
+	_, ok := externalAddr[0].Address().(*address.AddressScriptHash)
 	if !ok {
 		t.Fatalf("wrong type: %T", externalAddr[0].Address())
 	}
@@ -2486,7 +2492,8 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 		t.Fatalf("addr type mismatch: expected %v, got %v",
 			WitnessPubKey, internalAddr[0].AddrType())
 	}
-	_, ok = internalAddr[0].Address().(*btcutil.AddressWitnessPubKeyHash)
+
+	_, ok = internalAddr[0].Address().(*address.AddressWitnessPubKeyHash)
 	if !ok {
 		t.Fatalf("wrong type: %T", externalAddr[0].Address())
 	}
@@ -3207,12 +3214,12 @@ func TestManagedAddressValidation(t *testing.T) {
 			// bitflip during the address generation process.
 			name: "addr bitflip",
 			mutator: func(addr *managedAddress, priv *btcec.PrivateKey) {
-				hash160 := btcutil.Hash160(
+				hash160 := address.Hash160(
 					addr.pubKey.SerializeCompressed(),
 				)
 				hash160[0] ^= 0x01
 
-				addr.address, err = btcutil.NewAddressWitnessPubKeyHash(
+				addr.address, err = address.NewAddressWitnessPubKeyHash(
 					hash160, &chaincfg.MainNetParams,
 				)
 				if err != nil {

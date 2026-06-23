@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcutil"
-	"github.com/btcsuite/btcd/btcutil/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -264,8 +264,8 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	// Get the address info for the single key we imported.
 	switch tc.addrType {
 	case waddrmgr.NestedWitnessPubKey:
-		witnessAddr, err := btcutil.NewAddressWitnessPubKeyHash(
-			btcutil.Hash160(acct3ExternalPub.SerializeCompressed()),
+		witnessAddr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(acct3ExternalPub.SerializeCompressed()),
 			&chaincfg.TestNet3Params,
 		)
 		require.NoError(t, err)
@@ -273,14 +273,14 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 		witnessProg, err := txscript.PayToAddrScript(witnessAddr)
 		require.NoError(t, err)
 
-		intAddr, err = btcutil.NewAddressScriptHash(
+		intAddr, err = address.NewAddressScriptHash(
 			witnessProg, &chaincfg.TestNet3Params,
 		)
 		require.NoError(t, err)
 
 	case waddrmgr.WitnessPubKey:
-		intAddr, err = btcutil.NewAddressWitnessPubKeyHash(
-			btcutil.Hash160(acct3ExternalPub.SerializeCompressed()),
+		intAddr, err = address.NewAddressWitnessPubKeyHash(
+			address.Hash160(acct3ExternalPub.SerializeCompressed()),
 			&chaincfg.TestNet3Params,
 		)
 		require.NoError(t, err)
