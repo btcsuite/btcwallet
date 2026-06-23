@@ -12,9 +12,9 @@ require (
 	github.com/btcsuite/btcd/wire/v2 v2.0.0
 	github.com/btcsuite/btclog v1.0.0
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5
-	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2
-	github.com/btcsuite/btcwallet/wallet/txsizes v1.2.5
-	github.com/btcsuite/btcwallet/walletdb v1.5.1
+	github.com/btcsuite/btcwallet/wallet/txrules v1.3.0
+	github.com/btcsuite/btcwallet/wallet/txsizes v1.3.0
+	github.com/btcsuite/btcwallet/walletdb v1.6.0
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.6
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792
 	github.com/davecgh/go-spew v1.1.1
