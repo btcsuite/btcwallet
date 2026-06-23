@@ -8,7 +8,7 @@ require (
 	github.com/btcsuite/btcd/wire/v2 v2.0.0
 	github.com/btcsuite/btclog v1.0.0
 	github.com/btcsuite/btcwallet v0.16.18
-	github.com/btcsuite/btcwallet/walletdb v1.5.1
+	github.com/btcsuite/btcwallet/walletdb v1.6.0
 	github.com/lightningnetwork/lnd/clock v1.0.1
 	github.com/stretchr/testify v1.10.0
 )
@@ -29,7 +29,3 @@ require (
 )
 
 go 1.25.11
-
-replace github.com/btcsuite/btcwallet/walletdb => ../walletdb
-
-replace github.com/btcsuite/btcwallet => ..

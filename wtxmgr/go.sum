@@ -16,6 +16,10 @@ github.com/btcsuite/btcd/wire/v2 v2.0.0 h1:mYSKzZZ0a1sK+aMhXzfDSVsSzRkWkU3x2U04T
 github.com/btcsuite/btcd/wire/v2 v2.0.0/go.mod h1:bGxkPkk8IiDvUo1D96wE03llBIk7p2MdWYRyAQwLmqM=
 github.com/btcsuite/btclog v1.0.0 h1:sEkpKJMmfGiyZjADwEIgB1NSwMyfdD1FB8v6+w1T0Ns=
 github.com/btcsuite/btclog v1.0.0/go.mod h1:w7xnGOhwT3lmrS4H3b/D1XAXxvh+tbhUm8xeHN2y3TQ=
+github.com/btcsuite/btcwallet v0.16.18 h1:6h0kMxij4igPu35jOPAWZbn22ceOC4me4L3jj8Za6Zk=
+github.com/btcsuite/btcwallet v0.16.18/go.mod h1:4TTru0cgIPbCZpY4aRfAVwX87zrQw4GXM8MH6+A5xZw=
+github.com/btcsuite/btcwallet/walletdb v1.6.0 h1:Yund5XbdqFxNW7+R2Sxs02bMC5fMrmORj4GN8MV55no=
+github.com/btcsuite/btcwallet/walletdb v1.6.0/go.mod h1:q9xif0Csp52GVb3l252BbHCuyiCnuEbrPWu/HAsvaYc=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/decred/dcrd/crypto/blake256 v1.1.0 h1:zPMNGQCm0g4QTY27fOCorQW7EryeQ/U0x++OzVrdms8=
