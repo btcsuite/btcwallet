@@ -1,5 +1,5 @@
-github.com/btcsuite/btcd v0.26.0-beta.rc1 h1:1gCNMsV113Rlm9vNri+K+HOfSKv+eDdELu4JujFOa8M=
-github.com/btcsuite/btcd v0.26.0-beta.rc1/go.mod h1:7ft7+a/MoJHFouFopCb1zyiR9IWPlrcPVn6K/lJ1dcA=
+github.com/btcsuite/btcd v0.26.0 h1:yntnSshlG3+H7dTwIOR4LTFXDPojVBsFORBNN5y5c/c=
+github.com/btcsuite/btcd v0.26.0/go.mod h1:7ft7+a/MoJHFouFopCb1zyiR9IWPlrcPVn6K/lJ1dcA=
 github.com/btcsuite/btcd/address/v2 v2.0.0 h1:UVu8Hal6Siu4XastFe+JX5JkeBYONbDUIY5E+SVTs6I=
 github.com/btcsuite/btcd/address/v2 v2.0.0/go.mod h1:htJK1AtaeK3bKNfZY63ep2oN8LbrI6qvmPGe1vekb3I=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0 h1:KioMXOWa76b86sTZZOmbzv/ldaQCmB8KFAyn5PbB8E8=

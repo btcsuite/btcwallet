@@ -1,7 +1,7 @@
 module github.com/btcsuite/btcwallet/wallet/txrules
 
 require (
-	github.com/btcsuite/btcd v0.26.0-beta.rc1
+	github.com/btcsuite/btcd v0.26.0
 	github.com/btcsuite/btcd/btcutil/v2 v2.0.0
 	github.com/btcsuite/btcd/txscript/v2 v2.0.0
 	github.com/btcsuite/btcd/wire/v2 v2.0.0
