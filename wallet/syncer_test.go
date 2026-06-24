@@ -161,14 +161,14 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer with a test database and mock chain.
-	db, cleanup := setupTestDB(t)
+	dbConn, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
 	mockChain := &bwmock.Chain{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, mockAddrStore, nil, nil,
+		Config{Chain: mockChain, DB: dbConn}, mockAddrStore, nil, nil,
 	)
 
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
@@ -205,7 +205,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 
 	// Arrange: Initialize a syncer with a test database and mocks to
 	// simulate a chain reorganization.
-	db, cleanup := setupTestDB(t)
+	dbConn, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
@@ -214,7 +214,7 @@ func TestCheckRollbackDetected(t *testing.T) {
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, mockAddrStore, mockTxStore,
+		Config{Chain: mockChain, DB: dbConn}, mockAddrStore, mockTxStore,
 		mockPublisher,
 	)
 
@@ -332,7 +332,7 @@ func TestSyncerLoadScanState(t *testing.T) {
 
 	// Arrange: Initialize a syncer with a test database and set up complex
 	// mock expectations for loading wallet scan data.
-	db, cleanup := setupTestDB(t)
+	dbConn, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
@@ -341,7 +341,7 @@ func TestSyncerLoadScanState(t *testing.T) {
 
 	s := newSyncer(
 		Config{
-			DB:             db,
+			DB:             dbConn,
 			RecoveryWindow: 10,
 			ChainParams:    &chainParams,
 		},
@@ -441,14 +441,14 @@ func TestScanBatchWithCFilters(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer and set up a recovery state.
-	db, cleanup := setupTestDB(t)
+	dbConn, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: db}, nil, nil, mockPublisher,
+		Config{Chain: mockChain, DB: dbConn}, nil, nil, mockPublisher,
 	)
 
 	mockAddrStore := &bwmock.AddrStore{}
@@ -860,39 +860,76 @@ func TestExtractAddrEntries(t *testing.T) {
 	require.Equal(t, uint32(0), entries[0].Credit.Index)
 }
 
+// matchRewindWalletParams returns a matcher for one wallet-scoped manual
+// rescan rewind target.
+func matchRewindWalletParams(walletID uint32,
+	block waddrmgr.BlockStamp) any {
+
+	return mock.MatchedBy(func(params db.RewindWalletParams) bool {
+		if block.Height < 0 {
+			return false
+		}
+
+		return params.WalletID == walletID &&
+			params.Block.Height == uint32(block.Height) &&
+			params.Block.Hash == block.Hash &&
+			params.Block.Timestamp.Equal(block.Timestamp.UTC())
+	})
+}
+
 // TestHandleScanReq verifies scan request handling.
 func TestHandleScanReq(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Initialize a syncer with a test database and mocks to
 	// test handling of different scan request types.
-	db, cleanup := setupTestDB(t)
+	dbConn, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	mockAddrStore := &bwmock.AddrStore{}
+	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
+	mockTxStore := &bwmock.TxStore{}
+	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{DB: db}, mockAddrStore, nil, mockPublisher,
+		Config{DB: dbConn, Chain: mockChain}, mockAddrStore,
+		mockTxStore, mockPublisher,
+		syncerStoreConfig{store: store, walletID: 0},
 	)
 
-	// Case 1: Test handling of a rewind scan request.
+	// Case 1: Test handling of a rewind scan request. The current tip is at
+	// height 100, so rewinding to height 50 uses the wallet-scoped Store
+	// rewind while the decision also comes from the Store tip.
+	start := waddrmgr.BlockStamp{Height: 50}
 	req := &scanReq{
 		typ:        scanTypeRewind,
-		startBlock: waddrmgr.BlockStamp{Height: 50},
+		startBlock: start,
 	}
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100},
+
+	rewindHash := chainhash.Hash{50}
+	rewindHeader := &wire.BlockHeader{
+		Timestamp: time.Unix(50, 0).UTC(),
+	}
+	rewindBlock := waddrmgr.BlockStamp{
+		Height:    start.Height,
+		Hash:      rewindHash,
+		Timestamp: rewindHeader.Timestamp,
+	}
+
+	store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 100}}, nil,
 	).Once()
-
-	// Expect sync state update and transaction rollback for the rewind.
-	mockAddrStore.On(
-		"SetSyncedTo", mock.Anything, mock.Anything,
+	mockChain.On("GetBlockHash", int64(start.Height)).Return(
+		&rewindHash, nil,
+	).Once()
+	mockChain.On("GetBlockHeader", &rewindHash).Return(
+		rewindHeader, nil,
+	).Once()
+	store.On(
+		"RewindWallet", mock.Anything,
+		matchRewindWalletParams(0, rewindBlock),
 	).Return(nil).Once()
-
-	mockTxStore := &bwmock.TxStore{}
-	s.txStore = mockTxStore
-	mockTxStore.On("Rollback", mock.Anything, int32(51)).Return(nil).Once()
 
 	// Act & Assert: Verify that a rewind scan request is correctly handled.
 	err := s.handleScanReq(t.Context(), req)
@@ -904,7 +941,7 @@ func TestHandleScanReq(t *testing.T) {
 		startBlock: waddrmgr.BlockStamp{Height: 100},
 		targets:    []waddrmgr.AccountScope{{Account: 1}},
 	}
-	mockChain := &bwmock.Chain{}
+	mockChain = &bwmock.Chain{}
 	s.cfg.Chain = mockChain
 	mockChain.On("GetBestBlock").Return(
 		&chainhash.Hash{}, int32(101), nil,
@@ -2700,6 +2737,95 @@ func TestSyncedBlockHashesRoutesStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestRewindToBlockRoutesStore verifies the store rewind path issues a single
+// atomic RollbackToBlock for the rollback boundary, which rewinds the wallet
+// sync tip and rolls transaction state back together, rather than two
+// independent sync-tip and rollback writes.
+func TestRewindToBlockRoutesStore(t *testing.T) {
+	t.Parallel()
+
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil)
+	s.store = store
+	s.walletID = 99
+
+	fork := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{99},
+		Height:    100,
+		Timestamp: time.Unix(1710003900, 0),
+	}
+
+	store.On(
+		"RollbackToBlock", mock.Anything, uint32(101),
+	).Return(nil).Once()
+
+	err := s.rewindToBlock(t.Context(), fork)
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestScanWithRewindRoutesStoreRewind verifies manual rescans route through
+// the wallet-scoped Store rewind API when Store-backed sync reads are enabled.
+func TestScanWithRewindRoutesStoreRewind(t *testing.T) {
+	t.Parallel()
+
+	const walletName = "manual-rewind-wallet"
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Name: walletName}, nil, nil, nil,
+		syncerStoreConfig{store: store, walletID: 100},
+	)
+
+	current := &db.Block{Hash: chainhash.Hash{100}, Height: 100}
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{SyncedTo: current}, nil,
+	).Once()
+
+	start := waddrmgr.BlockStamp{
+		Hash:      chainhash.Hash{50},
+		Height:    50,
+		Timestamp: time.Unix(1710004100, 0),
+	}
+
+	store.On(
+		"RewindWallet", mock.Anything,
+		matchRewindWalletParams(100, start),
+	).Return(nil).Once()
+
+	err := s.scanWithRewind(t.Context(), &scanReq{
+		typ:        scanTypeRewind,
+		startBlock: start,
+	})
+	require.NoError(t, err)
+
+	store.AssertExpectations(t)
+}
+
+// TestRewindToBlockFallsBackToLegacy verifies that, when no runtime store is
+// configured, rewindToBlock still routes through the legacy DBPutRewind path
+// (SetSyncedTo + wtxmgr Rollback) rather than the store.
+func TestRewindToBlockFallsBackToLegacy(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+	require.Nil(t, s.store)
+
+	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+
+	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
+	mocks.txStore.On("Rollback",
+		mock.Anything, int32(101),
+	).Return(nil).Once()
+
+	err := s.rewindToBlock(t.Context(), bs)
+	require.NoError(t, err)
+
+	mocks.addrStore.AssertExpectations(t)
+	mocks.txStore.AssertExpectations(t)
+}
+
 // TestHandleChainUpdate_SpecialNotifs verifies RescanProgress and
 // RescanFinished.
 func TestHandleChainUpdate_SpecialNotifs(t *testing.T) {
@@ -3129,34 +3255,40 @@ func TestLoadFullScanState_Error(t *testing.T) {
 	require.ErrorContains(t, err, "db error")
 }
 
-// TestScanWithRewind_Error verifies error propagation from DBPutRewind.
+// TestScanWithRewind_Error verifies error propagation from the Store rewind.
 func TestScanWithRewind_Error(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup mock expectations for a rewind scan where a database
-	// rollback failure occurs.
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	// Arrange: Setup a store-backed syncer for a rewind scan where the Store
+	// rewind fails.
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, nil,
+		syncerStoreConfig{store: store, walletID: 0},
+	)
 
-	mockTxStore := &bwmock.TxStore{}
-	mockAddrStore := &bwmock.AddrStore{}
-	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
-	mockAddrStore.On("SyncedTo").Return(
-		waddrmgr.BlockStamp{Height: 100}).Maybe()
+	rewindTip := waddrmgr.BlockStamp{
+		Height:    90,
+		Hash:      chainhash.Hash{90},
+		Timestamp: time.Unix(90, 0).UTC(),
+	}
 
-	mockAddrStore.On("SetSyncedTo", mock.Anything,
-		mock.Anything).Return(nil).Maybe()
-	mockTxStore.On("Rollback", mock.Anything, mock.Anything).Return(
-		errRollbackFail).Once()
+	store.On("GetWallet", mock.Anything, "").Return(
+		&db.WalletInfo{SyncedTo: &db.Block{Height: 100}}, nil,
+	).Once()
+	store.On(
+		"RewindWallet", mock.Anything,
+		matchRewindWalletParams(0, rewindTip),
+	).Return(errRollbackFail).Once()
 
 	// Act: Attempt to perform a scan with rewind.
 	err := s.scanWithRewind(
 		t.Context(), &scanReq{
-			startBlock: waddrmgr.BlockStamp{Height: 90},
+			startBlock: rewindTip,
 		},
 	)
 
-	// Assert: Verify rollback failure is propagated.
+	// Assert: Verify the rewind failure is propagated.
 	require.ErrorContains(t, err, "rollback fail")
 }
 
