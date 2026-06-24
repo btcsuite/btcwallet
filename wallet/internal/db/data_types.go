@@ -1106,6 +1106,17 @@ type TxBatchParams struct {
 	SyncedTo *Block
 }
 
+// RewindWalletParams contains the wallet-scoped rewind target for a manual
+// rescan. The block is the new synced tip for the wallet after transactions at
+// and above the next height are detached from confirmed history.
+type RewindWalletParams struct {
+	// WalletID is the ID of the wallet to rewind.
+	WalletID uint32
+
+	// Block is the wallet's new synced-to block after the rewind.
+	Block Block
+}
+
 // ScanHorizon records the highest recovered address index for one account
 // branch.
 type ScanHorizon struct {

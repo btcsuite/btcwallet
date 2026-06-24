@@ -420,6 +420,13 @@ type TxStore interface {
 	// ApplyScanBatch atomically records recovery scan writes for one wallet.
 	ApplyScanBatch(ctx context.Context, params ScanBatchParams) error
 
+	// RewindWallet atomically detaches one wallet's confirmed transactions at
+	// and above the block after params.Block, and updates only that wallet's
+	// synced tip to params.Block. Unlike RollbackToBlock, this method is
+	// wallet-scoped and must not delete shared block rows or mutate other
+	// wallets' sync states.
+	RewindWallet(ctx context.Context, params RewindWalletParams) error
+
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
 	// transaction is not found.
