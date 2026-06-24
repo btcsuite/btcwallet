@@ -257,6 +257,30 @@ func (c *BitcoindClient) TestMempoolAccept(txns []*wire.MsgTx,
 	return c.chainConn.client.TestMempoolAccept(txns, maxFeeRate)
 }
 
+// SubmitPackage submits a package of related transactions (topologically
+// sorted, parents first and child last) to bitcoind's mempool for atomic
+// validation and acceptance via the submitpackage RPC. This is what allows a
+// zero-fee v3/TRUC parent to be accepted when paired with a fee-paying CPFP
+// child, which sendrawtransaction (single-tx) rejects.
+//
+// maxFeeRate is the optional per-tx fee-rate ceiling in BTC/kvB (pass a
+// pointer to 0 to disable the limit for high-feerate CPFP children).
+//
+// NOTE: This is part of the chain.Interface interface.
+func (c *BitcoindClient) SubmitPackage(txns []*wire.MsgTx,
+	maxFeeRate *float64) (*btcjson.SubmitPackageResult, error) {
+
+	// The rpcclient SubmitPackage exposes a maxBurnAmount limit too, which
+	// we don't surface on chain.Interface; pass nil to use the node
+	// default.
+	result, err := c.chainConn.client.SubmitPackage(txns, maxFeeRate, nil)
+	if err != nil {
+		return nil, c.MapRPCErr(err)
+	}
+
+	return result, nil
+}
+
 // Notifications returns a channel to retrieve notifications from.
 //
 // NOTE: This is part of the chain.Interface interface.
