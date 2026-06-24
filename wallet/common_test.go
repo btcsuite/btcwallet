@@ -11,6 +11,7 @@ import (
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	vaultmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock/vault"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
@@ -97,7 +98,7 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
 	addrStore      *bwmock.AddrStore
-	vault          *walletmock.Vault
+	vault          *vaultmock.Vault
 	store          *walletmock.Store
 	txStore        *bwmock.TxStore
 	syncer         *mockChainSyncer
@@ -118,7 +119,7 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Cleanup(cleanup)
 
 	mockAddrStore := &bwmock.AddrStore{}
-	mockVault := &walletmock.Vault{}
+	mockVault := &vaultmock.Vault{}
 	mockStore := &walletmock.Store{}
 	mockTxStore := &bwmock.TxStore{}
 	mockSyncer := &mockChainSyncer{}

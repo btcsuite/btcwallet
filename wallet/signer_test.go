@@ -24,7 +24,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	vaultmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock/vault"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -1332,7 +1332,7 @@ func createDummyTestTx(pkScript []byte) (*wire.TxOut, *wire.MsgTx) {
 // newSQLAddressSigningWallet returns a started, unlocked wallet whose address
 // records are stored in SQLite while signing keys come from legacy waddrmgr.
 func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
-	*walletmock.Vault) {
+	*vaultmock.Vault) {
 
 	t.Helper()
 
@@ -1384,7 +1384,7 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 	require.NoError(t, err)
 
 	chain := &bwmock.Chain{}
-	vault := &walletmock.Vault{}
+	vault := &vaultmock.Vault{}
 
 	w = &Wallet{
 		addrStore: addrStore,
