@@ -399,7 +399,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 			}
 
 			// Perform the rollback.
-			return s.DBPutRewind(ctx, waddrmgr.BlockStamp{
+			return s.rewindToBlock(ctx, waddrmgr.BlockStamp{
 				Height:    forkHeight,
 				Hash:      *forkHash,
 				Timestamp: header.Timestamp,
@@ -412,6 +412,96 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// rewindToBlock rewinds wallet sync and transaction state to the given fork
+// point.
+func (s *syncer) rewindToBlock(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	if s.store == nil {
+		return s.DBPutRewind(ctx, block)
+	}
+
+	rollbackBoundary := int64(block.Height) + 1
+
+	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
+	if err != nil {
+		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
+	}
+
+	// Roll transaction state back and rewind the wallet sync tip to the same
+	// fork point in one atomic store call so a failure cannot leave the sync
+	// tip rewound while transaction state still references the abandoned
+	// chain. RollbackToBlock derives the new sync tip from the stored
+	// fork-point block, so the caller only supplies the rollback boundary.
+	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	if err != nil {
+		return fmt.Errorf("rollback to block: %w", err)
+	}
+
+	return nil
+}
+
+// rewindWallet rewinds this wallet's sync and transaction state for a manual
+// rescan without requiring a DB-wide block rollback.
+func (s *syncer) rewindWallet(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	if s.store == nil {
+		return s.DBPutRewind(ctx, block)
+	}
+
+	storeBlock, err := s.resolveRewindBlock(block)
+	if err != nil {
+		return fmt.Errorf("rewind wallet block: %w", err)
+	}
+
+	err = s.store.RewindWallet(ctx, db.RewindWalletParams{
+		WalletID: s.walletID,
+		Block:    *storeBlock,
+	})
+	if err != nil {
+		return fmt.Errorf("rewind wallet: %w", err)
+	}
+
+	return nil
+}
+
+// resolveRewindBlock resolves the requested manual-rewind height into the
+// canonical block metadata recorded as the wallet's new synced tip.
+func (s *syncer) resolveRewindBlock(
+	block waddrmgr.BlockStamp) (*db.Block, error) {
+
+	if block.Hash != (chainhash.Hash{}) && !block.Timestamp.IsZero() {
+		storeBlock, err := db.BlockFromBlockStamp(block)
+		if err != nil {
+			return nil, fmt.Errorf("convert rewind block: %w", err)
+		}
+
+		return storeBlock, nil
+	}
+
+	hash, err := s.cfg.Chain.GetBlockHash(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block hash: %w", err)
+	}
+
+	header, err := s.cfg.Chain.GetBlockHeader(hash)
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block header: %w", err)
+	}
+
+	storeBlock, err := db.BlockFromBlockStamp(waddrmgr.BlockStamp{
+		Height:    block.Height,
+		Hash:      *hash,
+		Timestamp: header.Timestamp,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("convert resolved rewind block: %w", err)
+	}
+
+	return storeBlock, nil
 }
 
 // syncedBlockHashes returns the wallet's synced block hashes for the inclusive
@@ -1343,7 +1433,15 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 // scanWithRewind rewinds the wallet's sync status to the requested start
 // block.
 func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
-	current := s.addrStore.SyncedTo()
+	// Read the synced tip through syncedTo so a Store-backed backend uses
+	// the Store's tip rather than the legacy addrStore tip. A backend that
+	// does not mirror ApplyScanBatch/RewindWallet into the legacy manager
+	// would otherwise compare against a stale legacy height and could
+	// wrongly conclude there is nothing to rewind for a full rescan.
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
 
 	if req.startBlock.Height >= current.Height {
 		// Requested start is ahead of or equal to current sync.
@@ -1354,8 +1452,7 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	log.Infof("Rewinding sync status from %d to %d for rescan",
 		current.Height, req.startBlock.Height)
 
-	// Rewind the database status.
-	err := s.DBPutRewind(ctx, req.startBlock)
+	err = s.rewindWallet(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
 
