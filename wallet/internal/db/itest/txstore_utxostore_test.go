@@ -2201,6 +2201,117 @@ func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
 	require.Equal(t, forkBlock.Hash, walletInfo.SyncedTo.Hash)
 }
 
+// TestRewindWalletLeavesOtherWalletState verifies manual rescan rewind is
+// wallet-scoped. It must detach only the selected wallet's confirmed
+// transactions and sync tip, leaving another wallet that shares the same Store
+// at the same block height untouched.
+func TestRewindWalletLeavesOtherWalletState(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	const (
+		walletAName = "wallet-rewind-scoped-a"
+		walletBName = "wallet-rewind-scoped-b"
+	)
+
+	walletA := newWallet(t, store, walletAName)
+	walletB := newWallet(t, store, walletBName)
+
+	rewindBlock := db.Block{
+		Hash:      chainhash.Hash{100},
+		Height:    100,
+		Timestamp: time.Unix(1710006100, 0),
+	}
+	tipBlock := db.Block{
+		Hash:      chainhash.Hash{101},
+		Height:    101,
+		Timestamp: time.Unix(1710006110, 0),
+	}
+
+	txA := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 1000}},
+	)
+	txB := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 2000}},
+	)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletA,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletA,
+			Tx:       txA,
+			Received: time.Unix(1710006120, 0),
+			Block:    &tipBlock,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &tipBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletB,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletB,
+			Tx:       txB,
+			Received: time.Unix(1710006130, 0),
+			Block:    &tipBlock,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &tipBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.RewindWallet(t.Context(), db.RewindWalletParams{
+		WalletID: walletA,
+		Block:    rewindBlock,
+	})
+	require.NoError(t, err)
+
+	infoA, err := store.GetWallet(t.Context(), walletAName)
+	require.NoError(t, err)
+	require.NotNil(t, infoA.SyncedTo)
+	require.Equal(t, rewindBlock.Height, infoA.SyncedTo.Height)
+	require.Equal(t, rewindBlock.Hash, infoA.SyncedTo.Hash)
+
+	infoB, err := store.GetWallet(t.Context(), walletBName)
+	require.NoError(t, err)
+	require.NotNil(t, infoB.SyncedTo)
+	require.Equal(t, tipBlock.Height, infoB.SyncedTo.Height)
+	require.Equal(t, tipBlock.Hash, infoB.SyncedTo.Hash)
+
+	confirmedA, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletA,
+		StartHeight: tipBlock.Height,
+		EndHeight:   tipBlock.Height,
+	})
+	require.NoError(t, err)
+	require.Empty(t, confirmedA)
+
+	unminedA, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletA,
+		UnminedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, unminedA, 1)
+	require.Equal(t, txA.TxHash(), unminedA[0].Hash)
+	require.Nil(t, unminedA[0].Block)
+	require.Equal(t, db.TxStatusPublished, unminedA[0].Status)
+
+	confirmedB, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletB,
+		StartHeight: tipBlock.Height,
+		EndHeight:   tipBlock.Height,
+	})
+	require.NoError(t, err)
+	require.Len(t, confirmedB, 1)
+	require.Equal(t, txB.TxHash(), confirmedB[0].Hash)
+	require.NotNil(t, confirmedB[0].Block)
+	require.Equal(t, tipBlock.Height, confirmedB[0].Block.Height)
+}
+
 // TestCreateTxReconfirmsOrphanedCoinbase verifies that CreateTx can restore an
 // orphaned coinbase row to confirmed history when the same coinbase hash later
 // re-enters the best chain.
