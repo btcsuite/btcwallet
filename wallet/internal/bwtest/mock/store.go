@@ -440,6 +440,15 @@ func (m *Store) ApplyScanBatch(ctx context.Context,
 	return args.Error(0)
 }
 
+// RewindWallet implements the db.TxStore interface.
+func (m *Store) RewindWallet(ctx context.Context,
+	params db.RewindWalletParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
 // GetTx implements the db.TxStore interface.
 func (m *Store) GetTx(ctx context.Context,
 	query db.GetTxQuery) (*db.TxInfo, error) {
