@@ -1143,6 +1143,59 @@ func (s *Store) InvalidateUnminedTx(_ context.Context,
 	return nil
 }
 
+// RewindWallet atomically rewinds the single kvdb wallet to the requested
+// manual-rescan sync tip and detaches transactions confirmed above it.
+func (s *Store) RewindWallet(_ context.Context,
+	params db.RewindWalletParams) error {
+
+	block, err := db.BlockStampFromBlock(&params.Block)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.RewindWallet: block: %w", err)
+	}
+
+	rollbackHeight, err := db.Int64ToInt32(int64(params.Block.Height) + 1)
+	if err != nil {
+		return fmt.Errorf("kvdb.Store.RewindWallet: rollback height: %w",
+			err)
+	}
+
+	var preRewindTip waddrmgr.BlockStamp
+
+	// Hold the Store write lock through the commit-failure restore below. This
+	// keeps the cache restore ordered before a following Store write can commit
+	// the same tip and create an ABA match.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		preRewindTip = s.addrStore.SyncedTo()
+
+		err := s.addrStore.SetSyncedTo(addrmgrNs, &block)
+		if err != nil {
+			return fmt.Errorf("set synced to: %w", err)
+		}
+
+		return s.txStore.Rollback(txmgrNs, rollbackHeight)
+	})
+	if err != nil {
+		s.addrStore.RestoreSyncedToIfCurrent(preRewindTip, block)
+
+		return fmt.Errorf("kvdb.Store.RewindWallet: %w", err)
+	}
+
+	return nil
+}
+
 // RollbackToBlock atomically rolls legacy transaction state back to the
 // provided height and rewinds wallet sync metadata to the same fork point in
 // one walletdb update, mirroring the legacy SetSyncedTo + wtxmgr Rollback

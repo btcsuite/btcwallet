@@ -10,6 +10,95 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
 
+const maxSQLBlockHeight = int64(1<<31 - 1)
+
+// RewindWallet atomically rewinds one wallet for a manual rescan without
+// deleting shared block rows or mutating other wallets' sync states.
+func (s *Store) RewindWallet(ctx context.Context,
+	params db.RewindWalletParams) error {
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		err := rewindWalletTransactions(ctx, qtx, params)
+		if err != nil {
+			return err
+		}
+
+		err = db.UpdateWalletWithOps(ctx, db.UpdateWalletParams{
+			WalletID: params.WalletID,
+			SyncedTo: &params.Block,
+		}, updateWalletOps{q: qtx})
+		if err != nil {
+			return fmt.Errorf("update wallet sync tip: %w", err)
+		}
+
+		return nil
+	})
+}
+
+// rewindWalletTransactions detaches one wallet's confirmed transactions above
+// the manual-rescan rewind point while preserving shared block rows.
+func rewindWalletTransactions(ctx context.Context, qtx *sqlc.Queries,
+	params db.RewindWalletParams) error {
+
+	startHeight, err := db.Int64ToInt32(int64(params.Block.Height) + 1)
+	if err != nil {
+		return fmt.Errorf("rewind start height: %w", err)
+	}
+
+	rows, err := qtx.ListTransactionsByHeightRange(
+		ctx, sqlc.ListTransactionsByHeightRangeParams{
+			WalletID:    int64(params.WalletID),
+			StartHeight: int64(startHeight),
+			EndHeight:   maxSQLBlockHeight,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("list wallet rewind txs: %w", err)
+	}
+
+	coinbaseRoots := make([]chainhash.Hash, 0)
+	for _, row := range rows {
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return fmt.Errorf("rewind tx hash: %w", err)
+		}
+
+		status := db.TxStatusPublished
+		if row.IsCoinbase {
+			status = db.TxStatusOrphaned
+
+			coinbaseRoots = append(coinbaseRoots, *txHash)
+		}
+
+		updated, err := qtx.UpdateTransactionStateByHash(
+			ctx, sqlc.UpdateTransactionStateByHashParams{
+				BlockHeight: sql.NullInt64{},
+				Status:      int64(status),
+				WalletID:    int64(params.WalletID),
+				TxHash:      row.TxHash,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("detach rewind tx %s: %w", txHash, err)
+		}
+
+		if updated == 0 {
+			return fmt.Errorf("rewind tx %s: %w", txHash,
+				db.ErrTxNotFound)
+		}
+	}
+
+	if len(coinbaseRoots) == 0 {
+		return nil
+	}
+
+	return db.InvalidateRollbackDescendants(
+		ctx, map[uint32][]chainhash.Hash{
+			params.WalletID: coinbaseRoots,
+		}, rollbackToBlockOps{qtx: qtx},
+	)
+}
+
 // RollbackToBlock atomically removes every block at or above the provided
 // height and rewrites wallet sync-state references so the block delete can
 // succeed.

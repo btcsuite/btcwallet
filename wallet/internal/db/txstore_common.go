@@ -1767,6 +1767,16 @@ func invalidateRollbackDescendants(ctx context.Context,
 	return nil
 }
 
+// InvalidateRollbackDescendants clears spend edges and fails unmined
+// descendants rooted in disconnected coinbase transactions. Wallet-scoped
+// rewind paths use this without deleting shared block rows.
+func InvalidateRollbackDescendants(ctx context.Context,
+	rootHashesByWallet map[uint32][]chainhash.Hash,
+	ops RollbackToBlockOps) error {
+
+	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
+}
+
 // MarkTxRootsOrphaned rewrites every disconnected coinbase root to the
 // orphaned state before descendant invalidation completes.
 func MarkTxRootsOrphaned(ctx context.Context,
