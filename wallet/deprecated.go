@@ -45,6 +45,28 @@ var (
 	bucketTxLabels = []byte("l")
 )
 
+// AccountResult is the result of a ListAccounts query.
+type AccountResult struct {
+	// AccountProperties is the account's properties.
+	waddrmgr.AccountProperties
+
+	// TotalBalance is the total balance of the account.
+	TotalBalance btcutil.Amount
+}
+
+// AccountsResult is the result of a ListAccounts query. It contains a list of
+// accounts and the current block height and hash.
+type AccountsResult struct {
+	// Accounts is a list of accounts.
+	Accounts []AccountResult
+
+	// CurrentBlockHash is the hash of the current block.
+	CurrentBlockHash chainhash.Hash
+
+	// CurrentBlockHeight is the height of the current block.
+	CurrentBlockHeight int32
+}
+
 // CreateWithCallback is the same as Create with an added callback that will be
 // called in the same transaction the wallet structure is initialized.
 //

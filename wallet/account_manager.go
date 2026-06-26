@@ -19,7 +19,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/netparams"
@@ -140,28 +139,6 @@ func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
 	})
 
 	return props, err
-}
-
-// AccountResult is the result of a ListAccounts query.
-type AccountResult struct {
-	// AccountProperties is the account's properties.
-	waddrmgr.AccountProperties
-
-	// TotalBalance is the total balance of the account.
-	TotalBalance btcutil.Amount
-}
-
-// AccountsResult is the result of a ListAccounts query. It contains a list of
-// accounts and the current block height and hash.
-type AccountsResult struct {
-	// Accounts is a list of accounts.
-	Accounts []AccountResult
-
-	// CurrentBlockHash is the hash of the current block.
-	CurrentBlockHash chainhash.Hash
-
-	// CurrentBlockHeight is the height of the current block.
-	CurrentBlockHeight int32
 }
 
 // ListAccounts returns a list of all accounts for the wallet, including those
