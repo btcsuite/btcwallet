@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -129,6 +130,60 @@ type ScopedIndex struct {
 // by the target key scope.
 func (k KeyScope) String() string {
 	return fmt.Sprintf("m/%v'/%v'", k.Purpose, k.Coin)
+}
+
+// AccountScope uniquely identifies a specific account within a key scope.
+type AccountScope struct {
+	// Scope is the BIP44 account' used to derive the child key.
+	Scope KeyScope
+
+	// Account is the account number.
+	Account uint32
+}
+
+// String returns a human readable version describing the account scope.
+func (as AccountScope) String() string {
+	return fmt.Sprintf("%s/%d'", as.Scope, as.Account)
+}
+
+// BranchScope uniquely identifies a specific derivation branch within an
+// account.
+type BranchScope struct {
+	// Scope is the key scope of the branch.
+	Scope KeyScope
+
+	// Account is the account number of the branch.
+	Account uint32
+
+	// Branch is the branch number (e.g. waddrmgr.ExternalBranch or
+	// waddrmgr.InternalBranch).
+	Branch uint32
+}
+
+// String returns a human readable version describing the branch scope.
+func (bs BranchScope) String() string {
+	return fmt.Sprintf("%s/%d/%d'", bs.Scope, bs.Account, bs.Branch)
+}
+
+// IsChange returns true if the branch matches the internal (change) branch.
+func (bs BranchScope) IsChange() bool {
+	return bs.Branch == InternalBranch
+}
+
+// AddrScope uniquely identifies a specific address within a derivation branch.
+type AddrScope struct {
+	BranchScope BranchScope
+	Index       uint32
+}
+
+// String returns a human readable version describing the address scope.
+func (as AddrScope) String() string {
+	return fmt.Sprintf("%s/%d", as.BranchScope, as.Index)
+}
+
+// IsChange returns true if the address belongs to an internal (change) branch.
+func (as AddrScope) IsChange() bool {
+	return as.BranchScope.IsChange()
 }
 
 // Identity is a closure that returns the identifier of an address.
@@ -301,6 +356,24 @@ type ScopedKeyManager struct {
 	privKeyCache *lru.Cache[DerivationPath, *cachedKey]
 
 	mtx sync.RWMutex
+}
+
+// A compile-time assertion to ensure that ScopedKeyManager implements the
+// AccountStore interface.
+var _ AccountStore = (*ScopedKeyManager)(nil)
+
+// ActiveAccounts returns the account numbers of all accounts currently loaded
+// in memory.
+func (s *ScopedKeyManager) ActiveAccounts() []uint32 {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	accounts := make([]uint32, 0, len(s.acctInfo))
+	for account := range s.acctInfo {
+		accounts = append(accounts, account)
+	}
+
+	return accounts
 }
 
 // Scope returns the exact KeyScope of this scoped key manager.
@@ -1002,6 +1075,41 @@ func (s *ScopedKeyManager) accountAddrType(acctInfo *accountInfo,
 	return addrSchema.ExternalAddrType
 }
 
+// TODO(yy): This method is a "God method" that does too much, leading to
+// several issues. It should be refactored to improve separation of concerns,
+// reduce complexity, and increase robustness.
+//
+// Issues:
+//  1. **Excessive Responsibility:** The method handles account validation, key
+//     derivation, address creation, database persistence, and in-memory state
+//     management, violating the Single Responsibility Principle.
+//  2. **Fragile Concurrency Model:** The use of an `onCommit` closure to sync
+//     the in-memory cache with the database state is prone to race
+//     conditions and deadlocks, as it requires re-acquiring a mutex outside
+//     of the original database transaction's scope.
+//  3. **Inefficiency and Redundancy:** The method performs a read-after-write
+//     validation by loading addresses from the DB immediately after saving
+//     them, which indicates a lack of confidence in the persistence logic.
+//  4. **Complex API:** The method returns a slice of addresses but is almost
+//     always called with a request for a single address, making the API and
+//     its usage unnecessarily complex.
+//
+// Refactoring Tasks:
+//   - **Separate DB Logic:** Encapsulate all database read/write operations
+//     within this package. The method should handle its own transaction
+//     instead of accepting a `walletdb.ReadWriteBucket`.
+//   - **Simplify State Management:** Refactor the in-memory cache (`s.addrs`)
+//     and the next address index (`acctInfo.next...Index`) to be updated
+//     atomically with the database write, removing the fragile `onCommit`
+//     closure.
+//   - **Decompose the Method:** Break this function into smaller, private
+//     helpers for each distinct responsibility: deriving keys, creating
+//     managed addresses, and persisting them.
+//   - **Simplify the API:** Create a new, simpler method that returns a single
+//     address, as this is the most common use case. The batch generation
+//     logic can be deprecated or refactored into a separate method if still
+//     needed.
+//
 // nextAddresses returns the specified number of next chained address from the
 // branch indicated by the internal flag.
 //
@@ -1010,8 +1118,10 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	account uint32, numAddresses uint32, internal bool) ([]ManagedAddress,
 	error) {
 
-	// The next address can only be generated for accounts that have
-	// already been created.
+	// The next address can only be generated for accounts that have already
+	// been created. We load the account info to retrieve the decrypted keys and
+	// other cached metadata. This ensures we don't perform expensive crypto
+	// operations for every address generation.
 	acctInfo, err := s.loadAccountInfo(ns, account)
 	if err != nil {
 		return nil, err
@@ -1020,23 +1130,36 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 	// Choose the account key to used based on whether the address manager
 	// is locked.
 	acctKey := acctInfo.acctKeyPub
-	watchOnly := s.rootManager.WatchOnly() || len(acctInfo.acctKeyEncrypted) == 0
+	watchOnly := s.rootManager.WatchOnly() ||
+		len(acctInfo.acctKeyEncrypted) == 0
+
 	if !s.rootManager.IsLocked() && !watchOnly {
 		acctKey = acctInfo.acctKeyPriv
-	}
-
-	// Choose the branch key and index depending on whether or not this is
-	// an internal address.
-	branchNum, nextIndex := ExternalBranch, acctInfo.nextExternalIndex
-	if internal {
-		branchNum = InternalBranch
-		nextIndex = acctInfo.nextInternalIndex
 	}
 
 	// Choose the appropriate type of address to derive since it's possible
 	// for a watch-only account to have a different schema from the
 	// manager's.
 	addrType := s.accountAddrType(acctInfo, internal)
+
+	// We also fetch the raw account row directly from the database to
+	// ensure we have the most up-to-date address indices, bypassing any
+	// potentially stale cached state. This is critical for preventing
+	// race conditions during concurrent address generation.
+	//
+	// NOTE: We must do this *after* loadAccountInfo to ensure the account
+	// exists and is cached, but we override the indices with the DB values.
+	nextIndex, err := s.getNextIndex(ns, account, internal)
+	if err != nil {
+		return nil, err
+	}
+
+	// Choose the branch key and index depending on whether or not this is
+	// an internal address.
+	branchNum := ExternalBranch
+	if internal {
+		branchNum = InternalBranch
+	}
 
 	// Ensure the requested number of addresses doesn't exceed the maximum
 	// allowed for this account.
@@ -1209,13 +1332,22 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		}
 
 		// Set the last address and next address for tracking.
+		//
+		// NOTE: We only update the cache if the new index is strictly greater
+		// than the current cached index. This protects against a race condition
+		// where a slower transaction commits *after* a faster one, which could
+		// otherwise cause the cache to regress.
 		ma := addressInfo[len(addressInfo)-1].managedAddr
 		if internal {
-			acctInfo.nextInternalIndex = nextIndex
-			acctInfo.lastInternalAddr = ma
+			if nextIndex > acctInfo.nextInternalIndex {
+				acctInfo.nextInternalIndex = nextIndex
+				acctInfo.lastInternalAddr = ma
+			}
 		} else {
-			acctInfo.nextExternalIndex = nextIndex
-			acctInfo.lastExternalAddr = ma
+			if nextIndex > acctInfo.nextExternalIndex {
+				acctInfo.nextExternalIndex = nextIndex
+				acctInfo.lastExternalAddr = ma
+			}
 		}
 	}
 	ns.Tx().OnCommit(onCommit)
@@ -1248,18 +1380,29 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		acctKey = acctInfo.acctKeyPriv
 	}
 
-	// Choose the branch key and index depending on whether or not this is
-	// an internal address.
-	branchNum, nextIndex := ExternalBranch, acctInfo.nextExternalIndex
-	if internal {
-		branchNum = InternalBranch
-		nextIndex = acctInfo.nextInternalIndex
-	}
-
 	// Choose the appropriate type of address to derive since it's possible
 	// for a watch-only account to have a different schema from the
 	// manager's.
 	addrType := s.accountAddrType(acctInfo, internal)
+
+	// We also fetch the raw account row directly from the database to
+	// ensure we have the most up-to-date address indices, bypassing any
+	// potentially stale cached state. This is critical for preventing
+	// race conditions during concurrent address generation.
+	//
+	// NOTE: We must do this *after* loadAccountInfo to ensure the account
+	// exists and is cached, but we override the indices with the DB values.
+	nextIndex, err := s.getNextIndex(ns, account, internal)
+	if err != nil {
+		return err
+	}
+
+	// Choose the branch key and index depending on whether or not this is
+	// an internal address.
+	branchNum := ExternalBranch
+	if internal {
+		branchNum = InternalBranch
+	}
 
 	// If the last index requested is already lower than the next index, we
 	// can return early.
@@ -1399,16 +1542,43 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 	}
 
 	// Set the last address and next address for tracking.
+	//
+	// NOTE: We only update the cache if the new index is strictly greater
+	// than the current cached index. This protects against a race condition
+	// where a slower transaction commits *after* a faster one, which could
+	// otherwise cause the cache to regress.
 	ma := addressInfo[len(addressInfo)-1].managedAddr
 	if internal {
-		acctInfo.nextInternalIndex = nextIndex
-		acctInfo.lastInternalAddr = ma
+		if nextIndex > acctInfo.nextInternalIndex {
+			acctInfo.nextInternalIndex = nextIndex
+			acctInfo.lastInternalAddr = ma
+		}
 	} else {
-		acctInfo.nextExternalIndex = nextIndex
-		acctInfo.lastExternalAddr = ma
+		if nextIndex > acctInfo.nextExternalIndex {
+			acctInfo.nextExternalIndex = nextIndex
+			acctInfo.lastExternalAddr = ma
+		}
 	}
 
 	return nil
+}
+
+// ExtendAddresses ensures that all valid keys through lastIndex are
+// derived and stored in the wallet for the specified branch.
+func (s *ScopedKeyManager) ExtendAddresses(ns walletdb.ReadWriteBucket,
+	account uint32, lastIndex uint32, branch uint32) error {
+
+	if account > MaxAccountNum {
+		err := managerError(ErrAccountNumTooHigh, errAcctTooHigh, nil)
+		return err
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	return s.extendAddresses(
+		ns, account, lastIndex, branch == InternalBranch,
+	)
 }
 
 // NextExternalAddresses returns the specified number of next chained addresses
@@ -1549,21 +1719,30 @@ func (s *ScopedKeyManager) LastInternalAddress(ns walletdb.ReadBucket,
 	return nil, managerError(ErrAddressNotFound, "no previous internal address", nil)
 }
 
-// NewRawAccount creates a new account for the scoped manager. This method
-// differs from the NewAccount method in that this method takes the account
-// number *directly*, rather than taking a string name for the account, then
-// mapping that to the next highest account number.
-func (s *ScopedKeyManager) NewRawAccount(ns walletdb.ReadWriteBucket, number uint32) error {
+// CanAddAccount returns an error if a new account cannot be created.
+// This is the case if the manager is watch-only or is locked. A descriptive
+// error is returned in these cases.
+func (s *ScopedKeyManager) CanAddAccount() error {
 	if s.rootManager.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
 	}
 
-	s.mtx.Lock()
-	defer s.mtx.Unlock()
-
 	if s.rootManager.IsLocked() {
 		return managerError(ErrLocked, errLocked, nil)
 	}
+
+	return nil
+}
+
+// NewRawAccount creates a new account for the scoped manager. This method
+// differs from the NewAccount method in that this method takes the account
+// number *directly*, rather than taking a string name for the account, then
+// mapping that to the next highest account number.
+func (s *ScopedKeyManager) NewRawAccount(
+	ns walletdb.ReadWriteBucket, number uint32) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	// As this is an ad hoc account that may not follow our normal linear
 	// derivation, we'll create a new name for this account based off of
@@ -1608,16 +1787,8 @@ func (s *ScopedKeyManager) NewRawAccountWatchingOnly(
 // access to the cointype keys (from which extended account keys are derived),
 // it requires the manager to be unlocked.
 func (s *ScopedKeyManager) NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error) {
-	if s.rootManager.WatchOnly() {
-		return 0, managerError(ErrWatchingOnly, errWatchingOnly, nil)
-	}
-
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
-	if s.rootManager.IsLocked() {
-		return 0, managerError(ErrLocked, errLocked, nil)
-	}
 
 	// Fetch latest account, and create a new account in the same
 	// transaction Fetch the latest account number to generate the next
@@ -1830,11 +2001,6 @@ func (s *ScopedKeyManager) RenameAccount(ns walletdb.ReadWriteBucket,
 		return managerError(ErrDuplicateAccount, str, err)
 	}
 
-	// Validate account name
-	if err := ValidateAccountName(name); err != nil {
-		return err
-	}
-
 	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
 	if err != nil {
 		return err
@@ -1978,6 +2144,82 @@ func (s *ScopedKeyManager) ImportPublicKey(ns walletdb.ReadWriteBucket,
 	}
 
 	return s.toImportedPublicManagedAddress(pubKey, true)
+}
+
+// DeriveAddr derives a single address and its corresponding pkScript for the
+// given account, branch, and index. This method relies on the in-memory
+// account state and extended public keys, avoiding database access.
+func (s *ScopedKeyManager) DeriveAddr(account uint32, branch uint32,
+	index uint32) (address.Address, []byte, error) {
+
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	acctInfo, ok := s.acctInfo[account]
+	if !ok {
+		return nil, nil, managerError(ErrAccountNotCached,
+			"account not cached", nil)
+	}
+
+	return s.deriveAddr(acctInfo, account, branch, index)
+}
+
+// DeriveAddrs derives a range of addresses and their corresponding pkScripts
+// for the given account and branch. It generates `count` addresses starting
+// from `startIndex`. This method relies on the in-memory account state and
+// extended public keys, avoiding database access.
+//
+// It returns:
+// - A slice of derived addresses.
+// - A slice of corresponding pkScripts.
+// - An error if the account is not cached or derivation fails.
+func (s *ScopedKeyManager) DeriveAddrs(account uint32, branch uint32,
+	startIndex uint32, count uint32) ([]address.Address, [][]byte, error) {
+
+	// Make sure the index is sane.
+	if startIndex+count < startIndex {
+		str := fmt.Sprintf("child index overflow: %d + %d",
+			startIndex, count)
+
+		return nil, nil, managerError(ErrTooManyAddresses, str, nil)
+	}
+
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	// Ensure the account information is cached. If not, we cannot proceed
+	// without a DB transaction, so we return an error. The caller is
+	// expected to ensure the account is loaded (e.g. via AccountProperties)
+	// before calling this method.
+	acctInfo, ok := s.acctInfo[account]
+	if !ok {
+		return nil, nil, managerError(ErrAccountNotCached,
+			"account not cached", nil)
+	}
+
+	addrs := make([]address.Address, 0, count)
+	scripts := make([][]byte, 0, count)
+
+	// Iterate through the requested range of child indexes (startIndex to
+	// startIndex+count). For each index, we derive the corresponding
+	// extended key and convert it into a payment address and script.
+	//
+	// TODO(yy): Optimize by deriving the branch key once outside the loop
+	// instead of re-deriving it for every index via s.deriveKey.
+	endIndex := startIndex + count
+	for index := startIndex; index < endIndex; index++ {
+		addr, script, err := s.deriveAddr(
+			acctInfo, account, branch, index,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		addrs = append(addrs, addr)
+		scripts = append(scripts, script)
+	}
+
+	return addrs, scripts, nil
 }
 
 // importPublicKey imports a public key into the address manager and updates the
@@ -2578,4 +2820,164 @@ func (s *ScopedKeyManager) InvalidateAccountCache(account uint32) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	delete(s.acctInfo, account)
+}
+
+// NewAddress returns a new address for the given account. The `change`
+// parameter dictates whether a change address (internal) or a receiving
+// address (external) should be generated. The caller is responsible for
+// providing a database transaction. The method first looks up the account
+// number from the provided account name. It then uses the appropriate
+// method (`NextInternalAddresses` or `NextExternalAddresses`) to derive the
+// next chained address for that account.
+func (s *ScopedKeyManager) NewAddress(addrmgrNs walletdb.ReadWriteBucket,
+	account string, change bool) (address.Address, error) {
+
+	accountNum, err := s.LookupAccount(addrmgrNs, account)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO(yy): get rid of the list, we should always return one address
+	// here.
+	var addrs []ManagedAddress
+
+	if change {
+		// Get next chained change address from wallet for account.
+		addrs, err = s.NextInternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Get next address from wallet.
+		addrs, err = s.NextExternalAddresses(addrmgrNs, accountNum, 1)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if len(addrs) == 0 {
+		return nil, managerError(
+			ErrAddressNotFound, "no addresses were generated", nil,
+		)
+	}
+
+	addr := addrs[0].Address()
+
+	return addr, nil
+}
+
+// getNextIndex fetches the current next address index for the specified branch
+// (internal/external) of an account directly from the database. This bypasses
+// the in-memory cache to ensure the most up-to-date state is used, avoiding
+// potential race conditions.
+func (s *ScopedKeyManager) getNextIndex(ns walletdb.ReadBucket,
+	account uint32, internal bool) (uint32, error) {
+
+	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
+	if err != nil {
+		return 0, maybeConvertDbError(err)
+	}
+
+	var nextInternal, nextExternal uint32
+	switch row := rowInterface.(type) {
+	case *dbDefaultAccountRow:
+		nextInternal = row.nextInternalIndex
+		nextExternal = row.nextExternalIndex
+
+	case *dbWatchOnlyAccountRow:
+		nextInternal = row.nextInternalIndex
+		nextExternal = row.nextExternalIndex
+
+	default:
+		str := fmt.Sprintf("unsupported account type %T", row)
+		return 0, managerError(ErrDatabase, str, nil)
+	}
+
+	if internal {
+		return nextInternal, nil
+	}
+
+	return nextExternal, nil
+}
+
+// deriveAddr performs the actual derivation logic for a single address using
+// the provided account info. It assumes the manager lock is held.
+func (s *ScopedKeyManager) deriveAddr(acctInfo *accountInfo, account, branch,
+	index uint32) (address.Address, []byte, error) {
+
+	// Determine the address type (schema) for this account and branch.
+	// This tells us whether to generate P2PKH (BIP44), P2WPKH (BIP84),
+	// Nested P2WPKH (BIP49), or Taproot (BIP86) addresses.
+	// Internal branch usually implies change addresses.
+	internal := branch == InternalBranch
+	addrType := s.accountAddrType(acctInfo, internal)
+
+	// Derive the extended key for this index.
+	// We pass 'false' for the private flag because we only need the
+	// public key to derive the address. This allows operation even
+	// if the wallet is locked (encrypted private keys unavailable).
+	key, err := s.deriveKey(acctInfo, branch, index, false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pubKey, err := key.ECPubKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse public key: %w",
+			err)
+	}
+
+	// Construct the derivation path metadata. This is required by
+	// newManagedAddressWithoutPrivKey to properly tag the address.
+	derivationPath := DerivationPath{
+		InternalAccount:      account,
+		Account:              acctInfo.acctKeyPub.ChildIndex(),
+		Branch:               branch,
+		Index:                index,
+		MasterKeyFingerprint: acctInfo.masterKeyFingerprint,
+	}
+
+	// Create a temporary managed address. We use this helper because
+	// it encapsulates the complex logic for converting a public key
+	// into the correct address format (e.g. P2SH wrapping for nested
+	// SegWit) based on the addrType.
+	ma, err := newManagedAddressWithoutPrivKey(
+		s, derivationPath, pubKey, true, addrType,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	addr := ma.Address()
+
+	script, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create script: %w", err)
+	}
+
+	return addr, script, nil
+}
+
+// accountInfo returns a copy of the account info map.
+func (s *ScopedKeyManager) accountInfo() map[uint32]*accountInfo {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	acctInfoCopy := make(map[uint32]*accountInfo, len(s.acctInfo))
+	maps.Copy(acctInfoCopy, s.acctInfo)
+
+	return acctInfoCopy
+}
+
+// addresses returns a slice of all managed addresses.
+func (s *ScopedKeyManager) addresses() []ManagedAddress {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	addrs := make([]ManagedAddress, 0, len(s.addrs))
+	for _, ma := range s.addrs {
+		addrs = append(addrs, ma)
+	}
+
+	return addrs
 }

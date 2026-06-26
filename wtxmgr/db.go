@@ -434,6 +434,10 @@ func readRawTxRecord(txHash *chainhash.Hash, v []byte, rec *TxRecord) error {
 			bucketTxRecords, txHash)
 		return storeError(ErrData, str, err)
 	}
+
+	// Cache the raw bytes when the above deserialization succeeded.
+	rec.SerializedTx = v[8:]
+
 	return nil
 }
 

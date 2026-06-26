@@ -67,96 +67,115 @@ func (m *mockRescanner) WaitForShutdown() {
 // mockChainService is a mock implementation of a chain service for use in
 // tests.  Only the Start, GetBlockHeader and BestBlock methods are implemented.
 type mockChainService struct {
+	mock.Mock
 }
 
 func (m *mockChainService) Start(_ context.Context) error {
-	return nil
+	args := m.Called()
+	return args.Error(0)
 }
 
 func (m *mockChainService) BestBlock() (*headerfs.BlockStamp, error) {
-	return testBestBlock, nil
+	args := m.Called()
+	return args.Get(0).(*headerfs.BlockStamp), args.Error(1)
 }
 
 func (m *mockChainService) GetBlockHeader(
-	*chainhash.Hash) (*wire.BlockHeader, error) {
+	hash *chainhash.Hash) (*wire.BlockHeader, error) {
 
-	return &wire.BlockHeader{}, nil
+	args := m.Called(hash)
+	return args.Get(0).(*wire.BlockHeader), args.Error(1)
 }
 
-func (m *mockChainService) GetBlock(chainhash.Hash,
-	...neutrino.QueryOption) (*btcutil.Block, error) {
+func (m *mockChainService) GetBlock(
+	hash chainhash.Hash,
+	options ...neutrino.QueryOption) (*btcutil.Block, error) {
 
-	return nil, errNotImplemented
+	args := m.Called(hash, options)
+	return args.Get(0).(*btcutil.Block), args.Error(1)
 }
 
-func (m *mockChainService) GetBlockHeight(*chainhash.Hash) (int32, error) {
-	return 0, errNotImplemented
+func (m *mockChainService) GetBlockHeight(hash *chainhash.Hash) (int32, error) {
+	args := m.Called(hash)
+	return args.Get(0).(int32), args.Error(1)
 }
 
-func (m *mockChainService) GetBlockHash(int64) (*chainhash.Hash, error) {
-	return nil, errNotImplemented
+func (m *mockChainService) GetBlockHash(height int64) (*chainhash.Hash, error) {
+	args := m.Called(height)
+	return args.Get(0).(*chainhash.Hash), args.Error(1)
 }
 
 func (m *mockChainService) IsCurrent() bool {
-	return false
+	args := m.Called()
+	return args.Bool(0)
 }
 
-func (m *mockChainService) SendTransaction(*wire.MsgTx) error {
-	return errNotImplemented
+func (m *mockChainService) SendTransaction(tx *wire.MsgTx) error {
+	args := m.Called(tx)
+	return args.Error(0)
 }
 
-func (m *mockChainService) GetCFilter(chainhash.Hash,
-	wire.FilterType, ...neutrino.QueryOption) (*gcs.Filter, error) {
+func (m *mockChainService) GetCFilter(
+	hash chainhash.Hash, filterType wire.FilterType,
+	options ...neutrino.QueryOption) (*gcs.Filter, error) {
 
-	return nil, errNotImplemented
+	args := m.Called(hash, filterType, options)
+	return args.Get(0).(*gcs.Filter), args.Error(1)
 }
 
 func (m *mockChainService) GetUtxo(
-	_ ...neutrino.RescanOption) (*neutrino.SpendReport, error) {
+	opts ...neutrino.RescanOption) (*neutrino.SpendReport, error) {
 
-	return nil, errNotImplemented
+	args := m.Called(opts)
+	return args.Get(0).(*neutrino.SpendReport), args.Error(1)
 }
 
-func (m *mockChainService) BanPeer(string, banman.Reason) error {
-	return errNotImplemented
+func (m *mockChainService) BanPeer(addr string, reason banman.Reason) error {
+	args := m.Called(addr, reason)
+	return args.Error(0)
 }
 
 func (m *mockChainService) IsBanned(addr string) bool {
-	panic(errNotImplemented)
+	args := m.Called(addr)
+	return args.Bool(0)
 }
 
-func (m *mockChainService) AddPeer(*neutrino.ServerPeer) {
-	panic(errNotImplemented)
+func (m *mockChainService) AddPeer(peer *neutrino.ServerPeer) {
+	m.Called(peer)
 }
 
-func (m *mockChainService) AddBytesSent(uint64) {
-	panic(errNotImplemented)
+func (m *mockChainService) AddBytesSent(bytes uint64) {
+	m.Called(bytes)
 }
 
-func (m *mockChainService) AddBytesReceived(uint64) {
-	panic(errNotImplemented)
+func (m *mockChainService) AddBytesReceived(bytes uint64) {
+	m.Called(bytes)
 }
 
 func (m *mockChainService) NetTotals() (uint64, uint64) {
-	panic(errNotImplemented)
+	args := m.Called()
+	return args.Get(0).(uint64), args.Get(1).(uint64)
 }
 
-func (m *mockChainService) UpdatePeerHeights(*chainhash.Hash,
-	int32, *neutrino.ServerPeer,
-) {
-	panic(errNotImplemented)
+func (m *mockChainService) UpdatePeerHeights(hash *chainhash.Hash,
+	height int32, peer *neutrino.ServerPeer) {
+
+	m.Called(hash, height, peer)
 }
 
 func (m *mockChainService) ChainParams() chaincfg.Params {
-	panic(errNotImplemented)
+	args := m.Called()
+	return args.Get(0).(chaincfg.Params)
 }
 
 func (m *mockChainService) Stop() error {
-	panic(errNotImplemented)
+	args := m.Called()
+	return args.Error(0)
 }
 
-func (m *mockChainService) PeerByAddr(string) *neutrino.ServerPeer {
-	panic(errNotImplemented)
+func (m *mockChainService) PeerByAddr(addr string) *neutrino.ServerPeer {
+	args := m.Called(addr)
+	return args.Get(0).(*neutrino.ServerPeer)
 }
 
 // mockRPCClient mocks the rpcClient interface.
