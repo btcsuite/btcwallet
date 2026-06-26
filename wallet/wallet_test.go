@@ -284,4 +284,3 @@ func TestLocateBirthdayBlock(t *testing.T) {
 		}
 	}
 }
-

@@ -81,6 +81,7 @@ func (w *Wallet) ImportP2SHRedeemScript(
 	script []byte) (*address.AddressScriptHash, error) {
 
 	var p2shAddr *address.AddressScriptHash
+
 	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
