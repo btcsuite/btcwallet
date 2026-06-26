@@ -9,10 +9,12 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -696,17 +698,9 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 		return nil, err
 	}
 
-	// The address must be a public key address.
-	pubKeyAddr, ok := scriptInfo.Addr.(waddrmgr.ManagedPubKeyAddress)
-	if !ok {
-		return nil, fmt.Errorf("%w: addr %s",
-			ErrNotPubKeyAddress, scriptInfo.Addr.Address())
-	}
-
-	// Get the private key for the derived address.
-	privKey, err := pubKeyAddr.PrivKey()
+	privKey, err := w.privKeyForOutput(scriptInfo)
 	if err != nil {
-		return nil, fmt.Errorf("cannot get private key: %w", err)
+		return nil, err
 	}
 	defer privKey.Zero()
 
@@ -724,17 +718,198 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	return signAndAssembleScript(params, privKey, &scriptInfo)
 }
 
+// privKeyForOutput returns the private key needed to sign for the given
+// wallet-controlled output.
+func (w *Wallet) privKeyForOutput(scriptInfo OutputScriptInfo) (
+	*btcec.PrivateKey, error) {
+
+	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
+		return w.privKeyForAddressInfo(scriptInfo.AddressInfo)
+	}
+
+	pubKeyAddr, err := w.loadManagedPubKeyAddr(scriptInfo.Addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.resolvePrivKey(pubKeyAddr)
+}
+
+// canUseAddressInfoDerivation reports whether address metadata contains enough
+// derivation information to derive a private key without a legacy address row.
+func canUseAddressInfoDerivation(addressInfo AddressInfo) bool {
+	if addressInfo.Imported || addressInfo.Derivation == nil {
+		return false
+	}
+
+	return addressInfo.Derivation.KeyScope != (waddrmgr.KeyScope{})
+}
+
+// privKeyForAddressInfo derives the private key described by store-backed
+// address metadata.
+func (w *Wallet) privKeyForAddressInfo(addressInfo AddressInfo) (
+	*btcec.PrivateKey, error) {
+
+	derivation := addressInfo.Derivation
+	if derivation == nil {
+		return nil, fmt.Errorf("%w: derivation info not found for %v",
+			ErrDerivationPathNotFound, addressInfo.Addr)
+	}
+
+	derivationPath := waddrmgr.DerivationPath{
+		InternalAccount:      derivation.Account,
+		Account:              derivation.Account + hdkeychain.HardenedKeyStart,
+		Branch:               derivation.Branch,
+		Index:                derivation.Index,
+		MasterKeyFingerprint: derivation.MasterKeyFingerprint,
+	}
+
+	return w.resolveDerivedPathPrivKey(derivation.KeyScope, derivationPath)
+}
+
+// loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
+// access.
+func (w *Wallet) loadManagedPubKeyAddr(addr address.Address) (
+	waddrmgr.ManagedPubKeyAddress, error) {
+
+	var pubKeyAddr waddrmgr.ManagedPubKeyAddress
+
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err := w.addrStore.Address(addrmgrNs, addr)
+		if err != nil {
+			return fmt.Errorf("fetch address: %w", err)
+		}
+
+		var ok bool
+
+		pubKeyAddr, ok = managedAddr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+				managedAddr.Address())
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("view signer address: %w", err)
+	}
+
+	return pubKeyAddr, nil
+}
+
+// resolvePrivKey resolves the private key for a managed pubkey address without
+// using output-script inspection as the private-key lookup seam.
+func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
+	*btcec.PrivateKey, error) {
+
+	// Imported spendable keys have no derivation path, so we fall back to the
+	// dedicated private-key lookup exposed by the managed pubkey address.
+	if pubKeyAddr.Imported() {
+		privKey, err := pubKeyAddr.PrivKey()
+		if err != nil {
+			return nil, fmt.Errorf("fetch imported private key: %w", err)
+		}
+
+		return privKey, nil
+	}
+
+	keyScope, derivationPath, ok := pubKeyAddr.DerivationInfo()
+	if !ok {
+		return nil, fmt.Errorf("%w: addr=%v", ErrDerivationPathNotFound,
+			pubKeyAddr.Address())
+	}
+
+	return w.resolveDerivedPathPrivKey(keyScope, derivationPath)
+}
+
+// resolveDerivedPathPrivKey resolves one derived private key through the scoped
+// manager cache or the database-backed fallback.
+func (w *Wallet) resolveDerivedPathPrivKey(keyScope waddrmgr.KeyScope,
+	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	// TODO(yy): SQL-only accounts (created via Store.CreateDerivedAccount
+	// without a mirrored legacy waddrmgr account) miss both
+	// DeriveFromKeyPathCache and the DB-backed DeriveFromKeyPath fallback
+	// below because the legacy waddrmgr has no row for them. The
+	// signer-store PR (impl-tx-creator-store) will replace this path for
+	// SQL-only accounts with a keyVault-backed derivation: fetch
+	// account_secrets.encrypted_priv_key, decrypt via w.keyVault, and
+	// derive at branch/index locally — symmetric to deriveAddressData's
+	// AccountPubKey plumbing on the public-key side.
+	accountManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		return nil, fmt.Errorf("fetch scoped key manager: %w", err)
+	}
+
+	privKey, err := accountManager.DeriveFromKeyPathCache(derivationPath)
+	if err == nil {
+		return privKey, nil
+	}
+
+	// Only a cold account cache warrants the slower DB-backed fallback. Other
+	// derivation errors are real failures that re-running through the database
+	// will not repair.
+	if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotCached) {
+		return nil, fmt.Errorf("derive private key from cache: %w", err)
+	}
+
+	return w.resolveDerivedPrivKey(accountManager, derivationPath)
+}
+
+// resolveDerivedPrivKey resolves one derived private key through the normal
+// database-backed derivation path after a cache miss.
+func (w *Wallet) resolveDerivedPrivKey(accountManager waddrmgr.AccountStore,
+	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	var privKey *btcec.PrivateKey
+
+	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
+		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		managedAddr, err := accountManager.DeriveFromKeyPath(
+			addrmgrNs, derivationPath,
+		)
+		if err != nil {
+			return fmt.Errorf("derive private key from db: %w", err)
+		}
+
+		pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return fmt.Errorf("%w: addr %s", ErrNotPubKeyAddress,
+				managedAddr.Address())
+		}
+
+		privKey, err = pubKeyAddr.PrivKey()
+		if err != nil {
+			return fmt.Errorf("fetch derived private key: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("view signer derivation: %w", err)
+	}
+
+	return privKey, nil
+}
+
 // signAndAssembleScript is a helper function that performs the final signing
 // and script assembly for a given set of parameters and a private key.
 func signAndAssembleScript(params *UnlockingScriptParams,
 	privKey *btcec.PrivateKey,
-	scriptInfo *Script) (*UnlockingScript, error) {
+	scriptInfo *OutputScriptInfo) (*UnlockingScript, error) {
 
-	// Dispatch to the correct signing logic based on the address type of
-	// the output.
-	switch scriptInfo.Addr.AddrType() {
-	// For Taproot key-path spends, we produce a Schnorr signature.
-	case waddrmgr.TaprootPubKey:
+	// Dispatch to the correct signing logic based on the address type signing
+	// method.
+	signingMethod, err := scriptInfo.AddrType.SigningMethod()
+	if err != nil {
+		return nil, fmt.Errorf("determine signing method: %w", err)
+	}
+
+	switch signingMethod {
+	case waddrmgr.SigningMethodTaprootKeySpend:
 		witness, err := txscript.TaprootWitnessSignature(
 			params.Tx, params.SigHashes, params.InputIndex,
 			params.Output.Value, params.Output.PkScript,
@@ -744,12 +919,9 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 			return nil, fmt.Errorf("taproot witness error: %w", err)
 		}
 
-		return &UnlockingScript{
-			Witness: witness,
-		}, nil
+		return &UnlockingScript{Witness: witness}, nil
 
-	// For SegWit v0 outputs, we'll generate a standard ECDSA signature.
-	case waddrmgr.WitnessPubKey, waddrmgr.NestedWitnessPubKey:
+	case waddrmgr.SigningMethodWitnessV0:
 		witness, err := txscript.WitnessSignature(
 			params.Tx, params.SigHashes, params.InputIndex,
 			params.Output.Value, scriptInfo.WitnessProgram,
@@ -759,13 +931,17 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 			return nil, fmt.Errorf("witness sig error: %w", err)
 		}
 
+		sigScript, err := redeemSigScript(scriptInfo.RedeemScript)
+		if err != nil {
+			return nil, err
+		}
+
 		return &UnlockingScript{
 			Witness:   witness,
-			SigScript: scriptInfo.RedeemScript,
+			SigScript: sigScript,
 		}, nil
 
-	// For legacy P2PKH outputs, we'll generate a signature script.
-	case waddrmgr.PubKeyHash:
+	case waddrmgr.SigningMethodLegacy:
 		sigScript, err := txscript.SignatureScript(
 			params.Tx, params.InputIndex, params.Output.PkScript,
 			params.HashType, privKey, true,
@@ -774,20 +950,30 @@ func signAndAssembleScript(params *UnlockingScriptParams,
 			return nil, fmt.Errorf("sig script error: %w", err)
 		}
 
-		return &UnlockingScript{
-			SigScript: sigScript,
-		}, nil
-
-	// The following address types are not supported by this function.
-	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
-		waddrmgr.TaprootScript:
-		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			scriptInfo.Addr.AddrType())
+		return &UnlockingScript{SigScript: sigScript}, nil
 
 	default:
 		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			scriptInfo.Addr.AddrType())
+			scriptInfo.AddrType)
 	}
+}
+
+// redeemSigScript wraps a redeem script into the final scriptSig push required
+// for nested witness spends.
+func redeemSigScript(redeemScript []byte) ([]byte, error) {
+	if len(redeemScript) == 0 {
+		return nil, nil
+	}
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddData(redeemScript)
+
+	sigScript, err := builder.Script()
+	if err != nil {
+		return nil, fmt.Errorf("build sig script: %w", err)
+	}
+
+	return sigScript, nil
 }
 
 // ComputeRawSig generates a raw signature for a single transaction input. The
@@ -861,7 +1047,7 @@ func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
 // GetPrivKeyForAddress returns the private key for a given address.
 //
 // DANGER: This method exports sensitive key material.
-func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
+func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 	*btcec.PrivateKey, error) {
 
 	err := w.state.canSign()
@@ -869,7 +1055,31 @@ func (w *Wallet) GetPrivKeyForAddress(_ context.Context, a address.Address) (
 		return nil, err
 	}
 
-	return w.PrivKeyForAddress(a)
+	// Try the store-routed lookup so SQL-derived addresses (persisted
+	// only in the store) can be signed for. Fall back to the legacy
+	// waddrmgr lookup ONLY when the address is genuinely not in the
+	// store, or when the store record lacks usable derivation metadata
+	// (imported / kvdb cases). Unexpected store errors must surface — do
+	// not mask them.
+	info, err := w.GetAddressInfo(ctx, a)
+	switch {
+	case err == nil && canUseAddressInfoDerivation(info):
+		return w.privKeyForAddressInfo(info)
+
+	case err == nil:
+		// Store record exists but no usable derivation info
+		// (imported case).
+		return w.PrivKeyForAddress(a)
+
+	case errors.Is(err, db.ErrAddressNotFound):
+		// Address not in the store — fall through to the legacy
+		// lookup (kvdb path or pre-store legacy address).
+		return w.PrivKeyForAddress(a)
+
+	default:
+		// Unexpected store error: surface, don't mask.
+		return nil, fmt.Errorf("GetPrivKeyForAddress: %w", err)
+	}
 }
 
 // PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK

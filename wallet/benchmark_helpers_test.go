@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -310,6 +311,8 @@ func setupBenchmarkWallet(tb testing.TB,
 	if w.sync == nil {
 		w.sync = newSyncer(w.cfg, w.addrStore, w.txStore, w)
 	}
+
+	require.NotNil(tb, w.store)
 
 	// Initialize controller channels and timer.
 	if w.requestChan == nil {
@@ -932,14 +935,12 @@ func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 }
 
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as ListAccounts by calling Accounts API across all active key scopes
+// contract as ListAccounts by calling Accounts across all active key scopes
 // and aggregating the results.
-func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
+func listAccountsDeprecated(w *Wallet) ([]db.AccountInfo, error) {
 	var (
-		allAccounts      []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
-		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
+		allAccounts   []db.AccountInfo
+		scopeManagers = w.addrStore.ActiveScopedKeyManagers()
 	)
 
 	for _, scopeMgr := range scopeManagers {
@@ -950,29 +951,24 @@ func listAccountsDeprecated(w *Wallet) (*AccountsResult, error) {
 			return nil, err
 		}
 
-		allAccounts = append(allAccounts, result.Accounts...)
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
+		for _, account := range result.Accounts {
+			allAccounts = append(
+				allAccounts, accountResultToInfo(w, account),
+			)
+		}
 	}
 
-	return &AccountsResult{
-		Accounts:           allAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return allAccounts, nil
 }
 
 // listAccountsByNameDeprecated wraps the deprecated Accounts API to satisfy the
 // same contract as ListAccountsByName by calling Accounts API across all active
 // key scopes, filtering by account name, and aggregating the results.
 func listAccountsByNameDeprecated(w *Wallet,
-	name string) (*AccountsResult, error) {
+	name string) ([]db.AccountInfo, error) {
 
 	var (
-		matchingAccounts []AccountResult
-		finalBlockHash   chainhash.Hash
-		finalBlockHeight int32
+		matchingAccounts []db.AccountInfo
 		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
 	)
 
@@ -988,27 +984,21 @@ func listAccountsByNameDeprecated(w *Wallet,
 		for _, account := range result.Accounts {
 			if account.AccountName == name {
 				matchingAccounts = append(
-					matchingAccounts, account,
+					matchingAccounts,
+					accountResultToInfo(w, account),
 				)
 			}
 		}
-
-		finalBlockHash = result.CurrentBlockHash
-		finalBlockHeight = result.CurrentBlockHeight
 	}
 
-	return &AccountsResult{
-		Accounts:           matchingAccounts,
-		CurrentBlockHash:   finalBlockHash,
-		CurrentBlockHeight: finalBlockHeight,
-	}, nil
+	return matchingAccounts, nil
 }
 
 // getAccountDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as GetAccount by calling Accounts API across all active key scopes
 // and filtering by account name.
 func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string) (*AccountResult, error) {
+	accountName string) (*db.AccountInfo, error) {
 
 	result, err := w.Accounts(scope)
 	if err != nil {
@@ -1017,34 +1007,24 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 
 	for _, account := range result.Accounts {
 		if account.AccountName == accountName {
-			return &account, nil
+			info := accountResultToInfo(w, account)
+
+			return &info, nil
 		}
 	}
 
 	return nil, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
 }
 
-// getBalanceDeprecated wraps the deprecated Accounts API to satisfy the same
-// contract as GetBalance by calling Accounts API across all active key scopes
-// and filtering by account name.
-func getBalanceDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string, _ int32) (btcutil.Amount, error) {
+// accountResultToInfo converts the deprecated account result shape into the
+// account-info shape used by the replacement read APIs.
+func accountResultToInfo(w *Wallet, account AccountResult) db.AccountInfo {
+	isImported := account.AccountNumber == waddrmgr.ImportedAddrAccount
 
-	result, err := w.Accounts(scope)
-	if err != nil {
-		return 0, err
-	}
-
-	for _, account := range result.Accounts {
-		if account.AccountName == accountName {
-			// The deprecated Accounts API doesn't support
-			// confirmation filtering. It always returns total
-			// balance.
-			return account.TotalBalance, nil
-		}
-	}
-
-	return 0, fmt.Errorf("%w: %s", errAccountNotFound, accountName)
+	return propertiesToAccountInfo(
+		&account.AccountProperties, account.TotalBalance, isImported,
+		w.addrStore.WatchOnly(), w.masterFingerprint,
+	)
 }
 
 // listAddressesDeprecated wraps the deprecated AccountAddresses and

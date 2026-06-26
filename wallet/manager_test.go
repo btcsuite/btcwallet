@@ -5,10 +5,20 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
+
+// TestWalletID verifies that Wallet.ID returns the cached runtime ID.
+func TestWalletID(t *testing.T) {
+	t.Parallel()
+
+	w := &Wallet{id: 42}
+
+	require.Equal(t, uint32(42), w.ID())
+}
 
 // TestManagerCreateSuccess verifies that a wallet can be successfully created
 // in various modes. It checks that the Manager correctly initializes the
@@ -102,7 +112,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			m := NewManager()
 			cfg := Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				PubPassphrase:  []byte("public"),
@@ -116,6 +126,7 @@ func TestManagerCreateSuccess(t *testing.T) {
 			// without error.
 			require.NoError(t, err)
 			require.NotNil(t, w)
+			require.Zero(t, w.ID())
 
 			// Verify internal state: Ensure the manager is tracking the
 			// newly created wallet in its internal map, keyed by the
@@ -218,7 +229,7 @@ func TestManagerCreateError(t *testing.T) {
 			m := NewManager()
 			cfg := Config{
 				DB:             db,
-				Chain:          &mockChain{},
+				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -354,7 +365,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 	m := NewManager()
 	cfg := Config{
 		DB:             db,
-		Chain:          &mockChain{},
+		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
 		PubPassphrase:  []byte("public"),
@@ -386,6 +397,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 	m2.RUnlock()
 	require.True(t, ok)
 	require.Same(t, w, loadedW)
+	require.Zero(t, w.ID())
 }
 
 // TestManagerLoad_ExistingWallet verifies that if Load is called for a wallet
@@ -399,7 +411,7 @@ func TestManagerLoad_ExistingWallet(t *testing.T) {
 	m := NewManager()
 	cfg := Config{
 		DB:             db,
-		Chain:          &mockChain{},
+		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
 		PubPassphrase:  []byte("public"),
@@ -450,7 +462,7 @@ func TestManagerLoadError(t *testing.T) {
 		m := NewManager()
 		cfg := Config{
 			DB:          db,
-			Chain:       &mockChain{},
+			Chain:       &bwmock.Chain{},
 			ChainParams: &chainParams,
 			Name:        "test",
 		}
@@ -597,4 +609,59 @@ func TestManager_deriveRootKey(t *testing.T) {
 		require.NotNil(t, key)
 		require.True(t, key.IsPrivate())
 	})
+}
+
+// TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
+// a non-watch-only wallet cannot ship with InitialAccounts. The validator
+// runs before DBCreateWallet so the failure is atomic and no half-created
+// wallet is left on disk.
+func TestValidateInitialAccountsModeUpfront(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		params  CreateWalletParams
+		wantErr bool
+	}{
+		{
+			name: "watch-only with initial accounts is fine",
+			params: CreateWalletParams{
+				WatchOnly: true,
+				InitialAccounts: []WatchOnlyAccount{{
+					Name: "imported-xpub",
+				}},
+			},
+		},
+		{
+			name: "spendable with no initial accounts is fine",
+			params: CreateWalletParams{
+				WatchOnly: false,
+			},
+		},
+		{
+			name: "spendable with initial accounts is rejected",
+			params: CreateWalletParams{
+				WatchOnly: false,
+				InitialAccounts: []WatchOnlyAccount{{
+					Name: "imported-xpub",
+				}},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateInitialAccountsMode(tc.params)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrWalletParams)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
 }

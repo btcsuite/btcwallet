@@ -1,0 +1,91 @@
+-- name: CreateKeyScope :one
+-- Creates a new key scope for a wallet and returns its ID.
+INSERT INTO key_scopes (
+    wallet_id,
+    purpose,
+    coin_type,
+    coin_pub_key,
+    internal_type_id,
+    external_type_id
+) VALUES (
+    ?, ?, ?, ?, ?, ?
+)
+ON CONFLICT (wallet_id, purpose, coin_type) DO NOTHING
+RETURNING id;
+
+-- name: InsertKeyScopeSecrets :exec
+-- Inserts secrets for a spendable key scope. Watch-only scopes are represented
+-- by an absent key_scope_secrets row.
+INSERT INTO key_scope_secrets (
+    scope_id,
+    encrypted_coin_priv_key
+) VALUES (
+    ?, ?
+);
+
+-- name: GetKeyScopeByID :one
+-- Retrieves a key scope by its ID.
+SELECT
+    id,
+    wallet_id,
+    purpose,
+    coin_type,
+    coin_pub_key,
+    internal_type_id,
+    external_type_id
+FROM key_scopes
+WHERE id = ?;
+
+-- name: GetKeyScopeByWalletAndScope :one
+-- Retrieves a key scope by wallet ID, purpose, and coin type.
+SELECT
+    id,
+    wallet_id,
+    purpose,
+    coin_type,
+    coin_pub_key,
+    internal_type_id,
+    external_type_id
+FROM key_scopes
+WHERE wallet_id = ? AND purpose = ? AND coin_type = ?;
+
+-- name: GetAndIncrementNextAccountNumber :one
+-- Atomically gets the next derived account number for a key scope and
+-- increments the persisted counter. Returns the current value before
+-- incrementing.
+UPDATE key_scopes
+SET next_account_number = next_account_number + 1
+WHERE id = ?
+RETURNING next_account_number - 1 AS account_number;
+
+-- name: ListKeyScopesByWallet :many
+-- Lists all key scopes for a wallet, ordered by ID.
+SELECT
+    id,
+    wallet_id,
+    purpose,
+    coin_type,
+    coin_pub_key,
+    internal_type_id,
+    external_type_id
+FROM key_scopes
+WHERE wallet_id = ?
+ORDER BY id;
+
+-- name: GetKeyScopeSecrets :one
+-- Retrieves the secrets for a key scope.
+SELECT
+    scope_id,
+    encrypted_coin_priv_key
+FROM key_scope_secrets
+WHERE scope_id = ?;
+
+-- name: DeleteKeyScopeSecrets :execrows
+-- Deletes the secrets for a key scope.
+DELETE FROM key_scope_secrets
+WHERE scope_id = ?;
+
+-- name: DeleteKeyScope :execrows
+-- Deletes a key scope by its ID.
+DELETE FROM key_scopes
+WHERE id = ?;

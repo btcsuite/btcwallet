@@ -9,7 +9,7 @@
 //
 // TODO(yy): bring wrapcheck back when implementing the `Store` interface.
 //
-//nolint:wrapcheck,cyclop
+//nolint:wrapcheck
 package wallet
 
 import (
@@ -19,11 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -340,6 +340,20 @@ type Wallet struct {
 	// querying the wallet's transaction history and unspent outputs.
 	txStore wtxmgr.TxStore
 
+	// keyVault provides encryption and decryption for wallet key material.
+	keyVault keyvault.Vault
+
+	// store provides access to database operations used by wallet managers.
+	//
+	// TODO(yy): Migrate UTXO-related callers behind db.UTXOStore.
+	store db.Store
+
+	// cache is the wallet-private runtime seam between wallet managers and
+	// the durable db.Store. It exposes pass-through reads and absorbs
+	// legacy walks the wallet managers used to perform inline through
+	// walletdb. Real caching lands in a later change.
+	cache runtimeCache
+
 	// NtfnServer handles the delivery of wallet-related events (e.g., new
 	// transactions, block connections) to connected clients.
 	//
@@ -353,6 +367,12 @@ type Wallet struct {
 	// cfg holds the static configuration parameters provided when the
 	// wallet was created or loaded.
 	cfg Config
+
+	// id is the runtime wallet identifier used by wallet-scoped DB calls.
+	//
+	// NOTE: Until the wallet store is wired into the manager load path, this
+	// field may remain the legacy zero-value for single-wallet setups.
+	id uint32
 
 	// sync is the dedicated synchronization component that manages the
 	// chain loop, scanning, and reorganization handling.
@@ -391,6 +411,44 @@ type Wallet struct {
 	// birthdayBlock is the block from which the wallet started scanning.
 	// It is loaded on startup and cached to avoid database lookups.
 	birthdayBlock waddrmgr.BlockStamp
+
+	// masterFingerprint is the cached BIP32 master-key fingerprint for
+	// this wallet, computed from the wallet's master HD pubkey at
+	// Manager.Load time. The value is the canonical source for derived-
+	// account fingerprints exposed via AccountProperties — the db
+	// layer's per-row value for derived rows is ignored in favor of
+	// this cache. Shell / watch-only wallets that lack a stored master
+	// HD pubkey leave this at zero, matching their existing behavior.
+	masterFingerprint uint32
+
+	// isWatchOnly is the cached wallet-level watch-only flag from ADR
+	// 0012. The value is sourced from waddrmgr.Manager.WatchOnly() on
+	// kvdb backends and from wallets.is_watch_only on SQL backends, then
+	// normalized to a single immutable bool at Wallet construction.
+	// Callers read it through IsWatchOnly(); the read-side joins against
+	// account_secrets are obsolete now that the value is wallet-level.
+	isWatchOnly bool
+}
+
+// IsWatchOnly reports whether this wallet was created without private-key
+// material. The value is the canonical wallet-level watch-only flag from
+// ADR 0012: it is set once at wallet construction and immutable thereafter.
+// Callers SHOULD prefer IsWatchOnly over the per-account or per-address
+// IsWatchOnly fields on db.AccountInfo / db.AddressInfo — those fields
+// are wallet-level convenience copies that may be removed in a future
+// cleanup task.
+func (w *Wallet) IsWatchOnly() bool {
+	return w.isWatchOnly
+}
+
+// ID returns the runtime wallet identifier for the wallet.
+func (w *Wallet) ID() uint32 {
+	return w.id
+}
+
+// SyncedTo calls the `SyncedTo` method on the wallet's manager.
+func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
+	return w.addrStore.SyncedTo()
 }
 
 // hasMinConfs checks whether a transaction at height txHeight has met minconf
@@ -422,159 +480,4 @@ func calcConf(txHeight, curHeight int32) int32 {
 	default:
 		return curHeight - txHeight + 1
 	}
-}
-
-// RemoveDescendants attempts to remove any transaction from the wallet's tx
-// store (that may be unconfirmed) that spends outputs created by the passed
-// transaction. This remove propagates recursively down the chain of descendent
-// transactions.
-func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
-	txRecord, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-	if err != nil {
-		return err
-	}
-
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		wtxmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		return w.txStore.RemoveUnminedTx(wtxmgrNs, txRecord)
-	})
-}
-
-// BirthdayBlock returns the birthday block of the wallet.
-//
-// NOTE: The wallet won't start until the backend is synced, thus the birthday
-// block won't be set and `ErrBirthdayBlockNotSet` will be returned.
-func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
-	var birthdayBlock waddrmgr.BlockStamp
-
-	// Query the wallet's birthday block height from db.
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		bb, _, err := w.addrStore.BirthdayBlock(addrmgrNs)
-		birthdayBlock = bb
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return &birthdayBlock, nil
-}
-
-// SyncedTo calls the `SyncedTo` method on the wallet's manager.
-func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
-	return w.addrStore.SyncedTo()
-}
-
-// AddrManager returns the internal address manager.
-//
-// TODO(yy): Refactor it in lnd and remove the method.
-func (w *Wallet) AddrManager() waddrmgr.AddrStore {
-	return w.addrStore
-}
-
-// NotificationServer returns the internal NotificationServer.
-//
-// TODO(yy): Refactor it in lnd and remove the method.
-func (w *Wallet) NotificationServer() *NotificationServer {
-	return w.NtfnServer
-}
-
-// CreateWithCallback is the same as Create with an added callback that will be
-// called in the same transaction the wallet structure is initialized.
-func CreateWithCallback(db walletdb.DB, pubPass, privPass []byte,
-	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
-	birthday time.Time, cb func(walletdb.ReadWriteTx) error) error {
-
-	return create(
-		db, pubPass, privPass, rootKey, params, birthday, false, cb,
-	)
-}
-
-// CreateWatchingOnlyWithCallback is the same as CreateWatchingOnly with an
-// added callback that will be called in the same transaction the wallet
-// structure is initialized.
-func CreateWatchingOnlyWithCallback(db walletdb.DB, pubPass []byte,
-	params *chaincfg.Params, birthday time.Time,
-	cb func(walletdb.ReadWriteTx) error) error {
-
-	return create(
-		db, pubPass, nil, nil, params, birthday, true, cb,
-	)
-}
-
-// CreateWatchingOnly creates an new watch-only wallet, writing it to
-// an empty database. No root key can be provided as this wallet will be
-// watching only.  Likewise no private passphrase may be provided
-// either.
-func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
-	params *chaincfg.Params, birthday time.Time) error {
-
-	return create(
-		db, pubPass, nil, nil, params, birthday, true, nil,
-	)
-}
-
-func create(db walletdb.DB, pubPass, privPass []byte,
-	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
-	birthday time.Time, isWatchingOnly bool,
-	cb func(walletdb.ReadWriteTx) error) error {
-
-	// If no root key was provided, we create one now from a random seed.
-	// But only if this is not a watching-only wallet where the accounts are
-	// created individually from their xpubs.
-	if !isWatchingOnly && rootKey == nil {
-		hdSeed, err := hdkeychain.GenerateSeed(
-			hdkeychain.RecommendedSeedLen,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Derive the master extended key from the seed.
-		rootKey, err = hdkeychain.NewMaster(hdSeed, params)
-		if err != nil {
-			return fmt.Errorf("failed to derive master extended " +
-				"key")
-		}
-	}
-
-	// We need a private key if this isn't a watching only wallet.
-	if !isWatchingOnly && rootKey != nil && !rootKey.IsPrivate() {
-		return fmt.Errorf("need extended private key for wallet that " +
-			"is not watching only")
-	}
-
-	return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
-		if err != nil {
-			return err
-		}
-		txmgrNs, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
-		if err != nil {
-			return err
-		}
-
-		err = waddrmgr.Create(
-			addrmgrNs, rootKey, pubPass, privPass, params, nil,
-			birthday,
-		)
-		if err != nil {
-			return err
-		}
-
-		err = wtxmgr.Create(txmgrNs)
-		if err != nil {
-			return err
-		}
-
-		if cb != nil {
-			return cb(tx)
-		}
-
-		return nil
-	})
 }

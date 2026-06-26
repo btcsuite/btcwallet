@@ -10,6 +10,9 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/walletdb"
 )
 
 var (
@@ -93,8 +96,24 @@ type CreateWalletParams struct {
 	PrivatePassphrase []byte
 }
 
-// validate ensures that the parameters are consistent with the chosen creation
-// mode.
+// validateInitialAccountsMode enforces the ADR 0012 wallet-level watch-only
+// invariant against the params before any on-disk artifact is created. A
+// non-watch-only wallet cannot ship with watch-only InitialAccounts; the
+// import would later be rejected by requireAccountPrivKeyOnSpendable but
+// only after the wallet row had already been written. The check fires
+// once at create time so the failure is atomic.
+func validateInitialAccountsMode(params CreateWalletParams) error {
+	if params.WatchOnly || len(params.InitialAccounts) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%w: cannot create a non-watch-only wallet with "+
+		"InitialAccounts; xpub-only imports require WatchOnly=true",
+		ErrWalletParams)
+}
+
+// validate ensures that the parameters are consistent with the chosen
+// creation mode.
 //
 // We skip cyclop because this method performs exhaustive validation of
 // mutually exclusive fields across all creation modes.
@@ -209,6 +228,16 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
+	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
+	// spendable. Validate the params.InitialAccounts list upfront so a
+	// mismatched-mode create fails before DBCreateWallet runs (otherwise
+	// the wallet row exists on disk while importInitialAccounts later
+	// rejects an entry, leaving a half-created wallet).
+	err = validateInitialAccountsMode(params)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the underlying database structure.
 	err = DBCreateWallet(cfg, params, rootKey)
 	if err != nil {
@@ -276,6 +305,11 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
+	// TODO(yy): Once Wallet.store includes wallet metadata accessors such as
+	// WalletStore.GetWallet, load the runtime wallet ID from that store
+	// instead of using the legacy single-wallet default.
+	walletID := uint32(0)
+
 	// Apply the safe default for auto-lock duration if not specified.
 	if cfg.AutoLockDuration == 0 {
 		cfg.AutoLockDuration = defaultLockDuration
@@ -289,16 +323,32 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		<-lockTimer.C
 	}
 
+	// Cache the wallet's master HD fingerprint up-front, before any
+	// context/cancel is set up so an error here doesn't leak a
+	// cancellable context.
+	masterFingerprint, err := resolveMasterFingerprint(cfg.DB, addrMgr)
+	if err != nil {
+		return nil, fmt.Errorf("cache master fingerprint: %w", err)
+	}
+
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 
+	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
+
 	w := &Wallet{
-		cfg:         cfg,
-		addrStore:   addrMgr,
-		txStore:     txMgr,
-		requestChan: make(chan any),
-		lifetimeCtx: lifetimeCtx,
-		cancel:      cancel,
-		lockTimer:   lockTimer,
+		cfg:               cfg,
+		id:                walletID,
+		addrStore:         addrMgr,
+		store:             store,
+		cache:             newStoreRuntimeCache(store),
+		keyVault:          keyvault.NewDBVault(store, walletID),
+		txStore:           txMgr,
+		requestChan:       make(chan any),
+		lifetimeCtx:       lifetimeCtx,
+		cancel:            cancel,
+		lockTimer:         lockTimer,
+		masterFingerprint: masterFingerprint,
+		isWatchOnly:       addrMgr.WatchOnly(),
 	}
 
 	w.sync = newSyncer(cfg, w.addrStore, w.txStore, w)
@@ -310,6 +360,74 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	m.Unlock()
 
 	return w, nil
+}
+
+// errMissingWaddrmgrNamespace is returned when the waddrmgr namespace
+// bucket is missing from the wallet database. DBLoadWallet would have
+// already failed if this were a real wallet, so encountering it here
+// indicates a wiring bug.
+var errMissingWaddrmgrNamespace = errors.New(
+	"missing waddrmgr namespace",
+)
+
+// resolveMasterFingerprint reads the persisted master HD pubkey via
+// addrMgr, parses it, and returns its BIP32 fingerprint. Shell,
+// watch-only, and pre-master-key wallets have no pubkey persisted —
+// fingerprint is zero.
+func resolveMasterFingerprint(db walletdb.DB,
+	addrMgr *waddrmgr.Manager) (uint32, error) {
+
+	var fingerprint uint32
+
+	err := walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingWaddrmgrNamespace
+		}
+
+		masterHDPubKey, err := addrMgr.MasterHDPubKey(ns)
+		switch {
+		case err == nil:
+			// Continue to parse below.
+
+		case waddrmgr.IsError(err, waddrmgr.ErrNoExist):
+			// Shell / watch-only / pre-master-key wallets:
+			// no pubkey persisted. Leave fingerprint at zero
+			// and continue.
+			return nil
+
+		default:
+			return fmt.Errorf("read master HD pubkey: %w", err)
+		}
+
+		if len(masterHDPubKey) == 0 {
+			// Defensive: persisted-but-empty is treated the
+			// same as the ErrNoExist case above.
+			return nil
+		}
+
+		extKey, err := hdkeychain.NewKeyFromString(
+			string(masterHDPubKey),
+		)
+		if err != nil {
+			return fmt.Errorf("parse master HD pubkey: %w",
+				err)
+		}
+
+		mfp, err := masterKeyFingerprint(extKey)
+		if err != nil {
+			return fmt.Errorf("master fingerprint: %w", err)
+		}
+
+		fingerprint = mfp
+
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("read master fingerprint: %w", err)
+	}
+
+	return fingerprint, nil
 }
 
 // prepareWalletCreation validates the configuration and parameters, and derives

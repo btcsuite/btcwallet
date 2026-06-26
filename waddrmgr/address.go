@@ -7,6 +7,7 @@ package waddrmgr
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -36,6 +36,16 @@ var (
 	// invalid.
 	ErrInvalidSignature = fmt.Errorf("private key sig doesn't validate " +
 		"against pubkey")
+
+	// ErrUnknownSigningMethod is returned when an address type reports a
+	// signing method the current validation path does not understand.
+	ErrUnknownSigningMethod = errors.New("unknown signing method")
+
+	// errUnsupportedManagedPubKeyAddress is returned when a public-key
+	// address implementation cannot expose encrypted private-key state.
+	errUnsupportedManagedPubKeyAddress = errors.New(
+		"unsupported managed pubkey address",
+	)
 )
 
 // AddressType represents the various address types waddrmgr is currently able
@@ -178,6 +188,19 @@ type ManagedPubKeyAddress interface {
 	// imported keys, the first value will be set to false to indicate that
 	// we don't know exactly how the key was derived.
 	DerivationInfo() (KeyScope, DerivationPath, bool)
+}
+
+// ManagedPubKeyAddressHasPrivateKey reports whether the managed public-key
+// address carries encrypted private-key material.
+func ManagedPubKeyAddressHasPrivateKey(addr ManagedPubKeyAddress) (bool,
+	error) {
+
+	managedAddr, ok := addr.(*managedAddress)
+	if !ok {
+		return false, errUnsupportedManagedPubKeyAddress
+	}
+
+	return len(managedAddr.privKeyEncrypted) > 0, nil
 }
 
 // ValidatableManagedAddress is a type of managed pubkey address that can
@@ -499,21 +522,20 @@ func (a *managedAddress) Validate(msg [32]byte, priv *btcec.PrivateKey) error {
 	// make sure we can generate a signature that verifies under the target
 	// public key.
 	//
-	// TODO(roasbeef): potentially run _all_ checks then see which one
-	// fails?
 	var sig signature
 
 	addrPrivKey, _ := btcec.PrivKeyFromBytes(a.privKeyCT)
 
-	switch a.addrType {
-	// For the "legacy" addr types, we'll generate an ECDSA signature to
-	// verify against.
-	case NestedWitnessPubKey, PubKeyHash, WitnessPubKey:
+	signingMethod, err := a.addrType.SigningMethod()
+	if err != nil {
+		return err
+	}
+
+	switch signingMethod {
+	case SigningMethodLegacy, SigningMethodWitnessV0:
 		sig = ecdsa.Sign(addrPrivKey, msg[:])
 
-	// For the newer taproot addr type, we'll generate a schnorr signature
-	// to verify against.
-	case TaprootPubKey:
+	case SigningMethodTaprootKeySpend:
 		sig, err = schnorr.Sign(addrPrivKey, msg[:])
 		if err != nil {
 			return fmt.Errorf("unable to generate validate "+
@@ -521,8 +543,8 @@ func (a *managedAddress) Validate(msg [32]byte, priv *btcec.PrivateKey) error {
 		}
 
 	default:
-		return fmt.Errorf("unable to validate addr, unknown type: %v",
-			a.addrType)
+		return fmt.Errorf("%w: %v", ErrUnknownSigningMethod,
+			signingMethod)
 	}
 
 	if !sig.Verify(msg[:], basePubKey) {
@@ -539,81 +561,21 @@ func newManagedAddressWithoutPrivKey(m *ScopedKeyManager,
 	derivationPath DerivationPath, pubKey *btcec.PublicKey, compressed bool,
 	addrType AddressType) (*managedAddress, error) {
 
-	// Create a pay-to-pubkey-hash address from the public key.
-	var pubKeyHash []byte
-	if compressed {
-		pubKeyHash = address.Hash160(pubKey.SerializeCompressed())
-	} else {
-		pubKeyHash = address.Hash160(pubKey.SerializeUncompressed())
+	pubKeyBytes := pubKey.SerializeCompressed()
+	if !compressed {
+		pubKeyBytes = pubKey.SerializeUncompressed()
 	}
 
-	var newAddress address.Address
-	var err error
-
-	switch addrType {
-
-	case NestedWitnessPubKey:
-		// For this address type we'll generate an address which is
-		// backwards compatible to Bitcoin nodes running 0.6.0 onwards, but
-		// allows us to take advantage of segwit's scripting improvements,
-		// and malleability fixes.
-
-		// First, we'll generate a normal p2wkh address from the pubkey hash.
-		witAddr, err := address.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		// Next we'll generate the witness program which can be used as a
-		// pkScript to pay to this generated address.
-		witnessProgram, err := txscript.PayToAddrScript(witAddr)
-		if err != nil {
-			return nil, err
-		}
-
-		// Finally, we'll use the witness program itself as the pre-image
-		// to a p2sh address. In order to spend, we first use the
-		// witnessProgram as the sigScript, then present the proper
-		// <sig, pubkey> pair as the witness.
-		newAddress, err = address.NewAddressScriptHash(
-			witnessProgram, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case PubKeyHash:
-		newAddress, err = address.NewAddressPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case WitnessPubKey:
-		newAddress, err = address.NewAddressWitnessPubKeyHash(
-			pubKeyHash, m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-	case TaprootPubKey:
-		tapKey := txscript.ComputeTaprootKeyNoScript(pubKey)
-
-		newAddress, err = address.NewAddressTaproot(
-			schnorr.SerializePubKey(tapKey), m.rootManager.chainParams,
-		)
-		if err != nil {
-			return nil, err
-		}
+	address, err := addrType.AddrFromPubKeyBytes(
+		pubKeyBytes, m.rootManager.chainParams,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &managedAddress{
 		manager:          m,
-		address:          newAddress,
+		address:          address,
 		derivationPath:   derivationPath,
 		imported:         false,
 		internal:         false,

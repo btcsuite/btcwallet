@@ -184,6 +184,16 @@ type AddrStore interface {
 
 	// Close cleanly shuts down the manager.
 	Close()
+
+	// EncryptedMasterHDPriv reads the encrypted master HD private key
+	// from the manager's main bucket. Returns ErrWatchingOnly when no
+	// encrypted master HD private key is persisted.
+	EncryptedMasterHDPriv(ns walletdb.ReadBucket) ([]byte, error)
+
+	// Decrypt decrypts the supplied ciphertext with the address
+	// manager crypto key identified by keyType. Returns an error if
+	// the manager is locked or the ciphertext is malformed.
+	Decrypt(keyType CryptoKeyType, in []byte) ([]byte, error)
 }
 
 // AccountStore is an interface that describes a scoped key manager.
@@ -194,6 +204,13 @@ type AddrStore interface {
 type AccountStore interface {
 	// Scope returns the key scope of the manager.
 	Scope() KeyScope
+
+	// AddrSchema returns the persisted address schema for this scope. The
+	// returned value matches what was passed to the underlying
+	// ScopedKeyManager at creation time, so callers building public
+	// AccountInfo rows can use it instead of recomputing from the global
+	// default map.
+	AddrSchema() ScopeAddrSchema
 
 	// AccountProperties returns the properties of an account, including
 	// address indexes and name.
@@ -241,11 +258,43 @@ type AccountStore interface {
 	DeriveFromKeyPath(ns walletdb.ReadBucket,
 		path DerivationPath) (ManagedAddress, error)
 
-	// CanAddAccount returns an error if a new account cannot be created.
-	CanAddAccount() error
+	// CanAddAccountDeprecated returns an error if a new account cannot be
+	// created.
+	//
+	// Deprecated: use NewAccount directly so validation stays coupled to the
+	// mutation path. This is only kept for legacy callers.
+	CanAddAccountDeprecated() error
 
 	// NewAccount creates a new account.
 	NewAccount(ns walletdb.ReadWriteBucket, name string) (uint32, error)
+
+	// AllocateDerivedAccountNumber advances the scoped manager's
+	// lastAccount counter and returns the next derived account number.
+	AllocateDerivedAccountNumber(ns walletdb.ReadWriteBucket) (
+		uint32, error)
+
+	// PutDerivedAccountWithKeys persists a derived account row using
+	// the caller-supplied account material. Must run in the same
+	// walletdb.Update transaction as AllocateDerivedAccountNumber.
+	PutDerivedAccountWithKeys(ns walletdb.ReadWriteBucket,
+		account uint32, name string, plaintextPubKey []byte,
+		encryptedPrivKey []byte) error
+
+	// AllocateImportedAccountNumber advances the scoped manager's
+	// lastAccount counter and returns the next account number for an
+	// imported (watch-only) account.
+	AllocateImportedAccountNumber(ns walletdb.ReadWriteBucket) (
+		uint32, error)
+
+	// PutWatchOnlyAccountWithKeys persists an imported (watch-only)
+	// account row using the supplied extended public key. Must run in
+	// the same walletdb.Update transaction as
+	// AllocateImportedAccountNumber.
+	PutWatchOnlyAccountWithKeys(ns walletdb.ReadWriteBucket,
+		account uint32, name string,
+		pubKey *hdkeychain.ExtendedKey,
+		masterKeyFingerprint uint32,
+		addrSchema *ScopeAddrSchema) error
 
 	// LastAccount returns the last account number.
 	LastAccount(ns walletdb.ReadBucket) (uint32, error)
@@ -285,6 +334,13 @@ type AccountStore interface {
 	// IsWatchOnlyAccount determines if the account is watch-only.
 	IsWatchOnlyAccount(ns walletdb.ReadBucket, account uint32) (bool, error)
 
+	// IsImportedAccount reports whether the persisted account row is
+	// a watch-only (imported) row. Unlike IsWatchOnlyAccount this is
+	// independent of wallet lock state: a derived account in a
+	// locked wallet returns false here.
+	IsImportedAccount(ns walletdb.ReadBucket, account uint32) (
+		bool, error)
+
 	// NewAccountWatchingOnly creates a new watch-only account.
 	NewAccountWatchingOnly(ns walletdb.ReadWriteBucket, name string,
 		pubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
@@ -320,4 +376,12 @@ type AccountStore interface {
 	// and index.
 	DeriveAddr(account uint32, branch uint32, index uint32) (
 		address.Address, []byte, error)
+
+	// ImportWitnessScript imports a user-provided native witness
+	// script under this scoped manager and returns a managed
+	// address that wraps the script. The script is encrypted with
+	// the manager's CryptoKeyScript when isSecretScript is true.
+	ImportWitnessScript(ns walletdb.ReadWriteBucket, script []byte,
+		bs *BlockStamp, witnessVersion byte,
+		isSecretScript bool) (ManagedScriptAddress, error)
 }

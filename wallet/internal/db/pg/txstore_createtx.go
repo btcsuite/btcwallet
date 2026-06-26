@@ -1,0 +1,541 @@
+package pg
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+)
+
+// CreateTx atomically records a wallet-scoped transaction row, its
+// wallet-owned credits, and any spend edges created by its inputs.
+//
+// The full write runs inside the shared write helper so the transaction row,
+// created UTXOs, spent-parent markers, and any required invalidation are
+// either committed together or not at all. Received timestamps are normalized
+// to UTC before Insert. When the wallet already stores the same unmined
+// transaction hash, CreateTx may promote that existing row to confirmed state
+// instead of inserting a duplicate.
+func (s *Store) CreateTx(ctx context.Context,
+	params db.CreateTxParams) error {
+
+	req, err := db.NewCreateTxRequest(params)
+	if err != nil {
+		return err
+	}
+
+	return s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		return db.CreateTxWithOps(ctx, req, &createTxOps{
+			invalidateUnminedTxOps: invalidateUnminedTxOps{
+				qtx: qtx,
+			},
+		})
+	})
+}
+
+// createTxOps adapts postgres sqlc queries to the shared CreateTx flow.
+type createTxOps struct {
+	invalidateUnminedTxOps
+
+	blockHeight sql.NullInt32
+}
+
+var _ db.CreateTxOps = (*createTxOps)(nil)
+
+// LoadExisting loads any existing wallet-scoped row for the requested tx hash.
+func (o *createTxOps) LoadExisting(ctx context.Context,
+	req db.CreateTxRequest) (*db.CreateTxExistingTarget, error) {
+
+	meta, err := o.qtx.GetTransactionMetaByHash(
+		ctx,
+		sqlc.GetTransactionMetaByHashParams{
+			WalletID: int64(req.Params.WalletID),
+			TxHash:   req.TxHash[:],
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrCreateTxExistingNotFound
+		}
+
+		return nil, fmt.Errorf("get tx metadata: %w", err)
+	}
+
+	status, err := db.ParseTxStatus(int64(meta.TxStatus))
+	if err != nil {
+		return nil, err
+	}
+
+	return &db.CreateTxExistingTarget{
+		ID:         meta.ID,
+		Status:     status,
+		HasBlock:   meta.BlockHeight.Valid,
+		IsCoinbase: meta.IsCoinbase,
+	}, nil
+}
+
+// ConfirmExisting promotes one existing unmined row to its confirmed state.
+func (o *createTxOps) ConfirmExisting(ctx context.Context,
+	req db.CreateTxRequest,
+	_ db.CreateTxExistingTarget) error {
+
+	blockHeight, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
+	if err != nil {
+		return fmt.Errorf("require confirming block: %w", err)
+	}
+
+	rows, err := o.qtx.UpdateTransactionStateByHash(
+		ctx, sqlc.UpdateTransactionStateByHashParams{
+			BlockHeight: sql.NullInt32{Int32: blockHeight, Valid: true},
+			Status:      int16(db.TxStatusPublished),
+			WalletID:    int64(req.Params.WalletID),
+			TxHash:      req.TxHash[:],
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update tx state query: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("tx %s: %w", req.TxHash, db.ErrTxNotFound)
+	}
+
+	return nil
+}
+
+// PrepareBlock validates the optional confirming block and caches the postgres
+// block-height value that the later Insert query will store.
+func (o *createTxOps) PrepareBlock(ctx context.Context,
+	req db.CreateTxRequest) error {
+
+	o.blockHeight = sql.NullInt32{}
+
+	if req.Params.Block == nil {
+		return nil
+	}
+
+	height, err := requireBlockMatches(ctx, o.qtx, req.Params.Block)
+	if err != nil {
+		return err
+	}
+
+	o.blockHeight = sql.NullInt32{Int32: height, Valid: true}
+
+	return nil
+}
+
+// ListConflictTxns returns the direct conflict root IDs plus the matching tx
+// hashes used for descendant discovery.
+func (o *createTxOps) ListConflictTxns(ctx context.Context,
+	req db.CreateTxRequest) ([]int64, []chainhash.Hash, error) {
+
+	rootIDs, err := collectConflictRootIDs(ctx, o.qtx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(rootIDs) == 0 {
+		return nil, nil, nil
+	}
+
+	rows, err := o.qtx.ListUnminedTransactions(ctx, int64(req.Params.WalletID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	return buildConflictRoots(rows, rootIDs)
+}
+
+// collectConflictRootIDs returns the active unmined spender row IDs
+// that currently own any wallet-controlled input spent by the incoming tx.
+func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest) (map[int64]struct{}, error) {
+
+	if blockchain.IsCoinBaseTx(req.Params.Tx) {
+		return map[int64]struct{}{}, nil
+	}
+
+	rootIDs := make(map[int64]struct{}, len(req.Params.Tx.TxIn))
+	for inputIndex, txIn := range req.Params.Tx.TxIn {
+		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
+		if err != nil {
+			return nil, fmt.Errorf("convert input outpoint index %d: %w",
+				inputIndex, err)
+		}
+
+		spentByTxID, err := qtx.GetUtxoSpendByOutpoint(
+			ctx, sqlc.GetUtxoSpendByOutpointParams{
+				WalletID:    int64(req.Params.WalletID),
+				TxHash:      txIn.PreviousOutPoint.Hash[:],
+				OutputIndex: outputIndex,
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+
+			return nil, fmt.Errorf("lookup input conflict %d: %w", inputIndex,
+				err)
+		}
+
+		if !spentByTxID.Valid {
+			continue
+		}
+
+		rootIDs[spentByTxID.Int64] = struct{}{}
+	}
+
+	return rootIDs, nil
+}
+
+// buildConflictRoots maps the selected unmined rows into ordered root IDs and
+// the matching root hashes used for descendant discovery.
+func buildConflictRoots(rows []sqlc.ListUnminedTransactionsRow,
+	rootIDSet map[int64]struct{}) (
+	[]int64, []chainhash.Hash, error) {
+
+	rootIDs := make([]int64, 0, len(rootIDSet))
+
+	rootHashes := make([]chainhash.Hash, 0, len(rootIDSet))
+	for _, row := range rows {
+		if _, ok := rootIDSet[row.ID]; !ok {
+			continue
+		}
+
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("tx hash: %w", err)
+		}
+
+		rootIDs = append(rootIDs, row.ID)
+		rootHashes = append(rootHashes, *txHash)
+	}
+
+	return rootIDs, rootHashes, nil
+}
+
+// Insert stores one new postgres transaction row for CreateTx.
+func (o *createTxOps) Insert(ctx context.Context,
+	req db.CreateTxRequest) (int64, error) {
+
+	txID, err := o.qtx.InsertTransaction(ctx, sqlc.InsertTransactionParams{
+		WalletID:     int64(req.Params.WalletID),
+		TxHash:       req.TxHash[:],
+		RawTx:        req.RawTx,
+		BlockHeight:  o.blockHeight,
+		TxStatus:     int16(req.Params.Status),
+		ReceivedTime: req.Received,
+		IsCoinbase:   req.IsCoinbase,
+		TxLabel:      req.Params.Label,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("insert tx row: %w", err)
+	}
+
+	return txID, nil
+}
+
+// InsertCredits stores any wallet-owned outputs created by the transaction.
+func (o *createTxOps) InsertCredits(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	return insertCredits(ctx, o.qtx, req.Params, txID)
+}
+
+// MarkInputsSpent records wallet-owned inputs spent by the transaction.
+func (o *createTxOps) MarkInputsSpent(ctx context.Context,
+	req db.CreateTxRequest, txID int64) error {
+
+	return markInputsSpent(ctx, o.qtx, req.Params, txID)
+}
+
+// MarkTxnsReplaced marks the provided direct conflict roots replaced in one
+// batch update.
+func (o *createTxOps) MarkTxnsReplaced(
+	ctx context.Context, walletID int64, txIDs []int64) error {
+
+	_, err := o.qtx.UpdateTransactionStatusByIDs(
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
+			WalletID: walletID,
+			Status:   int16(db.TxStatusReplaced),
+			TxIds:    txIDs,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark txns replaced: %w", err)
+	}
+
+	return nil
+}
+
+// InsertReplacementEdges records replacement-history edges from each direct
+// conflict root to the newly inserted confirmed transaction row.
+func (o *createTxOps) InsertReplacementEdges(
+	ctx context.Context, walletID int64, replacedTxIDs []int64,
+	replacementTxID int64) error {
+
+	for _, replacedTxID := range replacedTxIDs {
+		_, err := o.qtx.InsertTxReplacementEdge(
+			ctx, sqlc.InsertTxReplacementEdgeParams{
+				WalletID:        walletID,
+				ReplacedTxID:    replacedTxID,
+				ReplacementTxID: replacementTxID,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("insert replacement edge for %d: %w",
+				replacedTxID, err)
+		}
+	}
+
+	return nil
+}
+
+// creditLookupScript returns the script_pub_key used to resolve the owning
+// address row for the credited output at the given index.
+//
+// When the caller supplied a resolved credit address, ownership is keyed on
+// that address's own script (PayToAddrScript). This mirrors the kvdb backend,
+// which validates the credit as a member of the output script and then looks
+// the address up directly: a bare-multisig output the wallet partly owns is
+// stored against the wallet-owned member rather than the full multisig script,
+// which no address row would ever match. For a single-address output the
+// member script equals the output script, so the lookup is unchanged.
+//
+// When the credit address is nil the caller has no resolved owner, so the
+// on-chain output script is used directly, preserving the store's original
+// behavior.
+//
+// NOTE: This only selects the address-ownership lookup key. The stored UTXO
+// always records the on-chain output script (TxOut[index].PkScript) via
+// InsertUtxo's amount/output-index, never the member script.
+func creditLookupScript(params db.CreateTxParams, index uint32) ([]byte,
+	error) {
+
+	creditAddr := params.Credits[index]
+	if creditAddr == nil {
+		return params.Tx.TxOut[index].PkScript, nil
+	}
+
+	// A non-nil credit address is authoritative for ownership, so reject it
+	// unless the output it claims to credit actually pays to it. Without this
+	// check a caller could point output N at any wallet address and have the
+	// store record a UTXO owned by an address the output never pays,
+	// corrupting ownership. Membership (not equality) keeps bare-multisig
+	// member credits valid.
+	err := db.ValidateCreditAddrMembership(
+		creditAddr, params.Tx.TxOut[index].PkScript,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("credit output %d: %w", index, err)
+	}
+
+	lookupScript, err := txscript.PayToAddrScript(creditAddr)
+	if err != nil {
+		return nil, fmt.Errorf("credit output %d: build address script: "+
+			"%w", index, err)
+	}
+
+	return lookupScript, nil
+}
+
+// insertCredits inserts one wallet-owned UTXO row for each credited output of
+// the transaction being stored.
+func insertCredits(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams, txID int64) error {
+
+	for index := range params.Credits {
+		creditExists, err := creditExists(
+			ctx, qtx, params.WalletID, params.Tx.TxHash(), index,
+		)
+		if err != nil {
+			return err
+		}
+
+		if creditExists {
+			continue
+		}
+
+		lookupScript, err := creditLookupScript(params, index)
+		if err != nil {
+			return err
+		}
+
+		addrRow, err := qtx.GetAddressByScriptPubKey(
+			ctx, sqlc.GetAddressByScriptPubKeyParams{
+				ScriptPubKey: lookupScript,
+				WalletID:     int64(params.WalletID),
+			},
+		)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrAddressNotFound)
+			}
+
+			return fmt.Errorf("resolve credit address %d: %w", index, err)
+		}
+
+		outputIndex, err := db.Uint32ToInt32(index)
+		if err != nil {
+			return fmt.Errorf("convert credit index %d: %w", index, err)
+		}
+
+		_, err = qtx.InsertUtxo(ctx, sqlc.InsertUtxoParams{
+			WalletID:    int64(params.WalletID),
+			TxID:        txID,
+			OutputIndex: outputIndex,
+			Amount:      params.Tx.TxOut[index].Value,
+			AddressID:   addrRow.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("insert credit output %d: %w", index, err)
+		}
+	}
+
+	return nil
+}
+
+// creditExists reports whether the wallet already has a UTXO row for the
+// given credited output, even if that output is now spent by a child tx.
+func creditExists(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, error) {
+
+	convertedIndex, err := db.Uint32ToInt32(outputIndex)
+	if err != nil {
+		return false, fmt.Errorf("convert credit index %d: %w", outputIndex,
+			err)
+	}
+
+	_, err = qtx.GetUtxoSpendByOutpoint(
+		ctx, sqlc.GetUtxoSpendByOutpointParams{
+			WalletID:    int64(walletID),
+			TxHash:      txHash[:],
+			OutputIndex: convertedIndex,
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("lookup credit output %d: %w", outputIndex,
+			err)
+	}
+
+	return true, nil
+}
+
+// markInputsSpent attaches wallet-owned outpoints spent by the stored
+// transaction to its row ID and input indexes.
+//
+// If another wallet transaction already owns the spend edge for a
+// wallet-controlled input, the create path fails with ErrTxInputConflict
+// instead of silently storing a second spender. Inputs that reference a
+// wallet-owned output whose parent transaction is already invalid fail with
+// ErrTxInputInvalidParent.
+func markInputsSpent(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams, txID int64) error {
+
+	if blockchain.IsCoinBaseTx(params.Tx) {
+		return nil
+	}
+
+	for inputIndex, txIn := range params.Tx.TxIn {
+		outputIndex, err := db.Uint32ToInt32(txIn.PreviousOutPoint.Index)
+		if err != nil {
+			return fmt.Errorf("convert input outpoint index %d: %w", inputIndex,
+				err)
+		}
+
+		spentInputIndex, err := db.Int64ToInt32(int64(inputIndex))
+		if err != nil {
+			return fmt.Errorf("convert input index %d: %w", inputIndex, err)
+		}
+
+		rowsAffected, err := qtx.MarkUtxoSpent(ctx, sqlc.MarkUtxoSpentParams{
+			WalletID:        int64(params.WalletID),
+			TxHash:          txIn.PreviousOutPoint.Hash[:],
+			OutputIndex:     outputIndex,
+			SpentByTxID:     sql.NullInt64{Int64: txID, Valid: true},
+			SpentInputIndex: sql.NullInt32{Int32: spentInputIndex, Valid: true},
+		})
+		if err != nil {
+			return fmt.Errorf("mark spent input %d: %w", inputIndex, err)
+		}
+
+		if rowsAffected == 0 {
+			err = ensureSpendConflict(
+				ctx, qtx, params.WalletID, txIn.PreviousOutPoint.Hash,
+				outputIndex, txID,
+			)
+			if err != nil {
+				return fmt.Errorf("mark spent input %d: %w", inputIndex, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ensureSpendConflict reports ErrTxInputConflict when the referenced outpoint
+// is wallet-owned, still eligible for spending, and already attached to another
+// transaction. If the wallet owns the parent output but that parent is already
+// invalid, the helper returns ErrTxInputInvalidParent instead.
+func ensureSpendConflict(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, txHash chainhash.Hash, outputIndex int32,
+	txID int64) error {
+
+	spendByTxID, err := qtx.GetUtxoSpendByOutpoint(
+		ctx, sqlc.GetUtxoSpendByOutpointParams{
+			WalletID:    int64(walletID),
+			TxHash:      txHash[:],
+			OutputIndex: outputIndex,
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ensureWalletParentValid(
+				ctx, qtx, walletID, txHash, outputIndex,
+			)
+		}
+
+		return fmt.Errorf("check spend conflict: %w", err)
+	}
+
+	if spendByTxID.Valid && spendByTxID.Int64 != txID {
+		return db.ErrTxInputConflict
+	}
+
+	return nil
+}
+
+// ensureWalletParentValid reports ErrTxInputInvalidParent when the wallet
+// owns the referenced outpoint but its parent transaction is already invalid.
+func ensureWalletParentValid(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, txHash chainhash.Hash, outputIndex int32) error {
+
+	hasInvalid, err := qtx.HasInvalidWalletUtxoByOutpoint(
+		ctx, sqlc.HasInvalidWalletUtxoByOutpointParams{
+			WalletID:    int64(walletID),
+			TxHash:      txHash[:],
+			OutputIndex: outputIndex,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("check invalid wallet parent: %w", err)
+	}
+
+	if hasInvalid {
+		return db.ErrTxInputInvalidParent
+	}
+
+	return nil
+}

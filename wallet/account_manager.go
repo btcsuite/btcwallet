@@ -19,14 +19,65 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
-	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
+
+// buildAccountDeriveFn returns an AccountDerivationFunc closure. Spendable
+// wallets normally preload the master HD private key before the store opens
+// its write transaction. Neutered-root kvdb wallets are the exception: they
+// need to defer a missing-root-key error to the store callback so kvdb can
+// derive from the scoped coin-type key inside its walletdb transaction.
+func (w *Wallet) buildAccountDeriveFn(
+	ctx context.Context) (db.AccountDerivationFunc, error) {
+
+	if w.addrStore.WatchOnly() {
+		return func(_ context.Context, _ db.KeyScope, _ uint32,
+			_ bool) (*db.DerivedAccountData, error) {
+
+			return nil, errWatchOnlyAccountDerivation
+		}, nil
+	}
+
+	encrypted, err := w.store.GetEncryptedHDSeed(ctx, w.id)
+	switch {
+	case err == nil:
+
+	case errors.Is(err, db.ErrSecretNotFound):
+		return func(_ context.Context, _ db.KeyScope, _ uint32,
+			_ bool) (*db.DerivedAccountData, error) {
+
+			return nil, fmt.Errorf("load encrypted master HD priv: %w",
+				err)
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("load encrypted master HD priv: %w", err)
+	}
+
+	plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt master HD priv: %w", err)
+	}
+
+	masterKey, err := hdkeychain.NewKeyFromString(string(plaintext))
+	zero.Bytes(plaintext)
+
+	if err != nil {
+		return nil, fmt.Errorf("parse master HD priv: %w", err)
+	}
+
+	fingerprint, err := masterKeyFingerprint(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("master key fingerprint: %w", err)
+	}
+
+	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
+}
 
 // AccountManager provides a high-level interface for managing wallet
 // accounts.
@@ -64,26 +115,26 @@ type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
 	NewAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*waddrmgr.AccountProperties, error)
+		*db.AccountInfo, error)
 
 	// ListAccounts returns a list of all accounts managed by the wallet.
-	ListAccounts(ctx context.Context) (*AccountsResult, error)
+	ListAccounts(ctx context.Context) ([]db.AccountInfo, error)
 
 	// ListAccountsByScope returns a list of all accounts for a given key
 	// scope.
 	ListAccountsByScope(ctx context.Context, scope waddrmgr.KeyScope) (
-		*AccountsResult, error)
+		[]db.AccountInfo, error)
 
 	// ListAccountsByName searches for accounts with the given name across
 	// all key scopes. Because names are not globally unique, this may
 	// return multiple results.
 	ListAccountsByName(ctx context.Context, name string) (
-		*AccountsResult, error)
+		[]db.AccountInfo, error)
 
-	// GetAccount returns the properties for a specific account, looked up
+	// GetAccount returns the snapshot for a specific account, looked up
 	// by its key scope and unique name within that scope.
 	GetAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*AccountResult, error)
+		*db.AccountInfo, error)
 
 	// RenameAccount renames an existing account. To uniquely identify the
 	// account, the key scope must be provided. The new name must be unique
@@ -92,527 +143,294 @@ type AccountManager interface {
 	RenameAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		oldName string, newName string) error
 
-	// Balance returns the balance for a specific account, identified by its
-	// scope and name, for a given number of required confirmations.
-	Balance(ctx context.Context, conf uint32, scope waddrmgr.KeyScope,
-		name string) (btcutil.Amount, error)
-
-	// ImportAccount imports an account from an extended public or private
-	// key. The key scope is derived from the version bytes of the
-	// extended key. The account name must be unique within the derived
-	// scope. If dryRun is true, the import is validated but not persisted.
+	// ImportAccount imports an account from an extended public key.
+	// Private extended keys are rejected. The key scope is derived from
+	// the version bytes of the extended key. The account name must be
+	// unique within the derived scope. If dryRun is true, the import is
+	// validated but not persisted.
 	ImportAccount(ctx context.Context, name string,
 		accountKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-		dryRun bool) (*waddrmgr.AccountProperties, error)
+		dryRun bool) (*db.AccountInfo, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.
 var _ AccountManager = (*Wallet)(nil)
 
-// NewAccount creates the next account and returns its account number. The name
-// must be unique under the kep scope. In order to support automatic seed
+// NewAccount creates the next account and returns its account info. The name
+// must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
 // accounts have no transaction history (this is a deviation from the BIP0044
 // spec, which allows no unused account gaps).
-func (w *Wallet) NewAccount(_ context.Context, scope waddrmgr.KeyScope,
-	name string) (*waddrmgr.AccountProperties, error) {
+func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
+	name string) (*db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
+	deriveFn, err := w.buildAccountDeriveFn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate that the scope manager can add this new account.
-	err = manager.CanAddAccount()
+	info, err := w.store.CreateDerivedAccount(ctx,
+		db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     name,
+		}, deriveFn,
+	)
 	if err != nil {
-		return nil, err
-	}
-
-	var props *waddrmgr.AccountProperties
-
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Create a new account under the current key scope.
-		accNum, err := manager.NewAccount(addrmgrNs, name)
-		if err != nil {
-			return err
+		// Preserve the legacy waddrmgr.ManagerError contract so that
+		// callers using waddrmgr.IsError(err, ...) keep working after
+		// kvdb wraps the underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return nil, mErr
 		}
 
-		// Get the account's properties.
-		props, err = manager.AccountProperties(addrmgrNs, accNum)
+		return nil, err
+	}
 
-		return err
-	})
+	if info.Origin == db.DerivedAccount {
+		info.MasterKeyFingerprint = w.masterFingerprint
+	}
 
-	return props, err
+	return info, nil
 }
 
-// AccountResult is the result of a ListAccounts query.
-type AccountResult struct {
-	// AccountProperties is the account's properties.
-	waddrmgr.AccountProperties
+// propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total
+// balance into the canonical db.AccountInfo shape the public wallet
+// API now exposes. The legacy waddrmgr path does not separate
+// confirmed/unconfirmed balances, so the supplied total is reported
+// on ConfirmedBalance; UnconfirmedBalance stays zero. For derived accounts,
+// wallet-level watch-only and master-fingerprint state takes precedence over
+// lock-state-dependent waddrmgr account properties.
+func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
+	total btcutil.Amount, isImported bool, walletWatchOnly bool,
+	masterFingerprint uint32) db.AccountInfo {
 
-	// TotalBalance is the total balance of the account.
-	TotalBalance btcutil.Amount
+	var pubKey []byte
+	if props.AccountPubKey != nil {
+		pubKey = []byte(props.AccountPubKey.String())
+	}
+
+	origin := db.DerivedAccount
+	if isImported {
+		origin = db.ImportedAccount
+	}
+
+	// db.AccountInfo masks AccountNumber to 0 for imported accounts
+	// (see data_types.go godoc): the waddrmgr per-scope counter is
+	// not part of the contract for imported rows. Internal callers
+	// that need the real number look it up via waddrmgr separately.
+	accountNumber := props.AccountNumber
+	if origin == db.ImportedAccount {
+		accountNumber = 0
+	}
+
+	isWatchOnly := walletWatchOnly
+
+	fingerprint := props.MasterKeyFingerprint
+	if masterFingerprint != 0 {
+		fingerprint = masterFingerprint
+	}
+
+	if isImported {
+		isWatchOnly = walletWatchOnly || props.IsWatchOnly
+		fingerprint = props.MasterKeyFingerprint
+	}
+
+	scope := db.KeyScope(props.KeyScope)
+	addrSchema := db.ScopeAddrMap[scope]
+
+	if props.AddrSchema != nil {
+		override, err := db.ScopeAddrSchemaFromWaddrmgr(*props.AddrSchema)
+		if err != nil {
+			log.Errorf("propertiesToAccountInfo: skipping invalid "+
+				"AddrSchema override (%v); falling back to scope "+
+				"default", err)
+		} else {
+			addrSchema = override
+		}
+	}
+
+	return db.AccountInfo{
+		AccountNumber:        accountNumber,
+		AccountName:          props.AccountName,
+		Origin:               origin,
+		ExternalKeyCount:     props.ExternalKeyCount,
+		InternalKeyCount:     props.InternalKeyCount,
+		ImportedKeyCount:     props.ImportedKeyCount,
+		IsWatchOnly:          isWatchOnly,
+		KeyScope:             scope,
+		AddrSchema:           addrSchema,
+		PublicKey:            pubKey,
+		MasterKeyFingerprint: fingerprint,
+		ConfirmedBalance:     total,
+	}
 }
 
-// AccountsResult is the result of a ListAccounts query. It contains a list of
-// accounts and the current block height and hash.
-type AccountsResult struct {
-	// Accounts is a list of accounts.
-	Accounts []AccountResult
-
-	// CurrentBlockHash is the hash of the current block.
-	CurrentBlockHash chainhash.Hash
-
-	// CurrentBlockHeight is the height of the current block.
-	CurrentBlockHeight int32
-}
-
-// ListAccounts returns a list of all accounts for the wallet, including those
-// with a zero balance. The current chain tip is included in the result for
-// reference.
-//
-// The function calculates balances by first creating a comprehensive map of
-// balances for all accounts that currently own UTXOs. It then iterates through
-// all known accounts across all key scopes, retrieving their properties and
-// assigning the pre-calculated balance. Accounts with no UTXOs will correctly
-// be assigned a zero balance.
-//
-// The time complexity of this method is O(U*logA + A), where U is the number of
-// UTXOs and A is the number of accounts in the wallet. A potential future
-// improvement is to make the balance calculation optional.
-func (w *Wallet) ListAccounts(_ context.Context) (*AccountsResult, error) {
+// ListAccounts returns every account across all key scopes with its balance.
+func (w *Wallet) ListAccounts(ctx context.Context) ([]db.AccountInfo, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	// Get all active key scope managers to iterate through all available
-	// scopes.
-	scopes := w.addrStore.ActiveScopedKeyManagers()
-
-	var accounts []AccountResult
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// First, build a map of balances for all accounts that own at
-		// least one UTXO. This is done by iterating through the UTXO
-		// set and aggregating the values by account.
-		scopedBalances, err := w.fetchAccountBalances(tx)
-		if err != nil {
-			return err
-		}
-
-		// Now, iterate through all key scopes to assemble the final
-		// list of accounts with their properties and balances.
-		for _, scopeMgr := range scopes {
-			scope := scopeMgr.Scope()
-			accountBalances := scopedBalances[scope]
-
-			// For the current scope, retrieve the properties for
-			// each account and combine them with the
-			// pre-calculated balances.
-			scopedAccounts, err := listAccountsWithBalances(
-				scopeMgr, addrmgrNs, accountBalances,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Append the accounts from this scope to the final
-			// list.
-			accounts = append(accounts, scopedAccounts...)
-		}
-
-		return nil
+	return w.listAccountInfos(ctx, db.ListAccountsQuery{
+		WalletID: w.id,
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Include the wallet's current sync state in the result to provide a
-	// point-in-time reference for the balances.
-	syncBlock := w.addrStore.SyncedTo()
-
-	return &AccountsResult{
-		Accounts:           accounts,
-		CurrentBlockHash:   syncBlock.Hash,
-		CurrentBlockHeight: syncBlock.Height,
-	}, nil
 }
 
-// ListAccountsByScope returns a list of all accounts for a given key scope,
-// including those with a zero balance. The current chain tip is included for
-// reference.
-//
-// The function first fetches the balances for all accounts within the given
-// scope by iterating over the wallet's UTXO set. It then retrieves the
-// properties for each account in that scope and combines them with the
-// pre-calculated balances.
-//
-// The time complexity of this method is O(U*logA + A), where U is the number of
-// UTXOs and A is the number of accounts in the wallet.
-func (w *Wallet) ListAccountsByScope(_ context.Context,
-	scope waddrmgr.KeyScope) (*AccountsResult, error) {
+// listAccountInfos returns cache.ListAccounts snapshots with wallet-cached
+// master fingerprints injected for derived account rows.
+func (w *Wallet) listAccountInfos(ctx context.Context,
+	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	err := w.state.validateStarted()
+	infos, err := w.cache.ListAccounts(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// First, we'll fetch the scoped key manager for the given scope. This
-	// manager will be used to list the accounts.
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return nil, err
-	}
-
-	var accounts []AccountResult
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Calculate the balances for all accounts, but only for the
-		// key scope we are interested in.
-		scopedBalances, err := w.fetchAccountBalances(
-			tx, withScope(scope),
-		)
-		if err != nil {
-			return err
+	for i := range infos {
+		if infos[i].Origin == db.DerivedAccount {
+			infos[i].MasterKeyFingerprint = w.masterFingerprint
 		}
-
-		// Now, retrieve the properties for each account in the scope
-		// and combine them with the balances calculated above.
-		accounts, err = listAccountsWithBalances(
-			manager, addrmgrNs, scopedBalances[scope],
-		)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
 	}
 
-	// Include the wallet's current sync state in the result.
-	syncBlock := w.addrStore.SyncedTo()
-
-	return &AccountsResult{
-		Accounts:           accounts,
-		CurrentBlockHash:   syncBlock.Hash,
-		CurrentBlockHeight: syncBlock.Height,
-	}, nil
+	return infos, nil
 }
 
-// ListAccountsByName returns a list of all accounts that have a given name.
-// Since account names are only unique within a key scope, this can return
-// multiple accounts. The current chain tip is included for reference.
-//
-// The function first calculates the balances for any accounts matching the
-// given name, and then iterates through all key scopes to find and retrieve
-// the properties of those accounts.
-//
-// The time complexity of this method is O(U*logA), where U is the number of
-// UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) ListAccountsByName(_ context.Context,
-	name string) (*AccountsResult, error) {
+// ListAccountsByScope returns all accounts for the given key scope.
+func (w *Wallet) ListAccountsByScope(ctx context.Context,
+	scope waddrmgr.KeyScope) ([]db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	scopes := w.addrStore.ActiveScopedKeyManagers()
+	dbScope := db.KeyScope(scope)
 
-	var accounts []AccountResult
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		// First, calculate the balances for any accounts that match the
-		// given name. This is efficient as it iterates over the UTXO
-		// set, not accounts.
-		scopedBalances, err := w.fetchAccountBalances(tx)
-		if err != nil {
-			return err
-		}
-
-		// Now, find all accounts that match the given name by iterating
-		// through all active scopes.
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		for _, scopeMgr := range scopes {
-			// Look up the account number for the given name in the
-			// current scope.
-			accNum, err := scopeMgr.LookupAccount(addrmgrNs, name)
-			if err != nil {
-				// If the account is not found in this scope,
-				// we can safely continue to the next one.
-				if waddrmgr.IsError(
-					err, waddrmgr.ErrAccountNotFound) {
-
-					continue
-				}
-
-				return err
-			}
-
-			// Retrieve the account's properties.
-			props, err := scopeMgr.AccountProperties(
-				addrmgrNs, accNum,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Get the pre-calculated balance for this account. If
-			// the account has no balance, it will be zero.
-			var balance btcutil.Amount
-
-			balances, ok := scopedBalances[scopeMgr.Scope()]
-			if ok {
-				balance = balances[accNum]
-			}
-
-			accounts = append(accounts, AccountResult{
-				AccountProperties: *props,
-				TotalBalance:      balance,
-			})
-		}
-
-		return nil
-	})
+	_, err = w.addrStore.FetchScopedKeyManager(scope)
 	if err != nil {
 		return nil, err
 	}
 
-	syncBlock := w.addrStore.SyncedTo()
+	return w.listAccountInfos(ctx, db.ListAccountsQuery{
+		WalletID: w.id,
+		Scope:    &dbScope,
+	})
+}
 
-	return &AccountsResult{
-		Accounts:           accounts,
-		CurrentBlockHash:   syncBlock.Hash,
-		CurrentBlockHeight: syncBlock.Height,
-	}, nil
+// ListAccountsByName returns every account matching name across all scopes.
+func (w *Wallet) ListAccountsByName(ctx context.Context,
+	name string) ([]db.AccountInfo, error) {
+
+	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	return w.listAccountInfos(ctx, db.ListAccountsQuery{
+		WalletID: w.id,
+		Name:     &name,
+	})
 }
 
 // GetAccount returns the account for a given account name and key scope.
-//
-// The function first looks up the account's properties and then calculates its
-// balance by iterating over the wallet's UTXO set.
-//
-// The time complexity of this method is O(U*logA), where U is the number of
-// UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) GetAccount(_ context.Context, scope waddrmgr.KeyScope,
-	name string) (*AccountResult, error) {
+// The account snapshot, including the running balance, is fetched in a
+// single Store read.
+func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
+	name string) (*db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return nil, err
-	}
-
-	var account *AccountResult
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Look up the account number for the given name and scope. This
-		// is a fast, indexed lookup.
-		accNum, err := manager.LookupAccount(addrmgrNs, name)
-		if err != nil {
-			return err
-		}
-
-		// Retrieve the static properties for the account.
-		props, err := manager.AccountProperties(addrmgrNs, accNum)
-		if err != nil {
-			return err
-		}
-
-		account = &AccountResult{
-			AccountProperties: *props,
-		}
-
-		// Calculate the balance for this specific account by fetching
-		// the UTXOs that belong to it.
-		scopedBalances, err := w.fetchAccountBalances(
-			tx, withScope(scope),
-		)
-		if err != nil {
-			return err
-		}
-
-		// Assign the balance to the account result. If the account has
-		// no UTXOs, the balance will be zero.
-		if balances, ok := scopedBalances[scope]; ok {
-			if balance, ok := balances[accNum]; ok {
-				account.TotalBalance = balance
-			}
-		}
-
-		return nil
+	info, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    db.KeyScope(scope),
+		Name:     &name,
 	})
 	if err != nil {
+		// Preserve waddrmgr.ManagerError semantics so callers
+		// using waddrmgr.IsError(err, ...) keep working when kvdb
+		// wraps the underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return nil, mErr
+		}
+
 		return nil, err
 	}
 
-	return account, nil
+	// The kvdb store's default-account row carries fingerprint=0 for
+	// derived accounts because waddrmgr persists no per-account
+	// fingerprint there. Inject the wallet-cached value (parsed from
+	// the master HD pubkey at Manager.Load time) so external consumers
+	// see the canonical BIP32 root fingerprint.
+	if info.Origin == db.DerivedAccount {
+		info.MasterKeyFingerprint = w.masterFingerprint
+	}
+
+	return info, nil
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
 // the same key scope. The reserved "imported" account cannot be renamed.
-//
-// The time complexity of this method is dominated by the database lookup for
-// the old account name.
-func (w *Wallet) RenameAccount(_ context.Context, scope waddrmgr.KeyScope,
-	oldName, newName string) error {
+func (w *Wallet) RenameAccount(ctx context.Context,
+	scope waddrmgr.KeyScope, oldName, newName string) error {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return err
 	}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(scope)
-	if err != nil {
-		return err
-	}
-
-	// Validate the new account name to ensure it meets the required
-	// criteria.
 	err = waddrmgr.ValidateAccountName(newName)
 	if err != nil {
 		return err
 	}
 
-	return walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Look up the account number for the given name. This is
-		// required to perform the rename operation.
-		accNum, err := manager.LookupAccount(addrmgrNs, oldName)
-		if err != nil {
-			return err
-		}
-
-		// Perform the rename operation in the address manager.
-		return manager.RenameAccount(addrmgrNs, accNum, newName)
-	})
-}
-
-// Balance returns the balance for a specific account, identified by its scope
-// and name, for a given number of required confirmations.
-//
-// The function first looks up the account number and then iterates through all
-// unspent transaction outputs (UTXOs), summing the values of those that belong
-// to the account and meet the required number of confirmations.
-//
-// The time complexity of this method is O(U*logA), where U is the number of
-// UTXOs and logA is the cost of an account lookup.
-func (w *Wallet) Balance(_ context.Context, conf uint32,
-	scope waddrmgr.KeyScope, name string) (btcutil.Amount, error) {
-
-	err := w.state.validateStarted()
-	if err != nil {
-		return 0, err
-	}
-
-	var balance btcutil.Amount
-
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-		// Look up the account number for the given name and scope.
-		manager, err := w.addrStore.FetchScopedKeyManager(scope)
-		if err != nil {
-			return err
-		}
-
-		accNum, err := manager.LookupAccount(addrmgrNs, name)
-		if err != nil {
-			return err
-		}
-
-		// Iterate through all unspent outputs and sum the balances for
-		// the addresses that belong to the target account.
-		syncBlock := w.addrStore.SyncedTo()
-
-		utxos, err := w.txStore.UnspentOutputs(txmgrNs)
-		if err != nil {
-			return err
-		}
-
-		for _, utxo := range utxos {
-			// Skip any UTXOs that have not yet reached the required
-			// number of confirmations.
-			if !hasMinConfs(conf, utxo.Height, syncBlock.Height) {
-				continue
-			}
-
-			balance += w.balanceForUTXO(
-				addrmgrNs, scope, accNum, utxo,
-			)
-		}
-
-		return nil
+	err = w.store.RenameAccount(ctx, db.RenameAccountParams{
+		WalletID: w.id,
+		Scope:    db.KeyScope(scope),
+		OldName:  oldName,
+		NewName:  newName,
 	})
 	if err != nil {
-		return 0, err
+		// Preserve waddrmgr.ManagerError semantics so callers using
+		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
+		// underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return mErr
+		}
+
+		return err
 	}
 
-	return balance, nil
+	return nil
 }
 
-// balanceForUTXO is a helper function for Balance that calculates the balance
-// of a single UTXO if it belongs to the target account.
-func (w *Wallet) balanceForUTXO(addrmgrNs walletdb.ReadBucket,
-	scope waddrmgr.KeyScope, accNum uint32,
-	utxo wtxmgr.Credit) btcutil.Amount {
-
-	// Extract the address from the UTXO's public key script.
-	addr := extractAddrFromPKScript(
-		utxo.PkScript, w.cfg.ChainParams,
-	)
-	if addr == nil {
-		return 0
-	}
-
-	// Look up the account that owns the address.
-	addrScope, addrAcc, err := w.addrStore.AddrAccount(addrmgrNs, addr)
-	if err != nil {
-		// Ignore addresses that are not found in the wallet.
-		return 0
-	}
-
-	// If the address belongs to the target account, add the UTXO's value
-	// to the total balance.
-	if addrScope.Scope() == scope && addrAcc == accNum {
-		return utxo.Amount
-	}
-
-	return 0
-}
-
-// ImportAccount imports an account from an extended public or private key. The
-// key scope is derived from the version bytes of the extended key. The account
-// name must be unique within the derived scope. If dryRun is true, the import
-// is validated but not persisted.
+// ImportAccount imports an account from an extended public key. Private
+// extended keys are rejected. The key scope is derived from the version
+// bytes of the extended key. The account name must be unique within the
+// derived scope.
 //
-// The time complexity of this method is dominated by the database lookup to
-// ensure the account name is unique within the scope.
+// dryRun=true validates the import through the store and rolls the transaction
+// back; no account row is persisted.
+//
+// The time complexity of this method is dominated by the database lookup
+// to ensure the account name is unique within the scope.
 func (w *Wallet) ImportAccount(ctx context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-	dryRun bool) (*waddrmgr.AccountProperties, error) {
+	dryRun bool) (*db.AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -625,123 +443,77 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,
-// allowing callers (like Manager.Create) to bypass the started check.
-//
-// TODO(yy): we will move the db operation to a dedicated method, so we can
-// ignore cyclop for now.
-//
-//nolint:cyclop
-func (w *Wallet) importAccountInternal(_ context.Context,
+// allowing Manager.Create to bypass the started check.
+func (w *Wallet) importAccountInternal(ctx context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-	dryRun bool) (*waddrmgr.AccountProperties, error) {
+	dryRun bool) (*db.AccountInfo, error) {
 
-	// Ensure we have a valid account public key. We require an account-level
-	// key (depth 3) to properly manage the derivation path.
-	err := validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
+	err := validateExtendedPubKey(
+		accountKey, true, w.cfg.ChainParams,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Determine what key scope the account public key should belong to and
-	// whether it should use a custom address schema. This is inferred from
-	// the key's HD version bytes.
-	keyScope, addrSchema, err := keyScopeFromPubKey(accountKey, &addrType)
+	keyScope, addrSchema, err := keyScopeFromPubKey(
+		accountKey, &addrType,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	var props *waddrmgr.AccountProperties
-
-	// We'll perform the import within a database update transaction to ensure
-	// atomicity. If dryRun is enabled, we'll return a special error at the end
-	// to trigger a rollback.
-	err = walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		// Check if a manager for this key scope already exists. If not, we'll
-		// create a new one using the inferred schema.
-		scopedMgr, err := w.addrStore.FetchScopedKeyManager(keyScope)
-		if err != nil {
-			scopedMgr, err = w.addrStore.NewScopedKeyManager(
-				ns, keyScope, *addrSchema,
-			)
-			if err != nil {
-				return err
-			}
+	info, err := w.store.CreateImportedAccount(ctx,
+		db.CreateImportedAccountParams{
+			WalletID:          w.id,
+			Name:              name,
+			Scope:             db.KeyScope(keyScope),
+			MasterFingerprint: masterKeyFingerprint,
+			PublicKey:         []byte(accountKey.String()),
+			DryRun:            dryRun,
+			AddrSchema:        dbScopeAddrSchema(addrSchema),
+		},
+	)
+	if err != nil {
+		// Preserve waddrmgr.ManagerError semantics so callers using
+		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
+		// underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			return nil, mErr
 		}
 
-		// Create the new watching-only account using the provided key. Since we
-		// only have the public key, the wallet won't be able to sign for this
-		// account unless the private key is also provided later.
-		account, err := scopedMgr.NewAccountWatchingOnly(
-			ns, name, accountKey, masterKeyFingerprint, addrSchema,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Retrieve the properties for the newly created account.
-		props, err = scopedMgr.AccountProperties(ns, account)
-		if !dryRun {
-			return err
-		}
-
-		// If this is a dry-run, we'll generate a few addresses to simulate the
-		// import process and then roll back.
-		props, err = importAccountDryRun(ns, props, scopedMgr)
-		if err != nil {
-			return err
-		}
-
-		// Make sure we always roll back the dry-run transaction by returning an
-		// error here.
-		return walletdb.ErrDryRunRollBack
-	})
-
-	// If this was a dry-run, we ignore the rollback error.
-	if err != nil && !dryRun && !errors.Is(err, walletdb.ErrDryRunRollBack) {
 		return nil, err
 	}
 
-	return props, nil
+	return info, nil
 }
 
-// importAccountDryRun simulates an account import by generating a single
-// address for both the internal and external derivation branches. This ensures
-// that the provided account key is valid and can be used to derive addresses.
-// The changes made during this simulation are rolled back by the caller.
-func importAccountDryRun(ns walletdb.ReadWriteBucket,
-	props *waddrmgr.AccountProperties, scopedMgr waddrmgr.AccountStore) (
-	*waddrmgr.AccountProperties, error) {
+// dbScopeAddrSchema converts a waddrmgr per-account address schema override
+// into the account-store contract type.
+func dbScopeAddrSchema(
+	schema *waddrmgr.ScopeAddrSchema) *db.ScopeAddrSchema {
 
-	// The importAccount method above will cache the imported account within the
-	// scoped manager. Since this is a dry-run attempt, we'll want to invalidate
-	// the cache for it.
-	defer scopedMgr.InvalidateAccountCache(props.AccountNumber)
-
-	_, err := scopedMgr.NextExternalAddresses(ns, props.AccountNumber, 1)
-	if err != nil {
-		return nil, err
+	if schema == nil {
+		return nil
 	}
 
-	_, err = scopedMgr.NextInternalAddresses(ns, props.AccountNumber, 1)
-	if err != nil {
-		return nil, err
+	return &db.ScopeAddrSchema{
+		ExternalAddrType: db.AddressType(schema.ExternalAddrType),
+		InternalAddrType: db.AddressType(schema.InternalAddrType),
 	}
-
-	// Refresh the account's properties after generating the addresses.
-	props, err = scopedMgr.AccountProperties(ns, props.AccountNumber)
-	if err != nil {
-		return nil, err
-	}
-
-	return props, nil
 }
 
 // validateExtendedPubKey ensures a sane derived public key is provided.
 func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	isAccountKey bool, chainParams *chaincfg.Params) error {
+
+	// A nil key cannot be validated and would otherwise panic on the
+	// IsPrivate call below.
+	if pubKey == nil {
+		return fmt.Errorf("%w: account key cannot be nil",
+			ErrInvalidAccountKey)
+	}
 
 	// Private keys are not allowed.
 	if pubKey.IsPrivate() {
@@ -855,205 +627,4 @@ func extractAddrFromPKScript(pkScript []byte,
 	// are correctly handled as a single address), this is a low-priority
 	// issue.
 	return addrs[0]
-}
-
-// accountFilter is an internal struct used to specify filters for account
-// balance queries.
-type accountFilter struct {
-	scope *waddrmgr.KeyScope
-}
-
-// filterOption is a functional option type for account filtering.
-type filterOption func(*accountFilter)
-
-// withScope is a filter option to limit account queries to a specific key
-// scope.
-func withScope(scope waddrmgr.KeyScope) filterOption {
-	return func(f *accountFilter) {
-		f.scope = &scope
-	}
-}
-
-// scopedBalances is a type alias for a map of key scopes to a map of account
-// numbers to their total balance.
-type scopedBalances map[waddrmgr.KeyScope]map[uint32]btcutil.Amount
-
-// fetchAccountBalances creates a nested map of account balances, keyed by scope
-// and account number.
-//
-// This function is a core component of the wallet's balance calculation
-// logic. It is designed to be efficient, especially for wallets with a large
-// number of addresses.
-//
-// Design Rationale:
-// The primary performance consideration is the trade-off between iterating
-// through all Unspent Transaction Outputs (UTXOs) versus iterating through all
-// derived addresses for all accounts. A mature wallet may have millions of used
-// addresses, but a relatively small set of UTXOs. Therefore, this function is
-// optimized for this common case.
-//
-// The algorithm works as follows:
-// 1. Make a single pass over all UTXOs in the wallet.
-// 2. For each UTXO, look up the address and its corresponding account.
-// 3. Aggregate the UTXO values into a map of balances per account.
-//
-// This approach avoids iterating through a potentially massive number of
-// addresses and performing a database lookup for each one to check for a
-// balance. Instead, it starts with the smaller, known set of UTXOs and works
-// backward to the accounts.
-//
-// Filters:
-// The function's behavior can be customized by passing one or more filterOption
-// functions. This allows the caller to restrict the balance calculation to:
-//   - A specific key scope (withScope).
-//
-// If no filters are provided, balances for all accounts across all scopes will
-// be fetched.
-//
-// TODO(yy): With a future SQL backend, this entire function could be
-// replaced by a single, more efficient query. By adding `account_id` and
-// `key_scope` columns to the `outputs` table, we could perform a direct
-// aggregation in the database, like:
-// `SELECT key_scope, account_id, SUM(value) FROM outputs
-// WHERE is_spent = false GROUP BY key_scope, account_id;`.
-// This would be significantly faster as the database is optimized for
-// these types of operations.
-//
-// TODO(yy): The current UTXO-first approach is optimal for mature wallets where
-// the number of addresses greatly exceeds the number of UTXOs. For new wallets
-// or accounts, an address-first approach might be more efficient. A future
-// improvement could be to dynamically choose the strategy based on the relative
-// counts of addresses and UTXOs for the accounts in question.
-func (w *Wallet) fetchAccountBalances(tx walletdb.ReadTx,
-	opts ...filterOption) (scopedBalances, error) {
-
-	// Apply the filter options.
-	filter := &accountFilter{}
-	for _, opt := range opts {
-		opt(filter)
-	}
-
-	addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-	txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-
-	// First, fetch all unspent outputs.
-	utxos, err := w.txStore.UnspentOutputs(txmgrNs)
-	if err != nil {
-		return nil, err
-	}
-
-	// Now, create the nested map to hold the balances.
-	scopedBalances := make(scopedBalances)
-
-	// Iterate through all UTXOs, mapping them back to their owning account
-	// to aggregate the total balance for each.
-	for _, utxo := range utxos {
-		addr := extractAddrFromPKScript(
-			utxo.PkScript, w.cfg.ChainParams,
-		)
-		if addr == nil {
-			// This can happen for non-standard script types.
-			continue
-		}
-
-		// Now that we have the address, we'll look up which account it
-		// belongs to.
-		scope, accNum, err := w.addrStore.AddrAccount(addrmgrNs, addr)
-		if err != nil {
-			log.Errorf("Unable to query account using address %v: "+
-				"%v", addr, err)
-
-			continue
-		}
-
-		// If a scope filter was provided, apply it now.
-		if filter.scope != nil {
-			if scope.Scope() != *filter.scope {
-				continue
-			}
-		}
-
-		// We'll use a nested map to store balances. If this is the
-		// first time we've seen this key scope, we'll need to
-		// initialize the inner map.
-		keyScope := scope.Scope()
-		if _, ok := scopedBalances[keyScope]; !ok {
-			scopedBalances[keyScope] = make(
-				map[uint32]btcutil.Amount,
-			)
-		}
-
-		// Finally, we'll add the UTXO's value to the account's
-		// balance.
-		scopedBalances[keyScope][accNum] += utxo.Amount
-	}
-
-	return scopedBalances, nil
-}
-
-// listAccountsWithBalances is a helper function that iterates through all
-// accounts in a given scope, fetches their properties, and combines them with
-// the provided account balances.
-//
-// This function is designed to be called after the balances for all relevant
-// accounts have already been computed by a function like fetchAccountBalances.
-// It serves as the final step to assemble the complete AccountResult objects.
-//
-// The function operates as follows:
-//  1. It determines the last account number for the given scope.
-//  2. It iterates from account number 0 to the last account.
-//  3. For each account, it retrieves its properties from the database.
-//  4. It looks up the pre-calculated balance from the accountBalances map.
-//  5. It constructs an AccountResult object with both the properties and the
-//     balance.
-//
-// This separation of concerns (first calculating all balances, then assembling
-// the results) is a key part of the overall optimization strategy. It ensures
-// that we can efficiently gather all necessary data in distinct phases, rather
-// than mixing database reads and balance calculations in a less efficient
-// manner.
-func listAccountsWithBalances(scopeMgr waddrmgr.AccountStore,
-	addrmgrNs walletdb.ReadBucket,
-	accountBalances map[uint32]btcutil.Amount) ([]AccountResult, error) {
-
-	var accounts []AccountResult
-
-	lastAccount, err := scopeMgr.LastAccount(addrmgrNs)
-	if err != nil {
-		// If the scope has no accounts, we can just return an empty
-		// slice. This is a normal condition and not an error.
-		if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
-			return nil, nil
-		}
-
-		return nil, err
-	}
-
-	// Iterate through all accounts from 0 to the last known account
-	// number for this scope.
-	for accNum := uint32(0); accNum <= lastAccount; accNum++ {
-		// For each account number, we'll fetch its full set of
-		// properties from the database.
-		props, err := scopeMgr.AccountProperties(addrmgrNs, accNum)
-		if err != nil {
-			return nil, err
-		}
-
-		// We'll look up the pre-calculated balance for this account.
-		// If the account has no UTXOs, it won't be in the map, so
-		// we'll default to a balance of 0.
-		balance, ok := accountBalances[accNum]
-		if !ok {
-			balance = 0
-		}
-
-		// Finally, we'll construct the full account result and add it
-		// to our list.
-		accounts = append(accounts, AccountResult{
-			AccountProperties: *props,
-			TotalBalance:      balance,
-		})
-	}
-
-	return accounts, nil
 }

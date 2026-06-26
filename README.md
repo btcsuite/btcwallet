@@ -17,15 +17,13 @@ disk.  btcwallet uses the
 HD path for all derived addresses, as described by
 [BIP0044](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki).
 
-Due to the sensitive nature of public data in a BIP0032 wallet,
-btcwallet provides the option of encrypting not just private keys, but
-public data as well.  This is intended to thwart privacy risks where a
-wallet file is compromised without exposing all current and future
-addresses (public keys) managed by the wallet. While access to this
-information would not allow an attacker to spend or steal coins, it
-does mean they could track all transactions involving your addresses
-and therefore know your exact balance.  In a future release, public data
-encryption will extend to transactions as well.
+btcwallet encrypts all private key material (private keys, HD seeds)
+at rest using a single passphrase.  Public data such as addresses,
+transactions, and balances is stored in plaintext, consistent with
+Bitcoin Core conventions.  Users who require stronger privacy at rest
+should use full disk encryption (e.g. LUKS).  See
+[ADR 0009](docs/developer/adr/0009-single-passphrase-encryption.md)
+for design rationale.
 
 btcwallet is not an SPV client and requires connecting to a local or
 remote btcd instance for asynchronous blockchain queries and

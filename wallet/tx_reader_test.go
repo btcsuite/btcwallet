@@ -13,13 +13,14 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// TestBuildTxDetail tests the buildTxDetail function.
-func TestBuildTxDetail(t *testing.T) {
+// TestBuildTxDetailFromStore tests the detailed store-backed tx builder.
+func TestBuildTxDetailFromStore(t *testing.T) {
 	t.Parallel()
 
 	// Create the various test cases.
@@ -63,12 +64,79 @@ func TestBuildTxDetail(t *testing.T) {
 			currentHeight := int32(1)
 
 			// Act: Build the TxDetail.
-			result := w.buildTxDetail(tc.details, currentHeight)
+			result, err := w.buildTxDetailFromStore(
+				txDetailInfoFromLegacy(tc.details), currentHeight,
+			)
 
 			// Assert: Check that the correct details are returned.
+			require.NoError(t, err)
 			require.Equal(t, tc.expectedTxDetail, result)
 		})
 	}
+}
+
+// TestBuildTxDetailFromStoreRequiresMsgTx tests that store rows must include a
+// parsed transaction.
+func TestBuildTxDetailFromStoreRequiresMsgTx(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store detail row that violates the MsgTx contract.
+	minedDetails, _ := createMinedTxDetail(t)
+	txDetails := txDetailInfoFromLegacy(minedDetails)
+	txDetails.MsgTx = nil
+	w, _ := createStartedWalletWithMocks(t)
+
+	// Act: Build the TxDetail from the malformed store row.
+	_, err := w.buildTxDetailFromStore(txDetails, 1)
+
+	// Assert: Check that the contract violation is reported.
+	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+}
+
+// TestGetTxPropagatesNilMsgTx tests that GetTx returns store detail contract
+// violations to callers.
+func TestGetTxPropagatesNilMsgTx(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Mock a store detail row that omits the parsed transaction.
+	minedDetails, _ := createMinedTxDetail(t)
+	txDetails := txDetailInfoFromLegacy(minedDetails)
+	txDetails.MsgTx = nil
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     *TstTxHash,
+	}).Return(txDetails, nil).Once()
+
+	// Act: Get the transaction through the public wallet method.
+	_, err := w.GetTx(t.Context(), *TstTxHash)
+
+	// Assert: Check that the contract violation is propagated.
+	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+}
+
+// TestListTxnsPropagatesNilMsgTx tests that ListTxns returns store detail
+// contract violations to callers.
+func TestListTxnsPropagatesNilMsgTx(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Mock one listed store detail row that omits the parsed
+	// transaction.
+	minedDetails, _ := createMinedTxDetail(t)
+	txDetails := txDetailInfoFromLegacy(minedDetails)
+	txDetails.MsgTx = nil
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.store.On("ListTxDetails", mock.Anything, db.ListTxDetailsQuery{
+		WalletID:    w.id,
+		StartHeight: 0,
+		EndHeight:   1000,
+	}).Return([]db.TxDetailInfo{*txDetails}, nil).Once()
+
+	// Act: List transactions through the public wallet method.
+	_, err := w.ListTxns(t.Context(), 0, 1000)
+
+	// Assert: Check that the contract violation is propagated.
+	require.ErrorIs(t, err, errNilTxDetailMsgTx)
 }
 
 // TestGetTxSuccess tests the GetTx method of the wallet for success scenarios.
@@ -80,17 +148,17 @@ func TestGetTxSuccess(t *testing.T) {
 
 	testCases := []struct {
 		name             string
-		mockDetails      *wtxmgr.TxDetails
+		mockDetails      *db.TxDetailInfo
 		expectedTxDetail *TxDetail
 	}{
 		{
 			name:             "mined tx",
-			mockDetails:      minedDetails,
+			mockDetails:      txDetailInfoFromLegacy(minedDetails),
 			expectedTxDetail: minedTxDetail,
 		},
 		{
 			name:             "unmined tx",
-			mockDetails:      unminedDetails,
+			mockDetails:      txDetailInfoFromLegacy(unminedDetails),
 			expectedTxDetail: unminedTxDetail,
 		},
 	}
@@ -102,8 +170,10 @@ func TestGetTxSuccess(t *testing.T) {
 			w, mocks := createStartedWalletWithMocks(t)
 			// SyncedTo is mocked in createStartedWalletWithMocks (height 1).
 
-			mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
-				Return(tc.mockDetails, nil).Once()
+			mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+				WalletID: w.id,
+				Txid:     *TstTxHash,
+			}).Return(tc.mockDetails, nil).Once()
 
 			// Act: Get the transaction.
 			details, err := w.GetTx(t.Context(), *TstTxHash)
@@ -123,8 +193,10 @@ func TestGetTxNotFound(t *testing.T) {
 	// Arrange: Create a test wallet with mocks and mock the TxDetails call
 	// to return nil, simulating a non-existing tx.
 	w, mocks := createStartedWalletWithMocks(t)
-	mocks.txStore.On("TxDetails", mock.Anything, TstTxHash).
-		Return(nil, nil).Once()
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     *TstTxHash,
+	}).Return(nil, db.ErrTxNotFound).Once()
 
 	// Act: Attempt to get the transaction.
 	_, err := w.GetTx(t.Context(), *TstTxHash)
@@ -143,23 +215,13 @@ func TestListTxnsSuccess(t *testing.T) {
 
 	// SyncedTo is mocked in createStartedWalletWithMocks (height 1).
 
-	// Set up the mock for the tx store. We use .Run to execute the
-	// callback function that's passed in as an argument to the mock.
-	mocks.txStore.On("RangeTransactions",
-		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
-	).Run(func(args mock.Arguments) {
-		// Get the callback function from the arguments.
-		f, ok := args.Get(3).(func([]wtxmgr.TxDetails) (bool, error))
-		require.True(t, ok)
-
-		// Create the mock details to pass to the callback.
-		minedDetails, _ := createMinedTxDetail(t)
-		details := []wtxmgr.TxDetails{*minedDetails}
-
-		// Call the callback.
-		_, err := f(details)
-		require.NoError(t, err)
-	}).Return(nil).Once()
+	minedDetails, _ := createMinedTxDetail(t)
+	mocks.store.On("ListTxDetails", mock.Anything, db.ListTxDetailsQuery{
+		WalletID:    w.id,
+		StartHeight: 0,
+		EndHeight:   1000,
+	}).Return([]db.TxDetailInfo{*txDetailInfoFromLegacy(minedDetails)}, nil).
+		Once()
 
 	// Act: List txns.
 	details, err := w.ListTxns(t.Context(), 0, 1000)
@@ -301,4 +363,45 @@ func createMinedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 	}
 
 	return minedDetails, minedTxDetail
+}
+
+// txDetailInfoFromLegacy converts one legacy wtxmgr transaction fixture into
+// the db-native detail shape consumed by store-backed reader tests.
+func txDetailInfoFromLegacy(details *wtxmgr.TxDetails) *db.TxDetailInfo {
+	var block *db.Block
+	if details.Block.Height >= 0 {
+		block = &db.Block{
+			Hash:      details.Block.Hash,
+			Height:    uint32(details.Block.Height),
+			Timestamp: details.Block.Time,
+		}
+	}
+
+	ownedInputs := make([]db.TxOwnedInput, 0, len(details.Debits))
+	for _, debit := range details.Debits {
+		ownedInputs = append(ownedInputs, db.TxOwnedInput{
+			Index:  debit.Index,
+			Amount: debit.Amount,
+		})
+	}
+
+	ownedOutputs := make([]db.TxOwnedOutput, 0, len(details.Credits))
+	for _, credit := range details.Credits {
+		ownedOutputs = append(ownedOutputs, db.TxOwnedOutput{
+			Index:  credit.Index,
+			Amount: credit.Amount,
+		})
+	}
+
+	return &db.TxDetailInfo{
+		Hash:         details.Hash,
+		MsgTx:        &details.MsgTx,
+		SerializedTx: details.SerializedTx,
+		Received:     details.Received,
+		Block:        block,
+		Status:       db.TxStatusPublished,
+		Label:        details.Label,
+		OwnedInputs:  ownedInputs,
+		OwnedOutputs: ownedOutputs,
+	}
 }

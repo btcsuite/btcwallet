@@ -1,0 +1,1545 @@
+// Package db provides a database-agnostic interface for wallet data storage,
+// defining the core data types and store interfaces for wallets, accounts,
+// addresses, transactions, and UTXOs.
+package db
+
+import (
+	"errors"
+	"math"
+	"time"
+
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+)
+
+const (
+	// UnminedHeight is a sentinel value used in UtxoInfo.Height to indicate
+	// that the UTXO is unconfirmed.
+	//
+	// Database rows represent an unconfirmed creating transaction by setting
+	// `transactions.block_height` to NULL. The store layer maps that NULL to
+	// this sentinel value so callers can continue to treat UtxoInfo.Height
+	// as a non-nullable `uint32`.
+	//
+	// NOTE: This value must never overlap with a real block height.
+	UnminedHeight uint32 = math.MaxUint32
+
+	// MaxAccountNumber is the largest derived account number the SQL store
+	// may allocate. It matches waddrmgr.MaxAccountNum so account derivation
+	// stays within the hardened BIP44 child range while leaving the legacy
+	// imported-account child reserved.
+	//
+	// The 31 bit width mirrors waddrmgr.MaxAccountNum, which is the BIP32
+	// hardened-child cap of 2^31 - 1; the -2 leaves the topmost child
+	// number for the legacy imported-account sentinel.
+	MaxAccountNumber uint32 = (1 << 31) - 2 //nolint:mnd
+)
+
+// ============================================================================
+// Data Types & Method Parameters
+// ============================================================================
+
+// KeyScope represents the BIP-44 key scope as defined in BIP-43. It is used
+// to organize keys based on their purpose and coin type, providing a
+// hierarchical structure for key derivation.
+type KeyScope struct {
+	// Purpose is the purpose number for the scope, as defined in BIP-43.
+	Purpose uint32
+
+	// Coin is the coin type number for the scope, as defined in BIP-44.
+	Coin uint32
+}
+
+// AddressType specifies the type of a managed address. This is used to
+// identify the script type of an address, such as P2PKH, P2SH, P2WKH, etc.
+//
+// The enum values MUST match the IDs in the address_types database table.
+// See migration 000003_address_types for the canonical descriptions.
+type AddressType uint8
+
+const (
+	// RawPubKey represents a pay-to-pubkey (P2PK) address.
+	RawPubKey AddressType = iota
+
+	// PubKeyHash represents a pay-to-pubkey-hash (P2PKH) address.
+	PubKeyHash
+
+	// ScriptHash represents a pay-to-script-hash (P2SH) address.
+	ScriptHash
+
+	// NestedWitnessPubKey represents a P2WKH output nested within a P2SH
+	// address.
+	NestedWitnessPubKey
+
+	// WitnessPubKey represents a pay-to-witness-pubkey-hash (P2WKH)
+	// address.
+	WitnessPubKey
+
+	// WitnessScript represents a pay-to-witness-script-hash (P2WSH)
+	// address.
+	WitnessScript
+
+	// TaprootPubKey represents a pay-to-taproot (P2TR) address.
+	TaprootPubKey
+
+	// Anchor represents a pay-to-anchor (P2A) address.
+	Anchor
+)
+
+// AddressTypeInfo groups an address type identifier with its readable
+// description.
+type AddressTypeInfo struct {
+	// Type is the AddressType value used as the unique identifier on both
+	// the application side and the database side.
+	Type AddressType
+
+	// Description is a readable description of the address type.
+	// It is intended for argument parsing, logging, and user-facing output.
+	Description string
+}
+
+const (
+	// BIP0044Purpose is the purpose field for BIP0044 derivation.
+	BIP0044Purpose = 44
+
+	// BIP0049Purpose is the purpose field for BIP0049 derivation.
+	BIP0049Purpose = 49
+
+	// BIP0084Purpose is the purpose field for BIP0084 derivation.
+	BIP0084Purpose = 84
+
+	// BIP0086Purpose is the purpose field for BIP0086 derivation.
+	BIP0086Purpose = 86
+)
+
+var (
+	// KeyScopeBIP0049Plus is the key scope of our modified BIP0049
+	// derivation. We say this is BIP0049 "plus", as it acts as an
+	// optimization for fee savings. Standard BIP0049 uses P2SH-wrapped
+	// SegWit for both external (receive) and internal (change) addresses.
+	// This scheme uses P2SH-wrapped SegWit for external addresses (to
+	// ensure backward compatibility with senders using legacy wallets) but
+	// uses Native SegWit (P2WKH) for internal change addresses. Since the
+	// wallet controls its own change, it can use the more efficient Native
+	// SegWit format to reduce transaction weight and save on fees when
+	// spending that change later.
+	KeyScopeBIP0049Plus = KeyScope{
+		Purpose: BIP0049Purpose,
+		Coin:    0,
+	}
+
+	// KeyScopeBIP0084 is the key scope for BIP0084 derivation. BIP0084
+	// will be used to derive all p2wkh addresses.
+	KeyScopeBIP0084 = KeyScope{
+		Purpose: BIP0084Purpose,
+		Coin:    0,
+	}
+
+	// KeyScopeBIP0086 is the key scope for BIP0086 derivation. BIP0086
+	// will be used to derive all p2tr addresses.
+	KeyScopeBIP0086 = KeyScope{
+		Purpose: BIP0086Purpose,
+		Coin:    0,
+	}
+
+	// KeyScopeBIP0044 is the key scope for BIP0044 derivation. Legacy
+	// wallets will only be able to use this key scope, and no keys beyond
+	// it.
+	KeyScopeBIP0044 = KeyScope{
+		Purpose: BIP0044Purpose,
+		Coin:    0,
+	}
+
+	// ScopeAddrMap is a map from the default key scopes to the scope
+	// address schema for each scope type.
+	ScopeAddrMap = map[KeyScope]ScopeAddrSchema{
+		KeyScopeBIP0049Plus: {
+			ExternalAddrType: NestedWitnessPubKey,
+			InternalAddrType: WitnessPubKey,
+		},
+		KeyScopeBIP0084: {
+			ExternalAddrType: WitnessPubKey,
+			InternalAddrType: WitnessPubKey,
+		},
+		KeyScopeBIP0086: {
+			ExternalAddrType: TaprootPubKey,
+			InternalAddrType: TaprootPubKey,
+		},
+		KeyScopeBIP0044: {
+			InternalAddrType: PubKeyHash,
+			ExternalAddrType: PubKeyHash,
+		},
+	}
+)
+
+// AccountOrigin specifies the origin of an account. This is used to identify
+// the account origin type, such as derived from the wallet's HD seed or
+// imported from an external source.
+//
+// The enum values MUST match the IDs in the account_origins database table.
+// See migration 000005_accounts for the canonical descriptions.
+type AccountOrigin uint8
+
+const (
+	// DerivedAccount indicates the account was derived from a hierarchical
+	// deterministic key.
+	DerivedAccount AccountOrigin = iota
+
+	// ImportedAccount indicates the account was imported from an external
+	// source.
+	ImportedAccount
+)
+
+// --------------------
+// WalletStore Types
+// --------------------
+
+// WalletInfo contains the static properties of a wallet. This struct provides a
+// summary of the wallet's configuration and state.
+type WalletInfo struct {
+	// ID is the unique identifier for the wallet.
+	//
+	// NOTE: This is a uint32 rather than a uint64 to ensure compatibility
+	// with standard SQL databases (PostgreSQL, SQLite) which typically use
+	// signed 64-bit integers for their BIGINT/INTEGER types. A uint64 can
+	// overflow a signed 64-bit integer, whereas a uint32 fits comfortably.
+	ID uint32
+
+	// Name is the human-readable name of the wallet.
+	Name string
+
+	// IsImported indicates whether the wallet was created from an existing
+	// seed or was created as a new wallet.
+	IsImported bool
+
+	// ManagerVersion is the version of the wallet manager that created this
+	// wallet.
+	ManagerVersion int32
+
+	// IsWatchOnly indicates whether the wallet is in watch-only mode,
+	// meaning it does not have private keys and cannot sign transactions.
+	IsWatchOnly bool
+
+	// Birthday is the user-provided timestamp for when to start rescanning.
+	// This is stored directly in the database and may be zero if not set.
+	// If zero, means the wallet should be rescanned from the genesis block.
+	Birthday time.Time
+
+	// BirthdayBlock is the verified block reference for starting a rescan.
+	// When this is non-nil, it indicates the block has been verified.
+	// A nil value means the birthday block has not been set or verified.
+	BirthdayBlock *Block
+
+	// SyncedTo represents the wallet's current synchronization state with
+	// the blockchain.
+	SyncedTo *Block
+
+	// MasterPubKey is the plaintext master HD public key of the wallet.
+	// Watch-only wallets are unlocked through this key. May be nil for
+	// wallets that do not persist a master HD public key.
+	MasterPubKey []byte
+}
+
+// Block defines a block's hash, height, and timestamp. This is used to
+// represent a block's identity and position in the blockchain.
+type Block struct {
+	// Hash is the 32-byte hash of the block.
+	Hash chainhash.Hash
+
+	// Height is the height of the block in the blockchain.
+	Height uint32
+
+	// Timestamp is the UTC timestamp of the block, which is used for
+	// wallet synchronization and rescan operations.
+	Timestamp time.Time
+}
+
+// ListWalletsQuery contains the parameters for listing wallets.
+type ListWalletsQuery struct {
+	// Page holds the pagination parameters for this query.
+	Page page.Request[uint32]
+}
+
+// CreateWalletParams contains the parameters required to create a new wallet.
+type CreateWalletParams struct {
+	// Name is the name of the new wallet.
+	Name string
+
+	// IsImported should be set to true if the wallet is being created from
+	// an existing seed.
+	IsImported bool
+
+	// ManagerVersion is the version of the wallet manager that created this
+	// wallet.
+	ManagerVersion int32
+
+	// IsWatchOnly indicates whether the wallet is being created in
+	// watch-only mode.
+	IsWatchOnly bool
+
+	// Birthday is the user-provided birthday timestamp for the wallet.
+	// The zero value is treated as "no birthday" and is stored as NULL in
+	// the database.
+	Birthday time.Time
+
+	// EncryptedMasterPrivKey is the encrypted master HD private key.
+	EncryptedMasterPrivKey []byte
+
+	// MasterPubKey is the master HD public key.
+	MasterPubKey []byte
+
+	// MasterKeyPrivParams are the parameters (e.g. salt, scrypt N/R/P) used
+	// to derive the master private key.
+	MasterKeyPrivParams []byte
+
+	// EncryptedCryptoPrivKey is the encrypted private crypto key, used to
+	// protect private keys in the database.
+	EncryptedCryptoPrivKey []byte
+
+	// EncryptedCryptoScriptKey is the encrypted script crypto key, used to
+	// protect scripts in the database.
+	EncryptedCryptoScriptKey []byte
+}
+
+// UpdateWalletParams contains the parameters for updating a wallet's
+// properties. Fields are pointers to allow for partial updates.
+type UpdateWalletParams struct {
+	// WalletID is the ID of the wallet to update.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Birthday is the user-provided birthday timestamp for the wallet.
+	// Setting this does NOT set BirthdayBlock.
+	Birthday *time.Time
+
+	// BirthdayBlock is the verified birthday block for the wallet.
+	// When this is set, it indicates the block is already verified.
+	BirthdayBlock *Block
+
+	// SyncedTo is the new synchronization state for the wallet.
+	SyncedTo *Block
+}
+
+// WalletSecrets contains the encrypted secret material stored for one wallet.
+type WalletSecrets struct {
+	// MasterPrivParams are the parameters used to derive the master private
+	// key.
+	MasterPrivParams []byte
+
+	// EncryptedCryptoPrivKey is the encrypted private crypto key used to
+	// protect private keys in the database.
+	EncryptedCryptoPrivKey []byte
+
+	// EncryptedCryptoScriptKey is the encrypted script crypto key used to
+	// protect scripts in the database.
+	EncryptedCryptoScriptKey []byte
+
+	// EncryptedMasterHdPrivKey is the encrypted master HD private key.
+	EncryptedMasterHdPrivKey []byte
+}
+
+// UpdateWalletSecretsParams contains the parameters for updating a wallet's
+// secrets.
+type UpdateWalletSecretsParams struct {
+	// WalletID is the ID of the wallet to update.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// MasterPrivParams are the parameters (e.g. salt, scrypt N/R/P) used
+	// to derive the master private key.
+	MasterPrivParams []byte
+
+	// EncryptedCryptoPrivKey is the encrypted private crypto key, used to
+	// protect private keys in the database.
+	EncryptedCryptoPrivKey []byte
+
+	// EncryptedCryptoScriptKey is the encrypted script crypto key, used to
+	// protect scripts in the database.
+	EncryptedCryptoScriptKey []byte
+
+	// EncryptedMasterHdPrivKey is the encrypted master HD private key.
+	EncryptedMasterHdPrivKey []byte
+}
+
+// --------------------
+// AccountStore Types
+// --------------------
+
+// AccountInfo contains all information about a single account, including its
+// properties and balances.
+type AccountInfo struct {
+	// AccountNumber is the BIP44 account index used for derived accounts.
+	// Imported accounts do not follow BIP44 derivation and therefore do not
+	// have a meaningful account index. For those accounts, this field is
+	// set to 0 and must not be used when Origin is ImportedAccount.
+	AccountNumber uint32
+
+	// AccountName is the human-readable name of the account.
+	AccountName string
+
+	// Origin indicates whether the account was derived from the wallet's
+	// HD seed or imported from an external source.
+	Origin AccountOrigin
+
+	// ExternalKeyCount is the number of external keys that have been
+	// derived.
+	ExternalKeyCount uint32
+
+	// InternalKeyCount is the number of internal (change) keys that have
+	// been derived.
+	InternalKeyCount uint32
+
+	// ImportedKeyCount is the number of imported keys in the account.
+	ImportedKeyCount uint32
+
+	// ConfirmedBalance is the total balance of the account from confirmed
+	// transactions.
+	ConfirmedBalance btcutil.Amount
+
+	// UnconfirmedBalance is the total balance of the account from
+	// unconfirmed transactions.
+	UnconfirmedBalance btcutil.Amount
+
+	// IsWatchOnly is a wallet-level convenience copy of the wallet's
+	// watch-only state. Per ADR 0012 (wallet-level watch-only as a uniform
+	// invariant) every account in the same wallet shares this value;
+	// callers that want the canonical reading use Wallet.IsWatchOnly().
+	// The field is retained as a convenience to minimize caller churn and
+	// may be removed in a future cleanup task.
+	IsWatchOnly bool
+
+	// CreatedAt is the timestamp when the account was created in the database.
+	CreatedAt time.Time
+
+	// KeyScope is the key scope the account belongs to. This determines the
+	// derivation path and the default address schema.
+	KeyScope KeyScope
+
+	// AddrSchema is the effective address schema for the account. SQL backends
+	// expose the key-scope schema because they do not currently model legacy
+	// per-account schema overrides; kvdb uses the waddrmgr account override
+	// when one is present.
+	AddrSchema ScopeAddrSchema
+
+	// PublicKey is the account-level extended public key in plaintext.
+	// It is set for both derived and imported accounts where the wallet
+	// knows the account public material.
+	PublicKey []byte
+
+	// MasterKeyFingerprint is the fingerprint of the root master key
+	// (BIP32 m/) corresponding to this account's public key. Used by
+	// some hardware wallets for proper identification and signing.
+	MasterKeyFingerprint uint32
+
+	// rowID is the SQL backend's per-account row ID. Populated by
+	// ProcessAccountRows so AttachBalances can pair AccountBalancesByIDs
+	// results back to the originating AccountInfo without threading a
+	// parallel ids slice. Unexported because it is a backend-specific
+	// detail; kvdb backends leave it at zero.
+	rowID int64
+}
+
+// ScopeAddrSchema is the address schema of a particular KeyScope. It is
+// persisted on the key_scopes row and consulted when deriving any keys
+// for a particular scope to know how to encode the public keys as
+// addresses.
+//
+// Asymmetric schemas (ExternalAddrType != InternalAddrType) are *not*
+// BIP-spec compliant — every standardized derivation BIP (44, 49, 84,
+// 86) assigns a single address type to both branches. The asymmetry
+// exists in btcwallet only for KeyScopeBIP0049Plus, which deliberately
+// derives change as P2WPKH (cheaper to spend) while keeping the BIP-49
+// nested-SegWit external addresses. Self-derived BIP-0049Plus accounts
+// always use that schema.
+//
+// waddrmgr also supports a per-account override that flips a
+// BIP-0049Plus account back to the strict BIP-49 nested-everywhere
+// schema (KeyScopeBIP0049AddrSchema) so the wallet can faithfully scan
+// a strict-BIP-49 xpub imported from an external wallet (Trezor,
+// Ledger, etc.). The SQL backends in this package do not model that
+// override; every account exposes its scope's default schema, so a
+// strict-BIP-49 watch-only import scans at btcwallet's Plus default
+// (internal=P2WPKH) and misses the source wallet's internal change
+// UTXOs (which live at P2SH-P2WPKH) until the scanner is taught to
+// derive both branch variants — a follow-up to this stack.
+type ScopeAddrSchema struct {
+	// ExternalAddrType is the address type for all keys within branch 0.
+	ExternalAddrType AddressType
+
+	// InternalAddrType is the address type for all keys within branch 1
+	// (change addresses).
+	InternalAddrType AddressType
+}
+
+// CreateDerivedAccountParams contains the parameters for creating a new derived
+// account.
+type CreateDerivedAccountParams struct {
+	// WalletID is the ID of the wallet to create the account in.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope is the key scope for the new account.
+	Scope KeyScope
+
+	// Name is the name of the new account.
+	Name string
+}
+
+// CreateImportedAccountParams contains the data required to store an imported
+// account from an external extended key.
+type CreateImportedAccountParams struct {
+	// WalletID is the ID of the wallet to import the account into.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Name is the name of the account to import.
+	Name string
+
+	// Scope is the key scope for the account. The address schema for the
+	// scope is determined by the default mapping unless AddrSchema is set.
+	Scope KeyScope
+
+	// MasterFingerprint is the fingerprint of the master key.
+	MasterFingerprint uint32
+
+	// PublicKey is the extended public key for the account.
+	PublicKey []byte
+
+	// EncryptedPrivateKey is the encrypted extended private key for the
+	// account. This should be encrypted by the caller before being passed
+	// to the database layer. A nil or empty slice means no account private
+	// key material is stored; the imported account will be watch-only.
+	EncryptedPrivateKey []byte
+
+	// DryRun simulates the import without committing any database writes.
+	DryRun bool
+
+	// AddrSchema optionally overrides the scope's default address schema for
+	// this imported account.
+	AddrSchema *ScopeAddrSchema
+}
+
+// GetAccountQuery contains the parameters for querying a single account. The
+// query must specify either the account name or the account number. Using
+// pointers for these fields allows the query to be unambiguous, as a nil value
+// indicates that the field should not be used for filtering. This avoids the
+// "zero value" problem, where 0 or an empty string could be valid query
+// targets.
+type GetAccountQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope is the key scope of the account.
+	Scope KeyScope
+
+	// Name is the name of the account to query. If nil, the query will be
+	// performed using the AccountNumber.
+	Name *string
+
+	// AccountNumber is the number of the account to query. If nil, the
+	// query will be performed using the Name.
+	AccountNumber *uint32
+
+	// SkipBalance, when true, skips the dedicated AccountBalance query
+	// that the adapter normally runs alongside the account read. The
+	// returned AccountInfo reports ConfirmedBalance and UnconfirmedBalance
+	// as zero. Default (false) issues the balance query inside the same
+	// read transaction as the account fetch and populates both fields.
+	// Set this only when balance is unnecessary (e.g. identity-only
+	// lookups, autocomplete UIs, schema audits) to avoid the UTXO scan.
+	//
+	// For filtered or locked-aware balance reads (min/max confirmations,
+	// coinbase maturity, locked-output exclusion) use Store.Balance with
+	// BalanceParams instead.
+	SkipBalance bool
+}
+
+// ListAccountsQuery holds the set of options for a ListAccounts query.
+type ListAccountsQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope is an optional filter to list accounts only for a specific key
+	// scope.
+	Scope *KeyScope
+
+	// Name is an optional filter to list accounts only with a specific
+	// name.
+	Name *string
+
+	// SkipBalance, when true, skips the dedicated AccountBalances query
+	// that the adapter normally runs alongside the list fetch. Each
+	// returned AccountInfo reports ConfirmedBalance and
+	// UnconfirmedBalance as zero. Default (false) issues a single batch
+	// balance query inside the same read transaction as the list fetch
+	// and merges the per-account totals into the result by account_id.
+	// Set this only when balance is unnecessary (e.g. identity-only
+	// lookups, autocomplete UIs, schema audits) to avoid the UTXO scan.
+	//
+	// For filtered or locked-aware balance reads (min/max confirmations,
+	// coinbase maturity, locked-output exclusion) use Store.Balance with
+	// BalanceParams instead.
+	SkipBalance bool
+}
+
+// RenameAccountParams contains the parameters for renaming an account. The
+// account can be identified by either its old name or its account number.
+type RenameAccountParams struct {
+	// WalletID is the ID of the wallet containing the account.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope is the key scope of the account.
+	Scope KeyScope
+
+	// OldName is the current name of the account. This is used to identify
+	// the account if AccountNumber is not provided. An empty string means
+	// this field is not provided (use AccountNumber instead).
+	OldName string
+
+	// AccountNumber is the number of the account to rename. This is used
+	// to identify the account if OldName is not provided.
+	AccountNumber *uint32
+
+	// NewName is the new name for the account.
+	NewName string
+}
+
+// --------------------
+// AddressStore Types
+// --------------------
+
+// AddressInfo represents a wallet-managed address, including its properties and
+// derivation information.
+type AddressInfo struct {
+	// ID is the database unique identifier for the address.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	ID uint32
+
+	// AccountID is the database unique identifier for the account this address
+	// belongs to.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	AccountID uint32
+
+	// AccountNumber is the BIP44 account index used for derived accounts.
+	// Imported accounts do not have a meaningful BIP44 account index, so this
+	// field is set to 0 for imported rows and must not be used when Origin is
+	// ImportedAccount.
+	AccountNumber uint32
+
+	// AccountName is the human-readable account name that owns the address.
+	AccountName string
+
+	// KeyScope identifies the wallet scope that owns the address.
+	KeyScope KeyScope
+
+	// MasterKeyFingerprint is the root fingerprint associated with the owning
+	// account. It is 0 when the database does not store one for the account.
+	MasterKeyFingerprint uint32
+
+	// AddrType is the type of address (P2PKH, P2WPKH, P2TR, etc.).
+	AddrType AddressType
+
+	// CreatedAt is when the address was created in the wallet database.
+	CreatedAt time.Time
+
+	// Origin indicates whether this is a derived HD address or an imported
+	// address. Reuses the AccountOrigin enum.
+	Origin AccountOrigin
+
+	// Branch is the BIP44 branch number (0=external, 1=internal/change).
+	// Zero value for imported addresses.
+	Branch uint32
+
+	// Index is the BIP44 index within the branch. Zero value for imported
+	// addresses.
+	Index uint32
+
+	// ScriptPubKey is the script pubkey (plaintext).
+	ScriptPubKey []byte
+
+	// PubKey is the public key (plaintext) when the address is public-key
+	// based.
+	PubKey []byte
+
+	// HasScript indicates whether the address has encrypted script material.
+	// This is needed for address families whose output type alone is
+	// ambiguous, such as P2TR key-path versus P2TR script-path imports.
+	HasScript bool
+
+	// IsWatchOnly is a wallet-level convenience copy of the wallet's
+	// watch-only state. Per ADR 0012 every address in the same wallet
+	// shares this value; callers that want the canonical reading use
+	// Wallet.IsWatchOnly(). The field is retained as a convenience and
+	// may be removed in a future cleanup task.
+	IsWatchOnly bool
+
+	// IsUsed reports whether the address has a non-abandoned
+	// on-chain transaction the wallet has observed. Monotonic
+	// across reorgs/replaces; `DeleteTx` clears it along with
+	// the abandoned tx (see ADR 0011). SQL backends derive via
+	// EXISTS on utxos; kvdb reads waddrmgr's sticky bit.
+	IsUsed bool
+}
+
+// AddressSecret contains sensitive encrypted material for an address.
+type AddressSecret struct {
+	// AddressID is the database unique identifier for the address.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	AddressID uint32
+
+	// EncryptedPrivKey is the encrypted private key.
+	EncryptedPrivKey []byte
+
+	// EncryptedScript is the encrypted redeem or witness script for
+	// P2SH/P2WSH addresses. For Taproot, this is the TLV-encoded Tapscript.
+	EncryptedScript []byte
+}
+
+// NewDerivedAddressParams contains the parameters for creating a new derived
+// address.
+type NewDerivedAddressParams struct {
+	// WalletID is the ID of the wallet to create the address in.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// AccountName is the name of the account to create the address for.
+	AccountName string
+
+	// Scope is the key scope for the new address.
+	Scope KeyScope
+
+	// Change indicates whether to create a change address (true) or an
+	// external address (false).
+	Change bool
+}
+
+// NewImportedAddressParams defines the input required to import a single
+// address into the wallet. All imported addresses are assigned to the
+// wallet imported account. The caller is responsible for encrypting any
+// sensitive material before populating this struct.
+//
+// Watch-only semantics: An imported address is watch-only if the parent wallet
+// is watch-only or if EncryptedPrivateKey is empty. EncryptedScript alone does
+// not make the imported address spendable.
+type NewImportedAddressParams struct {
+	// WalletID identifies the wallet that will own this address.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope is the key scope for the imported address.
+	Scope KeyScope
+
+	// AddressType specifies the address format being imported, such as
+	// P2PKH, P2WPKH, or P2TR.
+	AddressType AddressType
+
+	// ScriptPubKey contains the script pubkey associated with the address
+	// (stored in plaintext).
+	ScriptPubKey []byte
+
+	// PubKey contains the public key corresponding to the private key for
+	// this address (stored in plaintext).
+	PubKey []byte
+
+	// EncryptedPrivateKey contains the encrypted private key for the address.
+	EncryptedPrivateKey []byte
+
+	// EncryptedScript contains the encrypted, pre serialized script.
+	// For P2SH and P2WSH this is the redeem or witness script.
+	// For Taproot this is the TLV encoded Tapscript.
+	EncryptedScript []byte
+}
+
+// GetAddressQuery contains the parameters for querying an address.
+type GetAddressQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ScriptPubKey is the script pubkey to be fetched.
+	ScriptPubKey []byte
+}
+
+// ResolveOwnedAddressesQuery contains the parameters for a batched,
+// wallet-scoped address ownership lookup. It resolves which of the supplied
+// script pubkeys belong to the wallet in a single store operation.
+type ResolveOwnedAddressesQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ScriptPubKeys is the set of script pubkeys to resolve. Order is not
+	// significant and duplicates are tolerated. An empty or nil slice
+	// yields an empty result without touching the backend.
+	ScriptPubKeys [][]byte
+}
+
+// GetAddressSecretQuery contains the parameters for querying an address
+// secret. The query is wallet-scoped: it retrieves the encrypted secret
+// material for a specific address within a wallet.
+type GetAddressSecretQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// AddressID is the ID of the address whose secret should be fetched.
+	AddressID uint32
+}
+
+// ListAddressesQuery contains the parameters for listing addresses.
+type ListAddressesQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// AccountName is the name of the account to list addresses for.
+	AccountName string
+
+	// Scope is the key scope of the account.
+	Scope KeyScope
+
+	// Page holds the pagination parameters for this query.
+	Page page.Request[uint32]
+}
+
+// --------------------
+// TxStore Types
+// --------------------
+
+// TxStatus represents the wallet-relative validity state of a transaction.
+//
+// The value is stored in the `transactions.status` column as a compact numeric
+// code so hot-path predicates and indexes do not pay the storage/index cost of
+// repeated status strings.
+//
+// The enum values MUST match the numeric codes enforced by migration
+// `000007_transactions` in both Postgres and SQLite.
+type TxStatus uint8
+
+const (
+	// TxStatusPending indicates a locally-created transaction that has not yet
+	// been broadcast.
+	//
+	// Callers use this state when they need the store to retain a locally
+	// authored transaction before network publication.
+	TxStatusPending TxStatus = iota
+
+	// TxStatusPublished indicates a transaction that is still considered
+	// valid by the wallet and is either unconfirmed in the mempool or
+	// confirmed in the current best chain.
+	//
+	// The two cases share one validity status because Block already tells the
+	// caller whether the transaction is mined. Keeping both under
+	// TxStatusPublished avoids contradictory combinations such as
+	// "confirmed but not published" and keeps this field focused on whether the
+	// wallet still treats the transaction as valid.
+	TxStatusPublished
+
+	// TxStatusReplaced indicates a transaction that was invalidated by a
+	// competing transaction spending the same inputs via RBF.
+	TxStatusReplaced
+
+	// TxStatusFailed indicates a transaction that was invalidated by a
+	// competing transaction spending the same inputs (double-spend).
+	TxStatusFailed
+
+	// TxStatusOrphaned indicates a coinbase transaction that was reorged out of
+	// the best chain.
+	//
+	// This state is reserved for coinbase transactions. Non-coinbase rows must
+	// use a different terminal state such as TxStatusFailed or
+	// TxStatusReplaced.
+	TxStatusOrphaned
+)
+
+// String returns the human-readable name of one transaction status code.
+func (s TxStatus) String() string {
+	switch s {
+	case TxStatusPending:
+		return "pending"
+
+	case TxStatusPublished:
+		return "published"
+
+	case TxStatusReplaced:
+		return "replaced"
+
+	case TxStatusFailed:
+		return "failed"
+
+	case TxStatusOrphaned:
+		return "orphaned"
+
+	default:
+		return "unknown"
+	}
+}
+
+// TxInfo represents the details of a transaction relevant to the wallet.
+type TxInfo struct {
+	// Hash is the transaction hash.
+	Hash chainhash.Hash
+
+	// SerializedTx is the serialized transaction.
+	SerializedTx []byte
+
+	// Received is the timestamp when the transaction was received.
+	Received time.Time
+
+	// Block contains metadata about the block that includes the
+	// transaction. This will be nil for unmined (unconfirmed) transactions
+	// and non-nil for mined (confirmed) transactions.
+	Block *Block
+
+	// Status is the wallet-relative validity state of the transaction.
+	//
+	// For confirmed transactions, Status is always TxStatusPublished.
+	Status TxStatus
+
+	// Label is a user-defined label for the transaction.
+	Label string
+}
+
+// TxOwnedInput records one wallet-owned previous output spent by a
+// transaction.
+type TxOwnedInput struct {
+	// Index is the input index within the transaction.
+	Index uint32
+
+	// Amount is the value of the wallet-owned input being spent.
+	Amount btcutil.Amount
+}
+
+// TxOwnedOutput records one wallet-owned output created by a transaction.
+type TxOwnedOutput struct {
+	// Index is the output index within the transaction.
+	Index uint32
+
+	// Amount is the value of the wallet-owned output.
+	Amount btcutil.Amount
+}
+
+// TxDetailInfo is a db-native transaction detail model tailored for wallet tx
+// history reads.
+type TxDetailInfo struct {
+	// Hash is the transaction hash.
+	Hash chainhash.Hash
+
+	// MsgTx is the decoded wire transaction when the backend already has it.
+	MsgTx *wire.MsgTx
+
+	// SerializedTx is the serialized transaction.
+	SerializedTx []byte
+
+	// Received is the timestamp when the transaction was received.
+	Received time.Time
+
+	// Block contains metadata about the block that includes the transaction.
+	Block *Block
+
+	// Status is the wallet-relative validity state of the transaction.
+	Status TxStatus
+
+	// Label is a user-defined label for the transaction.
+	Label string
+
+	// OwnedInputs are the wallet-owned inputs spent by the transaction.
+	OwnedInputs []TxOwnedInput
+
+	// OwnedOutputs are the wallet-owned outputs created by the transaction.
+	OwnedOutputs []TxOwnedOutput
+}
+
+// CreateTxParams contains the parameters for creating a new transaction record.
+type CreateTxParams struct {
+	// WalletID is the ID of the wallet to create the transaction in.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Tx is the transaction to record.
+	Tx *wire.MsgTx
+
+	// Received is the timestamp when the wallet learned about the transaction.
+	//
+	// Callers supply this explicitly so import/recovery paths can preserve the
+	// wallet-observed time instead of defaulting to insertion time.
+	//
+	// This timestamp is stored in the database as UTC.
+	Received time.Time
+
+	// Block optionally records the transaction as already confirmed in the
+	// provided block. When nil, the transaction is treated as unmined.
+	//
+	// The Store layer records factual transaction state. A non-nil Block means
+	// the caller is inserting a row already anchored to a specific block in
+	// wallet history; it does not ask the Store layer to infer publishing or
+	// confirmation policy on the caller's behalf.
+	//
+	// NOTE: Coinbase transactions cannot exist in the mempool. Callers MUST
+	// provide a non-nil Block when recording coinbase transactions.
+	Block *Block
+
+	// Status is the initial wallet-relative validity state for the
+	// transaction.
+	//
+	// This Store-layer API inserts an already-constructed transaction row. It
+	// does not build, sign, publish, or infer higher-level wallet policy.
+	// Callers must therefore set Status explicitly instead of asking the Store
+	// to guess how an app-layer workflow intends to use the row.
+	//
+	// Unmined inserts choose between TxStatusPending and TxStatusPublished.
+	// Confirmed inserts (Block non-nil) must use TxStatusPublished to satisfy
+	// the transaction-state invariants. TxStatusOrphaned is reserved for
+	// coinbase rows and must not be used for ordinary transactions.
+	Status TxStatus
+
+	// Label is an optional label for the transaction.
+	Label string
+
+	// Credits maps wallet-owned output indexes to the resolved address that
+	// makes the output ours.
+	//
+	// The output index is the map key, so duplicate credited outputs are
+	// impossible by construction.
+	//
+	// A non-nil address is authoritative for ownership: the store resolves the
+	// owning address row by that address's own script (PayToAddrScript),
+	// not by the full output script. This lets a bare-multisig output the
+	// wallet partly owns resolve to the wallet-owned member, whose script the
+	// multisig output script itself would never match. For a single-address
+	// output the member script equals the output script, so the lookup is
+	// unchanged.
+	//
+	// Because that address is trusted as the owner, the store first validates
+	// that the credited output actually pays it. Membership (not strict script
+	// equality) is required so bare-multisig members pass, while an address the
+	// output does not pay is rejected with ErrInvalidParam rather than
+	// recording a UTXO owned by an unrelated address.
+	//
+	// A nil address means the caller has no resolved owner; the store then
+	// keys ownership on the output's own script_pub_key
+	// (`params.Tx.TxOut[index].PkScript`).
+	//
+	// NOTE: This only selects the address-ownership lookup key. The stored
+	// UTXO always records the on-chain output script, never the member
+	// script.
+	Credits map[uint32]address.Address
+}
+
+// UpdateTxState contains one requested transaction-state change.
+type UpdateTxState struct {
+	// Block records the transaction as confirmed in the provided block.
+	//
+	// Nil clears any current block assignment and returns the row to an unmined
+	// state.
+	Block *Block
+
+	// Status is the wallet-relative transaction state to store together with
+	// the requested block assignment.
+	Status TxStatus
+}
+
+// UpdateTxParams contains the mutable fields that UpdateTx may patch.
+type UpdateTxParams struct {
+	// WalletID is the ID of the wallet containing the transaction.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Txid is the hash of the transaction to update.
+	Txid chainhash.Hash
+
+	// Label optionally replaces the stored user-visible label.
+	//
+	// Nil leaves the label unchanged. The empty string is a valid value and
+	// clears any prior label.
+	Label *string
+
+	// State optionally replaces the stored block/status view of the
+	// transaction.
+	//
+	// Nil leaves the chain-state metadata unchanged.
+	State *UpdateTxState
+}
+
+// GetTxQuery contains the parameters for querying a transaction. While a
+// transaction hash (TxHash) is globally unique on the blockchain, the WalletID
+// is necessary to retrieve wallet-specific metadata (e.g., labels, credits,
+// debits) associated with that transaction. In a multi-wallet database, the
+// same transaction might be relevant to multiple wallets, but its context
+// (e.g., whether it's a credit or debit, and any custom labels) will differ
+// for each wallet. The WalletID ensures the query returns the transaction's
+// details from the correct wallet's perspective.
+type GetTxQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Txid is the hash of the transaction to query.
+	Txid chainhash.Hash
+}
+
+// GetTxDetailQuery contains the parameters for querying detailed transaction
+// data for one wallet-scoped transaction.
+type GetTxDetailQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// Txid is the hash of the transaction to query.
+	Txid chainhash.Hash
+}
+
+// ListTxDetailsQuery contains the parameters for listing detailed transaction
+// data using wallet tx-reader range semantics.
+type ListTxDetailsQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// StartHeight is the starting height in wallet tx-reader semantics.
+	StartHeight int32
+
+	// EndHeight is the ending height in wallet tx-reader semantics.
+	EndHeight int32
+}
+
+// ListTxnsQuery contains the parameters for listing transactions.
+type ListTxnsQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// StartHeight is the starting block height for the query.
+	StartHeight uint32
+
+	// EndHeight is the ending block height for the query.
+	EndHeight uint32
+
+	// UnminedOnly, if true, switches ListTxns onto the dedicated no-confirming-
+	// block read path.
+	//
+	// This path returns the active unmined set together with retained invalid
+	// history rows that also no longer have a confirming block, such as
+	// orphaned or failed transactions after rollback.
+	//
+	// This is not equivalent to using zero confirmations. The confirmed
+	// height-range query cannot express "only rows with no block", so
+	// StartHeight and EndHeight are ignored when this flag is set.
+	UnminedOnly bool
+}
+
+// DeleteTxParams contains the parameters for the DeleteTx method.
+type DeleteTxParams struct {
+	// WalletID is the ID of the wallet containing the transaction.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Txid is the hash of the transaction to delete.
+	Txid chainhash.Hash
+}
+
+// InvalidateUnminedTxParams contains the parameters for invalidating one
+// wallet-owned unmined transaction branch.
+type InvalidateUnminedTxParams struct {
+	// WalletID is the ID of the wallet containing the transaction.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Txid is the hash of the unmined transaction to invalidate.
+	Txid chainhash.Hash
+}
+
+// --------------------
+// UTXOStore Types
+// --------------------
+
+// UtxoInfo represents an unspent transaction output (UTXO).
+type UtxoInfo struct {
+	// OutPoint is the outpoint of the UTXO.
+	OutPoint wire.OutPoint
+
+	// Amount is the value of the UTXO.
+	Amount btcutil.Amount
+
+	// PkScript is the public key script of the UTXO.
+	PkScript []byte
+
+	// Received is the timestamp when the UTXO was received.
+	Received time.Time
+
+	// FromCoinBase indicates whether the UTXO is from a coinbase
+	// transaction.
+	FromCoinBase bool
+
+	// Height is the block height of the UTXO.
+	//
+	// Unconfirmed UTXOs use the sentinel value UnminedHeight.
+	Height uint32
+
+	// AccountName is the name of the wallet account this UTXO belongs to.
+	// Populated by the SQL backends from accounts.account_name in the
+	// same query that returns the UTXO row; no follow-up store call is
+	// needed.
+	AccountName string
+
+	// Origin reports whether the UTXO belongs to a derived or imported
+	// account. The wallet's spendability rule combines this with the
+	// wallet-level Wallet.IsWatchOnly() to decide whether to surface
+	// imported-account outputs in coin selection (see Task 132).
+	Origin AccountOrigin
+
+	// AddrType is the address type of the UTXO's credited address (P2PKH,
+	// P2WKH, etc.). Sourced from addresses.type_id; lets coin selection
+	// reason about output type without a follow-up address read.
+	AddrType AddressType
+
+	// HasScript is true when the credited address has a persisted
+	// encrypted script (e.g. a P2WSH script-only import). Sourced from
+	// LEFT JOIN address_secrets so watch-only addresses without any
+	// secret row report false rather than dropping out of the result.
+	HasScript bool
+
+	// IsLocked is true when the UTXO has an active (non-expired) lease.
+	// Sourced from LEFT JOIN utxo_leases with the lease-expiration
+	// comparison done in SQL against a caller-supplied UTC timestamp; the
+	// API still models leases separately from UTXO existence, but the
+	// pre-computed flag lets the wallet skip a per-row lease lookup.
+	IsLocked bool
+
+	// KeyScope is the BIP-43 key scope (purpose + coin type) of the
+	// account that owns this UTXO, sourced from key_scopes. Callers use it
+	// instead of deriving a scope from AddrType, which is lossy (a P2WPKH
+	// change output under a BIP0049Plus account would misreport as
+	// BIP0084).
+	KeyScope KeyScope
+}
+
+// GetUtxoQuery contains the parameters for querying a UTXO.
+type GetUtxoQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// OutPoint is the outpoint of the UTXO to query.
+	OutPoint wire.OutPoint
+}
+
+// ListUtxosQuery holds the set of options for a ListUTXOs query.
+type ListUtxosQuery struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope optionally restricts the listing to a single key scope. When
+	// Account or AccountName is also set, Scope is required to
+	// disambiguate cross-scope account reuse: account numbers are
+	// allocated per scope and account names are unique only within a
+	// scope.
+	Scope *KeyScope
+
+	// Account optionally restricts the listing to one BIP44 account
+	// number. When Account is set, callers must also set Scope so the
+	// filter is uniquely scoped (see Scope above). Account is mutually
+	// exclusive with AccountName.
+	Account *uint32
+
+	// AccountName optionally restricts the listing to a single account
+	// by name. Account names are unique within a scope, so AccountName
+	// requires Scope. AccountName is mutually exclusive with Account:
+	// the caller picks one disambiguation handle, not both.
+	// AccountName is the public-facing handle for imported accounts
+	// whose AccountNumber collapses to 0 on read (NULL → zero for SQL
+	// backends).
+	AccountName *string
+
+	// MinConfs optionally requires each returned UTXO to have at least this
+	// many confirmations.
+	MinConfs *int32
+
+	// MaxConfs optionally requires each returned UTXO to have at most this
+	// many confirmations.
+	MaxConfs *int32
+}
+
+// ErrListUtxosQueryAccountWithoutScope is returned by
+// ListUtxosQuery.Validate when Account is set but Scope is not.
+// Account numbers are allocated per-scope on legacy wallets, so a UTXO
+// listing filtered by account number alone would silently mix outputs
+// across scopes.
+var ErrListUtxosQueryAccountWithoutScope = errors.New(
+	"list utxos: Account requires Scope to disambiguate per-scope " +
+		"account-number reuse",
+)
+
+// ErrListUtxosQueryNameWithoutScope is returned by
+// ListUtxosQuery.Validate when AccountName is set but Scope is not.
+// Account names are unique only within a scope; a name-only UTXO
+// listing would return outputs across scopes (or depend on
+// backend-specific lookup behavior).
+var ErrListUtxosQueryNameWithoutScope = errors.New(
+	"list utxos: AccountName requires Scope (account names are " +
+		"scope-unique)",
+)
+
+// ErrListUtxosQueryAccountAndName is returned by
+// ListUtxosQuery.Validate when both Account and AccountName are set.
+// The two fields are mutually exclusive: picking one disambiguates
+// the account, picking both is contradictory.
+var ErrListUtxosQueryAccountAndName = errors.New(
+	"list utxos: Account and AccountName are mutually exclusive",
+)
+
+// Validate returns ErrListUtxosQueryAccountWithoutScope when Account
+// is set without Scope, ErrListUtxosQueryNameWithoutScope when
+// AccountName is set without Scope, or
+// ErrListUtxosQueryAccountAndName when both are set. All other
+// parameter combinations are accepted.
+func (q ListUtxosQuery) Validate() error {
+	if q.Account != nil && q.AccountName != nil {
+		return ErrListUtxosQueryAccountAndName
+	}
+
+	if q.Account != nil && q.Scope == nil {
+		return ErrListUtxosQueryAccountWithoutScope
+	}
+
+	if q.AccountName != nil && q.Scope == nil {
+		return ErrListUtxosQueryNameWithoutScope
+	}
+
+	return nil
+}
+
+// LeaseOutputParams contains the parameters for leasing a UTXO.
+type LeaseOutputParams struct {
+	// WalletID is the ID of the wallet containing the UTXO.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ID is the lock ID for the UTXO.
+	ID [32]byte
+
+	// OutPoint is the outpoint of the UTXO to lock.
+	OutPoint wire.OutPoint
+
+	// Duration is the duration to lock the UTXO for.
+	Duration time.Duration
+}
+
+// ReleaseOutputParams contains the parameters for releasing a UTXO lease.
+type ReleaseOutputParams struct {
+	// WalletID is the ID of the wallet containing the UTXO.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// ID is the lock ID of the UTXO to unlock.
+	ID [32]byte
+
+	// OutPoint is the outpoint of the UTXO to unlock.
+	OutPoint wire.OutPoint
+}
+
+// LeasedOutput represents a UTXO that is currently locked.
+type LeasedOutput struct {
+	// OutPoint is the outpoint of the locked UTXO.
+	OutPoint wire.OutPoint
+
+	// LockID is the ID of the lock.
+	LockID LockID
+
+	// Expiration is the time when the lock expires.
+	Expiration time.Time
+}
+
+// BalanceResult represents one wallet-scoped balance view after applying the
+// requested filters.
+type BalanceResult struct {
+	// Total is the sum of every matching UTXO, including leased outputs.
+	Total btcutil.Amount
+
+	// Locked is the subset of Total currently covered by active output leases.
+	Locked btcutil.Amount
+}
+
+// BalanceParams contains the parameters for the Balance method.
+type BalanceParams struct {
+	// WalletID is the ID of the wallet to query.
+	//
+	// NOTE: uint32 is used to ensure compatibility with standard SQL
+	// databases (signed 64-bit integers).
+	WalletID uint32
+
+	// Scope optionally restricts the balance to a single key scope. When
+	// Account is also set, Scope is required to disambiguate cross-scope
+	// account-number reuse: legacy wallets allocate account numbers per
+	// scope, so the same account number (e.g. 0) can appear under
+	// BIP-0049 and BIP-0084 simultaneously, and balance reads filtered by
+	// account number alone overcount across scopes.
+	Scope *KeyScope
+
+	// Account optionally restricts the balance to one BIP44 account
+	// number. When Account is set, callers should also set Scope so the
+	// filter is uniquely scoped (see Scope above).
+	Account *uint32
+
+	// MinConfs optionally requires each counted output to have at least
+	// this many confirmations.
+	MinConfs *int32
+
+	// MaxConfs optionally requires each counted output to have at most
+	// this many confirmations.
+	MaxConfs *int32
+
+	// CoinbaseMaturity optionally requires coinbase outputs to have at
+	// least this many confirmations before they count toward the returned
+	// balance result. Non-coinbase outputs ignore this filter.
+	CoinbaseMaturity *int32
+
+	// Name optionally restricts the balance to a single account by name.
+	// Account names are unique within a scope, so Name requires Scope.
+	// Name is mutually exclusive with Account: callers either know the
+	// raw account number (Account) or the account name (Name), never
+	// both. Name is the public-facing handle for imported accounts whose
+	// AccountNumber is masked to 0 by the contract; passing Account=0
+	// for such accounts would collide with the default derived account.
+	Name *string
+}
+
+// ErrBalanceParamsAccountWithoutScope is returned by BalanceParams.Validate
+// when Account is set but Scope is not. Account numbers are allocated
+// per-scope on legacy wallets, so a balance read filtered by account number
+// without a scope filter would silently overcount across scopes.
+var ErrBalanceParamsAccountWithoutScope = errors.New(
+	"balance: Account requires Scope to disambiguate per-scope " +
+		"account-number reuse",
+)
+
+// ErrBalanceParamsNameWithoutScope is returned by BalanceParams.Validate
+// when Name is set but Scope is not. Account names are unique only within
+// a scope; a name-only balance query would sum across scopes (or depend
+// on backend-specific lookup behavior).
+var ErrBalanceParamsNameWithoutScope = errors.New(
+	"balance: Name requires Scope (account names are scope-unique)",
+)
+
+// ErrBalanceParamsAccountAndName is returned by BalanceParams.Validate when
+// both Account and Name are set. The two fields are mutually exclusive:
+// picking one disambiguates the account, picking both is contradictory.
+var ErrBalanceParamsAccountAndName = errors.New(
+	"balance: Account and Name are mutually exclusive",
+)
+
+// Validate returns ErrBalanceParamsAccountWithoutScope when Account is set
+// without Scope, ErrBalanceParamsNameWithoutScope when Name is set without
+// Scope, or ErrBalanceParamsAccountAndName when both are set. All other
+// parameter combinations are accepted.
+func (p BalanceParams) Validate() error {
+	if p.Account != nil && p.Name != nil {
+		return ErrBalanceParamsAccountAndName
+	}
+
+	if p.Account != nil && p.Scope == nil {
+		return ErrBalanceParamsAccountWithoutScope
+	}
+
+	if p.Name != nil && p.Scope == nil {
+		return ErrBalanceParamsNameWithoutScope
+	}
+
+	return nil
+}
+
+// LockID represents a unique context-specific ID assigned to an output lock.
+type LockID [32]byte
+
+// DerivedAddressData contains the derived address information returned by
+// the AddressDerivationFunc callback.
+type DerivedAddressData struct {
+	// ScriptPubKey is the script public key for the derived address.
+	ScriptPubKey []byte
+
+	// PubKey is the serialized public key for the derived address when one is
+	// available. Script-only addresses leave this empty.
+	PubKey []byte
+}
+
+// AddressDerivationParams contains the wallet-side data needed to derive a
+// store-allocated address.
+type AddressDerivationParams struct {
+	// Scope is the key scope that owns the derived address.
+	Scope KeyScope
+
+	// AccountNumber is the BIP44 account number, not the database row ID.
+	// It is 0 for imported accounts where no BIP44 account number applies;
+	// callbacks deriving for imported accounts must use AccountPubKey only.
+	AccountNumber uint32
+
+	// Branch is the BIP44 branch number (0=external, 1=internal/change).
+	Branch uint32
+
+	// Index is the BIP44 child index allocated by the store.
+	Index uint32
+
+	// AddrType is the address type selected from the account's effective
+	// address schema for Branch.
+	AddrType AddressType
+
+	// AccountPubKey is the account-level extended public key in plaintext.
+	AccountPubKey []byte
+}

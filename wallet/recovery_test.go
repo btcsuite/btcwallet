@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -230,22 +231,27 @@ func TestBranchRecoveryState(t *testing.T) {
 	}
 }
 
+// assertHorizon checks the expected recovery horizon for a step.
 func assertHorizon(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect horizon", have, want)
 }
 
+// assertDelta checks the expected horizon delta for a step.
 func assertDelta(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect delta", have, want)
 }
 
+// assertNextUnfound checks the expected next unfound child for a step.
 func assertNextUnfound(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect next unfound", have, want)
 }
 
+// assertNumInvalid checks the expected invalid child count for a step.
 func assertNumInvalid(t *testing.T, i int, have, want uint32) {
 	assertHaveWant(t, i, "incorrect num invalid children", have, want)
 }
 
+// assertHaveWant compares recovery test values with step context.
 func assertHaveWant(t *testing.T, i int, msg string, have, want uint32) {
 	t.Helper()
 	require.Equal(t, want, have, "[step: %d] %s", i, msg)
@@ -343,7 +349,7 @@ func TestBranchRecoveryStateInvalidChild(t *testing.T) {
 func TestGetBranchState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{
@@ -359,7 +365,7 @@ func TestGetBranchState(t *testing.T) {
 	// Expect FetchScopedKeyManager to be called only once for a given
 	// scope.
 	addrMgr.On("FetchScopedKeyManager", scope).Return(
-		&mockAccountStore{}, nil,
+		&bwmock.AccountStore{}, nil,
 	).Once()
 
 	rs := NewRecoveryState(10, &chainParams, addrMgr)
@@ -384,10 +390,10 @@ func TestGetBranchState(t *testing.T) {
 func TestInitialize(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -410,7 +416,7 @@ func TestInitialize(t *testing.T) {
 	mockDerive := func(branch, count uint32) {
 		for i := range count {
 			id := int(branch)*1000 + int(i)
-			addr := &mockAddress{}
+			addr := &bwmock.Address{}
 			addrStr := fmt.Sprintf("addr-%d", id)
 			script := fmt.Appendf(nil, "script-%d", id)
 
@@ -453,10 +459,10 @@ func TestInitialize(t *testing.T) {
 func TestProcessBlock(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -561,6 +567,143 @@ func TestProcessBlock(t *testing.T) {
 	require.Equal(t, uint32(12), res.FoundHorizons[bs])
 }
 
+// TestProcessBlockKeepsSameBlockSpendOnExpansion verifies that a spend-only
+// transaction is retained in the final result when a credit in the same block
+// triggers a horizon expansion, forcing the filter loop to re-run. filterTx
+// deletes a watched outpoint as soon as it sees a spend of it, so a naive
+// re-run of filterBlock over the same block would no longer recognize that
+// spend on the second pass and silently drop the spend-only transaction from
+// the overwritten result. The block here pairs a spend of a pre-watched
+// outpoint (with no other relevance) with a credit to a lookahead address that
+// triggers expansion; the spend transaction must still appear in the final
+// RelevantTxs.
+func TestProcessBlockKeepsSameBlockSpendOnExpansion(t *testing.T) {
+	t.Parallel()
+
+	addrMgr := &bwmock.AddrStore{}
+	defer addrMgr.AssertExpectations(t)
+
+	accountStore := &bwmock.AccountStore{}
+	defer accountStore.AssertExpectations(t)
+
+	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
+	props := &waddrmgr.AccountProperties{
+		KeyScope:      scope,
+		AccountNumber: 0,
+
+		// Start fresh so the lookahead window is derived from scratch.
+		ExternalKeyCount: 0,
+		InternalKeyCount: 0,
+	}
+
+	addrMgr.On("FetchScopedKeyManager", scope).Return(
+		accountStore, nil,
+	).Maybe()
+
+	// Store generated addresses to construct block data.
+	addrs := make(map[int]address.Address)
+
+	// Helper to mock DeriveAddr and store the generated address.
+	setupDerive := func(branch, idx uint32) {
+		id := int(branch)*1000 + int(idx)
+
+		hash := make([]byte, 20)
+		hash[0] = byte(id >> 8)
+		hash[1] = byte(id)
+		addr, _ := address.NewAddressPubKeyHash(hash, &chainParams)
+		addrs[id] = addr
+
+		script, _ := txscript.PayToAddrScript(addr)
+		accountStore.On(
+			"DeriveAddr", uint32(0), branch, idx,
+		).Return(addr, script, nil).Maybe()
+	}
+
+	// Initial lookahead (0-9 for both branches) plus the external addresses
+	// (10-15) derived once finding index 5 expands the horizon to 6+10=16.
+	for i := range uint32(10) {
+		setupDerive(0, i)
+		setupDerive(1, i)
+	}
+
+	for i := uint32(10); i < 16; i++ {
+		setupDerive(0, i)
+	}
+
+	// Pre-watch an outpoint, mirroring a UTXO the wallet already owns and
+	// monitors for spends. This is the outpoint whose spend must survive
+	// the same-block expansion re-run.
+	watchedOp := wire.OutPoint{Hash: chainhash.Hash{0xaa}, Index: 0}
+	unspent := []wtxmgr.Credit{{
+		OutPoint: watchedOp,
+		PkScript: []byte{0x00},
+	}}
+
+	rs := NewRecoveryState(10, &chainParams, addrMgr)
+	err := rs.Initialize(
+		[]*waddrmgr.AccountProperties{props}, nil, unspent,
+	)
+	require.NoError(t, err)
+
+	// Construct the block.
+	block := wire.NewMsgBlock(wire.NewBlockHeader(
+		0, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
+	))
+
+	// txSpend spends the watched outpoint and pays to an unrelated address,
+	// so its only relevance is the spend. It is placed first so the spend
+	// (and the outpoint deletion in filterTx) happens before the credit
+	// that triggers the expansion.
+	unrelatedHash := make([]byte, 20)
+	for i := range unrelatedHash {
+		unrelatedHash[i] = 0xff
+	}
+
+	unrelatedAddr, _ := address.NewAddressPubKeyHash(
+		unrelatedHash, &chainParams,
+	)
+	unrelatedScript, _ := txscript.PayToAddrScript(unrelatedAddr)
+	txSpend := wire.NewMsgTx(2)
+	txSpend.AddTxIn(wire.NewTxIn(&watchedOp, nil, nil))
+	txSpend.AddTxOut(wire.NewTxOut(900, unrelatedScript))
+	_ = block.AddTransaction(txSpend)
+	spendHash := txSpend.TxHash()
+
+	// txCredit pays to addr 5 (within the initial lookahead), which marks
+	// the address found and triggers a horizon expansion, forcing the
+	// filter loop to run a second pass over the block.
+	addr5 := addrs[5]
+	script5, _ := txscript.PayToAddrScript(addr5)
+	txCredit := wire.NewMsgTx(2)
+	txCredit.AddTxOut(wire.NewTxOut(1000, script5))
+	_ = block.AddTransaction(txCredit)
+	creditHash := txCredit.TxHash()
+
+	// Process the block.
+	res, err := rs.ProcessBlock(block)
+	require.NoError(t, err)
+
+	// The credit must have triggered a lookahead expansion, which is what
+	// forces the second filter pass that exposes the bug.
+	require.True(t, res.Expanded,
+		"credit to lookahead address should expand the horizon")
+
+	// Both the spend and the credit must be reported as relevant. Before
+	// the fix, the spend-only transaction was dropped on the second pass
+	// because its outpoint had already been deleted.
+	relevant := make(map[chainhash.Hash]struct{}, len(res.RelevantTxs))
+	for _, tx := range res.RelevantTxs {
+		relevant[*tx.Hash()] = struct{}{}
+	}
+
+	require.Contains(t, relevant, spendHash,
+		"spend of a pre-watched outpoint must survive the same-block "+
+			"expansion re-run")
+	require.Contains(t, relevant, creditHash,
+		"credit to a watched address must be reported as relevant")
+	require.Len(t, res.RelevantTxs, 2)
+}
+
 // TestBuildCFilterData verifies the BuildCFilterData method of RecoveryState.
 // It ensures that the method correctly aggregates all relevant scripts from
 // both the transient address filters and the watched outpoints into a single
@@ -569,7 +712,7 @@ func TestProcessBlock(t *testing.T) {
 func TestBuildCFilterData(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, &chainParams, addrMgr)
@@ -620,10 +763,10 @@ func TestBuildCFilterData(t *testing.T) {
 func TestInitAccountState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 84, Coin: 0}
@@ -649,7 +792,7 @@ func TestInitAccountState(t *testing.T) {
 	mockDerive := func(branch uint32) {
 		for i := range uint32(2) {
 			id := int(branch)*1000 + int(i)
-			addr := &mockAddress{}
+			addr := &bwmock.Address{}
 			addrStr := fmt.Sprintf("b%d-%d", branch, i)
 			script := fmt.Appendf(nil, "script-%d", id)
 
@@ -680,7 +823,7 @@ func TestInitAccountState(t *testing.T) {
 func TestExpandHorizons(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -697,7 +840,7 @@ func TestExpandHorizons(t *testing.T) {
 
 	// Expect derivation of 0, 1, 2.
 	for i := range uint32(3) {
-		addr := &mockAddress{}
+		addr := &bwmock.Address{}
 		addrStr := fmt.Sprintf("addr-%d", i)
 		script := fmt.Appendf(nil, "script-%d", i)
 
@@ -823,9 +966,9 @@ func TestRecoveryStateWatchedOutPoints(t *testing.T) {
 	require.Empty(t, rs.WatchedOutPoints())
 
 	op1 := wire.OutPoint{Hash: chainhash.Hash{1}, Index: 0}
-	addr1 := &mockAddress{}
+	addr1 := &bwmock.Address{}
 	op2 := wire.OutPoint{Hash: chainhash.Hash{2}, Index: 1}
-	addr2 := &mockAddress{}
+	addr2 := &bwmock.Address{}
 
 	rs.AddWatchedOutPoint(&op1, addr1)
 	rs.AddWatchedOutPoint(&op2, addr2)
@@ -874,7 +1017,7 @@ var errFetch = errors.New("fetch error")
 func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -889,7 +1032,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	brs.ReportFound(0)
 
 	// Expect derivation of 0 -> Success
-	addr0 := &mockAddress{}
+	addr0 := &bwmock.Address{}
 	addr0.On("EncodeAddress").Return("addr-0")
 	addr0.On("ScriptAddress").Return([]byte("script-0"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(0)).Return(
@@ -902,7 +1045,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	).Once()
 
 	// Expect derivation of 2 -> Success
-	addr2 := &mockAddress{}
+	addr2 := &bwmock.Address{}
 	addr2.On("EncodeAddress").Return("addr-2")
 	addr2.On("ScriptAddress").Return([]byte("script-2"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(2)).Return(
@@ -910,7 +1053,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 	).Once()
 
 	// Expect derivation of 3 -> Success (to fill window)
-	addr3 := &mockAddress{}
+	addr3 := &bwmock.Address{}
 	addr3.On("EncodeAddress").Return("addr-3")
 	addr3.On("ScriptAddress").Return([]byte("script-3"))
 	store.On("DeriveAddr", uint32(0), uint32(0), uint32(3)).Return(
@@ -934,7 +1077,7 @@ func TestExpandHorizonsWithInvalidChild(t *testing.T) {
 func TestInitializeError(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, nil, addrMgr)
@@ -953,8 +1096,8 @@ func TestInitializeError(t *testing.T) {
 func TestInitAccountStateDeriveError(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
-	accountStore := &mockAccountStore{}
+	addrMgr := &bwmock.AddrStore{}
+	accountStore := &bwmock.AccountStore{}
 
 	defer addrMgr.AssertExpectations(t)
 	defer accountStore.AssertExpectations(t)
@@ -983,7 +1126,7 @@ func TestInitAccountStateDeriveError(t *testing.T) {
 func TestExpandHorizonsError(t *testing.T) {
 	t.Parallel()
 
-	accountStore := &mockAccountStore{}
+	accountStore := &bwmock.AccountStore{}
 	defer accountStore.AssertExpectations(t)
 
 	rs := NewRecoveryState(2, nil, nil)
@@ -1008,13 +1151,13 @@ func TestExpandHorizonsError(t *testing.T) {
 func TestInitializeWithState(t *testing.T) {
 	t.Parallel()
 
-	addrMgr := &mockAddrStore{}
+	addrMgr := &bwmock.AddrStore{}
 	defer addrMgr.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, nil, addrMgr)
 
 	// Mock address and outpoint.
-	addr := &mockAddress{}
+	addr := &bwmock.Address{}
 	addr.On("EncodeAddress").Return("addr1")
 
 	outpoint := wtxmgr.Credit{
@@ -1035,7 +1178,7 @@ func TestInitializeWithState(t *testing.T) {
 func TestProcessBlockError(t *testing.T) {
 	t.Parallel()
 
-	store := &mockAccountStore{}
+	store := &bwmock.AccountStore{}
 	defer store.AssertExpectations(t)
 
 	rs := NewRecoveryState(10, &chainParams, nil)

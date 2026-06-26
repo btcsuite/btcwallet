@@ -2,12 +2,25 @@ package waddrmgr
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/lightningnetwork/lnd/tlv"
+)
+
+var (
+	// errNilTapscript is returned when a caller attempts to encode a nil
+	// taproot script.
+	errNilTapscript = errors.New("cannot encode nil script")
+
+	// errMissingControlBlockInternalKey is returned when a taproot control
+	// block cannot be serialized because it has no internal key.
+	errMissingControlBlockInternalKey = errors.New(
+		"control block is missing internal key",
+	)
 )
 
 const (
@@ -22,11 +35,11 @@ const (
 	typeTapLeafScript  tlv.Type = 2
 )
 
-// tlvEncodeTaprootScript encodes the given internal key and full set of taproot
-// script leaves into a byte slice encoded as a TLV stream.
-func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
+// EncodeTaprootScript encodes the given taproot script data into a byte slice
+// encoded as a TLV stream.
+func EncodeTaprootScript(s *Tapscript) ([]byte, error) {
 	if s == nil {
-		return nil, fmt.Errorf("cannot encode nil script")
+		return nil, errNilTapscript
 	}
 
 	typ := uint8(s.Type)
@@ -34,20 +47,13 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 		tlv.MakePrimitiveRecord(typeTapscriptType, &typ),
 	}
 
-	if s.ControlBlock != nil {
-		if s.ControlBlock.InternalKey == nil {
-			return nil, fmt.Errorf("control block is missing " +
-				"internal key")
-		}
+	controlBlockRecord, ok, err := taprootControlBlockRecord(s.ControlBlock)
+	if err != nil {
+		return nil, err
+	}
 
-		blockBytes, err := s.ControlBlock.ToBytes()
-		if err != nil {
-			return nil, fmt.Errorf("error encoding control block: "+
-				"%w", err)
-		}
-		tlvRecords = append(tlvRecords, tlv.MakePrimitiveRecord(
-			typeTapscriptControlBlock, &blockBytes,
-		))
+	if ok {
+		tlvRecords = append(tlvRecords, controlBlockRecord)
 	}
 
 	if len(s.Leaves) > 0 {
@@ -89,6 +95,44 @@ func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// taprootControlBlockRecord encodes a taproot control block into its TLV
+// record, if the script includes one.
+func taprootControlBlockRecord(block *txscript.ControlBlock) (tlv.Record,
+	bool, error) {
+
+	if block == nil {
+		return tlv.Record{}, false, nil
+	}
+
+	if block.InternalKey == nil {
+		return tlv.Record{}, false, errMissingControlBlockInternalKey
+	}
+
+	blockBytes, err := block.ToBytes()
+	if err != nil {
+		return tlv.Record{}, false,
+			fmt.Errorf("error encoding control block: %w", err)
+	}
+
+	record := tlv.MakePrimitiveRecord(
+		typeTapscriptControlBlock, &blockBytes,
+	)
+
+	return record, true, nil
+}
+
+// DecodeTaprootScript decodes the given byte slice as a TLV stream and returns
+// the taproot script data it encodes.
+func DecodeTaprootScript(tlvData []byte) (*Tapscript, error) {
+	return tlvDecodeTaprootTaprootScript(tlvData)
+}
+
+// tlvEncodeTaprootScript encodes the given internal key and full set of taproot
+// script leaves into a byte slice encoded as a TLV stream.
+func tlvEncodeTaprootScript(s *Tapscript) ([]byte, error) {
+	return EncodeTaprootScript(s)
 }
 
 // tlvDecodeTaprootTaprootScript decodes the given byte slice as a TLV stream

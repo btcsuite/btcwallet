@@ -1105,6 +1105,18 @@ func (s *Store) UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error) {
 	return s.fetchCredits(ns, false, false, true)
 }
 
+// UnspentOutputsIncludingLocked returns all unspent received transaction
+// outputs, including outputs currently held by an active output lease.
+// Callers that report a wallet balance to external consumers should use
+// this entrypoint so the balance reflects the wallet's total UTXO value
+// independent of leasing state; spendable-only walks should keep using
+// UnspentOutputs.
+func (s *Store) UnspentOutputsIncludingLocked(
+	ns walletdb.ReadBucket) ([]Credit, error) {
+
+	return s.fetchCredits(ns, true, false, true)
+}
+
 // Balance returns the spendable wallet balance (total value of all unspent
 // transaction outputs) given a minimum of minConf confirmations, calculated
 // at a current chain height of curHeight.  Coinbase outputs are only included
@@ -1266,33 +1278,6 @@ func (s *Store) Balance(ns walletdb.ReadBucket, minConf int32, syncHeight int32)
 	}
 
 	return bal, nil
-}
-
-// PutTxLabel validates transaction labels and writes them to disk if they
-// are non-zero and within the label length limit. The entry is keyed by the
-// transaction hash:
-// [0:32] Transaction hash (32 bytes)
-//
-// The label itself is written to disk in length value format:
-// [0:2] Label length
-// [2: +len] Label
-func (s *Store) PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
-	label string) error {
-
-	if len(label) == 0 {
-		return ErrEmptyLabel
-	}
-
-	if len(label) > TxLabelLimit {
-		return ErrLabelTooLong
-	}
-
-	labelBucket, err := ns.CreateBucketIfNotExists(bucketTxLabels)
-	if err != nil {
-		return err
-	}
-
-	return PutTxLabel(labelBucket, txid, label)
 }
 
 // PutTxLabel writes a label for a tx to the bucket provided. Note that it does

@@ -10,26 +10,23 @@ import (
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-// TestListUnspent tests the ListUnspent method with various filters.
+// TestListUnspent tests that ListUnspent composes store UTXO, lease, and
+// address reads into sorted wallet-facing results.
 func TestListUnspent(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Define account names.
-	account1 := defaultAccountName
-	account2 := "test"
-
-	// Create the addresses that our mocks will return.
 	privKeyDefault, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	addrDefault, err := address.NewAddressPubKey(
@@ -44,164 +41,58 @@ func TestListUnspent(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to match the default mock (1).
-	currentHeight := int32(1)
-
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
-		false, account1, waddrmgr.WitnessPubKey,
-	)
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrTest).Return(
-		false, account2, waddrmgr.NestedWitnessPubKey,
-	)
-
-	// Now that the mocks are set up, we can create the pkScripts.
 	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
 	require.NoError(t, err)
 	pkScriptTest, err := txscript.PayToAddrScript(addrTest)
 	require.NoError(t, err)
 
-	const (
-		minConf = 2
-		maxConf = 6
-	)
-
-	// Create two UTXOs, one for each address.
-	utxo1 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{1},
-			Index: 0,
-		},
-		Amount:   100000,
-		PkScript: pkScriptDefault,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - minConf + 1,
-			},
-		},
+	utxoDefault := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      200000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
 	}
-	utxo2 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{2},
-			Index: 0,
-		},
-		Amount:   200000,
-		PkScript: pkScriptTest,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight - maxConf + 1,
-			},
-		},
+	utxoTest := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptTest,
+		Height:      1,
+		AccountName: "test",
+		Origin:      db.DerivedAccount,
+		AddrType:    db.NestedWitnessPubKey,
+		IsLocked:    true,
 	}
 
-	// Mock the UnspentOutputs method to return the two UTXOs.
-	mocks.txStore.On("UnspentOutputs", mock.Anything).Return(
-		[]wtxmgr.Credit{utxo1, utxo2}, nil,
-	)
+	query := UtxoQuery{MinConfs: 0, MaxConfs: 999999}
+	minConfs := query.MinConfs
+	maxConfs := query.MaxConfs
 
-	testCases := []struct {
-		name          string
-		query         UtxoQuery
-		expectedCount int
-		expectedAddrs map[string]bool
-	}{
-		{
-			name:          "no filter",
-			query:         UtxoQuery{MinConfs: 0, MaxConfs: 999999},
-			expectedCount: 2,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-				addrTest.String():    true,
-			},
-		},
-		{
-			name: "filter by default account",
-			query: UtxoQuery{
-				Account:  account1,
-				MinConfs: 0,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-			},
-		},
-		{
-			name: "filter by test account",
-			query: UtxoQuery{
-				Account:  account2,
-				MinConfs: 0,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrTest.String(): true,
-			},
-		},
-		{
-			name: "filter by min confs",
-			query: UtxoQuery{
-				MinConfs: minConf + 1,
-				MaxConfs: 999999,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrTest.String(): true,
-			},
-		},
-		{
-			name: "filter by max confs",
-			query: UtxoQuery{
-				MinConfs: 0,
-				MaxConfs: maxConf - 1,
-			},
-			expectedCount: 1,
-			expectedAddrs: map[string]bool{
-				addrDefault.String(): true,
-			},
-		},
-	}
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+		MinConfs: &minConfs,
+		MaxConfs: &maxConfs,
+	}).Return([]db.UtxoInfo{utxoDefault, utxoTest}, nil).Once()
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			utxos, err := w.ListUnspent(t.Context(), tc.query)
-			require.NoError(t, err)
-			require.Len(t, utxos, tc.expectedCount)
-
-			// Check that the correct addresses are returned. We do
-			// this by creating a map of the returned addresses and
-			// comparing it to the expected map. This ensures that
-			// all expected addresses are present and there are no
-			// duplicates.
-			returnedAddrs := make(map[string]bool)
-			for _, utxo := range utxos {
-				returnedAddrs[utxo.Address.String()] = true
-			}
-
-			require.Equal(t, tc.expectedAddrs, returnedAddrs)
-
-			// Check that the UTXOs are sorted by amount in
-			// ascending order.
-			for i := range len(utxos) - 1 {
-				require.LessOrEqual(
-					t, utxos[i].Amount, utxos[i+1].Amount,
-				)
-			}
-		})
-	}
+	utxos, err := w.ListUnspent(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, utxos, 2)
+	require.Equal(t, addrTest.String(), utxos[0].Address.String())
+	require.Equal(t, btcutil.Amount(100000), utxos[0].Amount)
+	require.True(t, utxos[0].Locked)
+	require.Equal(t, addrDefault.String(), utxos[1].Address.String())
+	require.False(t, utxos[1].Locked)
 }
 
-// TestGetUtxo tests that the GetUtxo method can successfully retrieve a UTXO.
-func TestGetUtxo(t *testing.T) {
+// TestListUnspentFiltersByAccount tests that ListUnspent applies the
+// wallet-facing account-name filter after reading store UTXO rows.
+func TestListUnspentFiltersByAccount(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Define account names.
-	account1 := "default"
-
-	// Create the addresses that our mocks will return.
 	privKeyDefault, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 	addrDefault, err := address.NewAddressPubKey(
@@ -209,72 +100,120 @@ func TestGetUtxo(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Set the current block height to match the default mock (1).
-	currentHeight := int32(1)
-
-	mocks.addrStore.On("AddressDetails", mock.Anything, addrDefault).Return(
-		false, account1, waddrmgr.WitnessPubKey,
+	privKeyTest, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrTest, err := address.NewAddressPubKey(
+		privKeyTest.PubKey().SerializeCompressed(), &chainParams,
 	)
+	require.NoError(t, err)
 
-	// Now that the mocks are set up, we can create the pkScripts.
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+	pkScriptTest, err := txscript.PayToAddrScript(addrTest)
+	require.NoError(t, err)
+
+	utxoDefault := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
+	}
+	utxoTest := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:      200000,
+		PkScript:    pkScriptTest,
+		Height:      1,
+		AccountName: "test",
+		Origin:      db.DerivedAccount,
+		AddrType:    db.NestedWitnessPubKey,
+	}
+
+	query := UtxoQuery{
+		Account:  "test",
+		MinConfs: 0,
+		MaxConfs: 999999,
+	}
+	minConfs := query.MinConfs
+	maxConfs := query.MaxConfs
+
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+		MinConfs: &minConfs,
+		MaxConfs: &maxConfs,
+	}).Return([]db.UtxoInfo{utxoDefault, utxoTest}, nil).Once()
+
+	utxos, err := w.ListUnspent(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, addrTest.String(), utxos[0].Address.String())
+	require.Equal(t, btcutil.Amount(200000), utxos[0].Amount)
+}
+
+// TestGetUtxo tests that the GetUtxo method can successfully retrieve a UTXO.
+func TestGetUtxo(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := address.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
 	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
 	require.NoError(t, err)
 
-	// Create a UTXO.
-	utxo1 := wtxmgr.Credit{
-		OutPoint: wire.OutPoint{
-			Hash:  [32]byte{1},
-			Index: 0,
-		},
-		Amount:   100000,
-		PkScript: pkScriptDefault,
-		BlockMeta: wtxmgr.BlockMeta{
-			Block: wtxmgr.Block{
-				Height: currentHeight,
-			},
-		},
+	utxoInfo := &db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		Origin:      db.DerivedAccount,
+		AddrType:    db.WitnessPubKey,
 	}
 
-	// Mock the GetUtxo method to return the UTXO.
-	mocks.txStore.On("GetUtxo", mock.Anything, utxo1.OutPoint).Return(
-		&utxo1, nil,
-	)
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: utxoInfo.OutPoint,
+	}).Return(utxoInfo, nil).Once()
 
-	// Construct the expected Utxo.
 	expectedUtxo := &Utxo{
-		OutPoint:      utxo1.OutPoint,
-		Amount:        utxo1.Amount,
-		PkScript:      utxo1.PkScript,
+		OutPoint:      utxoInfo.OutPoint,
+		Amount:        utxoInfo.Amount,
+		PkScript:      utxoInfo.PkScript,
 		Confirmations: 1,
-		Spendable:     false,
+		Spendable:     true,
 		Address:       addrDefault,
-		Account:       account1,
+		Account:       defaultAccountName,
 		AddressType:   waddrmgr.WitnessPubKey,
+		Locked:        false,
 	}
 
-	// Now, try to get the UTXO and compare it to our expected result.
-	utxo, err := w.GetUtxo(t.Context(), utxo1.OutPoint)
+	utxo, err := w.GetUtxo(t.Context(), utxoInfo.OutPoint)
 	require.NoError(t, err)
 	require.Equal(t, expectedUtxo, utxo)
 }
 
-// TestGetUtxo_Err tests the error conditions of the GetUtxo method.
-func TestGetUtxo_Err(t *testing.T) {
+// TestGetUtxoErr tests the error conditions of the GetUtxo method.
+func TestGetUtxoErr(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Test the case where the UTXO is not found.
-	utxoNotFound := wire.OutPoint{
-		Hash:  [32]byte{2},
-		Index: 0,
-	}
-	mocks.txStore.On("GetUtxo", mock.Anything, utxoNotFound).Return(
-		nil, wtxmgr.ErrUtxoNotFound,
-	)
+	utxoNotFound := wire.OutPoint{Hash: [32]byte{2}, Index: 0}
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: utxoNotFound,
+	}).Return((*db.UtxoInfo)(nil), db.ErrUtxoNotFound).Once()
+
 	utxo, err := w.GetUtxo(t.Context(), utxoNotFound)
-	require.ErrorIs(t, err, wtxmgr.ErrUtxoNotFound)
+	require.ErrorIs(t, err, ErrUnknownOutput)
 	require.Nil(t, utxo)
 }
 
@@ -282,28 +221,77 @@ func TestGetUtxo_Err(t *testing.T) {
 func TestLeaseOutput(t *testing.T) {
 	t.Parallel()
 
-	// Create a new test wallet with mocks.
 	w, mocks := createStartedWalletWithMocks(t)
 
-	// Create a UTXO.
-	utxo := wire.OutPoint{
-		Hash:  [32]byte{1},
-		Index: 0,
-	}
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	expiration := time.Now().Add(time.Hour).UTC()
 
-	// Mock the LockOutput method to return a fixed expiration time.
-	expiration := time.Now().Add(time.Hour)
-	mocks.txStore.On("LockOutput", mock.Anything, mock.Anything, utxo,
-		mock.Anything).Return(expiration, nil)
+	mocks.store.On("LeaseOutput", mock.Anything, db.LeaseOutputParams{
+		WalletID: w.id,
+		ID:       db.LockID{1},
+		OutPoint: outPoint,
+		Duration: time.Hour,
+	}).Return(&db.LeasedOutput{
+		OutPoint:   outPoint,
+		LockID:     db.LockID{1},
+		Expiration: expiration,
+	}, nil).Once()
 
-	// Now, try to lease the output.
-	leaseID := wtxmgr.LockID{1}
-	leaseDuration := time.Hour
 	actualExpiration, err := w.LeaseOutput(
-		t.Context(), leaseID, utxo, leaseDuration,
+		t.Context(), wtxmgr.LockID{1}, outPoint, time.Hour,
 	)
 	require.NoError(t, err)
 	require.Equal(t, expiration, actualExpiration)
+}
+
+// TestLeaseOutputErr tests that LeaseOutput translates the store's db-native
+// sentinels into the public, wallet-owned errors.
+func TestLeaseOutputErr(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		expectedErr error
+	}{
+		{
+			name:        "missing output",
+			storeErr:    db.ErrUtxoNotFound,
+			expectedErr: ErrUnknownOutput,
+		},
+		{
+			name:        "already leased",
+			storeErr:    db.ErrOutputAlreadyLeased,
+			expectedErr: ErrOutputAlreadyLocked,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+
+			mocks.store.On(
+				"LeaseOutput", mock.Anything,
+				db.LeaseOutputParams{
+					WalletID: w.id,
+					ID:       db.LockID{1},
+					OutPoint: outPoint,
+					Duration: time.Hour,
+				},
+			).Return((*db.LeasedOutput)(nil), tc.storeErr).Once()
+
+			expiration, err := w.LeaseOutput(
+				t.Context(), wtxmgr.LockID{1}, outPoint,
+				time.Hour,
+			)
+			require.ErrorIs(t, err, tc.expectedErr)
+			require.True(t, expiration.IsZero())
+		})
+	}
 }
 
 // TestReleaseOutput tests the ReleaseOutput method.
@@ -311,7 +299,7 @@ func TestReleaseOutput(t *testing.T) {
 	t.Parallel()
 
 	// Create a new test wallet with mocks.
-	w, mocks := createStartedWalletWithMocks(t)
+	w, mocks := createStartedWalletWithID(t, 7)
 
 	// Create a UTXO.
 	utxo := wire.OutPoint{
@@ -319,15 +307,63 @@ func TestReleaseOutput(t *testing.T) {
 		Index: 0,
 	}
 
-	// Mock the UnlockOutput method to return nil.
-	mocks.txStore.On("UnlockOutput",
-		mock.Anything, mock.Anything, utxo,
-	).Return(nil)
+	// Mock the UTXOStore ReleaseOutput method to return nil.
+	mocks.store.On("ReleaseOutput", mock.Anything, db.ReleaseOutputParams{
+		WalletID: 7,
+		ID:       [32]byte{1},
+		OutPoint: utxo,
+	}).Return(nil)
 
 	// Now, try to release the output.
 	leaseID := wtxmgr.LockID{1}
 	err := w.ReleaseOutput(t.Context(), leaseID, utxo)
 	require.NoError(t, err)
+}
+
+// TestReleaseOutputErr tests that ReleaseOutput translates the store's
+// db-native sentinels into the public, wallet-owned errors.
+func TestReleaseOutputErr(t *testing.T) {
+	t.Parallel()
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+	leaseID := wtxmgr.LockID{1}
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		expectedErr error
+	}{
+		{
+			name:        "missing output",
+			storeErr:    db.ErrUtxoNotFound,
+			expectedErr: ErrUnknownOutput,
+		},
+		{
+			name:        "wrong lock id",
+			storeErr:    db.ErrOutputUnlockNotAllowed,
+			expectedErr: ErrOutputUnlockNotAllowed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithID(t, 7)
+
+			mocks.store.On(
+				"ReleaseOutput", mock.Anything,
+				db.ReleaseOutputParams{
+					WalletID: 7,
+					ID:       [32]byte{1},
+					OutPoint: outPoint,
+				},
+			).Return(tc.storeErr).Once()
+
+			err := w.ReleaseOutput(t.Context(), leaseID, outPoint)
+			require.ErrorIs(t, err, tc.expectedErr)
+		})
+	}
 }
 
 // TestListLeasedOutputs tests the ListLeasedOutputs method.
@@ -347,14 +383,19 @@ func TestListLeasedOutputs(t *testing.T) {
 		Expiration: time.Now().Add(time.Hour),
 	}
 
-	// Mock the ListLockedOutputs method to return the leased output.
-	mocks.txStore.On("ListLockedOutputs", mock.Anything).Return(
-		[]*wtxmgr.LockedOutput{leasedOutput}, nil,
+	mocks.store.On("ListLeasedOutputs", mock.Anything, w.id).Return(
+		[]db.LeasedOutput{{
+			OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+			LockID:     db.LockID{1},
+			Expiration: leasedOutput.Expiration,
+		}}, nil,
 	)
 
-	// Now, try to list the leased outputs.
 	leasedOutputs, err := w.ListLeasedOutputs(t.Context())
 	require.NoError(t, err)
-	require.Len(t, leasedOutputs, 1)
-	require.Equal(t, leasedOutput, leasedOutputs[0])
+	require.Equal(t, []*LeasedOutput{{
+		OutPoint:   wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		LockID:     wtxmgr.LockID{1},
+		Expiration: leasedOutput.Expiration,
+	}}, leasedOutputs)
 }

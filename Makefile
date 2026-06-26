@@ -6,6 +6,18 @@ GOINSTALL := GO111MODULE=on go install -v
 
 GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
+
+# SQL directories.
+SQL_DIR := wallet/internal/sql
+
+# SQL file paths.
+SQL_POSTGRES_DIR := $(SQL_DIR)/pg
+SQL_POSTGRES_MIGRATIONS := $(SQL_POSTGRES_DIR)/migrations
+SQL_POSTGRES_QUERIES := $(SQL_POSTGRES_DIR)/queries
+SQL_SQLITE_DIR := $(SQL_DIR)/sqlite
+SQL_SQLITE_MIGRATIONS := $(SQL_SQLITE_DIR)/migrations
+SQL_SQLITE_QUERIES := $(SQL_SQLITE_DIR)/queries
+
 RM := rm -f
 CP := cp
 MAKE := make
@@ -14,15 +26,58 @@ XARGS := xargs -L 1
 include make/testing_flags.mk
 
 # Linting uses a lot of memory, so keep it under control by limiting the number
-# of workers if requested.
-ifneq ($(workers),)
+# of workers. Override with `workers=<n>` when needed.
+workers ?= 4
 LINT_WORKERS = --concurrency=$(workers)
-endif
+
+GOLANGCI_LINT = golangci-lint run -v --config .golangci.yml $(LINT_WORKERS)
+LINT_DB_SQLITE_PKGS = ./wallet/internal/db/sqlite ./wallet/internal/db/itest
+LINT_DB_POSTGRES_PKGS = ./wallet/internal/db/pg ./wallet/internal/db/itest
+
+define lint_targets
+	@$(call print, "Linting source.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX)
+	@$(call print, "Linting integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) nolog" ./itest
+	@$(call print, "Linting SQLite DB integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) $(LOG_TAGS)" \
+		$(LINT_DB_SQLITE_PKGS)
+	@$(call print, "Linting PostgreSQL DB integration tests.")
+	$(DOCKER_TOOLS) $(GOLANGCI_LINT) $(LINT_FIX) \
+		--build-tags="itest $(DEV_TAGS) $(LOG_TAGS) test_db_postgres" \
+		$(LINT_DB_POSTGRES_PKGS)
+endef
+
+# Detect if we're in a git worktree. Use git rev-parse --git-common-dir to get
+# the path to the main git directory for the linter's diff processor to work
+# correctly with the new-from-rev setting.
+GIT_COMMON_DIR := $(shell \
+  common_dir="$$(git rev-parse --git-common-dir 2>/dev/null)"; \
+  if [ "$$common_dir" != ".git" ] && [ -n "$$common_dir" ]; then \
+    echo "$$common_dir"; \
+  fi)
+GIT_VOLUME := $(if $(GIT_COMMON_DIR),-v "$(GIT_COMMON_DIR):$(GIT_COMMON_DIR):ro",)
 
 DOCKER_TOOLS = docker run \
   --rm \
   -v $(shell bash -c "mkdir -p /tmp/go-build-cache; echo /tmp/go-build-cache"):/root/.cache/go-build \
-  -v $$(pwd):/build btcwallet-tools
+  -v $$(pwd):/build \
+  $(GIT_VOLUME) \
+  btcwallet-tools
+
+# Pin the sqlfluff image by digest to keep linting results stable across
+# environments and over time. The tag alone is mutable, so it could later point
+# to a different build with changed rules or behavior. This digest currently
+# corresponds to sqlfluff 4.2.1 on Docker Hub:
+# https://hub.docker.com/layers/sqlfluff/sqlfluff/4.2.1
+SQLFLUFF = docker run \
+	--rm \
+	--user $$(id -u):$$(id -g) \
+    -v $$(pwd):/sql \
+    -w /sql \
+    sqlfluff/sqlfluff@sha256:0b1f131e3e9b4ac10bf45f1b2cb8680e67f74e63f8e6db9f0f0207dbbe3c71d2
 
 GREEN := "\\033[0;32m"
 NC := "\\033[0m"
@@ -84,6 +139,44 @@ unit-bench:
 	@$(call print, "Running benchmark tests.")
 	$(UNIT_BENCH)
 
+#? itest-db: Run integration tests for wallet database
+itest-db:
+	@if [ -z "$(IT_DB_LABEL)" ]; then \
+		echo "Unknown integration test database '$(db)'. Use db=sqlite or db=postgres." ; \
+		exit 1 ; \
+	fi
+	@$(call print, "Running $(IT_DB_LABEL) integration tests.")
+	$(ITEST_DB)
+	@if [ -n "$(ITEST_DB_COVERPROFILE)" ]; then \
+		echo  "Filtering coverage report."; \
+		./scripts/filter_coverage.sh $(IT_DB_TYPE); \
+	fi
+
+#? itest-db-race: Run integration tests for wallet database with race detector
+itest-db-race:
+	@if [ -z "$(IT_DB_LABEL)" ]; then \
+		echo "Unknown integration test database '$(db)'. Use db=sqlite or db=postgres." ; \
+		exit 1 ; \
+	fi
+	@$(call print, "Running $(IT_DB_LABEL) integration tests (race).")
+	env CGO_ENABLED=1 GORACE="history_size=7 halt_on_errors=1" $(ITEST_DB_RACE)
+
+#? itest: Run integration tests
+#? itest (vars): chain=btcd|bitcoind|neutrino backend=btcd|bitcoind|neutrino db=kvdb|sqlite|postgres
+#? itest (vars): icase=<regex> (filter itest cases)
+#? itest (vars): timeout=<duration> verbose=1 nocache=1
+#? itest (ex): make itest icase=manager
+#? itest (ex): make itest chain=btcd db=kvdb
+itest:
+	@$(call print, "Running integration tests.")
+	@$(GOTEST) -v ./itest \
+		-tags="itest $(DEV_TAGS) nolog" \
+		$(if $(icase),-test.run="TestBtcWallet$$|$(icase)",) \
+		$(filter-out -test.run=%,$(TEST_FLAGS)) \
+		-args \
+		-chain="$(if $(backend),$(backend),$(if $(chain),$(chain),btcd))" \
+		-db="$(if $(db),$(db),kvdb)"
+
 # =========
 # UTILITIES
 # =========
@@ -108,17 +201,16 @@ rpc-format:
 #? lint-config-check: Verify golangci-lint configuration
 lint-config-check: docker-tools
 	@$(call print, "Verifying golangci-lint configuration.")
-	$(DOCKER_TOOLS) golangci-lint config verify -v
+	$(DOCKER_TOOLS) golangci-lint config verify -v --config .golangci.yml
 
 #? lint: Lint source and check errors
 lint-check: lint-config-check
-	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v $(LINT_WORKERS)
+	$(call lint_targets)
 
 #? lint: Lint source and fix
+lint: LINT_FIX = --fix
 lint: lint-config-check
-	@$(call print, "Linting source.")
-	$(DOCKER_TOOLS) golangci-lint run -v --fix $(LINT_WORKERS)
+	$(call lint_targets)
 
 #? docker-tools: Build tools docker image
 docker-tools:
@@ -138,7 +230,7 @@ rpc-check: rpc
 #? protolint: Lint proto files using protolint
 protolint:
 	@$(call print, "Linting proto files.")
-	docker run --rm --volume "$$(pwd):/workspace" --workdir /workspace yoheimuta/protolint lint rpc/
+	$(DOCKER_TOOLS) protolint lint -config_dir_path=. rpc/
 
 #? sample-conf-check: Make sure default values in the sample-btcwallet.conf file are set correctly
 sample-conf-check: install
@@ -159,6 +251,79 @@ tidy-module:
 tidy-module-check: tidy-module
 	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
 
+#? sql-parse: Ensures SQL files are syntactically valid
+sql-parse:
+	@$(call print, "Validating SQL files (postgres migrations).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS) --format none
+	@$(call print, "Validating SQL files (postgres queries).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES) --format none
+	@$(call print, "Validating SQL files (sqlite migrations).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS) --format none
+	@$(call print, "Validating SQL files (sqlite queries).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES) --format none
+
+#? sqlc: Generate Go code from SQL queries and migrations
+sqlc: sql-parse docker-tools
+	@$(call print, "Generating sql models and queries in Go")
+	$(DOCKER_TOOLS) sqlc generate -f sqlc.yaml
+
+#? sqlc-check: Verify generated Go SQL queries and migrations are up-to-date
+sqlc-check: sqlc
+	@$(call print, "Verifying sql code generation.")
+	if test -n "$$(git status --porcelain '*.go')"; then echo "SQL models not properly generated!"; git status --porcelain '*.go'; exit 1; fi
+
+#? sql-format: Format SQL migration and query files (like 'make fmt')
+sql-format:
+	@$(call print, "Formatting SQL files (postgres migrations).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Formatting SQL files (postgres queries).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Formatting SQL files (sqlite migrations).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Formatting SQL files (sqlite queries).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
+
+#? sql-check: Verify SQL migration and query files are formatted correctly (like 'make fmt-check')
+sql-format-check: sql-format
+	@$(call print, "Checking SQL formatting.")
+	if test -n "$$(git status --porcelain '$(SQL_DIR)/**/*.sql')"; then echo "SQL files not formatted correctly, please run 'make sql-format' again!"; git status; git diff; exit 1; fi
+
+#? sql-lint: Lint SQL migration and query files and fix issues (like 'make lint')
+sql-lint:
+	@$(call print, "Linting SQL files (postgres migrations).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres queries).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Linting SQL files (sqlite migrations).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite queries).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
+
+#? sql-lint-check: Lint SQL files and report errors (like 'make lint-check')
+sql-lint-check:
+	@$(call print, "Linting SQL files (postgres migrations).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres queries).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
+	@$(call print, "Linting SQL files (sqlite migrations).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite queries).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
+
+#? sql: Lint, verify, format, and regenerate SQL code for local development
+# First try auto-fixes. If that still fails, rerun lint in check mode so the
+# remaining unfixable violations are printed before aborting the workflow.
+# On success, verify the final SQL is clean before formatting and regeneration.
+sql:
+	@if ! $(MAKE) --no-print-directory --silent sql-lint; then \
+		$(MAKE) --no-print-directory --silent sql-lint-check; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory --silent sql-lint-check
+	@$(MAKE) --no-print-directory --silent sql-format
+	@$(MAKE) --no-print-directory --silent sqlc
+
+
 .PHONY: all \
 	default \
 	build \
@@ -168,10 +333,21 @@ tidy-module-check: tidy-module
 	unit-race \
 	unit-debug \
 	unit-bench \
+	itest \
+	itest-db \
+	itest-db-race \
 	fmt \
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	sql-parse \
+	sql \
+	sqlc \
+	sqlc-check \
+	sql-format \
+	sql-lint \
+	sql-lint-check \
+	sql-format-check \
 	rpc-format \
 	lint \
 	lint-config-check \
