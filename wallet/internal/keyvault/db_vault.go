@@ -63,10 +63,6 @@ func (v *DBVault) Unlock(_ context.Context, _ []byte) error {
 	return v.notImplemented("Unlock")
 }
 
-// Lock is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Lock() {}
-
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.
 func (v *DBVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
