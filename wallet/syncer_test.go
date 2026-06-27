@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -19,6 +23,9 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -419,9 +426,11 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	hashes := []chainhash.Hash{{0x01}}
 
 	// Create a mock block message for testing.
+	blockTime := time.Unix(1710004500, 0)
 	msgBlock := wire.NewMsgBlock(wire.NewBlockHeader(
 		1, &chainhash.Hash{}, &chainhash.Hash{}, 0, 0,
 	))
+	msgBlock.Header.Timestamp = blockTime
 	blocks := []*wire.MsgBlock{msgBlock}
 	mockChain.On(
 		"GetBlocks", hashes,
@@ -436,6 +445,7 @@ func TestScanBatchWithFullBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Equal(t, int32(10), results[0].meta.Height)
+	require.Equal(t, blockTime, results[0].meta.Time)
 }
 
 // TestScanBatchWithCFilters verifies CFilter-based scan logic.
@@ -1031,8 +1041,8 @@ func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
 }
 
 // TestProcessRelevantTxUsesBareMultisigMember verifies store-backed relevant
-// transaction notifications keep bare-multisig credits when the wallet owns a
-// member pubkey address but not the full multisig output script.
+// transaction notifications keep bare-multisig credit candidates when the
+// wallet owns a member pubkey address but not the full multisig output script.
 func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 	t.Parallel()
 
@@ -1066,6 +1076,1656 @@ func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
 
 	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
 	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// matchConfirmedTxBatchNoSyncTip returns a matcher asserting a confirmed
+// relevant transaction is written as one store batch whose transaction carries
+// the confirming block, while SyncedTo stays nil so the standalone
+// notification does not advance the wallet sync tip.
+func matchConfirmedTxBatchNoSyncTip(walletID uint32, tx *wire.MsgTx,
+	addr address.Address, received time.Time, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo != nil {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block == nil ||
+			!matchStoreBlockFields(txParams.Block, block) {
+
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received,
+			db.TxStatusPublished, "",
+		)
+	})
+}
+
+// TestProcessRelevantTxUsesStoreConfirmedBlock verifies that a confirmed
+// relevant transaction notification (one carrying a block) builds an
+// ApplyTxBatch with the transaction's confirming block set but SyncedTo left
+// nil, so the standalone notification records the confirmed tx without
+// advancing the wallet sync tip. The Store block row is then ensured by the
+// SQL applyBatchTransaction path (covered separately on the Store-layer fix).
+func TestProcessRelevantTxUsesStoreConfirmedBlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A store-backed syncer and a transaction paying a
+	// wallet-owned address, confirmed in a block.
+	const walletID uint32 = 8
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0c},
+			Height: 222,
+		},
+		Time: time.Unix(789, 0).UTC(),
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchConfirmedTxBatchNoSyncTip(
+			walletID, tx, addr, received, block,
+		),
+	).Return(nil).Once()
+
+	// Act: Process a confirmed relevant transaction notification.
+	err = s.processChainUpdate(
+		t.Context(), chain.RelevantTx{TxRecord: rec, Block: block},
+	)
+
+	// Assert: The batch carries the confirming block but leaves the sync
+	// tip untouched. The mock registers only ApplyTxBatch (and address
+	// lookups), so any sync-tip write would fail AssertExpectations.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// matchStoreBlockFields reports whether a store block matches the wtxmgr block
+// metadata's hash, height, and timestamp.
+func matchStoreBlockFields(b *db.Block, block *wtxmgr.BlockMeta) bool {
+	return b.Hash == block.Hash &&
+		b.Height == uint32(block.Height) &&
+		b.Timestamp.Equal(block.Time)
+}
+
+// matchBlockTxBatch returns a matcher asserting a filtered block transaction is
+// written as one store batch together with the matching sync-tip update.
+func matchBlockTxBatch(walletID uint32, tx *wire.MsgTx, addr address.Address,
+	received time.Time, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo == nil {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block == nil ||
+			!matchStoreBlockFields(txParams.Block, block) {
+
+			return false
+		}
+
+		if !matchStoreBlockFields(params.SyncedTo, block) {
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received,
+			db.TxStatusPublished, "",
+		)
+	})
+}
+
+// newBareMultisigScript builds a 1-of-2 bare-multisig output script and returns
+// the two member pubkey addresses it pays to.
+func newBareMultisigScript(t *testing.T) ([]address.Address, []byte) {
+	t.Helper()
+
+	firstKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	secondKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	firstAddr, err := address.NewAddressPubKey(
+		firstKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	secondAddr, err := address.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	builder := txscript.NewScriptBuilder()
+	builder.AddInt64(1)
+	builder.AddData(firstKey.PubKey().SerializeCompressed())
+	builder.AddData(secondKey.PubKey().SerializeCompressed())
+	builder.AddInt64(2)
+	builder.AddOp(txscript.OP_CHECKMULTISIG)
+
+	script, err := builder.Script()
+	require.NoError(t, err)
+
+	return []address.Address{firstAddr, secondAddr}, script
+}
+
+// matchMultisigCandidateBatch returns a matcher asserting a filtered block
+// transaction is written as one store batch whose index-0 credit candidates
+// carry one of the bare-multisig member addresses.
+func matchMultisigCandidateBatch(walletID uint32, tx *wire.MsgTx,
+	members []address.Address, block *wtxmgr.BlockMeta) any {
+
+	want := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		want[member.EncodeAddress()] = struct{}{}
+	}
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 ||
+			params.SyncedTo == nil {
+
+			return false
+		}
+
+		return matchMultisigCandidateTx(
+			params.Transactions[0], tx, block, want,
+		)
+	})
+}
+
+// matchMultisigCandidateTx reports whether the batched transaction params
+// record the expected multisig transaction with one of the wanted member
+// addresses carried as a credit candidate.
+func matchMultisigCandidateTx(txParams db.CreateTxParams, tx *wire.MsgTx,
+	block *wtxmgr.BlockMeta, want map[string]struct{}) bool {
+
+	if txParams.Tx == nil ||
+		txParams.Tx.TxHash() != tx.TxHash() ||
+		txParams.Block == nil ||
+		len(txParams.Credits) != 0 ||
+		!matchStoreBlockFields(txParams.Block, block) {
+
+		return false
+	}
+
+	var found bool
+	for _, candidate := range txParams.CreditCandidates[0] {
+		if _, ok := want[candidate.EncodeAddress()]; ok {
+			found = true
+			break
+		}
+	}
+
+	return found
+}
+
+// TestProcessFilteredBlockBareMultisigCandidate verifies that a bare-multisig
+// output carries its member pubkeys through the applyStoreTxBatch path.
+// PayToAddrScript(member) does not equal the multisig output script, so the
+// removed GetAddress(outputScript) lookup would have missed the wallet-owned
+// candidate; the Store must instead receive the matched member addresses.
+func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block containing a
+	// bare-multisig output.
+	const walletID uint32 = 11
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	members, pkScript := newBareMultisigScript(t)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0c},
+			Height: 102,
+		},
+		Time: blockTime,
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchMultisigCandidateBatch(walletID, tx, members, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: The member credit candidates were written through the store batch
+	// API instead of being dropped.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// matchCandidateTxShape reports whether the batch carries exactly the one
+// expected wallet transaction confirmed in the expected block, ignoring its
+// credit candidates. Pulling the transaction-shape checks out of the matcher
+// keeps the matcher's cyclomatic complexity within bounds.
+func matchCandidateTxShape(params db.TxBatchParams, walletID uint32,
+	tx *wire.MsgTx, block *wtxmgr.BlockMeta) bool {
+
+	if params.WalletID != walletID ||
+		len(params.Transactions) != 1 ||
+		params.SyncedTo == nil {
+
+		return false
+	}
+
+	txParams := params.Transactions[0]
+
+	return txParams.Tx != nil &&
+		txParams.Tx.TxHash() == tx.TxHash() &&
+		txParams.Block != nil &&
+		matchStoreBlockFields(txParams.Block, block)
+}
+
+// matchCandidateBatch returns a matcher asserting a filtered block transaction
+// is written as one store batch whose CreditCandidates carry every output
+// address candidate and whose Credits stay unresolved for the Store to fill.
+func matchCandidateBatch(walletID uint32, tx *wire.MsgTx,
+	want map[uint32]address.Address, block *wtxmgr.BlockMeta) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if !matchCandidateTxShape(params, walletID, tx, block) {
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if len(txParams.Credits) != 0 ||
+			len(txParams.CreditCandidates) != len(want) {
+
+			return false
+		}
+
+		for index, addr := range want {
+			candidates := txParams.CreditCandidates[index]
+			if len(candidates) != 1 || candidates[0] == nil {
+				return false
+			}
+
+			if candidates[0].EncodeAddress() != addr.EncodeAddress() {
+				return false
+			}
+		}
+
+		return true
+	})
+}
+
+// TestProcessFilteredBlockPassesCreditCandidates verifies that a relevant
+// transaction carrying multiple output addresses passes all candidates to the
+// Store. The Store resolves ownership inside ApplyTxBatch so syncer-side
+// filtering cannot race account/address updates.
+func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block whose single
+	// relevant transaction pays two different output addresses.
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	firstAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	firstScript, err := txscript.PayToAddrScript(firstAddr)
+	require.NoError(t, err)
+
+	secondAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	secondScript, err := txscript.PayToAddrScript(secondAddr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: firstScript})
+	tx.AddTxOut(&wire.TxOut{Value: 2000, PkScript: secondScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0d},
+			Height: 103,
+		},
+		Time: time.Unix(789, 0).UTC(),
+	}
+
+	wantCandidates := map[uint32]address.Address{
+		0: firstAddr,
+		1: secondAddr,
+	}
+	store.On("ApplyTxBatch", mock.Anything,
+		matchCandidateBatch(walletID, tx, wantCandidates, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: All output addresses were carried as candidates and left
+	// unresolved for the Store batch.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestProcessFilteredBlockUsesStore verifies that filtered block notifications
+// are routed through the store as one transaction batch with a sync-tip update.
+func TestProcessFilteredBlockUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and a filtered block containing a
+	// wallet-owned transaction output.
+	const walletID uint32 = 9
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x09},
+			Height: 101,
+		},
+		Time: blockTime,
+	}
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchBlockTxBatch(walletID, tx, addr, received, block),
+	).Return(nil).Once()
+
+	// Act: Process a filtered block connected notification.
+	err = s.processChainUpdate(t.Context(), chain.FilteredBlockConnected{
+		Block:       block,
+		RelevantTxs: []*wtxmgr.TxRecord{rec},
+	})
+
+	// Assert: The block transaction and sync tip were written together.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// storeScanBatchFixture contains expected values for store scan batch tests.
+type storeScanBatchFixture struct {
+	accountID uint32
+	result    scanResult
+	tx        *wire.MsgTx
+	addr      address.Address
+	scope     waddrmgr.BranchScope
+	block     *wtxmgr.BlockMeta
+	received  time.Time
+}
+
+// newStoreScanBatchFixture builds one scan result with a horizon and wallet
+// transaction output.
+func newStoreScanBatchFixture(t *testing.T) storeScanBatchFixture {
+	t.Helper()
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(
+		tx, time.Unix(1, 0).UTC(),
+	)
+	require.NoError(t, err)
+
+	scope := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 2,
+		Branch:  waddrmgr.InternalBranch,
+	}
+
+	blockTime := time.Unix(789, 0).UTC()
+	block := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{0x0b},
+			Height: 111,
+		},
+		Time: blockTime,
+	}
+
+	return storeScanBatchFixture{
+		accountID: 33,
+		result: scanResult{
+			BlockProcessResult: &BlockProcessResult{
+				FoundHorizons: map[waddrmgr.BranchScope]uint32{
+					scope: 12,
+				},
+				RelevantOutputs: TxEntries{{
+					Rec: rec,
+					Entries: []AddrEntry{{
+						Address: addr,
+						Credit: wtxmgr.CreditEntry{
+							Index: 0,
+						},
+					}},
+				}},
+			},
+			meta: block,
+		},
+		tx:       tx,
+		addr:     addr,
+		scope:    scope,
+		block:    block,
+		received: blockTime,
+	}
+}
+
+// matchStoreScanHorizon reports whether a scan horizon matches the fixture's
+// branch scope at the expected discovered index.
+func matchStoreScanHorizon(horizon db.ScanHorizon,
+	fixture storeScanBatchFixture) bool {
+
+	return horizon.Scope == db.KeyScope(fixture.scope.Scope) &&
+		horizon.AccountID != nil &&
+		*horizon.AccountID == fixture.accountID &&
+		horizon.Account == fixture.scope.Account &&
+		horizon.Branch == fixture.scope.Branch &&
+		horizon.Index == 12
+}
+
+// seedScanStateAccountID records the fixture's stable account ID in the scan
+// state, mirroring loadFullScanState/loadTargetedScanState.
+func seedScanStateAccountID(scanState *RecoveryState,
+	fixture storeScanBatchFixture) {
+
+	accountID := fixture.accountID
+	scanState.setAccountID(
+		fixture.scope.Scope, fixture.scope.Account, &accountID,
+	)
+}
+
+// matchStoreScanSyncedBlocks reports whether the batch's synced blocks match
+// the expectation implied by wantSynced: exactly one fixture block when
+// syncing, or none otherwise.
+func matchStoreScanSyncedBlocks(params db.ScanBatchParams, wantSynced bool,
+	fixture storeScanBatchFixture) bool {
+
+	if !wantSynced {
+		return len(params.SyncedBlocks) == 0
+	}
+
+	return len(params.SyncedBlocks) == 1 &&
+		matchStoreScanBlock(&params.SyncedBlocks[0], fixture)
+}
+
+// matchStoreScanTx reports whether the batched scan transaction carries the
+// fixture's wallet, hash, receive time, credit, status, and confirming block.
+func matchStoreScanTx(txParams db.CreateTxParams, walletID uint32,
+	fixture storeScanBatchFixture) bool {
+
+	creditAddr, ok := txParams.Credits[0]
+	if !ok || creditAddr == nil || txParams.Tx == nil ||
+		txParams.Block == nil {
+
+		return false
+	}
+
+	if !matchStoreScanBlock(txParams.Block, fixture) {
+		return false
+	}
+
+	return txParams.WalletID == walletID &&
+		txParams.Tx.TxHash() == fixture.tx.TxHash() &&
+		txParams.Received.Equal(fixture.received) &&
+		txParams.Status == db.TxStatusPublished &&
+		creditAddr.EncodeAddress() == fixture.addr.EncodeAddress()
+}
+
+// matchStoreScanBatch matches the store scan batch produced by scan routing.
+func matchStoreScanBatch(walletID uint32, fixture storeScanBatchFixture,
+	wantSynced bool) any {
+
+	return mock.MatchedBy(func(params db.ScanBatchParams) bool {
+		if params.WalletID != walletID || len(params.Horizons) != 1 ||
+			len(params.Transactions) != 1 {
+
+			return false
+		}
+
+		if !matchStoreScanSyncedBlocks(params, wantSynced, fixture) {
+			return false
+		}
+
+		if !matchStoreScanHorizon(params.Horizons[0], fixture) {
+			return false
+		}
+
+		return matchStoreScanTx(
+			params.Transactions[0], walletID, fixture,
+		)
+	})
+}
+
+// matchStoreScanBlock reports whether a store block matches the scan fixture.
+func matchStoreScanBlock(block *db.Block,
+	fixture storeScanBatchFixture) bool {
+
+	return block.Hash == fixture.block.Hash &&
+		block.Height == uint32(fixture.block.Height) &&
+		block.Timestamp.Equal(fixture.block.Time)
+}
+
+// TestPutSyncBatchStore verifies sync scan writes use the store batch API.
+func TestPutSyncBatchStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one scan result.
+	const walletID uint32 = 11
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(walletID, fixture, true),
+	).Return(nil).Once()
+
+	// Act: Apply a normal sync scan batch.
+	err := s.putSyncBatch(
+		t.Context(), scanState, []scanResult{fixture.result},
+	)
+
+	// Assert: The store saw transactions, horizons, and synced blocks.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestPutTargetedBatchStore verifies targeted scan writes use the store batch
+// API without advancing synced blocks.
+func TestPutTargetedBatchStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one targeted scan result.
+	const walletID uint32 = 12
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	fixture := newStoreScanBatchFixture(t)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+	seedScanStateAccountID(scanState, fixture)
+
+	store.On(
+		"ApplyScanBatch", mock.Anything,
+		matchStoreScanBatch(walletID, fixture, false),
+	).Return(nil).Once()
+
+	// Act: Apply a targeted scan batch.
+	err := s.putTargetedBatch(
+		t.Context(), scanState, []scanResult{fixture.result},
+	)
+
+	// Assert: The store saw transactions and horizons, but no synced blocks.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestStampRecoveryAccountIDsCarriesStableID verifies that the scan state keeps
+// the stable account ID resolved from the loaded account snapshot, so horizon
+// emission does not need a later name lookup that could race an account rename.
+func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+	scanState := NewRecoveryState(0, &chainParams, nil)
+
+	props := &waddrmgr.AccountProperties{
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+		AccountNumber: 5,
+		AccountName:   "before-rename",
+	}
+	scanState.accountNames[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = props.AccountName
+
+	accountID := uint32(77)
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == walletID &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.Name != nil &&
+				*query.Name == "before-rename" &&
+				query.AccountNumber == nil &&
+				query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{
+		AccountID: &accountID,
+	}, nil).Once()
+
+	err := s.stampRecoveryAccountIDs(
+		t.Context(), scanState, []*waddrmgr.AccountProperties{props},
+	)
+	require.NoError(t, err)
+
+	props.AccountName = "after-rename"
+	horizons := scanHorizonParams(scanState, map[waddrmgr.BranchScope]uint32{
+		{
+			Scope:   props.KeyScope,
+			Account: props.AccountNumber,
+			Branch:  waddrmgr.ExternalBranch,
+		}: 3,
+	})
+	require.Len(t, horizons, 1)
+	require.NotNil(t, horizons[0].AccountID)
+	require.Equal(t, accountID, *horizons[0].AccountID)
+	require.Equal(t, "before-rename", horizons[0].AccountName)
+	store.AssertExpectations(t)
+}
+
+// TestScanHorizonParamsStampsAccountIdentity verifies that scanHorizonParams
+// stamps every emitted horizon with the stable account ID and account name
+// resolved from the recovery state.
+func TestScanHorizonParamsStampsAccountIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A recovery state that knows the identity of one account but not
+	// another, and a horizon map covering a branch in each.
+	rs := NewRecoveryState(0, &chainParams, nil)
+
+	named := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 5,
+	}
+	accountID := uint32(55)
+	rs.accountNames[named] = "imported-xpub"
+	rs.setAccountID(named.Scope, named.Account, &accountID)
+
+	namedBranch := waddrmgr.BranchScope{
+		Scope:   named.Scope,
+		Account: named.Account,
+		Branch:  waddrmgr.ExternalBranch,
+	}
+	unnamedBranch := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 9,
+		Branch:  waddrmgr.InternalBranch,
+	}
+	horizons := map[waddrmgr.BranchScope]uint32{
+		namedBranch:   3,
+		unnamedBranch: 7,
+	}
+
+	// Act: Flatten the horizon map into store params.
+	params := scanHorizonParams(rs, horizons)
+
+	// Assert: The known account's horizon carries its stable identity, while
+	// the unknown account's horizon falls back to no account ID or name.
+	require.Len(t, params, 2)
+
+	byAccount := make(map[uint32]db.ScanHorizon, len(params))
+	for _, horizon := range params {
+		byAccount[horizon.Account] = horizon
+	}
+
+	require.Equal(t, "imported-xpub", byAccount[5].AccountName)
+	require.NotNil(t, byAccount[5].AccountID)
+	require.Equal(t, accountID, *byAccount[5].AccountID)
+	require.Equal(t, uint32(3), byAccount[5].Index)
+	require.Empty(t, byAccount[9].AccountName)
+	require.Nil(t, byAccount[9].AccountID)
+	require.Equal(t, uint32(7), byAccount[9].Index)
+}
+
+// TestStoreScanHorizonsListAccounts verifies full scan horizon reads use the
+// store account list.
+func TestStoreScanHorizonsListAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with two scan accounts.
+	const walletID uint32 = 13
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	accounts := []db.AccountInfo{{
+		AccountNumber:        testUint32Ptr(2),
+		AccountName:          "default",
+		ExternalKeyCount:     5,
+		InternalKeyCount:     3,
+		ImportedKeyCount:     1,
+		MasterKeyFingerprint: 9,
+		KeyScope:             db.KeyScopeBIP0084,
+		IsWatchOnly:          true,
+	}}
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	// Act: Load all scan horizons from the store.
+	props, err := s.storeScanHorizons(t.Context(), nil)
+
+	// Assert: The store account row was converted for RecoveryState.
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, *accounts[0].AccountNumber, props[0].AccountNumber)
+	require.Equal(t, accounts[0].ExternalKeyCount, props[0].ExternalKeyCount)
+	require.Equal(t, accounts[0].InternalKeyCount, props[0].InternalKeyCount)
+	require.Equal(t, waddrmgr.KeyScopeBIP0084, props[0].KeyScope)
+	require.True(t, props[0].IsWatchOnly)
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsGetAccount verifies targeted scan horizon reads use the
+// store account lookup.
+func TestStoreScanHorizonsGetAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one targeted account.
+	const walletID uint32 = 14
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	target := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 7,
+	}
+	account := db.AccountInfo{
+		AccountNumber:    testUint32Ptr(target.Account),
+		ExternalKeyCount: 8,
+		InternalKeyCount: 4,
+		KeyScope:         db.KeyScope(target.Scope),
+	}
+
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == walletID &&
+				query.Scope == db.KeyScope(target.Scope) &&
+				query.AccountNumber != nil &&
+				*query.AccountNumber == target.Account &&
+				query.SkipBalance
+		},
+	)).Return(&account, nil).Once()
+
+	// Act: Load targeted scan horizons from the store.
+	props, err := s.storeScanHorizons(
+		t.Context(), []waddrmgr.AccountScope{target},
+	)
+
+	// Assert: The targeted account row was converted for RecoveryState.
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, target.Account, props[0].AccountNumber)
+	require.Equal(t, account.ExternalKeyCount, props[0].ExternalKeyCount)
+	require.Equal(t, account.InternalKeyCount, props[0].InternalKeyCount)
+	require.Equal(t, target.Scope, props[0].KeyScope)
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsGetAccountSkipsImported verifies that targeted scan
+// horizon reads skip every imported account -- both the keyless
+// imported-address bucket and a true imported xpub account -- so an imported
+// account never seeds the recovery state. Crucially the imported xpub account
+// surfaces with the masked AccountNumber 0 that the store contract guarantees
+// for imported rows, in the same scope as a default derived account that
+// legitimately owns number 0. Withholding it proves the masked imported
+// account cannot collide with or clobber the default account at (scope, 0).
+func TestStoreScanHorizonsGetAccountSkipsImported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer with three targets: a default derived
+	// account at number 0, the keyless imported-address bucket, and a true
+	// imported xpub account that the store surfaces with the masked number 0
+	// -- the same (scope, number) as the default account.
+	const walletID uint32 = 22
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	derived := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+	}
+	bucket := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: waddrmgr.ImportedAddrAccount,
+	}
+	importedXpub := waddrmgr.AccountScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+	}
+
+	// The default derived account legitimately owns number 0 and must be
+	// the only horizon emitted.
+	derivedInfo := db.AccountInfo{
+		AccountNumber:    testUint32Ptr(derived.Account),
+		AccountName:      "default",
+		ExternalKeyCount: 8,
+		InternalKeyCount: 4,
+		KeyScope:         db.KeyScope(derived.Scope),
+	}
+
+	// The true imported xpub account carries an account public key and HD
+	// key counts, but the store masks its number to 0. It is still an
+	// imported account, so it must be skipped rather than collide with the
+	// default account at (scope, 0).
+	importedXpubInfo := db.AccountInfo{
+		AccountNumber:    nil,
+		AccountName:      "imported-xpub",
+		ExternalKeyCount: 6,
+		InternalKeyCount: 2,
+		KeyScope:         db.KeyScope(importedXpub.Scope),
+		IsImported:       true,
+		PublicKey:        []byte("account-xpub"),
+	}
+
+	// The imported-address bucket target must be skipped before lookup. The
+	// remaining derived and imported-xpub targets both arrive as account 0 in
+	// this regression, so return those two rows in order and allow no lookup
+	// for waddrmgr.ImportedAddrAccount.
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.AccountNumber != nil &&
+				*query.AccountNumber == 0
+		},
+	)).
+		Return(&derivedInfo, nil).Once()
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.AccountNumber != nil &&
+				*query.AccountNumber == 0
+		},
+	)).
+		Return(&importedXpubInfo, nil).Once()
+
+	// Act: load targeted scan horizons.
+	props, err := s.storeScanHorizons(t.Context(), []waddrmgr.AccountScope{
+		derived, bucket, importedXpub,
+	})
+
+	// Assert: exactly one horizon is emitted -- the default derived account
+	// -- proving both imported accounts (including the masked-0 xpub) were
+	// withheld and did not clobber the default account at (scope, 0).
+	require.NoError(t, err)
+	require.Len(t, props, 1)
+	require.Equal(t, "default", props[0].AccountName)
+	require.Equal(t, uint32(0), props[0].AccountNumber)
+	require.Equal(
+		t, derivedInfo.ExternalKeyCount, props[0].ExternalKeyCount,
+	)
+	require.Equal(
+		t, derivedInfo.InternalKeyCount, props[0].InternalKeyCount,
+	)
+
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanHorizonsListAccountsKeepsImportedXpub verifies untargeted scan
+// horizon reads skip only the keyless imported-address bucket while preserving
+// a true imported xpub account's lookahead horizon under its non-masked
+// waddrmgr account number.
+func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real store-backed syncer with the default derived account at
+	// number 0 and an imported-xpub account whose Store AccountNumber is
+	// masked but whose waddrmgr account number is distinct.
+	s, mgr := newStoreScanSyncer(t)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	importedNumber := createImportedXpubAccount(
+		t, s, mgr, scope, "imported-xpub",
+	)
+
+	// Act: load all scan horizons from the store.
+	props, err := s.storeScanHorizons(t.Context(), nil)
+
+	// Assert: the imported xpub is preserved with its non-masked derivation
+	// number rather than colliding with the default account at number 0.
+	require.NoError(t, err)
+
+	byName := make(map[string]*waddrmgr.AccountProperties, len(props))
+	for _, prop := range props {
+		byName[prop.AccountName] = prop
+	}
+
+	defaultProps := byName[waddrmgr.DefaultAccountName]
+	require.NotNil(t, defaultProps)
+	require.Equal(t, uint32(waddrmgr.DefaultAccountNum),
+		defaultProps.AccountNumber)
+
+	importedProps := byName["imported-xpub"]
+	require.NotNil(t, importedProps)
+	require.Equal(t, importedNumber, importedProps.AccountNumber)
+	require.Equal(t, scope, importedProps.KeyScope)
+	require.True(t, importedProps.IsWatchOnly)
+}
+
+// newStoreScanSyncer builds a store-backed syncer over a real, freshly created
+// and unlocked waddrmgr-backed wallet. It returns the syncer and the open
+// *waddrmgr.Manager so tests can resolve internal (non-masked) account numbers
+// the same way production identity resolution does. The legacy manager is the
+// identity-aware backend the Store path consults before its own masked
+// lookups, so a real one is required to exercise resolveScanTargets.
+func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
+	t.Helper()
+
+	dbConn, cleanup := setupTestDB(t)
+	t.Cleanup(cleanup)
+
+	const (
+		pubPass  = "pub"
+		privPass = "priv"
+	)
+
+	seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+	rootKey, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	var mgr *waddrmgr.Manager
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		err := waddrmgr.Create(
+			ns, rootKey, []byte(pubPass), []byte(privPass),
+			&chaincfg.SimNetParams, &waddrmgr.FastScryptOptions,
+			time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+
+		mgr, err = waddrmgr.Open(
+			ns, []byte(pubPass), &chaincfg.SimNetParams,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	// Unlock the manager so scoped key managers can derive new accounts.
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		return mgr.Unlock(ns, []byte(privPass))
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	// Create and open a real transaction store so the full targeted-scan
+	// flow (active addresses and watched outputs) can read through the
+	// Store rather than relying on mocks.
+	var txStore *wtxmgr.Store
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		err := wtxmgr.Create(ns)
+		if err != nil {
+			return err
+		}
+
+		txStore, err = wtxmgr.Open(ns, &chaincfg.SimNetParams)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	store := kvdb.NewStore(dbConn, txStore, mgr)
+	s := newSyncer(
+		Config{DB: dbConn, ChainParams: &chaincfg.SimNetParams}, mgr,
+		txStore, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: 0},
+	)
+
+	return s, mgr
+}
+
+// createImportedXpubAccount imports a watch-only xpub account into the real
+// manager-backed store and returns its non-masked internal waddrmgr account
+// number. The Store masks an imported account's public AccountNumber to 0, so
+// tests need the internal number to address the imported account distinctly
+// from the default derived account that also owns number 0.
+func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
+	scope waddrmgr.KeyScope, name string) uint32 {
+
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0xC1}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	_, err = s.store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			Scope:     db.KeyScope(scope),
+			Name:      name,
+			PublicKey: []byte(masterPub.String()),
+		},
+	)
+	require.NoError(t, err)
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var internalNumber uint32
+
+	err = walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		internalNumber, err = scopedMgr.LookupAccount(ns, name)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return internalNumber
+}
+
+// expectImportedScanAddressPage expects the Store scan path to page the
+// reserved imported-address alias for a key scope.
+func expectImportedScanAddressPage(store *walletmock.Store, walletID uint32,
+	scope db.KeyScope, result page.Result[db.AddressInfo, uint32]) {
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == db.DefaultImportedAccountName &&
+				query.Scope == scope &&
+				query.Page.Limit() == scanAddressPageLimit
+		},
+	)).Return(result, nil).Once()
+}
+
+// expectImportedScanAddressPages expects Store scan imports for each supplied
+// scope, returning an empty page for any scope not present in results.
+func expectImportedScanAddressPages(store *walletmock.Store, walletID uint32,
+	scopes []db.KeyScope,
+	results map[db.KeyScope]page.Result[db.AddressInfo, uint32]) {
+
+	for _, scope := range scopes {
+		expectImportedScanAddressPage(
+			store, walletID, scope, results[scope],
+		)
+	}
+}
+
+// TestStoreScanAddresses verifies scan address reads use paginated store
+// address queries.
+func TestStoreScanAddresses(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one stored address script.
+	const walletID uint32 = 15
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "default",
+		KeyScope:    db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "default" &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.Page.Limit() == scanAddressPageLimit
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+	}, nil).Once()
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(accounts), nil,
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The stored script was converted into a scan address.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesIncludesImportedAlias verifies raw imported addresses
+// are loaded from the reserved imported account alias even though ListAccounts
+// does not materialize that pseudo-account.
+func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with one materialized scope and a
+	// raw imported address exposed only through the imported alias.
+	const walletID uint32 = 24
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x24}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "default",
+		KeyScope:    db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "default" &&
+				query.Scope == db.KeyScopeBIP0084
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{}, nil).Once()
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(accounts),
+		map[db.KeyScope]page.Result[db.AddressInfo, uint32]{
+			db.KeyScopeBIP0084: {
+				Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+			},
+		},
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The raw imported address was included in the scan set.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesIncludesRawImportOnlyScope verifies raw imports are
+// watched even when their key scope has no materialized account rows.
+func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer where ListAccounts returns no
+	// account rows, but the default BIP84 raw-import alias has one address.
+	const walletID uint32 = 25
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x25}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo(nil), nil).Once()
+
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(nil),
+		map[db.KeyScope]page.Result[db.AddressInfo, uint32]{
+			db.KeyScopeBIP0084: {
+				Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+			},
+		},
+	)
+
+	// Act: Load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: The raw imported-only scope was probed and included.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesIncludesActiveRawImportScope verifies raw imports are
+// watched for active key scopes even when SQL has no materialized account row
+// for the reserved imported-account alias.
+func TestStoreScanAddressesIncludesActiveRawImportScope(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 27
+
+	store := &walletmock.Store{}
+	mockAddrStore := &bwmock.AddrStore{}
+	scopedMgr := &bwmock.AccountStore{}
+
+	dbConn, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	s := newSyncer(
+		Config{DB: dbConn, ChainParams: &chainParams}, mockAddrStore,
+		nil, &mockTxPublisher{}, syncerStoreConfig{
+			store:    store,
+			walletID: walletID,
+		},
+	)
+
+	customScope := db.KeyScope{Purpose: 1018, Coin: 0}
+	scopedMgr.On("Scope").Return(waddrmgr.KeyScope(customScope)).Once()
+	mockAddrStore.On("ActiveScopedKeyManagers").Return(
+		[]waddrmgr.AccountStore{scopedMgr},
+	).Once()
+
+	addr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x27}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo(nil), nil).Once()
+
+	scopes := storeScanAddressScopes(nil, customScope)
+	expectImportedScanAddressPages(
+		store, walletID, scopes,
+		map[db.KeyScope]page.Result[db.AddressInfo, uint32]{
+			customScope: {
+				Items: []db.AddressInfo{{
+					ScriptPubKey: pkScript,
+					Branch:       waddrmgr.InternalBranch,
+				}},
+			},
+		},
+	)
+
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+	mockAddrStore.AssertExpectations(t)
+	scopedMgr.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesSkipsWrappedMissingImportedScope verifies raw-import
+// scan setup ignores a missing imported-address scope even after the Store path
+// wraps the legacy manager error.
+func TestStoreScanAddressesSkipsWrappedMissingImportedScope(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 26
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo(nil), nil).Once()
+
+	scopes := storeScanAddressScopes(nil)
+	require.NotEmpty(t, scopes)
+
+	missingScope := scopes[0]
+	wrappedMissingScope := fmt.Errorf("list addresses: %w",
+		waddrmgr.ManagerError{ErrorCode: waddrmgr.ErrScopeNotFound})
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == db.DefaultImportedAccountName &&
+				query.Scope == missingScope
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{}, wrappedMissingScope).Once()
+
+	for _, scope := range scopes[1:] {
+		expectImportedScanAddressPage(
+			store, walletID, scope, page.Result[db.AddressInfo, uint32]{},
+		)
+	}
+
+	addrs, err := s.storeScanAddresses(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, addrs)
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanAddressesNonDefaultScope verifies that, for non-default key
+// scopes, only internal-branch (change) addresses are watched, matching the
+// legacy ForEachRelevantActiveAddress filtering.
+func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer with one non-default-scope account
+	// holding one external and one internal address.
+	const walletID uint32 = 23
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	// A purpose outside waddrmgr.DefaultKeyScopes is a non-default scope.
+	nonDefault := db.KeyScope{Purpose: 1017, Coin: 0}
+
+	externalAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x01}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	externalScript, err := txscript.PayToAddrScript(externalAddr)
+	require.NoError(t, err)
+
+	internalAddr, err := address.NewAddressPubKeyHash(
+		bytes.Repeat([]byte{0x02}, 20), &chainParams,
+	)
+	require.NoError(t, err)
+	internalScript, err := txscript.PayToAddrScript(internalAddr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountName: "custom",
+		KeyScope:    nonDefault,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "custom" &&
+				query.Scope == nonDefault
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{
+			{
+				ScriptPubKey: externalScript,
+				Branch:       waddrmgr.ExternalBranch,
+			},
+			{
+				ScriptPubKey: internalScript,
+				Branch:       waddrmgr.InternalBranch,
+			},
+		},
+	}, nil).Once()
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(accounts), nil,
+	)
+
+	// Act: load scan addresses from the store.
+	addrs, err := s.storeScanAddresses(t.Context())
+
+	// Assert: only the internal-branch address survived the filter.
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, internalAddr.EncodeAddress(), addrs[0].EncodeAddress())
+	store.AssertExpectations(t)
+}
+
+// TestStoreScanUnspent verifies scan UTXO reads use the store watch-output API.
+func TestStoreScanUnspent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer and one watch output.
+	const walletID uint32 = 16
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x16}, Index: 2}
+	received := time.Unix(987, 0).UTC()
+	utxos := []db.UtxoInfo{{
+		OutPoint:     outpoint,
+		Amount:       btcutil.Amount(1234),
+		PkScript:     []byte{0x51},
+		Received:     received,
+		FromCoinBase: true,
+		Height:       42,
+	}}
+
+	store.On(
+		"ListOutputsToWatch", mock.Anything, walletID,
+	).Return(utxos, nil).Once()
+
+	// Act: Load scan UTXOs from the store.
+	credits, err := s.storeScanUnspent(t.Context())
+
+	// Assert: The store UTXO row was converted into a recovery credit.
+	require.NoError(t, err)
+	require.Len(t, credits, 1)
+	require.Equal(t, outpoint, credits[0].OutPoint)
+	require.Equal(t, utxos[0].Amount, credits[0].Amount)
+	require.Equal(t, utxos[0].PkScript, credits[0].PkScript)
+	require.Equal(t, received, credits[0].Received)
+	require.Equal(t, int32(42), credits[0].Height)
+	require.True(t, credits[0].FromCoinBase)
+	store.AssertExpectations(t)
+}
+
+// TestLoadWalletScanDataStore verifies wallet scan-data loading uses the store
+// when store wiring is available.
+func TestLoadWalletScanDataStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store-backed syncer with one account, address, and
+	// watch output.
+	const walletID uint32 = 17
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	accounts := []db.AccountInfo{{
+		AccountNumber:    testUint32Ptr(3),
+		AccountName:      "default",
+		ExternalKeyCount: 4,
+		InternalKeyCount: 5,
+		KeyScope:         db.KeyScopeBIP0084,
+	}}
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Twice()
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName == "default" &&
+				query.Scope == db.KeyScopeBIP0084
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
+	}, nil).Once()
+	expectImportedScanAddressPages(
+		store, walletID, storeScanAddressScopes(accounts), nil,
+	)
+
+	store.On(
+		"ListOutputsToWatch", mock.Anything, walletID,
+	).Return([]db.UtxoInfo{{
+		OutPoint: wire.OutPoint{Hash: chainhash.Hash{0x17}, Index: 1},
+		PkScript: pkScript,
+		Height:   db.UnminedHeight,
+	}}, nil).Once()
+
+	// Act: Load wallet scan data through the store-backed path.
+	horizons, addrs, unspent, err := s.loadWalletScanData(t.Context())
+
+	// Assert: All scan initialization groups came from the store.
+	require.NoError(t, err)
+	require.Len(t, horizons, 1)
+	require.Equal(t, uint32(3), horizons[0].AccountNumber)
+	require.Len(t, addrs, 1)
+	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
+	require.Len(t, unspent, 1)
+	require.Equal(t, int32(-1), unspent[0].Height)
 	store.AssertExpectations(t)
 }
 
@@ -1200,6 +2860,30 @@ func TestHandleScanReq(t *testing.T) {
 	scopedMgr.On(
 		"AccountProperties", mock.Anything, uint32(1),
 	).Return(props, nil).Twice()
+
+	accountID := uint32(7)
+	accountNumber := uint32(1)
+	store.On("GetAccount", mock.Anything, mock.MatchedBy(
+		func(query db.GetAccountQuery) bool {
+			return query.WalletID == 0 &&
+				query.Scope == db.KeyScopeBIP0084 &&
+				query.AccountNumber != nil &&
+				*query.AccountNumber == accountNumber &&
+				query.SkipBalance
+		},
+	)).Return(&db.AccountInfo{
+		AccountID:     &accountID,
+		AccountNumber: &accountNumber,
+		KeyScope:      db.KeyScopeBIP0084,
+	}, nil).Once()
+	store.On(
+		"ApplyScanBatch", mock.Anything, mock.MatchedBy(
+			func(params db.ScanBatchParams) bool {
+				return params.WalletID == 0
+			},
+		),
+	).Return(nil).Once()
+
 	// ActiveAccounts might not be called in targeted scan flow.
 	scopedMgr.On("ActiveAccounts").Return([]uint32{1}).Maybe()
 	mockAddrStore.On(
@@ -2949,41 +4633,41 @@ func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestAdvanceChainSyncUsesLegacySyncedToWithStore verifies regular chain sync
-// keeps reading the legacy sync tip while scanBatch still writes through the
-// legacy walletdb path, even when a runtime store is configured.
-func TestAdvanceChainSyncUsesLegacySyncedToWithStore(t *testing.T) {
+// TestAdvanceChainSyncUsesStoreSyncedTo verifies Store-backed synchronization
+// reads the current sync tip from the Store instead of the legacy address
+// manager once scan batches are also committed through the Store.
+func TestAdvanceChainSyncUsesStoreSyncedTo(t *testing.T) {
 	t.Parallel()
 
 	const (
 		walletID   uint32 = 78
-		walletName        = "legacy-sync-tip"
+		walletName        = "store-sync-tip"
 	)
 
 	store := &walletmock.Store{}
-	addrStore := &bwmock.AddrStore{}
 	chain := &bwmock.Chain{}
-	syncedTo := waddrmgr.BlockStamp{
+	syncedTo := &db.Block{
 		Hash:      chainhash.Hash{78},
 		Height:    144,
 		Timestamp: time.Unix(1710003900, 0),
 	}
 
 	s := newSyncer(
-		Config{Name: walletName, Chain: chain}, addrStore, nil, nil,
+		Config{Name: walletName, Chain: chain}, nil, nil, nil,
 		syncerStoreConfig{store: store, walletID: walletID},
 	)
 
 	chain.On("GetBestBlock").Return(
-		&syncedTo.Hash, syncedTo.Height, nil,
+		&syncedTo.Hash, int32(syncedTo.Height), nil,
 	).Once()
-	addrStore.On("SyncedTo").Return(syncedTo).Once()
+	store.On("GetWallet", mock.Anything, walletName).Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
 
 	syncFinished, err := s.advanceChainSync(t.Context())
 	require.NoError(t, err)
 	require.True(t, syncFinished)
 	chain.AssertExpectations(t)
-	addrStore.AssertExpectations(t)
 	store.AssertExpectations(t)
 }
 
@@ -4058,6 +5742,48 @@ func TestAdvanceChainSync_GetBestBlockError(t *testing.T) {
 	require.ErrorIs(t, err, errBestBlock)
 }
 
+// TestAdvanceChainSyncStoreSyncedTip verifies that store-backed advancement
+// reads the synced tip from the Store rather than the legacy addrStore. A nil
+// addrStore is passed so any accidental addrStore.SyncedTo() call would panic.
+func TestAdvanceChainSyncStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer whose Store reports a synced tip at
+	// the chain's best height.
+	const walletID uint32 = 21
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Chain: mockChain, Name: "store-sync"}, nil, nil,
+		&mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	mockChain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(100), nil,
+	).Once()
+	store.On("GetWallet", mock.Anything, "store-sync").Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Hash:   chainhash.Hash{0x01},
+				Height: 100,
+			},
+		}, nil,
+	).Once()
+
+	// Act: advance the chain sync.
+	finished, err := s.advanceChainSync(t.Context())
+
+	// Assert: the store tip matched the chain tip, so we are synced and
+	// the addrStore was never consulted.
+	require.NoError(t, err)
+	require.True(t, finished)
+	require.Equal(t, syncStateSynced, s.syncState())
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
 // TestDispatchScanStrategy_AutoDefaultThreshold verifies threshold=0 branch.
 func TestDispatchScanStrategy_AutoDefaultThreshold(t *testing.T) {
 	t.Parallel()
@@ -4139,4 +5865,195 @@ func TestAdvanceChainSync_LargeGap(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, finished)
 	require.Equal(t, uint32(syncStateSyncing), s.state.Load())
+}
+
+// TestCheckRollbackStoreSyncedTip verifies that checkRollback reads the synced
+// tip from the Store rather than the legacy addrStore. The Store reports a
+// current tip while the legacy addrStore is nil, so any read of the legacy tip
+// would panic; checkRollback must still scan from the Store tip and detect the
+// reorg. This guards a Store-backed backend that does not mirror its tip into
+// the legacy manager, where a stale legacy height could skip a needed rollback.
+func TestCheckRollbackStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a store-backed syncer whose Store reports a current tip at
+	// height 100. The legacy addrStore is nil so any SyncedTo() read panics.
+	const walletID uint32 = 31
+
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{Chain: mockChain, Name: "rollback-store"}, nil, nil,
+		&mockTxPublisher{},
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	// syncedTip reads the current tip (height 100) from the Store.
+	store.On("GetWallet", mock.Anything, "rollback-store").Return(
+		&db.WalletInfo{
+			SyncedTo: &db.Block{
+				Hash:   chainhash.Hash{0x01},
+				Height: 100,
+			},
+		}, nil,
+	).Once()
+
+	// Local hashes for heights 91..100 come from the Store, ascending.
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{
+			Hash:   chainhash.Hash{byte(i)},
+			Height: i,
+		})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   100,
+	}).Return(localBlocks, nil).Once()
+
+	// Remote hashes fork at height 95: 91..95 match, 96..100 differ.
+	remoteHashes := make([]chainhash.Hash, 10)
+	for i := range 10 {
+		h := 91 + i
+		if h > 95 {
+			remoteHashes[i] = chainhash.Hash{0xff}
+		} else {
+			remoteHashes[i] = chainhash.Hash{byte(h)}
+		}
+	}
+
+	mockChain.On(
+		"GetBlockHashes", int64(91), int64(100),
+	).Return(remoteHashes, nil).Once()
+
+	forkHash := chainhash.Hash{byte(95)}
+	header := &wire.BlockHeader{Timestamp: time.Unix(95, 0).UTC()}
+	mockChain.On("GetBlockHeader", &forkHash).Return(header, nil).Once()
+
+	// The rollback is written atomically through the Store to the fork
+	// height plus one (96). RollbackToBlock derives the new sync tip from
+	// the stored fork-point block, so the caller only supplies the rollback
+	// boundary.
+	store.On(
+		"RollbackToBlock", mock.Anything, uint32(96),
+	).Return(nil).Once()
+
+	// Act: run the rollback check.
+	err := s.checkRollback(t.Context())
+
+	// Assert: the reorg was detected from the Store tip and rolled back
+	// without ever consulting the legacy addrStore.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
+// TestScanWithRewindStoreSyncedTip verifies that scanWithRewind decides whether
+// to rewind using the Store tip rather than the legacy addrStore. This guards a
+// Store-backed backend whose stale legacy tip could otherwise make a needed
+// full rescan wrongly conclude there is nothing to rewind.
+func TestScanWithRewindStoreSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rewinds when start is below store tip", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a store-backed syncer whose Store tip is current at
+		// height 100 and a rescan requesting a start at height 50.
+		const walletID uint32 = 32
+
+		store := &walletmock.Store{}
+		s := newSyncer(
+			Config{Name: "rewind-store"}, nil, nil, &mockTxPublisher{},
+			syncerStoreConfig{store: store, walletID: walletID},
+		)
+
+		store.On("GetWallet", mock.Anything, "rewind-store").Return(
+			&db.WalletInfo{
+				SyncedTo: &db.Block{
+					Hash:   chainhash.Hash{0x01},
+					Height: 100,
+				},
+			}, nil,
+		).Once()
+
+		start := waddrmgr.BlockStamp{
+			Height:    50,
+			Hash:      chainhash.Hash{byte(50)},
+			Timestamp: time.Unix(50, 0).UTC(),
+		}
+
+		// Because the Store tip (100) is above the requested start (50),
+		// the manual rewind rolls this wallet's tx state and sync metadata
+		// back to the requested start block.
+		store.On(
+			"RewindWallet", mock.Anything, db.RewindWalletParams{
+				WalletID: walletID,
+				Block: db.Block{
+					Hash:      start.Hash,
+					Height:    uint32(start.Height),
+					Timestamp: start.Timestamp,
+				},
+			},
+		).Return(nil).Once()
+
+		// Act: request a rewind rescan.
+		err := s.scanWithRewind(
+			t.Context(), &scanReq{
+				typ:        scanTypeRewind,
+				startBlock: start,
+			},
+		)
+
+		// Assert: both the rewind decision and write used the Store path.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+	})
+
+	t.Run("no rewind when start is at store tip", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: a store-backed syncer whose Store tip is at height 50
+		// and a rescan requesting a start at the same height.
+		const walletID uint32 = 33
+
+		store := &walletmock.Store{}
+		s := newSyncer(
+			Config{Name: "rewind-noop"}, nil, nil,
+			&mockTxPublisher{},
+			syncerStoreConfig{store: store, walletID: walletID},
+		)
+
+		store.On("GetWallet", mock.Anything, "rewind-noop").Return(
+			&db.WalletInfo{
+				SyncedTo: &db.Block{
+					Hash:   chainhash.Hash{0x01},
+					Height: 50,
+				},
+			}, nil,
+		).Once()
+
+		start := waddrmgr.BlockStamp{
+			Height: 50,
+			Hash:   chainhash.Hash{byte(50)},
+		}
+
+		// Act: request a rewind rescan whose start is not below the
+		// Store tip.
+		err := s.scanWithRewind(
+			t.Context(), &scanReq{
+				typ:        scanTypeRewind,
+				startBlock: start,
+			},
+		)
+
+		// Assert: the decision came from the Store tip, so no rewind write was
+		// issued and the legacy addrStore was never read.
+		require.NoError(t, err)
+		store.AssertExpectations(t)
+		store.AssertNotCalled(
+			t, "RollbackToBlock", mock.Anything, mock.Anything,
+		)
+	})
 }
