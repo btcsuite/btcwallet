@@ -564,6 +564,11 @@ func validateCreateTxParams(params CreateTxParams) error {
 		}
 	}
 
+	if len(params.CreditCandidates) > 0 {
+		return fmt.Errorf("%w: unresolved credit candidates",
+			ErrInvalidParam)
+	}
+
 	// Coinbase transactions only enter wallet history once a block already
 	// anchors them, so CreateTx requires the caller to provide that block up
 	// front instead of storing a fake unmined intermediate row first.
@@ -1765,6 +1770,16 @@ func invalidateRollbackDescendants(ctx context.Context,
 	}
 
 	return nil
+}
+
+// InvalidateRollbackDescendants clears spend edges and fails unmined
+// descendants rooted in disconnected coinbase transactions. Wallet-scoped
+// rewind paths use this without deleting shared block rows.
+func InvalidateRollbackDescendants(ctx context.Context,
+	rootHashesByWallet map[uint32][]chainhash.Hash,
+	ops RollbackToBlockOps) error {
+
+	return invalidateRollbackDescendants(ctx, rootHashesByWallet, ops)
 }
 
 // MarkTxRootsOrphaned rewrites every disconnected coinbase root to the
