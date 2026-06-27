@@ -323,7 +323,7 @@ func TestCreateDerivedAccountSequentialNumbers(t *testing.T) {
 			t.Context(), params, SpendableDeriveFn(),
 		)
 		require.NoError(t, err)
-		require.Equal(t, uint32(i), info.AccountNumber,
+		require.Equal(t, uint32(i), accountNumberValue(t, info.AccountNumber),
 			"account %d should have number %d", i, i)
 	}
 }
@@ -360,7 +360,8 @@ func TestCreateDerivedAccountMaxAccountNumber(t *testing.T) {
 
 	// Assert: the max allocation succeeds, and the next one fails.
 	require.NoError(t, err)
-	require.Equal(t, db.MaxAccountNumber, info.AccountNumber)
+	require.Equal(t, db.MaxAccountNumber,
+		accountNumberValue(t, info.AccountNumber))
 
 	_, err = store.CreateDerivedAccount(
 		t.Context(), db.CreateDerivedAccountParams{
@@ -387,7 +388,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	const workers = 20
 
 	type createResult struct {
-		number uint32
+		number *uint32
 		err    error
 	}
 
@@ -417,7 +418,9 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 				return
 			}
 
-			resultCh <- createResult{number: info.AccountNumber}
+			resultCh <- createResult{
+				number: info.AccountNumber,
+			}
 		}(i)
 	}
 
@@ -427,7 +430,7 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	results := make([]uint32, 0, workers)
 	for result := range resultCh {
 		require.NoError(t, result.err)
-		results = append(results, result.number)
+		results = append(results, accountNumberValue(t, result.number))
 	}
 
 	require.Len(t, results, workers)

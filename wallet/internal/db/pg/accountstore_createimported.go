@@ -81,7 +81,6 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 		ctx, sqlc.CreateImportedAccountParams{
 			ScopeID:     req.ScopeID,
 			AccountName: req.Name,
-			OriginID:    int16(db.ImportedAccount),
 			PublicKey:   req.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(req.MasterFingerprint),
@@ -145,13 +144,13 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	return db.AccountPropsRowToInfo(
-		db.AccountPropsRow[int16, int16]{
+		db.AccountPropsRow[int16]{
+			RowID:             accountID,
 			AccountNumber:     row.AccountNumber,
 			AccountName:       row.AccountName,
-			OriginID:          row.OriginID,
+			IsDerived:         row.IsDerived,
 			ExternalKeyCount:  row.ExternalKeyCount,
 			InternalKeyCount:  row.InternalKeyCount,
-			ImportedKeyCount:  row.ImportedKeyCount,
 			PublicKey:         row.PublicKey,
 			MasterFingerprint: row.MasterFingerprint,
 			IsWatchOnly:       row.WalletIsWatchOnly,
@@ -160,7 +159,6 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 			CoinType:          row.CoinType,
 			InternalTypeID:    row.InternalTypeID,
 			ExternalTypeID:    row.ExternalTypeID,
-			IDToOriginType:    db.IDToAccountOrigin[int16],
 		},
 	)
 }

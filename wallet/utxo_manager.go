@@ -196,8 +196,8 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 
 // buildWalletUtxoFromStore converts one store-level UTXO row into the
 // wallet's public Utxo view. The enrichment fields populated by the
-// store (AccountName, Origin, AddrType, HasScript, IsLocked) supersede
-// the prior per-UTXO follow-up calls to GetAddress / ListLeasedOutputs.
+// store (AccountName, AddrType, HasScript, IsLocked) supersede the prior
+// per-UTXO follow-up calls to GetAddress / ListLeasedOutputs.
 //
 // This is a pure mapper: the store only returns wallet-owned, enrichable
 // rows, so a row whose script cannot be converted to an address is an
@@ -205,12 +205,11 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 // than a silent skip. Account filtering is the caller's responsibility
 // and is applied before this conversion.
 //
-// Spendability follows ADR 0012 (wallet-level watch-only invariant):
-// a UTXO is spendable when the wallet is not watch-only AND the owning
-// account is not imported. Imported-account outputs are unspendable
-// even when the wallet holds private-key material for them — matching
-// the legacy waddrmgr.AddressDetails policy that this routing path
-// replaces.
+// Spendability follows ADR 0012 (wallet-level watch-only invariant) unless
+// the store supplies a backend-specific override. SQL stores leave the
+// override nil; kvdb uses it for grandfathered mixed-mode rows that can still
+// be non-spendable inside an otherwise spendable legacy wallet. Coinbase
+// maturity remains a final per-output adjustment.
 func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 	currentHeight int32) (*Utxo, error) {
 
@@ -232,8 +231,10 @@ func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 		return nil, err
 	}
 
-	spendable := !w.IsWatchOnly() &&
-		info.Origin != db.ImportedAccount
+	spendable := !w.IsWatchOnly()
+	if info.Spendable != nil {
+		spendable = *info.Spendable
+	}
 
 	if info.FromCoinBase {
 		maturity := w.cfg.ChainParams.CoinbaseMaturity

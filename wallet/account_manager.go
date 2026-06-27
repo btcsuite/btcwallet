@@ -194,7 +194,7 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	if info.Origin == db.DerivedAccount {
+	if !info.IsImported {
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
@@ -217,18 +217,9 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		pubKey = []byte(props.AccountPubKey.String())
 	}
 
-	origin := db.DerivedAccount
-	if isImported {
-		origin = db.ImportedAccount
-	}
-
-	// db.AccountInfo masks AccountNumber to 0 for imported accounts
-	// (see data_types.go godoc): the waddrmgr per-scope counter is
-	// not part of the contract for imported rows. Internal callers
-	// that need the real number look it up via waddrmgr separately.
-	accountNumber := props.AccountNumber
-	if origin == db.ImportedAccount {
-		accountNumber = 0
+	var accountNumber *uint32
+	if !isImported {
+		accountNumber = &props.AccountNumber
 	}
 
 	isWatchOnly := walletWatchOnly
@@ -260,7 +251,7 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	return db.AccountInfo{
 		AccountNumber:        accountNumber,
 		AccountName:          props.AccountName,
-		Origin:               origin,
+		IsImported:           isImported,
 		ExternalKeyCount:     props.ExternalKeyCount,
 		InternalKeyCount:     props.InternalKeyCount,
 		ImportedKeyCount:     props.ImportedKeyCount,
@@ -296,7 +287,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	}
 
 	for i := range infos {
-		if infos[i].Origin == db.DerivedAccount {
+		if !infos[i].IsImported {
 			infos[i].MasterKeyFingerprint = w.masterFingerprint
 		}
 	}
@@ -374,7 +365,7 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	// fingerprint there. Inject the wallet-cached value (parsed from
 	// the master HD pubkey at Manager.Load time) so external consumers
 	// see the canonical BIP32 root fingerprint.
-	if info.Origin == db.DerivedAccount {
+	if !info.IsImported {
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 

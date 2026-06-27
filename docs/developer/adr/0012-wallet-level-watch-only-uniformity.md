@@ -70,28 +70,20 @@ The legacy JSON-RPC contract (`getbalance`, `listaccounts`,
 external consumers do not break. Wallet-internal callers migrate to the
 single-bucket shape.
 
-### Imported addresses land in a reserved wallet-level bucket
+### Imported addresses use a reserved compatibility alias
+
+ADR 0013 supersedes the earlier stored SQL imported-address bucket shape. The
+reserved name `imported` remains as a compatibility alias for raw imported
+address APIs, but normalized SQL stores raw imported addresses directly under the
+wallet and scope without materializing an account row.
 
 An imported address — with or without private-key material — is never
-treated as a member of a derived (HD) account. The store holds every
-imported address in a single per-scope, wallet-level **imported bucket**:
-the account named `imported` (`db.DefaultImportedAccountName`), keyed by the
-address's `(wallet_id, purpose, coin_type)` only. The bucket is internal
-infrastructure, not an imported xpub account — it is **keyless** (no
-account-level public key, no master fingerprint, and no `account_secrets`
-row) and merely holds individually-imported address rows. Each imported
-address row carries its own secret material when the wallet is spendable.
+treated as a member of a wallet-derived (HD) account. The alias is reserved —
+`CreateDerivedAccount` and `CreateImportedAccount` both reject
+`DefaultImportedAccountName` with `ErrReservedAccountName`, so neither a derived
+account nor a true imported xpub account can occupy the compatibility name.
 
-The bucket is materialized lazily: the first import into a scope
-auto-creates it inside the same write transaction, and later imports reuse
-it. The bucket name is **reserved** — `CreateDerivedAccount` and
-`CreateImportedAccount` both reject `DefaultImportedAccountName` with
-`ErrReservedAccountName`, so neither a derived account nor a true imported
-xpub account can occupy the slot, and an imported address can never be
-retargeted into a derived account.
-
-Because the bucket is keyless, the spendable-wallet invariant does not apply
-to the bucket account itself; it applies **per imported address**:
+The spendable-wallet invariant applies **per imported address**:
 
 - On a spendable wallet, an imported address must carry its own
   `encrypted_priv_key`. A public-only or script-only address import is
@@ -102,7 +94,7 @@ to the bucket account itself; it applies **per imported address**:
 
 Derived addresses are unaffected: they inherit their key material from the
 account xpub/xpriv and are reached through `AccountKeyFromParams` (the
-caller-supplied account name), never through the imported bucket.
+caller-supplied account name), never through the raw-import compatibility alias.
 
 ### P2A / anchor outputs are transaction state, not imports
 

@@ -1300,7 +1300,6 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 	}).Return(&db.AddressInfo{
 		ScriptPubKey: pkScript99,
 		AddrType:     db.AddressType(99),
-		Origin:       db.DerivedAccount,
 	}, nil).Once()
 
 	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, 10000)

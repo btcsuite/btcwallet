@@ -53,7 +53,7 @@ func (p accountGetQueries) GetAccountByNumber(ctx context.Context,
 			WalletID:      int64(query.WalletID),
 			Purpose:       int64(query.Scope.Purpose),
 			CoinType:      int64(query.Scope.Coin),
-			AccountNumber: db.NullableUint32ToSQLInt64(query.AccountNumber),
+			AccountNumber: int64(*query.AccountNumber),
 		},
 	)
 	if err != nil {

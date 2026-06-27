@@ -30,14 +30,29 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN derived_accounts AS dacct ON acc.id = dacct.account_id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
+    AND a.wallet_id = $2
     AND ks.wallet_id = $2
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
+    AND (
+        (a.is_derived = FALSE AND da.address_id IS NULL)
+        OR (
+            a.is_derived
+            AND da.address_id IS NOT NULL
+            AND acc.id IS NOT NULL
+            AND (
+                (acc.is_derived AND dacct.account_number IS NOT NULL)
+                OR (acc.is_derived = FALSE AND dacct.account_number IS NULL)
+            )
+        )
+    )
     AND (
         $3::BIGINT IS NULL
         OR ks.purpose = $3::BIGINT
@@ -48,11 +63,18 @@ WHERE
     )
     AND (
         $5::BIGINT IS NULL
-        OR acc.account_number = $5::BIGINT
+        OR (
+            acc.is_derived
+            AND dacct.account_number = $5::BIGINT
+        )
     )
     AND (
         $6::TEXT IS NULL
         OR acc.account_name = $6::TEXT
+        OR (
+            $6::TEXT = 'imported'
+            AND a.is_derived = FALSE
+        )
     )
     AND (
         $7::INTEGER IS NULL
@@ -115,8 +137,8 @@ type BalanceRow struct {
 // How:
 //   - Starts from wallet-scoped unspent outputs and rejoins transactions plus
 //     wallet_sync_states for confirmation math.
-//   - Rejoins addresses -> accounts -> key_scopes so ownership validation and
-//     optional account filtering stay in one read.
+//   - Rejoins addresses for ownership validation and key scope filters; account
+//     filters use derived_addresses/accounts when requested.
 //   - Applies optional confirmation-range and coinbase-maturity policy directly
 //     inside the aggregate query so callers can request factual or policy-shaped
 //     balance reads through one public method.
@@ -226,11 +248,15 @@ SELECT
     t.is_coinbase,
     t.block_height,
     -- Enrichment columns derived from the ownership joins below.
-    acc.account_name, -- owning account
-    acc.origin_id, -- derived vs imported account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.is_derived AS address_is_derived,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.is_derived AS account_is_derived,
+    dacct.account_number,
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    coalesce(acc.account_name, 'imported') AS account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -246,12 +272,15 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN derived_accounts AS dacct ON acc.id = dacct.account_id
 LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
 LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 WHERE
     t.wallet_id = $2
+    AND a.wallet_id = $2
     AND ks.wallet_id = $2
     AND t.tx_hash = $3
     AND u.output_index = $4
@@ -267,20 +296,24 @@ type GetUtxoByOutpointParams struct {
 }
 
 type GetUtxoByOutpointRow struct {
-	TxHash       []byte
-	OutputIndex  int32
-	Amount       int64
-	ScriptPubKey []byte
-	ReceivedTime time.Time
-	IsCoinbase   bool
-	BlockHeight  sql.NullInt32
-	AccountName  string
-	OriginID     int16
-	TypeID       int16
-	Purpose      int64
-	CoinType     int64
-	HasScript    bool
-	IsLocked     bool
+	TxHash           []byte
+	OutputIndex      int32
+	Amount           int64
+	ScriptPubKey     []byte
+	ReceivedTime     time.Time
+	IsCoinbase       bool
+	BlockHeight      sql.NullInt32
+	AddressIsDerived bool
+	DerivedAddressID sql.NullInt64
+	AccountID        sql.NullInt64
+	AccountIsDerived sql.NullBool
+	AccountNumber    sql.NullInt64
+	TypeID           int16
+	Purpose          int64
+	CoinType         int64
+	AccountName      string
+	HasScript        bool
+	IsLocked         bool
 }
 
 // Retrieves a single unspent UTXO by its outpoint.
@@ -288,8 +321,8 @@ type GetUtxoByOutpointRow struct {
 // How:
 //   - Joins utxos -> transactions on `tx_id` to resolve the outpoint
 //     from tx hash plus output index.
-//   - Joins addresses -> accounts -> key_scopes so the read path reasserts that
-//     the credited address belongs to the requested wallet.
+//   - Joins addresses directly for wallet ownership and optional account
+//     metadata through derived_addresses.
 //   - Returns leased and unleased outputs alike because leasing affects coin
 //     selection, not whether the UTXO exists.
 //   - Treats outputs from unmined `pending` and `published` parent transactions
@@ -314,11 +347,15 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.ReceivedTime,
 		&i.IsCoinbase,
 		&i.BlockHeight,
-		&i.AccountName,
-		&i.OriginID,
+		&i.AddressIsDerived,
+		&i.DerivedAddressID,
+		&i.AccountID,
+		&i.AccountIsDerived,
+		&i.AccountNumber,
 		&i.TypeID,
 		&i.Purpose,
 		&i.CoinType,
+		&i.AccountName,
 		&i.HasScript,
 		&i.IsLocked,
 	)
@@ -330,11 +367,9 @@ SELECT u.id
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 WHERE
     t.wallet_id = $1
-    AND ks.wallet_id = $1
+    AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
     AND u.spent_by_tx_id IS NULL
@@ -354,8 +389,8 @@ type GetUtxoIDByOutpointParams struct {
 //     network outpoint (`tx_hash`, `output_index`) instead of the internal row ID.
 //   - Restricts the result to unspent outputs whose parent transaction is still
 //     `pending` or `published`.
-//   - Rejoins addresses -> accounts -> key_scopes so helper lookups do not return
-//     rows whose credited address does not actually belong to the wallet.
+//   - Rejoins addresses so helper lookups do not return rows whose credited
+//     address does not actually belong to the wallet.
 //   - Exists separately from GetUtxoByOutpoint because mutation helpers often
 //     need the stable internal UTXO row ID without reading the full public UTXO
 //     payload.
@@ -456,8 +491,6 @@ INSERT INTO utxos (
     $2 AS amount,
     a.id AS address_id
 FROM addresses AS a
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 CROSS JOIN transactions AS t
 WHERE
     t.id = $3
@@ -465,7 +498,7 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND
     a.id = $5
-    AND ks.wallet_id = $4
+    AND a.wallet_id = $4
 RETURNING id
 `
 
@@ -482,8 +515,8 @@ type InsertUtxoParams struct {
 // How:
 //   - Writes only the utxos table using already-resolved transaction and address
 //     IDs.
-//   - Rejoins addresses -> accounts -> key_scopes so the insert only succeeds if
-//     the provided address ID belongs to the same wallet.
+//   - Rejoins addresses so the insert only succeeds if the provided address ID
+//     belongs to the same wallet.
 //
 // Performance:
 //   - Single-row insert. The main cost is the wallet-ownership validation join
@@ -564,11 +597,15 @@ SELECT
     t.is_coinbase,
     t.block_height,
     -- Enrichment columns derived from the ownership joins below.
-    acc.account_name, -- owning account
-    acc.origin_id, -- derived vs imported account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.is_derived AS address_is_derived,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.is_derived AS account_is_derived,
+    dacct.account_number,
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    coalesce(acc.account_name, 'imported') AS account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -584,13 +621,16 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN derived_accounts AS dacct ON da.account_id = dacct.account_id
 LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
 LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = $2
+    AND a.wallet_id = $2
     AND ks.wallet_id = $2
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
@@ -604,11 +644,18 @@ WHERE
     )
     AND (
         $5::BIGINT IS NULL
-        OR acc.account_number = $5::BIGINT
+        OR (
+            acc.is_derived
+            AND dacct.account_number = $5::BIGINT
+        )
     )
     AND (
         $6::TEXT IS NULL
         OR acc.account_name = $6::TEXT
+        OR (
+            $6::TEXT = 'imported'
+            AND a.is_derived = FALSE
+        )
     )
     AND (
         $7::INTEGER IS NULL
@@ -648,20 +695,24 @@ type ListUtxosParams struct {
 }
 
 type ListUtxosRow struct {
-	TxHash       []byte
-	OutputIndex  int32
-	Amount       int64
-	ScriptPubKey []byte
-	ReceivedTime time.Time
-	IsCoinbase   bool
-	BlockHeight  sql.NullInt32
-	AccountName  string
-	OriginID     int16
-	TypeID       int16
-	Purpose      int64
-	CoinType     int64
-	HasScript    bool
-	IsLocked     bool
+	TxHash           []byte
+	OutputIndex      int32
+	Amount           int64
+	ScriptPubKey     []byte
+	ReceivedTime     time.Time
+	IsCoinbase       bool
+	BlockHeight      sql.NullInt32
+	AddressIsDerived bool
+	DerivedAddressID sql.NullInt64
+	AccountID        sql.NullInt64
+	AccountIsDerived sql.NullBool
+	AccountNumber    sql.NullInt64
+	TypeID           int16
+	Purpose          int64
+	CoinType         int64
+	AccountName      string
+	HasScript        bool
+	IsLocked         bool
 }
 
 // Lists unspent UTXOs that match the provided filters.
@@ -669,9 +720,8 @@ type ListUtxosRow struct {
 // How:
 //   - Starts from utxos and joins transactions for tx metadata plus
 //     wallet_sync_states for confirmation math.
-//   - Joins addresses to return the required script_pub_key, then reuses
-//     addresses -> accounts -> key_scopes so account filtering and wallet
-//     ownership checks happen in the same read.
+//   - Joins addresses to return the required script_pub_key and wallet ownership,
+//     then uses derived_addresses/accounts for optional account filters.
 //   - Returns leased outputs too because the API models leases separately from
 //     UTXO existence.
 //   - Includes outputs whose parent transaction is still in `pending` or
@@ -711,11 +761,15 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.ReceivedTime,
 			&i.IsCoinbase,
 			&i.BlockHeight,
-			&i.AccountName,
-			&i.OriginID,
+			&i.AddressIsDerived,
+			&i.DerivedAddressID,
+			&i.AccountID,
+			&i.AccountIsDerived,
+			&i.AccountNumber,
 			&i.TypeID,
 			&i.Purpose,
 			&i.CoinType,
+			&i.AccountName,
 			&i.HasScript,
 			&i.IsLocked,
 		); err != nil {

@@ -43,10 +43,12 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), info.ID)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, "addr", info.AccountName)
-	require.Equal(t, props.AccountNumber, info.AccountID)
+	require.Nil(t, info.AccountID)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, props.AccountNumber, *info.AccountNumber)
 	require.NotEmpty(t, info.ScriptPubKey)
 	require.NotEmpty(t, info.PubKey)
 
@@ -72,6 +74,47 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	require.Equal(t, *info, result.Items[0])
+}
+
+// TestAddressStoreImportedXpubChildHasNoAccountNumber verifies that kvdb
+// matches SQL's imported-xpub contract: the address is imported key material,
+// but its account number is not exposed as a wallet-derived BIP44 account
+// number.
+func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+	accountName := "imported-xpub-address"
+	createImportedXpubAccount(
+		t, store, waddrmgr.KeyScopeBIP0084, accountName, 0xA5,
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    0,
+			AccountName: accountName,
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
+	require.Equal(t, accountName, info.AccountName)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.IsImported)
+	require.Nil(t, got.AccountNumber)
+	require.Equal(t, accountName, got.AccountName)
 }
 
 // TestAddressStoreNewDerivedAddressWatchOnlyWallet verifies that derived
@@ -212,7 +255,7 @@ func TestAddressStoreImportedPublicKeyIsWatchOnly(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, pkScript, info.ScriptPubKey)
 	require.Equal(t, pubKeyBytes, info.PubKey)
@@ -558,7 +601,7 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.TaprootPubKey, info.AddrType)
 	require.True(t, info.HasScript)
 	require.Equal(t, pkScript, info.ScriptPubKey)

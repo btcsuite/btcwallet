@@ -80,13 +80,8 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
-			ScopeID: scopeID,
-			AccountNumber: sql.NullInt64{
-				Int64: accountNumber,
-				Valid: true,
-			},
+			ScopeID:     scopeID,
 			AccountName: name,
-			OriginID:    int64(db.DerivedAccount),
 			PublicKey:   derived.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(derived.MasterKeyFingerprint),
@@ -96,6 +91,18 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	)
 	if err != nil {
 		return db.CreateDerivedAccountRow{}, err
+	}
+
+	storedNumber, err := o.q.CreateDerivedAccountNumber(
+		ctx, sqlc.CreateDerivedAccountNumberParams{
+			AccountID:     row.ID,
+			AccountNumber: accountNumber,
+		},
+	)
+	if err != nil {
+		return db.CreateDerivedAccountRow{}, fmt.Errorf(
+			"create derived account number: %w", err,
+		)
 	}
 
 	if len(derived.EncryptedPrivateKey) > 0 {
@@ -113,7 +120,11 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	}
 
 	return db.CreateDerivedAccountRow{
-		AccountNumber: row.AccountNumber,
-		CreatedAt:     row.CreatedAt,
+		AccountID: row.ID,
+		AccountNumber: sql.NullInt64{
+			Int64: storedNumber,
+			Valid: true,
+		},
+		CreatedAt: row.CreatedAt,
 	}, nil
 }

@@ -42,11 +42,11 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = addrType
-	info.Origin = db.DerivedAccount
 	info.AccountName = accountName
-	info.AccountNumber = 0
+	info.AccountNumber = testUint32Ptr(0)
 	info.KeyScope = db.KeyScope(scope)
 	info.MasterKeyFingerprint = fingerprint
+	info.HasDerivationPath = true
 	info.Index = index
 
 	if change {
@@ -69,7 +69,7 @@ func importedPubKeyAddressInfoFromAddr(t *testing.T, addr address.Address,
 
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = db.WitnessPubKey
-	info.Origin = db.ImportedAccount
+	info.IsImported = true
 	info.AccountName = db.DefaultImportedAccountName
 	info.KeyScope = db.KeyScope(scope)
 	info.IsWatchOnly = true
@@ -150,11 +150,6 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	origin := db.DerivedAccount
-	if imported {
-		origin = db.ImportedAccount
-	}
-
 	var branch uint32
 	if internal {
 		branch = 1
@@ -166,12 +161,17 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	}
 
 	storeInfo := &db.AddressInfo{
-		ScriptPubKey: pkScript,
-		AddrType:     addrType,
-		Origin:       origin,
-		Branch:       branch,
-		PubKey:       pubKeyBytes,
+		ScriptPubKey:      pkScript,
+		AddrType:          addrType,
+		IsImported:        imported,
+		HasDerivationPath: !imported,
+		Branch:            branch,
+		PubKey:            pubKeyBytes,
 	}
+	if !imported {
+		storeInfo.AccountNumber = testUint32Ptr(0)
+	}
+
 	if keyScope != (waddrmgr.KeyScope{}) {
 		storeInfo.KeyScope = db.KeyScope(keyScope)
 		storeInfo.MasterKeyFingerprint = 1
@@ -197,9 +197,6 @@ func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
 	}
 }
 
-// TestNewAddress tests the NewAddress method, ensuring it can generate
-// various address types for different accounts and correctly handles both
-// internal and external address generation.
 // expectStoreAddressInfo configures mock expectations for address lookup.
 func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	addr address.Address, info *db.AddressInfo) {
@@ -218,6 +215,9 @@ func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	).Return(info, nil).Once()
 }
 
+// TestNewAddress tests the NewAddress method, ensuring it can generate
+// various address types for different accounts and correctly handles both
+// internal and external address generation.
 func TestNewAddress(t *testing.T) {
 	t.Parallel()
 
@@ -376,6 +376,34 @@ func TestGetUnusedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, firstAddr.String(), unusedAddr.String())
+
+	importedXpubAddr, _ := address.NewAddressWitnessPubKeyHash(
+		[]byte{
+			31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+			41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+		}, w.cfg.ChainParams,
+	)
+	importedXpubInfo := derivedAddressInfoFromAddr(
+		t, importedXpubAddr, db.WitnessPubKey, "imported-xpub", scope,
+		false, 0, 0, nil,
+	)
+	importedXpubInfo.IsImported = true
+	importedXpubInfo.AccountNumber = nil
+
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: "imported-xpub",
+			Scope:       db.KeyScope(scope),
+			Page:        req,
+		},
+	).Return(addressIter(*importedXpubInfo)).Once()
+	unusedImportedAddr, err := w.GetUnusedAddress(
+		t.Context(), "imported-xpub", waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, importedXpubAddr.String(), unusedImportedAddr.String())
 
 	usedFirstAddr := derivedAddressInfoFromAddr(
 		t, firstAddr, db.WitnessPubKey, "default", scope, false,
@@ -783,7 +811,7 @@ func TestImportTaprootScript(t *testing.T) {
 			EncryptedScript: encryptedScript,
 		}).Return(&db.AddressInfo{
 		AddrType:     db.TaprootPubKey,
-		Origin:       db.ImportedAccount,
+		IsImported:   true,
 		AccountName:  db.DefaultImportedAccountName,
 		KeyScope:     db.KeyScope(waddrmgr.KeyScopeBIP0086),
 		ScriptPubKey: pkScript,

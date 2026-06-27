@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
@@ -13,6 +14,10 @@ import (
 )
 
 var _ db.AddressStore = (*Store)(nil)
+
+// errUnknownAddressRowType is returned when an address row has an
+// unrecognized concrete type.
+var errUnknownAddressRowType = errors.New("unknown address row type")
 
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
@@ -172,10 +177,11 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		sqlc.GetAccountByWalletScopeAndNameRow,
 		db.AccountLookupKey,
 		sqlc.CreateDerivedAddressRow]{
-		GetAccount:           getAccountFromKey(s.queries),
+		GetAccount:           getAccountFromKey,
 		AccountParams:        db.AccountKeyFromParams,
 		GetAccountID:         derivedAddressGetAccountID,
 		GetAccountNumber:     derivedAddressGetAccountNumber,
+		GetAccountIsDerived:  derivedAddressGetAccountIsDerived,
 		GetWalletWatchOnly:   derivedAddressGetWalletWatchOnly,
 		GetAccountAddrSchema: derivedAddressGetAccountAddrSchema,
 		GetAccountPubKey:     derivedAddressGetAccountPubKey,
@@ -196,30 +202,93 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 func (s *Store) NewImportedAddress(ctx context.Context,
 	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
-	adapters := db.ImportedAddressAdapters[
-		*sqlc.Queries,
-		sqlc.GetAccountByWalletScopeAndNameRow,
-		db.AccountLookupKey,
-		sqlc.CreateImportedAddressParams,
-		sqlc.CreateImportedAddressRow,
-		sqlc.InsertAddressSecretParams]{
-		GetAccount:           getAccountFromKey(s.queries),
-		AccountParams:        db.AccountKeyFromImportedParams,
-		CreateBucketAccount:  createImportedBucketAccount,
-		GetAccountID:         importedAddressGetAccountID,
-		GetWalletWatchOnly:   importedAddressGetWalletWatchOnly,
-		CreateAddr:           createImportedAddress,
-		CreateParams:         createImportedAddressParams,
-		InsertSecret:         insertAddressSecret,
-		SecretParams:         insertAddressSecretParams,
-		RowID:                importedAddressRowID,
-		RowCreatedAt:         importedAddressRowCreatedAt,
-		ApplyAccountMetadata: applyAddressAccountMetadata,
+	err := params.ValidateBasic()
+	if err != nil {
+		return nil, err
 	}
 
-	return db.NewImportedAddressWithTx(
-		ctx, params, s.execWrite, adapters,
+	var info *db.AddressInfo
+
+	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		created, err := s.createImportedAddress(ctx, qtx, params)
+		if err != nil {
+			return err
+		}
+
+		info = created
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// createImportedAddress performs the imported-address write within an existing
+// transaction and returns the resulting address info.
+func (s *Store) createImportedAddress(ctx context.Context, qtx *sqlc.Queries,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	walletIsWatchOnly, err := getWalletWatchOnly(ctx, qtx, params.WalletID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.RequireAddressPrivKeyOnSpendable(
+		params.WalletID, walletIsWatchOnly, params.HasPrivateKey(),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	scopeID, _, err := ensureKeyScope(
+		ctx, qtx, params.WalletID, params.Scope, nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ensure scope: %w", err)
+	}
+
+	row, err := qtx.CreateImportedAddress(
+		ctx, createImportedAddressParams(scopeID, params),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create imported address: %w", err)
+	}
+
+	if params.HasSecretMaterial() {
+		err = qtx.InsertAddressSecret(
+			ctx, insertAddressSecretParams(row.ID, params),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert address secret: %w", err)
+		}
+	}
+
+	addrID, err := db.Int64ToUint32(row.ID)
+	if err != nil {
+		return nil, fmt.Errorf("address ID: %w", err)
+	}
+
+	return &db.AddressInfo{
+		ID:           addrID,
+		AccountName:  db.DefaultImportedAccountName,
+		KeyScope:     params.Scope,
+		AddrType:     params.AddressType,
+		CreatedAt:    row.CreatedAt,
+		IsImported:   true,
+		ScriptPubKey: params.ScriptPubKey,
+		PubKey:       params.PubKey,
+		HasScript:    params.HasScript(),
+		IsWatchOnly:  walletIsWatchOnly,
+		IsUsed:       false,
+	}, nil
 }
 
 // getAccountFromKey returns a helper to look up accounts by key.
@@ -260,33 +329,51 @@ func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
 	context.Context, int64, int64, db.AddressType, uint32, uint32, []byte,
 	[]byte) (sqlc.CreateDerivedAddressRow, error) {
 
-	return db.DerivedAddressCreateAddr(
-		qtx.CreateDerivedAddress, buildDerivedAddressParams,
-	)
+	return func(ctx context.Context, walletID int64, accountID int64,
+		addrType db.AddressType, branch uint32, index uint32,
+		scriptPubKey []byte, pubKey []byte) (sqlc.CreateDerivedAddressRow,
+		error) {
+
+		row, err := qtx.CreateDerivedAddress(
+			ctx, buildDerivedAddressParams(
+				walletID, accountID, addrType, scriptPubKey, pubKey,
+			),
+		)
+		if err != nil {
+			return sqlc.CreateDerivedAddressRow{}, err
+		}
+
+		err = qtx.CreateDerivedAddressPath(
+			ctx, sqlc.CreateDerivedAddressPathParams{
+				AddressID:     row.ID,
+				AccountID:     accountID,
+				AddressBranch: int64(branch),
+				AddressIndex:  int64(index),
+			},
+		)
+		if err != nil {
+			return sqlc.CreateDerivedAddressRow{}, fmt.Errorf(
+				"create derived address path: %w", err,
+			)
+		}
+
+		return row, nil
+	}
 }
 
 // buildDerivedAddressParams maps common derived-address inputs to SQLite sqlc
 // insert params.
 func buildDerivedAddressParams(walletID int64, accountID int64,
-	addrType db.AddressType, branch uint32, index uint32,
-	scriptPubKey []byte,
-	pubKey []byte) (sqlc.CreateDerivedAddressParams, error) {
+	addrType db.AddressType, scriptPubKey []byte,
+	pubKey []byte) sqlc.CreateDerivedAddressParams {
 
 	return sqlc.CreateDerivedAddressParams{
 		WalletID:     walletID,
 		AccountID:    accountID,
 		ScriptPubKey: scriptPubKey,
-		TypeID:       int64(addrType),
-		AddressBranch: sql.NullInt64{
-			Int64: int64(branch),
-			Valid: true,
-		},
-		AddressIndex: sql.NullInt64{
-			Int64: int64(index),
-			Valid: true,
-		},
-		PubKey: pubKey,
-	}, nil
+		ScriptTypeID: int64(addrType),
+		PubKey:       pubKey,
+	}
 }
 
 // derivedAddressRowID returns the created address ID.
@@ -303,90 +390,17 @@ func derivedAddressRowCreatedAt(
 	return row.CreatedAt
 }
 
-// createImportedBucketAccount materializes the keyless wallet-level imported
-// bucket account for the import's scope inside the active write transaction
-// and returns the freshly looked-up account row. The bucket carries empty
-// account-level key material (no public key, no master fingerprint) and no
-// account_secrets row: it is a holder for individually-imported addresses, not
-// an imported xpub account. The key scope is created on demand using its
-// default address schema if it does not already exist.
-//
-// Materialization is an idempotent get-or-create: the insert uses ON CONFLICT
-// DO NOTHING so concurrent first-imports into the same scope cannot collide on
-// the (scope_id, account_name) unique index, and the row is always re-read
-// through GetAccountByWalletScopeAndName afterwards. The re-read both yields a
-// row whose shape matches the existing-bucket lookup path exactly and returns
-// the surviving bucket when this call was the no-op loser of a race.
-func createImportedBucketAccount(ctx context.Context, qtx *sqlc.Queries,
-	params db.NewImportedAddressParams) (
-	sqlc.GetAccountByWalletScopeAndNameRow, error) {
-
-	var zero sqlc.GetAccountByWalletScopeAndNameRow
-
-	scopeID, _, err := ensureKeyScope(
-		ctx, qtx, params.WalletID, params.Scope, nil,
-	)
-	if err != nil {
-		return zero, fmt.Errorf("ensure scope: %w", err)
-	}
-
-	// ON CONFLICT DO NOTHING makes this a get-or-create: a concurrent
-	// first-import that already materialized the bucket is a no-op here,
-	// and the re-read below returns the existing row.
-	err = qtx.CreateImportedBucketAccount(
-		ctx, sqlc.CreateImportedBucketAccountParams{
-			ScopeID:     scopeID,
-			AccountName: db.DefaultImportedAccountName,
-			OriginID:    int64(db.ImportedAccount),
-		},
-	)
-	if err != nil {
-		return zero, fmt.Errorf("create bucket account: %w", err)
-	}
-
-	return getAccountFromKey(qtx)(
-		ctx, db.AccountKeyFromImportedParams(params),
-	)
-}
-
-// createImportedAddress returns the imported address insert helper.
-func createImportedAddress(qtx *sqlc.Queries) func(context.Context,
-	sqlc.CreateImportedAddressParams) (
-	sqlc.CreateImportedAddressRow, error) {
-
-	return qtx.CreateImportedAddress
-}
-
-// insertAddressSecret returns the secret insert helper.
-func insertAddressSecret(qtx *sqlc.Queries) func(context.Context,
-	sqlc.InsertAddressSecretParams) error {
-
-	return qtx.InsertAddressSecret
-}
-
 // createImportedAddressParams maps imported params to sqlc params.
-func createImportedAddressParams(walletID int64, accountID int64,
+func createImportedAddressParams(scopeID int64,
 	params db.NewImportedAddressParams) sqlc.CreateImportedAddressParams {
 
 	return sqlc.CreateImportedAddressParams{
-		WalletID:     walletID,
-		AccountID:    accountID,
+		WalletID:     int64(params.WalletID),
 		ScriptPubKey: params.ScriptPubKey,
-		TypeID:       int64(params.AddressType),
+		ScriptTypeID: int64(params.AddressType),
 		PubKey:       params.PubKey,
+		ScopeID:      scopeID,
 	}
-}
-
-// importedAddressRowID returns the created address ID.
-func importedAddressRowID(row sqlc.CreateImportedAddressRow) int64 {
-	return row.ID
-}
-
-// importedAddressRowCreatedAt returns the CreatedAt timestamp.
-func importedAddressRowCreatedAt(
-	row sqlc.CreateImportedAddressRow) time.Time {
-
-	return row.CreatedAt
 }
 
 // applyAddressAccountMetadata copies account metadata from the account lookup
@@ -397,6 +411,7 @@ func applyAddressAccountMetadata(info *db.AddressInfo,
 	return db.ApplyAddressAccountMetadata(
 		info, row.AccountNumber, row.AccountName,
 		row.MasterFingerprint, row.Purpose, row.CoinType,
+		!row.IsDerived,
 	)
 }
 
@@ -433,47 +448,109 @@ func addressSecretRowToSecret(
 type addressInfoRow interface {
 	sqlc.GetAddressByScriptPubKeyRow |
 		sqlc.ListAddressesByAccountRow |
-		sqlc.ListAddressesByScriptPubKeysRow
+		sqlc.ListAddressesByScriptPubKeysRow |
+		sqlc.ListRawImportedAddressesRow
 }
 
 // addressRowToInfo converts a SQLite address row to an AddressInfo struct.
 func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
-	// Direct conversion works only because all constraint types have
-	// identical fields. If sqlc types diverge, compilation will fail.
-	base := sqlc.GetAddressByScriptPubKeyRow(row)
+	switch base := any(row).(type) {
+	case sqlc.GetAddressByScriptPubKeyRow:
+		return addressFieldsToInfo(
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+		)
 
-	info, err := db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
-		ID:                base.ID,
-		AccountID:         base.AccountID,
-		AccountNumber:     base.AccountNumber,
-		AccountName:       base.AccountName,
-		MasterFingerprint: base.MasterFingerprint,
-		Purpose:           base.Purpose,
-		CoinType:          base.CoinType,
-		TypeID:            base.TypeID,
-		OriginID:          base.OriginID,
-		WalletIsWatchOnly: base.WalletIsWatchOnly,
-		HasScript:         base.HasScript,
-		CreatedAt:         base.CreatedAt,
-		AddressBranch:     base.AddressBranch,
-		AddressIndex:      base.AddressIndex,
-		ScriptPubKey:      base.ScriptPubKey,
-		PubKey:            base.PubKey,
-		IsUsed:            base.IsUsed,
-		IDToAddrType:      db.IDToAddressType[int64],
-		IDToOrigin:        db.IDToOrigin[int64],
-	})
-	if err != nil {
-		return nil, err
+	case sqlc.ListAddressesByScriptPubKeysRow:
+		return addressFieldsToInfo(
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+		)
+
+	case sqlc.ListRawImportedAddressesRow:
+		return addressFieldsToInfo(
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+		)
+
+	case sqlc.ListAddressesByAccountRow:
+		return addressFieldsToInfo(
+			base.ID,
+			sql.NullInt64{Int64: base.DerivedAddressID, Valid: true},
+			sql.NullInt64{Int64: base.AccountID, Valid: true},
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			sql.NullInt64{Int64: base.AddressBranch, Valid: true},
+			sql.NullInt64{Int64: base.AddressIndex, Valid: true},
+			base.IsDerived,
+			sql.NullBool{Bool: base.AccountIsDerived, Valid: true},
+			base.ScriptPubKey, base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+		)
+
+	default:
+		return nil, fmt.Errorf("%w: %T", errUnknownAddressRowType, row)
 	}
+}
 
-	return info, nil
+// addressFieldsToInfo converts common SQLite address query fields to
+// AddressInfo.
+func addressFieldsToInfo(id int64, derivedAddressID sql.NullInt64,
+	accountID sql.NullInt64, accountNumber sql.NullInt64, accountName string,
+	masterFingerprint sql.NullInt64, purpose int64, coinType int64,
+	scriptTypeID int64, addressBranch sql.NullInt64,
+	addressIndex sql.NullInt64, isDerived bool,
+	accountIsDerived sql.NullBool, scriptPubKey []byte, pubKey []byte,
+	createdAt time.Time, walletIsWatchOnly bool,
+	hasScript bool, isUsed bool) (*db.AddressInfo, error) {
+
+	return db.AddressRowToInfo(db.AddressInfoRow[int64]{
+		ID:                id,
+		DerivedAddressID:  derivedAddressID,
+		AccountID:         accountID,
+		AccountNumber:     accountNumber,
+		AccountName:       accountName,
+		MasterFingerprint: masterFingerprint,
+		Purpose:           purpose,
+		CoinType:          coinType,
+		TypeID:            scriptTypeID,
+		IsDerived:         isDerived,
+		AccountIsDerived:  accountIsDerived,
+		WalletIsWatchOnly: walletIsWatchOnly,
+		HasScript:         hasScript,
+		CreatedAt:         createdAt,
+		AddressBranch:     addressBranch,
+		AddressIndex:      addressIndex,
+		ScriptPubKey:      scriptPubKey,
+		PubKey:            pubKey,
+		IsUsed:            isUsed,
+		IDToAddrType:      db.IDToAddressType[int64],
+	})
 }
 
 // listAddressesByAccount lists addresses filtered by wallet ID, key
 // scope, and account name, with pagination support.
 func listAddressesByAccount(ctx context.Context, q *sqlc.Queries,
 	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	if query.AccountName == db.DefaultImportedAccountName {
+		return listRawImportedAddresses(ctx, q, query)
+	}
 
 	rows, err := q.ListAddressesByAccount(
 		ctx, buildAddressPageParams(query),
@@ -495,6 +572,45 @@ func listAddressesByAccount(ctx context.Context, q *sqlc.Queries,
 	}
 
 	return items, nil
+}
+
+// listRawImportedAddresses lists raw imported addresses for the imported alias.
+func listRawImportedAddresses(ctx context.Context, q *sqlc.Queries,
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	rows, err := q.ListRawImportedAddresses(
+		ctx, sqlc.ListRawImportedAddressesParams{
+			WalletID:  int64(query.WalletID),
+			Purpose:   int64(query.Scope.Purpose),
+			CoinType:  int64(query.Scope.Coin),
+			PageLimit: int64(query.Page.Limit()) + 1,
+			CursorID:  rawAddressCursor(query),
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list raw imported addresses: %w", err)
+	}
+
+	items := make([]db.AddressInfo, len(rows))
+	for i, row := range rows {
+		item, err := addressRowToInfo(row)
+		if err != nil {
+			return nil, fmt.Errorf("list raw imported addresses: %w", err)
+		}
+
+		items[i] = *item
+	}
+
+	return items, nil
+}
+
+// rawAddressCursor converts an optional page cursor into a nullable sqlc value.
+func rawAddressCursor(q db.ListAddressesQuery) any {
+	if q.Page.After == nil {
+		return nil
+	}
+
+	return int64(*q.Page.After)
 }
 
 // buildAddressPageParams translates a ListAddresses query to

@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
@@ -105,7 +106,10 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 	pubKey *hdkeychain.ExtendedKey,
 	walletIsWatchOnly bool) (*db.AccountInfo, error) {
 
-	addrSchema := waddrmgrScopeAddrSchema(params.AddrSchema)
+	addrSchema, err := waddrmgrScopeAddrSchema(params.AddrSchema)
+	if err != nil {
+		return nil, fmt.Errorf("address schema: %w", err)
+	}
 
 	scopedMgr, err := s.scopedManagerOrCreate(
 		ns, scope, addrSchema, params.DryRun,
@@ -209,14 +213,26 @@ func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
 // waddrmgrScopeAddrSchema converts the account-store schema type into the
 // waddrmgr per-account address schema type.
 func waddrmgrScopeAddrSchema(
-	schema *db.ScopeAddrSchema) *waddrmgr.ScopeAddrSchema {
+	schema *db.ScopeAddrSchema) (*waddrmgr.ScopeAddrSchema, error) {
 
 	if schema == nil {
-		return nil
+		// A nil schema intentionally maps to no per-account override.
+		//nolint:nilnil
+		return nil, nil
+	}
+
+	external, err := addresstype.ToWallet(schema.ExternalAddrType, false)
+	if err != nil {
+		return nil, fmt.Errorf("external address type: %w", err)
+	}
+
+	internal, err := addresstype.ToWallet(schema.InternalAddrType, false)
+	if err != nil {
+		return nil, fmt.Errorf("internal address type: %w", err)
 	}
 
 	return &waddrmgr.ScopeAddrSchema{
-		ExternalAddrType: waddrmgr.AddressType(schema.ExternalAddrType),
-		InternalAddrType: waddrmgr.AddressType(schema.InternalAddrType),
-	}
+		ExternalAddrType: external,
+		InternalAddrType: internal,
+	}, nil
 }
