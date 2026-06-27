@@ -3650,6 +3650,38 @@ func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
 		walletInfo.SyncedTo.Timestamp.Unix())
 }
 
+// TestApplyTxBatchRejectsStaleDuplicateTx verifies that a duplicate batch
+// observation is not skipped when the existing row is terminal history. A blind
+// ErrTxAlreadyExists skip would leave the failed row in place while reporting a
+// successful batch application.
+func TestApplyTxBatchRejectsStaleDuplicateTx(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-tx-batch-stale")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+	)
+	params := db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710000155, 0),
+		Status:   db.TxStatusPending,
+	}
+
+	err := store.CreateTx(t.Context(), params)
+	require.NoError(t, err)
+	setTxStatus(t, store, walletID, tx.TxHash(), db.TxStatusFailed)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID:     walletID,
+		Transactions: []db.CreateTxParams{params},
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+}
+
 // TestApplyTxBatchConfirmsTxInSameBlock verifies that a batch can record a
 // transaction confirmed in the very block the same batch introduces as the new
 // sync tip. The confirming block row does not exist before the batch, so the
@@ -4148,4 +4180,395 @@ func TestApplyTxBatchRejectsNilTx(t *testing.T) {
 		Txid:     tx.TxHash(),
 	})
 	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
+
+// TestApplyScanBatchConfirmsTxInNewBlock verifies that a scan batch can record
+// relevant transactions confirmed in blocks the same batch newly connects. The
+// confirming block rows do not exist before the batch, so the batch must
+// connect the synced blocks before recording the confirmed transactions;
+// otherwise the confirmed inserts fail with ErrBlockNotFound.
+func TestApplyScanBatchConfirmsTxInNewBlock(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-scan-batch-confirmed"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addrEarly := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	addrLate := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	// Two newly discovered synced blocks, neither inserted ahead of time.
+	earlyBlock := NewBlockFixture(220)
+	lateBlock := NewBlockFixture(221)
+
+	// One relevant transaction confirmed in each newly synced block.
+	earlyTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 6000, PkScript: addrEarly.ScriptPubKey}},
+	)
+	lateTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 9000, PkScript: addrLate.ScriptPubKey}},
+	)
+
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       earlyTx,
+			Received: time.Unix(1710000400, 0),
+			Block:    &earlyBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}, {
+			WalletID: walletID,
+			Tx:       lateTx,
+			Received: time.Unix(1710000500, 0),
+			Block:    &lateBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedBlocks: []db.Block{earlyBlock, lateBlock},
+	})
+	require.NoError(t, err)
+
+	// Both transactions are recorded as confirmed in their respective newly
+	// connected blocks, with their credited outputs in the UTXO set.
+	earlyInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     earlyTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, earlyInfo.Block)
+	require.Equal(t, earlyBlock.Height, earlyInfo.Block.Height)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: earlyTx.TxHash(), Index: 0,
+	}))
+
+	lateInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     lateTx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, lateInfo.Block)
+	require.Equal(t, lateBlock.Height, lateInfo.Block.Height)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: lateTx.TxHash(), Index: 0,
+	}))
+
+	// The sync tip advanced to the final synced block.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.NotNil(t, walletInfo.SyncedTo)
+	require.Equal(t, lateBlock.Height, walletInfo.SyncedTo.Height)
+	require.Equal(t, lateBlock.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyScanBatchRejectsMismatchedWalletID verifies that a scan batch is
+// rejected when any transaction is owned by a wallet other than the batch
+// wallet, and that the rejection commits nothing: the synced block is not
+// connected, the sync tip is not advanced, and no transaction row is written.
+func TestApplyScanBatchRejectsMismatchedWalletID(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-scan-batch-mismatch"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+	syncedBlock := NewBlockFixture(222)
+
+	// The batch targets walletID and carries a synced block, but the lone
+	// transaction claims a different wallet. The whole batch must be rejected
+	// before any synced-block or transaction write.
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID + 99,
+			Tx:       tx,
+			Received: time.Unix(1710000600, 0),
+			Block:    &syncedBlock,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+		SyncedBlocks: []db.Block{syncedBlock},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// The synced block was not connected: the wallet sync tip is unchanged.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.Nil(t, walletInfo.SyncedTo)
+
+	// No transaction row was written for either wallet.
+	_, err = store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.ErrorIs(t, err, db.ErrTxNotFound)
+}
+
+// TestApplyTxBatchConfirmed verifies that a runtime batch can record a
+// transaction confirmed in a block that did not exist before the batch, even
+// when the batch carries no sync-tip update (SyncedTo is nil). This is the
+// standalone relevant-tx notification path: applyBatchTransaction must ensure
+// the confirming block row exists before CreateTxWithOps validates it,
+// otherwise the confirmed insert fails with ErrBlockNotFound. The wallet sync
+// tip must not advance, because only the sync-tip update path may move it.
+func TestApplyTxBatchConfirmed(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-confirmed-no-tip"
+	walletID := newWallet(t, store, walletName)
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	addr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+	)
+
+	// The confirming block does not exist before the batch and the batch
+	// carries no sync-tip update, so the transaction path itself must create
+	// the block row.
+	block := NewBlockFixture(214)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000170, 0),
+			Block:    &block,
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: nil},
+		}},
+	})
+	require.NoError(t, err)
+
+	// The transaction is recorded as confirmed in the batch's block with its
+	// credited output in the wallet UTXO set.
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.NotNil(t, txInfo.Block)
+	require.Equal(t, block.Height, txInfo.Block.Height)
+	require.Equal(t, block.Hash, txInfo.Block.Hash)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+
+	// The wallet sync tip must not have advanced: a standalone confirmed
+	// notification ensures only the tx's own block row, never the sync tip.
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.Nil(t, walletInfo.SyncedTo)
+}
+
+// TestApplyTxBatchDuplicate verifies that a duplicate batch transaction whose
+// stored row shape matches the new observation does not silently skip while
+// leaving wallet-owned edges unrecorded. CreateTxWithOps returns
+// ErrTxAlreadyExists before writing credits or marking wallet-input spends, so
+// a duplicate that newly carries a credit or a wallet-input spend must replay
+// those edges. An exact duplicate that already has every edge may still be
+// skipped without error.
+func TestApplyTxBatchDuplicate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("later credit is recorded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Insert the tx row first with no credits, so the wallet
+		// owns no output for it yet.
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-dup-later-credit")
+		createDerivedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, "default",
+		)
+
+		addr := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, "default", false,
+		)
+		tx := newRegularTx(
+			[]wire.OutPoint{randomOutPoint()},
+			[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+		)
+
+		err := store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000180, 0),
+			Status:   db.TxStatusPending,
+		})
+		require.NoError(t, err)
+
+		creditOutPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+		require.False(
+			t, walletUtxoExists(t, store, walletID, creditOutPoint),
+		)
+
+		// Act: Re-observe the same tx through a batch that now carries the
+		// wallet credit. The stored row shape matches, so the old skip path
+		// would drop the credit.
+		err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+			WalletID: walletID,
+			Transactions: []db.CreateTxParams{{
+				WalletID: walletID,
+				Tx:       tx,
+				Received: time.Unix(1710000180, 0),
+				Status:   db.TxStatusPending,
+				Credits:  map[uint32]address.Address{0: nil},
+			}},
+		})
+		require.NoError(t, err)
+
+		// Assert: The duplicate batch recorded the previously missing credit.
+		require.True(
+			t, walletUtxoExists(t, store, walletID, creditOutPoint),
+		)
+	})
+
+	t.Run("later wallet-input spend is recorded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Record the child tx first while the parent output it
+		// spends is not yet wallet-owned, so no spend edge is created.
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-dup-later-spend")
+		createDerivedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, "default",
+		)
+
+		addr := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, "default", false,
+		)
+
+		// Build the parent funding tx first so its hash is known, then have
+		// the child spend the parent's output 0. The parent is not recorded
+		// yet, so when the child is created its input is not wallet-owned and
+		// no spend edge is written.
+		parentTx := newRegularTx(
+			[]wire.OutPoint{randomOutPoint()},
+			[]*wire.TxOut{{Value: 9000, PkScript: addr.ScriptPubKey}},
+		)
+		parentOutPoint := wire.OutPoint{Hash: parentTx.TxHash(), Index: 0}
+		childTx := newRegularTx(
+			[]wire.OutPoint{parentOutPoint},
+			[]*wire.TxOut{{Value: 4000, PkScript: RandomBytes(22)}},
+		)
+		childParams := db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       childTx,
+			Received: time.Unix(1710000190, 0),
+			Status:   db.TxStatusPending,
+		}
+		err := store.CreateTx(t.Context(), childParams)
+		require.NoError(t, err)
+
+		// Now record the parent funding tx with a wallet credit at output 0.
+		err = store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       parentTx,
+			Received: time.Unix(1710000191, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		})
+		require.NoError(t, err)
+		require.True(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
+
+		// Creating the parent credit reconciles the already-stored child. Clear
+		// the edge directly to model a partially replayed duplicate where the
+		// child row exists but its spend edge is still missing.
+		clearUtxosSpentByTxID(t, store, walletID, childTx.TxHash())
+		require.False(t, walletUtxoSpent(t, store, walletID, parentOutPoint))
+
+		// Act: Re-observe the child through a batch. The stored row matches,
+		// so the old skip path would leave the now-wallet-owned parent
+		// unspent.
+		err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+			WalletID:     walletID,
+			Transactions: []db.CreateTxParams{childParams},
+		})
+		require.NoError(t, err)
+
+		// Assert: The parent output is now spent by the child. A competing
+		// transaction spending the same parent output must therefore be
+		// rejected as a conflict, which only holds once the spend edge from
+		// the replayed child exists.
+		conflictTx := newRegularTx(
+			[]wire.OutPoint{parentOutPoint},
+			[]*wire.TxOut{{Value: 3000, PkScript: RandomBytes(22)}},
+		)
+		err = store.CreateTx(t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       conflictTx,
+			Received: time.Unix(1710000192, 0),
+			Status:   db.TxStatusPending,
+		})
+		require.ErrorIs(t, err, db.ErrTxInputConflict)
+	})
+
+	t.Run("exact duplicate may skip", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Record the tx with its wallet credit already present.
+		store := NewTestStore(t)
+		walletID := newWallet(t, store, "wallet-dup-exact")
+		createDerivedAccount(
+			t, store, walletID, db.KeyScopeBIP0084, "default",
+		)
+
+		addr := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, "default", false,
+		)
+		tx := newRegularTx(
+			[]wire.OutPoint{randomOutPoint()},
+			[]*wire.TxOut{{Value: 7000, PkScript: addr.ScriptPubKey}},
+		)
+		params := db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000200, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		}
+		err := store.CreateTx(t.Context(), params)
+		require.NoError(t, err)
+
+		creditOutPoint := wire.OutPoint{Hash: tx.TxHash(), Index: 0}
+		require.True(
+			t, walletUtxoExists(t, store, walletID, creditOutPoint),
+		)
+
+		// Act: Re-observe the identical tx through a batch.
+		err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+			WalletID:     walletID,
+			Transactions: []db.CreateTxParams{params},
+		})
+
+		// Assert: The exact duplicate is accepted and the credit is still
+		// present exactly once.
+		require.NoError(t, err)
+		require.True(
+			t, walletUtxoExists(t, store, walletID, creditOutPoint),
+		)
+	})
 }

@@ -1,13 +1,16 @@
 package kvdb
 
 import (
+	"bytes"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -562,6 +565,8 @@ func TestRollbackToBlockHeightZeroResetsSyncTip(t *testing.T) {
 	// The address manager reports a synced tip above genesis so the rollback
 	// to zero has a stale tip to clear. SetSyncedTo(nil) is the reset to the
 	// start block; the rollback must invoke it rather than skip the rewind.
+	// SyncedTo is also read once to snapshot the pre-rollback tip for the
+	// failed-rollback restore path, which this success case does not exercise.
 	addrStore := &bwmock.AddrStore{}
 	mockNoBirthdayBlock(addrStore)
 	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
@@ -2942,4 +2947,1021 @@ func TestApplyTxBatchCreditNilFallback(t *testing.T) {
 	// The address manager must not have been consulted for a nil credit.
 	addrStore.AssertNotCalled(t, "Address", mock.Anything, mock.Anything)
 	addrStore.AssertNotCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+}
+
+// TestApplyScanBatchRecordsTxAndSyncedBlocks verifies that kvdb.Store applies
+// scan-discovered transactions and connected sync blocks in one write batch.
+func TestApplyScanBatchRecordsTxAndSyncedBlocks(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(false).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, mock.Anything).
+		Return(managedAddr, nil)
+	addrStore.On("MarkUsed", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(nil)
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{}).Maybe()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 11_000, PkScript: script})
+
+	syncedBlocks := []db.Block{{
+		Hash:      chainhash.Hash{66},
+		Height:    145,
+		Timestamp: time.Unix(1710003300, 0),
+	}, {
+		Hash:      chainhash.Hash{67},
+		Height:    146,
+		Timestamp: time.Unix(1710003400, 0),
+	}}
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003350, 0),
+			Status:   db.TxStatusPublished,
+			Credits:  map[uint32]address.Address{0: addr},
+		}},
+		SyncedBlocks: syncedBlocks,
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+
+		return nil
+	})
+	require.NoError(t, err)
+	addrStore.AssertCalled(t, "MarkUsed", mock.Anything, mock.Anything)
+	addrStore.AssertCalled(
+		t, "SetSyncedTo", mock.Anything,
+		mock.MatchedBy(func(bs *waddrmgr.BlockStamp) bool {
+			return bs.Height == int32(146)
+		}),
+	)
+}
+
+// TestApplyScanBatchHorizonRollbackSafety verifies that when a recovery scan
+// batch fails after its horizon extension has already advanced the scoped
+// manager's in-memory address state, the live manager does not keep reporting
+// the unpersisted horizon advance once walletdb rolls the batch back.
+func TestApplyScanBatchHorizonRollbackSafety(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	// newSpendableAddrMgr creates the addrmgr namespace and a real manager
+	// with the default account already present on every default scope.
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = addrStore.Lock()
+		addrStore.Close()
+	})
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return addrStore.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const account = waddrmgr.DefaultAccountNum
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := addrStore.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// The fresh default account has not derived any external addresses yet.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+
+	const horizonIndex = 9
+
+	horizon := db.ScanHorizon{
+		Scope:   db.KeyScope(scope),
+		Account: account,
+		// AccountName carries the account's durable identity; it is
+		// always set, even for the default account, so resolution never
+		// has to guess whether the masked Account number is trustworthy.
+		AccountName: waddrmgr.DefaultAccountName,
+		Branch:      waddrmgr.ExternalBranch,
+		Index:       horizonIndex,
+	}
+
+	// A synced block whose height overflows the legacy int32 height domain
+	// fails the synced-block step, which runs after the horizon extension
+	// has already mutated the manager's in-memory address state.
+	overflowBlock := db.Block{
+		Hash:      chainhash.Hash{0xAB},
+		Height:    uint32(math.MaxInt32) + 1,
+		Timestamp: time.Unix(1_700_000_000, 0),
+	}
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID:     0,
+		Horizons:     []db.ScanHorizon{horizon},
+		SyncedBlocks: []db.Block{overflowBlock},
+	})
+	require.Error(t, err)
+
+	// The live manager must not observe the rolled-back horizon advance, and
+	// the persisted addrmgr bucket must not record any derived external
+	// addresses either.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+
+	// As a positive control, the same horizon extension applied without the
+	// failing block must succeed and advance the external next index past the
+	// recovered child, proving the rollback path above did not simply skip the
+	// extension and that the invalidated cache reloads cleanly.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{horizon},
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t, uint32(horizonIndex+1),
+		externalKeyCount(t, dbConn, scopedMgr, account),
+	)
+}
+
+// externalKeyCount reports the number of external keys the scoped manager
+// considers derived for the account, read through the live manager so any
+// unpersisted in-memory advance would be observable.
+func externalKeyCount(t *testing.T, dbConn walletdb.DB,
+	scopedMgr waddrmgr.AccountStore, account uint32) uint32 {
+
+	t.Helper()
+
+	var count uint32
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		props, err := scopedMgr.AccountProperties(ns, account)
+		if err != nil {
+			return err
+		}
+
+		count = props.ExternalKeyCount
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return count
+}
+
+// failOnSyncedBlockStore wraps a real address manager and fails the SetSyncedTo
+// call at index failAt (zero-based), delegating every other call to the
+// embedded manager. This lets a scan-batch test commit some real in-memory
+// state and then fail mid-batch so the rollback path can be exercised against a
+// genuine manager rather than a mock.
+type failOnSyncedBlockStore struct {
+	*waddrmgr.Manager
+
+	failAt int
+	calls  int
+}
+
+// SetSyncedTo delegates to the real manager until the configured failure index,
+// at which point it returns an induced error without writing.
+func (f *failOnSyncedBlockStore) SetSyncedTo(ns walletdb.ReadWriteBucket,
+	bs *waddrmgr.BlockStamp) error {
+
+	defer func() { f.calls++ }()
+
+	if f.calls == f.failAt {
+		return errInducedFailure
+	}
+
+	return f.Manager.SetSyncedTo(ns, bs)
+}
+
+// TestApplyScanBatchRollsBackDerivedAddressCache verifies that when a scan
+// batch extends an address horizon and then fails later in the same update, the
+// rolled-back scan-derived address is neither observable through the live
+// manager's account next-index nor returned by Address, even though the horizon
+// extension had already mutated the manager's in-memory state.
+func TestApplyScanBatchRollsBackDerivedAddressCache(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const account = waddrmgr.DefaultAccountNum
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// The fresh default account has not derived any external addresses yet.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+
+	// Re-derive the address the horizon extension below would cache so the
+	// test can assert it is unreachable after the rolled-back batch.
+	const horizonIndex = 6
+
+	scanAddr, _, err := scopedMgr.DeriveAddr(
+		account, waddrmgr.ExternalBranch, horizonIndex,
+	)
+	require.NoError(t, err)
+
+	// The first synced block fails, so the batch unwinds after the horizon
+	// extension has already advanced the manager's in-memory state.
+	addrStore := &failOnSyncedBlockStore{Manager: mgr, failAt: 0}
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     account,
+			AccountName: waddrmgr.DefaultAccountName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+		SyncedBlocks: []db.Block{*someBlock(t, 100)},
+	})
+	require.Error(t, err)
+
+	// The persisted next index must reload to zero, proving the horizon
+	// advance did not survive the rollback.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+
+	// The rolled-back scan-derived address must not be returned by Address.
+	// Address consults the in-memory cache before the bucket, so a stale
+	// cache entry would surface here even though the bucket was rolled back.
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		_, err := mgr.Address(ns, scanAddr)
+
+		return err
+	})
+	require.Error(t, err)
+}
+
+// TestApplyScanBatchRollsBackSyncedTip verifies that a multi-block scan batch
+// that advances one synced block and then fails on a later block leaves both
+// the persisted synced tip and the live manager's in-memory SyncedTo at the
+// pre-batch value. A fully-successful batch must still advance SyncedTo.
+func TestApplyScanBatchRollsBackSyncedTip(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	txStore := newTxStore(t, dbConn)
+
+	preBatchTip := mgr.SyncedTo()
+
+	firstBlock := someBlock(t, 200)
+	secondBlock := someBlock(t, 201)
+
+	// The second synced block fails, after the first has already advanced
+	// both the bucket and the in-memory tip.
+	failStore := &failOnSyncedBlockStore{Manager: mgr, failAt: 1}
+	store := NewStore(dbConn, txStore, failStore)
+
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID:     0,
+		SyncedBlocks: []db.Block{*firstBlock, *secondBlock},
+	})
+	require.Error(t, err)
+
+	// The in-memory tip must be restored to the pre-batch value, not left at
+	// the first block whose bucket write was rolled back.
+	require.Equal(t, preBatchTip, mgr.SyncedTo())
+
+	// The persisted tip must also match the pre-batch value. Open a fresh
+	// manager on the same database so the synced tip is read straight from
+	// the rolled-back bucket rather than from the live manager's memory.
+	var reopened *waddrmgr.Manager
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		var oerr error
+
+		reopened, oerr = waddrmgr.Open(
+			ns, []byte("pub"), &chaincfg.SimNetParams,
+		)
+
+		return oerr
+	})
+	require.NoError(t, err)
+	t.Cleanup(reopened.Close)
+
+	require.Equal(t, preBatchTip.Height, reopened.SyncedTo().Height)
+	require.Equal(t, preBatchTip.Hash, reopened.SyncedTo().Hash)
+
+	// As a positive control, a fully-successful batch through the real
+	// manager must advance SyncedTo to the final block.
+	successStore := NewStore(dbConn, txStore, mgr)
+	err = successStore.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID:     0,
+		SyncedBlocks: []db.Block{*firstBlock, *secondBlock},
+	})
+	require.NoError(t, err)
+	require.Equal(t, secondBlock.Height, uint32(mgr.SyncedTo().Height))
+	require.Equal(t, secondBlock.Hash, mgr.SyncedTo().Hash)
+}
+
+// recordEvictScopedMgr wraps a real AccountStore so a scan-batch test can both
+// observe the index range passed to EvictDerivedAddresses and simulate a
+// post-extension next index that advanced past the requested horizon (as
+// happens when ExtendAddresses skips HD-invalid children). The first
+// AccountProperties read (the pre-extension snapshot) is delegated unchanged;
+// the second read (the post-extension re-read) reports postExtNextIndex so the
+// rollback range under test is forced to extend beyond horizon.Index+1.
+type recordEvictScopedMgr struct {
+	waddrmgr.AccountStore
+
+	branch           uint32
+	postExtNextIndex uint32
+
+	propCalls int
+
+	evictFrom uint32
+	evictTo   uint32
+	evicted   bool
+}
+
+// AccountProperties delegates the pre-extension read to the real manager and
+// overrides the external/internal key count on the post-extension re-read so
+// the test can assert the rollback range tracks the advanced next index.
+func (r *recordEvictScopedMgr) AccountProperties(ns walletdb.ReadBucket,
+	account uint32) (*waddrmgr.AccountProperties, error) {
+
+	props, err := r.AccountStore.AccountProperties(ns, account)
+	if err != nil {
+		return nil, err
+	}
+
+	r.propCalls++
+
+	// The first call is the pre-extension snapshot; leave it untouched. The
+	// second call is the post-extension re-read the fix relies on.
+	if r.propCalls >= 2 {
+		if r.branch == waddrmgr.InternalBranch {
+			props.InternalKeyCount = r.postExtNextIndex
+		} else {
+			props.ExternalKeyCount = r.postExtNextIndex
+		}
+	}
+
+	return props, nil
+}
+
+// EvictDerivedAddresses records the half-open range the rollback evicts so the
+// test can assert it covers the advanced next index, not horizon.Index+1.
+func (r *recordEvictScopedMgr) EvictDerivedAddresses(account, branch, fromIndex,
+	toIndex uint32) {
+
+	r.evicted = true
+	r.evictFrom = fromIndex
+	r.evictTo = toIndex
+
+	r.AccountStore.EvictDerivedAddresses(
+		account, branch, fromIndex, toIndex,
+	)
+}
+
+// recordEvictAddrStore wraps a real AddrStore and returns the same
+// recordEvictScopedMgr spy from FetchScopedKeyManager so a scan-batch test can
+// inspect the rollback eviction range.
+type recordEvictAddrStore struct {
+	waddrmgr.AddrStore
+
+	spy *recordEvictScopedMgr
+}
+
+// FetchScopedKeyManager returns the recording spy wrapping the real scoped
+// manager so the test observes the eviction range the rollback uses.
+func (r *recordEvictAddrStore) FetchScopedKeyManager(
+	scope waddrmgr.KeyScope) (waddrmgr.AccountStore, error) {
+
+	realMgr, err := r.AddrStore.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	r.spy.AccountStore = realMgr
+
+	return r.spy, nil
+}
+
+// TestApplyScanBatchRollbackEvictsThroughAdvancedNextIndex verifies that when a
+// horizon extension advances the branch's next index past horizon.Index+1 (as
+// when ExtendAddresses skips HD-invalid children), a failed batch evicts every
+// derived child through the actual advanced next index, not just the requested
+// horizon child. The rollback must re-read the post-extension next index rather
+// than assuming horizon.Index+1.
+func TestApplyScanBatchRollbackEvictsThroughAdvancedNextIndex(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const (
+		account      = waddrmgr.DefaultAccountNum
+		horizonIndex = 5
+
+		// The post-extension next index lands two past horizon.Index+1,
+		// emulating ExtendAddresses skipping HD-invalid children at
+		// indices 6 and 7 before settling on 8.
+		advancedNextIndex = horizonIndex + 3
+	)
+
+	// Wrap the real manager so the post-extension AccountProperties re-read
+	// reports the advanced next index and the eviction range is recorded.
+	spy := &recordEvictScopedMgr{
+		branch:           waddrmgr.ExternalBranch,
+		postExtNextIndex: advancedNextIndex,
+	}
+	addrStore := &recordEvictAddrStore{AddrStore: mgr, spy: spy}
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// A synced block whose height overflows the legacy int32 height domain
+	// fails the batch after the horizon extension has already advanced the
+	// manager's in-memory address state, forcing the rollback path.
+	overflowBlock := db.Block{
+		Hash:      chainhash.Hash{0xCD},
+		Height:    uint32(math.MaxInt32) + 1,
+		Timestamp: time.Unix(1_700_000_000, 0),
+	}
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, addrStore)
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     account,
+			AccountName: waddrmgr.DefaultAccountName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+		SyncedBlocks: []db.Block{overflowBlock},
+	})
+	require.Error(t, err)
+
+	// The rollback must have evicted from the pre-extension next index (0)
+	// through the advanced post-extension next index, covering the invalid-
+	// child-skip children, not just horizon.Index+1.
+	require.True(t, spy.evicted)
+	require.Equal(t, uint32(0), spy.evictFrom)
+	require.Equal(t, uint32(advancedNextIndex), spy.evictTo)
+	require.Greater(t, spy.evictTo, uint32(horizonIndex+1))
+}
+
+// TestApplyScanBatchRejectsInvalidBranch verifies that ApplyScanBatch rejects a
+// horizon whose branch is neither external nor internal, mirroring the SQL
+// backend's ExtendScanHorizon, and that the malformed branch does not extend
+// either the external or internal horizon state.
+func TestApplyScanBatchRejectsInvalidBranch(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	const account = waddrmgr.DefaultAccountNum
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+	require.Zero(t, internalKeyCount(t, dbConn, scopedMgr, account))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	// Branch 2 is neither external (0) nor internal (1); the legacy
+	// ExtendAddresses would coerce it to external, but the store must reject
+	// it as an invalid param instead.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     account,
+			AccountName: waddrmgr.DefaultAccountName,
+			Branch:      2,
+			Index:       9,
+		}},
+	})
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+
+	// Neither branch's horizon state may have advanced.
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, account))
+	require.Zero(t, internalKeyCount(t, dbConn, scopedMgr, account))
+}
+
+// internalKeyCount reports the number of internal keys the scoped manager
+// considers derived for the account, read through the live manager so any
+// unpersisted in-memory advance would be observable.
+func internalKeyCount(t *testing.T, dbConn walletdb.DB,
+	scopedMgr waddrmgr.AccountStore, account uint32) uint32 {
+
+	t.Helper()
+
+	var count uint32
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		props, err := scopedMgr.AccountProperties(ns, account)
+		if err != nil {
+			return err
+		}
+
+		count = props.InternalKeyCount
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return count
+}
+
+// importWatchOnlyXpubAccount imports a watch-only ("imported xpub") account
+// onto the given scope and returns its real waddrmgr account number. The
+// account key is derived from an independent master seed so the imported
+// account is distinct from the wallet's own derived accounts; what matters for
+// the scan-horizon path is only that it is a valid, child-derivable account
+// xpub the manager can extend.
+func importWatchOnlyXpubAccount(t *testing.T, dbConn walletdb.DB,
+	mgr *waddrmgr.Manager, scope waddrmgr.KeyScope,
+	name string) uint32 {
+
+	t.Helper()
+
+	// Derive m/scope.Purpose'/scope.Coin'/0' from a distinct seed and
+	// neuter it so the manager stores a watch-only account public key.
+	seed := bytes.Repeat([]byte{0xC3}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+
+	purposeKey, err := master.DeriveNonStandard(
+		scope.Purpose + hdkeychain.HardenedKeyStart,
+	)
+	require.NoError(t, err)
+
+	coinKey, err := purposeKey.DeriveNonStandard(
+		scope.Coin + hdkeychain.HardenedKeyStart,
+	)
+	require.NoError(t, err)
+
+	acctKey, err := coinKey.DeriveNonStandard(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+
+	acctPub, err := acctKey.Neuter()
+	require.NoError(t, err)
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	var account uint32
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		account, err = scopedMgr.NewAccountWatchingOnly(
+			ns, name, acctPub, 0, nil,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	return account
+}
+
+// TestApplyScanBatchHorizonResolvesImportedAccountByName verifies that a
+// horizon emitted for an imported account, whose Account number has been masked
+// to 0 (the default derived account's number), is resolved by its durable
+// AccountName and extends the imported account's branch rather than the default
+// account's.
+func TestApplyScanBatchHorizonResolvesImportedAccountByName(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// Import a watch-only account; it receives a real, non-zero waddrmgr
+	// number, but the AccountInfo contract masks imported numbers to 0.
+	const importedName = "imported-xpub"
+
+	importedAccount := importWatchOnlyXpubAccount(
+		t, dbConn, mgr, scope, importedName,
+	)
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), importedAccount)
+
+	// Neither the default nor the imported account has derived an external
+	// address yet.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, importedAccount))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	const horizonIndex = 4
+
+	// The horizon mirrors what the AccountInfo contract emits for an
+	// imported account: Account masked to 0, identity carried by name.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     0,
+			AccountName: importedName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+	})
+	require.NoError(t, err)
+
+	// The imported account's branch must have advanced past the recovered
+	// child, while the default account (number 0) must remain untouched:
+	// resolving the masked number 0 directly would have extended it.
+	require.Equal(t, uint32(horizonIndex+1), externalKeyCount(
+		t, dbConn, scopedMgr, importedAccount,
+	))
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+}
+
+// TestApplyScanBatchHorizonResolvesDerivedAccountByNumber verifies that a
+// horizon for a derived account whose name matches its real account number
+// extends that derived account, confirming the name resolution agrees with the
+// number fast path for non-imported accounts.
+func TestApplyScanBatchHorizonResolvesDerivedAccountByNumber(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	// Create a second derived account so resolution must distinguish it from
+	// the default account by both its non-zero number and its name.
+	const derivedName = "derived-1"
+
+	props := createLegacyAccount(t, dbConn, mgr, scope, derivedName)
+	derivedAccount := props.AccountNumber
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), derivedAccount)
+
+	require.Zero(t, externalKeyCount(t, dbConn, scopedMgr, derivedAccount))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	const horizonIndex = 3
+
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     derivedAccount,
+			AccountName: derivedName,
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       horizonIndex,
+		}},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, uint32(horizonIndex+1), externalKeyCount(
+		t, dbConn, scopedMgr, derivedAccount,
+	))
+	// The default account must not have been touched.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+}
+
+// TestApplyScanBatchHorizonMissingNameErrors verifies that a horizon naming an
+// account that no longer exists (e.g. a rename racing the scan) fails the batch
+// instead of silently extending the default account, which shares the masked
+// Account number 0.
+func TestApplyScanBatchHorizonMissingNameErrors(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(func() {
+		_ = mgr.Lock()
+		mgr.Close()
+	})
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		return mgr.Unlock(ns, testPrivPass)
+	})
+	require.NoError(t, err)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	scopedMgr, err := mgr.FetchScopedKeyManager(scope)
+	require.NoError(t, err)
+
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, mgr)
+
+	// The horizon carries a name no account holds and the masked number 0.
+	// Resolution must surface the lookup miss instead of extending the
+	// default account that happens to own number 0.
+	err = store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: 0,
+		Horizons: []db.ScanHorizon{{
+			Scope:       db.KeyScope(scope),
+			Account:     0,
+			AccountName: "does-not-exist",
+			Branch:      waddrmgr.ExternalBranch,
+			Index:       7,
+		}},
+	})
+	require.Error(t, err)
+
+	// The default account (number 0) must not have absorbed the extension.
+	require.Zero(t, externalKeyCount(
+		t, dbConn, scopedMgr, waddrmgr.DefaultAccountNum,
+	))
+}
+
+// errForcedRollback is a static error injected by the rollback atomicity test
+// to fail the transaction rollback step after the sync-tip rewind has run.
+var errForcedRollback = errors.New("forced rollback failure")
+
+// rewindAddrManagerSeed is a fixed BIP32 seed used to build a real waddrmgr
+// address manager for the rollback atomicity test, so SetSyncedTo writes to a
+// real namespace that bbolt can roll back.
+var rewindAddrManagerSeed = []byte{
+	0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+	0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+	0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+	0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+}
+
+// newRealAddrManager creates the waddrmgr namespace and a real address manager
+// in the test database, returning the opened manager. The manager is used by
+// the rollback atomicity test because, unlike the mock address store, its
+// SetSyncedTo performs a real namespace write that bbolt reverts on rollback.
+func newRealAddrManager(t *testing.T,
+	dbConn walletdb.DB) *waddrmgr.Manager {
+
+	t.Helper()
+
+	rootKey, err := hdkeychain.NewMaster(
+		rewindAddrManagerSeed, &chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+
+	pubPass := []byte("public")
+	privPass := []byte("private")
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgr.NamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		return waddrmgr.Create(
+			ns, rootKey, pubPass, privPass,
+			&chaincfg.RegressionNetParams, &waddrmgr.FastScryptOptions,
+			time.Time{},
+		)
+	})
+	require.NoError(t, err)
+
+	var mgr *waddrmgr.Manager
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		mgr, err = waddrmgr.Open(ns, pubPass, &chaincfg.RegressionNetParams)
+
+		return err
+	})
+	require.NoError(t, err)
+	t.Cleanup(mgr.Close)
+
+	return mgr
+}
+
+// persistedSyncedHeight re-opens the address manager from disk and returns its
+// persisted synced-to height, bypassing the in-memory cache so the value
+// reflects what bbolt actually committed.
+func persistedSyncedHeight(t *testing.T, dbConn walletdb.DB) int32 {
+	t.Helper()
+
+	var height int32
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		require.NotNil(t, ns)
+
+		fresh, err := waddrmgr.Open(
+			ns, []byte("public"), &chaincfg.RegressionNetParams,
+		)
+		if err != nil {
+			return err
+		}
+		defer fresh.Close()
+
+		height = fresh.SyncedTo().Height
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	return height
+}
+
+// TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError verifies that
+// kvdb.Store.RollbackToBlock discards the sync-tip rewind when the transaction
+// rollback fails, proving both effects share one walletdb transaction.
+//
+// The address manager is real so SetSyncedTo persists, while the transaction
+// store is a mock that fails Rollback. A two-write rollback (SetSyncedTo then a
+// separate Rollback) would already have committed the rewound sync tip when the
+// rollback failed; the single-transaction implementation instead reverts it, so
+// the persisted and live sync tips must remain at their original height.
+func TestRollbackToBlockAtomicRollsBackSyncTipOnRollbackError(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrMgr := newRealAddrManager(t, dbConn)
+
+	// Seed a contiguous fork->tip chain so the rollback can derive the fork
+	// block hash at height-1, and so the synced tip starts at the rollback
+	// boundary and must survive a failed rollback.
+	const (
+		forkHeight     = 49
+		initialHeight  = 50
+		rollbackHeight = initialHeight
+	)
+
+	forkStamp := &waddrmgr.BlockStamp{
+		Height: forkHeight,
+		Hash:   chainhash.Hash{0xaa},
+	}
+	tipStamp := &waddrmgr.BlockStamp{
+		Height: initialHeight,
+		Hash:   chainhash.Hash{0xbb},
+	}
+	err := walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+
+		err := addrMgr.SetSyncedTo(ns, forkStamp)
+		if err != nil {
+			return err
+		}
+
+		return addrMgr.SetSyncedTo(ns, tipStamp)
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, initialHeight, persistedSyncedHeight(t, dbConn))
+
+	// The wtxmgr namespace must exist for the rollback transaction to find it.
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(wtxmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+
+		return wtxmgr.Create(ns)
+	})
+	require.NoError(t, err)
+
+	// Fail the transaction rollback before the live sync tip is rewound.
+	mockTxStore := &bwmock.TxStore{}
+	mockTxStore.On("Rollback", mock.Anything, int32(rollbackHeight)).
+		Return(errForcedRollback).Once()
+
+	store := NewStore(dbConn, mockTxStore, addrMgr)
+
+	err = store.RollbackToBlock(t.Context(), rollbackHeight)
+	require.ErrorIs(t, err, errForcedRollback)
+
+	// The persisted and live sync tips must remain at the original height: the
+	// store does not rewind wallet metadata until the transaction rollback
+	// succeeds.
+	require.EqualValues(t, initialHeight, persistedSyncedHeight(t, dbConn))
+	require.EqualValues(t, initialHeight, addrMgr.SyncedTo().Height)
+	require.Equal(t, tipStamp.Hash, addrMgr.SyncedTo().Hash)
+	mockTxStore.AssertExpectations(t)
 }
