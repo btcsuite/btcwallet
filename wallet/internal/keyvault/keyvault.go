@@ -3,14 +3,23 @@ package keyvault
 
 import (
 	"context"
+	"errors"
+
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
+
+// ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
+var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
 
 // Vault manages the lock lifecycle and cryptographic operations for wallet key
 // material.
 type Vault interface {
 	// Unlock unlocks the vault with the provided passphrase.
-	// An invalid passphrase must leave the vault locked.
+	//
+	// If the passphrase is invalid, or the unlock operation fails, the vault
+	// must remain locked. If Unlock is called while the vault is already
+	// unlocked, it must be a no-op and must not validate the provided
+	// passphrase.
 	Unlock(ctx context.Context, passphrase []byte) error
 
 	// Lock locks the vault and erases secret material from memory. Lock is

@@ -1,7 +1,6 @@
 package keyvault
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,9 +11,16 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
-// errDBVaultNotImplemented marks db vault methods whose runtime state is not
-// available through db.Store yet.
-var errDBVaultNotImplemented = errors.New("db vault method not implemented")
+var (
+	// errDBVaultNotImplemented marks db vault methods whose runtime state is not
+	// available through db.Store yet.
+	errDBVaultNotImplemented = errors.New("db vault method not implemented")
+
+	// errUnexpectedState reports that the vault is in an unexpected state,
+	// which may indicate a programming error or data corruption. Normal
+	// operation should not return this error, and that's why it's unexported.
+	errUnexpectedState = errors.New("unexpected state")
+)
 
 // DBVault adapts db.Store wallet secret storage to the wallet key-vault
 // boundary.
@@ -55,12 +61,6 @@ func NewDBVault(store db.Store, walletID uint32) *DBVault {
 		store:    store,
 		walletID: walletID,
 	}
-}
-
-// Unlock is not implemented yet.
-// TODO(gus): implement it.
-func (v *DBVault) Unlock(_ context.Context, _ []byte) error {
-	return v.notImplemented("Unlock")
 }
 
 // Encrypt is not implemented yet.
