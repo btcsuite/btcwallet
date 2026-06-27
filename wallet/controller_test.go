@@ -59,8 +59,10 @@ func TestHandleUnlockReq(t *testing.T) {
 	pass := []byte("password")
 	req := newUnlockReq(UnlockRequest{Passphrase: pass})
 
-	// Setup the expected call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Setup the expected call to the key vault's Unlock method.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass, mock.Anything,
+	).Return(nil).Once()
 
 	// Act: Dispatch the unlock request to the handler.
 	w.handleUnlockReq(req)
@@ -106,7 +108,9 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 
 		pass := []byte("password")
 		req := newUnlockReq(UnlockRequest{Passphrase: pass})
-		deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+		deps.vault.On(
+			"Unlock", mock.Anything, pass, mock.Anything,
+		).Return(
 			errDBMock,
 		).Once()
 
@@ -134,8 +138,8 @@ func TestHandleLockReq(t *testing.T) {
 
 	req := newLockReq()
 
-	// Setup the expected call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Setup the expected call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Dispatch the lock request to the handler.
 	w.handleLockReq(req)
@@ -147,42 +151,6 @@ func TestHandleLockReq(t *testing.T) {
 	require.False(t, w.state.isUnlocked())
 }
 
-// TestHandleLockReq_Idempotency verifies that if the wallet is already locked
-// (indicated by waddrmgr.ErrLocked), the lock request treats it as a success
-// and ensures the state is consistent.
-func TestHandleLockReq_Idempotency(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and transition it to 'Started'.
-	w, deps := createTestWalletWithMocks(t)
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	// Transition the wallet to the 'Unlocked' state for testing.
-	w.state.toUnlocked()
-
-	req := newLockReq()
-
-	// Setup the expected call to the address manager's Lock method
-	// returning ErrLocked.
-	errLocked := waddrmgr.ManagerError{
-		ErrorCode:   waddrmgr.ErrLocked,
-		Description: "address manager is locked",
-	}
-	deps.addrStore.On("Lock").Return(errLocked).Once()
-
-	// Act: Dispatch the lock request to the handler.
-	w.handleLockReq(req)
-
-	// Assert: Verify that the response indicates success and the wallet
-	// state is 'Locked'.
-	resp := <-req.resp
-	require.NoError(t, resp)
-	require.False(t, w.state.isUnlocked())
-}
-
-// TestHandleLockReq_Errors verifies that handleLockReq correctly handles error
-// conditions, such as attempting to lock a stopped wallet.
 func TestHandleLockReq_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -248,11 +216,14 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 	}
 	req := newChangePassphraseReq(reqStruct)
 
-	// Setup the expected call to the address manager's ChangePassphrase
-	// method.
+	// DBPutPassphrase drives the legacy address manager for the private
+	// rotation, then the controller refreshes the vault's runtime state.
 	deps.addrStore.On(
 		"ChangePassphrase", mock.Anything, []byte("old"),
 		[]byte("new"), true, mock.Anything,
+	).Return(nil).Once()
+	deps.vault.On(
+		"RefreshPrivatePassphrase", []byte("new"),
 	).Return(nil).Once()
 
 	// Act: Call the handler.
@@ -621,8 +592,8 @@ func TestControllerLock(t *testing.T) {
 	w.state.toUnlocked()
 	require.True(t, w.state.isUnlocked())
 
-	// Expect a call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Expect a call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Call the Lock method.
 	err := w.Lock(t.Context())
@@ -660,8 +631,10 @@ func TestControllerUnlock(t *testing.T) {
 
 	pass := []byte("password")
 
-	// Expect a call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Expect a call to the key vault's Unlock method.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass, mock.Anything,
+	).Return(nil).Once()
 
 	// Act: Call the Unlock method.
 	err := w.Unlock(t.Context(), UnlockRequest{Passphrase: pass})
@@ -703,10 +676,14 @@ func TestControllerChangePassphrase(t *testing.T) {
 		PrivateNew:    []byte("new"),
 	}
 
-	// Expect a call to ChangePassphrase in the address store.
+	// DBPutPassphrase drives the legacy address manager for the private
+	// rotation, then the controller refreshes the vault's runtime state.
 	deps.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"), []byte("new"),
-		true, mock.Anything,
+		"ChangePassphrase", mock.Anything, []byte("old"),
+		[]byte("new"), true, mock.Anything,
+	).Return(nil).Once()
+	deps.vault.On(
+		"RefreshPrivatePassphrase", []byte("new"),
 	).Return(nil).Once()
 
 	// Act: Call ChangePassphrase.
@@ -858,9 +835,9 @@ func TestMainLoop_AutoLock(t *testing.T) {
 	w.lockTimer = time.NewTimer(time.Millisecond * 10)
 
 	lockCalled := make(chan struct{})
-	deps.addrStore.On("Lock").Run(func(args mock.Arguments) {
+	deps.vault.On("Lock").Run(func(args mock.Arguments) {
 		close(lockCalled)
-	}).Return(nil).Once()
+	}).Return().Once()
 
 	// Act: Start main loop.
 	w.wg.Add(1)
@@ -1434,10 +1411,12 @@ func TestControllerUnlock_DefaultTimeout(t *testing.T) {
 
 	pass := []byte("pass")
 	req := UnlockRequest{Passphrase: pass}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	deps.vault.On(
+		"Unlock", mock.Anything, pass, mock.Anything,
+	).Return(nil).Once()
 	// Auto-lock might trigger if the test runs slowly, but it's not
 	// guaranteed.
-	deps.addrStore.On("Lock").Return(nil).Maybe()
+	deps.vault.On("Lock").Return().Maybe()
 
 	// Act: Perform Unlock with default timeout.
 	err := w.Unlock(t.Context(), req)
@@ -1494,7 +1473,9 @@ func TestControllerUnlock_NegativeTimeout(t *testing.T) {
 
 	pass := []byte("pass")
 	req := UnlockRequest{Passphrase: pass, Timeout: -1}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	deps.vault.On(
+		"Unlock", mock.Anything, pass, mock.Anything,
+	).Return(nil).Once()
 
 	// Act: Perform Unlock with negative timeout (no auto-lock).
 	err := w.Unlock(t.Context(), req)
@@ -1523,7 +1504,7 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	go w.mainLoop()
 
 	pass := []byte("pass")
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+	deps.vault.On("Unlock", mock.Anything, pass, mock.Anything).Return(
 		errDBMock).Once()
 
 	// Act: Attempt Unlock.
@@ -1535,28 +1516,6 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	// Clean up.
 	w.cancel()
 	w.wg.Wait()
-}
-
-// TestHandleLockReq_LockError verifies error handling when Lock fails.
-func TestHandleLockReq_LockError(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup mock expectations where internal lock fails.
-	w, deps := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	req := lockReq{resp: make(chan error, 1)}
-
-	deps.addrStore.On("Lock").Return(errLockMock).Once()
-
-	// Act: Handle lock request.
-	w.handleLockReq(req)
-	err := <-req.resp
-
-	// Assert: Verify error.
-	require.ErrorContains(t, err, "lock fail")
 }
 
 // TestSubmitRescanRequest_HeightOverflow verifies large start height rejection.

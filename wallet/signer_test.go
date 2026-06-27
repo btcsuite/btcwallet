@@ -948,6 +948,52 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	require.NoError(t, vm.Execute(), "script execution failed")
 }
 
+// TestResolveDerivedPrivKeyFromStoreRejectsWatchOnly verifies that the
+// store-only signer branch returns a precise error for accounts without
+// encrypted private key material.
+func TestResolveDerivedPrivKeyFromStoreRejectsWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	path := waddrmgr.DerivationPath{InternalAccount: 3}
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountNumber: &path.InternalAccount,
+	}
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		&db.AccountSecret{AccountNumber: path.InternalAccount}, nil,
+	).Once()
+
+	_, err := w.resolveDerivedPrivKeyFromStore(
+		t.Context(), waddrmgr.KeyScopeBIP0084, path,
+	)
+	require.ErrorIs(t, err, ErrWatchOnlyAccount)
+}
+
+// TestResolveDerivedPrivKeyFromStoreAbsentAccount verifies that a missing
+// account row terminates the store-only signer branch with
+// ErrAccountNotInStore.
+func TestResolveDerivedPrivKeyFromStoreAbsentAccount(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	path := waddrmgr.DerivationPath{InternalAccount: 7}
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountNumber: &path.InternalAccount,
+	}
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		(*db.AccountSecret)(nil), db.ErrAccountNotFound,
+	).Once()
+
+	_, err := w.resolveDerivedPrivKeyFromStore(
+		t.Context(), waddrmgr.KeyScopeBIP0084, path,
+	)
+	require.ErrorIs(t, err, ErrAccountNotInStore)
+}
+
 // TestGetPrivKeyForAddressSQLDerivedAddress verifies that GetPrivKeyForAddress
 // recovers the private key for an address whose only persistent record lives
 // in the SQL store.
@@ -983,11 +1029,8 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 // TestNewAddressOnSQLOnlyAccount verifies that SQL-owned accounts can derive
 // receive addresses without a mirrored legacy waddrmgr account.
 //
-// The test exercises the public-key path only. Signing with addresses owned
-// by a SQL-only account currently routes through the legacy waddrmgr
-// derivation cache, which does not see SQL-only accounts; that gap is
-// tracked separately and will be closed by the signer-store work on
-// impl-tx-creator-store using keyVault-backed account-secret derivation.
+// The test exercises the public-key path; signer coverage for SQL-only
+// accounts is provided by TestGetPrivKeyForAddressSQLDerivedAddress.
 func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	t.Parallel()
 
@@ -1162,7 +1205,7 @@ func TestResolvePrivKeyFallsBackAfterCacheMiss(t *testing.T) {
 	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil).Once()
 
 	// Act: Resolve the private key for the managed pubkey address.
-	resolvedPrivKey, err := w.resolvePrivKey(mocks.pubKeyAddr)
+	resolvedPrivKey, err := w.resolvePrivKey(t.Context(), mocks.pubKeyAddr)
 	require.NoError(t, err)
 
 	// Assert: The fallback path returns the same private key bytes.

@@ -198,23 +198,6 @@ func (w *Wallet) DBDeleteExpiredLockedOutputs(_ context.Context) error {
 	return nil
 }
 
-// DBUnlock attempts to unlock the wallet's address manager with the provided
-// passphrase.
-//
-// TODO(yy): Refactor this in the `Store` implementation - the only db
-// operation needed is to load the account info and derive the private keys.
-func (w *Wallet) DBUnlock(_ context.Context, passphrase []byte) error {
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		return w.addrStore.Unlock(addrmgrNs, passphrase)
-	})
-	if err != nil {
-		return fmt.Errorf("view: %w", err)
-	}
-
-	return nil
-}
-
 // DBPutPassphrase updates the wallet's public or private passphrases.
 //
 // TODO(yy): Refactor this in the `Store` implementation - we can call

@@ -142,25 +142,6 @@ func TestDBBirthdayBlock(t *testing.T) {
 	require.Equal(t, block, retBlock)
 }
 
-// TestDBUnlock verifies that the wallet can successfully unlock its address
-// manager using the provided passphrase.
-func TestDBUnlock(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and setup the expected mock call for
-	// unlocking the address manager.
-	w, mocks := createTestWalletWithMocks(t)
-	pass := []byte("password")
-
-	mocks.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
-
-	// Act: Attempt to unlock the wallet with the passphrase.
-	err := w.DBUnlock(t.Context(), pass)
-
-	// Assert: Verify that the unlock operation succeeded.
-	require.NoError(t, err)
-}
-
 // TestDBDeleteExpiredLockedOutputs verifies that the wallet successfully
 // invokes the transaction store to remove any expired output locks.
 func TestDBDeleteExpiredLockedOutputs(t *testing.T) {
