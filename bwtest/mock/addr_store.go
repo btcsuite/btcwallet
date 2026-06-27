@@ -51,6 +51,16 @@ func (m *AddrStore) SyncedTo() waddrmgr.BlockStamp {
 	return args.Get(0).(waddrmgr.BlockStamp)
 }
 
+// RestoreSyncedToIfCurrent restores the in-memory synced-to block after a
+// failed write transaction rolls back the matching database update, but only if
+// the live tip still equals the expected current tip.
+func (m *AddrStore) RestoreSyncedToIfCurrent(previous,
+	current waddrmgr.BlockStamp) bool {
+
+	args := m.Called(previous, current)
+	return args.Bool(0)
+}
+
 // BlockHash returns the block hash at a particular block height.
 func (m *AddrStore) BlockHash(ns walletdb.ReadBucket,
 	height int32) (*chainhash.Hash, error) {

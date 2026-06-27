@@ -80,6 +80,27 @@ func (m *Manager) SyncedTo() BlockStamp {
 	return m.syncState.syncedTo
 }
 
+// RestoreSyncedToIfCurrent restores the in-memory synced-to block after a
+// failed write transaction rolls back the matching database update, but only if
+// the live tip still equals the expected current tip.
+func (m *Manager) RestoreSyncedToIfCurrent(previous,
+	current BlockStamp) bool {
+
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+
+	syncedTo := m.syncState.syncedTo
+	if syncedTo.Height != current.Height || syncedTo.Hash != current.Hash ||
+		!syncedTo.Timestamp.Equal(current.Timestamp) {
+
+		return false
+	}
+
+	m.syncState.syncedTo = previous
+
+	return true
+}
+
 // BlockHash returns the block hash at a particular block height. This
 // information is useful for comparing against the chain back-end to see if a
 // reorg is taking place and how far back it goes.
