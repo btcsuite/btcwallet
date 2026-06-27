@@ -2446,3 +2446,187 @@ func TestValidateBatchTransactionsTx(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidParam)
 	})
 }
+
+// TestCanSkipCreateTxDuplicate verifies that the duplicate-row predicate only
+// reports a skippable batch retry when the stored row exactly matches the
+// requested observation, and rejects every mismatched or terminal shape.
+func TestCanSkipCreateTxDuplicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		reqBlock    *Block
+		reqStatus   TxStatus
+		reqLabel    string
+		rowStatus   TxStatus
+		rowLabel    string
+		reqCoinbase bool
+		rowCoinbase bool
+		rowBlock    *Block
+		wantCanSkip bool
+	}{
+		{
+			name:        "unmined matching pending",
+			reqStatus:   TxStatusPending,
+			rowStatus:   TxStatusPending,
+			wantCanSkip: true,
+		},
+		{
+			name:        "unmined matching published",
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			wantCanSkip: true,
+		},
+		{
+			name:        "unmined status mismatch",
+			reqStatus:   TxStatusPending,
+			rowStatus:   TxStatusPublished,
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined label mismatch",
+			reqStatus:   TxStatusPending,
+			reqLabel:    "request label",
+			rowStatus:   TxStatusPending,
+			rowLabel:    "stored label",
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined coinbase mismatch",
+			reqStatus:   TxStatusPending,
+			reqCoinbase: true,
+			rowStatus:   TxStatusPending,
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined request but stored row has block",
+			reqStatus:   TxStatusPending,
+			rowStatus:   TxStatusPublished,
+			rowBlock:    testBlock(100),
+			wantCanSkip: false,
+		},
+		{
+			name:        "unmined request but stored row failed",
+			reqStatus:   TxStatusPending,
+			rowStatus:   TxStatusFailed,
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed matching block",
+			reqBlock:    testBlock(101),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			rowBlock:    testBlock(101),
+			wantCanSkip: true,
+		},
+		{
+			name:        "confirmed request but stored row unmined",
+			reqBlock:    testBlock(102),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			rowBlock:    nil,
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed request but stored row not published",
+			reqBlock:    testBlock(103),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusOrphaned,
+			rowBlock:    testBlock(103),
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed block height mismatch",
+			reqBlock:    testBlock(104),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			rowBlock:    testBlock(105),
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed label mismatch",
+			reqBlock:    testBlock(104),
+			reqStatus:   TxStatusPublished,
+			reqLabel:    "request label",
+			rowStatus:   TxStatusPublished,
+			rowLabel:    "stored label",
+			rowBlock:    testBlock(104),
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed coinbase mismatch",
+			reqBlock:    testBlock(105),
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPublished,
+			rowCoinbase: true,
+			rowBlock:    testBlock(105),
+			wantCanSkip: false,
+		},
+		{
+			name:        "confirmed request status not published",
+			reqBlock:    testBlock(106),
+			reqStatus:   TxStatusPending,
+			rowStatus:   TxStatusPublished,
+			rowBlock:    testBlock(106),
+			wantCanSkip: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Build the duplicate request shape under test. The
+			// request struct is constructed directly so confirmed-but-
+			// unpublished combinations, which NewCreateTxRequest rejects,
+			// can still exercise the predicate.
+			req := CreateTxRequest{
+				Params: CreateTxParams{
+					Block:  tc.reqBlock,
+					Status: tc.reqStatus,
+					Label:  tc.reqLabel,
+				},
+				IsCoinbase: tc.reqCoinbase,
+			}
+
+			// Act: Ask whether the stored row is a skippable duplicate.
+			canSkip := CanSkipCreateTxDuplicate(
+				req, tc.rowStatus, tc.rowLabel, tc.rowCoinbase,
+				tc.rowBlock,
+			)
+
+			// Assert: The predicate matches the expected decision.
+			require.Equal(t, tc.wantCanSkip, canSkip)
+		})
+	}
+}
+
+// TestConfirmedBlockHashMismatchNotSkippable verifies that a confirmed
+// duplicate whose stored block has the requested height but a different header
+// hash is not treated as a skippable retry.
+func TestConfirmedBlockHashMismatchNotSkippable(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build a confirmed request and a stored row at the same height
+	// but with a differing block hash.
+	reqBlock := testBlock(200)
+	storedBlock := &Block{
+		Hash:      chainhash.Hash{0xff},
+		Height:    reqBlock.Height,
+		Timestamp: reqBlock.Timestamp,
+	}
+	req := CreateTxRequest{
+		Params: CreateTxParams{
+			Block:  reqBlock,
+			Status: TxStatusPublished,
+		},
+	}
+
+	// Act: Ask whether the differing-hash row is skippable.
+	canSkip := CanSkipCreateTxDuplicate(
+		req, TxStatusPublished, "", false, storedBlock,
+	)
+
+	// Assert: A hash mismatch must not be skipped.
+	require.False(t, canSkip)
+}

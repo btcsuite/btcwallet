@@ -3539,6 +3539,65 @@ func TestApplyTxBatchChildBeforeParent(t *testing.T) {
 	}))
 }
 
+// TestApplyScanBatchChildBeforeParent verifies that ApplyScanBatch records the
+// parent->child spend edge even when the child transaction is listed before the
+// in-batch parent whose output it spends.
+func TestApplyScanBatchChildBeforeParent(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-scan-batch-child-first")
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, "default")
+
+	parentAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+	childAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, "default", false,
+	)
+
+	parentTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: parentAddr.ScriptPubKey}},
+	)
+	childTx := newRegularTx(
+		[]wire.OutPoint{{Hash: parentTx.TxHash(), Index: 0}},
+		[]*wire.TxOut{{Value: 6000, PkScript: childAddr.ScriptPubKey}},
+	)
+	block := NewBlockFixture(211)
+
+	err := store.ApplyScanBatch(t.Context(), db.ScanBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{
+			{
+				WalletID: walletID,
+				Tx:       childTx,
+				Received: time.Unix(1710000180, 0),
+				Block:    &block,
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+			{
+				WalletID: walletID,
+				Tx:       parentTx,
+				Received: time.Unix(1710000181, 0),
+				Block:    &block,
+				Status:   db.TxStatusPublished,
+				Credits:  map[uint32]address.Address{0: nil},
+			},
+		},
+		SyncedBlocks: []db.Block{block},
+	})
+	require.NoError(t, err)
+
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: childTx.TxHash(), Index: 0,
+	}))
+	require.True(t, walletUtxoSpent(t, store, walletID, wire.OutPoint{
+		Hash: parentTx.TxHash(), Index: 0,
+	}))
+}
+
 // TestApplyTxBatchStoresTxAndSyncTip verifies that a runtime batch can persist
 // transaction history and advance the wallet sync tip atomically.
 func TestApplyTxBatchStoresTxAndSyncTip(t *testing.T) {
@@ -3925,6 +3984,62 @@ func TestApplyTxBatchRejectsDuplicateStateMismatch(t *testing.T) {
 	require.NotNil(t, walletInfo.SyncedTo)
 	require.Equal(t, firstBlock.Height, walletInfo.SyncedTo.Height)
 	require.Equal(t, firstBlock.Hash, walletInfo.SyncedTo.Hash)
+}
+
+// TestApplyTxBatchRejectsDuplicateLabelMismatch verifies that a duplicate batch
+// transaction must match the stored label before it can be treated as an
+// idempotent replay. The rejected duplicate must not advance the batch sync
+// tip.
+func TestApplyTxBatchRejectsDuplicateLabelMismatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletName := "wallet-apply-tx-batch-duplicate-label"
+	walletID := newWallet(t, store, walletName)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+	)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000165, 0),
+			Status:   db.TxStatusPending,
+			Label:    "original",
+		}},
+	})
+	require.NoError(t, err)
+
+	block := NewBlockFixture(219)
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000166, 0),
+			Status:   db.TxStatusPending,
+			Label:    "mutated",
+		}},
+		SyncedTo: &block,
+	})
+	require.ErrorIs(t, err, db.ErrTxAlreadyExists)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "original", txInfo.Label)
+	require.Equal(t, db.TxStatusPending, txInfo.Status)
+	require.Nil(t, txInfo.Block)
+
+	walletInfo, err := store.GetWallet(t.Context(), walletName)
+	require.NoError(t, err)
+	require.Nil(t, walletInfo.SyncedTo)
 }
 
 // TestApplyTxBatchRejectsMismatchedWalletID verifies that a batch is rejected
