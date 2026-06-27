@@ -762,10 +762,159 @@ func TestCreateTxWithOpsDuplicate(t *testing.T) {
 	})
 
 	ops.On("LoadExisting", mock.Anything, req).Return(
-		&CreateTxExistingTarget{ID: 4}, nil).Once()
+		&CreateTxExistingTarget{
+			ID:     4,
+			Status: TxStatusPublished,
+		}, nil,
+	).Once()
 
 	err := CreateTxWithOps(context.Background(), req, ops)
 	require.ErrorIs(t, err, ErrTxAlreadyExists)
+}
+
+// TestCreateTxWithOpsIdempotentDuplicate verifies that the shared CreateTx
+// helper replays edge writes for an exact duplicate observation.
+func TestCreateTxWithOpsIdempotentDuplicate(t *testing.T) {
+	t.Parallel()
+
+	req := testCreateTxRequest(t)
+	existing := CreateTxExistingTarget{
+		ID:         4,
+		Status:     req.Params.Status,
+		IsCoinbase: req.IsCoinbase,
+		Label:      req.Params.Label,
+	}
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+	ops.On("InsertCredits", mock.Anything, req, int64(4)).Return(nil).Once()
+	ops.On("MarkInputsSpent", mock.Anything, req, int64(4)).Return(nil).Once()
+
+	err := CreateTxWithOps(context.Background(), req, ops)
+	require.NoError(t, err)
+}
+
+// TestCreateTxWithOpsValidatesIdempotentDuplicateCredits verifies that the
+// duplicate replay path validates requested credit addresses before it treats a
+// matching tx row as idempotent.
+func TestCreateTxWithOpsValidatesIdempotentDuplicateCredits(t *testing.T) {
+	t.Parallel()
+
+	params := &chaincfg.RegressionNetParams
+	paidKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	paidAddr, err := address.NewAddressPubKey(
+		paidKey.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	wrongKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	wrongAddr, err := address.NewAddressPubKey(
+		wrongKey.PubKey().SerializeCompressed(), params,
+	)
+	require.NoError(t, err)
+
+	paidScript, err := txscript.PayToAddrScript(paidAddr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{31}},
+	})
+	tx.AddTxOut(&wire.TxOut{Value: 1_000, PkScript: paidScript})
+
+	req, err := NewCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       tx,
+		Received: time.Unix(456, 0),
+		Status:   TxStatusPending,
+		Credits:  map[uint32]address.Address{0: wrongAddr},
+	})
+	require.NoError(t, err)
+
+	existing := CreateTxExistingTarget{
+		ID:         4,
+		Status:     req.Params.Status,
+		IsCoinbase: req.IsCoinbase,
+		Label:      req.Params.Label,
+	}
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+
+	err = CreateTxWithOps(context.Background(), req, ops)
+	require.ErrorIs(t, err, ErrInvalidParam)
+}
+
+// TestCreateTxWithOpsValidatesDuplicateBlock verifies that an exact confirmed
+// duplicate still checks the caller's block metadata before replaying edge
+// writes.
+func TestCreateTxWithOpsValidatesDuplicateBlock(t *testing.T) {
+	t.Parallel()
+
+	req, err := NewCreateTxRequest(CreateTxParams{
+		WalletID: 5,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(456, 0),
+		Block:    testBlock(77),
+		Status:   TxStatusPublished,
+		Label:    "mined",
+	})
+	require.NoError(t, err)
+
+	height := req.Params.Block.Height
+	hash := req.Params.Block.Hash
+	existing := CreateTxExistingTarget{
+		ID:          4,
+		Status:      req.Params.Status,
+		HasBlock:    true,
+		BlockHeight: &height,
+		BlockHash:   &hash,
+		IsCoinbase:  req.IsCoinbase,
+		Label:       req.Params.Label,
+	}
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+	ops.On("PrepareBlock", mock.Anything, req).Return(ErrBlockMismatch).Once()
+
+	err = CreateTxWithOps(context.Background(), req, ops)
+	require.ErrorIs(t, err, ErrBlockMismatch)
+}
+
+// TestCreateTxWithOpsIgnoresUnminedConfirmedDuplicate verifies that an unmined
+// re-observation of an already confirmed transaction is a no-op.
+func TestCreateTxWithOpsIgnoresUnminedConfirmedDuplicate(t *testing.T) {
+	t.Parallel()
+
+	req := testCreateTxRequest(t)
+	existing := CreateTxExistingTarget{
+		ID:       4,
+		Status:   TxStatusPublished,
+		HasBlock: true,
+	}
+
+	ops := &mockCreateTxOps{}
+	t.Cleanup(func() {
+		ops.AssertExpectations(t)
+	})
+
+	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
+
+	err := CreateTxWithOps(context.Background(), req, ops)
+	require.NoError(t, err)
 }
 
 // TestCreateTxWithOpsConfirmExisting verifies that the shared CreateTx flow can
@@ -797,6 +946,11 @@ func TestCreateTxWithOpsConfirmExisting(t *testing.T) {
 	ops.On("LoadExisting", mock.Anything, req).Return(&existing, nil).Once()
 
 	ops.On("ConfirmExisting", mock.Anything, req, existing).Return(nil).Once()
+	ops.On("ListConflictTxns", mock.Anything, req).Return(
+		[]int64(nil), []chainhash.Hash(nil), nil,
+	).Once()
+	ops.On("InsertCredits", mock.Anything, req, int64(7)).Return(nil).Once()
+	ops.On("MarkInputsSpent", mock.Anything, req, int64(7)).Return(nil).Once()
 
 	err = CreateTxWithOps(context.Background(), req, ops)
 	require.NoError(t, err)
@@ -1796,6 +1950,104 @@ func TestCheckReuseCreateTx(t *testing.T) {
 	}
 }
 
+// TestCheckIdempotentCreateTx verifies that duplicate observations are only
+// skipped when the persisted tx status, block assignment, coinbase flag, and
+// label already match the incoming request.
+func TestCheckIdempotentCreateTx(t *testing.T) {
+	t.Parallel()
+
+	confirmedReq, err := NewCreateTxRequest(CreateTxParams{
+		WalletID: 9,
+		Tx:       testRegularMsgTx(),
+		Received: time.Unix(556, 0),
+		Block:    testBlock(23),
+		Status:   TxStatusPublished,
+		Label:    "mined",
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	height := uint32(23)
+	wrongHeight := uint32(24)
+	blockHash := confirmedReq.Params.Block.Hash
+	wrongHash := chainhash.Hash{99}
+	tests := []struct {
+		name     string
+		req      CreateTxRequest
+		existing CreateTxExistingTarget
+		want     bool
+	}{
+		{
+			name: "unmined duplicate",
+			req:  testCreateTxRequest(t),
+			existing: CreateTxExistingTarget{
+				Status: TxStatusPending,
+			},
+			want: true,
+		},
+		{
+			name: "confirmed duplicate",
+			req:  confirmedReq,
+			existing: CreateTxExistingTarget{
+				Status:      TxStatusPublished,
+				HasBlock:    true,
+				BlockHeight: &height,
+				BlockHash:   &blockHash,
+				Label:       "mined",
+			},
+			want: true,
+		},
+		{
+			name: "different status",
+			req:  testCreateTxRequest(t),
+			existing: CreateTxExistingTarget{
+				Status: TxStatusPublished,
+			},
+		},
+		{
+			name: "different block",
+			req:  confirmedReq,
+			existing: CreateTxExistingTarget{
+				Status:      TxStatusPublished,
+				HasBlock:    true,
+				BlockHeight: &wrongHeight,
+				BlockHash:   &blockHash,
+				Label:       "mined",
+			},
+		},
+		{
+			name: "different block hash",
+			req:  confirmedReq,
+			existing: CreateTxExistingTarget{
+				Status:      TxStatusPublished,
+				HasBlock:    true,
+				BlockHeight: &height,
+				BlockHash:   &wrongHash,
+				Label:       "mined",
+			},
+		},
+		{
+			name: "different label",
+			req:  confirmedReq,
+			existing: CreateTxExistingTarget{
+				Status:      TxStatusPublished,
+				HasBlock:    true,
+				BlockHeight: &height,
+				BlockHash:   &blockHash,
+				Label:       "other",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, test.want,
+				checkIdempotentCreateTx(test.req, test.existing))
+		})
+	}
+}
+
 // TestLoadCreateTxExisting verifies not-found and wrapped-error handling for
 // the shared existing-row lookup.
 func TestLoadCreateTxExisting(t *testing.T) {
@@ -2117,4 +2369,80 @@ func TestValidateCreditAddrMembership(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestValidateBatchTransactionsWalletID verifies that the shared batch
+// wallet-ID validator accepts a batch whose transactions all match the batch
+// wallet and rejects any transaction owned by a different wallet with
+// ErrInvalidParam.
+func TestValidateBatchTransactionsWalletID(t *testing.T) {
+	t.Parallel()
+
+	const batchWalletID = 7
+
+	t.Run("all match", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID,
+			[]CreateTxParams{
+				{WalletID: batchWalletID},
+				{WalletID: batchWalletID},
+			})
+		require.NoError(t, err)
+	})
+
+	t.Run("empty batch", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID, nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("mismatch rejected", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsWalletID(batchWalletID,
+			[]CreateTxParams{
+				{WalletID: batchWalletID},
+				{WalletID: 99},
+			})
+		require.ErrorIs(t, err, ErrInvalidParam)
+	})
+}
+
+// TestValidateBatchTransactionsTx verifies that the shared batch nil-Tx
+// validator accepts a batch whose transactions all carry a Tx and rejects a
+// batch with any nil Tx with ErrInvalidParam, so the parents-first sort never
+// dereferences a nil transaction.
+func TestValidateBatchTransactionsTx(t *testing.T) {
+	t.Parallel()
+
+	tx := testRegularMsgTx()
+
+	t.Run("all present", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx([]CreateTxParams{
+			{Tx: tx},
+			{Tx: tx},
+		})
+		require.NoError(t, err)
+	})
+
+	t.Run("empty batch", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx(nil)
+		require.NoError(t, err)
+	})
+
+	t.Run("nil tx rejected", func(t *testing.T) {
+		t.Parallel()
+
+		err := ValidateBatchTransactionsTx([]CreateTxParams{
+			{Tx: tx},
+			{Tx: nil},
+		})
+		require.ErrorIs(t, err, ErrInvalidParam)
+	})
 }

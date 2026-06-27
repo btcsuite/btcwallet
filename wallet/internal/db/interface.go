@@ -411,6 +411,10 @@ type TxStore interface {
 	// graph-affecting lifecycle changes.
 	UpdateTx(ctx context.Context, params UpdateTxParams) error
 
+	// ApplyTxBatch atomically records a batch of transaction records and an
+	// optional wallet sync-tip update.
+	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
+
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
 	// transaction is not found.
@@ -516,6 +520,10 @@ type UTXOStore interface {
 
 	// DeleteExpiredLeases removes expired UTXO lease records for the wallet.
 	DeleteExpiredLeases(ctx context.Context, walletID uint32) error
+
+	// ListOutputsToWatch returns UTXOs that recovery scans should watch.
+	ListOutputsToWatch(ctx context.Context, walletID uint32) ([]UtxoInfo,
+		error)
 
 	// Balance returns a wallet-scoped balance view for the current unspent UTXO
 	// set after applying any optional caller-supplied filters.

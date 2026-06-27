@@ -1,14 +1,17 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
@@ -52,9 +55,9 @@ var _ db.CreateTxOps = (*createTxOps)(nil)
 func (o *createTxOps) LoadExisting(ctx context.Context,
 	req db.CreateTxRequest) (*db.CreateTxExistingTarget, error) {
 
-	meta, err := o.qtx.GetTransactionMetaByHash(
+	row, err := o.qtx.GetTransactionByHash(
 		ctx,
-		sqlc.GetTransactionMetaByHashParams{
+		sqlc.GetTransactionByHashParams{
 			WalletID: int64(req.Params.WalletID),
 			TxHash:   req.TxHash[:],
 		},
@@ -67,16 +70,38 @@ func (o *createTxOps) LoadExisting(ctx context.Context,
 		return nil, fmt.Errorf("get tx metadata: %w", err)
 	}
 
-	status, err := db.ParseTxStatus(int64(meta.TxStatus))
+	status, err := db.ParseTxStatus(int64(row.TxStatus))
 	if err != nil {
 		return nil, err
 	}
 
+	var (
+		blockHeight *uint32
+		blockHash   *chainhash.Hash
+	)
+	if row.BlockHeight.Valid {
+		block, err := buildBlock(
+			row.BlockHeight, row.BlockHash, row.BlockTimestamp,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		height := block.Height
+		blockHeight = &height
+
+		hash := block.Hash
+		blockHash = &hash
+	}
+
 	return &db.CreateTxExistingTarget{
-		ID:         meta.ID,
-		Status:     status,
-		HasBlock:   meta.BlockHeight.Valid,
-		IsCoinbase: meta.IsCoinbase,
+		ID:          row.ID,
+		Status:      status,
+		HasBlock:    row.BlockHeight.Valid,
+		BlockHeight: blockHeight,
+		BlockHash:   blockHash,
+		IsCoinbase:  row.IsCoinbase,
+		Label:       row.TxLabel,
 	}, nil
 }
 
@@ -169,7 +194,7 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 				inputIndex, err)
 		}
 
-		spentByTxID, err := qtx.GetUtxoSpendByOutpoint(
+		spend, err := qtx.GetUtxoSpendByOutpoint(
 			ctx, sqlc.GetUtxoSpendByOutpointParams{
 				WalletID:    int64(req.Params.WalletID),
 				TxHash:      txIn.PreviousOutPoint.Hash[:],
@@ -185,11 +210,11 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 				err)
 		}
 
-		if !spentByTxID.Valid {
+		if !spend.SpentByTxID.Valid {
 			continue
 		}
 
-		rootIDs[spentByTxID.Int64] = struct{}{}
+		rootIDs[spend.SpentByTxID.Int64] = struct{}{}
 	}
 
 	return rootIDs, nil
@@ -246,7 +271,7 @@ func (o *createTxOps) Insert(ctx context.Context,
 func (o *createTxOps) InsertCredits(ctx context.Context,
 	req db.CreateTxRequest, txID int64) error {
 
-	return insertCredits(ctx, o.qtx, req.Params, txID)
+	return insertCredits(ctx, o, req.Params, txID)
 }
 
 // MarkInputsSpent records wallet-owned inputs spent by the transaction.
@@ -346,75 +371,491 @@ func creditLookupScript(params db.CreateTxParams, index uint32) ([]byte,
 	return lookupScript, nil
 }
 
+// existingChildSpend describes one already-stored active transaction input that
+// spends an output whose wallet ownership was discovered later.
+type existingChildSpend struct {
+	// id is the stored child transaction row ID.
+	id int64
+
+	// hash is the child transaction hash used for descendant discovery.
+	hash chainhash.Hash
+
+	// confirmed reports whether the child row has confirming block metadata.
+	confirmed bool
+
+	// inputIndex is the input index that spends prevOut.
+	inputIndex int
+
+	// prevOut is the parent output spent by the child input.
+	prevOut wire.OutPoint
+}
+
 // insertCredits inserts one wallet-owned UTXO row for each credited output of
 // the transaction being stored.
-func insertCredits(ctx context.Context, qtx *sqlc.Queries,
+func insertCredits(ctx context.Context, ops *createTxOps,
 	params db.CreateTxParams, txID int64) error {
 
 	for index := range params.Credits {
-		creditExists, err := creditExists(
-			ctx, qtx, params.WalletID, params.Tx.TxHash(), index,
+		err := insertCredit(ctx, ops.qtx, params, txID, index)
+		if err != nil {
+			return err
+		}
+	}
+
+	err := markExistingChildSpends(ctx, ops, params, txID)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// insertCredit inserts or validates one wallet-owned UTXO row for a credited
+// output.
+func insertCredit(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams, txID int64, index uint32) error {
+
+	lookupScript, err := creditLookupScript(params, index)
+	if err != nil {
+		return err
+	}
+
+	creditExists, existingScript, err := creditExists(
+		ctx, qtx, params.WalletID, params.Tx.TxHash(), index,
+	)
+	if err != nil {
+		return err
+	}
+
+	if creditExists {
+		if !bytes.Equal(existingScript, lookupScript) {
+			return fmt.Errorf("credit output %d owner mismatch: %w",
+				index, db.ErrTxAlreadyExists)
+		}
+
+		return nil
+	}
+
+	addrRow, err := qtx.GetAddressByScriptPubKey(
+		ctx, sqlc.GetAddressByScriptPubKeyParams{
+			ScriptPubKey: lookupScript,
+			WalletID:     int64(params.WalletID),
+		},
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("credit output %d: %w", index,
+				db.ErrAddressNotFound)
+		}
+
+		return fmt.Errorf("resolve credit address %d: %w", index, err)
+	}
+
+	outputIndex, err := db.Uint32ToInt32(index)
+	if err != nil {
+		return fmt.Errorf("convert credit index %d: %w", index, err)
+	}
+
+	_, err = qtx.InsertUtxo(ctx, sqlc.InsertUtxoParams{
+		WalletID:    int64(params.WalletID),
+		TxID:        txID,
+		OutputIndex: outputIndex,
+		Amount:      params.Tx.TxOut[index].Value,
+		AddressID:   addrRow.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("insert credit output %d: %w", index, err)
+	}
+
+	return nil
+}
+
+// markExistingChildSpends attaches already-stored active child transaction
+// inputs to any credited outputs created by params.Tx.
+func markExistingChildSpends(ctx context.Context, ops *createTxOps,
+	params db.CreateTxParams, txID int64) error {
+
+	if len(params.Credits) == 0 {
+		return nil
+	}
+
+	qtx := ops.qtx
+
+	rows, err := qtx.ListActiveTransactionRaws(ctx, int64(params.WalletID))
+	if err != nil {
+		return fmt.Errorf("list active txns: %w", err)
+	}
+
+	parentHash := params.Tx.TxHash()
+
+	childSpends, err := collectExistingChildSpends(
+		rows, parentHash, params, txID,
+	)
+	if err != nil {
+		return err
+	}
+
+	outPoints := make([]wire.OutPoint, 0, len(childSpends))
+	for outPoint := range childSpends {
+		outPoints = append(outPoints, outPoint)
+	}
+
+	sort.Slice(outPoints, func(i, j int) bool {
+		return outPoints[i].Index < outPoints[j].Index
+	})
+
+	activeSpends := make(map[wire.OutPoint][]existingChildSpend, len(outPoints))
+	for _, outPoint := range outPoints {
+		spends, err := activeExistingChildSpends(
+			ctx, qtx, params.WalletID, childSpends[outPoint],
 		)
 		if err != nil {
 			return err
 		}
 
-		if creditExists {
-			continue
-		}
+		activeSpends[outPoint] = spends
+	}
 
-		lookupScript, err := creditLookupScript(params, index)
-		if err != nil {
-			return err
-		}
+	scheduledReplacements, err := validateExistingChildSpendGroups(
+		activeSpends,
+	)
+	if err != nil {
+		return err
+	}
 
-		addrRow, err := qtx.GetAddressByScriptPubKey(
-			ctx, sqlc.GetAddressByScriptPubKeyParams{
-				ScriptPubKey: lookupScript,
-				WalletID:     int64(params.WalletID),
-			},
+	appliedReplacements := make(map[int64]struct{}, len(scheduledReplacements))
+	for _, outPoint := range outPoints {
+		spends := activeSpends[outPoint]
+
+		err = reconcileExistingChildSpends(
+			ctx, ops, params, spends, scheduledReplacements,
+			appliedReplacements,
 		)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("credit output %d: %w", index,
-					db.ErrAddressNotFound)
-			}
-
-			return fmt.Errorf("resolve credit address %d: %w", index, err)
-		}
-
-		outputIndex, err := db.Uint32ToInt32(index)
-		if err != nil {
-			return fmt.Errorf("convert credit index %d: %w", index, err)
-		}
-
-		_, err = qtx.InsertUtxo(ctx, sqlc.InsertUtxoParams{
-			WalletID:    int64(params.WalletID),
-			TxID:        txID,
-			OutputIndex: outputIndex,
-			Amount:      params.Tx.TxOut[index].Value,
-			AddressID:   addrRow.ID,
-		})
-		if err != nil {
-			return fmt.Errorf("insert credit output %d: %w", index, err)
+			return err
 		}
 	}
 
 	return nil
 }
 
-// creditExists reports whether the wallet already has a UTXO row for the
-// given credited output, even if that output is now spent by a child tx.
+// validateExistingChildSpendGroups validates every credited-output spend group
+// before reconciliation mutates any spend edges.
+func validateExistingChildSpendGroups(
+	groups map[wire.OutPoint][]existingChildSpend) (map[int64]struct{}, error) {
+
+	scheduledReplacements := make(map[int64]struct{})
+	for _, spends := range groups {
+		confirmed, unmined := splitExistingChildSpends(spends)
+		if len(confirmed) > 1 {
+			return nil, db.ErrTxInputConflict
+		}
+
+		if len(confirmed) == 0 {
+			continue
+		}
+
+		for _, spend := range unmined {
+			scheduledReplacements[spend.id] = struct{}{}
+		}
+	}
+
+	for _, spends := range groups {
+		confirmed, unmined := splitExistingChildSpends(spends)
+		if len(confirmed) != 0 {
+			continue
+		}
+
+		unmined = filterExistingChildSpendsByID(
+			unmined, scheduledReplacements,
+		)
+		if len(unmined) > 1 {
+			return nil, db.ErrTxInputConflict
+		}
+	}
+
+	return scheduledReplacements, nil
+}
+
+// filterExistingChildSpendsByID removes spends whose child transaction ID is in
+// the skip set.
+func filterExistingChildSpendsByID(spends []existingChildSpend,
+	skip map[int64]struct{}) []existingChildSpend {
+
+	filtered := spends[:0]
+	for _, spend := range spends {
+		if _, ok := skip[spend.id]; ok {
+			continue
+		}
+
+		filtered = append(filtered, spend)
+	}
+
+	return filtered
+}
+
+// collectExistingChildSpends groups active children by the credited parent
+// outpoint they spend.
+func collectExistingChildSpends(rows []sqlc.ListActiveTransactionRawsRow,
+	parentHash chainhash.Hash, params db.CreateTxParams, txID int64) (
+	map[wire.OutPoint][]existingChildSpend, error) {
+
+	spends := make(map[wire.OutPoint][]existingChildSpend)
+	for _, row := range rows {
+		if row.ID == txID {
+			continue
+		}
+
+		txHash, err := chainhash.NewHash(row.TxHash)
+		if err != nil {
+			return nil, fmt.Errorf("active child tx hash %d: %w", row.ID,
+				err)
+		}
+
+		childTx, err := deserializeActiveTx(row.ID, row.RawTx)
+		if err != nil {
+			return nil, err
+		}
+
+		addChildInputSpends(
+			spends, childTx, parentHash, params, row.ID, *txHash,
+			row.BlockHeight.Valid,
+		)
+	}
+
+	return spends, nil
+}
+
+// activeExistingChildSpends filters one snapshot group to children that still
+// belong to the active spend set.
+func activeExistingChildSpends(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, spends []existingChildSpend) ([]existingChildSpend,
+	error) {
+
+	active := make([]existingChildSpend, 0, len(spends))
+	for _, spend := range spends {
+		row, err := qtx.GetTransactionByHash(
+			ctx, sqlc.GetTransactionByHashParams{
+				WalletID: int64(walletID),
+				TxHash:   spend.hash[:],
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("refresh existing child %d: %w",
+				spend.id, err)
+		}
+
+		status, err := db.ParseTxStatus(int64(row.TxStatus))
+		if err != nil {
+			return nil, fmt.Errorf("refresh existing child %d: %w",
+				spend.id, err)
+		}
+
+		if !db.IsUnminedStatus(status) {
+			continue
+		}
+
+		spend.confirmed = row.BlockHeight.Valid
+		active = append(active, spend)
+	}
+
+	return active, nil
+}
+
+// addChildInputSpends appends child inputs that spend credited parent outputs.
+func addChildInputSpends(spends map[wire.OutPoint][]existingChildSpend,
+	childTx *wire.MsgTx, parentHash chainhash.Hash, params db.CreateTxParams,
+	childTxID int64, childHash chainhash.Hash, confirmed bool) {
+
+	for inputIndex, txIn := range childTx.TxIn {
+		prevOut := txIn.PreviousOutPoint
+		if prevOut.Hash != parentHash {
+			continue
+		}
+
+		if _, ok := params.Credits[prevOut.Index]; !ok {
+			continue
+		}
+
+		spends[prevOut] = append(spends[prevOut], existingChildSpend{
+			id:         childTxID,
+			hash:       childHash,
+			confirmed:  confirmed,
+			inputIndex: inputIndex,
+			prevOut:    prevOut,
+		})
+	}
+}
+
+// deserializeActiveTx deserializes one active transaction row.
+func deserializeActiveTx(txID int64, rawTx []byte) (*wire.MsgTx, error) {
+	var msgTx wire.MsgTx
+
+	err := msgTx.Deserialize(bytes.NewReader(rawTx))
+	if err != nil {
+		return nil, fmt.Errorf("deserialize active tx %d: %w", txID, err)
+	}
+
+	return &msgTx, nil
+}
+
+// reconcileExistingChildSpends reconciles all active children that spend one
+// newly discovered parent credit before any spend edge is mutated.
+func reconcileExistingChildSpends(ctx context.Context, ops *createTxOps,
+	params db.CreateTxParams, spends []existingChildSpend,
+	scheduledReplacements, appliedReplacements map[int64]struct{}) error {
+
+	confirmed, unmined := splitExistingChildSpends(spends)
+	if len(confirmed) > 1 {
+		return db.ErrTxInputConflict
+	}
+
+	if len(confirmed) == 0 {
+		unmined = filterExistingChildSpendsByID(
+			unmined, scheduledReplacements,
+		)
+		if len(unmined) == 0 {
+			return nil
+		}
+
+		if len(unmined) != 1 {
+			return db.ErrTxInputConflict
+		}
+
+		return markChildInputSpent(ctx, ops.qtx, params, unmined[0])
+	}
+
+	confirmedSpend := confirmed[0]
+
+	unmined = filterExistingChildSpendsByID(unmined, appliedReplacements)
+	if len(unmined) > 0 {
+		err := replaceUnminedChildSpends(
+			ctx, ops, params, confirmedSpend.id, unmined,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, spend := range unmined {
+			appliedReplacements[spend.id] = struct{}{}
+		}
+	}
+
+	return markChildInputSpent(ctx, ops.qtx, params, confirmedSpend)
+}
+
+// splitExistingChildSpends separates confirmed child spends from unmined child
+// spends.
+func splitExistingChildSpends(spends []existingChildSpend) (
+	[]existingChildSpend, []existingChildSpend) {
+
+	confirmed := make([]existingChildSpend, 0, len(spends))
+	unmined := make([]existingChildSpend, 0, len(spends))
+
+	for _, spend := range spends {
+		if spend.confirmed {
+			confirmed = append(confirmed, spend)
+
+			continue
+		}
+
+		unmined = append(unmined, spend)
+	}
+
+	return confirmed, unmined
+}
+
+// replaceUnminedChildSpends marks unmined child spends replaced by a confirmed
+// child spend.
+func replaceUnminedChildSpends(ctx context.Context, ops *createTxOps,
+	params db.CreateTxParams, confirmedTxID int64,
+	unmined []existingChildSpend) error {
+
+	rootIDs := make([]int64, 0, len(unmined))
+	rootHashes := make([]chainhash.Hash, 0, len(unmined))
+
+	for _, spend := range unmined {
+		rootIDs = append(rootIDs, spend.id)
+		rootHashes = append(rootHashes, spend.hash)
+	}
+
+	err := db.ReplaceUnminedTxConflicts(
+		ctx, int64(params.WalletID), rootIDs, rootHashes, confirmedTxID,
+		ops,
+	)
+	if err != nil {
+		return fmt.Errorf("replace existing child spends: %w", err)
+	}
+
+	return nil
+}
+
+// markChildInputSpent attaches one child input to its credited parent output.
+func markChildInputSpent(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams, spend existingChildSpend) error {
+
+	outputIndex, err := db.Uint32ToInt32(spend.prevOut.Index)
+	if err != nil {
+		return fmt.Errorf("convert child outpoint index %d: %w",
+			spend.inputIndex, err)
+	}
+
+	spentInputIndex, err := db.Int64ToInt32(int64(spend.inputIndex))
+	if err != nil {
+		return fmt.Errorf("convert child input index %d: %w",
+			spend.inputIndex, err)
+	}
+
+	rowsAffected, err := qtx.MarkUtxoSpent(
+		ctx, sqlc.MarkUtxoSpentParams{
+			WalletID:    int64(params.WalletID),
+			TxHash:      spend.prevOut.Hash[:],
+			OutputIndex: outputIndex,
+			SpentByTxID: sql.NullInt64{
+				Int64: spend.id,
+				Valid: true,
+			},
+			SpentInputIndex: sql.NullInt32{
+				Int32: spentInputIndex,
+				Valid: true,
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("mark existing child %d input %d: %w",
+			spend.id, spend.inputIndex, err)
+	}
+
+	if rowsAffected != 0 {
+		return nil
+	}
+
+	err = ensureSpendConflict(
+		ctx, qtx, params.WalletID, spend.prevOut.Hash, outputIndex,
+		spend.id,
+	)
+	if err != nil {
+		return fmt.Errorf("mark existing child %d input %d: %w",
+			spend.id, spend.inputIndex, err)
+	}
+
+	return nil
+}
+
+// creditExists reports whether the wallet already has a UTXO row for the given
+// credited output, even if that output is now spent by a child tx. When the row
+// exists, it also returns the script used to resolve the owner address.
 func creditExists(ctx context.Context, qtx *sqlc.Queries,
-	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, error) {
+	walletID uint32, txHash chainhash.Hash, outputIndex uint32) (bool, []byte,
+	error) {
 
 	convertedIndex, err := db.Uint32ToInt32(outputIndex)
 	if err != nil {
-		return false, fmt.Errorf("convert credit index %d: %w", outputIndex,
-			err)
+		return false, nil, fmt.Errorf("convert credit index %d: %w",
+			outputIndex, err)
 	}
 
-	_, err = qtx.GetUtxoSpendByOutpoint(
+	row, err := qtx.GetUtxoSpendByOutpoint(
 		ctx, sqlc.GetUtxoSpendByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
@@ -423,14 +864,14 @@ func creditExists(ctx context.Context, qtx *sqlc.Queries,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+			return false, nil, nil
 		}
 
-		return false, fmt.Errorf("lookup credit output %d: %w", outputIndex,
-			err)
+		return false, nil, fmt.Errorf("lookup credit output %d: %w",
+			outputIndex, err)
 	}
 
-	return true, nil
+	return true, row.ScriptPubKey, nil
 }
 
 // markInputsSpent attaches wallet-owned outpoints spent by the stored
@@ -493,7 +934,7 @@ func ensureSpendConflict(ctx context.Context, qtx *sqlc.Queries,
 	walletID uint32, txHash chainhash.Hash, outputIndex int32,
 	txID int64) error {
 
-	spendByTxID, err := qtx.GetUtxoSpendByOutpoint(
+	spend, err := qtx.GetUtxoSpendByOutpoint(
 		ctx, sqlc.GetUtxoSpendByOutpointParams{
 			WalletID:    int64(walletID),
 			TxHash:      txHash[:],
@@ -510,7 +951,7 @@ func ensureSpendConflict(ctx context.Context, qtx *sqlc.Queries,
 		return fmt.Errorf("check spend conflict: %w", err)
 	}
 
-	if spendByTxID.Valid && spendByTxID.Int64 != txID {
+	if spend.SpentByTxID.Valid && spend.SpentByTxID.Int64 != txID {
 		return db.ErrTxInputConflict
 	}
 

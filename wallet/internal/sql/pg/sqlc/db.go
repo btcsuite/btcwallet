@@ -204,6 +204,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listAccountsByWalletScopeStmt, err = db.PrepareContext(ctx, ListAccountsByWalletScope); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAccountsByWalletScope: %w", err)
 	}
+	if q.listActiveTransactionRawsStmt, err = db.PrepareContext(ctx, ListActiveTransactionRaws); err != nil {
+		return nil, fmt.Errorf("error preparing query ListActiveTransactionRaws: %w", err)
+	}
 	if q.listActiveUtxoLeasesStmt, err = db.PrepareContext(ctx, ListActiveUtxoLeases); err != nil {
 		return nil, fmt.Errorf("error preparing query ListActiveUtxoLeases: %w", err)
 	}
@@ -218,6 +221,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listKeyScopesByWalletStmt, err = db.PrepareContext(ctx, ListKeyScopesByWallet); err != nil {
 		return nil, fmt.Errorf("error preparing query ListKeyScopesByWallet: %w", err)
+	}
+	if q.listOutputsToWatchStmt, err = db.PrepareContext(ctx, ListOutputsToWatch); err != nil {
+		return nil, fmt.Errorf("error preparing query ListOutputsToWatch: %w", err)
 	}
 	if q.listOwnedInputPrevOutputsByTxHashesStmt, err = db.PrepareContext(ctx, ListOwnedInputPrevOutputsByTxHashes); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOwnedInputPrevOutputsByTxHashes: %w", err)
@@ -596,6 +602,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listAccountsByWalletScopeStmt: %w", cerr)
 		}
 	}
+	if q.listActiveTransactionRawsStmt != nil {
+		if cerr := q.listActiveTransactionRawsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listActiveTransactionRawsStmt: %w", cerr)
+		}
+	}
 	if q.listActiveUtxoLeasesStmt != nil {
 		if cerr := q.listActiveUtxoLeasesStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listActiveUtxoLeasesStmt: %w", cerr)
@@ -619,6 +630,11 @@ func (q *Queries) Close() error {
 	if q.listKeyScopesByWalletStmt != nil {
 		if cerr := q.listKeyScopesByWalletStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listKeyScopesByWalletStmt: %w", cerr)
+		}
+	}
+	if q.listOutputsToWatchStmt != nil {
+		if cerr := q.listOutputsToWatchStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listOutputsToWatchStmt: %w", cerr)
 		}
 	}
 	if q.listOwnedInputPrevOutputsByTxHashesStmt != nil {
@@ -840,11 +856,13 @@ type Queries struct {
 	listAccountsByWalletStmt                    *sql.Stmt
 	listAccountsByWalletAndNameStmt             *sql.Stmt
 	listAccountsByWalletScopeStmt               *sql.Stmt
+	listActiveTransactionRawsStmt               *sql.Stmt
 	listActiveUtxoLeasesStmt                    *sql.Stmt
 	listAddressTypesStmt                        *sql.Stmt
 	listAddressesByAccountStmt                  *sql.Stmt
 	listAddressesByScriptPubKeysStmt            *sql.Stmt
 	listKeyScopesByWalletStmt                   *sql.Stmt
+	listOutputsToWatchStmt                      *sql.Stmt
 	listOwnedInputPrevOutputsByTxHashesStmt     *sql.Stmt
 	listOwnedOutputsByTxIDsStmt                 *sql.Stmt
 	listRawImportedAddressesStmt                *sql.Stmt
@@ -935,11 +953,13 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listAccountsByWalletStmt:                    q.listAccountsByWalletStmt,
 		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,
 		listAccountsByWalletScopeStmt:               q.listAccountsByWalletScopeStmt,
+		listActiveTransactionRawsStmt:               q.listActiveTransactionRawsStmt,
 		listActiveUtxoLeasesStmt:                    q.listActiveUtxoLeasesStmt,
 		listAddressTypesStmt:                        q.listAddressTypesStmt,
 		listAddressesByAccountStmt:                  q.listAddressesByAccountStmt,
 		listAddressesByScriptPubKeysStmt:            q.listAddressesByScriptPubKeysStmt,
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
+		listOutputsToWatchStmt:                      q.listOutputsToWatchStmt,
 		listOwnedInputPrevOutputsByTxHashesStmt:     q.listOwnedInputPrevOutputsByTxHashesStmt,
 		listOwnedOutputsByTxIDsStmt:                 q.listOwnedOutputsByTxIDsStmt,
 		listRawImportedAddressesStmt:                q.listRawImportedAddressesStmt,

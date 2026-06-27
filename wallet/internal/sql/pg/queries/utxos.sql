@@ -388,14 +388,19 @@ ORDER BY u.spent_by_tx_id;
 --   considers outputs whose parent status is `pending` or `published`.
 -- - Returns the nullable `spent_by_tx_id` column so callers can distinguish
 --   between an external/unknown parent and a wallet-owned conflict.
+-- - Returns the owner address script so duplicate credit replay can verify it
+--   matches the already-recorded UTXO rather than only checking outpoint
+--   existence.
 -- Performance:
 -- - Targets one wallet-scoped outpoint through the unique `(tx_id,
 --   output_index)` key after the parent hash lookup.
-SELECT u.spent_by_tx_id
+SELECT u.spent_by_tx_id, a.script_pub_key
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
+INNER JOIN addresses AS a ON u.address_id = a.id
 WHERE
     t.wallet_id = $1
+    AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
     AND t.tx_status IN (0, 1);
@@ -495,3 +500,43 @@ WHERE
         FROM transactions AS t
         WHERE t.id = u.tx_id AND t.wallet_id = $1
     );
+
+-- name: ListOutputsToWatch :many
+-- Lists every output a recovery rescan must keep watching for one wallet.
+--
+-- How:
+-- - Starts from the wallet's UTXO rows joined to their funding transaction;
+--   the rescan needs each outpoint plus the on-chain output script. The script
+--   is taken from the funding transaction's raw_tx (TxOut[output_index]) in the
+--   Store Go layer rather than from the credited address: a bare-multisig
+--   output the wallet partly owns is recorded against a member address whose
+--   own script differs from the multisig output script, so the address script
+--   would be the wrong thing to watch. Reading the actual output script matches
+--   the kvdb OutputsToWatch contract.
+-- - Includes outputs whose funding transaction is still active (pending or
+--   published); invalidated parents (replaced/failed/orphaned) are excluded so
+--   the watch set matches the legacy wtxmgr credit walk.
+-- - Keeps an output when it is either still unspent OR spent only by an
+--   unmined, still-active transaction. This mirrors the legacy behaviour of
+--   returning unmined credits and credits spent by other unmined txs, while
+--   dropping outputs already spent by a confirmed transaction.
+-- - Locked (leased) outputs are intentionally retained because leasing is
+--   modelled separately from existence and the rescan must still watch them.
+SELECT
+    t.tx_hash,
+    u.output_index,
+    t.raw_tx
+FROM utxos AS u
+INNER JOIN transactions AS t ON u.tx_id = t.id
+LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+WHERE
+    t.wallet_id = sqlc.arg('wallet_id')
+    AND t.tx_status IN (0, 1)
+    AND (
+        u.spent_by_tx_id IS NULL
+        OR (
+            spend.block_height IS NULL
+            AND spend.tx_status IN (0, 1)
+        )
+    )
+ORDER BY t.tx_hash, u.output_index;
