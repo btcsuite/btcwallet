@@ -450,20 +450,33 @@ func TestPutAddrHorizons(t *testing.T) {
 	mocks.addrStore.On("FetchScopedKeyManager", bs.Scope).Return(
 		scopedMgr, nil,
 	).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 4}, nil,
+	).Once()
 
 	scopedMgr.On("ExtendAddresses", mock.Anything, bs.Account, uint32(10),
 		bs.Branch,
 	).Return(nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 11}, nil,
+	).Once()
 
 	// Act: Trigger the horizon expansion within a database transaction.
+	var rollback addrHorizonRollback
+
 	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		return s.putAddrHorizons(t.Context(), ns, res)
+		var err error
+
+		rollback, err = s.putAddrHorizons(t.Context(), ns, res)
+
+		return err
 	})
 
 	// Assert: Verify that the horizons were extended without error.
 	require.NoError(t, err)
+	require.Len(t, rollback, 1)
 }
 
 // TestDBGetScanData verifies that the wallet can successfully retrieve all
@@ -790,6 +803,129 @@ func TestDBPutTargetedBatch_Errors(t *testing.T) {
 	require.ErrorIs(t, err, errDBInsert)
 }
 
+// expectHorizonExtension sets the mock expectations for one successful horizon
+// extension over a branch key range.
+func expectHorizonExtension(scopedMgr *bwmock.AccountStore,
+	bs waddrmgr.BranchScope, fromIndex, maxFoundIndex, toIndex uint32) {
+
+	before := &waddrmgr.AccountProperties{}
+	after := &waddrmgr.AccountProperties{}
+
+	if bs.Branch == waddrmgr.InternalBranch {
+		before.InternalKeyCount = fromIndex
+		after.InternalKeyCount = toIndex
+	} else {
+		before.ExternalKeyCount = fromIndex
+		after.ExternalKeyCount = toIndex
+	}
+
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		before, nil,
+	).Once()
+	scopedMgr.On("ExtendAddresses", mock.Anything, bs.Account, maxFoundIndex,
+		bs.Branch).Return(nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		after, nil,
+	).Once()
+}
+
+// TestDBPutSyncBatchEvictsHorizonsOnSyncTipError verifies that a failed batch
+// sync-tip update evicts addresses derived by the rolled-back horizon update.
+func TestDBPutSyncBatchEvictsHorizonsOnSyncTipError(t *testing.T) {
+	t.Parallel()
+
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &bwmock.AddrStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
+
+	bs := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+		Branch:  waddrmgr.ExternalBranch,
+	}
+	result := scanResult{
+		meta: &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 100},
+			Time:  time.Unix(1710005000, 0),
+		},
+		BlockProcessResult: &BlockProcessResult{
+			FoundHorizons: map[waddrmgr.BranchScope]uint32{
+				bs: 10,
+			},
+		},
+	}
+
+	scopedMgr := &bwmock.AccountStore{}
+	mockAddrStore.On("FetchScopedKeyManager", bs.Scope).Return(
+		scopedMgr, nil,
+	).Once()
+	expectHorizonExtension(scopedMgr, bs, 4, 10, 11)
+	scopedMgr.On(
+		"EvictDerivedAddresses", bs.Account, bs.Branch, uint32(4),
+		uint32(11),
+	).Once()
+	mockAddrStore.On("SetSyncedTo", mock.Anything, mock.Anything).Return(
+		errSetFail,
+	).Once()
+
+	err := s.DBPutSyncBatch(t.Context(), []scanResult{result})
+	require.ErrorIs(t, err, errSetFail)
+}
+
+// TestDBPutTargetedBatchEvictsHorizonsOnTxError verifies that a failed targeted
+// transaction write evicts addresses derived by the rolled-back horizon update.
+func TestDBPutTargetedBatchEvictsHorizonsOnTxError(t *testing.T) {
+	t.Parallel()
+
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	mockAddrStore := &bwmock.AddrStore{}
+	mockTxStore := &bwmock.TxStore{}
+	s := newSyncer(Config{DB: db}, mockAddrStore, mockTxStore, nil)
+
+	bs := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+		Branch:  waddrmgr.ExternalBranch,
+	}
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(wire.NewMsgTx(1), time.Now())
+	require.NoError(t, err)
+
+	result := scanResult{
+		meta: &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{Height: 100},
+			Time:  time.Unix(1710005100, 0),
+		},
+		BlockProcessResult: &BlockProcessResult{
+			FoundHorizons: map[waddrmgr.BranchScope]uint32{
+				bs: 10,
+			},
+			RelevantOutputs: TxEntries{{
+				Rec:     rec,
+				Entries: []AddrEntry{},
+			}},
+		},
+	}
+
+	scopedMgr := &bwmock.AccountStore{}
+	mockAddrStore.On("FetchScopedKeyManager", bs.Scope).Return(
+		scopedMgr, nil,
+	).Once()
+	expectHorizonExtension(scopedMgr, bs, 4, 10, 11)
+	scopedMgr.On(
+		"EvictDerivedAddresses", bs.Account, bs.Branch, uint32(4),
+		uint32(11),
+	).Once()
+	mockTxStore.On("InsertConfirmedTx", mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything).Return(errDBInsert).Once()
+
+	err = s.DBPutTargetedBatch(t.Context(), []scanResult{result})
+	require.ErrorIs(t, err, errDBInsert)
+}
+
 // TestDBPutTxns_Error verifies error propagation in DBPutTxns.
 func TestDBPutTxns_Error(t *testing.T) {
 	t.Parallel()
@@ -980,10 +1116,57 @@ func TestPutAddrHorizons_Error(t *testing.T) {
 		mock.Anything).Return(nil, errManager).Once()
 
 	// Act: Attempt to persist address horizons.
-	err := s.putAddrHorizons(t.Context(), nil, results)
+	_, err := s.putAddrHorizons(t.Context(), nil, results)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errManager)
+}
+
+// TestPutAddrHorizonsEvictsOnPostExtensionReadError verifies that a failed
+// branch state read after horizon extension evicts the in-memory derivation
+// range before returning the error.
+func TestPutAddrHorizonsEvictsOnPostExtensionReadError(t *testing.T) {
+	t.Parallel()
+
+	mockAddrStore := &bwmock.AddrStore{}
+	s := newSyncer(Config{}, mockAddrStore, nil, nil)
+
+	bs := waddrmgr.BranchScope{
+		Scope:   waddrmgr.KeyScopeBIP0084,
+		Account: 0,
+		Branch:  waddrmgr.ExternalBranch,
+	}
+	results := []scanResult{{
+		BlockProcessResult: &BlockProcessResult{
+			FoundHorizons: map[waddrmgr.BranchScope]uint32{
+				bs: 10,
+			},
+		},
+	}}
+
+	scopedMgr := &bwmock.AccountStore{}
+	mockAddrStore.On("FetchScopedKeyManager", bs.Scope).Return(
+		scopedMgr, nil,
+	).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		&waddrmgr.AccountProperties{ExternalKeyCount: 4}, nil,
+	).Once()
+	scopedMgr.On("ExtendAddresses", mock.Anything, bs.Account, uint32(10),
+		bs.Branch).Return(nil).Once()
+	scopedMgr.On("AccountProperties", mock.Anything, bs.Account).Return(
+		(*waddrmgr.AccountProperties)(nil), errManager,
+	).Once()
+	scopedMgr.On(
+		"EvictDerivedAddresses", bs.Account, bs.Branch, uint32(4),
+		uint32(waddrmgr.MaxAddressesPerAccount+1),
+	).Once()
+
+	rollback, err := s.putAddrHorizons(t.Context(), nil, results)
+	require.ErrorIs(t, err, errManager)
+	require.Empty(t, rollback)
+
+	mockAddrStore.AssertExpectations(t)
+	scopedMgr.AssertExpectations(t)
 }
 
 // TestDBGetScanData_AddressError verifies active address loading failure.

@@ -173,6 +173,51 @@ func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesB
 	return items, nil
 }
 
+const AdvanceNextExternalIndex = `-- name: AdvanceNextExternalIndex :exec
+UPDATE accounts
+SET
+    next_external_index = max(
+        next_external_index, cast(?1 AS INTEGER)
+    )
+WHERE id = ?2
+`
+
+type AdvanceNextExternalIndexParams struct {
+	NextIndex int64
+	ID        int64
+}
+
+// Advances the external branch's next index to the supplied value during
+// recovery horizon extension. The MAX guard keeps the counter monotonic so a
+// slower concurrent writer cannot regress it below an already-recorded index.
+func (q *Queries) AdvanceNextExternalIndex(ctx context.Context, arg AdvanceNextExternalIndexParams) error {
+	_, err := q.exec(ctx, q.advanceNextExternalIndexStmt, AdvanceNextExternalIndex, arg.NextIndex, arg.ID)
+	return err
+}
+
+const AdvanceNextInternalIndex = `-- name: AdvanceNextInternalIndex :exec
+UPDATE accounts
+SET
+    next_internal_index = max(
+        next_internal_index, cast(?1 AS INTEGER)
+    )
+WHERE id = ?2
+`
+
+type AdvanceNextInternalIndexParams struct {
+	NextIndex int64
+	ID        int64
+}
+
+// Advances the internal/change branch's next index to the supplied value
+// during recovery horizon extension. The MAX guard keeps the counter monotonic
+// so a slower concurrent writer cannot regress it below an already-recorded
+// index.
+func (q *Queries) AdvanceNextInternalIndex(ctx context.Context, arg AdvanceNextInternalIndexParams) error {
+	_, err := q.exec(ctx, q.advanceNextInternalIndexStmt, AdvanceNextInternalIndex, arg.NextIndex, arg.ID)
+	return err
+}
+
 const CreateAccountSecret = `-- name: CreateAccountSecret :exec
 INSERT INTO account_secrets (
     account_id,
@@ -653,6 +698,71 @@ type GetAccountPropsByIdRow struct {
 func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error) {
 	row := q.queryRow(ctx, q.getAccountPropsByIdStmt, GetAccountPropsById, id)
 	var i GetAccountPropsByIdRow
+	err := row.Scan(
+		&i.AccountNumber,
+		&i.AccountName,
+		&i.IsDerived,
+		&i.PublicKey,
+		&i.MasterFingerprint,
+		&i.CreatedAt,
+		&i.Purpose,
+		&i.CoinType,
+		&i.InternalTypeID,
+		&i.ExternalTypeID,
+		&i.ExternalKeyCount,
+		&i.InternalKeyCount,
+		&i.WalletIsWatchOnly,
+	)
+	return i, err
+}
+
+const GetAccountPropsByWalletAndId = `-- name: GetAccountPropsByWalletAndId :one
+SELECT
+    da.account_number,
+    a.account_name,
+    a.is_derived,
+    a.public_key,
+    a.master_fingerprint,
+    a.created_at,
+    ks.purpose,
+    ks.coin_type,
+    ks.internal_type_id,
+    ks.external_type_id,
+    a.next_external_index AS external_key_count,
+    a.next_internal_index AS internal_key_count,
+    w.is_watch_only AS wallet_is_watch_only
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN derived_accounts AS da ON a.id = da.account_id
+WHERE a.wallet_id = ? AND a.id = ?
+`
+
+type GetAccountPropsByWalletAndIdParams struct {
+	WalletID int64
+	ID       int64
+}
+
+type GetAccountPropsByWalletAndIdRow struct {
+	AccountNumber     sql.NullInt64
+	AccountName       string
+	IsDerived         bool
+	PublicKey         []byte
+	MasterFingerprint sql.NullInt64
+	CreatedAt         time.Time
+	Purpose           int64
+	CoinType          int64
+	InternalTypeID    int64
+	ExternalTypeID    int64
+	ExternalKeyCount  int64
+	InternalKeyCount  int64
+	WalletIsWatchOnly bool
+}
+
+// Returns full account properties by wallet id and account id.
+func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccountPropsByWalletAndIdParams) (GetAccountPropsByWalletAndIdRow, error) {
+	row := q.queryRow(ctx, q.getAccountPropsByWalletAndIdStmt, GetAccountPropsByWalletAndId, arg.WalletID, arg.ID)
+	var i GetAccountPropsByWalletAndIdRow
 	err := row.Scan(
 		&i.AccountNumber,
 		&i.AccountName,
