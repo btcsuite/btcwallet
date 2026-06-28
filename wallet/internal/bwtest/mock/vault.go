@@ -6,7 +6,6 @@ package mock
 
 import (
 	"context"
-	"time"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/stretchr/testify/mock"
@@ -36,10 +35,8 @@ func (m *Vault) Decrypt(keyType waddrmgr.CryptoKeyType,
 }
 
 // Unlock forwards to the configured testify expectations.
-func (m *Vault) Unlock(ctx context.Context, passphrase []byte,
-	timeout time.Duration) error {
-
-	args := m.Called(ctx, passphrase, timeout)
+func (m *Vault) Unlock(ctx context.Context, passphrase []byte) error {
+	args := m.Called(ctx, passphrase)
 	return args.Error(0)
 }
 
@@ -55,8 +52,10 @@ func (m *Vault) IsLocked() bool {
 }
 
 // RefreshPrivatePassphrase forwards to the configured testify expectations.
-func (m *Vault) RefreshPrivatePassphrase(passphrase []byte) error {
-	args := m.Called(passphrase)
+func (m *Vault) RefreshPrivatePassphrase(ctx context.Context,
+	passphrase []byte) error {
+
+	args := m.Called(ctx, passphrase)
 	return args.Error(0)
 }
 

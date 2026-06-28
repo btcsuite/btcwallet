@@ -3,27 +3,31 @@ package keyvault
 
 import (
 	"context"
-	"time"
+	"errors"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
+// ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
+var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
+
+// ErrVaultLocked reports that an operation requiring unlocked runtime state
+// was attempted while the vault was locked.
+var ErrVaultLocked = errors.New("vault is locked")
+
 // Vault manages the lock lifecycle and cryptographic operations for wallet key
 // material.
 type Vault interface {
-	// Unlock unlocks the vault with the provided passphrase and applies the
-	// requested automatic lock timeout.
+	// Unlock unlocks the vault with the provided passphrase.
 	//
-	// A zero timeout uses the implementation's default timeout.
-	// A negative timeout disables automatic locking until Lock is called.
-	// A positive timeout schedules Lock to run after that duration.
-	//
-	// A successful Unlock replaces any previously scheduled lock. An invalid
-	// passphrase must leave the vault locked.
-	Unlock(ctx context.Context, passphrase []byte, timeout time.Duration) error
+	// If the passphrase is invalid, or the unlock operation fails, the vault
+	// must remain locked. If Unlock is called while the vault is already
+	// unlocked, it must be a no-op and must not validate the provided
+	// passphrase.
+	Unlock(ctx context.Context, passphrase []byte) error
 
-	// Lock locks the vault, clears any pending automatic lock, and erases
-	// secret material from memory. Lock is idempotent.
+	// Lock locks the vault and erases secret material from memory. Lock is
+	// idempotent.
 	Lock()
 
 	// IsLocked reports whether the vault is currently locked.
@@ -37,10 +41,8 @@ type Vault interface {
 	// type.
 	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
 
-	// RefreshPrivatePassphrase refreshes vault owned runtime passphrase and
-	// crypto state after a successful private passphrase rotation.
-	//
-	// The vault must still be unlocked with the new passphrase when this method
-	// is called.
-	RefreshPrivatePassphrase(passphrase []byte) error
+	// RefreshPrivatePassphrase rotates persisted wallet secrets to the provided
+	// new private passphrase. The vault must already be unlocked when this
+	// method is called.
+	RefreshPrivatePassphrase(ctx context.Context, passphrase []byte) error
 }
