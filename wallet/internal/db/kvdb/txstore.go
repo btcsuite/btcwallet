@@ -380,7 +380,7 @@ func batchNeedsAddrStore(params db.TxBatchParams) bool {
 	}
 
 	for _, tx := range params.Transactions {
-		if len(tx.Credits) > 0 {
+		if len(tx.Credits) > 0 || len(tx.CreditCandidates) > 0 {
 			return true
 		}
 	}
@@ -461,7 +461,14 @@ func (s *Store) applyLegacyTxBatch(addrmgrNs walletdb.ReadWriteBucket,
 	txmgrNs walletdb.ReadWriteBucket, transactions []db.CreateTxParams) error {
 
 	for i := range transactions {
-		req, err := db.NewCreateTxRequest(transactions[i])
+		params, err := s.resolveLegacyCreditCandidates(
+			addrmgrNs, transactions[i],
+		)
+		if err != nil {
+			return fmt.Errorf("resolve credit candidates %d: %w", i, err)
+		}
+
+		req, err := db.NewCreateTxRequest(params)
 		if err != nil {
 			return fmt.Errorf("validate tx %d: %w", i, err)
 		}
@@ -473,6 +480,122 @@ func (s *Store) applyLegacyTxBatch(addrmgrNs walletdb.ReadWriteBucket,
 	}
 
 	return nil
+}
+
+// resolveLegacyCreditCandidates promotes wallet-owned notification credit
+// candidates into Credits while the surrounding walletdb write transaction is
+// open.
+func (s *Store) resolveLegacyCreditCandidates(
+	addrmgrNs walletdb.ReadWriteBucket,
+	params db.CreateTxParams) (db.CreateTxParams, error) {
+
+	if len(params.CreditCandidates) == 0 {
+		return params, nil
+	}
+
+	credits := make(
+		map[uint32]address.Address,
+		len(params.Credits)+len(params.CreditCandidates),
+	)
+	for index, addr := range params.Credits {
+		credits[index] = addr
+	}
+
+	for index, candidates := range params.CreditCandidates {
+		if _, ok := credits[index]; ok {
+			continue
+		}
+
+		if uint64(index) >= uint64(len(params.Tx.TxOut)) {
+			return params, fmt.Errorf("%w: credit candidate index %d: %w",
+				db.ErrInvalidParam, index, db.ErrIndexOutOfRange)
+		}
+
+		ownedAddr, err := s.ownedLegacyCreditCandidate(
+			addrmgrNs, params, index, candidates,
+		)
+		if err != nil {
+			return params, fmt.Errorf("lookup candidate %d: %w", index, err)
+		}
+
+		if ownedAddr != nil {
+			credits[index] = ownedAddr
+			continue
+		}
+
+		owned, err := s.legacyCreditScriptOwned(
+			addrmgrNs, params.Tx.TxOut[index].PkScript,
+		)
+		if err != nil {
+			return params, fmt.Errorf("lookup output script %d: %w", index,
+				err)
+		}
+
+		if owned {
+			credits[index] = nil
+		}
+	}
+
+	params.Credits = credits
+	params.CreditCandidates = nil
+
+	return params, nil
+}
+
+// ownedLegacyCreditCandidate returns the first candidate address owned by the
+// legacy address manager.
+func (s *Store) ownedLegacyCreditCandidate(
+	addrmgrNs walletdb.ReadBucket, params db.CreateTxParams, index uint32,
+	candidates []address.Address) (address.Address, error) {
+
+	chainParams := s.addrStore.ChainParams()
+	for _, candidate := range candidates {
+		if candidate == nil {
+			return nil, fmt.Errorf("%w: nil credit candidate",
+				db.ErrInvalidParam)
+		}
+
+		err := validateCreditAddr(
+			*params.Tx, index, candidate, chainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = s.addrStore.Address(addrmgrNs, candidate)
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			continue
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("lookup candidate address: %w", err)
+		}
+
+		return candidate, nil
+	}
+
+	return nil, nil //nolint:nilnil // A nil address means no candidate matched.
+}
+
+// legacyCreditScriptOwned reports whether script resolves to a wallet address.
+func (s *Store) legacyCreditScriptOwned(addrmgrNs walletdb.ReadBucket,
+	script []byte) (bool, error) {
+
+	addr := addressFromScript(script, s.addrStore.ChainParams())
+	if addr == nil {
+		return false, nil
+	}
+
+	_, err := s.addrStore.Address(addrmgrNs, addr)
+	if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("lookup script address: %w", err)
+	}
+
+	return true, nil
 }
 
 // applyLegacyTxNotification records one relevant transaction notification using
@@ -640,7 +763,7 @@ func (s *Store) applyUnconfirmedLegacyTx(
 // applyUnconfirmedDuplicate handles an unmined batch notification for a
 // transaction hash already present in the legacy store.
 func (s *Store) applyUnconfirmedDuplicate(
-	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
+	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadWriteBucket,
 	existing *wtxmgr.TxDetails, txHash chainhash.Hash,
 	req db.CreateTxRequest) error {
 
@@ -651,6 +774,17 @@ func (s *Store) applyUnconfirmedDuplicate(
 	status, err := readLegacyTxStatus(txmgrNs, txHash)
 	if err != nil {
 		return fmt.Errorf("read duplicate tx status: %w", err)
+	}
+
+	promoted, err := s.promoteUnconfirmedDuplicate(
+		addrmgrNs, txmgrNs, existing, txHash, status, req,
+	)
+	if err != nil {
+		return err
+	}
+
+	if promoted {
+		return nil
 	}
 
 	matches, err := s.legacyDuplicateMatches(
@@ -665,6 +799,38 @@ func (s *Store) applyUnconfirmedDuplicate(
 	}
 
 	return fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
+}
+
+// promoteUnconfirmedDuplicate marks a matching pending duplicate as published
+// while preserving its existing label.
+func (s *Store) promoteUnconfirmedDuplicate(
+	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadWriteBucket,
+	existing *wtxmgr.TxDetails, txHash chainhash.Hash, status db.TxStatus,
+	req db.CreateTxRequest) (bool, error) {
+
+	if req.Params.Status != db.TxStatusPublished ||
+		status != db.TxStatusPending {
+
+		return false, nil
+	}
+
+	creditsMatch, err := s.legacyCreditsMatch(
+		addrmgrNs, existing.Credits, req,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if !creditsMatch {
+		return false, nil
+	}
+
+	err = putLegacyTxStatus(txmgrNs, txHash, db.TxStatusPublished)
+	if err != nil {
+		return false, fmt.Errorf("promote duplicate tx status: %w", err)
+	}
+
+	return true, nil
 }
 
 // legacyDuplicateMatches reports whether a duplicate batch notification's
