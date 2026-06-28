@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -829,6 +830,243 @@ func TestHandleChainUpdate(t *testing.T) {
 	// processed.
 	err = s.handleChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
 	require.NoError(t, err)
+}
+
+// newBareMultisigCreditScript returns one member address, that member's own
+// P2PK script, and a bare-multisig output script containing that member.
+func newBareMultisigCreditScript(t *testing.T) (
+	*address.AddressPubKey, []byte, []byte) {
+
+	t.Helper()
+
+	memberKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	foreignKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	memberAddr, err := address.NewAddressPubKey(
+		memberKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	memberScript, err := txscript.PayToAddrScript(memberAddr)
+	require.NoError(t, err)
+
+	multiSigScript, err := txscript.NewScriptBuilder().
+		AddInt64(1).
+		AddData(memberKey.PubKey().SerializeCompressed()).
+		AddData(foreignKey.PubKey().SerializeCompressed()).
+		AddInt64(2).
+		AddOp(txscript.OP_CHECKMULTISIG).
+		Script()
+	require.NoError(t, err)
+
+	return memberAddr, memberScript, multiSigScript
+}
+
+// matchRelevantTxParams reports whether the single batched transaction carries
+// the expected wallet, hash, receive time, credit candidate, status, and label.
+// Block confirmation is validated separately by the caller.
+func matchRelevantTxParams(txParams db.CreateTxParams, walletID uint32,
+	tx *wire.MsgTx, addr address.Address, received time.Time,
+	status db.TxStatus, label string) bool {
+
+	if len(txParams.Credits) != 0 || txParams.Tx == nil {
+		return false
+	}
+
+	var hasCandidate bool
+	for _, candidate := range txParams.CreditCandidates[0] {
+		if candidate.EncodeAddress() == addr.EncodeAddress() {
+			hasCandidate = true
+			break
+		}
+	}
+
+	if !hasCandidate {
+		return false
+	}
+
+	return txParams.WalletID == walletID &&
+		txParams.Tx.TxHash() == tx.TxHash() &&
+		txParams.Received.Equal(received) &&
+		txParams.Status == status &&
+		txParams.Label == label
+}
+
+// matchUnminedTxBatchState returns a matcher asserting an unmined relevant
+// transaction is written as a single store batch with the expected metadata.
+func matchUnminedTxBatchState(walletID uint32, tx *wire.MsgTx,
+	addr address.Address, received time.Time, status db.TxStatus,
+	label string) any {
+
+	return mock.MatchedBy(func(params db.TxBatchParams) bool {
+		if params.WalletID != walletID ||
+			len(params.Transactions) != 1 {
+
+			return false
+		}
+
+		txParams := params.Transactions[0]
+		if txParams.Block != nil {
+			return false
+		}
+
+		return matchRelevantTxParams(
+			txParams, walletID, tx, addr, received, status, label,
+		)
+	})
+}
+
+// matchUnminedTxBatch returns a matcher asserting an unmined relevant
+// transaction is written as a single store batch with the expected credit and
+// no confirming block.
+func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
+	addr address.Address, received time.Time) any {
+
+	return matchUnminedTxBatchState(
+		walletID, tx, addr, received, db.TxStatusPublished, "",
+	)
+}
+
+// TestProcessRelevantTxUsesStore verifies that relevant transaction
+// notifications are routed through the store when store wiring is available.
+func TestProcessRelevantTxUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a syncer with store wiring and a transaction paying to a
+	// wallet-owned address.
+	const walletID uint32 = 7
+
+	store := &walletmock.Store{}
+	publisher := &mockTxPublisher{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, publisher,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(123, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	store.On("GetTx", mock.Anything, db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     rec.Hash,
+	}).Return(nil, db.ErrTxNotFound).Once()
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchUnminedTxBatch(walletID, tx, addr, received),
+	).Return(nil).Once()
+
+	// Act: Process an unconfirmed relevant transaction notification.
+	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+
+	// Assert: The notification was written through the store batch API.
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestProcessRelevantTxPreservesUnminedMetadata verifies that a mempool echo of
+// an already-recorded local transaction promotes it to published while
+// preserving the existing label when replayed through ApplyTxBatch.
+func TestProcessRelevantTxPreservesUnminedMetadata(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 9
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, nil,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	addr, err := address.NewAddressPubKeyHash(
+		make([]byte, 20), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: pkScript})
+
+	received := time.Unix(456, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	const label = "pending label"
+
+	store.On("GetTx", mock.Anything, db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     rec.Hash,
+	}).Return(&db.TxInfo{
+		Hash:   rec.Hash,
+		Status: db.TxStatusPending,
+		Label:  label,
+	}, nil).Once()
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchUnminedTxBatchState(
+			walletID, tx, addr, received, db.TxStatusPublished, label,
+		),
+	).Return(nil).Once()
+
+	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+}
+
+// TestProcessRelevantTxUsesBareMultisigMember verifies store-backed relevant
+// transaction notifications keep bare-multisig credits when the wallet owns a
+// member pubkey address but not the full multisig output script.
+func TestProcessRelevantTxUsesBareMultisigMember(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 8
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, nil,
+		syncerStoreConfig{store: store, walletID: walletID},
+	)
+
+	memberAddr, memberScript, multiSigScript :=
+		newBareMultisigCreditScript(t)
+	require.NotEqual(t, memberScript, multiSigScript)
+
+	tx := wire.NewMsgTx(1)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: multiSigScript})
+
+	received := time.Unix(124, 0).UTC()
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(tx, received)
+	require.NoError(t, err)
+
+	store.On("GetTx", mock.Anything, db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     rec.Hash,
+	}).Return(nil, db.ErrTxNotFound).Once()
+
+	store.On("ApplyTxBatch", mock.Anything,
+		matchUnminedTxBatch(walletID, tx, memberAddr, received),
+	).Return(nil).Once()
+
+	err = s.processChainUpdate(t.Context(), chain.RelevantTx{TxRecord: rec})
+	require.NoError(t, err)
+	store.AssertExpectations(t)
 }
 
 // TestExtractAddrEntries verifies address extraction from outputs.
