@@ -2446,3 +2446,75 @@ func TestValidateBatchTransactionsTx(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidParam)
 	})
 }
+
+// TestCanPromoteUnminedCreateTxDuplicate verifies that only a pending unmined
+// duplicate can be promoted to the published unmined state.
+func TestCanPromoteUnminedCreateTxDuplicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		reqBlock    *Block
+		reqStatus   TxStatus
+		rowStatus   TxStatus
+		reqCoinbase bool
+		rowCoinbase bool
+		rowBlock    *Block
+		wantPromote bool
+	}{
+		{
+			name:        "pending to published",
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPending,
+			wantPromote: true,
+		},
+		{
+			name:      "request pending",
+			reqStatus: TxStatusPending,
+			rowStatus: TxStatusPending,
+		},
+		{
+			name:      "row already published",
+			reqStatus: TxStatusPublished,
+			rowStatus: TxStatusPublished,
+		},
+		{
+			name:      "row has block",
+			reqStatus: TxStatusPublished,
+			rowStatus: TxStatusPending,
+			rowBlock:  testBlock(107),
+		},
+		{
+			name:      "request has block",
+			reqBlock:  testBlock(108),
+			reqStatus: TxStatusPublished,
+			rowStatus: TxStatusPending,
+		},
+		{
+			name:        "coinbase mismatch",
+			reqStatus:   TxStatusPublished,
+			rowStatus:   TxStatusPending,
+			reqCoinbase: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := CreateTxRequest{
+				Params: CreateTxParams{
+					Block:  tc.reqBlock,
+					Status: tc.reqStatus,
+				},
+				IsCoinbase: tc.reqCoinbase,
+			}
+
+			canPromote := CanPromoteUnminedCreateTxDuplicate(
+				req, tc.rowStatus, tc.rowCoinbase, tc.rowBlock,
+			)
+
+			require.Equal(t, tc.wantPromote, canPromote)
+		})
+	}
+}
