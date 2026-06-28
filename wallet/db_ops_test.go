@@ -530,6 +530,68 @@ func TestDBGetScanData(t *testing.T) {
 	require.Empty(t, initialUnspent)
 }
 
+// TestLoadWalletScanDataKeepsImportedXpubHorizons verifies that full-scan setup
+// builds its horizon targets from the legacy address manager's active accounts.
+// Imported xpub accounts have real waddrmgr account numbers that must remain in
+// the lookahead set even though SQL account metadata may not expose a BIP44
+// account number for them.
+func TestLoadWalletScanDataKeepsImportedXpubHorizons(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+
+	const importedAccount = uint32(9)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	props := &waddrmgr.AccountProperties{
+		AccountNumber:    importedAccount,
+		AccountName:      "imported-xpub",
+		ExternalKeyCount: 5,
+		InternalKeyCount: 2,
+		KeyScope:         scope,
+		IsWatchOnly:      true,
+	}
+
+	scopedMgr := &bwmock.AccountStore{}
+	mocks.addrStore.On("ActiveScopedKeyManagers").Return(
+		[]waddrmgr.AccountStore{scopedMgr},
+	).Once()
+
+	scopedMgr.On("ActiveAccounts").Return([]uint32{importedAccount}).Once()
+	scopedMgr.On("Scope").Return(scope).Once()
+
+	mocks.addrStore.On("FetchScopedKeyManager", scope).Return(
+		scopedMgr, nil,
+	).Once()
+
+	scopedMgr.On("AccountProperties", mock.Anything, importedAccount).Return(
+		props, nil,
+	).Once()
+
+	mocks.addrStore.On("ForEachRelevantActiveAddress", mock.Anything,
+		mock.Anything,
+	).Return(nil).Once()
+
+	mocks.txStore.On("OutputsToWatch", mock.Anything).Return(
+		[]wtxmgr.Credit(nil), nil,
+	).Once()
+
+	horizonData, initialAddrs, initialUnspent, err := s.loadWalletScanData(
+		t.Context(),
+	)
+
+	require.NoError(t, err)
+	require.Len(t, horizonData, 1)
+	require.Equal(t, props, horizonData[0])
+	require.Equal(t, importedAccount, horizonData[0].AccountNumber)
+	require.Empty(t, initialAddrs)
+	require.Empty(t, initialUnspent)
+
+	mocks.addrStore.AssertExpectations(t)
+	scopedMgr.AssertExpectations(t)
+}
+
 // TestDBGetSyncedBlocks verifies that the wallet can successfully retrieve a
 // range of block hashes from its internal index.
 func TestDBGetSyncedBlocks(t *testing.T) {
@@ -1353,7 +1415,7 @@ func TestDBPutRewind_Error(t *testing.T) {
 	).Return(false).Once()
 
 	// Act: Perform DBPutRewind.
-	err := s.DBPutRewind(t.Context(), waddrmgr.BlockStamp{})
+	err := s.DBPutRewind(t.Context(), rewindTip)
 
 	// Assert: Verify failure and that the pre-rewind tip was restored.
 	require.ErrorIs(t, err, errSetSync)
