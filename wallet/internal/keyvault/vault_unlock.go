@@ -13,7 +13,7 @@ import (
 // Unlock loads wallet secrets from the store and decrypts them into runtime
 // state using the provided private passphrase. If the vault is already
 // unlocked, Unlock is a no-op and does not validate the passphrase.
-func (v *DBVault) Unlock(ctx context.Context, passphrase []byte) error {
+func (v *WalletVault) Unlock(ctx context.Context, passphrase []byte) error {
 	v.mtx.Lock()
 	defer v.mtx.Unlock()
 

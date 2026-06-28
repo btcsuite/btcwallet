@@ -11,7 +11,7 @@ import (
 
 // RefreshPrivatePassphrase rotates persisted wallet secrets to the new private
 // passphrase and keeps the existing unlocked runtime state unchanged.
-func (v *DBVault) RefreshPrivatePassphrase(ctx context.Context,
+func (v *WalletVault) RefreshPrivatePassphrase(ctx context.Context,
 	passphrase []byte) error {
 
 	v.mtx.Lock()
@@ -57,7 +57,7 @@ func (v *DBVault) RefreshPrivatePassphrase(ctx context.Context,
 
 // validateRotatedWalletSecrets confirms rotated persisted secrets decrypt with
 // the new passphrase to the same runtime keys already held in memory.
-func (v *DBVault) validateRotatedWalletSecrets(
+func (v *WalletVault) validateRotatedWalletSecrets(
 	params db.UpdateWalletSecretsParams, passphrase []byte) error {
 
 	updatedSecrets := db.WalletSecrets{
@@ -105,7 +105,7 @@ func unlockedStateEqual(a, b *unlockedState) bool {
 
 // makeRotatedWalletSecrets creates a persisted wallet secret update encrypted
 // with a new private passphrase from the currently unlocked runtime state.
-func (v *DBVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
+func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
 	newPassphrase []byte) (db.UpdateWalletSecretsParams, error) {
 
 	if secrets == nil {

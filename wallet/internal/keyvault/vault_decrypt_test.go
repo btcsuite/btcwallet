@@ -71,8 +71,8 @@ func TestDBVaultDecryptLocked(t *testing.T) {
 	require.ErrorContains(t, err, "wallet 1 vault Decrypt")
 }
 
-// TestDBVaultDecryptUnsupportedKeyTypes verifies that DBVault only exposes the
-// runtime crypto keys it holds in unlockedState.
+// TestDBVaultDecryptUnsupportedKeyTypes verifies that WalletVault only exposes
+// the runtime crypto keys it holds in unlockedState.
 func TestDBVaultDecryptUnsupportedKeyTypes(t *testing.T) {
 	t.Parallel()
 

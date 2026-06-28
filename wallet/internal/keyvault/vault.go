@@ -16,9 +16,9 @@ var (
 	errUnexpectedState = errors.New("unexpected state")
 )
 
-// DBVault adapts db.Store wallet secret storage to the wallet key-vault
+// WalletVault adapts db.Store wallet secret storage to the wallet key-vault
 // boundary.
-type DBVault struct {
+type WalletVault struct {
 	// store is the underlying durable persistence layer for the wallets.
 	store db.Store
 
@@ -46,12 +46,12 @@ type unlockedState struct {
 	hdRootKey *hdkeychain.ExtendedKey
 }
 
-// Ensure DBVault implements keyvault.Vault.
-var _ Vault = (*DBVault)(nil)
+// Ensure WalletVault implements keyvault.Vault.
+var _ Vault = (*WalletVault)(nil)
 
 // NewDBVault creates a key-vault bridge scoped to one wallet row.
-func NewDBVault(store db.Store, walletID uint32) *DBVault {
-	return &DBVault{
+func NewDBVault(store db.Store, walletID uint32) *WalletVault {
+	return &WalletVault{
 		store:    store,
 		walletID: walletID,
 	}

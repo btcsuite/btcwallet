@@ -7,7 +7,7 @@ import (
 )
 
 // Decrypt decrypts ciphertext with the selected unlocked runtime crypto key.
-func (v *DBVault) Decrypt(keyType waddrmgr.CryptoKeyType,
+func (v *WalletVault) Decrypt(keyType waddrmgr.CryptoKeyType,
 	ciphertext []byte) ([]byte, error) {
 
 	v.mtx.Lock()

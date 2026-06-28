@@ -73,8 +73,8 @@ func TestDBVaultEncryptLocked(t *testing.T) {
 	require.ErrorContains(t, err, "wallet 1 vault Encrypt")
 }
 
-// TestDBVaultEncryptUnsupportedKeyTypes verifies that DBVault only exposes the
-// runtime crypto keys it holds in unlockedState.
+// TestDBVaultEncryptUnsupportedKeyTypes verifies that WalletVault only exposes
+// the runtime crypto keys it holds in unlockedState.
 func TestDBVaultEncryptUnsupportedKeyTypes(t *testing.T) {
 	t.Parallel()
 

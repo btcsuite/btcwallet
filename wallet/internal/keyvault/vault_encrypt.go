@@ -13,7 +13,7 @@ import (
 var errUnsupportedCryptoKeyType = errors.New("unsupported crypto key type")
 
 // Encrypt encrypts plaintext with the selected unlocked runtime crypto key.
-func (v *DBVault) Encrypt(keyType waddrmgr.CryptoKeyType,
+func (v *WalletVault) Encrypt(keyType waddrmgr.CryptoKeyType,
 	plaintext []byte) ([]byte, error) {
 
 	v.mtx.Lock()
@@ -39,7 +39,7 @@ func (v *DBVault) Encrypt(keyType waddrmgr.CryptoKeyType,
 }
 
 // selectUnlockedCryptoKey returns a crypto key available in unlockedState.
-func (v *DBVault) selectUnlockedCryptoKey(
+func (v *WalletVault) selectUnlockedCryptoKey(
 	keyType waddrmgr.CryptoKeyType) (*snacl.CryptoKey, error) {
 
 	switch keyType {
