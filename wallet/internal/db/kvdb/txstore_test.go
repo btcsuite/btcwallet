@@ -1925,6 +1925,61 @@ func TestApplyTxBatchConfirmedDuplicatePreservesUnminedLabel(t *testing.T) {
 	require.Equal(t, originalLabel, txInfo.Label)
 }
 
+// TestApplyTxBatchPromotesPendingDuplicate verifies that a mempool echo can
+// promote a locally-created pending transaction to published without replacing
+// the existing label.
+func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{71},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: []byte{0x51}})
+
+	const originalLabel = "original"
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710004100, 0),
+			Status:   db.TxStatusPending,
+			Label:    originalLabel,
+		}},
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710004200, 0),
+			Status:   db.TxStatusPublished,
+			Label:    "ignored",
+		}},
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: 0,
+		Txid:     txMsg.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, txInfo.Block)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.Equal(t, originalLabel, txInfo.Label)
+}
+
 // TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch verifies that a
 // confirmed duplicate for the same transaction hash cannot be recorded in a
 // second block.
@@ -1992,8 +2047,8 @@ func TestApplyTxBatchDuplicateConfirmedRejectsBlockMismatch(t *testing.T) {
 }
 
 // TestApplyTxBatchDuplicateUnminedRejectsMutation verifies that a duplicate
-// unconfirmed batch member cannot mutate status, label, or credit metadata for
-// a transaction already stored as unconfirmed.
+// unconfirmed batch member cannot mutate label or credit metadata for a
+// transaction already stored as unconfirmed.
 func TestApplyTxBatchDuplicateUnminedRejectsMutation(t *testing.T) {
 	t.Parallel()
 
@@ -2032,7 +2087,7 @@ func TestApplyTxBatchDuplicateUnminedRejectsMutation(t *testing.T) {
 			WalletID: 0,
 			Tx:       txMsg,
 			Received: time.Unix(1710003500, 0),
-			Status:   db.TxStatusPublished,
+			Status:   db.TxStatusPending,
 			Label:    "mutated",
 		}},
 	})
@@ -2141,6 +2196,74 @@ func TestApplyTxBatchRecordsTxAndSyncedTo(t *testing.T) {
 			return bs.Height == int32(syncedTo.Height)
 		}),
 	)
+}
+
+// TestApplyTxBatchResolvesCreditCandidates verifies kvdb resolves notification
+// credit candidates inside the batch write before recording credits.
+func TestApplyTxBatchResolvesCreditCandidates(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	txStore := newTxStore(t, dbConn)
+
+	addr, script := newTestAddressScript(t)
+	managedAddr := &bwmock.ManagedAddress{}
+	managedAddr.On("Internal").Return(true).Maybe()
+	managedAddr.On("Address").Return(addr).Maybe()
+	managedAddr.On("AddrType").Return(waddrmgr.WitnessPubKey).Maybe()
+	managedAddr.On("Imported").Return(false).Maybe()
+	managedAddr.On("InternalAccount").Return(uint32(0)).Maybe()
+	managedAddr.On("Compressed").Return(true).Maybe()
+	managedAddr.On("AddrHash").Return([]byte(nil)).Maybe()
+	managedAddr.On("Used", mock.Anything).Return(false).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams)
+	addrStore.On("Address", mock.Anything, addr).Return(
+		managedAddr, nil,
+	).Twice()
+	addrStore.On("MarkUsed", mock.Anything, addr).Return(nil).Once()
+	store := NewStore(dbConn, txStore, addrStore)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{65},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		Transactions: []db.CreateTxParams{{
+			WalletID: 0,
+			Tx:       txMsg,
+			Received: time.Unix(1710003110, 0),
+			Status:   db.TxStatusPublished,
+			CreditCandidates: map[uint32][]address.Address{
+				0: {addr},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	txid := txMsg.TxHash()
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &txid)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Len(t, details.Credits, 1)
+		require.True(t, details.Credits[0].Change)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	addrStore.AssertExpectations(t)
 }
 
 // TestApplyTxBatchRestoresSyncedToOnFailure verifies that a batch failure after
