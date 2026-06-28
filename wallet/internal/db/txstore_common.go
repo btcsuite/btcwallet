@@ -564,6 +564,11 @@ func validateCreateTxParams(params CreateTxParams) error {
 		}
 	}
 
+	if len(params.CreditCandidates) > 0 {
+		return fmt.Errorf("%w: unresolved credit candidates",
+			ErrInvalidParam)
+	}
+
 	// Coinbase transactions only enter wallet history once a block already
 	// anchors them, so CreateTx requires the caller to provide that block up
 	// front instead of storing a fake unmined intermediate row first.
@@ -1005,6 +1010,27 @@ func CanSkipCreateTxDuplicate(req CreateTxRequest, status TxStatus,
 
 	return block.Height == req.Params.Block.Height &&
 		block.Hash == req.Params.Block.Hash
+}
+
+// CanPromoteUnminedCreateTxDuplicate reports whether an unmined duplicate
+// observation may promote an existing pending row to published. The caller must
+// preserve the existing row label while applying this transition.
+func CanPromoteUnminedCreateTxDuplicate(req CreateTxRequest, status TxStatus,
+	isCoinbase bool, block *Block) bool {
+
+	if req.Params.Block != nil || block != nil {
+		return false
+	}
+
+	if req.Params.Status != TxStatusPublished {
+		return false
+	}
+
+	if status != TxStatusPending {
+		return false
+	}
+
+	return req.IsCoinbase == isCoinbase
 }
 
 // loadCreateTxExisting resolves any wallet-scoped row already stored for the
