@@ -1274,6 +1274,12 @@ type UtxoInfo struct {
 	// pre-computed flag lets the wallet skip a per-row lease lookup.
 	IsLocked bool
 
+	// Spendable optionally overrides wallet-level spendability. SQL backends
+	// usually leave this nil and rely on wallet-wide invariants; kvdb uses it
+	// for grandfathered mixed-mode rows where address/account watch-only state
+	// can differ from wallet-level state.
+	Spendable *bool
+
 	// KeyScope is the BIP-43 key scope (purpose + coin type) of the
 	// account that owns this UTXO, sourced from key_scopes. Callers use it
 	// instead of deriving a scope from AddrType, which is lossy (a P2WPKH
