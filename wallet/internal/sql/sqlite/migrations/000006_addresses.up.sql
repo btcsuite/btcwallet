@@ -99,6 +99,92 @@ CREATE INDEX idx_addresses_account_id ON addresses (account_id, id);
 CREATE INDEX idx_addresses_wallet_derived_id
 ON addresses (wallet_id, is_derived, id);
 
+-- Unique index to support composite foreign keys from derived_addresses.
+CREATE UNIQUE INDEX uidx_addresses_id_wallet
+ON addresses (id, wallet_id);
+
+-- Derived Addresses table stores HD child ownership and path data.
+CREATE TABLE derived_addresses (
+    -- Reference to the parent address. Also serves as the primary key,
+    -- enforcing one derived address row per address.
+    address_id INTEGER PRIMARY KEY,
+
+    -- Duplicate of addresses.wallet_id for account/address drift checks.
+    wallet_id INTEGER NOT NULL,
+
+    -- Reference to the account this derived address belongs to.
+    account_id INTEGER NOT NULL,
+
+    -- Branch number in BIP44 derivation path. We currently use only 0
+    -- (external) and 1 (internal/change).
+    address_branch INTEGER NOT NULL,
+
+    -- Index number in BIP44 derivation path.
+    address_index INTEGER NOT NULL,
+
+    -- Branch must be a BIP44 branch number.
+    CHECK (address_branch IN (0, 1)),
+
+    -- Address index must be non-negative.
+    CHECK (address_index >= 0),
+
+    -- Foreign key constraint to addresses. Using ON DELETE RESTRICT to ensure
+    -- that the address cannot be deleted if derived identity still exists.
+    FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT,
+
+    -- Foreign key constraint to accounts. Using ON DELETE RESTRICT to ensure
+    -- that the account cannot be deleted if addresses still exist.
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT,
+
+    -- Composite foreign key to ensure duplicated wallet_id matches the parent
+    -- address row.
+    FOREIGN KEY (address_id, wallet_id)
+    REFERENCES addresses (id, wallet_id) ON DELETE RESTRICT,
+
+    -- Composite foreign key to ensure derived address account ownership matches
+    -- the address wallet. Scope is inherited from the owning account.
+    FOREIGN KEY (account_id, wallet_id)
+    REFERENCES accounts (id, wallet_id) ON DELETE RESTRICT
+) WITHOUT ROWID;
+
+-- Unique index to prevent duplicate address derivations within the same account.
+CREATE UNIQUE INDEX uidx_derived_addresses_account_branch_index
+ON derived_addresses (account_id, address_branch, address_index);
+
+-- Index for efficient pagination of addresses by wallet and account.
+CREATE INDEX idx_derived_addresses_wallet_account_address
+ON derived_addresses (wallet_id, account_id, address_id);
+
+-- Narrow index for account-address joins when wallet_id is already known.
+CREATE INDEX idx_derived_addresses_account_address
+ON derived_addresses (account_id, address_id);
+
+-- Enforce that only addresses marked as derived can receive path/account rows.
+CREATE TRIGGER trg_assert_derived_address_parent_insert
+BEFORE INSERT ON derived_addresses
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'derived address parent must be marked derived')
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM addresses AS addr
+        WHERE
+            addr.id = new.address_id
+            AND addr.is_derived
+            AND addr.wallet_id = new.wallet_id
+    );
+END;
+
+-- Derived address identity/path rows are allocated once and never retargeted.
+CREATE TRIGGER trg_reject_derived_address_update
+BEFORE UPDATE ON derived_addresses
+FOR EACH ROW
+BEGIN
+    SELECT raise(
+        ABORT, 'derived address identity cannot be changed after creation'
+    );
+END;
+
 -- Enforce that wallet ownership chosen at address creation time remains
 -- immutable. This closes the database-boundary hole where a raw update could
 -- reparent an existing address into another wallet after insert.
