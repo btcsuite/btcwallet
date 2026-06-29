@@ -555,7 +555,7 @@ func TestCreateTransactionAccountNotFound(t *testing.T) {
 
 // TestCreateChangeSourceRedirectsDefaultImported verifies how change is routed
 // for imported accounts: a non-default imported xpub account keeps its own
-// change destination, while the default imported bucket redirects change to
+// change destination, while the reserved imported alias redirects change to
 // derived account 0 resolved by number (so it follows a renamed account 0
 // rather than assuming the literal "default" name).
 func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
@@ -571,7 +571,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 
 		// derivedName, when non-empty, is the current name of derived
 		// account 0 returned by the by-number resolution. It is only
-		// looked up for the default imported bucket.
+		// looked up for the reserved imported alias.
 		derivedName string
 
 		// expectedChangeAccount is the account name the change script
@@ -604,23 +604,29 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			w, mocks := createTestWalletWithMocks(t)
 			scope := waddrmgr.KeyScopeBIP0084
 			changeScript := []byte{0x00, 0x04}
+			isImportedAlias := tc.derivedName != ""
 
-			mocks.store.On("GetAccount", mock.Anything,
-				db.GetAccountQuery{
-					WalletID: w.id,
-					Scope:    db.KeyScope(scope),
-					Name:     &tc.accountName,
-				},
-			).Return(&db.AccountInfo{
-				AccountName: tc.accountName,
-				Origin:      db.ImportedAccount,
-				IsImported:  true,
-				AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
-			}, nil).Once()
+			// The reserved imported alias has no SQL account row, so the
+			// change source must not look it up by name. Real imported xpub
+			// accounts are still resolved by name for their effective schema.
+			if !isImportedAlias {
+				mocks.store.On("GetAccount", mock.Anything,
+					db.GetAccountQuery{
+						WalletID: w.id,
+						Scope:    db.KeyScope(scope),
+						Name:     &tc.accountName,
+					},
+				).Return(&db.AccountInfo{
+					AccountName: tc.accountName,
+					Origin:      db.ImportedAccount,
+					IsImported:  true,
+					AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
+				}, nil).Once()
+			}
 
-			// The default imported bucket resolves derived account 0
-			// by number to follow a possible rename.
-			if tc.derivedName != "" {
+			// The imported alias resolves derived account 0 by number to
+			// follow a possible rename and to obtain account 0's schema.
+			if isImportedAlias {
 				mocks.store.On("GetAccount", mock.Anything,
 					db.GetAccountQuery{
 						WalletID:      w.id,
@@ -630,6 +636,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				).Return(&db.AccountInfo{
 					AccountNumber: &defaultAccountNum,
 					AccountName:   tc.derivedName,
+					AddrSchema:    db.ScopeAddrMap[db.KeyScope(scope)],
 				}, nil).Once()
 			}
 
@@ -655,6 +662,15 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			script, err := changeSource.NewScript()
 			require.NoError(t, err)
 			require.Equal(t, changeScript, script)
+
+			if isImportedAlias {
+				mocks.store.AssertNotCalled(t, "GetAccount",
+					mock.Anything, db.GetAccountQuery{
+						WalletID: w.id,
+						Scope:    db.KeyScope(scope),
+						Name:     &tc.accountName,
+					})
+			}
 		})
 	}
 }
@@ -669,20 +685,8 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 	scope := waddrmgr.KeyScopeBIP0084
 	accountName := db.DefaultImportedAccountName
 
-	mocks.store.On("GetAccount", mock.Anything,
-		db.GetAccountQuery{
-			WalletID: w.id,
-			Scope:    db.KeyScope(scope),
-			Name:     &accountName,
-		},
-	).Return(&db.AccountInfo{
-		AccountName: accountName,
-		Origin:      db.ImportedAccount,
-		IsImported:  true,
-		AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
-	}, nil).Once()
-
-	// Resolving derived account 0 by number reports not found.
+	// The alias is not looked up by name; change redirects directly to derived
+	// account 0, which reports not found here.
 	mocks.store.On("GetAccount", mock.Anything,
 		mock.MatchedBy(func(q db.GetAccountQuery) bool {
 			return q.AccountNumber != nil &&
@@ -1000,6 +1004,68 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, eligible, 1)
 	require.Equal(t, outPoint, eligible[0].OutPoint)
+}
+
+// TestGetEligibleUTXOsImportedAccountBypassesGetAccount verifies that coin
+// selection from the reserved imported alias does not require an account row.
+func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+
+	accountName := db.DefaultImportedAccountName
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
+	rawOutPoint := wire.OutPoint{Hash: [32]byte{7}, Index: 0}
+	legacyOutPoint := wire.OutPoint{Hash: [32]byte{8}, Index: 0}
+	derivedOutPoint := wire.OutPoint{Hash: [32]byte{9}, Index: 0}
+	otherScopePoint := wire.OutPoint{Hash: [32]byte{10}, Index: 0}
+	unspent := []db.UtxoInfo{{
+		OutPoint: rawOutPoint,
+		Amount:   btcutil.Amount(10000),
+		PkScript: singleAddrPkScript(t),
+		Height:   100,
+	}, {
+		OutPoint:    legacyOutPoint,
+		Amount:      btcutil.Amount(10000),
+		PkScript:    singleAddrPkScript(t),
+		Height:      100,
+		KeyScope:    scope,
+		AccountName: db.DefaultImportedAccountName,
+	}, {
+		OutPoint:    derivedOutPoint,
+		Amount:      btcutil.Amount(10000),
+		PkScript:    singleAddrPkScript(t),
+		Height:      100,
+		KeyScope:    scope,
+		AccountName: waddrmgr.DefaultAccountName,
+	}, {
+		OutPoint:    otherScopePoint,
+		Amount:      btcutil.Amount(10000),
+		PkScript:    singleAddrPkScript(t),
+		Height:      100,
+		KeyScope:    db.KeyScopeBIP0049Plus,
+		AccountName: db.DefaultImportedAccountName,
+	}}
+
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+	}).Return(unspent, nil).Once()
+
+	eligible, err := w.getEligibleUTXOs(
+		t.Context(), ScopedAccount{
+			AccountName: accountName,
+			KeyScope:    waddrmgr.KeyScopeBIP0084,
+		}, 1,
+	)
+	require.NoError(t, err)
+	require.Len(t, eligible, 2)
+	require.Equal(t, rawOutPoint, eligible[0].OutPoint)
+	require.Equal(t, legacyOutPoint, eligible[1].OutPoint)
+
+	mocks.store.AssertNotCalled(t, "GetAccount", mock.Anything, mock.Anything)
 }
 
 // TestGetEligibleUTXOsSourceUTXOsValue verifies value-form explicit UTXO
