@@ -199,6 +199,10 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// AccountName is the human-readable name of the owning account.
 	AccountName string
 
+	// IsDerived reports whether the address has a normalized derived_addresses
+	// child row with branch/index path data.
+	IsDerived bool
+
 	// MasterFingerprint is the root fingerprint stored on the owning account.
 	MasterFingerprint sql.NullInt64
 
@@ -372,7 +376,8 @@ func convertAddressAccountMetadata[TypeID, OriginIDType any](
 // address info returned by a create path.
 func ApplyAddressAccountMetadata(info *AddressInfo,
 	accountNumber sql.NullInt64, accountName string,
-	masterFingerprint sql.NullInt64, purpose, coinType int64) error {
+	masterFingerprint sql.NullInt64, purpose, coinType int64,
+	isImported bool) error {
 
 	acctNum, fingerprint, keyScope, err := convertAccountMetadata(
 		accountNumber, masterFingerprint, purpose, coinType,
@@ -385,6 +390,12 @@ func ApplyAddressAccountMetadata(info *AddressInfo,
 	info.AccountName = accountName
 	info.KeyScope = keyScope
 	info.MasterKeyFingerprint = fingerprint
+	info.IsImported = isImported
+	if isImported {
+		info.Origin = ImportedAccount
+	} else {
+		info.Origin = DerivedAccount
+	}
 
 	return nil
 }
@@ -456,12 +467,13 @@ func convertAddressMetadata[TypeID, OriginIDType any](
 }
 
 // convertAddressPath converts BIP44 branch/index values into uint32 fields.
-// Imported addresses must have both branch/index unset and return zero values.
-// Derived addresses must have both fields set and convertible to uint32.
-func convertAddressPath(origin AccountOrigin, branch,
+// Raw imported addresses must have both branch/index unset and return zero
+// values. Derived address rows, including imported-xpub children, must have both
+// fields set and convertible to uint32.
+func convertAddressPath(hasDerivationPath bool, branch,
 	index sql.NullInt64) (uint32, uint32, error) {
 
-	if origin == ImportedAccount {
+	if !hasDerivationPath {
 		if branch.Valid || index.Valid {
 			return 0, 0, errInvalidDerivationPath
 		}
@@ -511,7 +523,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 	}
 
 	addrBranch, addrIndex, err := convertAddressPath(
-		origin, row.AddressBranch, row.AddressIndex,
+		row.IsDerived, row.AddressBranch, row.AddressIndex,
 	)
 	if err != nil {
 		return nil, err
@@ -528,7 +540,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		CreatedAt:            row.CreatedAt,
 		Origin:               origin,
 		IsImported:           origin == ImportedAccount,
-		HasDerivationPath:    origin == DerivedAccount,
+		HasDerivationPath:    row.IsDerived,
 		Branch:               addrBranch,
 		Index:                addrIndex,
 		ScriptPubKey:         row.ScriptPubKey,
@@ -584,6 +596,9 @@ type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
 
 	// GetAccountNumber extracts the BIP44 account number from an account row.
 	GetAccountNumber func(AccountRow) (uint32, error)
+
+	// GetAccountIsDerived reports whether the account row is wallet-derived.
+	GetAccountIsDerived func(AccountRow) bool
 
 	// GetWalletWatchOnly extracts the wallet watch-only state from an account
 	// row.
@@ -726,7 +741,7 @@ func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
 // the scope default).
 func createDerivedAddress[T any](ctx context.Context,
 	params NewDerivedAddressParams, walletID int64, accountID int64,
-	accountNumber uint32, walletIsWatchOnly bool, addrSchema ScopeAddrSchema,
+	accountNumber *uint32, walletIsWatchOnly bool, addrSchema ScopeAddrSchema,
 	accountPubKey []byte,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
@@ -759,12 +774,10 @@ func createDerivedAddress[T any](ctx context.Context,
 		return nil, err
 	}
 
-	accountNumberPtr := accountNumber
-
 	return &AddressInfo{
 		ID:                id,
 		AccountID:         convertedAcctID,
-		AccountNumber:     &accountNumberPtr,
+		AccountNumber:     accountNumber,
 		AddrType:          addrType,
 		CreatedAt:         rowCreatedAt(row),
 		Origin:            DerivedAccount,
@@ -784,7 +797,7 @@ func createDerivedAddress[T any](ctx context.Context,
 // the account's effective schema and must already account for any per-account
 // override; this function does not consult the scope default itself.
 func derivedAddressInput(ctx context.Context,
-	params NewDerivedAddressParams, accountID int64, accountNumber uint32,
+	params NewDerivedAddressParams, accountID int64, accountNumber *uint32,
 	addrSchema ScopeAddrSchema, accountPubKey []byte,
 	getExtIndex func(context.Context, int64) (int64, error),
 	getIntIndex func(context.Context, int64) (int64, error),
@@ -821,13 +834,25 @@ func derivedAddressInput(ctx context.Context,
 		return 0, 0, 0, nil, nil, fmt.Errorf("address index: %w", err)
 	}
 
+	accountIDPtr, err := optionalAccountID(accountID)
+	if err != nil {
+		return 0, 0, 0, nil, nil, err
+	}
+
+	var legacyAccountNumber uint32
+	if accountNumber != nil {
+		legacyAccountNumber = *accountNumber
+	}
+
 	deriveParams := AddressDerivationParams{
-		Scope:         params.Scope,
-		AccountNumber: accountNumber,
-		Branch:        branch,
-		Index:         index,
-		AddrType:      addrType,
-		AccountPubKey: accountPubKey,
+		AccountID:            accountIDPtr,
+		Scope:                params.Scope,
+		DerivedAccountNumber: accountNumber,
+		AccountNumber:        legacyAccountNumber,
+		Branch:               branch,
+		Index:                index,
+		AddrType:             addrType,
+		AccountPubKey:        accountPubKey,
 	}
 
 	derivedData, err := deriveFn(ctx, deriveParams)
@@ -842,6 +867,36 @@ func derivedAddressInput(ctx context.Context,
 
 	return addrType, branch, index, derivedData.ScriptPubKey,
 		derivedData.PubKey, nil
+}
+
+// resolveAddressAccountNumber maps the account-number lookup result to the
+// optional BIP44 account number, enforcing the wallet-derived/imported account
+// shape invariant.
+func resolveAddressAccountNumber(accountIsDerived bool,
+	accountNumValue uint32, errAccount error) (*uint32, error) {
+
+	var accountNumber *uint32
+
+	switch {
+	case errAccount == nil:
+		if !accountIsDerived {
+			return nil, fmt.Errorf("%w: non-derived account has "+
+				"derived account number", errAccountShapeCorruption)
+		}
+
+		accountNumber = &accountNumValue
+
+	case errors.Is(errAccount, ErrNilDBAccountNumber):
+		if accountIsDerived {
+			return nil, fmt.Errorf("%w: derived account missing "+
+				"account number", errAccountShapeCorruption)
+		}
+
+	default:
+		return nil, fmt.Errorf("account number: %w", errAccount)
+	}
+
+	return accountNumber, nil
 }
 
 // NewDerivedAddressWithTx combines transaction execution, account lookup,
@@ -864,17 +919,18 @@ func NewDerivedAddressWithTx[QTX any, AccountRow any,
 		row, err := adapters.GetAccount(ctx, adapters.AccountParams(params))
 		if err == nil {
 			accountID := adapters.GetAccountID(row)
+			accountIsDerived := adapters.GetAccountIsDerived(row)
 
 			// Imported accounts have NULL account_number; their derivation
 			// uses AccountPubKey directly so a BIP44 number is not
-			// available. Tolerate ErrNilDBAccountNumber and pass 0
-			// through to the callback — the callback uses AccountPubKey
-			// plus Branch/Index to derive imported xpub addresses.
-			accountNumber, errAccount := adapters.GetAccountNumber(row)
-			if errAccount != nil &&
-				!errors.Is(errAccount, ErrNilDBAccountNumber) {
-
-				return fmt.Errorf("account number: %w", errAccount)
+			// available. The callback receives a nil DerivedAccountNumber
+			// and uses AccountPubKey plus Branch/Index instead.
+			accountNumValue, errAccount := adapters.GetAccountNumber(row)
+			accountNumber, errNumber := resolveAddressAccountNumber(
+				accountIsDerived, accountNumValue, errAccount,
+			)
+			if errNumber != nil {
+				return errNumber
 			}
 
 			addrSchema, errSchema := adapters.GetAccountAddrSchema(row)

@@ -1548,12 +1548,24 @@ type DerivedAddressData struct {
 // AddressDerivationParams contains the wallet-side data needed to derive a
 // store-allocated address.
 type AddressDerivationParams struct {
+	// AccountID is the optional store-local account identity for the account
+	// whose public key is deriving this address.
+	AccountID *uint32
+
 	// Scope is the key scope that owns the derived address.
 	Scope KeyScope
+
+	// DerivedAccountNumber is the wallet-derived BIP44 account number, not the
+	// database row ID. It is nil for imported accounts; callbacks deriving from
+	// an imported account xpub must use AccountPubKey, Branch, and Index only.
+	DerivedAccountNumber *uint32
 
 	// AccountNumber is the BIP44 account number, not the database row ID.
 	// It is 0 for imported accounts where no BIP44 account number applies;
 	// callbacks deriving for imported accounts must use AccountPubKey only.
+	//
+	// Deprecated: use DerivedAccountNumber. This compatibility field is retained
+	// only while existing tests and callers move to the normalized identity.
 	AccountNumber uint32
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
