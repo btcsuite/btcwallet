@@ -82,11 +82,11 @@ func GetAccountWithOps(ctx context.Context, query GetAccountQuery,
 		return nil, fmt.Errorf("load account: %w", err)
 	}
 
-	// Imported accounts may only be looked up by Name; their AccountNumber is
-	// masked to 0 in the contract, which would otherwise collide with the
-	// default derived account. Reject inbound number-based lookups that resolve
-	// to imported.
-	if query.AccountNumber != nil && info.Origin == ImportedAccount {
+	// Imported accounts may only be looked up by Name; they do not expose a
+	// public account number. Reject inbound number-based lookups that resolve
+	// to imported so kvdb-internal account numbers cannot leak through this
+	// API.
+	if query.AccountNumber != nil && info.IsImported {
 		return nil, formatGetAccountNotFound(query)
 	}
 

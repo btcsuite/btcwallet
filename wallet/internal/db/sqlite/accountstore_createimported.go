@@ -81,7 +81,6 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 		ctx, sqlc.CreateImportedAccountParams{
 			ScopeID:     req.ScopeID,
 			AccountName: req.Name,
-			OriginID:    int64(db.ImportedAccount),
 			PublicKey:   req.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(req.MasterFingerprint),
@@ -144,7 +143,8 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 		return nil, fmt.Errorf("get account props: %w", err)
 	}
 
-	return db.AccountPropsRowToInfo(db.AccountPropsRow[int64, int64]{
+	return db.AccountPropsRowToInfo(db.AccountPropsRow[int64]{
+		RowID:             accountID,
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,
 		OriginID:          row.OriginID,

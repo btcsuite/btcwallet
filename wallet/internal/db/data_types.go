@@ -375,17 +375,22 @@ type UpdateWalletSecretsParams struct {
 // AccountInfo contains all information about a single account, including its
 // properties and balances.
 type AccountInfo struct {
+	// AccountID is the optional store-local account identity. SQL backends set
+	// this from accounts.id. Backends without a durable account row ID leave it
+	// nil rather than fabricating one from other account fields.
+	AccountID *uint32
+
 	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not follow BIP44 derivation and therefore do not
-	// have a meaningful account index. For those accounts, this field is
-	// set to 0 and must not be used when Origin is ImportedAccount.
-	AccountNumber uint32
+	// Imported accounts do not have a wallet-derived account number, so this is
+	// nil for imported xpub accounts and any backend that cannot expose one.
+	AccountNumber *uint32
 
 	// AccountName is the human-readable name of the account.
 	AccountName string
 
 	// Origin indicates whether the account was derived from the wallet's
-	// HD seed or imported from an external source.
+	// HD seed or imported from an external source. It is retained during the
+	// compatibility period while callers move to IsImported.
 	Origin AccountOrigin
 
 	// IsImported reports whether this account was imported rather than derived
@@ -401,7 +406,9 @@ type AccountInfo struct {
 	// been derived.
 	InternalKeyCount uint32
 
-	// ImportedKeyCount is the number of imported keys in the account.
+	// ImportedKeyCount is the number of individually imported keys in legacy
+	// account stores. SQL-backed raw imports are address rows, not account
+	// child rows, and therefore report zero here.
 	ImportedKeyCount uint32
 
 	// ConfirmedBalance is the total balance of the account from confirmed

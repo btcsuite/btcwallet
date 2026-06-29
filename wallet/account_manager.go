@@ -222,13 +222,9 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		origin = db.ImportedAccount
 	}
 
-	// db.AccountInfo masks AccountNumber to 0 for imported accounts
-	// (see data_types.go godoc): the waddrmgr per-scope counter is
-	// not part of the contract for imported rows. Internal callers
-	// that need the real number look it up via waddrmgr separately.
-	accountNumber := props.AccountNumber
-	if origin == db.ImportedAccount {
-		accountNumber = 0
+	var accountNumber *uint32
+	if !isImported {
+		accountNumber = &props.AccountNumber
 	}
 
 	isWatchOnly := walletWatchOnly

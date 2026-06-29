@@ -25,17 +25,18 @@ func TestGetAccountWithOps(t *testing.T) {
 		Name:     &accountName,
 	}
 	rowID := int64(11)
+	accountNumber := uint32(0)
 	loaded := &AccountInfo{
-		AccountNumber: 0,
+		AccountNumber: &accountNumber,
 		AccountName:   defaultAccountName,
-		Origin:        DerivedAccount,
+		IsImported:    false,
 		KeyScope:      query.Scope,
 		rowID:         rowID,
 	}
 	balanced := &AccountInfo{
-		AccountNumber:      0,
+		AccountNumber:      &accountNumber,
 		AccountName:        defaultAccountName,
-		Origin:             DerivedAccount,
+		IsImported:         false,
 		KeyScope:           query.Scope,
 		ConfirmedBalance:   btcutil.Amount(12),
 		UnconfirmedBalance: btcutil.Amount(34),
@@ -95,16 +96,16 @@ func TestGetAccountWithOpsPassesThroughLoadedAccount(t *testing.T) {
 	}
 	rowID := int64(11)
 	loaded := &AccountInfo{
-		AccountNumber: 5,
+		AccountNumber: &accountNumber,
 		AccountName:   "derived",
-		Origin:        DerivedAccount,
+		IsImported:    false,
 		KeyScope:      query.Scope,
 		rowID:         rowID,
 	}
 	balanced := &AccountInfo{
-		AccountNumber:      5,
+		AccountNumber:      &accountNumber,
 		AccountName:        "derived",
-		Origin:             DerivedAccount,
+		IsImported:         false,
 		KeyScope:           query.Scope,
 		ConfirmedBalance:   btcutil.Amount(50),
 		UnconfirmedBalance: btcutil.Amount(75),
@@ -142,11 +143,12 @@ func TestGetAccountWithOpsRejectsImportedByNumber(t *testing.T) {
 		Scope:         KeyScope{Purpose: 84, Coin: 0},
 		AccountNumber: &accountNumber,
 	}
+	// The importedness flag is authoritative even when the backend uses an
+	// internal account number for imported rows.
 	loaded := &AccountInfo{
-		AccountNumber: 0,
-		AccountName:   "imported",
-		Origin:        ImportedAccount,
-		KeyScope:      query.Scope,
+		AccountName: "imported",
+		IsImported:  true,
+		KeyScope:    query.Scope,
 	}
 
 	ops := &mockGetAccountOps{}
@@ -250,10 +252,11 @@ func TestGetAccountWithOpsForwardsStageErrors(t *testing.T) {
 		Name:     &accountName,
 	}
 	rowID := int64(11)
+	accountNumber := uint32(0)
 	loaded := &AccountInfo{
-		AccountNumber: 0,
+		AccountNumber: &accountNumber,
 		AccountName:   defaultAccountName,
-		Origin:        DerivedAccount,
+		IsImported:    false,
 		KeyScope:      query.Scope,
 		rowID:         rowID,
 	}
