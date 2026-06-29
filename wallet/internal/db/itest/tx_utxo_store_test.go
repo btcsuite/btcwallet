@@ -103,9 +103,6 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 	// the ADR 0012 spendable-wallet invariant.
 	walletID := newWatchOnlyWallet(t, store, "wallet-bare-multisig-credit")
 
-	scope := db.KeyScopeBIP0084
-	importedName := db.DefaultImportedAccountName
-
 	// Build a 1-of-2 bare-multisig script. memberScript is the member's own
 	// P2PK script (what PayToAddrScript(memberAddr) yields), which the wallet
 	// imports as an address. multiSigScript is the full on-chain output script,
@@ -116,7 +113,6 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 	_, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:        walletID,
-			Scope:           scope,
 			AddressType:     db.RawPubKey,
 			PubKey:          memberAddr.ScriptAddress(),
 			ScriptPubKey:    memberScript,
@@ -145,15 +141,14 @@ func TestCreateTxCreditBareMultisigMember(t *testing.T) {
 	require.True(t, walletUtxoExists(t, store, walletID, outPoint))
 
 	// The credit must resolve to the imported member address, not the multisig
-	// output script. Origin and address type prove the resolved address row is
-	// the member import.
+	// output script. Empty account identity and address type prove the resolved
+	// address row is the raw member import.
 	utxo, err := store.GetUtxo(t.Context(), db.GetUtxoQuery{
 		WalletID: walletID,
 		OutPoint: outPoint,
 	})
 	require.NoError(t, err)
-	require.Equal(t, importedName, utxo.AccountName)
-	require.Equal(t, db.ImportedAccount, utxo.Origin)
+	require.Empty(t, utxo.AccountName)
 	require.Equal(t, db.RawPubKey, utxo.AddrType)
 }
 
@@ -1921,11 +1916,11 @@ func TestListUTXOsReturnsCurrentWalletOutputs(t *testing.T) {
 }
 
 // TestUTXOEnrichmentFields verifies that ListUTXOs and GetUtxo populate the
-// UtxoInfo enrichment fields (AccountName, Origin, AddrType, HasScript,
-// IsLocked, KeyScope) from the backing account/address/lease joins. It pairs a
-// positive case (an imported script address with an active lease) against a
-// negative case (a derived address with neither a script nor a lease) so a
-// regression in any join or row-to-UtxoInfo conversion fails the assertions.
+// UtxoInfo enrichment fields (AccountName, AddrType, HasScript, IsLocked,
+// KeyScope) from the backing account/address/lease joins. It pairs a positive
+// case (an imported script address with an active lease) against a negative
+// case (a derived address with neither a script nor a lease) so a regression in
+// any join or row-to-UtxoInfo conversion fails the assertions.
 func TestUTXOEnrichmentFields(t *testing.T) {
 	t.Parallel()
 
@@ -1939,17 +1934,14 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 
 	const derivedName = "derived"
 
-	importedName := db.DefaultImportedAccountName
 	scope := db.KeyScopeBIP0084
 
 	// Imported script address: the encrypted script secret drives HasScript,
-	// and the import auto-creates the wallet-level imported bucket that drives
-	// Origin == ImportedAccount.
+	// while the raw import stays accountless.
 	importedScript := RandomBytes(32)
 	_, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:        walletID,
-			Scope:           scope,
 			AddressType:     db.WitnessScript,
 			PubKey:          RandomBytes(33),
 			ScriptPubKey:    importedScript,
@@ -1958,8 +1950,7 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Derived address: no script secret, so HasScript stays false and
-	// Origin == DerivedAccount.
+	// Derived address: no script secret, so HasScript stays false.
 	createDerivedAccount(t, store, walletID, scope, derivedName)
 	derivedAddr := newDerivedAddress(
 		t, store, walletID, scope, derivedName, false,
@@ -2013,17 +2004,26 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 
 	imported, ok := byOutPoint[importedOutPoint]
 	require.True(t, ok, "imported UTXO missing from ListUTXOs")
-	require.Equal(t, importedName, imported.AccountName)
-	require.Equal(t, db.ImportedAccount, imported.Origin)
+	require.Empty(t, imported.AccountName)
 	require.Equal(t, db.WitnessScript, imported.AddrType)
 	require.True(t, imported.HasScript)
 	require.True(t, imported.IsLocked)
-	require.Equal(t, scope, imported.KeyScope)
+	require.Equal(t, db.KeyScope{}, imported.KeyScope)
+
+	importedName := db.DefaultImportedAccountName
+	filteredImported, err := store.ListUTXOs(
+		t.Context(), db.ListUtxosQuery{
+			WalletID:    walletID,
+			Scope:       &scope,
+			AccountName: &importedName,
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, filteredImported)
 
 	derived, ok := byOutPoint[derivedOutPoint]
 	require.True(t, ok, "derived UTXO missing from ListUTXOs")
 	require.Equal(t, derivedName, derived.AccountName)
-	require.Equal(t, db.DerivedAccount, derived.Origin)
 	require.Equal(t, db.WitnessPubKey, derived.AddrType)
 	require.False(t, derived.HasScript)
 	require.False(t, derived.IsLocked)
@@ -2035,11 +2035,10 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 		OutPoint: importedOutPoint,
 	})
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, got.Origin)
 	require.Equal(t, db.WitnessScript, got.AddrType)
 	require.True(t, got.HasScript)
 	require.True(t, got.IsLocked)
-	require.Equal(t, scope, got.KeyScope)
+	require.Equal(t, db.KeyScope{}, got.KeyScope)
 }
 
 // TestListUTXOsFiltersByAccount verifies that ListUTXOs applies the optional
@@ -2097,6 +2096,147 @@ func TestListUTXOsFiltersByAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, txSavings.TxHash(), utxos[0].OutPoint.Hash)
+}
+
+// TestAccountNumberFiltersExcludeImportedAccounts verifies that numeric account
+// filters do not match imported-xpub accounts even if corrupt metadata gives
+// the imported account an account number.
+func TestAccountNumberFiltersExcludeImportedAccounts(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-utxo-imported-account-number",
+	)
+
+	accountName := hardwareAccountName
+	CreateImportedAccount(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, true,
+	)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+	scriptPubKey := RandomBytes(22)
+	err := createDerivedAddressRaw(
+		t, queries, walletID, accountID, 0, 0, scriptPubKey,
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 19000, PkScript: scriptPubKey}},
+	)
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710001650, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	accountNumber := uint32(7)
+	err = updateAccountNumberRaw(t, dbConn, accountID, accountNumber)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	unfiltered, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+	})
+	require.NoError(t, err)
+	require.Len(t, unfiltered, 1)
+	require.Equal(t, tx.TxHash(), unfiltered[0].OutPoint.Hash)
+
+	scope := db.KeyScopeBIP0084
+	filtered, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+		Scope:    &scope,
+		Account:  &accountNumber,
+	})
+	require.NoError(t, err)
+	require.Empty(t, filtered)
+
+	balance, err := store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+		Scope:    &scope,
+		Account:  &accountNumber,
+	})
+	require.NoError(t, err)
+	require.Zero(t, balance.Total)
+}
+
+// TestUTXOReadsRejectMalformedDerivedAddressShape verifies that per-row UTXO
+// reads reject malformed derived address shape instead of silently reporting
+// the output under the raw imported alias. Balance aggregation should exclude
+// the malformed row and still count well-formed UTXOs.
+func TestUTXOReadsRejectMalformedDerivedAddressShape(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "wallet-utxo-malformed-address")
+	accountName := defaultAccountName
+	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, accountName)
+
+	goodAddr := newDerivedAddress(
+		t, store, walletID, db.KeyScopeBIP0084, accountName, false,
+	)
+	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+	badScript := RandomBytes(22)
+	_, err := createDerivedAddressParentRaw(
+		t, queries, walletID, accountID, badScript,
+	)
+	require.NoError(t, err)
+
+	goodTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 41000, PkScript: goodAddr.ScriptPubKey}},
+	)
+	badTx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 42000, PkScript: badScript}},
+	)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       goodTx,
+		Received: time.Unix(1710001660, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	err = store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       badTx,
+		Received: time.Unix(1710001670, 0),
+		Status:   db.TxStatusPending,
+		Credits:  map[uint32]address.Address{0: nil},
+	})
+	require.NoError(t, err)
+
+	_, err = store.GetUtxo(t.Context(), db.GetUtxoQuery{
+		WalletID: walletID,
+		OutPoint: wire.OutPoint{Hash: badTx.TxHash(), Index: 0},
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "address subtype invariant violated")
+
+	_, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
+		WalletID: walletID,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "address subtype invariant violated")
+
+	balance, err := store.Balance(t.Context(), db.BalanceParams{
+		WalletID: walletID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(41000), balance.Total)
+	require.Zero(t, balance.Locked)
 }
 
 // TestListUTXOsFiltersByAccountName verifies that ListUTXOs filters by the
@@ -2201,7 +2341,7 @@ func TestListUTXOsRejectsNameWithoutScope(t *testing.T) {
 		t, store, "wallet-list-utxos-name-without-scope",
 	)
 
-	name := "default"
+	name := defaultAccountName
 	_, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID:    walletID,
 		AccountName: &name,
@@ -2225,7 +2365,7 @@ func TestListUTXOsRejectsAccountAndName(t *testing.T) {
 
 	scope := db.KeyScopeBIP0084
 	account := uint32(0)
-	name := "default"
+	name := defaultAccountName
 	_, err := store.ListUTXOs(t.Context(), db.ListUtxosQuery{
 		WalletID:    walletID,
 		Scope:       &scope,
@@ -2592,10 +2732,10 @@ func TestBalanceReturnsTotalAndLocked(t *testing.T) {
 	require.Equal(t, btcutil.Amount(24000), balance.Locked)
 }
 
-// TestBalanceNameFilterDisambiguatesMaskedImportedAccount verifies that the
-// account-name balance filter isolates rows when an imported account's public
-// AccountNumber is masked to zero.
-func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
+// TestBalanceNameFilterDisambiguatesImportedXpub verifies that the account-name
+// balance filter isolates imported-xpub child rows even though the imported
+// account does not expose a wallet-derived account number.
+func TestBalanceNameFilterDisambiguatesImportedXpub(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -2605,8 +2745,8 @@ func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
 	)
 
 	const (
-		derivedName  = "default"
-		importedName = "hardware"
+		derivedName  = defaultAccountName
+		importedName = hardwareAccountName
 	)
 
 	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0084, derivedName)
@@ -2620,8 +2760,8 @@ func TestBalanceNameFilterDisambiguatesMaskedImportedAccount(t *testing.T) {
 	importedScript := RandomBytes(22)
 	scopeID := GetKeyScopeID(t, queries, walletID, db.KeyScopeBIP0084)
 	importedAccountID := GetAccountID(t, queries, scopeID, importedName)
-	err := createImportedAddressRaw(
-		t.Context(), queries, walletID, importedAccountID,
+	err := createDerivedAddressRaw(
+		t, queries, walletID, importedAccountID, 0, 0,
 		importedScript,
 	)
 	require.NoError(t, err)
