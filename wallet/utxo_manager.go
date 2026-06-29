@@ -165,17 +165,17 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 
 	utxos := make([]*Utxo, 0, len(infos))
 	for i := range infos {
+		accountName := walletUtxoAccountName(&infos[i])
+
 		// The store has no scope to disambiguate a bare account name,
 		// so the wallet applies the account-name filter here rather
 		// than in the ListUTXOs query.
-		if query.Account != "" &&
-			infos[i].AccountName != query.Account {
-
+		if query.Account != "" && accountName != query.Account {
 			continue
 		}
 
 		utxo, err := w.buildWalletUtxoFromStore(
-			&infos[i], currentHeight,
+			&infos[i], accountName, currentHeight,
 		)
 		if err != nil {
 			return nil, err
@@ -194,10 +194,20 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 	return utxos, nil
 }
 
+// walletUtxoAccountName returns the wallet-facing account name for a store UTXO
+// row.
+func walletUtxoAccountName(info *db.UtxoInfo) string {
+	if info.AccountName != "" {
+		return info.AccountName
+	}
+
+	return db.DefaultImportedAccountName
+}
+
 // buildWalletUtxoFromStore converts one store-level UTXO row into the
 // wallet's public Utxo view. The enrichment fields populated by the
-// store (AccountName, Origin, AddrType, HasScript, IsLocked) supersede
-// the prior per-UTXO follow-up calls to GetAddress / ListLeasedOutputs.
+// store (AccountName, AddrType, HasScript, IsLocked) supersede the prior
+// per-UTXO follow-up calls to GetAddress / ListLeasedOutputs.
 //
 // This is a pure mapper: the store only returns wallet-owned, enrichable
 // rows, so a row whose script cannot be converted to an address is an
@@ -205,14 +215,11 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 // than a silent skip. Account filtering is the caller's responsibility
 // and is applied before this conversion.
 //
-// Spendability follows ADR 0012 (wallet-level watch-only invariant):
-// a UTXO is spendable when the wallet is not watch-only AND the owning
-// account is not imported. Imported-account outputs are unspendable
-// even when the wallet holds private-key material for them — matching
-// the legacy waddrmgr.AddressDetails policy that this routing path
-// replaces.
+// Spendability follows ADR 0012 (wallet-level watch-only invariant) unless the
+// store supplies a backend-specific override. Coinbase maturity remains a final
+// per-output adjustment.
 func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
-	currentHeight int32) (*Utxo, error) {
+	accountName string, currentHeight int32) (*Utxo, error) {
 
 	addr := extractAddrFromPKScript(info.PkScript, w.cfg.ChainParams)
 	if addr == nil {
@@ -232,8 +239,10 @@ func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 		return nil, err
 	}
 
-	spendable := !w.IsWatchOnly() &&
-		info.Origin != db.ImportedAccount
+	spendable := !w.IsWatchOnly()
+	if info.Spendable != nil {
+		spendable = *info.Spendable
+	}
 
 	if info.FromCoinBase {
 		maturity := w.cfg.ChainParams.CoinbaseMaturity
@@ -249,7 +258,7 @@ func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 		Confirmations: confirmations,
 		Spendable:     spendable,
 		Address:       addr,
-		Account:       info.AccountName,
+		Account:       accountName,
 		AddressType:   walletAddrType,
 		Locked:        info.IsLocked,
 	}, nil
@@ -299,7 +308,9 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 		return nil, fmt.Errorf("get utxo: %w", err)
 	}
 
-	utxo, err := w.buildWalletUtxoFromStore(info, currentHeight)
+	utxo, err := w.buildWalletUtxoFromStore(
+		info, walletUtxoAccountName(info), currentHeight,
+	)
 	if err != nil {
 		return nil, err
 	}
