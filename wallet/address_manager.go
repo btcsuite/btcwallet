@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -276,7 +277,7 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 	info := AddressInfo{
 		Addr:       addr,
 		AddrType:   addrType,
-		Imported:   storeAddr.IsImported,
+		Imported:   !storeAddr.HasDerivationPath,
 		Internal:   internal,
 		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
 	}
@@ -292,9 +293,9 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	if !storeAddr.HasDerivationPath {
-		return info, nil
-	}
+	// Imported-xpub children have a real branch/index but no wallet-derived
+	// account number. Do not fabricate account 0; without a BIP44 account
+	// number the public BIP32 derivation shape is intentionally absent.
 	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}
@@ -318,8 +319,15 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 	if len(params.AccountPubKey) == 0 {
-		return nil, fmt.Errorf("%w: scope=%v account=%d",
-			errMissingAccountPubKey, params.Scope, params.AccountNumber)
+		account := "none"
+		if params.DerivedAccountNumber != nil {
+			account = strconv.FormatUint(
+				uint64(*params.DerivedAccountNumber), 10,
+			)
+		}
+
+		return nil, fmt.Errorf("%w: scope=%v account=%s",
+			errMissingAccountPubKey, params.Scope, account)
 	}
 
 	accountPubKey, err := hdkeychain.NewKeyFromString(

@@ -493,6 +493,38 @@ func TestGetAddressInfo(t *testing.T) {
 	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType)
 }
 
+// TestGetAddressInfoImportedXpubChild verifies that an address derived from an
+// imported account xpub keeps its HD child path internally without fabricating a
+// public BIP32 account number.
+func TestGetAddressInfoImportedXpubChild(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	storeInfo := importedPubKeyAddressInfoFromAddr(
+		t, addr, waddrmgr.KeyScopeBIP0084, pubKey,
+	)
+	storeInfo.AccountName = "hardware"
+	storeInfo.HasDerivationPath = true
+	storeInfo.Index = 7
+
+	expectStoreAddressInfo(t, w, deps, addr, storeInfo)
+
+	info, err := w.GetAddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+	require.False(t, info.Imported)
+	require.Nil(t, info.Derivation)
+	require.NotNil(t, info.PubKey)
+}
+
 // TestGetDerivationInfoExternalAddressSuccess tests that we can successfully
 // get the derivation info for an external address.
 func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
