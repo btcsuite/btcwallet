@@ -47,7 +47,7 @@ WHERE
 
 type AccountBalanceParams struct {
 	WalletID  int64
-	AccountID int64
+	AccountID sql.NullInt64
 }
 
 type AccountBalanceRow struct {
@@ -104,11 +104,11 @@ GROUP BY addr.account_id
 
 type AccountBalancesByIDsParams struct {
 	WalletID   int64
-	AccountIds []int64
+	AccountIds []sql.NullInt64
 }
 
 type AccountBalancesByIDsRow struct {
-	AccountID          int64
+	AccountID          sql.NullInt64
 	ConfirmedBalance   int64
 	UnconfirmedBalance int64
 }

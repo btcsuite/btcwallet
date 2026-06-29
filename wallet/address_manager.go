@@ -761,11 +761,6 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		return err
 	}
 
-	keyScope, err := addrType.KeyScope()
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
-	}
-
 	storeAddrType, err := addresstype.FromWallet(addrType)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
@@ -788,7 +783,6 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	_, err = w.store.NewImportedAddress(
 		ctx, db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(keyScope),
 			AddressType:  storeAddrType.Type,
 			ScriptPubKey: scriptPubKey,
 			PubKey:       serializedPubKey,
@@ -835,7 +829,6 @@ func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	storeInfo, err := w.store.NewImportedAddress(
 		ctx, db.NewImportedAddressParams{
 			WalletID:        w.id,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    scriptPubKey,
 			EncryptedScript: encryptedScript,

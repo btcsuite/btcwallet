@@ -155,7 +155,7 @@ INSERT INTO addresses (
     address_index,
     pub_key
 ) VALUES (
-    ?1, ?2, FALSE, ?3, ?4, NULL, NULL, ?5
+    ?1, NULL, FALSE, ?2, ?3, NULL, NULL, ?4
 )
 RETURNING id, created_at;
 

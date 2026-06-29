@@ -136,7 +136,7 @@ func (p accountListQueries) AttachAccountBalances(ctx context.Context,
 			balances := make([]db.AccountBalance, len(rows))
 			for i := range rows {
 				balances[i] = db.AccountBalance{
-					AccountID:   rows[i].AccountID,
+					AccountID:   rows[i].AccountID.Int64,
 					Confirmed:   rows[i].ConfirmedBalance,
 					Unconfirmed: rows[i].UnconfirmedBalance,
 				}

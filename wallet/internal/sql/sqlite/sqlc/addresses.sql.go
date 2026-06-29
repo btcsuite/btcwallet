@@ -28,7 +28,7 @@ RETURNING id, created_at
 
 type CreateDerivedAddressParams struct {
 	WalletID      int64
-	AccountID     int64
+	AccountID     sql.NullInt64
 	ScriptPubKey  []byte
 	TypeID        int64
 	AddressBranch sql.NullInt64
@@ -111,14 +111,13 @@ INSERT INTO addresses (
     address_index,
     pub_key
 ) VALUES (
-    ?1, ?2, FALSE, ?3, ?4, NULL, NULL, ?5
+    ?1, NULL, FALSE, ?2, ?3, NULL, NULL, ?4
 )
 RETURNING id, created_at
 `
 
 type CreateImportedAddressParams struct {
 	WalletID     int64
-	AccountID    int64
 	ScriptPubKey []byte
 	TypeID       int64
 	PubKey       []byte
@@ -133,7 +132,6 @@ type CreateImportedAddressRow struct {
 func (q *Queries) CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error) {
 	row := q.queryRow(ctx, q.createImportedAddressStmt, CreateImportedAddress,
 		arg.WalletID,
-		arg.AccountID,
 		arg.ScriptPubKey,
 		arg.TypeID,
 		arg.PubKey,

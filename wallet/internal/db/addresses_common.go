@@ -69,19 +69,6 @@ func AccountKeyFromParams(params NewDerivedAddressParams) AccountLookupKey {
 	}
 }
 
-// AccountKeyFromImportedParams extracts account lookup fields from imported
-// params using DefaultImportedAccountName.
-func AccountKeyFromImportedParams(
-	params NewImportedAddressParams) AccountLookupKey {
-
-	return AccountLookupKey{
-		WalletID:    int64(params.WalletID),
-		Purpose:     int64(params.Scope.Purpose),
-		CoinType:    int64(params.Scope.Coin),
-		AccountName: DefaultImportedAccountName,
-	}
-}
-
 // GetAddressSecret is a generic helper that retrieves address secret
 // information using the provided getter function and converts it to an
 // AddressSecret with error handling.
@@ -150,6 +137,16 @@ func requireAddressPrivKeyOnSpendable(walletID uint32,
 		"without private-key material into account %q: %w",
 		walletID, DefaultImportedAccountName,
 		ErrSpendableWalletNeedsAddressPrivKey)
+}
+
+// RequireAddressPrivKeyOnSpendable enforces the SQL address spendability
+// invariant for backend packages outside db.
+func RequireAddressPrivKeyOnSpendable(walletID uint32,
+	walletIsWatchOnly bool, hasPrivKey bool) error {
+
+	return requireAddressPrivKeyOnSpendable(
+		walletID, walletIsWatchOnly, hasPrivKey,
+	)
 }
 
 // HasPrivateKey returns true if the params include private key material.
