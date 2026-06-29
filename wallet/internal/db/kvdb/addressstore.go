@@ -1059,23 +1059,23 @@ func addressFromScript(pkScript []byte,
 	return addrs[0]
 }
 
-// addressFromPkScript extracts the first standard address from one script.
+// addressesFromPkScript extracts all standard addresses from one script.
 //
 // This lets the legacy address manager resolve wallet metadata from a
 // script-pubkey-only store lookup.
-func addressFromPkScript(pkScript []byte,
-	chainParams *chaincfg.Params) (address.Address, error) {
+func addressesFromPkScript(pkScript []byte,
+	chainParams *chaincfg.Params) ([]address.Address, error) {
 
 	_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript, chainParams)
 	if err != nil {
-		return nil, fmt.Errorf("extract address from pkScript: %w", err)
+		return nil, fmt.Errorf("extract addresses from pkScript: %w", err)
 	}
 
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf(
-			"extract address from pkScript: %w", errNoAddressInPkScript,
+			"extract addresses from pkScript: %w", errNoAddressInPkScript,
 		)
 	}
 
-	return addrs[0], nil
+	return addrs, nil
 }
