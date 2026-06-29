@@ -4,8 +4,8 @@
 -- How:
 -- - Writes only the utxos table using already-resolved transaction and address
 --   IDs.
--- - Rejoins addresses -> accounts -> key_scopes so the insert only succeeds if
---   the provided address ID belongs to the same wallet.
+-- - Rejoins addresses so the insert only succeeds if the provided address ID
+--   belongs to the same wallet.
 -- Performance:
 -- - Single-row insert. The main cost is the wallet-ownership validation join
 --   plus FK and uniqueness checks.
@@ -20,8 +20,6 @@ INSERT INTO utxos (
     sqlc.arg('amount') AS amount,
     a.id AS address_id
 FROM addresses AS a
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 CROSS JOIN transactions AS t
 WHERE
     t.id = sqlc.arg('tx_id')
@@ -29,7 +27,7 @@ WHERE
     AND t.tx_status IN (0, 1)
     AND
     a.id = sqlc.arg('address_id')
-    AND ks.wallet_id = sqlc.arg('wallet_id')
+    AND a.wallet_id = sqlc.arg('wallet_id')
 RETURNING id;
 
 -- name: GetUtxoIDByOutpoint :one
@@ -40,8 +38,8 @@ RETURNING id;
 --   network outpoint (`tx_hash`, `output_index`) instead of the internal row ID.
 -- - Restricts the result to unspent outputs whose parent transaction is still
 --   `pending` or `published`.
--- - Rejoins addresses -> accounts -> key_scopes so helper lookups do not return
---   rows whose credited address does not actually belong to the wallet.
+-- - Rejoins addresses so helper lookups do not return rows whose credited
+--   address does not actually belong to the wallet.
 -- - Exists separately from GetUtxoByOutpoint because mutation helpers often
 --   need the stable internal UTXO row ID without reading the full public UTXO
 --   payload.
@@ -52,11 +50,9 @@ SELECT u.id
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 WHERE
     t.wallet_id = $1
-    AND ks.wallet_id = $1
+    AND a.wallet_id = $1
     AND t.tx_hash = $2
     AND u.output_index = $3
     AND u.spent_by_tx_id IS NULL
@@ -68,8 +64,8 @@ WHERE
 -- How:
 -- - Joins utxos -> transactions on `tx_id` to resolve the outpoint
 --   from tx hash plus output index.
--- - Joins addresses -> accounts -> key_scopes so the read path reasserts that
---   the credited address belongs to the requested wallet.
+-- - Joins addresses directly for wallet ownership and optional account
+--   metadata through derived_addresses.
 -- - Returns leased and unleased outputs alike because leasing affects coin
 --   selection, not whether the UTXO exists.
 -- - Treats outputs from unmined `pending` and `published` parent transactions
@@ -86,11 +82,16 @@ SELECT
     t.is_coinbase,
     t.block_height,
     -- Enrichment columns derived from the ownership joins below.
+    a.is_derived AS address_is_derived,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.is_derived AS account_is_derived,
+    acc.account_number,
     acc.account_name, -- owning account
-    acc.origin_id, -- derived vs imported account
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
+    coalesce(acc.origin_id, 1)::SMALLINT AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -106,13 +107,14 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
 LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
-    AND ks.wallet_id = sqlc.arg('wallet_id')
+    AND a.wallet_id = sqlc.arg('wallet_id')
     AND t.tx_hash = sqlc.arg('tx_hash')
     AND u.output_index = sqlc.arg('output_index')
     AND u.spent_by_tx_id IS NULL
@@ -124,9 +126,8 @@ WHERE
 -- How:
 -- - Starts from utxos and joins transactions for tx metadata plus
 --   wallet_sync_states for confirmation math.
--- - Joins addresses to return the required script_pub_key, then reuses
---   addresses -> accounts -> key_scopes so account filtering and wallet
---   ownership checks happen in the same read.
+-- - Joins addresses to return the required script_pub_key and wallet ownership,
+--   then uses derived_addresses/accounts for optional account filters.
 -- - Returns leased outputs too because the API models leases separately from
 --   UTXO existence.
 -- - Includes outputs whose parent transaction is still in `pending` or
@@ -135,8 +136,8 @@ WHERE
 --   wallet-owned UTXO existence rather than a strictly spendable subset.
 -- Performance:
 -- - Restricts first by wallet, spend state, and transaction status.
--- - Uses the address/account/scope joins to keep ownership validation and
---   account filtering in one pass.
+-- - Uses the address and optional account/scope joins to keep ownership
+--   validation and account filtering in one pass.
 -- - Treats min/max confirmations as optional filters so callers can
 --   distinguish "not set" from an explicit zero-conf request.
 SELECT
@@ -148,11 +149,16 @@ SELECT
     t.is_coinbase,
     t.block_height,
     -- Enrichment columns derived from the ownership joins below.
+    a.is_derived AS address_is_derived,
+    da.address_id AS derived_address_id,
+    da.account_id,
+    acc.is_derived AS account_is_derived,
+    acc.account_number,
     acc.account_name, -- owning account
-    acc.origin_id, -- derived vs imported account
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
+    coalesce(acc.origin_id, 1)::SMALLINT AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -168,14 +174,15 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id -- INNER joins enforce wallet ownership
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id -- non-wallet rows are dropped
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN utxo_leases AS l ON u.id = l.utxo_id -- LEFT joins: optional enrichment
 LEFT JOIN address_secrets AS asec ON a.id = asec.address_id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
-    AND ks.wallet_id = sqlc.arg('wallet_id')
+    AND a.wallet_id = sqlc.arg('wallet_id')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
     AND (
@@ -188,7 +195,10 @@ WHERE
     )
     AND (
         sqlc.narg('account_number')::BIGINT IS NULL
-        OR acc.account_number = sqlc.narg('account_number')::BIGINT
+        OR (
+            acc.is_derived
+            AND acc.account_number = sqlc.narg('account_number')::BIGINT
+        )
     )
     AND (
         sqlc.narg('account_name')::TEXT IS NULL
@@ -226,8 +236,8 @@ ORDER BY u.amount, t.tx_hash, u.output_index;
 -- How:
 -- - Starts from wallet-scoped unspent outputs and rejoins transactions plus
 --   wallet_sync_states for confirmation math.
--- - Rejoins addresses -> accounts -> key_scopes so ownership validation and
---   optional account filtering stay in one read.
+-- - Rejoins addresses for ownership validation and key scope filters; account
+--   filters use derived_addresses/accounts when requested.
 -- - Applies optional confirmation-range and coinbase-maturity policy directly
 --   inside the aggregate query so callers can request factual or policy-shaped
 --   balance reads through one public method.
@@ -238,8 +248,8 @@ ORDER BY u.amount, t.tx_hash, u.output_index;
 --   transaction is still `pending` or `published`.
 -- - Uses a filtered aggregate over active leases rather than issuing a second
 --   query for the locked subset.
--- - Uses the address/account/scope joins to keep ownership validation and
---   account filtering in one pass.
+-- - Uses the address and optional account/scope joins to keep ownership
+--   validation and account filtering in one pass.
 SELECT
     (coalesce(sum(u.amount), 0))::BIGINT AS total_balance,
     (coalesce(
@@ -258,14 +268,27 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
     t.wallet_id = sqlc.arg('wallet_id')
-    AND ks.wallet_id = sqlc.arg('wallet_id')
+    AND a.wallet_id = sqlc.arg('wallet_id')
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
+    AND (
+        (a.is_derived = FALSE AND da.address_id IS NULL)
+        OR (
+            a.is_derived
+            AND da.address_id IS NOT NULL
+            AND acc.id IS NOT NULL
+            AND (
+                (acc.is_derived AND acc.account_number IS NOT NULL)
+                OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+            )
+        )
+    )
     AND (
         sqlc.narg('purpose')::BIGINT IS NULL
         OR ks.purpose = sqlc.narg('purpose')::BIGINT
@@ -276,7 +299,10 @@ WHERE
     )
     AND (
         sqlc.narg('account_number')::BIGINT IS NULL
-        OR acc.account_number = sqlc.narg('account_number')::BIGINT
+        OR (
+            acc.is_derived
+            AND acc.account_number = sqlc.narg('account_number')::BIGINT
+        )
     )
     AND (
         sqlc.narg('account_name')::TEXT IS NULL

@@ -52,8 +52,8 @@ type Querier interface {
 	// How:
 	// - Starts from wallet-scoped unspent outputs and rejoins transactions plus
 	//   wallet_sync_states for confirmation math.
-	// - Rejoins addresses -> accounts -> key_scopes so ownership validation and
-	//   optional account filtering stay in one read.
+	// - Rejoins addresses for ownership validation and key scope filters; account
+	//   filters use derived_addresses/accounts when requested.
 	// - Applies optional confirmation-range and coinbase-maturity policy directly
 	//   inside the aggregate query so callers can request factual or policy-shaped
 	//   balance reads through one public method.
@@ -64,8 +64,8 @@ type Querier interface {
 	//   transaction is still `pending` or `published`.
 	// - Uses a filtered aggregate over active leases rather than issuing a second
 	//   query for the locked subset.
-	// - Uses the address/account/scope joins to keep ownership validation and
-	//   account filtering in one pass.
+	// - Uses the address and optional account/scope joins to keep ownership
+	//   validation and account filtering in one pass.
 	Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error)
 	// Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
 	//
@@ -219,8 +219,8 @@ type Querier interface {
 	// How:
 	// - Joins utxos -> transactions on `tx_id` to resolve the outpoint
 	//   from tx hash plus output index.
-	// - Joins addresses -> accounts -> key_scopes so the read path reasserts that
-	//   the credited address belongs to the requested wallet.
+	// - Joins addresses directly for wallet ownership and optional account
+	//   metadata through derived_addresses.
 	// - Returns leased and unleased outputs alike because leasing affects coin
 	//   selection, not whether the UTXO exists.
 	// - Treats outputs from unmined `pending` and `published` parent transactions
@@ -236,8 +236,8 @@ type Querier interface {
 	//   network outpoint (`tx_hash`, `output_index`) instead of the internal row ID.
 	// - Restricts the result to unspent outputs whose parent transaction is still
 	//   `pending` or `published`.
-	// - Rejoins addresses -> accounts -> key_scopes so helper lookups do not return
-	//   rows whose credited address does not actually belong to the wallet.
+	// - Rejoins addresses so helper lookups do not return rows whose credited
+	//   address does not actually belong to the wallet.
 	// - Exists separately from GetUtxoByOutpoint because mutation helpers often
 	//   need the stable internal UTXO row ID without reading the full public UTXO
 	//   payload.
@@ -319,8 +319,8 @@ type Querier interface {
 	// How:
 	// - Writes only the utxos table using already-resolved transaction and address
 	//   IDs.
-	// - Rejoins addresses -> accounts -> key_scopes so the insert only succeeds if
-	//   the provided address ID belongs to the same wallet.
+	// - Rejoins addresses so the insert only succeeds if the provided address ID
+	//   belongs to the same wallet.
 	// Performance:
 	// - Single-row insert. The main cost is the wallet-ownership validation join
 	//   plus FK and uniqueness checks.
@@ -370,8 +370,8 @@ type Querier interface {
 	//
 	// How:
 	// - Resolves previous transaction hashes to this wallet's tracked UTXO rows.
-	// - Rejoins addresses -> accounts -> key_scopes so debit reconstruction does
-	//   not depend only on transaction wallet scope.
+	// - Rejoins addresses so debit reconstruction does not depend only on
+	//   transaction wallet scope.
 	// - Does not read `spent_by_tx_id` because invalidation and rollback can clear
 	//   that mutable edge while the historical spending transaction still exists.
 	// Performance:
@@ -498,9 +498,8 @@ type Querier interface {
 	// How:
 	// - Starts from utxos and joins transactions for tx metadata plus
 	//   wallet_sync_states for confirmation math.
-	// - Joins addresses to return the required script_pub_key, then reuses
-	//   addresses -> accounts -> key_scopes so account filtering and wallet
-	//   ownership checks happen in the same read.
+	// - Joins addresses to return the required script_pub_key and wallet ownership,
+	//   then uses derived_addresses/accounts for optional account filters.
 	// - Returns leased outputs too because the API models leases separately from
 	//   UTXO existence.
 	// - Includes outputs whose parent transaction is still in `pending` or
@@ -509,8 +508,8 @@ type Querier interface {
 	//   wallet-owned UTXO existence rather than a strictly spendable subset.
 	// Performance:
 	// - Restricts first by wallet, spend state, and transaction status.
-	// - Uses the address/account/scope joins to keep ownership validation and
-	//   account filtering in one pass.
+	// - Uses the address and optional account/scope joins to keep ownership
+	//   validation and account filtering in one pass.
 	// - Treats min/max confirmations as optional filters so callers can
 	//   distinguish "not set" from an explicit zero-conf request.
 	ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error)

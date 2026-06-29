@@ -13,8 +13,8 @@ import (
 //
 // The result set is already constrained to outputs whose creating
 // transactions are still in `pending` or `published` status. Enrichment
-// columns (account name + origin, address type, has-script bit, lease
-// status) are populated by the same query.
+// columns (account name + origin, address type, has-script bit, lease status)
+// are populated by the same query.
 func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
@@ -44,6 +44,17 @@ func (s *Store) ListUTXOs(ctx context.Context,
 
 		utxos = make([]db.UtxoInfo, len(rows))
 		for i, row := range rows {
+			err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
+				IsDerived:        row.AddressIsDerived,
+				DerivedAddressID: row.DerivedAddressID,
+				AccountID:        row.AccountID,
+				AccountIsDerived: row.AccountIsDerived,
+				AccountNumber:    row.AccountNumber,
+			})
+			if err != nil {
+				return err
+			}
+
 			utxo, err := utxoInfoFromRow(
 				row.TxHash, row.OutputIndex, row.Amount,
 				row.ScriptPubKey, row.ReceivedTime, row.IsCoinbase,
@@ -71,8 +82,8 @@ func (s *Store) ListUTXOs(ctx context.Context,
 }
 
 // applyListRowEnrichment derives and sets the per-row UTXO enrichment
-// fields (account name + origin, address type, has-script bit, lease
-// status) on utxo from a ListUtxos result row.
+// fields (account name + origin, address type, has-script bit, lease status)
+// on utxo from a ListUtxos result row.
 func applyListRowEnrichment(utxo *db.UtxoInfo,
 	row sqlc.ListUtxosRow) error {
 
@@ -86,17 +97,29 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 		return fmt.Errorf("addr type: %w", err)
 	}
 
-	keyScope, err := db.KeyScopeFromIDs(row.Purpose, row.CoinType)
+	keyScope, hasScope, err := db.KeyScopeFromNullIDs(
+		row.Purpose, row.CoinType,
+	)
 	if err != nil {
 		return fmt.Errorf("key scope: %w", err)
 	}
 
-	utxo.AccountName = row.AccountName
+	if row.AddressIsDerived && !hasScope {
+		return fmt.Errorf("key scope: %w", db.ErrInvalidListAddressesQuery)
+	}
+
+	if row.AccountName.Valid {
+		utxo.AccountName = row.AccountName.String
+	}
+
 	utxo.Origin = origin
 	utxo.AddrType = addrType
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked != 0
-	utxo.KeyScope = keyScope
+
+	if hasScope {
+		utxo.KeyScope = keyScope
+	}
 
 	return nil
 }
