@@ -614,6 +614,7 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			).Return(&db.AccountInfo{
 				AccountName: tc.accountName,
 				Origin:      db.ImportedAccount,
+				IsImported:  true,
 				AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
 			}, nil).Once()
 
@@ -678,6 +679,7 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 	).Return(&db.AccountInfo{
 		AccountName: accountName,
 		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
 	}, nil).Once()
 

@@ -536,7 +536,7 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 	// by number rather than assuming the literal "default" name; looking it
 	// up by name would break change derivation after a rename.
 	derivationAccount := accountName
-	if accountInfo.Origin == db.ImportedAccount &&
+	if accountInfo.IsImported &&
 		accountInfo.AccountName == db.DefaultImportedAccountName {
 
 		derivedAccount := uint32(waddrmgr.DefaultAccountNum)

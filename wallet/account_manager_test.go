@@ -149,7 +149,7 @@ func TestPropertiesToAccountInfoLockedDerivedNotMisclassified(t *testing.T) {
 	}, 123, false, false, masterFingerprint)
 
 	require.Equal(t, uint32(7), info.AccountNumber)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
 	require.Equal(t, masterFingerprint, info.MasterKeyFingerprint)
 }
@@ -178,7 +178,7 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	}, 123, true, false, 0xDEADBEEF)
 
 	require.Equal(t, uint32(0), info.AccountNumber)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
 	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
 }
@@ -323,6 +323,7 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 		{
 			AccountName:      waddrmgr.ImportedAddrAccountName,
 			Origin:           db.ImportedAccount,
+			IsImported:       true,
 			KeyScope:         dbScope,
 			ImportedKeyCount: 2,
 		},
@@ -333,7 +334,7 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	require.Len(t, accounts, 1)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName,
 		accounts[0].AccountName)
-	require.Equal(t, db.ImportedAccount, accounts[0].Origin)
+	require.True(t, accounts[0].IsImported)
 	require.Equal(t, uint32(0), accounts[0].AccountNumber)
 	require.Equal(t, uint32(2), accounts[0].ImportedKeyCount)
 }
@@ -425,6 +426,7 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	}).Return(&db.AccountInfo{
 		AccountName:      waddrmgr.ImportedAddrAccountName,
 		Origin:           db.ImportedAccount,
+		IsImported:       true,
 		KeyScope:         dbScope,
 		ImportedKeyCount: 3,
 	}, nil).Once()
@@ -434,7 +436,7 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, account.AccountName)
-	require.Equal(t, db.ImportedAccount, account.Origin)
+	require.True(t, account.IsImported)
 	require.Equal(t, uint32(0), account.AccountNumber)
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
@@ -594,6 +596,7 @@ func TestImportAccount(t *testing.T) {
 		AccountNumber: 1,
 		AccountName:   testAccountName,
 		Origin:        db.ImportedAccount,
+		IsImported:    true,
 		IsWatchOnly:   true,
 		KeyScope:      dbScope,
 		PublicKey:     []byte(acctPubKey.String()),
@@ -634,6 +637,7 @@ func TestImportAccountDryRun(t *testing.T) {
 		}).Return(&db.AccountInfo{
 		AccountName: testAccountName,
 		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 		KeyScope:    dbScope,
 		PublicKey:   []byte(acctPubKey.String()),
@@ -678,6 +682,7 @@ func TestImportAccountAddrSchema(t *testing.T) {
 		}).Return(&db.AccountInfo{
 		AccountName: testAccountName,
 		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 		KeyScope:    dbScope,
 		PublicKey:   []byte(acctPubKey.String()),

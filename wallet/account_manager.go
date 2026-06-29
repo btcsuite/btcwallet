@@ -194,7 +194,7 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	if info.Origin == db.DerivedAccount {
+	if !info.IsImported {
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
@@ -261,6 +261,7 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		AccountNumber:        accountNumber,
 		AccountName:          props.AccountName,
 		Origin:               origin,
+		IsImported:           isImported,
 		ExternalKeyCount:     props.ExternalKeyCount,
 		InternalKeyCount:     props.InternalKeyCount,
 		ImportedKeyCount:     props.ImportedKeyCount,
@@ -296,7 +297,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	}
 
 	for i := range infos {
-		if infos[i].Origin == db.DerivedAccount {
+		if !infos[i].IsImported {
 			infos[i].MasterKeyFingerprint = w.masterFingerprint
 		}
 	}
@@ -374,7 +375,7 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	// fingerprint there. Inject the wallet-cached value (parsed from
 	// the master HD pubkey at Manager.Load time) so external consumers
 	// see the canonical BIP32 root fingerprint.
-	if info.Origin == db.DerivedAccount {
+	if !info.IsImported {
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
