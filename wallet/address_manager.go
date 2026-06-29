@@ -271,13 +271,12 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			storeAddr.AddrType)
 	}
 
-	internal := storeAddr.Origin == db.DerivedAccount &&
-		storeAddr.Branch == 1
+	internal := storeAddr.HasDerivationPath && storeAddr.Branch == 1
 
 	info := AddressInfo{
 		Addr:       addr,
 		AddrType:   addrType,
-		Imported:   storeAddr.Origin == db.ImportedAccount,
+		Imported:   storeAddr.IsImported,
 		Internal:   internal,
 		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
 	}
@@ -293,7 +292,10 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	if info.Imported {
+	if !storeAddr.HasDerivationPath {
+		return info, nil
+	}
+	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}
 
@@ -302,7 +304,7 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			Purpose: storeAddr.KeyScope.Purpose,
 			Coin:    storeAddr.KeyScope.Coin,
 		},
-		Account:              storeAddr.AccountNumber,
+		Account:              *storeAddr.AccountNumber,
 		Branch:               storeAddr.Branch,
 		Index:                storeAddr.Index,
 		MasterKeyFingerprint: storeAddr.MasterKeyFingerprint,
@@ -597,7 +599,7 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 	change bool,
 	chainParams *chaincfg.Params) (address.Address, bool, error) {
 
-	if storeAddr.Origin != db.DerivedAccount {
+	if !storeAddr.HasDerivationPath {
 		return nil, false, nil
 	}
 

@@ -22,8 +22,13 @@ CREATE TABLE addresses (
     -- Reference to the wallet this address belongs to.
     wallet_id BIGINT NOT NULL,
 
-    -- Reference to the account this address belongs to.
+    -- Legacy reference to the account this address belongs to. This remains
+    -- non-null while legacy queries are still present.
     account_id BIGINT NOT NULL,
+
+    -- Shape marker for the normalized identity model. TRUE means this address
+    -- has normalized derived identity with account ownership and path data.
+    is_derived BOOLEAN NOT NULL DEFAULT TRUE,
 
     -- Script pubkey that locks funds on-chain (stored in plaintext per ADR 0009:
     -- docs/developer/adr/0009-single-passphrase-encryption.md).
@@ -91,6 +96,10 @@ ON addresses (wallet_id, script_pub_key);
 -- Index on (account_id, id) for efficient pagination of addresses by account.
 -- Used by ListAddressesByAccount for cursor-based pagination.
 CREATE INDEX idx_addresses_account_id ON addresses (account_id, id);
+
+-- Index for normalized raw-import address listing by wallet.
+CREATE INDEX idx_addresses_wallet_derived_id
+ON addresses (wallet_id, is_derived, id);
 
 -- Enforce that wallet ownership chosen at address creation time remains
 -- immutable. This closes the database-boundary hole where a raw update could
