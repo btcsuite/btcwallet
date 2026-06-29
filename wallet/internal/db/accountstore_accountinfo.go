@@ -46,9 +46,6 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	// InternalKeyCount is the number of internal keys derived so far.
 	InternalKeyCount int64
 
-	// ImportedKeyCount is the legacy imported child count for the account.
-	ImportedKeyCount int64
-
 	// PublicKey is the serialized account public key when one is available.
 	PublicKey []byte
 
@@ -229,8 +226,10 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 		}
 	}
 
+	// Normalized SQL account rows track HD branch counters only. Individually
+	// imported address counts are a legacy kvdb/waddrmgr account property.
 	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
-		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+		row.ExternalKeyCount, row.InternalKeyCount, 0,
 	)
 	if err != nil {
 		return nil, err
@@ -378,9 +377,6 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	// InternalKeyCount is the number of internal keys derived so far.
 	InternalKeyCount int64
 
-	// ImportedKeyCount is the legacy imported child count for the account.
-	ImportedKeyCount int64
-
 	// PublicKey is the serialized account public key when one is available.
 	PublicKey []byte
 
@@ -442,8 +438,10 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
+	// Normalized SQL account rows track HD branch counters only. Individually
+	// imported address counts are a legacy kvdb/waddrmgr account property.
 	externalKeyCount, internalKeyCount, importedKeyCount, err := getKeyCounts(
-		row.ExternalKeyCount, row.InternalKeyCount, row.ImportedKeyCount,
+		row.ExternalKeyCount, row.InternalKeyCount, 0,
 	)
 	if err != nil {
 		return nil, err
