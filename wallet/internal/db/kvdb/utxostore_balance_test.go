@@ -13,10 +13,12 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,6 +120,53 @@ func TestBalanceAccountFilter(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(200), res.Total)
+}
+
+// TestBalanceBareMultisigOwnedByLaterMember verifies Balance checks every
+// extracted script member instead of only the first one.
+func TestBalanceBareMultisigOwnedByLaterMember(t *testing.T) {
+	t.Parallel()
+
+	store, addrStore, acctStore, amount := newBareMultisigBalanceStore(t)
+
+	res, err := store.Balance(t.Context(), db.BalanceParams{})
+	require.NoError(t, err)
+	require.Equal(t, amount, res.Total)
+
+	addrStore.AssertExpectations(t)
+	acctStore.AssertExpectations(t)
+}
+
+// TestAccountBalancesBareMultisigOwnedByLaterMember verifies account balance
+// attachment also checks every extracted script member.
+func TestAccountBalancesBareMultisigOwnedByLaterMember(t *testing.T) {
+	t.Parallel()
+
+	store, addrStore, acctStore, amount := newBareMultisigBalanceStore(t)
+
+	var balances map[accountBalanceKey]accountBalancePair
+
+	err := walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		var err error
+
+		balances, err = store.fetchAccountBalances(
+			tx.ReadBucket(waddrmgr.NamespaceKey),
+			tx.ReadBucket(wtxmgrNamespaceKey), nil,
+		)
+
+		return err
+	})
+	require.NoError(t, err)
+
+	key := accountBalanceKey{
+		scope:   waddrmgr.KeyScopeBIP0084,
+		account: 7,
+	}
+	require.Equal(t, amount, balances[key].confirmed)
+	require.Zero(t, balances[key].unconfirmed)
+
+	addrStore.AssertExpectations(t)
+	acctStore.AssertExpectations(t)
 }
 
 // TestBalanceReturnsLockedSubset verifies locked credits contribute to Total
@@ -518,6 +567,60 @@ func creditImportedKeyAtHeight(t *testing.T, dbConn walletdb.DB,
 	return insertBalanceCredit(
 		t, dbConn, mgr, txStore, pkScript, amount, height, false,
 	)
+}
+
+// newBareMultisigBalanceStore builds a mock-backed store with one
+// bare-multisig
+// credit whose first script member is unowned and second member is
+// wallet-owned.
+func newBareMultisigBalanceStore(t *testing.T) (*Store, *bwmock.AddrStore,
+	*bwmock.AccountStore, btcutil.Amount) {
+
+	t.Helper()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	newAddrmgrNamespace(t, dbConn)
+	_ = newTxStore(t, dbConn)
+
+	members, script := newMultisigScriptMembers(t)
+	amount := btcutil.Amount(12_345)
+	credit := wtxmgr.Credit{
+		OutPoint: wire.OutPoint{Hash: chainhash.Hash{88}, Index: 0},
+		BlockMeta: wtxmgr.BlockMeta{Block: wtxmgr.Block{
+			Height: balanceTestTipHeight,
+		}},
+		Amount:   amount,
+		PkScript: script,
+	}
+
+	txStore := &bwmock.TxStore{}
+	txStore.On(
+		"UnspentOutputsIncludingLocked", mock.Anything,
+	).Return([]wtxmgr.Credit{credit}, nil).Once()
+
+	acctStore := &bwmock.AccountStore{}
+	acctStore.On("Scope").Return(waddrmgr.KeyScopeBIP0084).Maybe()
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On("SyncedTo").Return(waddrmgr.BlockStamp{
+		Height: balanceTestTipHeight,
+	}).Once()
+	addrStore.On("ChainParams").Return(&chaincfg.RegressionNetParams).Once()
+	addrStore.On(
+		"AddrAccount", mock.Anything, matchAddress(members[0]),
+	).Return(
+		nil, uint32(0), waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrAddressNotFound,
+			Description: "address not found",
+		},
+	).Once()
+	addrStore.On(
+		"AddrAccount", mock.Anything, matchAddress(members[1]),
+	).Return(acctStore, uint32(7), nil).Once()
+
+	return NewStore(dbConn, txStore, addrStore), addrStore, acctStore, amount
 }
 
 // TestBalanceExcludesImportedFromNumericAccountFilter verifies that the

@@ -570,13 +570,11 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	scope := db.KeyScope(keyScope)
-
 	addresses := w.store.IterAddresses(
 		ctx, db.ListAddressesQuery{
 			WalletID:    w.id,
 			AccountName: &accountName,
-			Scope:       &scope,
+			Scope:       (*db.KeyScope)(&keyScope),
 			Page:        req,
 		},
 	)

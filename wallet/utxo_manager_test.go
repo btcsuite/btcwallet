@@ -52,7 +52,6 @@ func TestListUnspent(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 	utxoTest := db.UtxoInfo{
@@ -61,7 +60,6 @@ func TestListUnspent(t *testing.T) {
 		PkScript:    pkScriptTest,
 		Height:      1,
 		AccountName: "test",
-		Origin:      db.DerivedAccount,
 		AddrType:    db.NestedWitnessPubKey,
 		IsLocked:    true,
 	}
@@ -118,7 +116,6 @@ func TestListUnspentFiltersByAccount(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 	utxoTest := db.UtxoInfo{
@@ -127,7 +124,6 @@ func TestListUnspentFiltersByAccount(t *testing.T) {
 		PkScript:    pkScriptTest,
 		Height:      1,
 		AccountName: "test",
-		Origin:      db.DerivedAccount,
 		AddrType:    db.NestedWitnessPubKey,
 	}
 
@@ -238,7 +234,6 @@ func TestGetUtxo(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 

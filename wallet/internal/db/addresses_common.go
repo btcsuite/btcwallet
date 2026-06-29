@@ -42,12 +42,6 @@ var (
 	// subtype rows violate the normalized address identity invariant.
 	errAddressShapeCorruption = errors.New("address subtype invariant violated")
 
-	// errInvalidOriginID is returned when an origin ID from the database is
-	// outside the valid range [DerivedAccount, ImportedAccount]. In practice,
-	// this should never happen, but it's possible if the database is modified
-	// incorrectly or the query is incorrect.
-	errInvalidOriginID = errors.New("invalid origin ID: must be 0 or 1")
-
 	// errInvalidDerivationPath is returned when the database contains an
 	// invalid derivation path, such as a missing index or branch for a
 	// derived address. This should never happen, but it's possible if the
@@ -172,20 +166,10 @@ func (p NewImportedAddressParams) HasScript() bool {
 	return len(p.EncryptedScript) > 0
 }
 
-// IDToOrigin safely converts an integer to AccountOrigin. It returns an error
-// if the value is outside [DerivedAccount, ImportedAccount].
-func IDToOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
-	if v < 0 || v > T(ImportedAccount) {
-		return 0, fmt.Errorf("address origin: %d: %w", v, errInvalidOriginID)
-	}
-
-	return AccountOrigin(uint8(v)), nil
-}
-
 // AddressInfoRow captures common fields from all address row types across
 // PostgreSQL and SQLite backends. Uses generic type parameters to handle
 // different ID types (int16 for PostgreSQL, int64 for SQLite).
-type AddressInfoRow[TypeID, OriginIDType any] struct {
+type AddressInfoRow[TypeID any] struct {
 	// ID is the database unique identifier for the address.
 	ID int64
 
@@ -203,6 +187,9 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 	// child row with branch/index path data.
 	IsDerived bool
 
+	// AccountIsDerived reports whether the owning account is wallet-derived.
+	AccountIsDerived bool
+
 	// MasterFingerprint is the root fingerprint stored on the owning account.
 	MasterFingerprint sql.NullInt64
 
@@ -218,10 +205,6 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 
 	// TypeID is the database identifier for the address type.
 	TypeID TypeID
-
-	// OriginID is the database identifier for address origin (derived=0,
-	// imported=1).
-	OriginID OriginIDType
 
 	// WalletIsWatchOnly indicates whether the wallet is watch-only.
 	WalletIsWatchOnly bool
@@ -252,9 +235,6 @@ type AddressInfoRow[TypeID, OriginIDType any] struct {
 
 	// IDToAddrType converts TypeID to AddressType with validation.
 	IDToAddrType func(TypeID) (AddressType, error)
-
-	// IDToOrigin converts OriginIDType to AccountOrigin with validation.
-	IDToOrigin func(OriginIDType) (AccountOrigin, error)
 }
 
 // AddressSecretRow captures fields shared by address secret row types across
@@ -350,8 +330,8 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 // convertAddressAccountMetadata converts the owning account metadata for an
 // address row. SQL backends may fetch account properties separately to avoid
 // widening address queries.
-func convertAddressAccountMetadata[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (*uint32, string, uint32,
+func convertAddressAccountMetadata[TypeID any](
+	row AddressInfoRow[TypeID]) (*uint32, string, uint32,
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
@@ -391,11 +371,6 @@ func ApplyAddressAccountMetadata(info *AddressInfo,
 	info.KeyScope = keyScope
 	info.MasterKeyFingerprint = fingerprint
 	info.IsImported = isImported
-	if isImported {
-		info.Origin = ImportedAccount
-	} else {
-		info.Origin = DerivedAccount
-	}
 
 	return nil
 }
@@ -438,7 +413,6 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		AccountID:    acctID,
 		AddrType:     params.AddressType,
 		CreatedAt:    rowCreatedAt(addrRow),
-		Origin:       ImportedAccount,
 		IsImported:   true,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
@@ -447,23 +421,16 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 	}, nil
 }
 
-// convertAddressMetadata converts address type and origin IDs with error
-// handling.
-func convertAddressMetadata[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (AddressType, AccountOrigin,
-	error) {
+// convertAddressMetadata converts address type IDs with error handling.
+func convertAddressMetadata[TypeID any](
+	row AddressInfoRow[TypeID]) (AddressType, error) {
 
 	addrType, err := row.IDToAddrType(row.TypeID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("address type: %w", err)
+		return 0, fmt.Errorf("address type: %w", err)
 	}
 
-	origin, err := row.IDToOrigin(row.OriginID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("address origin: %w", err)
-	}
-
-	return addrType, origin, nil
+	return addrType, nil
 }
 
 // convertAddressPath converts BIP44 branch/index values into uint32 fields.
@@ -503,8 +470,8 @@ func convertAddressPath(hasDerivationPath bool, branch,
 //
 // Watch-only state is copied directly from the wallet-level flag. Address
 // secret presence is not used to infer public watch-only state.
-func AddressRowToInfo[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (*AddressInfo, error) {
+func AddressRowToInfo[TypeID any](
+	row AddressInfoRow[TypeID]) (*AddressInfo, error) {
 
 	id, accountID, err := convertAddressIDs(row.ID, row.AccountID)
 	if err != nil {
@@ -517,7 +484,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
-	addrType, origin, err := convertAddressMetadata(row)
+	addrType, err := convertAddressMetadata(row)
 	if err != nil {
 		return nil, err
 	}
@@ -529,6 +496,11 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		return nil, err
 	}
 
+	isImported := !row.IsDerived
+	if row.IsDerived {
+		isImported = !row.AccountIsDerived
+	}
+
 	return &AddressInfo{
 		ID:                   id,
 		AccountID:            accountID,
@@ -538,8 +510,7 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		MasterKeyFingerprint: masterFingerprint,
 		AddrType:             addrType,
 		CreatedAt:            row.CreatedAt,
-		Origin:               origin,
-		IsImported:           origin == ImportedAccount,
+		IsImported:           isImported,
 		HasDerivationPath:    row.IsDerived,
 		Branch:               addrBranch,
 		Index:                addrIndex,
@@ -780,7 +751,6 @@ func createDerivedAddress[T any](ctx context.Context,
 		AccountNumber:     accountNumber,
 		AddrType:          addrType,
 		CreatedAt:         rowCreatedAt(row),
-		Origin:            DerivedAccount,
 		IsImported:        false,
 		HasDerivationPath: true,
 		Branch:            branch,
@@ -839,16 +809,10 @@ func derivedAddressInput(ctx context.Context,
 		return 0, 0, 0, nil, nil, err
 	}
 
-	var legacyAccountNumber uint32
-	if accountNumber != nil {
-		legacyAccountNumber = *accountNumber
-	}
-
 	deriveParams := AddressDerivationParams{
 		AccountID:            accountIDPtr,
 		Scope:                params.Scope,
 		DerivedAccountNumber: accountNumber,
-		AccountNumber:        legacyAccountNumber,
 		Branch:               branch,
 		Index:                index,
 		AddrType:             addrType,

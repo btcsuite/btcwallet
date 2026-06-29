@@ -21,286 +21,320 @@ var (
 	defaultAccountName = "default"
 )
 
-// TestValidateTxIntent ensures that the validateTxIntent function returns
-// errors for all expected invalid transaction intents, and that it returns nil
-// for valid intents. The test covers a range of scenarios, including missing
-// inputs or outputs, dust outputs, duplicate UTXOs, and invalid account or
-// change source configurations.
-func TestValidateTxIntent(t *testing.T) {
-	t.Parallel()
+// Shared fixtures reused across the TxIntent validation test cases.
+var (
+	validOutput = wire.TxOut{Value: 10000, PkScript: []byte{}}
+	validUTXO   = wire.OutPoint{Hash: [32]byte{1}, Index: 0}
 
-	const defaultAccountName = "default"
-
-	// Define a set of valid outputs and inputs to be reused across test
-	// cases.
-	validOutput := wire.TxOut{Value: 10000, PkScript: []byte{}}
-	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
-	validAccountName := defaultAccountName
-	validScopedAccount := &ScopedAccount{
+	validAccountName   = defaultAccountName
+	validScopedAccount = &ScopedAccount{
 		AccountName: validAccountName,
 		KeyScope:    waddrmgr.KeyScopeBIP0086,
 	}
-	defaultFeeRate := btcunit.NewSatPerKVByte(1000)
 
-	// Define the test cases, each representing a different scenario for
-	// validating a TxIntent.
-	testCases := []struct {
-		name        string
-		intent      *TxIntent
-		expectedErr error
-	}{
-		{
-			name: "valid intent with manual inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+	defaultFeeRate = btcunit.NewSatPerKVByte(1000)
+)
+
+// txIntentTestCases enumerates the TxIntent validation scenarios exercised by
+// TestValidateTxIntent.
+var txIntentTestCases = []struct {
+	name        string
+	intent      *TxIntent
+	expectedErr error
+}{
+	{
+		name: "valid intent with manual inputs",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
 			},
-			expectedErr: nil,
-		},
-		{
-			name: "valid intent with policy inputs " +
-				"(scoped account)",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: validScopedAccount,
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: nil,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "valid intent with policy inputs (utxo source)",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &CoinSourceUTXOs{
-						UTXOs: []wire.OutPoint{
-							validUTXO,
-						},
+		expectedErr: nil,
+	},
+	{
+		name: "valid intent with policy inputs " +
+			"(scoped account)",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: validScopedAccount,
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: nil,
+	},
+	{
+		name: "valid intent with policy inputs " +
+			"(scoped account value)",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: ScopedAccount{
+					AccountName: validAccountName,
+					KeyScope:    waddrmgr.KeyScopeBIP0086,
+				},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: nil,
+	},
+	{
+		name: "valid intent with policy inputs (utxo source)",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: &CoinSourceUTXOs{
+					UTXOs: []wire.OutPoint{
+						validUTXO,
 					},
 				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
 			},
-			expectedErr: nil,
-		},
-		{
-			name: "valid intent with nil source in policy",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs:  &InputsPolicy{Source: nil},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: nil,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - nil inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs:  nil,
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
+		expectedErr: nil,
+	},
+	{
+		name: "valid intent with policy inputs " +
+			"(utxo source value)",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: CoinSourceUTXOs{
+					UTXOs: []wire.OutPoint{
+						validUTXO,
+					},
 				},
-				FeeRate: defaultFeeRate,
 			},
-			expectedErr: ErrMissingInputs,
-		},
-		{
-			name: "invalid intent - no outputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: ErrNoTxOutputs,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - dust output",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{{Value: 1}},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+		expectedErr: nil,
+	},
+	{
+		name: "valid intent with nil source in policy",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs:  &InputsPolicy{Source: nil},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: txrules.ErrOutputIsDust,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - empty manual inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
+		expectedErr: nil,
+	},
+	{
+		name: "invalid intent - nil inputs",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs:  nil,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: ErrMissingInputs,
+	},
+	{
+		name: "invalid intent - no outputs",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: ErrNoTxOutputs,
+	},
+	{
+		name: "invalid intent - dust output",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{{Value: 1}},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: txrules.ErrOutputIsDust,
+	},
+	{
+		name: "invalid intent - empty manual inputs",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: ErrManualInputsEmpty,
+	},
+	{
+		name: "invalid intent - duplicate manual inputs",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{
+					validUTXO, validUTXO,
+				},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: ErrDuplicatedUtxo,
+	},
+	{
+		name: "invalid intent - empty account name in source",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: &ScopedAccount{AccountName: ""},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
+		},
+		expectedErr: ErrMissingAccountName,
+	},
+	{
+		name: "invalid intent - empty utxo list in source",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: &CoinSourceUTXOs{
 					UTXOs: []wire.OutPoint{},
 				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
 			},
-			expectedErr: ErrManualInputsEmpty,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+			},
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - duplicate manual inputs",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
+		expectedErr: ErrManualInputsEmpty,
+	},
+	{
+		name: "invalid intent - duplicate utxos in policy",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: &CoinSourceUTXOs{
 					UTXOs: []wire.OutPoint{
 						validUTXO, validUTXO,
 					},
 				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
 			},
-			expectedErr: ErrDuplicatedUtxo,
-		},
-		{
-			name: "invalid intent - empty account name in source",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &ScopedAccount{AccountName: ""},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: ErrMissingAccountName,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - empty utxo list in source",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &CoinSourceUTXOs{
-						UTXOs: []wire.OutPoint{},
-					},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+		expectedErr: ErrDuplicatedUtxo,
+	},
+	{
+		name: "invalid intent - unsupported coin source",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsPolicy{
+				Source: &unsupportedCoinSource{},
 			},
-			expectedErr: ErrManualInputsEmpty,
-		},
-		{
-			name: "invalid intent - duplicate utxos in policy",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &CoinSourceUTXOs{
-						UTXOs: []wire.OutPoint{
-							validUTXO, validUTXO,
-						},
-					},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: ErrDuplicatedUtxo,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - unsupported coin source",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsPolicy{
-					Source: &unsupportedCoinSource{},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+		expectedErr: ErrUnsupportedCoinSource,
+	},
+	{
+		name: "invalid intent - unsupported inputs type",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs:  &unsupportedInputs{},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
 			},
-			expectedErr: ErrUnsupportedCoinSource,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - unsupported inputs type",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs:  &unsupportedInputs{},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-				},
-				FeeRate: defaultFeeRate,
+		expectedErr: nil,
+	},
+	{
+		name: "invalid intent - empty account name in change",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
 			},
-			expectedErr: nil,
-		},
-		{
-			name: "invalid intent - empty account name in change",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: "",
-					KeyScope:    waddrmgr.KeyScopeBIP0086,
-				},
-				FeeRate: defaultFeeRate,
+			ChangeSource: &ScopedAccount{
+				AccountName: "",
+				KeyScope:    waddrmgr.KeyScopeBIP0086,
 			},
-			expectedErr: ErrMissingAccountName,
+			FeeRate: defaultFeeRate,
 		},
-		{
-			name: "invalid intent - zero fee rate",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-					KeyScope:    waddrmgr.KeyScopeBIP0086,
-				},
-				FeeRate: btcunit.ZeroSatPerKVByte,
+		expectedErr: ErrMissingAccountName,
+	},
+	{
+		name: "invalid intent - zero fee rate",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
 			},
-			expectedErr: ErrMissingFeeRate,
-		},
-		{
-			name: "invalid intent - insane fee rate",
-			intent: &TxIntent{
-				Outputs: []wire.TxOut{validOutput},
-				Inputs: &InputsManual{
-					UTXOs: []wire.OutPoint{validUTXO},
-				},
-				ChangeSource: &ScopedAccount{
-					AccountName: defaultAccountName,
-					KeyScope:    waddrmgr.KeyScopeBIP0086,
-				},
-				FeeRate: btcunit.NewSatPerKVByte(2_000_000),
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+				KeyScope:    waddrmgr.KeyScopeBIP0086,
 			},
-			expectedErr: ErrFeeRateTooLarge,
+			FeeRate: btcunit.ZeroSatPerKVByte,
 		},
-	}
+		expectedErr: ErrMissingFeeRate,
+	},
+	{
+		name: "invalid intent - insane fee rate",
+		intent: &TxIntent{
+			Outputs: []wire.TxOut{validOutput},
+			Inputs: &InputsManual{
+				UTXOs: []wire.OutPoint{validUTXO},
+			},
+			ChangeSource: &ScopedAccount{
+				AccountName: defaultAccountName,
+				KeyScope:    waddrmgr.KeyScopeBIP0086,
+			},
+			FeeRate: btcunit.NewSatPerKVByte(2_000_000),
+		},
+		expectedErr: ErrFeeRateTooLarge,
+	},
+}
 
-	// Iterate through all test cases and run them.
-	for _, tc := range testCases {
+// TestValidateTxIntent checks validateTxIntent across the valid and invalid
+// transaction-intent scenarios.
+func TestValidateTxIntent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range txIntentTestCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -317,7 +351,6 @@ func TestValidateTxIntent(t *testing.T) {
 func TestInputsPolicyValidateValueSources(t *testing.T) {
 	t.Parallel()
 
-	validUTXO := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
 	testCases := []struct {
 		name        string
 		source      CoinSource
@@ -384,26 +417,6 @@ type unsupportedCoinSource struct{}
 // isCoinSource marks unsupportedCoinSource as a CoinSource implementation.
 func (u *unsupportedCoinSource) isCoinSource() {}
 
-// TestDetermineChangeSourceValueScopedAccount verifies a value-form scoped
-// account is used as the change source for policy-selected inputs.
-func TestDetermineChangeSourceValueScopedAccount(t *testing.T) {
-	t.Parallel()
-
-	w, _ := createStartedWalletWithMocks(t)
-	policyAccountSource := ScopedAccount{
-		AccountName: "policy",
-		KeyScope:    waddrmgr.KeyScopeBIP0049Plus,
-	}
-	intent := &TxIntent{
-		Inputs: &InputsPolicy{
-			Source: policyAccountSource,
-		},
-	}
-
-	source := w.determineChangeSource(intent)
-	require.Equal(t, &policyAccountSource, source)
-}
-
 // TestDetermineChangeSource tests the behavior of the determineChangeSource
 // method, ensuring that it correctly selects a change source based on the
 // transaction intent. It covers scenarios where the change source is
@@ -445,6 +458,16 @@ func TestDetermineChangeSource(t *testing.T) {
 			intent: &TxIntent{
 				Inputs: &InputsPolicy{
 					Source: policyAccountSource,
+				},
+				ChangeSource: nil,
+			},
+			expectedSource: policyAccountSource,
+		},
+		{
+			name: "nil change source with value-form policy account",
+			intent: &TxIntent{
+				Inputs: &InputsPolicy{
+					Source: *policyAccountSource,
 				},
 				ChangeSource: nil,
 			},
@@ -606,9 +629,9 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			changeScript := []byte{0x00, 0x04}
 			isImportedAlias := tc.derivedName != ""
 
-			// The reserved imported alias has no SQL account row, so the
-			// change source must not look it up by name. Real imported xpub
-			// accounts are still resolved by name for their effective schema.
+			// The reserved imported alias has no account row on the
+			// SQL/runtime store, so createChangeSource must not look it
+			// up by name. Only a real named account is resolved that way.
 			if !isImportedAlias {
 				mocks.store.On("GetAccount", mock.Anything,
 					db.GetAccountQuery{
@@ -618,14 +641,16 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 					},
 				).Return(&db.AccountInfo{
 					AccountName: tc.accountName,
-					Origin:      db.ImportedAccount,
 					IsImported:  true,
-					AddrSchema:  db.ScopeAddrMap[db.KeyScope(scope)],
+					AddrSchema: db.ScopeAddrMap[db.KeyScope(
+						scope,
+					)],
 				}, nil).Once()
 			}
 
-			// The imported alias resolves derived account 0 by number to
-			// follow a possible rename and to obtain account 0's schema.
+			// The reserved imported alias resolves derived account 0 by
+			// number to follow a possible rename and uses account 0's
+			// effective schema for the change script.
 			if isImportedAlias {
 				mocks.store.On("GetAccount", mock.Anything,
 					db.GetAccountQuery{
@@ -636,7 +661,9 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 				).Return(&db.AccountInfo{
 					AccountNumber: &defaultAccountNum,
 					AccountName:   tc.derivedName,
-					AddrSchema:    db.ScopeAddrMap[db.KeyScope(scope)],
+					AddrSchema: db.ScopeAddrMap[db.KeyScope(
+						scope,
+					)],
 				}, nil).Once()
 			}
 
@@ -663,6 +690,8 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, changeScript, script)
 
+			// The imported alias change path must not hit the by-name
+			// lookup; before the fix it did and failed on SQL backends.
 			if isImportedAlias {
 				mocks.store.AssertNotCalled(t, "GetAccount",
 					mock.Anything, db.GetAccountQuery{
@@ -685,8 +714,9 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 	scope := waddrmgr.KeyScopeBIP0084
 	accountName := db.DefaultImportedAccountName
 
-	// The alias is not looked up by name; change redirects directly to derived
-	// account 0, which reports not found here.
+	// The imported alias is not looked up by name; change redirects
+	// straight to derived account 0, resolved by number, which here
+	// reports not found.
 	mocks.store.On("GetAccount", mock.Anything,
 		mock.MatchedBy(func(q db.GetAccountQuery) bool {
 			return q.AccountNumber != nil &&
@@ -701,6 +731,82 @@ func TestCreateChangeSourceDefaultImportedMissingAccountZero(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, ErrAccountNotFound)
+}
+
+// TestCreateChangeSourceImportedAliasBypassesGetAccount verifies that change
+// directed at the reserved imported alias succeeds on a SQL/runtime backend,
+// where that alias has no account row. The alias cannot derive its own change,
+// so createChangeSource must skip the by-name lookup (which would fail with
+// ErrAccountNotFound) and redirect change to derived account 0. Before the fix
+// the unconditional by-name lookup ran first and the change path errored out
+// before it could redirect.
+func TestCreateChangeSourceImportedAliasBypassesGetAccount(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	accountName := db.DefaultImportedAccountName
+	derivedAccount := uint32(waddrmgr.DefaultAccountNum)
+	changeScript := []byte{0x00, 0x04}
+
+	// The imported alias has no account row, so a real GetAccount by name
+	// returns ErrAccountNotFound. Wire that same answer here: the fix must
+	// avoid calling it at all, which AssertNotCalled below verifies, rather
+	// than depending on the mock's unexpected-call panic.
+	mocks.store.On("GetAccount", mock.Anything,
+		db.GetAccountQuery{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     &accountName,
+		},
+	).Return(nil, db.ErrAccountNotFound).Maybe()
+
+	// Change redirects to derived account 0, resolved by number, whose
+	// effective schema drives the change script.
+	mocks.store.On("GetAccount", mock.Anything,
+		db.GetAccountQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: &derivedAccount,
+		},
+	).Return(&db.AccountInfo{
+		AccountNumber: &derivedAccount,
+		AccountName:   waddrmgr.DefaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[db.KeyScope(scope)],
+	}, nil).Once()
+
+	mocks.store.On("NewDerivedAddress", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID:    w.id,
+			AccountName: waddrmgr.DefaultAccountName,
+			Scope:       db.KeyScope(scope),
+			Change:      true,
+		},
+	).Return(&db.AddressInfo{
+		ScriptPubKey: changeScript,
+	}, nil).Once()
+
+	changeSource, err := w.createChangeSource(
+		t.Context(), &ScopedAccount{
+			AccountName: accountName,
+			KeyScope:    scope,
+		},
+	)
+	require.NoError(t, err)
+
+	script, err := changeSource.NewScript()
+	require.NoError(t, err)
+	require.Equal(t, changeScript, script)
+
+	// The imported alias must redirect to account 0 without an account
+	// existence check by name. Before the fix GetAccount by name runs first
+	// and fails.
+	mocks.store.AssertNotCalled(t, "GetAccount", mock.Anything,
+		db.GetAccountQuery{
+			WalletID: w.id,
+			Scope:    db.KeyScope(scope),
+			Name:     &accountName,
+		})
 }
 
 // TestFilterEligibleOutputsIncludesWatchOnlyOutputs verifies that tx authoring
@@ -918,13 +1024,12 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 
 	// The default account (number 0) has been renamed away from "default".
 	renamedName := "renamed-default"
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
 
 	mocks.chain.On("BlockStamp").Return(
 		&waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
-
-	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
 
 	// The default account must be resolved by number 0, never by the
 	// literal "default" name.
@@ -1008,6 +1113,10 @@ func TestGetEligibleUTXOsScopedAccountValue(t *testing.T) {
 
 // TestGetEligibleUTXOsImportedAccountBypassesGetAccount verifies that coin
 // selection from the reserved imported alias does not require an account row.
+// SQL raw imported addresses have no account row by design, while kvdb legacy
+// raw imports still carry the imported alias account metadata, so the selection
+// path must skip the GetAccount existence check and locally filter both shapes
+// out of the wallet-wide UTXO list.
 func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 	t.Parallel()
 
@@ -1050,6 +1159,19 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 	mocks.chain.On("BlockStamp").Return(
 		&waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
+
+	// The imported alias has no account row, so a real GetAccount returns
+	// ErrAccountNotFound. Wire that same answer here: the fix must avoid
+	// calling it at all, which AssertNotCalled below verifies, rather than
+	// depending on the mock's unexpected-call panic.
+	mocks.store.On("GetAccount", mock.Anything,
+		db.GetAccountQuery{
+			WalletID: w.id,
+			Scope:    scope,
+			Name:     &accountName,
+		},
+	).Return(nil, db.ErrAccountNotFound).Maybe()
+
 	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
 		WalletID: w.id,
 	}).Return(unspent, nil).Once()
@@ -1065,7 +1187,10 @@ func TestGetEligibleUTXOsImportedAccountBypassesGetAccount(t *testing.T) {
 	require.Equal(t, rawOutPoint, eligible[0].OutPoint)
 	require.Equal(t, legacyOutPoint, eligible[1].OutPoint)
 
-	mocks.store.AssertNotCalled(t, "GetAccount", mock.Anything, mock.Anything)
+	// The imported alias must reach ListUTXOs without an account existence
+	// check. Before the fix GetAccount runs first and fails.
+	mocks.store.AssertNotCalled(t, "GetAccount", mock.Anything,
+		mock.Anything)
 }
 
 // TestGetEligibleUTXOsSourceUTXOsValue verifies value-form explicit UTXO

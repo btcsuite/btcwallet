@@ -325,7 +325,6 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	}).Return([]db.AccountInfo{
 		{
 			AccountName:      waddrmgr.ImportedAddrAccountName,
-			Origin:           db.ImportedAccount,
 			IsImported:       true,
 			KeyScope:         dbScope,
 			ImportedKeyCount: 2,
@@ -429,7 +428,6 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 		Name:     &name,
 	}).Return(&db.AccountInfo{
 		AccountName:      waddrmgr.ImportedAddrAccountName,
-		Origin:           db.ImportedAccount,
 		IsImported:       true,
 		KeyScope:         dbScope,
 		ImportedKeyCount: 3,
@@ -600,7 +598,6 @@ func TestImportAccount(t *testing.T) {
 			PublicKey:         []byte(acctPubKey.String()),
 		}).Return(&db.AccountInfo{
 		AccountName: testAccountName,
-		Origin:      db.ImportedAccount,
 		IsImported:  true,
 		IsWatchOnly: true,
 		KeyScope:    dbScope,
@@ -641,7 +638,6 @@ func TestImportAccountDryRun(t *testing.T) {
 			DryRun:            true,
 		}).Return(&db.AccountInfo{
 		AccountName: testAccountName,
-		Origin:      db.ImportedAccount,
 		IsImported:  true,
 		IsWatchOnly: true,
 		KeyScope:    dbScope,
@@ -686,7 +682,6 @@ func TestImportAccountAddrSchema(t *testing.T) {
 			AddrSchema:        &addrSchema,
 		}).Return(&db.AccountInfo{
 		AccountName: testAccountName,
-		Origin:      db.ImportedAccount,
 		IsImported:  true,
 		IsWatchOnly: true,
 		KeyScope:    dbScope,

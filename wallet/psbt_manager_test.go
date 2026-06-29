@@ -509,8 +509,6 @@ func TestDecorateInputErrNotPubKey(t *testing.T) {
 		Return(&db.AddressInfo{
 			ScriptPubKey:      p2wkhScript,
 			AddrType:          db.WitnessPubKey,
-			Origin:            db.DerivedAccount,
-			IsImported:        false,
 			HasDerivationPath: true,
 		}, nil)
 
@@ -1267,8 +1265,6 @@ func TestAddChangeOutputInfoErrNotPubKey(t *testing.T) {
 		Return(&db.AddressInfo{
 			ScriptPubKey:      p2wkhScript,
 			AddrType:          db.WitnessPubKey,
-			Origin:            db.DerivedAccount,
-			IsImported:        false,
 			HasDerivationPath: true,
 		}, nil)
 
@@ -1314,12 +1310,10 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 	// so addChangeOutputInfo fails (change addr cannot be imported).
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
-			ScriptPubKey:      p2wkhScript,
-			AddrType:          db.WitnessPubKey,
-			Origin:            db.ImportedAccount,
-			IsImported:        true,
-			HasDerivationPath: false,
-			PubKey:            pubKey.SerializeCompressed(),
+			ScriptPubKey: p2wkhScript,
+			AddrType:     db.WitnessPubKey,
+			IsImported:   true,
+			PubKey:       pubKey.SerializeCompressed(),
 		}, nil)
 
 	// Act: Call addChangeOutputInfo.
@@ -1493,12 +1487,10 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 		Return(&db.AddressInfo{
 			ScriptPubKey:         p2wkhScript,
 			AddrType:             db.WitnessPubKey,
-			Origin:               db.DerivedAccount,
-			IsImported:           false,
-			HasDerivationPath:    true,
 			AccountNumber:        &accountNumber,
 			KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			MasterKeyFingerprint: 1,
+			HasDerivationPath:    true,
 			PubKey:               pubKey.SerializeCompressed(),
 		}, nil)
 

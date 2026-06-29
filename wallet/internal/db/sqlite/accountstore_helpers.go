@@ -47,7 +47,7 @@ func derivedAddressGetAccountNumber(
 func derivedAddressGetAccountIsDerived(
 	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
 
-	return row.OriginID == int64(db.DerivedAccount)
+	return row.IsDerived
 }
 
 // derivedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
@@ -105,7 +105,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 		RowID:             base.ID,
 		AccountNumber:     base.AccountNumber,
 		AccountName:       base.AccountName,
-		OriginID:          base.OriginID,
+		IsDerived:         base.IsDerived,
 		ExternalKeyCount:  base.ExternalKeyCount,
 		InternalKeyCount:  base.InternalKeyCount,
 		ImportedKeyCount:  base.ImportedKeyCount,
@@ -117,6 +117,5 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo,
 		CoinType:          base.CoinType,
 		InternalTypeID:    base.InternalTypeID,
 		ExternalTypeID:    base.ExternalTypeID,
-		IDToOriginType:    db.IDToAccountOrigin[int64],
 	})
 }

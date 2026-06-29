@@ -268,7 +268,6 @@ func (s *Store) createImportedAddress(ctx context.Context, qtx *sqlc.Queries,
 		ID:           addrID,
 		AddrType:     params.AddressType,
 		CreatedAt:    row.CreatedAt,
-		Origin:       db.ImportedAccount,
 		IsImported:   true,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
@@ -439,7 +438,7 @@ func applyAddressAccountMetadata(info *db.AddressInfo,
 	return db.ApplyAddressAccountMetadata(
 		info, row.AccountNumber, row.AccountName,
 		row.MasterFingerprint, row.Purpose, row.CoinType,
-		row.OriginID == int64(db.ImportedAccount),
+		!row.IsDerived,
 	)
 }
 
@@ -488,10 +487,10 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.ID, base.AccountID, base.AccountNumber,
 			base.AccountName, base.MasterFingerprint,
 			base.Purpose, base.CoinType, base.TypeID,
-			base.OriginID, base.IsDerived, base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt, base.AddressBranch,
-			base.AddressIndex, base.ScriptPubKey, base.PubKey,
-			base.IsUsed,
+			base.IsDerived, base.AccountIsDerived,
+			base.WalletIsWatchOnly, base.HasScript,
+			base.CreatedAt, base.AddressBranch, base.AddressIndex,
+			base.ScriptPubKey, base.PubKey, base.IsUsed,
 		)
 
 	case sqlc.ListAddressesByAccountRow:
@@ -508,8 +507,8 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.ID, base.AccountID, base.AccountNumber,
 			base.AccountName, base.MasterFingerprint,
 			base.Purpose, base.CoinType, base.TypeID,
-			base.OriginID, base.IsDerived, base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt,
+			base.IsDerived, base.AccountIsDerived,
+			base.WalletIsWatchOnly, base.HasScript, base.CreatedAt,
 			addressBranch, addressIndex, base.ScriptPubKey,
 			base.PubKey, base.IsUsed,
 		)
@@ -519,10 +518,10 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.ID, base.AccountID, base.AccountNumber,
 			base.AccountName, base.MasterFingerprint,
 			base.Purpose, base.CoinType, base.TypeID,
-			base.OriginID, base.IsDerived, base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt, base.AddressBranch,
-			base.AddressIndex, base.ScriptPubKey, base.PubKey,
-			base.IsUsed,
+			base.IsDerived, base.AccountIsDerived,
+			base.WalletIsWatchOnly, base.HasScript,
+			base.CreatedAt, base.AddressBranch, base.AddressIndex,
+			base.ScriptPubKey, base.PubKey, base.IsUsed,
 		)
 
 	case sqlc.ListRawImportedAddressesRow:
@@ -550,9 +549,10 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.ID, base.AccountID, accountNumber,
 			base.AccountName, masterFingerprint,
 			base.Purpose, base.CoinType, base.TypeID,
-			base.OriginID, base.IsDerived, base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt, addressBranch,
-			addressIndex, base.ScriptPubKey, base.PubKey, base.IsUsed,
+			base.IsDerived, base.AccountIsDerived,
+			base.WalletIsWatchOnly, base.HasScript,
+			base.CreatedAt, addressBranch, addressIndex,
+			base.ScriptPubKey, base.PubKey, base.IsUsed,
 		)
 
 	default:
@@ -583,22 +583,23 @@ func nullableInt64(value any) (sql.NullInt64, error) {
 func addressFieldsToInfo(id int64, accountID int64,
 	accountNumber sql.NullInt64, accountName string,
 	masterFingerprint sql.NullInt64, purpose int64, coinType int64,
-	typeID int64, originID int64, isDerived bool, walletIsWatchOnly bool,
-	hasScript bool, createdAt time.Time, addressBranch sql.NullInt64,
-	addressIndex sql.NullInt64, scriptPubKey []byte, pubKey []byte,
-	isUsed bool) (*db.AddressInfo, error) {
+	typeID int64, isDerived bool, accountIsDerived bool,
+	walletIsWatchOnly bool, hasScript bool, createdAt time.Time,
+	addressBranch sql.NullInt64, addressIndex sql.NullInt64,
+	scriptPubKey []byte, pubKey []byte, isUsed bool) (*db.AddressInfo,
+	error) {
 
-	return db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
+	return db.AddressRowToInfo(db.AddressInfoRow[int64]{
 		ID:                id,
 		AccountID:         accountID,
 		AccountNumber:     accountNumber,
 		AccountName:       accountName,
 		IsDerived:         isDerived,
+		AccountIsDerived:  accountIsDerived,
 		MasterFingerprint: masterFingerprint,
 		Purpose:           purpose,
 		CoinType:          coinType,
 		TypeID:            typeID,
-		OriginID:          originID,
 		WalletIsWatchOnly: walletIsWatchOnly,
 		HasScript:         hasScript,
 		CreatedAt:         createdAt,
@@ -608,7 +609,6 @@ func addressFieldsToInfo(id int64, accountID int64,
 		PubKey:            pubKey,
 		IsUsed:            isUsed,
 		IDToAddrType:      db.IDToAddressType[int64],
-		IDToOrigin:        db.IDToOrigin[int64],
 	})
 }
 
