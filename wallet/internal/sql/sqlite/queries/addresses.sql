@@ -109,6 +109,27 @@ INSERT INTO addresses (
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 RETURNING id, created_at;
 
+-- name: CreateDerivedAddressPath :exec
+-- Stores normalized account ownership and BIP44 path data for an HD-derived
+-- address while legacy address columns remain populated during migration.
+INSERT INTO derived_addresses (
+    address_id,
+    wallet_id,
+    account_id,
+    address_branch,
+    address_index
+)
+SELECT
+    a.id AS address_id,
+    a.wallet_id,
+    sqlc.arg('account_id') AS account_id,
+    sqlc.arg('address_branch') AS address_branch,
+    sqlc.arg('address_index') AS address_index
+FROM addresses AS a
+WHERE
+    a.id = sqlc.arg('address_id')
+    AND a.wallet_id = sqlc.arg('wallet_id');
+
 -- name: CreateImportedAddress :one
 -- Creates an imported address (no derivation path, has script/pubkey).
 INSERT INTO addresses (
