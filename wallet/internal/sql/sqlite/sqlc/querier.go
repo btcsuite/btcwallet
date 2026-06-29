@@ -386,6 +386,8 @@ type Querier interface {
 	// Performance:
 	// - Uses the provided tx-id slice to bound the scan to the selected rows.
 	ListOwnedOutputsByTxIDs(ctx context.Context, arg ListOwnedOutputsByTxIDsParams) ([]ListOwnedOutputsByTxIDsRow, error)
+	// Lists raw imported addresses in a wallet, ordered by address ID.
+	ListRawImportedAddresses(ctx context.Context, arg ListRawImportedAddressesParams) ([]ListRawImportedAddressesRow, error)
 	// Lists victim txids for a given replacement txid.
 	//
 	// How:

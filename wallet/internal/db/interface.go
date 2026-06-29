@@ -75,6 +75,12 @@ var (
 	// field combinations.
 	ErrInvalidAddressQuery = errors.New("ScriptPubKey must be provided")
 
+	// ErrInvalidListAddressesQuery is returned when ListAddressesQuery has an
+	// invalid selector combination.
+	ErrInvalidListAddressesQuery = errors.New(
+		"Scope and AccountName must both be set or both be nil",
+	)
+
 	// ErrInvalidPageLimit is returned when a paginated query is called with a
 	// zero page limit.
 	ErrInvalidPageLimit = page.ErrInvalidLimit

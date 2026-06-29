@@ -386,17 +386,7 @@ func (s *Store) ListAddresses(ctx context.Context,
 
 	addrMgr := s.addrStore
 
-	manager, err := addrMgr.FetchScopedKeyManager(
-		waddrmgr.KeyScope(query.Scope),
-	)
-	if err != nil {
-		return page.Result[db.AddressInfo, uint32]{},
-			fmt.Errorf("ListAddresses: fetch scoped manager: %w", err)
-	}
-
-	items, err := listAddressItems(
-		s.db, manager, addrMgr.WatchOnly(), query,
-	)
+	items, err := listAddressItems(s.db, addrMgr, query)
 	if err != nil {
 		return page.Result[db.AddressInfo, uint32]{},
 			fmt.Errorf("ListAddresses: %w", err)
@@ -669,10 +659,33 @@ func importTaprootScriptAddress(ns walletdb.ReadWriteBucket,
 	return managedAddr, nil
 }
 
-// listAddressItems loads, filters, and paginates account addresses from one
-// legacy scoped manager.
-func listAddressItems(dbConn walletdb.DB,
-	manager waddrmgr.AccountStore, walletIsWatchOnly bool,
+// listAddressItems loads, filters, and paginates legacy address records.
+func listAddressItems(dbConn walletdb.DB, addrMgr waddrmgr.AddrStore,
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	if query.Scope == nil && query.AccountName == nil {
+		return listRawImportedAddressItems(dbConn, addrMgr, query)
+	}
+
+	if query.Scope == nil || query.AccountName == nil {
+		return nil, db.ErrInvalidListAddressesQuery
+	}
+
+	manager, err := addrMgr.FetchScopedKeyManager(
+		waddrmgr.KeyScope(*query.Scope),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetch scoped manager: %w", err)
+	}
+
+	return listAccountAddressItems(
+		dbConn, manager, addrMgr.WatchOnly(), *query.AccountName, query,
+	)
+}
+
+// listAccountAddressItems loads and paginates addresses for one legacy account.
+func listAccountAddressItems(dbConn walletdb.DB,
+	manager waddrmgr.AccountStore, walletIsWatchOnly bool, accountName string,
 	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
 
 	var items []db.AddressInfo
@@ -683,7 +696,7 @@ func listAddressItems(dbConn walletdb.DB,
 			return errMissingAddrmgrNamespace
 		}
 
-		account, err := manager.LookupAccount(ns, query.AccountName)
+		account, err := manager.LookupAccount(ns, accountName)
 		if err != nil {
 			if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
 				return db.ErrAccountNotFound
@@ -700,6 +713,58 @@ func listAddressItems(dbConn walletdb.DB,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list address items: %w", err)
+	}
+
+	return addressPageItems(items, query), nil
+}
+
+// listRawImportedAddressItems loads raw imported addresses from every active
+// legacy scoped manager's imported account and applies a single global page.
+func listRawImportedAddressItems(dbConn walletdb.DB,
+	addrMgr waddrmgr.AddrStore,
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	var items []db.AddressInfo
+
+	managers := addrMgr.ActiveScopedKeyManagers()
+
+	err := walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		for _, manager := range managers {
+			account, err := manager.LookupAccount(
+				ns, db.DefaultImportedAccountName,
+			)
+			if err != nil {
+				if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+					continue
+				}
+
+				return fmt.Errorf("lookup imported account: %w", err)
+			}
+
+			accountItems, err := accountAddressInfos(
+				ns, manager, account, addrMgr.WatchOnly(),
+			)
+			if err != nil {
+				return err
+			}
+
+			items = append(items, accountItems...)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list raw imported address items: %w", err)
+	}
+
+	err = sortAddressInfos(items)
+	if err != nil {
+		return nil, err
 	}
 
 	return addressPageItems(items, query), nil
