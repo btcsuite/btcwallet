@@ -88,6 +88,9 @@ type Querier interface {
 	// The index is allocated separately via GetAndIncrementNextExternalIndex
 	// or GetAndIncrementNextInternalIndex.
 	CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error)
+	// Stores normalized account ownership and BIP44 path data for an HD-derived
+	// address while legacy address columns remain populated during migration.
+	CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error
 	// Creates a new imported account under the given scope with NULL account
 	// number. Imported accounts don't follow BIP44 derivation, so they don't need
 	// a sequential account number.

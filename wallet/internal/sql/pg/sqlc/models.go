@@ -16,6 +16,7 @@ type Account struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	OriginID          int16
+	IsDerived         bool
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
 	CreatedAt         time.Time

@@ -259,9 +259,40 @@ func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
 	context.Context, int64, int64, db.AddressType, uint32, uint32, []byte,
 	[]byte) (sqlc.CreateDerivedAddressRow, error) {
 
-	return db.DerivedAddressCreateAddr(
-		qtx.CreateDerivedAddress, buildDerivedAddressParams,
-	)
+	return func(ctx context.Context, walletID int64, accountID int64,
+		addrType db.AddressType, branch uint32, index uint32,
+		scriptPubKey []byte,
+		pubKey []byte) (sqlc.CreateDerivedAddressRow, error) {
+
+		params, err := buildDerivedAddressParams(
+			walletID, accountID, addrType, branch, index, scriptPubKey,
+			pubKey,
+		)
+		if err != nil {
+			return sqlc.CreateDerivedAddressRow{}, err
+		}
+
+		row, err := qtx.CreateDerivedAddress(ctx, params)
+		if err != nil {
+			return sqlc.CreateDerivedAddressRow{}, err
+		}
+
+		err = qtx.CreateDerivedAddressPath(
+			ctx, sqlc.CreateDerivedAddressPathParams{
+				AccountID:     accountID,
+				AddressBranch: params.AddressBranch.Int16,
+				AddressIndex:  params.AddressIndex.Int64,
+				AddressID:     row.ID,
+				WalletID:      walletID,
+			},
+		)
+		if err != nil {
+			return sqlc.CreateDerivedAddressRow{},
+				fmt.Errorf("create derived address path: %w", err)
+		}
+
+		return row, nil
+	}
 }
 
 // buildDerivedAddressParams maps common derived-address inputs to PostgreSQL
