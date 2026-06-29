@@ -288,17 +288,17 @@ func AddressSecretRowToSecret(row AddressSecretRow) (*AddressSecret, error) {
 	}, nil
 }
 
-// convertAddressIDs converts database IDs to their respective uint32 values
-// with error handling.
-func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
+// convertAddressIDs converts database address and account IDs to wallet-facing
+// values with error handling.
+func convertAddressIDs(id, accountID int64) (uint32, *uint32, error) {
 	addrID, err := Int64ToUint32(id)
 	if err != nil {
-		return 0, 0, fmt.Errorf("address ID: %w", err)
+		return 0, nil, fmt.Errorf("address ID: %w", err)
 	}
 
-	acctID, err := Int64ToUint32(accountID)
+	acctID, err := optionalAccountID(accountID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("account ID: %w", err)
+		return 0, nil, err
 	}
 
 	return addrID, acctID, nil
@@ -307,24 +307,19 @@ func convertAddressIDs(id, accountID int64) (uint32, uint32, error) {
 // convertAccountMetadata converts account-level row data into wallet-facing
 // fields on AddressInfo.
 func convertAccountMetadata(accountNumber sql.NullInt64,
-	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (uint32,
+	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (*uint32,
 	uint32, KeyScope, error) {
 
-	var account uint32
-	if accountNumber.Valid {
-		converted, err := Int64ToUint32(accountNumber.Int64)
-		if err != nil {
-			return 0, 0, KeyScope{}, fmt.Errorf("account number: %w", err)
-		}
-
-		account = converted
+	account, err := optionalAccountNumber(accountNumber)
+	if err != nil {
+		return nil, 0, KeyScope{}, err
 	}
 
 	var fingerprint uint32
 	if masterFingerprint.Valid {
 		converted, err := Int64ToUint32(masterFingerprint.Int64)
 		if err != nil {
-			return 0, 0, KeyScope{},
+			return nil, 0, KeyScope{},
 				fmt.Errorf("master fingerprint: %w", err)
 		}
 
@@ -333,12 +328,12 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 
 	convertedPurpose, err := Int64ToUint32(purpose)
 	if err != nil {
-		return 0, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
+		return nil, 0, KeyScope{}, fmt.Errorf("scope purpose: %w", err)
 	}
 
 	convertedCoin, err := Int64ToUint32(coinType)
 	if err != nil {
-		return 0, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
+		return nil, 0, KeyScope{}, fmt.Errorf("scope coin type: %w", err)
 	}
 
 	return account, fingerprint, KeyScope{
@@ -351,16 +346,11 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 // address row. SQL backends may fetch account properties separately to avoid
 // widening address queries.
 func convertAddressAccountMetadata[TypeID, OriginIDType any](
-	row AddressInfoRow[TypeID, OriginIDType]) (uint32, string, uint32,
+	row AddressInfoRow[TypeID, OriginIDType]) (*uint32, string, uint32,
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
-		var accountNumber uint32
-		if row.AccountProps.AccountNumber != nil {
-			accountNumber = *row.AccountProps.AccountNumber
-		}
-
-		return accountNumber, row.AccountProps.AccountName,
+		return row.AccountProps.AccountNumber, row.AccountProps.AccountName,
 			row.AccountProps.MasterKeyFingerprint,
 			row.AccountProps.KeyScope, nil
 	}
@@ -371,7 +361,7 @@ func convertAddressAccountMetadata[TypeID, OriginIDType any](
 			row.CoinType,
 		)
 	if err != nil {
-		return 0, "", 0, KeyScope{}, err
+		return nil, "", 0, KeyScope{}, err
 	}
 
 	return accountNumber, row.AccountName, masterFingerprint, keyScope, nil
@@ -437,6 +427,7 @@ func newImportedAddressTx[QTX any, Row any, CreateArgs any, InsertArgs any](
 		AddrType:     params.AddressType,
 		CreatedAt:    rowCreatedAt(addrRow),
 		Origin:       ImportedAccount,
+		IsImported:   true,
 		ScriptPubKey: params.ScriptPubKey,
 		PubKey:       params.PubKey,
 		HasScript:    params.HasScript(),
@@ -535,6 +526,8 @@ func AddressRowToInfo[TypeID, OriginIDType any](
 		AddrType:             addrType,
 		CreatedAt:            row.CreatedAt,
 		Origin:               origin,
+		IsImported:           origin == ImportedAccount,
+		HasDerivationPath:    origin == DerivedAccount,
 		Branch:               addrBranch,
 		Index:                addrIndex,
 		ScriptPubKey:         row.ScriptPubKey,
@@ -765,17 +758,22 @@ func createDerivedAddress[T any](ctx context.Context,
 		return nil, err
 	}
 
+	accountNumberPtr := accountNumber
+
 	return &AddressInfo{
-		ID:           id,
-		AccountID:    convertedAcctID,
-		AddrType:     addrType,
-		CreatedAt:    rowCreatedAt(row),
-		Origin:       DerivedAccount,
-		Branch:       branch,
-		Index:        index,
-		ScriptPubKey: scriptPubKey,
-		PubKey:       pubKey,
-		IsWatchOnly:  walletIsWatchOnly,
+		ID:                id,
+		AccountID:         convertedAcctID,
+		AccountNumber:     &accountNumberPtr,
+		AddrType:          addrType,
+		CreatedAt:         rowCreatedAt(row),
+		Origin:            DerivedAccount,
+		IsImported:        false,
+		HasDerivationPath: true,
+		Branch:            branch,
+		Index:             index,
+		ScriptPubKey:      scriptPubKey,
+		PubKey:            pubKey,
+		IsWatchOnly:       walletIsWatchOnly,
 	}, nil
 }
 

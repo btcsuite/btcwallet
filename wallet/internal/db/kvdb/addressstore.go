@@ -878,14 +878,20 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
+	var accountNumberPtr *uint32
+	if origin == db.DerivedAccount {
+		accountNumberPtr = &accountNumber
+	}
+
 	return &db.AddressInfo{
-		AccountID:            accountNumber,
-		AccountNumber:        accountNumber,
+		AccountNumber:        accountNumberPtr,
 		AccountName:          accountName,
 		KeyScope:             keyScope,
 		MasterKeyFingerprint: fingerprint,
 		AddrType:             addrType.Type,
 		Origin:               origin,
+		IsImported:           origin == db.ImportedAccount,
+		HasDerivationPath:    origin == db.DerivedAccount,
 		Branch:               branch,
 		Index:                index,
 		ScriptPubKey:         scriptPubKey,

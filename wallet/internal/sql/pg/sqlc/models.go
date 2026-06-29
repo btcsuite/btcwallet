@@ -38,6 +38,7 @@ type Address struct {
 	ID            int64
 	WalletID      int64
 	AccountID     int64
+	IsDerived     bool
 	ScriptPubKey  []byte
 	TypeID        int16
 	AddressBranch sql.NullInt16

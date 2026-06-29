@@ -649,18 +649,15 @@ type AddressInfo struct {
 	// databases (signed 64-bit integers).
 	ID uint32
 
-	// AccountID is the database unique identifier for the account this address
-	// belongs to.
-	//
-	// NOTE: uint32 is used to ensure compatibility with standard SQL
-	// databases (signed 64-bit integers).
-	AccountID uint32
+	// AccountID is the optional store-local identity of the owning account.
+	// Backends without a durable account row ID leave it nil rather than
+	// fabricating one from other account fields.
+	AccountID *uint32
 
 	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not have a meaningful BIP44 account index, so this
-	// field is set to 0 for imported rows and must not be used when Origin is
-	// ImportedAccount.
-	AccountNumber uint32
+	// Imported addresses do not have a wallet-derived account number, so this is
+	// nil when the account number is not meaningful.
+	AccountNumber *uint32
 
 	// AccountName is the human-readable account name that owns the address.
 	AccountName string
@@ -681,6 +678,16 @@ type AddressInfo struct {
 	// Origin indicates whether this is a derived HD address or an imported
 	// address. Reuses the AccountOrigin enum.
 	Origin AccountOrigin
+
+	// IsImported reports whether this address belongs to imported key material.
+	// It mirrors Origin during the compatibility period so callers can move to
+	// the normalized shape before Origin is removed.
+	IsImported bool
+
+	// HasDerivationPath reports whether this address has BIP44 branch/index path
+	// metadata. During the compatibility period this mirrors the legacy derived
+	// address shape.
+	HasDerivationPath bool
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
 	// Zero value for imported addresses.
