@@ -529,11 +529,25 @@ func retryDelay(attempt int, baseDelay, maxDelay time.Duration) time.Duration {
 func waitForRetry(ctx context.Context,
 	timer func(time.Duration) *time.Timer, delay time.Duration) error {
 
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+
+	default:
+	}
+
 	retryTimer := timer(delay)
 	defer stopRetryTimer(retryTimer)
 
 	select {
 	case <-retryTimer.C:
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+
+		default:
+		}
+
 		return nil
 
 	case <-ctx.Done():
