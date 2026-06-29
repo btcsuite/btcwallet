@@ -89,16 +89,10 @@ func buildListUtxosParams(query db.ListUtxosQuery) sqlc.ListUtxosParams {
 	}
 }
 
-// applyListRowEnrichment derives and sets the per-row UTXO enrichment
-// fields (account name + origin, address type, has-script bit, lease status)
+// applyListRowEnrichment derives and sets the per-row UTXO enrichment fields
 // on utxo from a ListUtxos result row.
 func applyListRowEnrichment(utxo *db.UtxoInfo,
 	row sqlc.ListUtxosRow) error {
-
-	origin, err := db.IDToAccountOrigin[int16](row.OriginID)
-	if err != nil {
-		return fmt.Errorf("origin: %w", err)
-	}
 
 	addrType, err := db.IDToAddressType(row.TypeID)
 	if err != nil {
@@ -120,7 +114,6 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 		utxo.AccountName = row.AccountName.String
 	}
 
-	utxo.Origin = origin
 	utxo.AddrType = addrType
 	utxo.HasScript = row.HasScript
 	utxo.IsLocked = row.IsLocked

@@ -91,7 +91,6 @@ SELECT
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
-    coalesce(acc.origin_id, 1) AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -160,7 +159,6 @@ SELECT
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
-    coalesce(acc.origin_id, 1) AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.

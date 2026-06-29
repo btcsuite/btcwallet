@@ -241,11 +241,6 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, fmt.Errorf("is imported account: %w", err)
 	}
 
-	origin := db.DerivedAccount
-	if accountIsImported {
-		origin = db.ImportedAccount
-	}
-
 	scope := scopedMgr.Scope()
 
 	var pubKey []byte
@@ -284,7 +279,6 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	return &db.AccountInfo{
 		AccountNumber:    accountNumberForContract,
 		AccountName:      props.AccountName,
-		Origin:           origin,
 		IsImported:       accountIsImported,
 		ExternalKeyCount: props.ExternalKeyCount,
 		InternalKeyCount: props.InternalKeyCount,

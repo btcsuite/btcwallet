@@ -161,15 +161,12 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(acc.is_derived, FALSE) AS account_is_derived,
     coalesce(da.address_id, 0) AS derived_address_id,
     coalesce(da.account_id, 0) AS account_id,
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -198,12 +195,12 @@ type GetAddressByScriptPubKeyRow struct {
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsUsed            bool
+	AccountIsDerived  bool
 	DerivedAddressID  int64
 	AccountID         int64
 	AccountName       string
 	Purpose           int64
 	CoinType          int64
-	OriginID          int64
 	HasScript         bool
 }
 
@@ -224,12 +221,12 @@ func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressBy
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
 		&i.IsUsed,
+		&i.AccountIsDerived,
 		&i.DerivedAddressID,
 		&i.AccountID,
 		&i.AccountName,
 		&i.Purpose,
 		&i.CoinType,
-		&i.OriginID,
 		&i.HasScript,
 	)
 	return i, err
@@ -299,6 +296,7 @@ SELECT
     da.address_branch,
     da.address_index,
     a.is_derived,
+    acc.is_derived AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -316,10 +314,6 @@ SELECT
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM derived_addresses AS da
 INNER JOIN addresses AS a ON da.address_id = a.id
@@ -360,6 +354,7 @@ type ListAddressesByAccountRow struct {
 	AddressBranch     int64
 	AddressIndex      int64
 	IsDerived         bool
+	AccountIsDerived  bool
 	ScriptPubKey      []byte
 	PubKey            []byte
 	CreatedAt         time.Time
@@ -371,7 +366,6 @@ type ListAddressesByAccountRow struct {
 	AccountName       string
 	Purpose           int64
 	CoinType          int64
-	OriginID          int64
 	HasScript         bool
 }
 
@@ -402,6 +396,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.AddressBranch,
 			&i.AddressIndex,
 			&i.IsDerived,
+			&i.AccountIsDerived,
 			&i.ScriptPubKey,
 			&i.PubKey,
 			&i.CreatedAt,
@@ -413,7 +408,6 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.AccountName,
 			&i.Purpose,
 			&i.CoinType,
-			&i.OriginID,
 			&i.HasScript,
 		); err != nil {
 			return nil, err
@@ -449,15 +443,12 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(acc.is_derived, FALSE) AS account_is_derived,
     coalesce(da.address_id, 0) AS derived_address_id,
     coalesce(da.account_id, 0) AS account_id,
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -488,12 +479,12 @@ type ListAddressesByScriptPubKeysRow struct {
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 	IsUsed            bool
+	AccountIsDerived  bool
 	DerivedAddressID  int64
 	AccountID         int64
 	AccountName       string
 	Purpose           int64
 	CoinType          int64
-	OriginID          int64
 	HasScript         bool
 }
 
@@ -534,12 +525,12 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
 			&i.IsUsed,
+			&i.AccountIsDerived,
 			&i.DerivedAddressID,
 			&i.AccountID,
 			&i.AccountName,
 			&i.Purpose,
 			&i.CoinType,
-			&i.OriginID,
 			&i.HasScript,
 		); err != nil {
 			return nil, err
@@ -563,6 +554,7 @@ SELECT
     NULL AS address_branch,
     NULL AS address_index,
     a.is_derived,
+    cast(FALSE AS BOOLEAN) AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -573,7 +565,6 @@ SELECT
     '' AS account_name,
     0 AS purpose,
     0 AS coin_type,
-    1 AS origin_id,
     cast(
         EXISTS (
             SELECT 1
@@ -609,6 +600,7 @@ type ListRawImportedAddressesRow struct {
 	AddressBranch     interface{}
 	AddressIndex      interface{}
 	IsDerived         bool
+	AccountIsDerived  bool
 	ScriptPubKey      []byte
 	PubKey            []byte
 	CreatedAt         time.Time
@@ -619,7 +611,6 @@ type ListRawImportedAddressesRow struct {
 	AccountName       string
 	Purpose           int64
 	CoinType          int64
-	OriginID          int64
 	IsUsed            bool
 	HasScript         bool
 }
@@ -641,6 +632,7 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 			&i.AddressBranch,
 			&i.AddressIndex,
 			&i.IsDerived,
+			&i.AccountIsDerived,
 			&i.ScriptPubKey,
 			&i.PubKey,
 			&i.CreatedAt,
@@ -651,7 +643,6 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 			&i.AccountName,
 			&i.Purpose,
 			&i.CoinType,
-			&i.OriginID,
 			&i.IsUsed,
 			&i.HasScript,
 		); err != nil {

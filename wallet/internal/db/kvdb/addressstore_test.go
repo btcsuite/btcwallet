@@ -43,7 +43,7 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), info.ID)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, "addr", info.AccountName)
 	require.Nil(t, info.AccountID)
@@ -219,7 +219,7 @@ func TestAddressStoreImportedPublicKeyIsWatchOnly(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, pkScript, info.ScriptPubKey)
 	require.Equal(t, pubKeyBytes, info.PubKey)
@@ -559,7 +559,7 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.TaprootPubKey, info.AddrType)
 	require.True(t, info.HasScript)
 	require.Equal(t, pkScript, info.ScriptPubKey)
