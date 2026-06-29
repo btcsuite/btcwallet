@@ -43,7 +43,7 @@ func TestRenameAccount(t *testing.T) {
 		info, err := store.GetAccount(t.Context(), query)
 		require.NoError(t, err)
 		require.Equal(t, newName, info.AccountName)
-		require.Equal(t, uint32(0), info.AccountNumber)
+		require.Equal(t, uint32(0), accountNumberNotNil(t, info.AccountNumber))
 
 		// Verify the old name no longer exists.
 		oldQuery := getAccountQueryByName(walletID, scope, oldName)
@@ -75,7 +75,7 @@ func TestRenameAccount(t *testing.T) {
 }
 
 // TestRenameAccountRejectsReservedName verifies that accounts cannot be
-// renamed to the wallet-level imported bucket name.
+// renamed to the reserved raw-import alias name.
 func TestRenameAccountRejectsReservedName(t *testing.T) {
 	t.Parallel()
 
@@ -134,9 +134,9 @@ func TestRenameAccountRejectsReservedName(t *testing.T) {
 	}
 }
 
-// TestRenameAccountRejectsImported verifies that imported accounts cannot be
-// renamed through the account store.
-func TestRenameAccountRejectsImported(t *testing.T) {
+// TestRenameAccountRenamesImportedXpub verifies that imported xpub accounts
+// are real account rows and can be renamed by name.
+func TestRenameAccountRenamesImportedXpub(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
@@ -152,20 +152,57 @@ func TestRenameAccountRejectsImported(t *testing.T) {
 		OldName:  name,
 		NewName:  "renamed-imported",
 	})
+	require.NoError(t, err)
+
+	info, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, "renamed-imported",
+		),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "renamed-imported", info.AccountName)
+	require.True(t, info.IsImported)
+
+	_, err = store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, name),
+	)
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
+// TestRenameAccountNumberRejectsImportedShape verifies that imported accounts
+// cannot be corrupted into numeric-account targets for RenameAccount.
+func TestRenameAccountNumberRejectsImportedShape(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	queries := store.Queries()
+	dbConn := store.DB()
+	walletID := newWallet(t, store, "wallet-rename-imported-number")
+	scope := db.KeyScopeBIP0084
+	name := "imported-rename-number"
+	accountNumber := uint32(7)
+
+	CreateImportedAccount(t, store, walletID, scope, name, false)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, scope)
+	accountID := GetAccountID(t, queries, scopeID, name)
+	err := updateAccountNumberRaw(t, dbConn, accountID, accountNumber)
+	require.Error(t, err)
+	requireDriverConstraintError(t, err)
+
+	err = store.RenameAccount(t.Context(), db.RenameAccountParams{
+		WalletID:      walletID,
+		Scope:         scope,
+		AccountNumber: &accountNumber,
+		NewName:       "renamed-imported-number",
+	})
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
 
 	info, err := store.GetAccount(
 		t.Context(), getAccountQueryByName(walletID, scope, name),
 	)
 	require.NoError(t, err)
-	require.Equal(t, name, info.AccountName)
-
-	_, err = store.GetAccount(
-		t.Context(), getAccountQueryByName(
-			walletID, scope, "renamed-imported",
-		),
-	)
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.True(t, info.IsImported)
 }
 
 // TestRenameAccountErrors verifies that RenameAccount returns appropriate

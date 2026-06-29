@@ -202,7 +202,7 @@ func TestListAccountsSkipBalanceZerosFields(t *testing.T) {
 
 		found := false
 		for _, acc := range accounts {
-			if acc.AccountName == "funded" {
+			if acc.AccountName == fundedAccountName {
 				found = true
 			}
 
@@ -228,7 +228,7 @@ func TestListAccountsSkipBalanceZerosFields(t *testing.T) {
 	require.NoError(t, err)
 	verify(t, byScope, "by scope")
 
-	name := "funded"
+	name := fundedAccountName
 	byName, err := store.ListAccounts(
 		t.Context(), db.ListAccountsQuery{
 			WalletID:    walletID,
@@ -412,16 +412,20 @@ func TestListAccountsOrdering(t *testing.T) {
 
 	// Derived accounts should come first (ordered by account number).
 	require.Equal(t, "derived-0", accounts[0].AccountName)
-	require.Equal(t, db.DerivedAccount, accounts[0].Origin)
-	require.Equal(t, uint32(0), accounts[0].AccountNumber)
+	require.False(t, accounts[0].IsImported)
+	require.Equal(
+		t, uint32(0), accountNumberNotNil(t, accounts[0].AccountNumber),
+	)
 
 	require.Equal(t, "derived-1", accounts[1].AccountName)
-	require.Equal(t, db.DerivedAccount, accounts[1].Origin)
-	require.Equal(t, uint32(1), accounts[1].AccountNumber)
+	require.False(t, accounts[1].IsImported)
+	require.Equal(
+		t, uint32(1), accountNumberNotNil(t, accounts[1].AccountNumber),
+	)
 
 	// Imported accounts should come last.
-	require.Equal(t, db.ImportedAccount, accounts[2].Origin)
-	require.Equal(t, db.ImportedAccount, accounts[3].Origin)
+	require.True(t, accounts[2].IsImported)
+	require.True(t, accounts[3].IsImported)
 }
 
 // findAccountInList searches for an account in the provided list that matches

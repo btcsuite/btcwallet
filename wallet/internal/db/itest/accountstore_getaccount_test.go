@@ -35,11 +35,14 @@ func TestGetAccount(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, info)
 				requireAccountMatches(t, info, tc)
-				accNumber = info.AccountNumber
+
+				if info.AccountNumber != nil {
+					accNumber = *info.AccountNumber
+				}
 			},
 		)
 
-		if tc.Origin == db.ImportedAccount {
+		if tc.IsImported {
 			continue
 		}
 
@@ -213,7 +216,10 @@ func TestGetAccountPopulatesBalance(t *testing.T) {
 
 	byNumber, err := store.GetAccount(
 		t.Context(),
-		getAccountQueryByNumber(walletID, scope, funded.AccountNumber),
+		getAccountQueryByNumber(
+			walletID, scope,
+			accountNumberNotNil(t, funded.AccountNumber),
+		),
 	)
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(24000), byNumber.ConfirmedBalance)
@@ -225,6 +231,77 @@ func TestGetAccountPopulatesBalance(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(0), empty.ConfirmedBalance)
 	require.Equal(t, btcutil.Amount(0), empty.UnconfirmedBalance)
+}
+
+// TestAccountBalancesExcludeCorruptRawAddressChild verifies that account-level
+// balance reads do not count raw imported addresses that have corrupt derived
+// address child rows pointing at an account.
+func TestAccountBalancesExcludeCorruptRawAddressChild(t *testing.T) {
+	// The sqlite corruption helper temporarily drops a trigger, so this test
+	// must not run in parallel with other database integration tests.
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWatchOnlyWallet(t, store, "account-balance-corrupt-raw")
+	scope := db.KeyScopeBIP0084
+	accountName := fundedAccountName
+
+	createDerivedAccount(t, store, walletID, scope, accountName)
+
+	scopeID := GetKeyScopeID(t, queries, walletID, scope)
+	accountID := GetAccountID(t, queries, scopeID, accountName)
+	badScript := RandomBytes(22)
+	imported, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:     walletID,
+			AddressType:  db.WitnessPubKey,
+			PubKey:       RandomBytes(33),
+			ScriptPubKey: badScript,
+		},
+	)
+	require.NoError(t, err)
+
+	err = insertCorruptDerivedAddressChildRaw(
+		t, store.DB(), walletID, scopeID, accountID, int64(imported.ID),
+		0, 0,
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 33000, PkScript: badScript}},
+	)
+	err = store.CreateTx(
+		t.Context(), db.CreateTxParams{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000400, 0),
+			Status:   db.TxStatusPending,
+			Credits:  map[uint32]address.Address{0: nil},
+		},
+	)
+	require.NoError(t, err)
+
+	account, err := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, accountName),
+	)
+	require.NoError(t, err)
+	require.Zero(t, account.ConfirmedBalance)
+	require.Zero(t, account.UnconfirmedBalance)
+
+	accounts, err := store.ListAccounts(
+		t.Context(), db.ListAccountsQuery{
+			WalletID: walletID,
+			Scope:    &scope,
+		},
+	)
+	require.NoError(t, err)
+
+	listed := findAccountInList(t, accounts, AccountTestCase{
+		Name:  accountName,
+		Scope: scope,
+	})
+	require.Zero(t, listed.ConfirmedBalance)
+	require.Zero(t, listed.UnconfirmedBalance)
 }
 
 // TestGetAccountSkipBalanceZerosFields verifies that GetAccount with
@@ -279,7 +356,7 @@ func TestGetAccountSkipBalanceZerosFields(t *testing.T) {
 	require.Equal(t, btcutil.Amount(0), infoByName.UnconfirmedBalance)
 
 	byNumberQuery := getAccountQueryByNumber(
-		walletID, scope, infoByName.AccountNumber,
+		walletID, scope, accountNumberNotNil(t, infoByName.AccountNumber),
 	)
 	byNumberQuery.SkipBalance = true
 
