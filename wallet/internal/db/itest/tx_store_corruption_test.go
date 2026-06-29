@@ -490,7 +490,7 @@ func TestCreateTxReturnsQueryErrorWhenUtxosTableMissing(t *testing.T) {
 }
 
 // TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing verifies that the
-// backend rollback queries surface database errors when the block table is
+// rollback sync-state rewind surfaces database errors when the block table is
 // gone.
 func TestRollbackToBlockReturnsQueryErrorWhenBlocksTableMissing(t *testing.T) {
 	t.Parallel()
