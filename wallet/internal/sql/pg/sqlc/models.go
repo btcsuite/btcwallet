@@ -64,6 +64,14 @@ type Block struct {
 	BlockTimestamp int64
 }
 
+type DerivedAddress struct {
+	AddressID     int64
+	WalletID      int64
+	AccountID     int64
+	AddressBranch int16
+	AddressIndex  int64
+}
+
 type KeyScope struct {
 	ID                int64
 	WalletID          int64
