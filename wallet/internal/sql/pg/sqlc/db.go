@@ -51,6 +51,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createDerivedAddressStmt, err = db.PrepareContext(ctx, CreateDerivedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAddress: %w", err)
 	}
+	if q.createDerivedAddressPathStmt, err = db.PrepareContext(ctx, CreateDerivedAddressPath); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAddressPath: %w", err)
+	}
 	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
 	}
@@ -333,6 +336,11 @@ func (q *Queries) Close() error {
 	if q.createDerivedAddressStmt != nil {
 		if cerr := q.createDerivedAddressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createDerivedAddressStmt: %w", cerr)
+		}
+	}
+	if q.createDerivedAddressPathStmt != nil {
+		if cerr := q.createDerivedAddressPathStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAddressPathStmt: %w", cerr)
 		}
 	}
 	if q.createImportedAccountStmt != nil {
@@ -773,6 +781,7 @@ type Queries struct {
 	createDerivedAccountStmt                    *sql.Stmt
 	createDerivedAccountWithNumberStmt          *sql.Stmt
 	createDerivedAddressStmt                    *sql.Stmt
+	createDerivedAddressPathStmt                *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
 	createImportedAddressStmt                   *sql.Stmt
 	createImportedBucketAccountStmt             *sql.Stmt
@@ -866,6 +875,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
 		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
 		createDerivedAddressStmt:                    q.createDerivedAddressStmt,
+		createDerivedAddressPathStmt:                q.createDerivedAddressPathStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
 		createImportedAddressStmt:                   q.createImportedAddressStmt,
 		createImportedBucketAccountStmt:             q.createImportedBucketAccountStmt,
