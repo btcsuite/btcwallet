@@ -494,18 +494,24 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 	accountName := changeAccount.AccountName
 
-	// storeAddrType is the effective internal address type used to build the
-	// change script; derivationAccount is the account the change address is
-	// derived under.
+	// storeAddrType is the effective internal (change branch) address type
+	// used to build the change script; derivationAccount is the account the
+	// change address is derived under. Both are resolved per branch below.
 	var (
 		storeAddrType     db.AddressType
 		derivationAccount string
 	)
 
 	switch accountName {
-	// The reserved imported alias cannot derive its own change and has no
-	// account row on SQL stores, so skip the by-name lookup and redirect
-	// change to derived account 0 in the same scope.
+	// The reserved imported alias cannot derive its own change and, unlike
+	// kvdb, has no account row on the SQL/runtime store, so a by-name
+	// lookup here would always fail with ErrAccountNotFound. Skip it and
+	// redirect change to derived account 0 in the same scope, matching the
+	// legacy behaviour. Account 0 may have been renamed, so we resolve it
+	// by number rather than assuming the literal "default" name; looking it
+	// up by name would break change derivation after a rename. Account 0's
+	// effective AddrSchema then drives the change script, which is what the
+	// post-redirect change script derived under it would use anyway.
 	case db.DefaultImportedAccountName:
 		derivedAccount := uint32(waddrmgr.DefaultAccountNum)
 
@@ -529,9 +535,16 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 		storeAddrType = derivedInfo.AddrSchema.InternalAddrType
 		derivationAccount = derivedInfo.AccountName
 
-	// Use the account's effective AddrSchema instead of the scope default.
-	// This lets strict BIP49 imports, and any other per-account override
-	// carried by kvdb, produce change scripts the external signer expects.
+	// For a named account (including non-default imported xpub accounts) the
+	// by-name lookup both rejects an unknown account up front and supplies
+	// the account's effective AddrSchema. Use that schema instead of the
+	// scope default so strict BIP49 imports (and any other per-account
+	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
+	// produce change scripts the external signer expects. SQL backends
+	// currently store schema at the key-scope level only and surface the
+	// effective scope schema here; per-account-only overrides under a shared
+	// scope still fall through to the scope default and are tracked as a
+	// known limitation in the AddrSchema docstring.
 	default:
 		accountInfo, err := w.cache.GetAccount(
 			ctx, db.GetAccountQuery{
@@ -546,7 +559,8 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 		}
 
 		if err != nil {
-			return nil, fmt.Errorf("get account %q: %w", accountName, err)
+			return nil, fmt.Errorf("get account %q: %w",
+				accountName, err)
 		}
 
 		storeAddrType = accountInfo.AddrSchema.InternalAddrType
@@ -913,9 +927,12 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
 	[]db.UtxoInfo, error) {
 
-	// The existence check rejects unknown real accounts up front. The reserved
-	// imported alias has no SQL account row, so raw imports are filtered locally
-	// by accountless UTXO metadata instead.
+	// The GetAccount call below exists only to reject an unknown account
+	// name up front; for the reserved imported alias it would always fail.
+	// Raw imported addresses deliberately use this alias with no account
+	// row (db.DefaultImportedAccountName), so skip the existence check for
+	// the alias. filterEligibleOutputs will select raw imports by their
+	// accountless enriched metadata instead of a SQL account alias.
 	if source.AccountName != db.DefaultImportedAccountName {
 		_, err := w.cache.GetAccount(
 			ctx, db.GetAccountQuery{
@@ -936,7 +953,8 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	}
 
 	return w.filterEligibleOutputs(
-		ctx, &source.KeyScope, source.AccountName, 0, minconf, bs,
+		ctx, &source.KeyScope, source.AccountName, 0,
+		minconf, bs,
 	)
 }
 
@@ -1150,9 +1168,11 @@ func (w *Wallet) filterEligibleOutputs(ctx context.Context,
 		return nil, err
 	}
 
-	// Real-account queries are already narrowed by (Scope, AccountName). For
-	// raw imports, the wallet-wide query is narrowed below using accountless
-	// metadata.
+	// For real accounts, the ListUTXOs query above already narrows results to
+	// the requested (Scope, AccountName), and the store enriches each UTXO
+	// with its authoritative KeyScope and lock state. For raw imports, the
+	// wallet-wide query is narrowed below using the accountless metadata that
+	// SQL exposes for raw imported addresses.
 	eligible := make([]db.UtxoInfo, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
@@ -1196,9 +1216,15 @@ func (w *Wallet) outputEligibleForSelection(rawImported bool,
 		return false
 	}
 
-	// ListUTXOs reports outputs the wallet owns, but ownership of one member
-	// key is not the same as being able to spend the output. Automatic coin
-	// selection therefore restricts itself to single-address scripts.
+	// ListUTXOs reports outputs the wallet *owns* (it resolves a script through
+	// its first extracted address), but ownership of one member key is not the
+	// same as being able to *spend* the output. For a bare multisig script the
+	// wallet may hold only one of several required pubkeys, yet ListUTXOs would
+	// still surface it. Automatic coin selection must only draw on outputs the
+	// wallet can actually sign, so we restrict it to single-address scripts:
+	// ExtractPkScriptAddrs returning exactly one address covers the standard
+	// P2PKH/P2WPKH/P2SH/P2WSH cases and excludes multi-address / bare-multisig
+	// scripts whose spendability this path cannot guarantee.
 	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 		output.PkScript, w.cfg.ChainParams,
 	)
@@ -1207,7 +1233,9 @@ func (w *Wallet) outputEligibleForSelection(rawImported bool,
 }
 
 // outputMatchesImportedAlias reports whether one enriched UTXO row belongs to
-// the wallet-facing imported alias.
+// the wallet-facing imported alias. SQL raw imports are accountless and
+// scopeless; kvdb's legacy raw imports still carry the reserved imported
+// account name and their owning key scope.
 func outputMatchesImportedAlias(output *db.UtxoInfo,
 	keyScope *waddrmgr.KeyScope) bool {
 

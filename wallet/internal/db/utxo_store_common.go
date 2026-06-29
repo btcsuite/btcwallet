@@ -71,8 +71,8 @@ func KeyScopeFromIDs(purpose, coinType int64) (KeyScope, error) {
 	return KeyScope{Purpose: p, Coin: c}, nil
 }
 
-// KeyScopeFromNullIDs builds a KeyScope from nullable purpose and coin_type
-// columns. A false hasScope return means both values are NULL, which is the
+// KeyScopeFromNullIDs builds a KeyScope from nullable purpose / coin_type
+// columns. It returns hasScope=false when both columns are NULL, which is the
 // expected shape for raw imported addresses.
 func KeyScopeFromNullIDs(purpose,
 	coinType sql.NullInt64) (KeyScope, bool, error) {
@@ -110,7 +110,8 @@ type UtxoAddressShape struct {
 	AccountID sql.NullInt64
 
 	// AccountIsDerived reports the owning account's structural shape when
-	// account metadata is present.
+	// account
+	// metadata is present.
 	AccountIsDerived sql.NullBool
 
 	// AccountNumber is set when the owning account is wallet-derived.
@@ -171,8 +172,8 @@ func ValidateUtxoAddressShape(shape UtxoAddressShape) error {
 
 // BuildUtxoInfo converts the normalized base SQL result fields into the public
 // UtxoInfo shape. Backends set the per-row enrichment fields (AccountName,
-// Origin, AddrType, HasScript, IsLocked, Spendable, KeyScope) directly on the
-// returned value after this call.
+// AddrType, HasScript, IsLocked, KeyScope) directly on the returned value after
+// this call.
 func BuildUtxoInfo(hash []byte, outputIndex uint32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight *uint32) (*UtxoInfo, error) {

@@ -763,13 +763,6 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 		return nil, fmt.Errorf("account properties: %w", err)
 	}
 
-	_, err = binding.acctStore.IsImportedAccount(
-		addrmgrNs, binding.acctNum,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("classify account origin: %w", err)
-	}
-
 	managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
 	if err != nil {
 		return nil, fmt.Errorf("managed address: %w", err)
@@ -792,10 +785,10 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 		return nil, err
 	}
 
-	// The raw-imported pseudo-account can hold imported private-key rows, so let
-	// address-level key material decide spendability there. Ordinary imported
-	// xpub accounts are account-level watch-only rows and must stay non-spendable
-	// when adapted through the new db UTXO contract.
+	// The raw-imported pseudo-account can hold imported private-key rows,
+	// so let address-level key material decide spendability there. Ordinary
+	// imported xpub accounts are account-level watch-only rows and must stay
+	// non-spendable when adapted through the new db UTXO contract.
 	accountWatchOnly := props.IsWatchOnly &&
 		binding.acctNum != waddrmgr.ImportedAddrAccount
 	spendable := !addrWatchOnly && !accountWatchOnly
@@ -808,8 +801,9 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	return info, nil
 }
 
-// listUTXOsInView performs the legacy UTXO scan using one walletdb view and
-// populates the enriched per-row metadata.
+// listUTXOsInView performs the legacy UTXO scan using one walletdb view
+// and populates the enriched per-row metadata (AccountName, AddrType,
+// HasScript, IsLocked).
 func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
 	query db.ListUtxosQuery, utxos *[]db.UtxoInfo) error {
 
