@@ -22,9 +22,9 @@ CREATE TABLE addresses (
     -- Reference to the wallet this address belongs to.
     wallet_id INTEGER NOT NULL,
 
-    -- Legacy reference to the account this address belongs to. This remains
-    -- non-null while legacy queries are still present.
-    account_id INTEGER NOT NULL,
+    -- Legacy reference to the account this address belongs to. Raw imported
+    -- addresses leave this NULL because they have no owning account row.
+    account_id INTEGER,
 
     -- Shape marker for the normalized identity model. TRUE means this address
     -- has normalized derived identity with account ownership and path data.

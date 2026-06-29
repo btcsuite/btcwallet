@@ -196,30 +196,84 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 func (s *Store) NewImportedAddress(ctx context.Context,
 	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
 
-	adapters := db.ImportedAddressAdapters[
-		*sqlc.Queries,
-		sqlc.GetAccountByWalletScopeAndNameRow,
-		db.AccountLookupKey,
-		sqlc.CreateImportedAddressParams,
-		sqlc.CreateImportedAddressRow,
-		sqlc.InsertAddressSecretParams]{
-		GetAccount:           getAccountFromKey(s.queries),
-		AccountParams:        db.AccountKeyFromImportedParams,
-		CreateBucketAccount:  createImportedBucketAccount,
-		GetAccountID:         importedAddressGetAccountID,
-		GetWalletWatchOnly:   importedAddressGetWalletWatchOnly,
-		CreateAddr:           createImportedAddress,
-		CreateParams:         createImportedAddressParams,
-		InsertSecret:         insertAddressSecret,
-		SecretParams:         insertAddressSecretParams,
-		RowID:                importedAddressRowID,
-		RowCreatedAt:         importedAddressRowCreatedAt,
-		ApplyAccountMetadata: applyAddressAccountMetadata,
+	err := params.ValidateBasic()
+	if err != nil {
+		return nil, err
 	}
 
-	return db.NewImportedAddressWithTx(
-		ctx, params, s.execWrite, adapters,
+	var info *db.AddressInfo
+
+	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		created, err := s.createImportedAddress(ctx, qtx, params)
+		if err != nil {
+			return err
+		}
+
+		info = created
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+// createImportedAddress performs the imported-address write within an existing
+// transaction and returns the resulting address info.
+func (s *Store) createImportedAddress(ctx context.Context, qtx *sqlc.Queries,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	walletIsWatchOnly, err := getWalletWatchOnly(ctx, qtx, params.WalletID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.ValidateWatchOnly(walletIsWatchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.RequireAddressPrivKeyOnSpendable(
+		params.WalletID, walletIsWatchOnly, params.HasPrivateKey(),
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	row, err := qtx.CreateImportedAddress(
+		ctx, createImportedAddressParams(params),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create imported address: %w", err)
+	}
+
+	if params.HasSecretMaterial() {
+		err = qtx.InsertAddressSecret(
+			ctx, insertAddressSecretParams(row.ID, params),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert address secret: %w", err)
+		}
+	}
+
+	addrID, err := db.Int64ToUint32(row.ID)
+	if err != nil {
+		return nil, fmt.Errorf("address ID: %w", err)
+	}
+
+	return &db.AddressInfo{
+		ID:           addrID,
+		AddrType:     params.AddressType,
+		CreatedAt:    row.CreatedAt,
+		Origin:       db.ImportedAccount,
+		IsImported:   true,
+		ScriptPubKey: params.ScriptPubKey,
+		PubKey:       params.PubKey,
+		HasScript:    params.HasScript(),
+		IsWatchOnly:  walletIsWatchOnly,
+	}, nil
 }
 
 // getAccountFromKey returns a helper to look up accounts by key.
@@ -304,8 +358,11 @@ func buildDerivedAddressParams(walletID int64, accountID int64,
 	pubKey []byte) (sqlc.CreateDerivedAddressParams, error) {
 
 	return sqlc.CreateDerivedAddressParams{
-		WalletID:     walletID,
-		AccountID:    accountID,
+		WalletID: walletID,
+		AccountID: sql.NullInt64{
+			Int64: accountID,
+			Valid: true,
+		},
 		ScriptPubKey: scriptPubKey,
 		TypeID:       int64(addrType),
 		AddressBranch: sql.NullInt64{
@@ -334,52 +391,6 @@ func derivedAddressRowCreatedAt(
 	return row.CreatedAt
 }
 
-// createImportedBucketAccount materializes the keyless wallet-level imported
-// bucket account for the import's scope inside the active write transaction
-// and returns the freshly looked-up account row. The bucket carries empty
-// account-level key material (no public key, no master fingerprint) and no
-// account_secrets row: it is a holder for individually-imported addresses, not
-// an imported xpub account. The key scope is created on demand using its
-// default address schema if it does not already exist.
-//
-// Materialization is an idempotent get-or-create: the insert uses ON CONFLICT
-// DO NOTHING so concurrent first-imports into the same scope cannot collide on
-// the (scope_id, account_name) unique index, and the row is always re-read
-// through GetAccountByWalletScopeAndName afterwards. The re-read both yields a
-// row whose shape matches the existing-bucket lookup path exactly and returns
-// the surviving bucket when this call was the no-op loser of a race.
-func createImportedBucketAccount(ctx context.Context, qtx *sqlc.Queries,
-	params db.NewImportedAddressParams) (
-	sqlc.GetAccountByWalletScopeAndNameRow, error) {
-
-	var zero sqlc.GetAccountByWalletScopeAndNameRow
-
-	scopeID, _, err := ensureKeyScope(
-		ctx, qtx, params.WalletID, params.Scope, nil,
-	)
-	if err != nil {
-		return zero, fmt.Errorf("ensure scope: %w", err)
-	}
-
-	// ON CONFLICT DO NOTHING makes this a get-or-create: a concurrent
-	// first-import that already materialized the bucket is a no-op here,
-	// and the re-read below returns the existing row.
-	err = qtx.CreateImportedBucketAccount(
-		ctx, sqlc.CreateImportedBucketAccountParams{
-			ScopeID:     scopeID,
-			AccountName: db.DefaultImportedAccountName,
-			OriginID:    int64(db.ImportedAccount),
-		},
-	)
-	if err != nil {
-		return zero, fmt.Errorf("create bucket account: %w", err)
-	}
-
-	return getAccountFromKey(qtx)(
-		ctx, db.AccountKeyFromImportedParams(params),
-	)
-}
-
 // createImportedAddress returns the imported address insert helper.
 func createImportedAddress(qtx *sqlc.Queries) func(context.Context,
 	sqlc.CreateImportedAddressParams) (
@@ -396,12 +407,11 @@ func insertAddressSecret(qtx *sqlc.Queries) func(context.Context,
 }
 
 // createImportedAddressParams maps imported params to sqlc params.
-func createImportedAddressParams(walletID int64, accountID int64,
+func createImportedAddressParams(
 	params db.NewImportedAddressParams) sqlc.CreateImportedAddressParams {
 
 	return sqlc.CreateImportedAddressParams{
-		WalletID:     walletID,
-		AccountID:    accountID,
+		WalletID:     int64(params.WalletID),
 		ScriptPubKey: params.ScriptPubKey,
 		TypeID:       int64(params.AddressType),
 		PubKey:       params.PubKey,
