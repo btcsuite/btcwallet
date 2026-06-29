@@ -112,11 +112,8 @@ func (s accountGetQueries) AttachAccountBalance(ctx context.Context,
 
 	bal, err := s.q.AccountBalance(
 		ctx, sqlc.AccountBalanceParams{
-			WalletID: int64(query.WalletID),
-			AccountID: sql.NullInt64{
-				Int64: accountID,
-				Valid: true,
-			},
+			WalletID:  int64(query.WalletID),
+			AccountID: accountID,
 		},
 	)
 	if err != nil {

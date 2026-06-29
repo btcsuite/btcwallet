@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
@@ -124,18 +123,10 @@ func (s accountListQueries) AttachAccountBalances(ctx context.Context,
 		func(ctx context.Context, walletID uint32,
 			ids []int64) ([]db.AccountBalance, error) {
 
-			accountIDs := make([]sql.NullInt64, len(ids))
-			for i := range ids {
-				accountIDs[i] = sql.NullInt64{
-					Int64: ids[i],
-					Valid: true,
-				}
-			}
-
 			rows, err := s.q.AccountBalancesByIDs(
 				ctx, sqlc.AccountBalancesByIDsParams{
 					WalletID:   int64(walletID),
-					AccountIds: accountIDs,
+					AccountIds: ids,
 				},
 			)
 			if err != nil {
@@ -145,7 +136,7 @@ func (s accountListQueries) AttachAccountBalances(ctx context.Context,
 			balances := make([]db.AccountBalance, len(rows))
 			for i := range rows {
 				balances[i] = db.AccountBalance{
-					AccountID:   rows[i].AccountID.Int64,
+					AccountID:   rows[i].AccountID,
 					Confirmed:   rows[i].ConfirmedBalance,
 					Unconfirmed: rows[i].UnconfirmedBalance,
 				}

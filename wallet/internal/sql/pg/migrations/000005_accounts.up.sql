@@ -1,14 +1,10 @@
 -- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 
--- Accounts table stores wallet accounts under each key scope (BIP32/BIP44
--- hierarchy). Each account represents either a derived HD account following
--- BIP44 derivation paths (m/purpose'/coin'/account') or an imported account
--- from an external source (e.g., hardware wallet, watch-only xpub).
---
--- The table supports both account types through nullable account_number:
--- - Derived accounts have sequential account_number values (0, 1, 2, ...)
--- - Imported accounts have NULL account_number (not part of BIP44 hierarchy)
+-- Accounts table stores wallet-level HD account identity under each key scope.
+-- Wallet-derived accounts carry a BIP44 account number; imported xpub accounts
+-- leave account_number NULL because they do not have wallet-derived BIP44
+-- identity.
 CREATE TABLE accounts (
     -- DB ID of the account, primary key.
     id BIGSERIAL PRIMARY KEY,
@@ -19,15 +15,16 @@ CREATE TABLE accounts (
     -- Reference to the key scope this account belongs to.
     scope_id BIGINT NOT NULL,
 
-    -- Account number described in BIP44. NULL for imported accounts since they
-    -- don't follow the BIP44 derivation path.
-    account_number BIGINT,
-
     -- Human friendly name for the account.
     account_name TEXT NOT NULL,
 
-    -- Shape marker for the normalized identity model.
-    is_derived BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Shape marker. TRUE means this account has a wallet-derived BIP44 account
+    -- number. Imported xpub accounts leave this FALSE.
+    is_derived BOOLEAN NOT NULL,
+
+    -- BIP44 account number allocated by the wallet for derived accounts.
+    -- Imported xpub accounts leave this NULL and are identified by id/name.
+    account_number BIGINT,
 
     -- Master fingerprint is the fingerprint of the master pub key that created
     -- this account.
@@ -41,10 +38,10 @@ CREATE TABLE accounts (
     -- in UTC.
     created_at TIMESTAMP NOT NULL DEFAULT (current_timestamp AT TIME ZONE 'UTC'),
 
-    -- Next index to use for external addresses (branch 0)
+    -- Next index to use for external addresses (branch 0).
     next_external_index BIGINT NOT NULL DEFAULT 0,
 
-    -- Next index to use for internal/change addresses (branch 1)
+    -- Next index to use for internal/change addresses (branch 1).
     next_internal_index BIGINT NOT NULL DEFAULT 0,
 
     -- External derivation index must be non-negative.
@@ -52,6 +49,15 @@ CREATE TABLE accounts (
 
     -- Internal derivation index must be non-negative.
     CHECK (next_internal_index >= 0),
+
+    -- Account numbers must be non-negative when present.
+    CHECK (account_number IS NULL OR account_number >= 0),
+
+    -- Derived account shape must match account-number presence.
+    CHECK (
+        (is_derived AND account_number IS NOT NULL)
+        OR (NOT is_derived AND account_number IS NULL)
+    ),
 
     -- Composite foreign key to key scopes. This ensures scope_id belongs to
     -- the same wallet_id as the account row. Wallet ownership is transitively
@@ -65,35 +71,36 @@ CREATE TABLE accounts (
 -- Index on foreign scope_id for faster lookups and joins.
 CREATE INDEX idx_accounts_scope ON accounts (scope_id);
 
--- Unique index to support composite foreign keys from addresses.
-CREATE UNIQUE INDEX uidx_accounts_wallet_id_id ON accounts (wallet_id, id);
+-- Unique index to prevent duplicate account names within the same key scope.
+CREATE UNIQUE INDEX uidx_accounts_wallet_scope_account_name
+ON accounts (wallet_id, scope_id, account_name);
 
--- Unique indexes to support normalized child-table foreign keys.
+-- Unique index to prevent duplicate BIP44 account numbers within a key scope.
+CREATE UNIQUE INDEX uidx_accounts_scope_account_number
+ON accounts (scope_id, account_number)
+WHERE account_number IS NOT NULL;
+
+-- Unique indexes to support composite child-table foreign keys.
+CREATE UNIQUE INDEX uidx_accounts_id_wallet_scope
+ON accounts (id, wallet_id, scope_id);
+
 CREATE UNIQUE INDEX uidx_accounts_id_wallet
 ON accounts (id, wallet_id);
 
 CREATE UNIQUE INDEX uidx_accounts_id_scope
 ON accounts (id, scope_id);
 
--- Unique partial index to prevent duplicate account numbers within the same
--- key scope. Only enforced for non-NULL account numbers (derived accounts).
--- Imported accounts have NULL account_number and are excluded from this
--- constraint.
-CREATE UNIQUE INDEX uidx_accounts_scope_account_number
-ON accounts (scope_id, account_number)
-WHERE account_number IS NOT NULL;
-
--- Unique index to prevent duplicate account names within the same key scope.
-CREATE UNIQUE INDEX uidx_accounts_scope_account_name
-ON accounts (scope_id, account_name);
-
--- Enforce that wallet ownership chosen at account creation time remains
--- immutable. This closes the database-boundary hole where a raw update could
--- reparent an existing account into another wallet after insert.
-CREATE FUNCTION assert_account_wallet_id_immutable() RETURNS TRIGGER AS $$
+-- Enforce that structural account identity fields chosen at account creation
+-- time remain immutable.
+CREATE FUNCTION assert_account_identity_immutable() RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.wallet_id IS DISTINCT FROM OLD.wallet_id THEN
-        RAISE EXCEPTION 'account wallet_id cannot be changed after creation'
+    IF NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.wallet_id IS DISTINCT FROM OLD.wallet_id
+        OR NEW.scope_id IS DISTINCT FROM OLD.scope_id
+        OR NEW.is_derived IS DISTINCT FROM OLD.is_derived
+        OR NEW.account_number IS DISTINCT FROM OLD.account_number THEN
+
+        RAISE EXCEPTION 'account identity cannot be changed after creation'
             USING ERRCODE = '23514'; -- check_violation
     END IF;
 
@@ -101,10 +108,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_assert_account_wallet_id_immutable
-BEFORE UPDATE OF wallet_id ON accounts
+CREATE TRIGGER trg_assert_account_identity_immutable
+BEFORE UPDATE OF id, wallet_id, scope_id, is_derived, account_number ON accounts
 FOR EACH ROW
-EXECUTE FUNCTION assert_account_wallet_id_immutable();
+EXECUTE FUNCTION assert_account_identity_immutable();
 
 -- Account Secrets table to hold encrypted account-level secrets.
 CREATE TABLE account_secrets (
