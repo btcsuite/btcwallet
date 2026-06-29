@@ -96,8 +96,8 @@ type AccountTestCase struct {
 	// Scope is the key scope for the account.
 	Scope db.KeyScope
 
-	// Origin indicates whether the account is derived or imported.
-	Origin db.AccountOrigin
+	// IsImported indicates whether the account is imported.
+	IsImported bool
 
 	// IsWatchOnly indicates whether the account is watch-only (has no private
 	// key material).
@@ -108,44 +108,36 @@ type AccountTestCase struct {
 // key scopes, with multiple accounts per scope.
 var DerivedAccountCases = []AccountTestCase{
 	{
-		Name:   "derived-bip84-default",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip84-default",
+		Scope: db.KeyScopeBIP0084,
 	},
 	{
-		Name:   "derived-bip84-savings",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip84-savings",
+		Scope: db.KeyScopeBIP0084,
 	},
 	{
-		Name:   "derived-bip86-default",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip86-default",
+		Scope: db.KeyScopeBIP0086,
 	},
 	{
-		Name:   "derived-bip86-savings",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip86-savings",
+		Scope: db.KeyScopeBIP0086,
 	},
 	{
-		Name:   "derived-bip44-default",
-		Scope:  db.KeyScopeBIP0044,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip44-default",
+		Scope: db.KeyScopeBIP0044,
 	},
 	{
-		Name:   "derived-bip44-savings",
-		Scope:  db.KeyScopeBIP0044,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip44-savings",
+		Scope: db.KeyScopeBIP0044,
 	},
 	{
-		Name:   "derived-bip49-default",
-		Scope:  db.KeyScopeBIP0049Plus,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip49-default",
+		Scope: db.KeyScopeBIP0049Plus,
 	},
 	{
-		Name:   "derived-bip49-savings",
-		Scope:  db.KeyScopeBIP0049Plus,
-		Origin: db.DerivedAccount,
+		Name:  "derived-bip49-savings",
+		Scope: db.KeyScopeBIP0049Plus,
 	},
 }
 
@@ -153,29 +145,29 @@ var DerivedAccountCases = []AccountTestCase{
 // across multiple key scopes.
 var ImportedAccountCases = []AccountTestCase{
 	{
-		Name:   "imported-bip84-main",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.ImportedAccount,
+		Name:       "imported-bip84-main",
+		Scope:      db.KeyScopeBIP0084,
+		IsImported: true,
 	},
 	{
-		Name:   "imported-bip84-hardware",
-		Scope:  db.KeyScopeBIP0084,
-		Origin: db.ImportedAccount,
+		Name:       "imported-bip84-hardware",
+		Scope:      db.KeyScopeBIP0084,
+		IsImported: true,
 	},
 	{
-		Name:   "imported-bip86-main",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.ImportedAccount,
+		Name:       "imported-bip86-main",
+		Scope:      db.KeyScopeBIP0086,
+		IsImported: true,
 	},
 	{
-		Name:   "imported-bip86-hardware",
-		Scope:  db.KeyScopeBIP0086,
-		Origin: db.ImportedAccount,
+		Name:       "imported-bip86-hardware",
+		Scope:      db.KeyScopeBIP0086,
+		IsImported: true,
 	},
 	{
-		Name:   "imported-bip44-legacy",
-		Scope:  db.KeyScopeBIP0044,
-		Origin: db.ImportedAccount,
+		Name:       "imported-bip44-legacy",
+		Scope:      db.KeyScopeBIP0044,
+		IsImported: true,
 	},
 }
 
@@ -186,25 +178,25 @@ var PublicOnlyImportedAccountCases = []AccountTestCase{
 	{
 		Name:        "xpub-bip84-cold",
 		Scope:       db.KeyScopeBIP0084,
-		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 	},
 	{
 		Name:        "xpub-bip84-monitor",
 		Scope:       db.KeyScopeBIP0084,
-		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 	},
 	{
 		Name:        "xpub-bip86-cold",
 		Scope:       db.KeyScopeBIP0086,
-		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 	},
 	{
 		Name:        "xpub-bip86-monitor",
 		Scope:       db.KeyScopeBIP0086,
-		Origin:      db.ImportedAccount,
+		IsImported:  true,
 		IsWatchOnly: true,
 	},
 }
