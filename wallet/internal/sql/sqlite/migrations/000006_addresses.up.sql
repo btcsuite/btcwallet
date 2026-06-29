@@ -254,23 +254,3 @@ BEGIN
                 AND w.is_watch_only
         );
 END;
-
--- Increments imported_key_count when a new imported address is inserted.
-CREATE TRIGGER trg_addresses_imported_key_count_insert
-AFTER INSERT ON addresses
-WHEN new.address_branch IS NULL
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count + 1
-    WHERE id = new.account_id;
-END;
-
--- Decrements imported_key_count when an imported address is deleted.
-CREATE TRIGGER trg_addresses_imported_key_count_delete
-AFTER DELETE ON addresses
-WHEN old.address_branch IS NULL
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count - 1
-    WHERE id = old.account_id;
-END;

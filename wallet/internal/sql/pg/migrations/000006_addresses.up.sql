@@ -274,39 +274,3 @@ CREATE TRIGGER trg_assert_watch_only_address_secrets_update
 BEFORE UPDATE ON address_secrets
 FOR EACH ROW
 EXECUTE FUNCTION assert_watch_only_address_secrets();
-
--- Increments imported_key_count for imported address inserts.
-CREATE FUNCTION sync_account_imported_key_count_insert() RETURNS TRIGGER AS $$
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count + 1
-    WHERE id = NEW.account_id;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger to keep imported_key_count accurate for imported address inserts.
-CREATE TRIGGER trg_addresses_imported_key_count_insert
-AFTER INSERT ON addresses
-FOR EACH ROW
-WHEN (new.address_branch IS NULL)
-EXECUTE FUNCTION sync_account_imported_key_count_insert();
-
--- Decrements imported_key_count for imported address deletes.
-CREATE FUNCTION sync_account_imported_key_count_delete() RETURNS TRIGGER AS $$
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count - 1
-    WHERE id = OLD.account_id;
-
-    RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger to keep imported_key_count accurate for imported address deletes.
-CREATE TRIGGER trg_addresses_imported_key_count_delete
-AFTER DELETE ON addresses
-FOR EACH ROW
-WHEN (old.address_branch IS NULL)
-EXECUTE FUNCTION sync_account_imported_key_count_delete();

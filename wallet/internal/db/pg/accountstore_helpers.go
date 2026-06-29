@@ -107,7 +107,6 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			IsDerived:         base.IsDerived,
 			ExternalKeyCount:  base.ExternalKeyCount,
 			InternalKeyCount:  base.InternalKeyCount,
-			ImportedKeyCount:  base.ImportedKeyCount,
 			PublicKey:         base.PublicKey,
 			MasterFingerprint: base.MasterFingerprint,
 			IsWatchOnly:       base.WalletIsWatchOnly,

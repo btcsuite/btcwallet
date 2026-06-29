@@ -5,14 +5,10 @@ DROP TRIGGER IF EXISTS trg_assert_watch_only_address_secrets_update ON address_s
 DROP TRIGGER IF EXISTS trg_assert_address_wallet_id_immutable ON addresses;
 DROP TRIGGER IF EXISTS trg_assert_derived_address_parent_insert ON derived_addresses;
 DROP TRIGGER IF EXISTS trg_reject_derived_address_update ON derived_addresses;
-DROP TRIGGER IF EXISTS trg_addresses_imported_key_count_insert ON addresses;
-DROP TRIGGER IF EXISTS trg_addresses_imported_key_count_delete ON addresses;
 DROP FUNCTION IF EXISTS assert_watch_only_address_secrets();
 DROP FUNCTION IF EXISTS assert_address_wallet_id_immutable();
 DROP FUNCTION IF EXISTS assert_derived_address_parent();
 DROP FUNCTION IF EXISTS reject_derived_address_update();
-DROP FUNCTION IF EXISTS sync_account_imported_key_count_insert();
-DROP FUNCTION IF EXISTS sync_account_imported_key_count_delete();
 DROP INDEX IF EXISTS idx_addresses_account_id;
 DROP TABLE IF EXISTS address_secrets;
 DROP TABLE IF EXISTS derived_addresses;
