@@ -15,19 +15,12 @@ type Account struct {
 	ScopeID           int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
 	IsDerived         bool
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
 	CreatedAt         time.Time
 	NextExternalIndex int64
 	NextInternalIndex int64
-	ImportedKeyCount  int64
-}
-
-type AccountOrigin struct {
-	ID          int64
-	Description string
 }
 
 type AccountSecret struct {

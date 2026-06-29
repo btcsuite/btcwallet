@@ -1,31 +1,6 @@
 -- Migration note: Intentionally NOT idempotent (no "IF NOT EXISTS").
 -- This ensures migration tracking stays accurate and fails loudly if run twice.
 
--- Account origin lookup table - provides standardized descriptions for wallet
--- account origins. This is a reference table that maps the AccountOrigin enum
--- values used in Go code to their human-readable names.
-CREATE TABLE account_origins (
-    -- Primary key matching the Go AccountOrigin enum values.
-    -- Using explicit IDs rather than auto-increment to ensure consistency
-    -- with the Go enum and across SQLite/Postgres implementations.
-    id INTEGER PRIMARY KEY,
-
-    -- Human-readable account origin description.
-    description TEXT NOT NULL
-);
-
--- Unique constraint on description to prevent duplicate entries.
--- This ensures referential integrity and enables efficient reverse lookups.
-CREATE UNIQUE INDEX uidx_account_origins_description
-ON account_origins (description);
-
--- Seed reference data matching the Go AccountOrigin enum constants.
--- These values are static and represent the account origin types.
--- IDs MUST match the iota values in wallet/internal/db/data_types.go.
-INSERT INTO account_origins (id, description) VALUES
-(0, 'derived'),   -- Derived from a hierarchical deterministic key.
-(1, 'imported');  -- Imported from an external source.
-
 -- Accounts table stores wallet accounts under each key scope (BIP32/BIP44
 -- hierarchy). Each account represents either a derived HD account following
 -- BIP44 derivation paths (m/purpose'/coin'/account') or an imported account
@@ -51,12 +26,7 @@ CREATE TABLE accounts (
     -- Human friendly name for the account.
     account_name TEXT NOT NULL,
 
-    -- Reference to the origin of the account.
-    origin_id INTEGER NOT NULL,
-
-    -- Shape marker for the normalized identity model. During the compatibility
-    -- phase legacy origin_id remains available to old queries while new queries
-    -- switch to this structural flag.
+    -- Shape marker for the normalized identity model.
     is_derived BOOLEAN NOT NULL DEFAULT TRUE,
 
     -- Master fingerprint is the fingerprint of the master pub key that created
@@ -76,17 +46,11 @@ CREATE TABLE accounts (
     -- Next index to use for internal/change addresses (branch 1)
     next_internal_index INTEGER NOT NULL DEFAULT 0,
 
-    -- Number of imported addresses in this account.
-    imported_key_count INTEGER NOT NULL DEFAULT 0,
-
     -- External derivation index must be non-negative.
     CHECK (next_external_index >= 0),
 
     -- Internal derivation index must be non-negative.
     CHECK (next_internal_index >= 0),
-
-    -- Imported address counter must be non-negative.
-    CHECK (imported_key_count >= 0),
 
     -- Composite foreign key to key scopes. This ensures scope_id belongs to
     -- the same wallet_id as the account row. Wallet ownership is transitively
@@ -94,11 +58,7 @@ CREATE TABLE accounts (
     -- DELETE RESTRICT to ensure that the wallet/scope cannot be deleted if
     -- accounts still exist.
     FOREIGN KEY (wallet_id, scope_id)
-    REFERENCES key_scopes (wallet_id, id) ON DELETE RESTRICT,
-
-    -- Foreign key constraint to account origins. Using ON DELETE RESTRICT to
-    -- ensure that the origin cannot be deleted if accounts still exist.
-    FOREIGN KEY (origin_id) REFERENCES account_origins (id) ON DELETE RESTRICT
+    REFERENCES key_scopes (wallet_id, id) ON DELETE RESTRICT
 );
 
 -- Index on foreign scope_id for faster lookups and joins.

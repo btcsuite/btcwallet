@@ -6,7 +6,7 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id,
+    is_derived,
     public_key,
     master_fingerprint
 )
@@ -15,7 +15,7 @@ SELECT
     ks.id AS scope_id,
     sqlc.arg('account_number') AS account_number,
     sqlc.arg('account_name') AS account_name,
-    sqlc.arg('origin_id') AS origin_id,
+    TRUE AS is_derived,
     sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
@@ -31,7 +31,7 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id,
+    is_derived,
     public_key,
     master_fingerprint
 )
@@ -40,7 +40,7 @@ SELECT
     ks.id AS scope_id,
     NULL AS account_number,
     sqlc.arg('account_name') AS account_name,
-    sqlc.arg('origin_id') AS origin_id,
+    FALSE AS is_derived,
     sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
@@ -59,14 +59,14 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id
+    is_derived
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     NULL AS account_number,
     sqlc.arg('account_name') AS account_name,
-    sqlc.arg('origin_id') AS origin_id
+    FALSE AS is_derived
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 ON CONFLICT (scope_id, account_name) DO NOTHING;
@@ -94,7 +94,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -117,7 +116,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -140,7 +138,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -167,7 +164,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -195,7 +191,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
@@ -217,7 +212,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -242,7 +236,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -270,7 +263,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -295,7 +287,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -344,14 +335,14 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id
+    is_derived
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     sqlc.arg('account_number') AS account_number,
     sqlc.arg('account_name') AS account_name,
-    sqlc.arg('origin_id') AS origin_id
+    TRUE AS is_derived
 FROM key_scopes AS ks
 WHERE ks.id = sqlc.arg('scope_id')
 RETURNING id, account_number, created_at;
