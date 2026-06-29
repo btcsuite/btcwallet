@@ -115,6 +115,18 @@ func collectAddressPages(t *testing.T, store db.AddressStore,
 	}
 }
 
+// scopedListAddressesQuery builds a ListAddressesQuery for one named account.
+func scopedListAddressesQuery(walletID uint32, scope db.KeyScope,
+	accountName string, req page.Request[uint32]) db.ListAddressesQuery {
+
+	return db.ListAddressesQuery{
+		WalletID:    walletID,
+		Scope:       &scope,
+		AccountName: &accountName,
+		Page:        req,
+	}
+}
+
 // flattenAddressPages flattens paginated address results into a single
 // slice containing all addresses from all pages.
 func flattenAddressPages(
@@ -1712,12 +1724,10 @@ func TestListAddresses(t *testing.T) {
 					false, 5,
 				)
 
-				return db.ListAddressesQuery{
-					WalletID:    walletID,
-					Scope:       db.KeyScopeBIP0044,
-					AccountName: "test-account",
-					Page:        newTestReq[uint32](t, 10),
-				}
+				return scopedListAddressesQuery(
+					walletID, db.KeyScopeBIP0044, "test-account",
+					newTestReq[uint32](t, 10),
+				)
 			},
 			wantCount: 5,
 			validate: func(t *testing.T, addrs []db.AddressInfo) {
@@ -1755,12 +1765,10 @@ func TestListAddresses(t *testing.T) {
 					"empty-account",
 				)
 
-				return db.ListAddressesQuery{
-					WalletID:    walletID,
-					Scope:       db.KeyScopeBIP0084,
-					AccountName: "empty-account",
-					Page:        newTestReq[uint32](t, 10),
-				}
+				return scopedListAddressesQuery(
+					walletID, db.KeyScopeBIP0084, "empty-account",
+					newTestReq[uint32](t, 10),
+				)
 			},
 			wantCount: 0,
 		},
@@ -1795,12 +1803,10 @@ func TestListAddresses(t *testing.T) {
 				)
 
 				// Query only BIP0044 scope.
-				return db.ListAddressesQuery{
-					WalletID:    walletID,
-					Scope:       db.KeyScopeBIP0044,
-					AccountName: "bip44-multi",
-					Page:        newTestReq[uint32](t, 10),
-				}
+				return scopedListAddressesQuery(
+					walletID, db.KeyScopeBIP0044, "bip44-multi",
+					newTestReq[uint32](t, 10),
+				)
 			},
 			wantCount: 3,
 			validate: func(t *testing.T, addrs []db.AddressInfo) {
@@ -1848,11 +1854,12 @@ func TestListAddressesZeroLimit(t *testing.T) {
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-list-addresses-zero-limit")
 
-	_, err := store.ListAddresses(t.Context(), db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       db.KeyScopeBIP0044,
-		AccountName: "test-account",
-	})
+	_, err := store.ListAddresses(
+		t.Context(), scopedListAddressesQuery(
+			walletID, db.KeyScopeBIP0044, "test-account",
+			page.Request[uint32]{},
+		),
+	)
 	require.ErrorIs(t, err, db.ErrInvalidPageLimit)
 }
 
@@ -1884,12 +1891,10 @@ func TestListAddressesWatchOnlyWallet(t *testing.T) {
 	)
 
 	pageResult, err := store.ListAddresses(
-		t.Context(), db.ListAddressesQuery{
-			WalletID:    walletInfo.ID,
-			Scope:       db.KeyScopeBIP0084,
-			AccountName: "watch-only-account",
-			Page:        newTestReq[uint32](t, 10),
-		},
+		t.Context(), scopedListAddressesQuery(
+			walletInfo.ID, db.KeyScopeBIP0084, "watch-only-account",
+			newTestReq[uint32](t, 10),
+		),
 	)
 	require.NoError(t, err)
 
@@ -2371,12 +2376,10 @@ func TestListAddressesOrdering(t *testing.T) {
 
 	pageResult, err := store.ListAddresses(
 		t.Context(),
-		db.ListAddressesQuery{
-			WalletID:    walletID,
-			Scope:       db.KeyScopeBIP0084,
-			AccountName: "ordering-account",
-			Page:        newTestReq[uint32](t, 10),
-		},
+		scopedListAddressesQuery(
+			walletID, db.KeyScopeBIP0084, "ordering-account",
+			newTestReq[uint32](t, 10),
+		),
 	)
 
 	require.NoError(t, err)
@@ -2432,12 +2435,9 @@ func TestListAddressesPagination(t *testing.T) {
 	)
 	createDerivedAddresses(t, store, walletID, scope, "account-b", false, 2)
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "account-a",
-		Page:        newTestReq[uint32](t, 2),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, "account-a", newTestReq[uint32](t, 2),
+	)
 
 	page1, err := store.ListAddresses(t.Context(), query)
 	require.NoError(t, err)
@@ -2491,12 +2491,9 @@ func TestListAddressesExactBoundary(t *testing.T) {
 		t, store, walletID, scope, accountName, false, 4,
 	)
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: accountName,
-		Page:        newTestReq[uint32](t, 2),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, accountName, newTestReq[uint32](t, 2),
+	)
 
 	page1, err := store.ListAddresses(t.Context(), query)
 	require.NoError(t, err)
@@ -2530,12 +2527,12 @@ func TestListAddressesPagedEmptyResult(t *testing.T) {
 
 	createDerivedAccount(t, store, walletID, scope, "empty-account")
 
-	pageResult, err := store.ListAddresses(t.Context(), db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "empty-account",
-		Page:        newTestReq[uint32](t, uint32(pageSize)),
-	})
+	pageResult, err := store.ListAddresses(
+		t.Context(), scopedListAddressesQuery(
+			walletID, scope, "empty-account",
+			newTestReq[uint32](t, uint32(pageSize)),
+		),
+	)
 	require.NoError(t, err)
 	require.Empty(t, pageResult.Items)
 	require.Nil(t, pageResult.Next)
@@ -2555,12 +2552,11 @@ func TestListAddressesDeterministicPagination(t *testing.T) {
 		t, store, walletID, scope, accountName, false, 5,
 	)
 
-	pages := collectAddressPages(t, store, db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: accountName,
-		Page:        newTestReq[uint32](t, 2),
-	})
+	pages := collectAddressPages(
+		t, store, scopedListAddressesQuery(
+			walletID, scope, accountName, newTestReq[uint32](t, 2),
+		),
+	)
 	require.Len(t, pages, 3)
 	require.Len(t, pages[0].Items, 2)
 	require.Len(t, pages[1].Items, 2)
@@ -2628,12 +2624,11 @@ func TestListAddressesAccountIsolation(t *testing.T) {
 		t, store, walletID, scope, "account-b", false, 3,
 	)
 
-	pages := collectAddressPages(t, store, db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "account-a",
-		Page:        newTestReq[uint32](t, 2),
-	})
+	pages := collectAddressPages(
+		t, store, scopedListAddressesQuery(
+			walletID, scope, "account-a", newTestReq[uint32](t, 2),
+		),
+	)
 	addresses := flattenAddressPages(pages)
 
 	require.Len(t, addresses, len(expected))
@@ -2659,12 +2654,9 @@ func TestListAddressesInsertAfterCursor(t *testing.T) {
 	createDerivedAccount(t, store, walletID, scope, accountName)
 	createDerivedAddresses(t, store, walletID, scope, accountName, false, 3)
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: accountName,
-		Page:        newTestReq[uint32](t, 2),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, accountName, newTestReq[uint32](t, 2),
+	)
 	page1, err := store.ListAddresses(t.Context(), query)
 	require.NoError(t, err)
 	require.Len(t, page1.Items, 2)
@@ -2701,12 +2693,11 @@ func TestListAddressesCursorEdges(t *testing.T) {
 	staleReq := newTestReq[uint32](t, 2)
 	staleReq.After = uint32Ptr(math.MaxUint32)
 
-	stalePage, err := store.ListAddresses(t.Context(), db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: accountName,
-		Page:        staleReq,
-	})
+	stalePage, err := store.ListAddresses(
+		t.Context(), scopedListAddressesQuery(
+			walletID, scope, accountName, staleReq,
+		),
+	)
 	require.NoError(t, err)
 	require.Empty(t, stalePage.Items)
 	require.Nil(t, stalePage.Next)
@@ -2714,12 +2705,11 @@ func TestListAddressesCursorEdges(t *testing.T) {
 	zeroReq := newTestReq[uint32](t, 2)
 	zeroReq.After = uint32Ptr(0)
 
-	zeroPage, err := store.ListAddresses(t.Context(), db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: accountName,
-		Page:        zeroReq,
-	})
+	zeroPage, err := store.ListAddresses(
+		t.Context(), scopedListAddressesQuery(
+			walletID, scope, accountName, zeroReq,
+		),
+	)
 	require.NoError(t, err)
 	require.Len(t, zeroPage.Items, 2)
 	require.Equal(t, uint32(0), zeroPage.Items[0].Index)
@@ -2742,12 +2732,10 @@ func TestIterAddresses(t *testing.T) {
 		t, store, walletID, scope, "iter-account", false, 5,
 	)
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "iter-account",
-		Page:        newTestReq[uint32](t, uint32(pageSize)),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, "iter-account",
+		newTestReq[uint32](t, uint32(pageSize)),
+	)
 
 	iterAddrs := make([]db.AddressInfo, 0, len(expected))
 	for addr, err := range store.IterAddresses(t.Context(), query) {
@@ -2776,12 +2764,9 @@ func TestIterAddressesPaginated(t *testing.T) {
 		t, store, walletID, scope, "iter-account", false, 4,
 	)
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "iter-account",
-		Page:        newTestReq[uint32](t, 2),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, "iter-account", newTestReq[uint32](t, 2),
+	)
 
 	pages := collectAddressPages(t, store, query)
 	require.Len(t, pages, 2)
@@ -2811,12 +2796,9 @@ func TestIterAddressesEmpty(t *testing.T) {
 
 	createDerivedAccount(t, store, walletID, scope, "empty-account")
 
-	query := db.ListAddressesQuery{
-		WalletID:    walletID,
-		Scope:       scope,
-		AccountName: "empty-account",
-		Page:        newTestReq[uint32](t, 10),
-	}
+	query := scopedListAddressesQuery(
+		walletID, scope, "empty-account", newTestReq[uint32](t, 10),
+	)
 
 	for addr, err := range store.IterAddresses(t.Context(), query) {
 		require.NoError(t, err)

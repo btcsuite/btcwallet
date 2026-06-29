@@ -63,11 +63,13 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+	accountName := "addr"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
 		t.Context(), db.ListAddressesQuery{
 			WalletID:    0,
-			AccountName: "addr",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &scope,
 			Page:        pageReq,
 		},
 	)
@@ -112,11 +114,13 @@ func TestAddressStoreNewDerivedAddressWatchOnlyWallet(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+	accountName := "watch"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
 		t.Context(), db.ListAddressesQuery{
 			WalletID:    0,
-			AccountName: "watch",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &scope,
 			Page:        pageReq,
 		},
 	)
@@ -152,11 +156,13 @@ func TestAddressStoreListAddressesPagination(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](2)
 	require.NoError(t, err)
+	accountName := "page"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 
 	query := db.ListAddressesQuery{
 		WalletID:    0,
-		AccountName: "page",
-		Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountName: &accountName,
+		Scope:       &scope,
 		Page:        pageReq,
 	}
 

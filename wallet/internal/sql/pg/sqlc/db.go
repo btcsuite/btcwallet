@@ -225,6 +225,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listOwnedOutputsByTxIDsStmt, err = db.PrepareContext(ctx, ListOwnedOutputsByTxIDs); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOwnedOutputsByTxIDs: %w", err)
 	}
+	if q.listRawImportedAddressesStmt, err = db.PrepareContext(ctx, ListRawImportedAddresses); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRawImportedAddresses: %w", err)
+	}
 	if q.listReplacedTxHashesByReplacementTxHashStmt, err = db.PrepareContext(ctx, ListReplacedTxHashesByReplacementTxHash); err != nil {
 		return nil, fmt.Errorf("error preparing query ListReplacedTxHashesByReplacementTxHash: %w", err)
 	}
@@ -628,6 +631,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listOwnedOutputsByTxIDsStmt: %w", cerr)
 		}
 	}
+	if q.listRawImportedAddressesStmt != nil {
+		if cerr := q.listRawImportedAddressesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRawImportedAddressesStmt: %w", cerr)
+		}
+	}
 	if q.listReplacedTxHashesByReplacementTxHashStmt != nil {
 		if cerr := q.listReplacedTxHashesByReplacementTxHashStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listReplacedTxHashesByReplacementTxHashStmt: %w", cerr)
@@ -839,6 +847,7 @@ type Queries struct {
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listOwnedInputPrevOutputsByTxHashesStmt     *sql.Stmt
 	listOwnedOutputsByTxIDsStmt                 *sql.Stmt
+	listRawImportedAddressesStmt                *sql.Stmt
 	listReplacedTxHashesByReplacementTxHashStmt *sql.Stmt
 	listReplacedTxIDsByReplacementTxIDStmt      *sql.Stmt
 	listReplacementTxHashesByReplacedTxHashStmt *sql.Stmt
@@ -933,6 +942,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listOwnedInputPrevOutputsByTxHashesStmt:     q.listOwnedInputPrevOutputsByTxHashesStmt,
 		listOwnedOutputsByTxIDsStmt:                 q.listOwnedOutputsByTxIDsStmt,
+		listRawImportedAddressesStmt:                q.listRawImportedAddressesStmt,
 		listReplacedTxHashesByReplacementTxHashStmt: q.listReplacedTxHashesByReplacementTxHashStmt,
 		listReplacedTxIDsByReplacementTxIDStmt:      q.listReplacedTxIDsByReplacementTxIDStmt,
 		listReplacementTxHashesByReplacedTxHashStmt: q.listReplacementTxHashesByReplacedTxHashStmt,
