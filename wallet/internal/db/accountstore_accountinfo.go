@@ -19,10 +19,6 @@ var (
 	// errAccountShapeCorruption is returned when an account row's shape marker
 	// and nullable account number disagree about its structural shape.
 	errAccountShapeCorruption = errors.New("account subtype invariant violated")
-
-	// errInvalidAccountOrigin is returned when an account origin ID from the
-	// database does not correspond to a known AccountOrigin value.
-	errInvalidAccountOrigin = errors.New("invalid account origin")
 )
 
 // AccountPropsRow represents the raw database fields needed to construct

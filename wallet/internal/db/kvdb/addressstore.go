@@ -108,8 +108,13 @@ func derivedAddressInfo(ns walletdb.ReadWriteBucket,
 		return nil, err
 	}
 
+	accountImported, err := accountIsImported(ns, manager, account)
+	if err != nil {
+		return nil, err
+	}
+
 	info, err := managedAddressInfo(
-		ns, manager, walletIsWatchOnly, managedAddr,
+		ns, manager, walletIsWatchOnly, accountImported, managedAddr,
 	)
 	if err != nil {
 		return nil, err
@@ -164,30 +169,58 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 			return errMissingAddrmgrNamespace
 		}
 
-		managedAddr, err := s.importAddress(ns, manager, params)
+		result, err := s.importAddressTx(ns, manager, addrMgr, params)
 		if err != nil {
 			return err
 		}
 
-		info, err = managedAddressInfo(
-			ns, manager, addrMgr.WatchOnly(), managedAddr,
-		)
-		if err != nil {
-			return err
-		}
+		info = result
 
-		err = validateImportedAddress(params, info)
-		if err != nil {
-			return err
-		}
-
-		return setAddressID(
-			ns, manager, managedAddr.InternalAccount(),
-			addrMgr.WatchOnly(), info,
-		)
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("NewImportedAddress: %w", err)
+	}
+
+	return info, nil
+}
+
+// importAddressTx performs the imported-address write within an existing
+// write transaction and returns the resulting address info.
+func (s *Store) importAddressTx(ns walletdb.ReadWriteBucket,
+	manager waddrmgr.AccountStore, addrMgr waddrmgr.AddrStore,
+	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
+
+	managedAddr, err := s.importAddress(ns, manager, params)
+	if err != nil {
+		return nil, err
+	}
+
+	accountImported, err := accountIsImported(
+		ns, manager, managedAddr.InternalAccount(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := managedAddressInfo(
+		ns, manager, addrMgr.WatchOnly(), accountImported, managedAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = validateImportedAddress(params, info)
+	if err != nil {
+		return nil, err
+	}
+
+	err = setAddressID(
+		ns, manager, managedAddr.InternalAccount(),
+		addrMgr.WatchOnly(), info,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return info, nil
@@ -358,8 +391,13 @@ func resolvedAddressInfo(ns walletdb.ReadBucket,
 		return nil, fmt.Errorf("lookup address account: %w", err)
 	}
 
+	accountImported, err := accountIsImported(ns, manager, account)
+	if err != nil {
+		return nil, err
+	}
+
 	info, err := managedAddressInfo(
-		ns, manager, resolver.WatchOnly(), managedAddr,
+		ns, manager, resolver.WatchOnly(), accountImported, managedAddr,
 	)
 	if err != nil {
 		return nil, err
@@ -692,7 +730,8 @@ func importTaprootScriptAddress(ns walletdb.ReadWriteBucket,
 	return managedAddr, nil
 }
 
-// listAddressItems loads, filters, and paginates legacy address records.
+// listAddressItems loads, filters, and paginates account addresses from one
+// legacy scoped manager.
 func listAddressItems(dbConn walletdb.DB, addrMgr waddrmgr.AddrStore,
 	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
 
@@ -834,10 +873,16 @@ func accountAddressInfos(ns walletdb.ReadBucket,
 
 	var items []db.AddressInfo
 
-	err := manager.ForEachAccountAddress(
+	accountImported, err := accountIsImported(ns, manager, account)
+	if err != nil {
+		return nil, err
+	}
+
+	err = manager.ForEachAccountAddress(
 		ns, account, func(managedAddr waddrmgr.ManagedAddress) error {
 			info, err := managedAddressInfo(
-				ns, manager, walletIsWatchOnly, managedAddr,
+				ns, manager, walletIsWatchOnly, accountImported,
+				managedAddr,
 			)
 			if err != nil {
 				return err
@@ -919,8 +964,9 @@ func addressPageItems(items []db.AddressInfo,
 
 // managedAddressInfo adapts one legacy managed address into the db address view
 // used by store callers.
-func managedAddressInfo(ns walletdb.ReadBucket,
-	manager waddrmgr.AccountStore, walletIsWatchOnly bool,
+func managedAddressInfo(
+	ns walletdb.ReadBucket, manager waddrmgr.AccountStore,
+	walletIsWatchOnly bool, accountImported bool,
 	managedAddr waddrmgr.ManagedAddress) (*db.AddressInfo, error) {
 
 	scriptPubKey, err := txscript.PayToAddrScript(managedAddr.Address())
@@ -933,14 +979,17 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		return nil, fmt.Errorf("legacy address type: %w", err)
 	}
 
-	accountNumber := managedAddr.InternalAccount()
-	accountName := db.DefaultImportedAccountName
-	keyScope := db.KeyScope(manager.Scope())
-	origin := db.DerivedAccount
+	var (
+		accountName   string
+		accountNumber = managedAddr.InternalAccount()
+		keyScope      = db.KeyScope(manager.Scope())
+	)
 
-	if managedAddr.Imported() {
+	rawImported := managedAddr.Imported()
+
+	if rawImported {
 		accountNumber = 0
-		origin = db.ImportedAccount
+		accountName = db.DefaultImportedAccountName
 	} else {
 		accountName, err = manager.AccountName(ns, accountNumber)
 		if err != nil {
@@ -948,26 +997,7 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		}
 	}
 
-	var (
-		branch      uint32
-		index       uint32
-		fingerprint uint32
-		pubKey      []byte
-	)
-
-	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
-	if ok {
-		pubKey = managedAddressPubKey(pubKeyAddr)
-
-		scope, path, ok := pubKeyAddr.DerivationInfo()
-		if ok {
-			accountNumber = path.InternalAccount
-			branch = path.Branch
-			index = path.Index
-			fingerprint = path.MasterKeyFingerprint
-			keyScope = db.KeyScope(scope)
-		}
-	}
+	derivation := managedAddressDerivation(managedAddr, keyScope, accountNumber)
 
 	isWatchOnly, err := managedAddressIsWatchOnly(
 		walletIsWatchOnly, managedAddr,
@@ -977,26 +1007,73 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 	}
 
 	var accountNumberPtr *uint32
-	if origin == db.DerivedAccount {
-		accountNumberPtr = &accountNumber
+	if derivation.hasPath && !accountImported {
+		accountNumberPtr = &derivation.accountNumber
 	}
 
 	return &db.AddressInfo{
 		AccountNumber:        accountNumberPtr,
 		AccountName:          accountName,
-		KeyScope:             keyScope,
-		MasterKeyFingerprint: fingerprint,
+		KeyScope:             derivation.keyScope,
+		MasterKeyFingerprint: derivation.fingerprint,
 		AddrType:             addrType.Type,
-		IsImported:           origin == db.ImportedAccount,
-		HasDerivationPath:    origin == db.DerivedAccount,
-		Branch:               branch,
-		Index:                index,
+		IsImported:           accountImported || rawImported,
+		HasDerivationPath:    derivation.hasPath,
+		Branch:               derivation.branch,
+		Index:                derivation.index,
 		ScriptPubKey:         scriptPubKey,
-		PubKey:               pubKey,
+		PubKey:               derivation.pubKey,
 		HasScript:            addrType.HasScript,
 		IsWatchOnly:          isWatchOnly,
 		IsUsed:               managedAddr.Used(ns),
 	}, nil
+}
+
+// managedAddrDerivation holds the optional HD derivation fields from a managed
+// address.
+type managedAddrDerivation struct {
+	accountNumber uint32
+	branch        uint32
+	index         uint32
+	fingerprint   uint32
+	keyScope      db.KeyScope
+	pubKey        []byte
+	hasPath       bool
+}
+
+// managedAddressDerivation extracts optional HD derivation fields from a
+// managed address, falling back to the supplied defaults when absent.
+func managedAddressDerivation(managedAddr waddrmgr.ManagedAddress,
+	defaultScope db.KeyScope, defaultAccount uint32) managedAddrDerivation {
+
+	result := managedAddrDerivation{
+		accountNumber: defaultAccount,
+		keyScope:      defaultScope,
+	}
+
+	pubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return result
+	}
+
+	result.pubKey = managedAddressPubKey(pubKeyAddr)
+
+	// DerivationInfo reports ok only for HD-derived addresses (both normal
+	// derived accounts and imported-xpub watch-only children); raw single
+	// imports return false because their key has no known chain position.
+	scope, path, ok := pubKeyAddr.DerivationInfo()
+	if !ok {
+		return result
+	}
+
+	result.accountNumber = path.InternalAccount
+	result.branch = path.Branch
+	result.index = path.Index
+	result.fingerprint = path.MasterKeyFingerprint
+	result.keyScope = db.KeyScope(scope)
+	result.hasPath = true
+
+	return result
 }
 
 // managedAddressPubKey returns a managed address's public key using its

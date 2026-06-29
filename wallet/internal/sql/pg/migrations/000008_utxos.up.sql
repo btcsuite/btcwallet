@@ -15,9 +15,8 @@ CREATE TABLE utxos (
 
     -- Reference to the address record that owns the output.
     --
-    -- NOTE: The address-manager schema does not expose wallet_id on addresses,
-    -- so ownership is derived via addresses -> accounts -> key_scopes and
-    -- enforced by trigger below.
+    -- Address rows expose wallet_id directly, so wallet ownership can be
+    -- enforced by trigger without an account join.
     address_id BIGINT NOT NULL REFERENCES addresses (id) ON DELETE RESTRICT,
 
     -- Spending input (when spent).
@@ -77,10 +76,8 @@ BEGIN
     FROM transactions AS t
     WHERE t.id = NEW.tx_id;
 
-    SELECT ks.wallet_id INTO address_wallet_id
+    SELECT a.wallet_id INTO address_wallet_id
     FROM addresses AS a
-    INNER JOIN accounts AS acc ON a.account_id = acc.id
-    INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
     WHERE a.id = NEW.address_id;
 
     IF creating_wallet_id IS NOT NULL

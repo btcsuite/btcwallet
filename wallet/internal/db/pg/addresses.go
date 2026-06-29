@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
@@ -13,6 +14,10 @@ import (
 )
 
 var _ db.AddressStore = (*Store)(nil)
+
+// errUnknownAddressRowType is returned when an address row has an
+// unrecognized concrete type.
+var errUnknownAddressRowType = errors.New("unknown address row type")
 
 // GetAddress retrieves information about a specific address, identified by
 // its script pubkey.
@@ -171,14 +176,39 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 		sqlc.GetAccountByWalletScopeAndNameRow,
 		db.AccountLookupKey,
 		sqlc.CreateDerivedAddressRow]{
-		GetAccount:           getAccountFromKey(s.queries),
-		AccountParams:        db.AccountKeyFromParams,
-		GetAccountID:         derivedAddressGetAccountID,
-		GetAccountNumber:     derivedAddressGetAccountNumber,
-		GetAccountIsDerived:  derivedAddressGetAccountIsDerived,
-		GetWalletWatchOnly:   derivedAddressGetWalletWatchOnly,
-		GetAccountAddrSchema: derivedAddressGetAccountAddrSchema,
-		GetAccountPubKey:     derivedAddressGetAccountPubKey,
+		GetAccount:    getAccountFromKey,
+		AccountParams: db.AccountKeyFromParams,
+		GetAccountID: func(row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
+			return row.ID
+		},
+		GetAccountNumber: func(row sqlc.GetAccountByWalletScopeAndNameRow) (
+			uint32, error) {
+
+			return db.DerivedAddressAccountNumber(row.AccountNumber)
+		},
+		GetAccountIsDerived: func(
+			row sqlc.GetAccountByWalletScopeAndNameRow) bool {
+
+			return row.IsDerived
+		},
+		GetWalletWatchOnly: func(
+			row sqlc.GetAccountByWalletScopeAndNameRow) bool {
+
+			return row.WalletIsWatchOnly
+		},
+		GetAccountAddrSchema: func(
+			row sqlc.GetAccountByWalletScopeAndNameRow) (
+			db.ScopeAddrSchema, error) {
+
+			return db.DerivedAddressAccountSchema(
+				row.InternalTypeID, row.ExternalTypeID,
+			)
+		},
+		GetAccountPubKey: func(
+			row sqlc.GetAccountByWalletScopeAndNameRow) []byte {
+
+			return row.PublicKey
+		},
 		GetExtIndex:          derivedAddressGetExtIndex,
 		GetIntIndex:          derivedAddressGetIntIndex,
 		CreateAddr:           derivedAddressCreateAddr,
@@ -272,6 +302,7 @@ func (s *Store) createImportedAddress(ctx context.Context, qtx *sqlc.Queries,
 		PubKey:       params.PubKey,
 		HasScript:    params.HasScript(),
 		IsWatchOnly:  walletIsWatchOnly,
+		IsUsed:       false,
 	}, nil
 }
 
@@ -315,34 +346,36 @@ func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
 
 	return func(ctx context.Context, walletID int64, accountID int64,
 		addrType db.AddressType, branch uint32, index uint32,
-		scriptPubKey []byte,
-		pubKey []byte) (sqlc.CreateDerivedAddressRow, error) {
+		scriptPubKey []byte, pubKey []byte) (sqlc.CreateDerivedAddressRow,
+		error) {
 
-		params, err := buildDerivedAddressParams(
-			walletID, accountID, addrType, branch, index, scriptPubKey,
-			pubKey,
+		row, err := qtx.CreateDerivedAddress(
+			ctx, buildDerivedAddressParams(
+				walletID, accountID, addrType, scriptPubKey, pubKey,
+			),
 		)
 		if err != nil {
 			return sqlc.CreateDerivedAddressRow{}, err
 		}
 
-		row, err := qtx.CreateDerivedAddress(ctx, params)
+		branchNum, err := db.Uint32ToInt16(branch)
 		if err != nil {
-			return sqlc.CreateDerivedAddressRow{}, err
+			return sqlc.CreateDerivedAddressRow{},
+				fmt.Errorf("address branch: %w", err)
 		}
 
 		err = qtx.CreateDerivedAddressPath(
 			ctx, sqlc.CreateDerivedAddressPathParams{
-				AccountID:     accountID,
-				AddressBranch: params.AddressBranch.Int16,
-				AddressIndex:  params.AddressIndex.Int64,
 				AddressID:     row.ID,
-				WalletID:      walletID,
+				AccountID:     accountID,
+				AddressBranch: branchNum,
+				AddressIndex:  int64(index),
 			},
 		)
 		if err != nil {
-			return sqlc.CreateDerivedAddressRow{},
-				fmt.Errorf("create derived address path: %w", err)
+			return sqlc.CreateDerivedAddressRow{}, fmt.Errorf(
+				"create derived address path: %w", err,
+			)
 		}
 
 		return row, nil
@@ -352,34 +385,16 @@ func derivedAddressCreateAddr(qtx *sqlc.Queries) func(
 // buildDerivedAddressParams maps common derived-address inputs to PostgreSQL
 // sqlc insert params.
 func buildDerivedAddressParams(walletID int64, accountID int64,
-	addrType db.AddressType, branch uint32, index uint32,
-	scriptPubKey []byte,
-	pubKey []byte) (sqlc.CreateDerivedAddressParams, error) {
-
-	branchNum, err := db.Uint32ToInt16(branch)
-	if err != nil {
-		return sqlc.CreateDerivedAddressParams{},
-			fmt.Errorf("address branch: %w", err)
-	}
+	addrType db.AddressType, scriptPubKey []byte,
+	pubKey []byte) sqlc.CreateDerivedAddressParams {
 
 	return sqlc.CreateDerivedAddressParams{
-		WalletID: walletID,
-		AccountID: sql.NullInt64{
-			Int64: accountID,
-			Valid: true,
-		},
+		WalletID:     walletID,
+		AccountID:    accountID,
 		ScriptPubKey: scriptPubKey,
-		TypeID:       int16(addrType),
-		AddressBranch: sql.NullInt16{
-			Int16: branchNum,
-			Valid: true,
-		},
-		AddressIndex: sql.NullInt64{
-			Int64: int64(index),
-			Valid: true,
-		},
-		PubKey: pubKey,
-	}, nil
+		ScriptTypeID: int16(addrType),
+		PubKey:       pubKey,
+	}
 }
 
 // derivedAddressRowID returns the created address ID.
@@ -394,21 +409,6 @@ func derivedAddressRowCreatedAt(
 	return row.CreatedAt
 }
 
-// createImportedAddress returns the imported address insert helper.
-func createImportedAddress(qtx *sqlc.Queries) func(context.Context,
-	sqlc.CreateImportedAddressParams) (sqlc.CreateImportedAddressRow,
-	error) {
-
-	return qtx.CreateImportedAddress
-}
-
-// insertAddressSecret returns the secret insert helper.
-func insertAddressSecret(qtx *sqlc.Queries) func(context.Context,
-	sqlc.InsertAddressSecretParams) error {
-
-	return qtx.InsertAddressSecret
-}
-
 // createImportedAddressParams maps imported params to sqlc params.
 func createImportedAddressParams(
 	params db.NewImportedAddressParams) sqlc.CreateImportedAddressParams {
@@ -416,7 +416,7 @@ func createImportedAddressParams(
 	return sqlc.CreateImportedAddressParams{
 		WalletID:     int64(params.WalletID),
 		ScriptPubKey: params.ScriptPubKey,
-		TypeID:       int16(params.AddressType),
+		ScriptTypeID: int16(params.AddressType),
 		PubKey:       params.PubKey,
 	}
 }
@@ -434,18 +434,6 @@ func insertAddressSecretParams(addressID int64,
 			params.EncryptedScript,
 		),
 	}
-}
-
-// importedAddressRowID returns the created address ID.
-func importedAddressRowID(row sqlc.CreateImportedAddressRow) int64 {
-	return row.ID
-}
-
-// importedAddressRowCreatedAt returns the CreatedAt timestamp.
-func importedAddressRowCreatedAt(
-	row sqlc.CreateImportedAddressRow) time.Time {
-
-	return row.CreatedAt
 }
 
 // applyAddressAccountMetadata copies account metadata from the account lookup
@@ -487,100 +475,94 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 	switch base := any(row).(type) {
 	case sqlc.GetAddressByScriptPubKeyRow:
 		return addressFieldsToInfo(
-			base.ID, base.AccountID, base.AccountNumber,
-			base.AccountName, base.MasterFingerprint,
-			base.Purpose, base.CoinType, base.TypeID,
-			base.IsDerived, base.AccountIsDerived,
-			base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt,
-			nullableInt16(base.AddressBranch), base.AddressIndex,
-			base.ScriptPubKey, base.PubKey, base.IsUsed,
-		)
-
-	case sqlc.ListAddressesByAccountRow:
-		addressBranch := sql.NullInt64{
-			Int64: int64(base.AddressBranch),
-			Valid: true,
-		}
-		addressIndex := sql.NullInt64{
-			Int64: base.AddressIndex,
-			Valid: true,
-		}
-
-		return addressFieldsToInfo(
-			base.ID, base.AccountID, base.AccountNumber,
-			base.AccountName, base.MasterFingerprint,
-			base.Purpose, base.CoinType, base.TypeID,
-			base.IsDerived, base.AccountIsDerived,
-			base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt,
-			addressBranch, addressIndex, base.ScriptPubKey,
-			base.PubKey, base.IsUsed,
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	case sqlc.ListAddressesByScriptPubKeysRow:
 		return addressFieldsToInfo(
-			base.ID, base.AccountID, base.AccountNumber,
-			base.AccountName, base.MasterFingerprint,
-			base.Purpose, base.CoinType, base.TypeID,
-			base.IsDerived, base.AccountIsDerived,
-			base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt,
-			nullableInt16(base.AddressBranch), base.AddressIndex,
-			base.ScriptPubKey, base.PubKey, base.IsUsed,
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	case sqlc.ListRawImportedAddressesRow:
 		return addressFieldsToInfo(
-			base.ID, base.AccountID, base.AccountNumber,
-			base.AccountName, base.MasterFingerprint,
-			base.Purpose, base.CoinType, base.TypeID,
-			base.IsDerived, base.AccountIsDerived,
-			base.WalletIsWatchOnly,
-			base.HasScript, base.CreatedAt,
-			nullableInt16(base.AddressBranch), base.AddressIndex,
-			base.ScriptPubKey, base.PubKey, base.IsUsed,
+			base.ID, base.DerivedAddressID, base.AccountID,
+			base.AccountNumber, base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.ScriptTypeID,
+			base.AddressBranch, base.AddressIndex, base.IsDerived,
+			base.AccountIsDerived, base.ScriptPubKey,
+			base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
+		)
+
+	case sqlc.ListAddressesByAccountRow:
+		return addressFieldsToInfo(
+			base.ID,
+			sql.NullInt64{Int64: base.DerivedAddressID, Valid: true},
+			sql.NullInt64{Int64: base.AccountID, Valid: true},
+			base.AccountNumber,
+			sql.NullString{String: base.AccountName, Valid: true},
+			base.MasterFingerprint,
+			sql.NullInt64{Int64: base.Purpose, Valid: true},
+			sql.NullInt64{Int64: base.CoinType, Valid: true},
+			base.ScriptTypeID,
+			sql.NullInt16{Int16: base.AddressBranch, Valid: true},
+			sql.NullInt64{Int64: base.AddressIndex, Valid: true},
+			base.IsDerived,
+			sql.NullBool{Bool: base.AccountIsDerived, Valid: true},
+			base.ScriptPubKey, base.PubKey, base.CreatedAt,
+			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
 		)
 
 	default:
-		return nil, fmt.Errorf("unknown address row type: %T", row)
+		return nil, fmt.Errorf("%w: %T", errUnknownAddressRowType, row)
 	}
 }
 
-// nullableInt16 converts a nullable int16 to a nullable int64.
-func nullableInt16(value sql.NullInt16) sql.NullInt64 {
-	return sql.NullInt64{
-		Int64: int64(value.Int16),
-		Valid: value.Valid,
-	}
-}
+// addressFieldsToInfo converts common PostgreSQL address query fields to
+// AddressInfo.
+func addressFieldsToInfo(id int64, derivedAddressID sql.NullInt64,
+	accountID sql.NullInt64, accountNumber sql.NullInt64,
+	accountName sql.NullString, masterFingerprint sql.NullInt64,
+	purpose sql.NullInt64, coinType sql.NullInt64,
+	scriptTypeID int16, addressBranch sql.NullInt16,
+	addressIndex sql.NullInt64, isDerived bool,
+	accountIsDerived sql.NullBool, scriptPubKey []byte, pubKey []byte,
+	createdAt time.Time, walletIsWatchOnly bool,
+	hasScript bool, isUsed bool) (*db.AddressInfo, error) {
 
-// addressFieldsToInfo converts PostgreSQL address query fields into an
-// AddressInfo struct.
-func addressFieldsToInfo(id int64, accountID int64,
-	accountNumber sql.NullInt64, accountName string,
-	masterFingerprint sql.NullInt64, purpose int64, coinType int64,
-	typeID int16, isDerived bool, accountIsDerived bool,
-	walletIsWatchOnly bool, hasScript bool, createdAt time.Time,
-	addressBranch sql.NullInt64, addressIndex sql.NullInt64,
-	scriptPubKey []byte, pubKey []byte, isUsed bool) (*db.AddressInfo,
-	error) {
+	branch := sql.NullInt64{
+		Int64: int64(addressBranch.Int16),
+		Valid: addressBranch.Valid,
+	}
 
 	return db.AddressRowToInfo(db.AddressInfoRow[int16]{
 		ID:                id,
+		DerivedAddressID:  derivedAddressID,
 		AccountID:         accountID,
 		AccountNumber:     accountNumber,
 		AccountName:       accountName,
-		IsDerived:         isDerived,
-		AccountIsDerived:  accountIsDerived,
 		MasterFingerprint: masterFingerprint,
 		Purpose:           purpose,
 		CoinType:          coinType,
-		TypeID:            typeID,
+		TypeID:            scriptTypeID,
+		IsDerived:         isDerived,
+		AccountIsDerived:  accountIsDerived,
 		WalletIsWatchOnly: walletIsWatchOnly,
 		HasScript:         hasScript,
 		CreatedAt:         createdAt,
-		AddressBranch:     addressBranch,
+		AddressBranch:     branch,
 		AddressIndex:      addressIndex,
 		ScriptPubKey:      scriptPubKey,
 		PubKey:            pubKey,
