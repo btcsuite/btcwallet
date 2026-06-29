@@ -659,12 +659,14 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	keyScope, err := addrType.KeyScope()
+	req, err := addressPageRequest()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+		return nil, err
 	}
 
-	req, err := addressPageRequest()
+	query, storeAddrType, err := listAddressesQuery(
+		w.id, req, accountName, addrType,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -675,19 +677,17 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 	}
 
 	properties := make([]AddressProperty, 0)
-	scope := db.KeyScope(keyScope)
 
-	addresses := w.store.IterAddresses(
-		ctx, db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: &accountName,
-			Scope:       &scope,
-			Page:        req,
-		},
-	)
+	addresses := w.store.IterAddresses(ctx, query)
 	for storeAddr, err := range addresses {
 		if err != nil {
 			return nil, err
+		}
+
+		if accountName == db.DefaultImportedAccountName &&
+			!walletAddressTypeMatches(storeAddr, storeAddrType) {
+
+			continue
 		}
 
 		addr := extractAddrFromPKScript(
@@ -704,6 +704,52 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 	}
 
 	return properties, nil
+}
+
+// walletAddressTypeMatches reports whether a store address row matches a
+// wallet-facing address type selector.
+func walletAddressTypeMatches(info db.AddressInfo,
+	addrType addresstype.StoreType) bool {
+
+	return info.AddrType == addrType.Type &&
+		info.HasScript == addrType.HasScript
+}
+
+// listAddressesQuery builds the store query for a wallet-facing account name.
+// The reserved imported alias has no account row in the SQL store, so it uses a
+// wallet-wide query and returns the address type needed for local filtering.
+func listAddressesQuery(walletID uint32, req page.Request[uint32],
+	accountName string, addrType waddrmgr.AddressType) (
+	db.ListAddressesQuery, addresstype.StoreType, error) {
+
+	query := db.ListAddressesQuery{
+		WalletID: walletID,
+		Page:     req,
+	}
+
+	if accountName == db.DefaultImportedAccountName {
+		storeAddrType, err := addresstype.FromWallet(addrType)
+		if err != nil {
+			return query, addresstype.StoreType{}, fmt.Errorf(
+				"%w: %v", ErrUnknownAddrType, addrType,
+			)
+		}
+
+		return query, storeAddrType, nil
+	}
+
+	keyScope, err := addrType.KeyScope()
+	if err != nil {
+		return query, addresstype.StoreType{}, fmt.Errorf(
+			"%w: %v", ErrUnknownAddrType, addrType,
+		)
+	}
+
+	scope := db.KeyScope(keyScope)
+	query.AccountName = &accountName
+	query.Scope = &scope
+
+	return query, addresstype.StoreType{}, nil
 }
 
 // ImportPublicKey imports a single public key as a watch-only address.

@@ -699,6 +699,69 @@ func TestListAddresses(t *testing.T) {
 	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
 }
 
+// TestListAddressesImportedAlias tests that raw imported addresses are listed
+// through the public imported alias without a scoped account selector.
+func TestListAddressesImportedAlias(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	witnessAddr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	scriptAddr, err := address.NewAddressWitnessScriptHash(
+		make([]byte, 32), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	witnessScript, err := txscript.PayToAddrScript(witnessAddr)
+	require.NoError(t, err)
+
+	scriptScript, err := txscript.PayToAddrScript(scriptAddr)
+	require.NoError(t, err)
+
+	req, err := addressPageRequest()
+	require.NoError(t, err)
+
+	deps.store.On(
+		"ListUTXOs", mock.Anything, db.ListUtxosQuery{
+			WalletID: w.id,
+		},
+	).Return([]db.UtxoInfo{{
+		Amount:   1000,
+		PkScript: witnessScript,
+	}, {
+		Amount:   2000,
+		PkScript: scriptScript,
+	}}, nil).Once()
+
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID: w.id,
+			Page:     req,
+		},
+	).Return(addressIter(db.AddressInfo{
+		ScriptPubKey: witnessScript,
+		AddrType:     db.WitnessPubKey,
+	}, db.AddressInfo{
+		ScriptPubKey: scriptScript,
+		AddrType:     db.WitnessScript,
+		HasScript:    true,
+	})).Once()
+
+	addrs, err := w.ListAddresses(
+		t.Context(), db.DefaultImportedAccountName,
+		waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, witnessAddr.String(), addrs[0].Address.String())
+	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
+}
+
 // TestImportPublicKey tests the ImportPublicKey method to ensure it can
 // import a public key as a watch-only address.
 func TestImportPublicKey(t *testing.T) {
