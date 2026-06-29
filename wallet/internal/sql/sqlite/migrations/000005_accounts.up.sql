@@ -54,6 +54,11 @@ CREATE TABLE accounts (
     -- Reference to the origin of the account.
     origin_id INTEGER NOT NULL,
 
+    -- Shape marker for the normalized identity model. During the compatibility
+    -- phase legacy origin_id remains available to old queries while new queries
+    -- switch to this structural flag.
+    is_derived BOOLEAN NOT NULL DEFAULT TRUE,
+
     -- Master fingerprint is the fingerprint of the master pub key that created
     -- this account.
     master_fingerprint INTEGER,
@@ -101,6 +106,13 @@ CREATE INDEX idx_accounts_scope ON accounts (scope_id);
 
 -- Unique index to support composite foreign keys from addresses.
 CREATE UNIQUE INDEX uidx_accounts_wallet_id_id ON accounts (wallet_id, id);
+
+-- Unique indexes to support normalized child-table foreign keys.
+CREATE UNIQUE INDEX uidx_accounts_id_wallet
+ON accounts (id, wallet_id);
+
+CREATE UNIQUE INDEX uidx_accounts_id_scope
+ON accounts (id, scope_id);
 
 -- Unique partial index to prevent duplicate account numbers within the same
 -- key scope. Only enforced for non-NULL account numbers (derived accounts).
