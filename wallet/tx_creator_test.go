@@ -628,9 +628,8 @@ func TestCreateChangeSourceRedirectsDefaultImported(t *testing.T) {
 						AccountNumber: &defaultAccountNum,
 					},
 				).Return(&db.AccountInfo{
-					AccountNumber: waddrmgr.DefaultAccountNum,
+					AccountNumber: &defaultAccountNum,
 					AccountName:   tc.derivedName,
-					Origin:        db.DerivedAccount,
 				}, nil).Once()
 			}
 
@@ -921,6 +920,8 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 		&waddrmgr.BlockStamp{Height: 100}, nil,
 	).Once()
 
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+
 	// The default account must be resolved by number 0, never by the
 	// literal "default" name.
 	mocks.store.On("GetAccount", mock.Anything,
@@ -930,9 +931,8 @@ func TestGetEligibleUTXOsNilSourceResolvesDefaultAccount(t *testing.T) {
 				*q.AccountNumber == waddrmgr.DefaultAccountNum
 		}),
 	).Return(&db.AccountInfo{
-		AccountNumber: waddrmgr.DefaultAccountNum,
+		AccountNumber: &defaultAccountNum,
 		AccountName:   renamedName,
-		Origin:        db.DerivedAccount,
 	}, nil).Once()
 
 	// UTXOs must be listed under the resolved (renamed) account name.

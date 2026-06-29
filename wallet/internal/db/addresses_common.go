@@ -355,7 +355,12 @@ func convertAddressAccountMetadata[TypeID, OriginIDType any](
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
-		return row.AccountProps.AccountNumber, row.AccountProps.AccountName,
+		var accountNumber uint32
+		if row.AccountProps.AccountNumber != nil {
+			accountNumber = *row.AccountProps.AccountNumber
+		}
+
+		return accountNumber, row.AccountProps.AccountName,
 			row.AccountProps.MasterKeyFingerprint,
 			row.AccountProps.KeyScope, nil
 	}

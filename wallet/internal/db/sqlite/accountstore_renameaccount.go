@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
@@ -30,11 +31,14 @@ func (s accountRenameOps) RenameByNumber(ctx context.Context,
 
 	return s.q.UpdateAccountNameByWalletScopeAndNumber(ctx,
 		sqlc.UpdateAccountNameByWalletScopeAndNumberParams{
-			NewName:       params.NewName,
-			WalletID:      int64(params.WalletID),
-			Purpose:       int64(params.Scope.Purpose),
-			CoinType:      int64(params.Scope.Coin),
-			AccountNumber: db.NullableUint32ToSQLInt64(params.AccountNumber),
+			NewName:  params.NewName,
+			WalletID: int64(params.WalletID),
+			Purpose:  int64(params.Scope.Purpose),
+			CoinType: int64(params.Scope.Coin),
+			AccountNumber: sql.NullInt64{
+				Int64: int64(*params.AccountNumber),
+				Valid: true,
+			},
 		},
 	)
 }
