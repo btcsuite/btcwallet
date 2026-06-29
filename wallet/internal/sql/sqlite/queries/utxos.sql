@@ -87,10 +87,10 @@ SELECT
     da.account_id,
     acc.is_derived AS account_is_derived,
     acc.account_number,
-    acc.account_name, -- owning account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    acc.account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -137,8 +137,8 @@ WHERE
 --   wallet-owned UTXO existence rather than a strictly spendable subset.
 -- Performance:
 -- - Restricts first by wallet, spend state, and transaction status.
--- - Uses the address and optional account/scope joins to keep ownership
---   validation and account filtering in one pass.
+-- - Uses the address/account/scope joins to keep ownership validation and
+--   account filtering in one pass.
 -- - Treats min/max confirmations as optional filters so callers can
 --   distinguish "not set" from an explicit zero-conf request.
 SELECT
@@ -155,10 +155,10 @@ SELECT
     da.account_id,
     acc.is_derived AS account_is_derived,
     acc.account_number,
-    acc.account_name, -- owning account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    acc.account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -251,8 +251,8 @@ ORDER BY u.amount, t.tx_hash, u.output_index;
 --   transaction is still `pending` or `published`.
 -- - Uses a filtered aggregate over active leases rather than issuing a second
 --   query for the locked subset.
--- - Uses the address and optional account/scope joins to keep ownership
---   validation and account filtering in one pass.
+-- - Uses the address/account/scope joins to keep ownership validation and
+--   account filtering in one pass.
 SELECT
     cast(coalesce(sum(u.amount), 0) AS INTEGER) AS total_balance,
     cast(

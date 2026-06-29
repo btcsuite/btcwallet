@@ -13,9 +13,9 @@ type Account struct {
 	ID                int64
 	WalletID          int64
 	ScopeID           int64
-	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	AccountNumber     sql.NullInt64
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
 	CreatedAt         time.Time
@@ -29,16 +29,13 @@ type AccountSecret struct {
 }
 
 type Address struct {
-	ID            int64
-	WalletID      int64
-	AccountID     sql.NullInt64
-	IsDerived     bool
-	ScriptPubKey  []byte
-	TypeID        int64
-	AddressBranch sql.NullInt64
-	AddressIndex  sql.NullInt64
-	PubKey        []byte
-	CreatedAt     time.Time
+	ID           int64
+	WalletID     int64
+	IsDerived    bool
+	ScriptPubKey []byte
+	ScriptTypeID int64
+	PubKey       []byte
+	CreatedAt    time.Time
 }
 
 type AddressSecret struct {

@@ -11,17 +11,12 @@ import (
 )
 
 type Querier interface {
-	// AccountBalance returns the confirmed/unconfirmed balance for one
-	// account, summed from the wallet's UTXO set at read time. Confirmed
-	// means the funding tx is in a block at or below the wallet's synced
-	// height; unconfirmed covers unmined and above-synced-tip outputs.
-	// Spent outputs (`u.spent_by_tx_id IS NOT NULL`) are excluded.
+	// AccountBalance returns the confirmed/unconfirmed balance for one account,
+	// summed from the wallet's well-formed derived-address UTXO set at read time.
 	AccountBalance(ctx context.Context, arg AccountBalanceParams) (AccountBalanceRow, error)
 	// AccountBalancesByIDs returns the confirmed/unconfirmed balance for each
-	// account in account_ids that has funded UTXOs, grouped by account_id. Accounts with no
-	// spendable outputs do not appear in the result; the Go caller defaults
-	// missing entries to zero. The confirmation predicate matches
-	// AccountBalance.
+	// account in account_ids that has well-formed funded UTXOs, grouped by
+	// account_id.
 	AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error)
 	// Acquires or renews a lease for an outpoint and returns the resulting
 	// expiration time.
@@ -64,8 +59,8 @@ type Querier interface {
 	//   transaction is still `pending` or `published`.
 	// - Uses a filtered aggregate over active leases rather than issuing a second
 	//   query for the locked subset.
-	// - Uses the address and optional account/scope joins to keep ownership
-	//   validation and account filtering in one pass.
+	// - Uses the address/account/scope joins to keep ownership validation and
+	//   account filtering in one pass.
 	Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error)
 	// Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
 	//
@@ -78,32 +73,18 @@ type Querier interface {
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
-	// Creates a new derived account under the given scope using a separately
-	// allocated account number.
+	// Creates the parent row for a wallet-derived account under the given scope.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
-	// Test-only: Creates a derived account with a specific account number.
-	// Used for testing account number overflow without creating billions of accounts.
-	CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error)
-	// Creates a derived address with the given index and derived data.
-	// The index is allocated separately via GetAndIncrementNextExternalIndex
-	// or GetAndIncrementNextInternalIndex.
+	// Creates the parent address row for an HD-derived address. The caller inserts
+	// the path and account ownership into derived_addresses in the same transaction.
 	CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error)
-	// Stores normalized account ownership and BIP44 path data for an HD-derived
-	// address while legacy address columns remain populated during migration.
+	// Stores account ownership and BIP44 path data for an HD-derived address.
 	CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error
-	// Creates a new imported account under the given scope with NULL account
-	// number. Imported accounts don't follow BIP44 derivation, so they don't need
-	// a sequential account number.
+	// Creates a new imported xpub account under the given scope. Imported xpub
+	// accounts are HD account-like rows but do not have BIP44 account numbers.
 	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
-	// Creates an imported address (no derivation path, has script/pubkey).
+	// Creates a raw imported address with no account or derivation path.
 	CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error)
-	// Materializes the keyless wallet-level imported "bucket" account for a scope.
-	// The bucket holds individually-imported addresses and carries no
-	// account-level key material. ON CONFLICT DO NOTHING makes the insert an
-	// idempotent get-or-create: concurrent first-imports into the same scope each
-	// attempt this insert, one wins and the rest are no-ops, so callers re-read the
-	// bucket instead of colliding on the (scope_id, account_name) unique index.
-	CreateImportedBucketAccount(ctx context.Context, arg CreateImportedBucketAccountParams) error
 	// Creates a new key scope for a wallet and returns its ID.
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
@@ -152,11 +133,11 @@ type Querier interface {
 	DeleteUtxosByTxID(ctx context.Context, arg DeleteUtxosByTxIDParams) (int64, error)
 	// Returns a single account by scope id and account name.
 	GetAccountByScopeAndName(ctx context.Context, arg GetAccountByScopeAndNameParams) (GetAccountByScopeAndNameRow, error)
-	// Returns a single account by scope id and account number.
+	// Returns a single derived account by scope id and account number.
 	GetAccountByScopeAndNumber(ctx context.Context, arg GetAccountByScopeAndNumberParams) (GetAccountByScopeAndNumberRow, error)
 	// Returns a single account by wallet id, scope tuple, and account name.
 	GetAccountByWalletScopeAndName(ctx context.Context, arg GetAccountByWalletScopeAndNameParams) (GetAccountByWalletScopeAndNameRow, error)
-	// Returns a single account by wallet id, scope tuple, and account number.
+	// Returns a single derived account by wallet id, scope tuple, and account number.
 	GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error)
 	// Returns full account properties by account id.
 	GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error)
@@ -168,7 +149,7 @@ type Querier interface {
 	// Performance:
 	// - Targets at most one row through the unique lease key.
 	GetActiveUtxoLeaseLockID(ctx context.Context, arg GetActiveUtxoLeaseLockIDParams) ([]byte, error)
-	// Retrieves an address by its script pubkey and account wallet.
+	// Retrieves an address by its script pubkey and wallet.
 	GetAddressByScriptPubKey(ctx context.Context, arg GetAddressByScriptPubKeyParams) (GetAddressByScriptPubKeyRow, error)
 	// Retrieves secret information for an address. Uses LEFT JOIN to distinguish:
 	// - Address exists with secret: returns full row
@@ -324,17 +305,13 @@ type Querier interface {
 	InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error)
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
-	// Lists all accounts in a scope, ordered by account number. Imported accounts
-	// (with NULL account_number) appear last.
+	// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 	ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error)
-	// Lists all accounts for a wallet, ordered by account number. Imported
-	// accounts (with NULL account_number) appear last.
+	// Lists all accounts for a wallet.
 	ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error)
-	// Lists all accounts for a wallet filtered by account name, ordered by account
-	// number. Imported accounts (with NULL account_number) appear last.
+	// Lists all accounts for a wallet filtered by account name.
 	ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error)
-	// Lists all accounts for a wallet and scope tuple, ordered by account number.
-	// Imported accounts (with NULL account_number) appear last.
+	// Lists all accounts for a wallet and scope tuple.
 	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
 	// Lists all currently active leases for a wallet.
 	//
@@ -350,10 +327,8 @@ type Querier interface {
 	ListActiveUtxoLeases(ctx context.Context, arg ListActiveUtxoLeasesParams) ([]ListActiveUtxoLeasesRow, error)
 	// Returns all address types ordered by ID.
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
-	// Lists addresses for an account identified by wallet_id, key scope
+	// Lists HD-derived addresses for an account identified by wallet_id, key scope
 	// (purpose/coin_type), and account name, ordered by address ID.
-	// When cursor_id is provided, only rows strictly after that address ID are
-	// returned. Returns up to page_limit rows.
 	ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error)
 	// Resolves a batch of script pubkeys to the wallet-owned address rows in a
 	// single query. Returns one row per matching script; scripts with no matching
@@ -505,8 +480,8 @@ type Querier interface {
 	//   wallet-owned UTXO existence rather than a strictly spendable subset.
 	// Performance:
 	// - Restricts first by wallet, spend state, and transaction status.
-	// - Uses the address and optional account/scope joins to keep ownership
-	//   validation and account filtering in one pass.
+	// - Uses the address/account/scope joins to keep ownership validation and
+	//   account filtering in one pass.
 	// - Treats min/max confirmations as optional filters so callers can
 	//   distinguish "not set" from an explicit zero-conf request.
 	ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error)
@@ -551,9 +526,9 @@ type Querier interface {
 	// - Touches only wallet_sync_states rows whose heights are at or above the
 	//   rollback boundary.
 	RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int64) (int64, error)
-	// Renames an account identified by wallet id, scope tuple, and current account name.
+	// Renames an account identified by wallet id, scope tuple, and current name.
 	UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error)
-	// Renames an account identified by wallet id, scope tuple, and account number.
+	// Renames a derived account identified by wallet id, scope tuple, and number.
 	UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error)
 	// Updates only the user-visible transaction label.
 	//
