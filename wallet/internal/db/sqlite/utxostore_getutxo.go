@@ -38,11 +38,6 @@ func (s *Store) GetUtxo(ctx context.Context,
 			return fmt.Errorf("get utxo: %w", err)
 		}
 
-		origin, err := db.IDToAccountOrigin[int64](row.OriginID)
-		if err != nil {
-			return fmt.Errorf("origin: %w", err)
-		}
-
 		addrType, err := db.IDToAddressType(row.TypeID)
 		if err != nil {
 			return fmt.Errorf("addr type: %w", err)
@@ -83,7 +78,6 @@ func (s *Store) GetUtxo(ctx context.Context,
 			utxo.AccountName = row.AccountName.String
 		}
 
-		utxo.Origin = origin
 		utxo.AddrType = addrType
 		utxo.HasScript = row.HasScript
 		utxo.IsLocked = row.IsLocked != 0

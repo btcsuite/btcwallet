@@ -59,25 +59,24 @@ func TestResolveAddressAccountNumberShape(t *testing.T) {
 func TestAddressRowToInfoImportedXpubPath(t *testing.T) {
 	t.Parallel()
 
-	info, err := AddressRowToInfo(AddressInfoRow[int64, int64]{
-		ID:            1,
-		AccountID:     2,
-		AccountName:   "hardware",
-		IsDerived:     true,
-		TypeID:        int64(WitnessPubKey),
-		OriginID:      int64(ImportedAccount),
-		ScriptPubKey:  []byte{0x51},
-		CreatedAt:     time.Unix(1710006000, 0),
-		AddressBranch: sqlNullInt64(1),
-		AddressIndex:  sqlNullInt64(7),
-		Purpose:       int64(KeyScopeBIP0084.Purpose),
-		CoinType:      int64(KeyScopeBIP0084.Coin),
+	info, err := AddressRowToInfo(AddressInfoRow[int64]{
+		ID:               1,
+		AccountID:        2,
+		AccountName:      "hardware",
+		IsDerived:        true,
+		AccountIsDerived: false,
+		TypeID:           int64(WitnessPubKey),
+		ScriptPubKey:     []byte{0x51},
+		CreatedAt:        time.Unix(1710006000, 0),
+		AddressBranch:    sqlNullInt64(1),
+		AddressIndex:     sqlNullInt64(7),
+		Purpose:          int64(KeyScopeBIP0084.Purpose),
+		CoinType:         int64(KeyScopeBIP0084.Coin),
 		MasterFingerprint: sql.NullInt64{
 			Int64: 1,
 			Valid: true,
 		},
 		IDToAddrType: IDToAddressType[int64],
-		IDToOrigin:   IDToOrigin[int64],
 	})
 	require.NoError(t, err)
 	require.True(t, info.IsImported)

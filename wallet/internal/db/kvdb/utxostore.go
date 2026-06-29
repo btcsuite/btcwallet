@@ -763,16 +763,11 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 		return nil, fmt.Errorf("account properties: %w", err)
 	}
 
-	imported, err := binding.acctStore.IsImportedAccount(
+	_, err = binding.acctStore.IsImportedAccount(
 		addrmgrNs, binding.acctNum,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("classify account origin: %w", err)
-	}
-
-	origin := db.DerivedAccount
-	if imported {
-		origin = db.ImportedAccount
 	}
 
 	managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
@@ -786,7 +781,6 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	}
 
 	info.AccountName = props.AccountName
-	info.Origin = origin
 	info.AddrType = storeType.Type
 	info.HasScript = storeType.HasScript
 	info.KeyScope = binding.scope
@@ -814,9 +808,8 @@ func (s *Store) enrichCredit(addrmgrNs walletdb.ReadBucket,
 	return info, nil
 }
 
-// listUTXOsInView performs the legacy UTXO scan using one walletdb view
-// and populates the enriched per-row metadata (AccountName, Origin,
-// AddrType, HasScript, IsLocked, Spendable).
+// listUTXOsInView performs the legacy UTXO scan using one walletdb view and
+// populates the enriched per-row metadata.
 func (s *Store) listUTXOsInView(tx walletdb.ReadTx,
 	query db.ListUtxosQuery, utxos *[]db.UtxoInfo) error {
 
@@ -970,13 +963,11 @@ func accountMatchesQuery(addrmgrNs walletdb.ReadBucket,
 	), nil
 }
 
-// accountIsImported reports whether the owning account is imported,
-// using the same on-disk classifier (AccountStore.IsImportedAccount)
-// that the enrichment path uses for db.UtxoInfo.Origin. This keeps the
-// numeric Account filter aligned with the SQL backends, where imported
-// accounts have a NULL account_number and so are never numerically
-// selectable, including imported xpub/watch-only accounts that carry
-// ordinary kvdb account numbers.
+// accountIsImported reports whether the owning account is imported. This keeps
+// the numeric Account filter aligned with the SQL backends, where imported
+// accounts have a NULL account_number and so are never numerically selectable,
+// including imported xpub/watch-only accounts that carry ordinary kvdb account
+// numbers.
 //
 // A nil acctStore only occurs for narrow test doubles that pre-date the
 // enrichment contract; production AddrStore always resolves a non-nil

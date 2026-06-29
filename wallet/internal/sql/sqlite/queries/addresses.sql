@@ -31,15 +31,12 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(acc.is_derived, FALSE) AS account_is_derived,
     coalesce(da.address_id, 0) AS derived_address_id,
     coalesce(da.account_id, 0) AS account_id,
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -73,15 +70,12 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(acc.is_derived, FALSE) AS account_is_derived,
     coalesce(da.address_id, 0) AS derived_address_id,
     coalesce(da.account_id, 0) AS account_id,
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
 INNER JOIN wallets AS w ON a.wallet_id = w.id
@@ -171,6 +165,7 @@ SELECT
     da.address_branch,
     da.address_index,
     a.is_derived,
+    acc.is_derived AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -188,10 +183,6 @@ SELECT
     coalesce(acc.account_name, '') AS account_name,
     coalesce(ks.purpose, 0) AS purpose,
     coalesce(ks.coin_type, 0) AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM derived_addresses AS da
 INNER JOIN addresses AS a ON da.address_id = a.id
@@ -224,6 +215,7 @@ SELECT
     NULL AS address_branch,
     NULL AS address_index,
     a.is_derived,
+    cast(FALSE AS BOOLEAN) AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -234,7 +226,6 @@ SELECT
     '' AS account_name,
     0 AS purpose,
     0 AS coin_type,
-    1 AS origin_id,
     cast(
         EXISTS (
             SELECT 1

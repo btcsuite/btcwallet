@@ -365,7 +365,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -392,7 +392,7 @@ type GetAccountByScopeAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -414,7 +414,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -435,7 +435,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -462,7 +462,7 @@ type GetAccountByScopeAndNumberRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -484,7 +484,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -505,7 +505,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -538,7 +538,7 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -565,7 +565,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -586,7 +586,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -619,7 +619,7 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -646,7 +646,7 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -666,7 +666,7 @@ const GetAccountPropsById = `-- name: GetAccountPropsById :one
 SELECT
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -687,7 +687,7 @@ WHERE a.id = ?
 type GetAccountPropsByIdRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	CreatedAt         time.Time
@@ -708,7 +708,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 	err := row.Scan(
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.CreatedAt,
@@ -761,7 +761,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -784,7 +784,7 @@ type ListAccountsByScopeRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -813,7 +813,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -844,7 +844,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -867,7 +867,7 @@ type ListAccountsByWalletRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -896,7 +896,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -927,7 +927,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -955,7 +955,7 @@ type ListAccountsByWalletAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -984,7 +984,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -1015,7 +1015,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -1047,7 +1047,7 @@ type ListAccountsByWalletScopeRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -1076,7 +1076,7 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,

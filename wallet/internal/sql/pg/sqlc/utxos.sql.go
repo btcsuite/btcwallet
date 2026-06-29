@@ -251,7 +251,6 @@ SELECT
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
-    coalesce(acc.origin_id, 1)::SMALLINT AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -305,7 +304,6 @@ type GetUtxoByOutpointRow struct {
 	TypeID           int16
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
-	OriginID         int16
 	HasScript        bool
 	IsLocked         bool
 }
@@ -350,7 +348,6 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.TypeID,
 		&i.Purpose,
 		&i.CoinType,
-		&i.OriginID,
 		&i.HasScript,
 		&i.IsLocked,
 	)
@@ -601,7 +598,6 @@ SELECT
     a.type_id, -- address type, used for coin selection
     ks.purpose, -- BIP-43 key scope purpose
     ks.coin_type, -- BIP-43 key scope coin type
-    coalesce(acc.origin_id, 1)::SMALLINT AS origin_id, -- derived vs imported account
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -701,7 +697,6 @@ type ListUtxosRow struct {
 	TypeID           int16
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
-	OriginID         int16
 	HasScript        bool
 	IsLocked         bool
 }
@@ -761,7 +756,6 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.TypeID,
 			&i.Purpose,
 			&i.CoinType,
-			&i.OriginID,
 			&i.HasScript,
 			&i.IsLocked,
 		); err != nil {

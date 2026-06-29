@@ -909,6 +909,16 @@ func insertSpendChain(t *testing.T, dbConn walletdb.DB,
 func newMultisigScript(t *testing.T) (address.Address, []byte) {
 	t.Helper()
 
+	members, script := newMultisigScriptMembers(t)
+
+	return members[0], script
+}
+
+// newMultisigScriptMembers builds a 1-of-2 bare-multisig output script and
+// returns both member pubkey addresses along with the script.
+func newMultisigScriptMembers(t *testing.T) ([]address.Address, []byte) {
+	t.Helper()
+
 	firstKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
@@ -917,6 +927,11 @@ func newMultisigScript(t *testing.T) (address.Address, []byte) {
 
 	memberAddr, err := address.NewAddressPubKey(
 		firstKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+	secondAddr, err := address.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(),
 		&chaincfg.RegressionNetParams,
 	)
 	require.NoError(t, err)
@@ -931,5 +946,12 @@ func newMultisigScript(t *testing.T) (address.Address, []byte) {
 	script, err := builder.Script()
 	require.NoError(t, err)
 
-	return memberAddr, script
+	return []address.Address{memberAddr, secondAddr}, script
+}
+
+// matchAddress returns a matcher for an address with the same encoded form.
+func matchAddress(addr address.Address) interface{} {
+	return mock.MatchedBy(func(got address.Address) bool {
+		return got.EncodeAddress() == addr.EncodeAddress()
+	})
 }
