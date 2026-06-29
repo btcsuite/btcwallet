@@ -253,11 +253,9 @@ SELECT
 FROM transactions AS t
 INNER JOIN utxos AS u ON t.id = u.tx_id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 WHERE
     t.wallet_id = ?1
-    AND ks.wallet_id = ?1
+    AND a.wallet_id = ?1
     AND t.tx_hash IN (/*SLICE:tx_hashes*/?)
 ORDER BY t.tx_hash, u.output_index
 `
@@ -278,8 +276,8 @@ type ListOwnedInputPrevOutputsByTxHashesRow struct {
 //
 // How:
 //   - Resolves previous transaction hashes to this wallet's tracked UTXO rows.
-//   - Rejoins addresses -> accounts -> key_scopes so debit reconstruction does
-//     not depend only on transaction wallet scope.
+//   - Rejoins addresses so debit reconstruction does not depend only on
+//     transaction wallet scope.
 //   - Does not read `spent_by_tx_id` because invalidation and rollback can clear
 //     that mutable edge while the historical spending transaction still exists.
 //
@@ -328,11 +326,9 @@ SELECT
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
 INNER JOIN addresses AS a ON u.address_id = a.id
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 WHERE
     t.wallet_id = ?1
-    AND ks.wallet_id = ?1
+    AND a.wallet_id = ?1
     AND u.tx_id IN (/*SLICE:tx_ids*/?)
 ORDER BY u.tx_id, u.output_index
 `

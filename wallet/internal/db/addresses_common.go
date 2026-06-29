@@ -38,6 +38,10 @@ var (
 	// success but does not return any derived address data.
 	errNilDerivedAddressData = errors.New("derived address data is nil")
 
+	// errAddressShapeCorruption is returned when an address parent row and its
+	// subtype rows violate the normalized address identity invariant.
+	errAddressShapeCorruption = errors.New("address subtype invariant violated")
+
 	// errInvalidOriginID is returned when an origin ID from the database is
 	// outside the valid range [DerivedAccount, ImportedAccount]. In practice,
 	// this should never happen, but it's possible if the database is modified
