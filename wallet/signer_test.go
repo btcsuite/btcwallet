@@ -1298,9 +1298,11 @@ func TestComputeUnlockingScriptUnknownAddrType(t *testing.T) {
 		WalletID:     w.id,
 		ScriptPubKey: pkScript99,
 	}).Return(&db.AddressInfo{
-		ScriptPubKey: pkScript99,
-		AddrType:     db.AddressType(99),
-		Origin:       db.DerivedAccount,
+		ScriptPubKey:      pkScript99,
+		AddrType:          db.AddressType(99),
+		Origin:            db.DerivedAccount,
+		IsImported:        false,
+		HasDerivationPath: true,
 	}, nil).Once()
 
 	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, 10000)
