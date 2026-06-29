@@ -51,9 +51,8 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 	params := testCreateImportedAccountParams()
 	createdAt := time.Unix(123, 0)
 	expectedInfo := &AccountInfo{
-		AccountNumber:        0,
 		AccountName:          params.Name,
-		Origin:               ImportedAccount,
+		IsImported:           true,
 		IsWatchOnly:          false,
 		CreatedAt:            createdAt,
 		KeyScope:             params.Scope,
@@ -170,9 +169,8 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 	// against a watch-only wallet.
 	params.EncryptedPrivateKey = nil
 	expectedInfo := &AccountInfo{
-		AccountNumber:        0,
 		AccountName:          params.Name,
-		Origin:               ImportedAccount,
+		IsImported:           true,
 		IsWatchOnly:          true,
 		KeyScope:             params.Scope,
 		AddrSchema:           ScopeAddrMap[params.Scope],

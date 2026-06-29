@@ -102,6 +102,7 @@ func TestCreateDerivedAccountPersistsMasterKeyFingerprint(t *testing.T) {
 		deriveFn,
 	)
 	require.NoError(t, err)
+	require.NotNil(t, info.AccountNumber)
 	require.Equal(t, testFingerprintValue, info.MasterKeyFingerprint)
 
 	// Round-trip via Store.GetAccount — the value must come back
@@ -157,7 +158,7 @@ func TestLoadAccountInfoFallsBackOnMissingFingerprintRow(t *testing.T) {
 		require.NotNil(t, bucket)
 
 		key := newAccountCreatedAtKey(
-			mgrScope, info.AccountNumber,
+			mgrScope, *info.AccountNumber,
 		)
 
 		return bucket.Delete(key[:])

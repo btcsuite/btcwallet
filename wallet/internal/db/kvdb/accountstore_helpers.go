@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -117,23 +116,16 @@ func (s *Store) walkAccountUTXOs(addrmgrNs,
 	for i := range unspent {
 		output := &unspent[i]
 
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, chainParams,
-		)
-		if err != nil || len(addrs) == 0 {
-			continue
-		}
-
-		owner, account, err := s.addrStore.AddrAccount(
-			addrmgrNs, addrs[0],
+		binding, _, err := s.resolveAccountForCredit(
+			addrmgrNs, output, chainParams,
 		)
 		if err != nil {
 			continue
 		}
 
 		key := accountBalanceKey{
-			scope:   owner.Scope(),
-			account: account,
+			scope:   binding.acctStore.Scope(),
+			account: binding.acctNum,
 		}
 
 		isConfirmed := output.Height > 0 &&
@@ -155,14 +147,10 @@ func attachAccountBalances(accounts []db.AccountInfo,
 	for i := range accounts {
 		info := &accounts[i]
 		// Key by the waddrmgr internal account number, NOT
-		// info.AccountNumber. loadAccountInfo masks imported
-		// AccountNumber to 0 at the contract boundary; if we
-		// keyed by info.AccountNumber the balance lookup for
-		// imported rows would collide with derived account 0
-		// (silently zeroing or mis-attributing imported
-		// balances). The internal number is preserved by
-		// collectScopedAccounts in a parallel slice for exactly
-		// this purpose.
+		// info.AccountNumber. Imported AccountInfo values expose a nil
+		// AccountNumber, while kvdb balance rows remain keyed by the original
+		// waddrmgr number. collectScopedAccounts preserves that internal
+		// number in a parallel slice for this merge step.
 		key := accountBalanceKey{
 			scope: waddrmgr.KeyScope{
 				Purpose: info.KeyScope.Purpose,
