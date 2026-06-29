@@ -849,11 +849,15 @@ type ListAddressesQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// AccountName is the name of the account to list addresses for.
-	AccountName string
+	// AccountName optionally names the account to list derived addresses for. It
+	// must be set together with Scope. When both are nil, the query lists raw
+	// imported addresses, which have no derivation identity.
+	AccountName *string
 
-	// Scope is the key scope of the account.
-	Scope KeyScope
+	// Scope optionally identifies the key scope of AccountName. It must be set
+	// together with AccountName. When both are nil, the query lists raw imported
+	// addresses, which have no key-scope derivation identity.
+	Scope *KeyScope
 
 	// Page holds the pagination parameters for this query.
 	Page page.Request[uint32]

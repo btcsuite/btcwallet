@@ -208,3 +208,42 @@ WHERE
     )
 ORDER BY da.address_id
 LIMIT sqlc.arg('page_limit')::BIGINT;
+
+-- name: ListRawImportedAddresses :many
+-- Lists raw imported addresses in a wallet, ordered by address ID.
+SELECT
+    a.id,
+    NULL::BIGINT AS account_number,
+    a.type_id,
+    NULL::SMALLINT AS address_branch,
+    NULL::BIGINT AS address_index,
+    a.is_derived,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    NULL::BIGINT AS master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    0::BIGINT AS derived_address_id,
+    0::BIGINT AS account_id,
+    ''::TEXT AS account_name,
+    0::BIGINT AS purpose,
+    0::BIGINT AS coin_type,
+    1::SMALLINT AS origin_id,
+    (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
+    exists(
+        SELECT 1
+        FROM utxos AS u
+        WHERE u.address_id = a.id
+    ) AS is_used
+FROM addresses AS a
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    a.wallet_id = sqlc.arg('wallet_id')
+    AND a.is_derived = FALSE
+    AND (
+        sqlc.narg('cursor_id')::BIGINT IS NULL -- noqa: RF02
+        OR a.id > sqlc.narg('cursor_id')::BIGINT -- noqa: RF02
+    )
+ORDER BY a.id
+LIMIT sqlc.arg('page_limit')::BIGINT;

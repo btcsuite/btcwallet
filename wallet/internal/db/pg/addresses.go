@@ -467,7 +467,8 @@ func addressSecretRowToSecret(
 type addressInfoRow interface {
 	sqlc.GetAddressByScriptPubKeyRow |
 		sqlc.ListAddressesByAccountRow |
-		sqlc.ListAddressesByScriptPubKeysRow
+		sqlc.ListAddressesByScriptPubKeysRow |
+		sqlc.ListRawImportedAddressesRow
 }
 
 // addressRowToInfo converts a PostgreSQL address row to an AddressInfo struct.
@@ -505,6 +506,17 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 		)
 
 	case sqlc.ListAddressesByScriptPubKeysRow:
+		return addressFieldsToInfo(
+			base.ID, base.AccountID, base.AccountNumber,
+			base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.TypeID,
+			base.OriginID, base.WalletIsWatchOnly,
+			base.HasScript, base.CreatedAt,
+			nullableInt16(base.AddressBranch), base.AddressIndex,
+			base.ScriptPubKey, base.PubKey, base.IsUsed,
+		)
+
+	case sqlc.ListRawImportedAddressesRow:
 		return addressFieldsToInfo(
 			base.ID, base.AccountID, base.AccountNumber,
 			base.AccountName, base.MasterFingerprint,
@@ -566,6 +578,14 @@ func addressFieldsToInfo(id int64, accountID int64,
 func listAddressesByAccount(ctx context.Context, q *sqlc.Queries,
 	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
 
+	if query.Scope == nil && query.AccountName == nil {
+		return listRawImportedAddresses(ctx, q, query)
+	}
+
+	if query.Scope == nil || query.AccountName == nil {
+		return nil, db.ErrInvalidListAddressesQuery
+	}
+
 	rows, err := q.ListAddressesByAccount(
 		ctx, buildAddressPageParams(query),
 	)
@@ -588,6 +608,46 @@ func listAddressesByAccount(ctx context.Context, q *sqlc.Queries,
 	return items, nil
 }
 
+// listRawImportedAddresses lists raw imported addresses for the imported alias.
+func listRawImportedAddresses(ctx context.Context, q *sqlc.Queries,
+	query db.ListAddressesQuery) ([]db.AddressInfo, error) {
+
+	rows, err := q.ListRawImportedAddresses(
+		ctx, sqlc.ListRawImportedAddressesParams{
+			WalletID:  int64(query.WalletID),
+			PageLimit: int64(query.Page.Limit()) + 1,
+			CursorID:  rawAddressCursor(query),
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list raw imported addresses: %w", err)
+	}
+
+	items := make([]db.AddressInfo, len(rows))
+	for i, row := range rows {
+		item, err := addressRowToInfo(row)
+		if err != nil {
+			return nil, fmt.Errorf("list raw imported addresses: %w", err)
+		}
+
+		items[i] = *item
+	}
+
+	return items, nil
+}
+
+// rawAddressCursor converts an optional page cursor into a nullable sqlc value.
+func rawAddressCursor(q db.ListAddressesQuery) sql.NullInt64 {
+	if q.Page.After == nil {
+		return sql.NullInt64{}
+	}
+
+	return sql.NullInt64{
+		Int64: int64(*q.Page.After),
+		Valid: true,
+	}
+}
+
 // buildAddressPageParams translates a ListAddresses query to
 // ListAddressesByAccount parameters, handling pagination cursors.
 func buildAddressPageParams(
@@ -597,7 +657,7 @@ func buildAddressPageParams(
 		WalletID:    int64(q.WalletID),
 		Purpose:     int64(q.Scope.Purpose),
 		CoinType:    int64(q.Scope.Coin),
-		AccountName: q.AccountName,
+		AccountName: *q.AccountName,
 		PageLimit:   int64(q.Page.Limit()) + 1,
 	}
 

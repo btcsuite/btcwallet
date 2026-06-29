@@ -367,6 +367,8 @@ func TestGetUnusedAddress(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	scope := waddrmgr.KeyScopeBIP0084
+	storeScope := db.KeyScope(scope)
+	accountName := "default"
 	req, err := addressPageRequest()
 	require.NoError(t, err)
 
@@ -374,8 +376,8 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &accountName,
+			Scope:       &storeScope,
 			Page:        req,
 		},
 	).Return(addressIter(*derivedAddressInfoFromAddr(
@@ -398,8 +400,8 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &accountName,
+			Scope:       &storeScope,
 			Page:        req,
 		},
 	).Return(addressIter(*usedFirstAddr)).Once()
@@ -431,8 +433,8 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &accountName,
+			Scope:       &storeScope,
 			Page:        req,
 		},
 	).Return(addressIter(*derivedAddressInfoFromAddr(
@@ -665,13 +667,15 @@ func TestListAddresses(t *testing.T) {
 	require.NoError(t, err)
 	req, err := addressPageRequest()
 	require.NoError(t, err)
+	accountName := "default"
+	storeScope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &storeScope,
 			Page:        req,
 		},
 	).Return(addressIter(db.AddressInfo{ScriptPubKey: pkScript})).Once()

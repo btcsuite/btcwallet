@@ -556,3 +556,116 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 	}
 	return items, nil
 }
+
+const ListRawImportedAddresses = `-- name: ListRawImportedAddresses :many
+SELECT
+    a.id,
+    NULL AS account_number,
+    a.type_id,
+    NULL AS address_branch,
+    NULL AS address_index,
+    a.is_derived,
+    a.script_pub_key,
+    a.pub_key,
+    a.created_at,
+    NULL AS master_fingerprint,
+    w.is_watch_only AS wallet_is_watch_only,
+    0 AS derived_address_id,
+    0 AS account_id,
+    '' AS account_name,
+    0 AS purpose,
+    0 AS coin_type,
+    1 AS origin_id,
+    cast(
+        EXISTS (
+            SELECT 1
+            FROM utxos AS u
+            WHERE u.address_id = a.id
+        ) AS BOOLEAN
+    ) AS is_used,
+    s.encrypted_script IS NOT NULL AS has_script
+FROM addresses AS a
+INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE
+    a.wallet_id = ?1
+    AND a.is_derived = FALSE
+    AND (
+        ?2 IS NULL -- noqa: RF02
+        OR a.id > ?2 -- noqa: RF02
+    )
+ORDER BY a.id
+LIMIT ?3
+`
+
+type ListRawImportedAddressesParams struct {
+	WalletID  int64
+	CursorID  interface{}
+	PageLimit int64
+}
+
+type ListRawImportedAddressesRow struct {
+	ID                int64
+	AccountNumber     interface{}
+	TypeID            int64
+	AddressBranch     interface{}
+	AddressIndex      interface{}
+	IsDerived         bool
+	ScriptPubKey      []byte
+	PubKey            []byte
+	CreatedAt         time.Time
+	MasterFingerprint interface{}
+	WalletIsWatchOnly bool
+	DerivedAddressID  int64
+	AccountID         int64
+	AccountName       string
+	Purpose           int64
+	CoinType          int64
+	OriginID          int64
+	IsUsed            bool
+	HasScript         bool
+}
+
+// Lists raw imported addresses in a wallet, ordered by address ID.
+func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImportedAddressesParams) ([]ListRawImportedAddressesRow, error) {
+	rows, err := q.query(ctx, q.listRawImportedAddressesStmt, ListRawImportedAddresses, arg.WalletID, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRawImportedAddressesRow
+	for rows.Next() {
+		var i ListRawImportedAddressesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountNumber,
+			&i.TypeID,
+			&i.AddressBranch,
+			&i.AddressIndex,
+			&i.IsDerived,
+			&i.ScriptPubKey,
+			&i.PubKey,
+			&i.CreatedAt,
+			&i.MasterFingerprint,
+			&i.WalletIsWatchOnly,
+			&i.DerivedAddressID,
+			&i.AccountID,
+			&i.AccountName,
+			&i.Purpose,
+			&i.CoinType,
+			&i.OriginID,
+			&i.IsUsed,
+			&i.HasScript,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
