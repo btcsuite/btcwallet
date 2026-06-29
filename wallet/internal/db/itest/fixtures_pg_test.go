@@ -75,18 +75,20 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 
 	t.Helper()
 
-	_, err := queries.CreateDerivedAccountWithNumber(
-		t.Context(), sqlc.CreateDerivedAccountWithNumberParams{
-			ScopeID: scopeID,
+	account, err := queries.CreateDerivedAccount(
+		t.Context(), sqlc.CreateDerivedAccountParams{
+			ScopeID:     scopeID,
+			AccountName: name,
 			AccountNumber: sql.NullInt64{
 				Int64: int64(accountNumber),
 				Valid: true,
 			},
-			AccountName: name,
-			OriginID:    int16(db.DerivedAccount),
+			PublicKey:         RandomBytes(32),
+			MasterFingerprint: sql.NullInt64{},
 		},
 	)
 	require.NoError(t, err)
+	require.Equal(t, int64(accountNumber), account.AccountNumber.Int64)
 }
 
 // createDerivedAccountRaw inserts a derived account directly through the
@@ -100,14 +102,15 @@ func createDerivedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 		INSERT INTO accounts (
 			wallet_id,
 			scope_id,
-			account_number,
 			account_name,
-			origin_id
-		) VALUES ($1, $2, $3, $4, $5)`
+			is_derived,
+			account_number,
+			public_key
+		) VALUES ($1, $2, $3, TRUE, $4, $5)`
 
 	_, err := dbConn.ExecContext(
-		t.Context(), stmt, int64(walletID), scopeID, int64(accountNumber),
-		name, int16(db.DerivedAccount),
+		t.Context(), stmt, int64(walletID), scopeID, name,
+		int64(accountNumber), RandomBytes(32),
 	)
 
 	return err
@@ -124,15 +127,32 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 		INSERT INTO accounts (
 			wallet_id,
 			scope_id,
-			account_number,
 			account_name,
-			origin_id,
+			is_derived,
 			public_key
-		) VALUES ($1, $2, NULL, $3, $4, $5)`
+		) VALUES ($1, $2, $3, FALSE, $4)`
 
 	_, err := dbConn.ExecContext(
-		t.Context(), stmt, int64(walletID), scopeID, name,
-		int16(db.ImportedAccount), RandomBytes(32),
+		t.Context(), stmt, int64(walletID), scopeID, name, RandomBytes(32),
+	)
+
+	return err
+}
+
+// updateAccountNumberRaw updates an account number directly so tests can
+// validate database-level account identity immutability.
+func updateAccountNumberRaw(t *testing.T, dbConn *sql.DB,
+	accountID int64, accountNumber uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET account_number = $1
+		WHERE id = $2`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(accountNumber), accountID,
 	)
 
 	return err
@@ -452,22 +472,144 @@ func reparentAccountRaw(t *testing.T, dbConn *sql.DB, accountID int64,
 	return nil
 }
 
-// reparentAddressRaw updates an address wallet/account pair directly through
-// the database so tests can validate wallet ownership immutability after
-// insert.
+// updateAccountIDRaw updates an account primary key directly through the
+// database so tests can validate account identity immutability after insert.
+func updateAccountIDRaw(t *testing.T, dbConn *sql.DB, accountID int64,
+	nextAccountID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET id = $1
+		WHERE id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, nextAccountID, accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// updateDerivedAccountNumberRaw updates a derived account number directly
+// through the database so tests can validate identity immutability.
+func updateDerivedAccountNumberRaw(t *testing.T, dbConn *sql.DB,
+	accountID int64, accountNumber uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET account_number = $1
+		WHERE id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(accountNumber), accountID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// reparentAddressRaw updates an address wallet directly through the database
+// so tests can validate wallet ownership immutability after insert.
 func reparentAddressRaw(t *testing.T, dbConn *sql.DB, addressID int64,
-	walletID uint32, accountID int64) error {
+	walletID uint32) error {
 
 	t.Helper()
 
 	const stmt = `
 		UPDATE addresses
-		SET wallet_id = $1,
-			account_id = $2
-		WHERE id = $3`
+		SET wallet_id = $1
+		WHERE id = $2`
 
 	result, err := dbConn.ExecContext(
-		t.Context(), stmt, int64(walletID), accountID, addressID,
+		t.Context(), stmt, int64(walletID), addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// updateAddressIDRaw updates an address primary key directly through the
+// database so tests can validate address identity immutability after insert.
+func updateAddressIDRaw(t *testing.T, dbConn *sql.DB, addressID int64,
+	nextAddressID int64) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE addresses
+		SET id = $1
+		WHERE id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, nextAddressID, addressID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("%w: got %d", errUnexpectedUpdatedRows, rows)
+	}
+
+	return nil
+}
+
+// updateDerivedAddressIndexRaw updates a derived address child row directly
+// through the database so tests can validate child identity immutability.
+func updateDerivedAddressIndexRaw(t *testing.T, dbConn *sql.DB,
+	addressID int64, index uint32) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE derived_addresses
+		SET address_index = $1
+		WHERE address_id = $2`
+
+	result, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(index), addressID,
 	)
 	if err != nil {
 		return err
@@ -493,15 +635,23 @@ func CreateAddressWithIndex(t *testing.T, queries *sqlc.Queries,
 
 	t.Helper()
 
-	_, err := queries.CreateDerivedAddress(
+	addr, err := queries.CreateDerivedAddress(
 		t.Context(), sqlc.CreateDerivedAddressParams{
-			WalletID:      int64(walletID),
+			WalletID:     int64(walletID),
+			AccountID:    accountID,
+			ScriptPubKey: RandomBytes(20),
+			ScriptTypeID: int16(db.WitnessPubKey),
+			PubKey:       nil,
+		},
+	)
+	require.NoError(t, err)
+
+	err = queries.CreateDerivedAddressPath(
+		t.Context(), sqlc.CreateDerivedAddressPathParams{
 			AccountID:     accountID,
-			ScriptPubKey:  RandomBytes(20),
-			TypeID:        int16(db.WitnessPubKey),
-			AddressBranch: sql.NullInt16{Int16: branch, Valid: true},
-			AddressIndex:  sql.NullInt64{Int64: int64(index), Valid: true},
-			PubKey:        nil,
+			AddressBranch: branch,
+			AddressIndex:  int64(index),
+			AddressID:     addr.ID,
 		},
 	)
 	require.NoError(t, err)
@@ -635,16 +785,15 @@ func deleteAddress(ctx context.Context, dbConn *sql.DB,
 }
 
 // createImportedAddressRaw inserts an imported address directly through the
-// database so tests can validate wallet/account ownership invariants.
+// database so tests can validate raw imported address invariants.
 func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
-	walletID uint32, accountID int64, scriptPubKey []byte) error {
+	walletID uint32, scriptPubKey []byte) error {
 
 	_, err := queries.CreateImportedAddress(
 		ctx, sqlc.CreateImportedAddressParams{
 			WalletID:     int64(walletID),
-			AccountID:    accountID,
 			ScriptPubKey: scriptPubKey,
-			TypeID:       int16(db.WitnessPubKey),
+			ScriptTypeID: int16(db.WitnessPubKey),
 			PubKey:       RandomBytes(33),
 		},
 	)
@@ -652,20 +801,74 @@ func createImportedAddressRaw(ctx context.Context, queries *sqlc.Queries,
 	return err
 }
 
-// createImportedBucketAccountRaw runs the idempotent imported-bucket
-// materialization query directly so tests can prove that a second
-// first-import attempt into a scope that already owns the bucket is a no-op
-// (ON CONFLICT DO NOTHING) rather than a unique-constraint failure.
-func createImportedBucketAccountRaw(ctx context.Context, queries *sqlc.Queries,
-	scopeID int64) error {
+// createDerivedAddressParentRaw inserts only the addresses parent row for a
+// derived address so tests can model a missing derived_addresses child row.
+func createDerivedAddressParentRaw(t *testing.T, queries *sqlc.Queries,
+	walletID uint32, accountID int64, scriptPubKey []byte) (int64, error) {
 
-	return queries.CreateImportedBucketAccount(
-		ctx, sqlc.CreateImportedBucketAccountParams{
-			ScopeID:     scopeID,
-			AccountName: db.DefaultImportedAccountName,
-			OriginID:    int16(db.ImportedAccount),
+	t.Helper()
+
+	addr, err := queries.CreateDerivedAddress(
+		t.Context(), sqlc.CreateDerivedAddressParams{
+			WalletID:     int64(walletID),
+			AccountID:    accountID,
+			ScriptPubKey: scriptPubKey,
+			ScriptTypeID: int16(db.WitnessPubKey),
+			PubKey:       nil,
 		},
 	)
+	if err != nil {
+		return 0, err
+	}
+
+	return addr.ID, nil
+}
+
+// insertCorruptDerivedAddressChildRaw inserts a derived_addresses child under
+// an arbitrary address parent so tests can model manually corrupted address
+// shape metadata.
+func insertCorruptDerivedAddressChildRaw(t *testing.T, dbConn *sql.DB,
+	walletID uint32, scopeID int64, accountID int64, addressID int64,
+	branch uint32, index uint32) error {
+
+	t.Helper()
+
+	branchNum, err := db.Uint32ToInt16(branch)
+	require.NoError(t, err)
+
+	const disableStmt = `
+		ALTER TABLE derived_addresses
+		DISABLE TRIGGER trg_assert_derived_address_parent_insert`
+
+	_, err = dbConn.ExecContext(t.Context(), disableStmt)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		const enableStmt = `
+			ALTER TABLE derived_addresses
+			ENABLE TRIGGER trg_assert_derived_address_parent_insert`
+
+		_, enableErr := dbConn.ExecContext(t.Context(), enableStmt)
+		require.NoError(t, enableErr)
+	}()
+
+	const stmt = `
+		INSERT INTO derived_addresses (
+			address_id,
+			wallet_id,
+			account_id,
+			address_branch,
+			address_index
+		) VALUES ($1, $2, $3, $4, $5)`
+
+	_, err = dbConn.ExecContext(
+		t.Context(), stmt, addressID, int64(walletID), accountID,
+		branchNum, int64(index),
+	)
+
+	return err
 }
 
 // insertAddressSecretRaw inserts an address secret directly through the
@@ -732,23 +935,25 @@ func createDerivedAddressRaw(t *testing.T, queries *sqlc.Queries,
 	branchNum, err := db.Uint32ToInt16(branch)
 	require.NoError(t, err)
 
-	_, err = queries.CreateDerivedAddress(
+	addr, err := queries.CreateDerivedAddress(
 		t.Context(), sqlc.CreateDerivedAddressParams{
 			WalletID:     int64(walletID),
 			AccountID:    accountID,
 			ScriptPubKey: scriptPubKey,
-			TypeID:       int16(db.WitnessPubKey),
-			AddressBranch: sql.NullInt16{
-				Int16: branchNum,
-				Valid: true,
-			},
-			AddressIndex: sql.NullInt64{
-				Int64: int64(index),
-				Valid: true,
-			},
-			PubKey: nil,
+			ScriptTypeID: int16(db.WitnessPubKey),
+			PubKey:       nil,
 		},
 	)
+	if err != nil {
+		return err
+	}
 
-	return err
+	return queries.CreateDerivedAddressPath(
+		t.Context(), sqlc.CreateDerivedAddressPathParams{
+			AccountID:     accountID,
+			AddressBranch: branchNum,
+			AddressIndex:  int64(index),
+			AddressID:     addr.ID,
+		},
+	)
 }

@@ -10,6 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test account names reused across the DB integration tests.
+const (
+	defaultAccountName  = "default"
+	fundedAccountName   = "funded"
+	hardwareAccountName = "hardware"
+)
+
 // newWallet creates a new wallet with the given name using the provided
 // store and returns its ID.
 func newWallet(t *testing.T, store db.WalletStore, name string) uint32 {
@@ -50,15 +57,13 @@ func createAllAccounts(t *testing.T, store db.AccountStore, walletID uint32) {
 	t.Helper()
 
 	for _, tc := range AllAccountCases {
-		switch tc.Origin {
-		case db.DerivedAccount:
+		if !tc.IsImported {
 			params := tc.DerivedParams(walletID)
 			_, err := store.CreateDerivedAccount(
 				t.Context(), params, SpendableDeriveFn(),
 			)
 			require.NoError(t, err)
-
-		case db.ImportedAccount:
+		} else {
 			params := tc.ImportedParams(walletID)
 			_, err := store.CreateImportedAccount(t.Context(), params)
 			require.NoError(t, err)
@@ -88,6 +93,15 @@ func getAccountQueryByNumber(walletID uint32, scope db.KeyScope,
 		Scope:         scope,
 		AccountNumber: &num,
 	}
+}
+
+// accountNumberNotNil requires a derived account number and returns its value.
+func accountNumberNotNil(t *testing.T, accountNumber *uint32) uint32 {
+	t.Helper()
+
+	require.NotNil(t, accountNumber)
+
+	return *accountNumber
 }
 
 // createDerivedAccount creates a new derived account with the given name,
@@ -142,7 +156,7 @@ func requireAccountMatches(t *testing.T, info *db.AccountInfo,
 
 	require.Equal(t, tc.Name, info.AccountName)
 	require.Equal(t, tc.Scope, info.KeyScope)
-	require.Equal(t, tc.Origin, info.Origin)
+	require.Equal(t, tc.IsImported, info.IsImported)
 
 	// Verify CreatedAt is populated and not in the future. The account may
 	// have been created several seconds earlier in the test when parallel
@@ -163,7 +177,7 @@ func requireAccountPropertiesMatches(t *testing.T, props *db.AccountInfo,
 
 	require.Equal(t, tc.Name, props.AccountName)
 	require.Equal(t, tc.Scope, props.KeyScope)
-	require.Equal(t, tc.Origin, props.Origin)
+	require.Equal(t, tc.IsImported, props.IsImported)
 
 	// Verify CreatedAt is populated and not in the future. Imported-account
 	// test fixtures can be created well before these assertions run under
