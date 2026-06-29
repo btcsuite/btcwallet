@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -28,6 +30,65 @@ func TestNewDerivedAddressWithTxNilDeriveFn(t *testing.T) {
 	require.ErrorIs(t, err, errNilAddressDerivationFunc)
 }
 
+// TestResolveAddressAccountNumberShape verifies that derived-address creation
+// keeps BIP44 account numbers only for wallet-derived accounts.
+func TestResolveAddressAccountNumberShape(t *testing.T) {
+	t.Parallel()
+
+	accountNumber, err := resolveAddressAccountNumber(true, 9, nil)
+	require.NoError(t, err)
+	require.NotNil(t, accountNumber)
+	require.Equal(t, uint32(9), *accountNumber)
+
+	accountNumber, err = resolveAddressAccountNumber(
+		false, 0, ErrNilDBAccountNumber,
+	)
+	require.NoError(t, err)
+	require.Nil(t, accountNumber)
+
+	_, err = resolveAddressAccountNumber(true, 0, ErrNilDBAccountNumber)
+	require.ErrorIs(t, err, errAccountShapeCorruption)
+
+	_, err = resolveAddressAccountNumber(false, 9, nil)
+	require.ErrorIs(t, err, errAccountShapeCorruption)
+}
+
+// TestAddressRowToInfoImportedXpubPath verifies that imported-xpub children
+// keep their branch/index path without receiving a wallet-derived account
+// number.
+func TestAddressRowToInfoImportedXpubPath(t *testing.T) {
+	t.Parallel()
+
+	info, err := AddressRowToInfo(AddressInfoRow[int64, int64]{
+		ID:            1,
+		AccountID:     2,
+		AccountName:   "hardware",
+		IsDerived:     true,
+		TypeID:        int64(WitnessPubKey),
+		OriginID:      int64(ImportedAccount),
+		ScriptPubKey:  []byte{0x51},
+		CreatedAt:     time.Unix(1710006000, 0),
+		AddressBranch: sqlNullInt64(1),
+		AddressIndex:  sqlNullInt64(7),
+		Purpose:       int64(KeyScopeBIP0084.Purpose),
+		CoinType:      int64(KeyScopeBIP0084.Coin),
+		MasterFingerprint: sql.NullInt64{
+			Int64: 1,
+			Valid: true,
+		},
+		IDToAddrType: IDToAddressType[int64],
+		IDToOrigin:   IDToOrigin[int64],
+	})
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.True(t, info.HasDerivationPath)
+	require.Nil(t, info.AccountNumber)
+	require.NotNil(t, info.AccountID)
+	require.Equal(t, uint32(2), *info.AccountID)
+	require.Equal(t, uint32(1), info.Branch)
+	require.Equal(t, uint32(7), info.Index)
+}
+
 // TestDerivedAddressInputNilDerivedData verifies that the shared derivation
 // path rejects a nil callback result before dereferencing it.
 func TestDerivedAddressInputNilDerivedData(t *testing.T) {
@@ -45,9 +106,11 @@ func TestDerivedAddressInputNilDerivedData(t *testing.T) {
 		return derivedData, nil
 	}
 
+	accountNumber := uint32(0)
+
 	addrType, branch, index, scriptPubKey, pubKey, err :=
 		derivedAddressInput(
-			t.Context(), params, 1, 0,
+			t.Context(), params, 1, &accountNumber,
 			ScopeAddrSchema{
 				ExternalAddrType: PubKeyHash,
 				InternalAddrType: PubKeyHash,
@@ -141,4 +204,9 @@ func TestRequireAddressPrivKeyOnSpendable(t *testing.T) {
 
 	err = requireAddressPrivKeyOnSpendable(7, true, false)
 	require.NoError(t, err)
+}
+
+// sqlNullInt64 creates a valid nullable integer for address conversion tests.
+func sqlNullInt64(value int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: value, Valid: true}
 }
