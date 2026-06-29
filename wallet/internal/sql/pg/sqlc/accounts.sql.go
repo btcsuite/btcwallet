@@ -168,7 +168,7 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id,
+    is_derived,
     public_key,
     master_fingerprint
 )
@@ -177,18 +177,17 @@ SELECT
     ks.id AS scope_id,
     $1 AS account_number,
     $2 AS account_name,
-    $3 AS origin_id,
-    $4 AS public_key,
-    $5 AS master_fingerprint
+    TRUE AS is_derived,
+    $3 AS public_key,
+    $4 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $6
+WHERE ks.id = $5
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	ScopeID           int64
@@ -206,7 +205,6 @@ func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAcc
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
 		arg.AccountNumber,
 		arg.AccountName,
-		arg.OriginID,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
@@ -222,23 +220,22 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id
+    is_derived
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     $1 AS account_number,
     $2 AS account_name,
-    $3 AS origin_id
+    TRUE AS is_derived
 FROM key_scopes AS ks
-WHERE ks.id = $4
+WHERE ks.id = $3
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountWithNumberParams struct {
 	AccountNumber sql.NullInt64
 	AccountName   string
-	OriginID      int16
 	ScopeID       int64
 }
 
@@ -251,12 +248,7 @@ type CreateDerivedAccountWithNumberRow struct {
 // Test-only: Creates a derived account with a specific account number.
 // Used for testing account number overflow without creating billions of accounts.
 func (q *Queries) CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error) {
-	row := q.queryRow(ctx, q.createDerivedAccountWithNumberStmt, CreateDerivedAccountWithNumber,
-		arg.AccountNumber,
-		arg.AccountName,
-		arg.OriginID,
-		arg.ScopeID,
-	)
+	row := q.queryRow(ctx, q.createDerivedAccountWithNumberStmt, CreateDerivedAccountWithNumber, arg.AccountNumber, arg.AccountName, arg.ScopeID)
 	var i CreateDerivedAccountWithNumberRow
 	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)
 	return i, err
@@ -268,7 +260,7 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id,
+    is_derived,
     public_key,
     master_fingerprint
 )
@@ -277,17 +269,16 @@ SELECT
     ks.id AS scope_id,
     NULL AS account_number,
     $1 AS account_name,
-    $2 AS origin_id,
-    $3 AS public_key,
-    $4 AS master_fingerprint
+    FALSE AS is_derived,
+    $2 AS public_key,
+    $3 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $5
+WHERE ks.id = $4
 RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
 	AccountName       string
-	OriginID          int16
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	ScopeID           int64
@@ -304,7 +295,6 @@ type CreateImportedAccountRow struct {
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
 		arg.AccountName,
-		arg.OriginID,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
@@ -320,22 +310,21 @@ INSERT INTO accounts (
     scope_id,
     account_number,
     account_name,
-    origin_id
+    is_derived
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
     NULL AS account_number,
     $1 AS account_name,
-    $2 AS origin_id
+    FALSE AS is_derived
 FROM key_scopes AS ks
-WHERE ks.id = $3
+WHERE ks.id = $2
 ON CONFLICT (scope_id, account_name) DO NOTHING
 `
 
 type CreateImportedBucketAccountParams struct {
 	AccountName string
-	OriginID    int16
 	ScopeID     int64
 }
 
@@ -346,7 +335,7 @@ type CreateImportedBucketAccountParams struct {
 // attempt this insert, one wins and the rest are no-ops, so callers re-read the
 // bucket instead of colliding on the (scope_id, account_name) unique index.
 func (q *Queries) CreateImportedBucketAccount(ctx context.Context, arg CreateImportedBucketAccountParams) error {
-	_, err := q.exec(ctx, q.createImportedBucketAccountStmt, CreateImportedBucketAccount, arg.AccountName, arg.OriginID, arg.ScopeID)
+	_, err := q.exec(ctx, q.createImportedBucketAccountStmt, CreateImportedBucketAccount, arg.AccountName, arg.ScopeID)
 	return err
 }
 
@@ -363,7 +352,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -390,7 +378,6 @@ type GetAccountByScopeAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -412,7 +399,6 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -433,7 +419,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -460,7 +445,6 @@ type GetAccountByScopeAndNumberRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -482,7 +466,6 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -503,7 +486,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -536,7 +518,6 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -563,7 +544,6 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -584,7 +564,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -617,7 +596,6 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -644,7 +622,6 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -666,7 +643,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
@@ -687,7 +663,6 @@ type GetAccountPropsByIdRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	WalletIsWatchOnly bool
 }
 
@@ -708,7 +683,6 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.WalletIsWatchOnly,
 	)
 	return i, err
@@ -759,7 +733,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -782,7 +755,6 @@ type ListAccountsByScopeRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -811,7 +783,6 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -842,7 +813,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -865,7 +835,6 @@ type ListAccountsByWalletRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -894,7 +863,6 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -925,7 +893,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -953,7 +920,6 @@ type ListAccountsByWalletAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -982,7 +948,6 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -1013,7 +978,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -1045,7 +1009,6 @@ type ListAccountsByWalletScopeRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -1074,7 +1037,6 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
