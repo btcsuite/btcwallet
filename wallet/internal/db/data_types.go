@@ -175,24 +175,6 @@ var (
 	}
 )
 
-// AccountOrigin specifies the origin of an account. This is used to identify
-// the account origin type, such as derived from the wallet's HD seed or
-// imported from an external source.
-//
-// The enum values MUST match the IDs in the account_origins database table.
-// See migration 000005_accounts for the canonical descriptions.
-type AccountOrigin uint8
-
-const (
-	// DerivedAccount indicates the account was derived from a hierarchical
-	// deterministic key.
-	DerivedAccount AccountOrigin = iota
-
-	// ImportedAccount indicates the account was imported from an external
-	// source.
-	ImportedAccount
-)
-
 // --------------------
 // WalletStore Types
 // --------------------
@@ -375,18 +357,25 @@ type UpdateWalletSecretsParams struct {
 // AccountInfo contains all information about a single account, including its
 // properties and balances.
 type AccountInfo struct {
+	// AccountID is the optional store-local account identity. SQL backends set
+	// this from accounts.id. Backends without a durable account row ID leave it
+	// nil rather than fabricating one from other account fields.
+	AccountID *uint32
+
 	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not follow BIP44 derivation and therefore do not
-	// have a meaningful account index. For those accounts, this field is
-	// set to 0 and must not be used when Origin is ImportedAccount.
-	AccountNumber uint32
+	// Imported accounts do not have a wallet-derived account number, so this is
+	// nil for imported xpub accounts and any backend that cannot expose one.
+	AccountNumber *uint32
 
 	// AccountName is the human-readable name of the account.
 	AccountName string
 
-	// Origin indicates whether the account was derived from the wallet's
-	// HD seed or imported from an external source.
-	Origin AccountOrigin
+	// IsImported reports whether this account was imported rather than derived
+	// from the wallet seed. Imported accounts have no wallet-derived BIP44
+	// account
+	// number, so callers that need AccountNumber must check this and the
+	// AccountNumber pointer.
+	IsImported bool
 
 	// ExternalKeyCount is the number of external keys that have been
 	// derived.
@@ -396,7 +385,9 @@ type AccountInfo struct {
 	// been derived.
 	InternalKeyCount uint32
 
-	// ImportedKeyCount is the number of imported keys in the account.
+	// ImportedKeyCount is the number of individually imported keys in legacy
+	// account stores. SQL-backed raw imports are address rows, not account
+	// child rows, and therefore report zero here.
 	ImportedKeyCount uint32
 
 	// ConfirmedBalance is the total balance of the account from confirmed
@@ -637,18 +628,18 @@ type AddressInfo struct {
 	// databases (signed 64-bit integers).
 	ID uint32
 
-	// AccountID is the database unique identifier for the account this address
-	// belongs to.
-	//
-	// NOTE: uint32 is used to ensure compatibility with standard SQL
-	// databases (signed 64-bit integers).
-	AccountID uint32
+	// AccountID is the optional store-local identity of the owning account.
+	// It is
+	// nil for raw imported addresses and for backends that cannot expose a
+	// durable
+	// account row identity.
+	AccountID *uint32
 
 	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported accounts do not have a meaningful BIP44 account index, so this
-	// field is set to 0 for imported rows and must not be used when Origin is
-	// ImportedAccount.
-	AccountNumber uint32
+	// It is nil for raw imports and imported-xpub HD children because those
+	// addresses must not be routed through wallet-seed account-number
+	// derivation.
+	AccountNumber *uint32
 
 	// AccountName is the human-readable account name that owns the address.
 	AccountName string
@@ -666,9 +657,16 @@ type AddressInfo struct {
 	// CreatedAt is when the address was created in the wallet database.
 	CreatedAt time.Time
 
-	// Origin indicates whether this is a derived HD address or an imported
-	// address. Reuses the AccountOrigin enum.
-	Origin AccountOrigin
+	// IsImported reports whether this address belongs to imported key material.
+	// Raw imported addresses and imported-xpub children both report true;
+	// wallet-seed-derived addresses report false.
+	IsImported bool
+
+	// HasDerivationPath reports whether this address has BIP44 branch/index
+	// path
+	// metadata. Imported-xpub children have a path even though AccountNumber is
+	// nil because they are not derived from the wallet seed.
+	HasDerivationPath bool
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
 	// Zero value for imported addresses.
@@ -756,9 +754,6 @@ type NewImportedAddressParams struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Scope is the key scope for the imported address.
-	Scope KeyScope
-
 	// AddressType specifies the address format being imported, such as
 	// P2PKH, P2WPKH, or P2TR.
 	AddressType AddressType
@@ -830,11 +825,16 @@ type ListAddressesQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// AccountName is the name of the account to list addresses for.
-	AccountName string
+	// AccountName optionally names the account to list derived or
+	// imported-xpub child addresses for. It must be set together with Scope.
+	// When both are nil, the query lists raw imported addresses, which have no
+	// account identity.
+	AccountName *string
 
-	// Scope is the key scope of the account.
-	Scope KeyScope
+	// Scope optionally identifies the key scope of AccountName. It must be set
+	// together with AccountName. When both are nil, the query lists raw
+	// imported addresses, which have no key-scope derivation identity.
+	Scope *KeyScope
 
 	// Page holds the pagination parameters for this query.
 	Page page.Request[uint32]
@@ -1230,12 +1230,6 @@ type UtxoInfo struct {
 	// needed.
 	AccountName string
 
-	// Origin reports whether the UTXO belongs to a derived or imported
-	// account. The wallet's spendability rule combines this with the
-	// wallet-level Wallet.IsWatchOnly() to decide whether to surface
-	// imported-account outputs in coin selection (see Task 132).
-	Origin AccountOrigin
-
 	// AddrType is the address type of the UTXO's credited address (P2PKH,
 	// P2WKH, etc.). Sourced from addresses.type_id; lets coin selection
 	// reason about output type without a follow-up address read.
@@ -1246,6 +1240,12 @@ type UtxoInfo struct {
 	// LEFT JOIN address_secrets so watch-only addresses without any
 	// secret row report false rather than dropping out of the result.
 	HasScript bool
+
+	// Spendable optionally overrides wallet-level spendability. SQL backends
+	// leave this nil because ADR 0012 makes spendability wallet-level for SQL
+	// wallets. The legacy kvdb backend sets it for rows whose account or
+	// address still carries mixed watch-only state inside a spendable wallet.
+	Spendable *bool
 
 	// IsLocked is true when the UTXO has an active (non-expired) lease.
 	// Sourced from LEFT JOIN utxo_leases with the lease-expiration
@@ -1299,9 +1299,8 @@ type ListUtxosQuery struct {
 	// by name. Account names are unique within a scope, so AccountName
 	// requires Scope. AccountName is mutually exclusive with Account:
 	// the caller picks one disambiguation handle, not both.
-	// AccountName is the public-facing handle for imported accounts
-	// whose AccountNumber collapses to 0 on read (NULL → zero for SQL
-	// backends).
+	// AccountName is the public-facing handle for imported accounts and raw
+	// imported addresses, which have no wallet-derived account number.
 	AccountName *string
 
 	// MinConfs optionally requires each returned UTXO to have at least this
@@ -1455,9 +1454,8 @@ type BalanceParams struct {
 	// Account names are unique within a scope, so Name requires Scope.
 	// Name is mutually exclusive with Account: callers either know the
 	// raw account number (Account) or the account name (Name), never
-	// both. Name is the public-facing handle for imported accounts whose
-	// AccountNumber is masked to 0 by the contract; passing Account=0
-	// for such accounts would collide with the default derived account.
+	// both. Name is the public-facing handle for imported accounts and raw
+	// imported addresses, which have no wallet-derived account number.
 	Name *string
 }
 
@@ -1522,13 +1520,18 @@ type DerivedAddressData struct {
 // AddressDerivationParams contains the wallet-side data needed to derive a
 // store-allocated address.
 type AddressDerivationParams struct {
+	// AccountID is the optional store-local account identity for the account
+	// whose public key is deriving this address.
+	AccountID *uint32
+
 	// Scope is the key scope that owns the derived address.
 	Scope KeyScope
 
-	// AccountNumber is the BIP44 account number, not the database row ID.
-	// It is 0 for imported accounts where no BIP44 account number applies;
-	// callbacks deriving for imported accounts must use AccountPubKey only.
-	AccountNumber uint32
+	// DerivedAccountNumber is the wallet-derived BIP44 account number, not the
+	// database row ID. It is nil for imported accounts; callbacks deriving
+	// from an
+	// imported account xpub must use AccountPubKey, Branch, and Index only.
+	DerivedAccountNumber *uint32
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
 	Branch uint32

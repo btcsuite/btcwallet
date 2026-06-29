@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -271,13 +272,12 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			storeAddr.AddrType)
 	}
 
-	internal := storeAddr.Origin == db.DerivedAccount &&
-		storeAddr.Branch == 1
+	internal := storeAddr.HasDerivationPath && storeAddr.Branch == 1
 
 	info := AddressInfo{
 		Addr:       addr,
 		AddrType:   addrType,
-		Imported:   storeAddr.Origin == db.ImportedAccount,
+		Imported:   !storeAddr.HasDerivationPath,
 		Internal:   internal,
 		Compressed: storeAddressPubKeyCompressed(storeAddr.PubKey),
 	}
@@ -293,7 +293,10 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	if info.Imported {
+	// Imported-xpub children have a real branch/index but no wallet-derived
+	// account number. Do not fabricate account 0; without a BIP44 account
+	// number the public BIP32 derivation shape is intentionally absent.
+	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}
 
@@ -302,7 +305,7 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 			Purpose: storeAddr.KeyScope.Purpose,
 			Coin:    storeAddr.KeyScope.Coin,
 		},
-		Account:              storeAddr.AccountNumber,
+		Account:              *storeAddr.AccountNumber,
 		Branch:               storeAddr.Branch,
 		Index:                storeAddr.Index,
 		MasterKeyFingerprint: storeAddr.MasterKeyFingerprint,
@@ -316,8 +319,15 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 	if len(params.AccountPubKey) == 0 {
-		return nil, fmt.Errorf("%w: scope=%v account=%d",
-			errMissingAccountPubKey, params.Scope, params.AccountNumber)
+		account := "none"
+		if params.DerivedAccountNumber != nil {
+			account = strconv.FormatUint(
+				uint64(*params.DerivedAccountNumber), 10,
+			)
+		}
+
+		return nil, fmt.Errorf("%w: scope=%v account=%s",
+			errMissingAccountPubKey, params.Scope, account)
 	}
 
 	accountPubKey, err := hdkeychain.NewKeyFromString(
@@ -563,8 +573,8 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 	addresses := w.store.IterAddresses(
 		ctx, db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: accountName,
-			Scope:       db.KeyScope(keyScope),
+			AccountName: &accountName,
+			Scope:       (*db.KeyScope)(&keyScope),
 			Page:        req,
 		},
 	)
@@ -597,7 +607,7 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 	change bool,
 	chainParams *chaincfg.Params) (address.Address, bool, error) {
 
-	if storeAddr.Origin != db.DerivedAccount {
+	if !storeAddr.HasDerivationPath {
 		return nil, false, nil
 	}
 
@@ -655,12 +665,14 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	keyScope, err := addrType.KeyScope()
+	req, err := addressPageRequest()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+		return nil, err
 	}
 
-	req, err := addressPageRequest()
+	query, storeAddrType, err := listAddressesQuery(
+		w.id, req, accountName, addrType,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -672,17 +684,16 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 
 	properties := make([]AddressProperty, 0)
 
-	addresses := w.store.IterAddresses(
-		ctx, db.ListAddressesQuery{
-			WalletID:    w.id,
-			AccountName: accountName,
-			Scope:       db.KeyScope(keyScope),
-			Page:        req,
-		},
-	)
+	addresses := w.store.IterAddresses(ctx, query)
 	for storeAddr, err := range addresses {
 		if err != nil {
 			return nil, err
+		}
+
+		if accountName == db.DefaultImportedAccountName &&
+			!walletAddressTypeMatches(storeAddr, storeAddrType) {
+
+			continue
 		}
 
 		addr := extractAddrFromPKScript(
@@ -701,6 +712,52 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 	return properties, nil
 }
 
+// walletAddressTypeMatches reports whether a store address row matches a
+// wallet-facing address type selector.
+func walletAddressTypeMatches(info db.AddressInfo,
+	addrType addresstype.StoreType) bool {
+
+	return info.AddrType == addrType.Type &&
+		info.HasScript == addrType.HasScript
+}
+
+// listAddressesQuery builds the store query for a wallet-facing account name.
+// The reserved imported alias has no account row in the SQL store, so it uses a
+// wallet-wide query and returns the address type needed for local filtering.
+func listAddressesQuery(walletID uint32, req page.Request[uint32],
+	accountName string, addrType waddrmgr.AddressType) (
+	db.ListAddressesQuery, addresstype.StoreType, error) {
+
+	query := db.ListAddressesQuery{
+		WalletID: walletID,
+		Page:     req,
+	}
+
+	if accountName == db.DefaultImportedAccountName {
+		storeAddrType, err := addresstype.FromWallet(addrType)
+		if err != nil {
+			return query, addresstype.StoreType{}, fmt.Errorf(
+				"%w: %v", ErrUnknownAddrType, addrType,
+			)
+		}
+
+		return query, storeAddrType, nil
+	}
+
+	keyScope, err := addrType.KeyScope()
+	if err != nil {
+		return query, addresstype.StoreType{}, fmt.Errorf(
+			"%w: %v", ErrUnknownAddrType, addrType,
+		)
+	}
+
+	scope := db.KeyScope(keyScope)
+	query.AccountName = &accountName
+	query.Scope = &scope
+
+	return query, addresstype.StoreType{}, nil
+}
+
 // ImportPublicKey imports a single public key as a watch-only address.
 func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
@@ -708,11 +765,6 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	err := w.state.validateStarted()
 	if err != nil {
 		return err
-	}
-
-	keyScope, err := addrType.KeyScope()
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
 	storeAddrType, err := addresstype.FromWallet(addrType)
@@ -737,7 +789,6 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	_, err = w.store.NewImportedAddress(
 		ctx, db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(keyScope),
 			AddressType:  storeAddrType.Type,
 			ScriptPubKey: scriptPubKey,
 			PubKey:       serializedPubKey,
@@ -784,7 +835,6 @@ func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	storeInfo, err := w.store.NewImportedAddress(
 		ctx, db.NewImportedAddressParams{
 			WalletID:        w.id,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    scriptPubKey,
 			EncryptedScript: encryptedScript,

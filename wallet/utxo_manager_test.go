@@ -52,7 +52,6 @@ func TestListUnspent(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 	utxoTest := db.UtxoInfo{
@@ -61,7 +60,6 @@ func TestListUnspent(t *testing.T) {
 		PkScript:    pkScriptTest,
 		Height:      1,
 		AccountName: "test",
-		Origin:      db.DerivedAccount,
 		AddrType:    db.NestedWitnessPubKey,
 		IsLocked:    true,
 	}
@@ -118,7 +116,6 @@ func TestListUnspentFiltersByAccount(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 	utxoTest := db.UtxoInfo{
@@ -127,7 +124,6 @@ func TestListUnspentFiltersByAccount(t *testing.T) {
 		PkScript:    pkScriptTest,
 		Height:      1,
 		AccountName: "test",
-		Origin:      db.DerivedAccount,
 		AddrType:    db.NestedWitnessPubKey,
 	}
 
@@ -149,6 +145,70 @@ func TestListUnspentFiltersByAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, addrTest.String(), utxos[0].Address.String())
+	require.Equal(t, btcutil.Amount(200000), utxos[0].Amount)
+}
+
+// TestListUnspentFiltersRawImportsByAlias tests that accountless raw imported
+// UTXOs match the public imported account alias.
+func TestListUnspentFiltersRawImportsByAlias(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := address.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	privKeyImported, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrImported, err := address.NewAddressPubKey(
+		privKeyImported.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+	pkScriptImported, err := txscript.PayToAddrScript(addrImported)
+	require.NoError(t, err)
+
+	utxoDefault := db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		AddrType:    db.WitnessPubKey,
+	}
+	utxoImported := db.UtxoInfo{
+		OutPoint: wire.OutPoint{Hash: [32]byte{2}, Index: 0},
+		Amount:   200000,
+		PkScript: pkScriptImported,
+		Height:   1,
+		AddrType: db.WitnessPubKey,
+	}
+
+	query := UtxoQuery{
+		Account:  db.DefaultImportedAccountName,
+		MinConfs: 0,
+		MaxConfs: 999999,
+	}
+	minConfs := query.MinConfs
+	maxConfs := query.MaxConfs
+
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id,
+		MinConfs: &minConfs,
+		MaxConfs: &maxConfs,
+	}).Return([]db.UtxoInfo{utxoDefault, utxoImported}, nil).Once()
+
+	utxos, err := w.ListUnspent(t.Context(), query)
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(t, addrImported.String(), utxos[0].Address.String())
+	require.Equal(t, db.DefaultImportedAccountName, utxos[0].Account)
 	require.Equal(t, btcutil.Amount(200000), utxos[0].Amount)
 }
 
@@ -174,7 +234,6 @@ func TestGetUtxo(t *testing.T) {
 		PkScript:    pkScriptDefault,
 		Height:      1,
 		AccountName: defaultAccountName,
-		Origin:      db.DerivedAccount,
 		AddrType:    db.WitnessPubKey,
 	}
 
@@ -198,6 +257,44 @@ func TestGetUtxo(t *testing.T) {
 	utxo, err := w.GetUtxo(t.Context(), utxoInfo.OutPoint)
 	require.NoError(t, err)
 	require.Equal(t, expectedUtxo, utxo)
+}
+
+// TestGetUtxoUsesStoreSpendableOverride verifies that backend-specific UTXO
+// spendability overrides are preserved in the wallet-facing result.
+func TestGetUtxoUsesStoreSpendableOverride(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+
+	privKeyDefault, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	addrDefault, err := address.NewAddressPubKey(
+		privKeyDefault.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	pkScriptDefault, err := txscript.PayToAddrScript(addrDefault)
+	require.NoError(t, err)
+
+	spendable := false
+	utxoInfo := &db.UtxoInfo{
+		OutPoint:    wire.OutPoint{Hash: [32]byte{1}, Index: 0},
+		Amount:      100000,
+		PkScript:    pkScriptDefault,
+		Height:      1,
+		AccountName: defaultAccountName,
+		AddrType:    db.WitnessPubKey,
+		Spendable:   &spendable,
+	}
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: utxoInfo.OutPoint,
+	}).Return(utxoInfo, nil).Once()
+
+	utxo, err := w.GetUtxo(t.Context(), utxoInfo.OutPoint)
+	require.NoError(t, err)
+	require.False(t, utxo.Spendable)
 }
 
 // TestGetUtxoErr tests the error conditions of the GetUtxo method.

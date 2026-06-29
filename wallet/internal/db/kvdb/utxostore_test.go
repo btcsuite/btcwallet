@@ -10,10 +10,12 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -250,7 +252,6 @@ func TestGetUtxoSuccess(t *testing.T) {
 	require.NotEmpty(t, utxo.PkScript)
 	require.Equal(t, uint32(1), utxo.Height)
 	require.Equal(t, waddrmgr.DefaultAccountName, utxo.AccountName)
-	require.Equal(t, db.DerivedAccount, utxo.Origin)
 	require.Equal(t, db.WitnessPubKey, utxo.AddrType)
 	require.False(t, utxo.HasScript)
 	require.Equal(t, db.KeyScopeBIP0084, utxo.KeyScope)
@@ -298,6 +299,46 @@ func TestGetUtxoRejectsSpentByUnminedTx(t *testing.T) {
 		},
 	)
 	require.ErrorIs(t, err, db.ErrUtxoNotFound)
+}
+
+// TestResolveAccountForCreditChecksAllScriptAddresses verifies bare-multisig
+// UTXO enrichment does not stop at the first extracted script member when that
+// member is not wallet-owned.
+func TestResolveAccountForCreditChecksAllScriptAddresses(t *testing.T) {
+	t.Parallel()
+
+	members, script := newMultisigScriptMembers(t)
+
+	acctStore := &bwmock.AccountStore{}
+	acctStore.On("Scope").Return(waddrmgr.KeyScopeBIP0084)
+
+	addrStore := &bwmock.AddrStore{}
+	addrStore.On(
+		"AddrAccount", mock.Anything, matchAddress(members[0]),
+	).Return(
+		nil, uint32(0), waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrAddressNotFound,
+			Description: "address not found",
+		},
+	).Once()
+	addrStore.On(
+		"AddrAccount", mock.Anything, matchAddress(members[1]),
+	).Return(acctStore, uint32(7), nil).Once()
+
+	store := NewStore(nil, nil, addrStore)
+	credit := &wtxmgr.Credit{PkScript: script}
+
+	binding, addr, err := store.resolveAccountForCredit(
+		nil, credit, &chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+	require.Equal(t, members[1].EncodeAddress(), addr.EncodeAddress())
+	require.Same(t, acctStore, binding.acctStore)
+	require.Equal(t, uint32(7), binding.acctNum)
+	require.Equal(t, db.KeyScope(waddrmgr.KeyScopeBIP0084), binding.scope)
+
+	addrStore.AssertExpectations(t)
+	acctStore.AssertExpectations(t)
 }
 
 // TestCalcConfsGenesisHeight verifies the shared kvdb confirmation helper
@@ -451,6 +492,8 @@ func TestListUTXOsIncludesLockedOutputs(t *testing.T) {
 	require.False(t, byOutPoint[unlockedPoint].IsLocked)
 }
 
+// TestUTXOEnrichmentFields verifies kvdb UTXO listing populates enriched
+// account, script type, and lock metadata.
 func TestUTXOEnrichmentFields(t *testing.T) {
 	t.Parallel()
 
@@ -497,7 +540,6 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	locked, ok := byOutPoint[lockedPoint]
 	require.True(t, ok, "locked UTXO missing from ListUTXOs")
 	require.Equal(t, waddrmgr.DefaultAccountName, locked.AccountName)
-	require.Equal(t, db.DerivedAccount, locked.Origin)
 	require.Equal(t, db.WitnessPubKey, locked.AddrType)
 	require.False(t, locked.HasScript)
 	require.True(t, locked.IsLocked)
@@ -506,7 +548,6 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	unlocked, ok := byOutPoint[unlockedPoint]
 	require.True(t, ok, "unlocked UTXO missing from ListUTXOs")
 	require.Equal(t, waddrmgr.DefaultAccountName, unlocked.AccountName)
-	require.Equal(t, db.DerivedAccount, unlocked.Origin)
 	require.Equal(t, db.WitnessPubKey, unlocked.AddrType)
 	require.False(t, unlocked.HasScript)
 	require.False(t, unlocked.IsLocked)
@@ -522,7 +563,6 @@ func TestUTXOEnrichmentFields(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, waddrmgr.DefaultAccountName, got.AccountName)
-	require.Equal(t, db.DerivedAccount, got.Origin)
 	require.Equal(t, db.WitnessPubKey, got.AddrType)
 	require.False(t, got.HasScript)
 	require.True(t, got.IsLocked)
@@ -755,7 +795,6 @@ func TestListUTXOsExcludesImportedFromNumericAccountFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, derivedPoint, utxos[0].OutPoint)
-	require.Equal(t, db.DerivedAccount, utxos[0].Origin)
 
 	// The imported UTXO remains selectable via (Scope, AccountName).
 	importedName := waddrmgr.ImportedAddrAccountName
@@ -769,7 +808,8 @@ func TestListUTXOsExcludesImportedFromNumericAccountFilter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, importedPoint, utxos[0].OutPoint)
-	require.Equal(t, db.ImportedAccount, utxos[0].Origin)
+	require.NotNil(t, utxos[0].Spendable)
+	require.True(t, *utxos[0].Spendable)
 }
 
 // TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter verifies that
@@ -826,7 +866,6 @@ func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, derivedPoint, utxos[0].OutPoint)
-	require.Equal(t, db.DerivedAccount, utxos[0].Origin)
 
 	// The imported account remains selectable through (Scope, AccountName).
 	utxos, err = store.ListUTXOs(t.Context(), db.ListUtxosQuery{
@@ -837,7 +876,8 @@ func TestListUTXOsExcludesWatchOnlyAccountFromNumericAccountFilter(
 	require.NoError(t, err)
 	require.Len(t, utxos, 1)
 	require.Equal(t, importedPoint, utxos[0].OutPoint)
-	require.Equal(t, db.ImportedAccount, utxos[0].Origin)
+	require.NotNil(t, utxos[0].Spendable)
+	require.False(t, *utxos[0].Spendable)
 }
 
 // createImportedXpubAccount creates an imported (watch-only) xpub account via

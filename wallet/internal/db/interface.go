@@ -95,10 +95,10 @@ var (
 
 	// ErrReservedAccountName is returned when a caller-initiated account
 	// operation targets the reserved wallet-level imported bucket name
-	// (DefaultImportedAccountName). That slot is owned exclusively by the
-	// keyless imported bucket, which is materialized only on the first
-	// address import (see NewImportedAddressWithTx); neither the derived,
-	// imported-xpub, nor rename public APIs may occupy it.
+	// (DefaultImportedAccountName). Raw single imports use that alias in
+	// compatibility responses and filters, but SQL must not materialize it as
+	// an account row; neither derived, imported-xpub, nor rename public APIs
+	// may occupy it.
 	ErrReservedAccountName = errors.New(
 		"account name is reserved for the imported bucket",
 	)

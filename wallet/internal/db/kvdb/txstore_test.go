@@ -241,6 +241,34 @@ func TestCreateTxCreditlessSucceeds(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestCreateTxCreditMissingAddrStore verifies credited transactions fail with a
+// domain error instead of panicking when the address manager is unavailable.
+func TestCreateTxCreditMissingAddrStore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+	addr, script := newTestAddressScript(t)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{74},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 6_000, PkScript: script})
+
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: 0,
+		Tx:       txMsg,
+		Received: time.Unix(1710003900, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: addr},
+	})
+	require.ErrorIs(t, err, errMissingAddrStore)
+}
+
 // TestCreateTxCreditNilFallback verifies that a nil credit address records the
 // credit via the output's own script, matching the documented
 // CreateTxParams.Credits fallback and the SQL backends. The nil path must not
@@ -462,8 +490,8 @@ func TestUpdateTxRejectsUnsupportedPatches(t *testing.T) {
 	require.ErrorIs(t, err, errNotImplemented)
 }
 
-// TestUpdateTxEmptyLabelPreservesLegacyError verifies that an empty label keeps
-// the legacy kvdb validation behavior.
+// TestUpdateTxEmptyLabelPreservesLegacyError verifies that kvdb keeps the
+// legacy empty-label rejection instead of reaching into private buckets.
 func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 	t.Parallel()
 
@@ -481,11 +509,17 @@ func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
 	require.NoError(t, err)
 
+	label := "old label"
 	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		require.NotNil(t, ns)
 
-		return txStore.InsertTx(ns, rec, nil)
+		err := txStore.InsertTx(ns, rec, nil)
+		if err != nil {
+			return err
+		}
+
+		return txStore.PutTxLabel(ns, rec.Hash, label)
 	})
 	require.NoError(t, err)
 
@@ -495,7 +529,20 @@ func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 		Txid:     rec.Hash,
 		Label:    &empty,
 	})
-	require.ErrorIs(t, err, wtxmgr.ErrEmptyLabel)
+	require.ErrorContains(t, err, "empty transaction label not allowed")
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		details, err := txStore.TxDetails(ns, &rec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Equal(t, label, details.Label)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // TestUpdateTxLongLabelPreservesLegacyError verifies that label length
@@ -909,14 +956,29 @@ func insertSpendChain(t *testing.T, dbConn walletdb.DB,
 func newMultisigScript(t *testing.T) (address.Address, []byte) {
 	t.Helper()
 
+	members, script := newMultisigScriptMembers(t)
+
+	return members[0], script
+}
+
+// newMultisigScriptMembers builds a 1-of-2 bare-multisig output script and
+// returns both member pubkey addresses along with the script.
+func newMultisigScriptMembers(t *testing.T) ([]address.Address, []byte) {
+	t.Helper()
+
 	firstKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
 	secondKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
-	memberAddr, err := address.NewAddressPubKey(
+	firstAddr, err := address.NewAddressPubKey(
 		firstKey.PubKey().SerializeCompressed(),
+		&chaincfg.RegressionNetParams,
+	)
+	require.NoError(t, err)
+	secondAddr, err := address.NewAddressPubKey(
+		secondKey.PubKey().SerializeCompressed(),
 		&chaincfg.RegressionNetParams,
 	)
 	require.NoError(t, err)
@@ -931,5 +993,12 @@ func newMultisigScript(t *testing.T) (address.Address, []byte) {
 	script, err := builder.Script()
 	require.NoError(t, err)
 
-	return memberAddr, script
+	return []address.Address{firstAddr, secondAddr}, script
+}
+
+// matchAddress returns a matcher for an address with the same encoded form.
+func matchAddress(addr address.Address) interface{} {
+	return mock.MatchedBy(func(got address.Address) bool {
+		return got.EncodeAddress() == addr.EncodeAddress()
+	})
 }

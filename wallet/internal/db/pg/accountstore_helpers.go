@@ -27,62 +27,6 @@ type accountInfoRow interface {
 		sqlc.ListAccountsByWalletAndNameRow
 }
 
-// derivedAddressGetAccountID extracts the account ID from a row.
-func derivedAddressGetAccountID(
-	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
-
-	return row.ID
-}
-
-// derivedAddressGetAccountNumber extracts the derived account number from a
-// row.
-func derivedAddressGetAccountNumber(
-	row sqlc.GetAccountByWalletScopeAndNameRow) (uint32, error) {
-
-	return db.DerivedAddressAccountNumber(row.AccountNumber)
-}
-
-// derivedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
-// from a row.
-func derivedAddressGetWalletWatchOnly(
-	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
-
-	return row.WalletIsWatchOnly
-}
-
-// derivedAddressGetAccountAddrSchema returns the address schema persisted for
-// the account's key scope.
-func derivedAddressGetAccountAddrSchema(
-	row sqlc.GetAccountByWalletScopeAndNameRow) (db.ScopeAddrSchema,
-	error) {
-
-	return db.DerivedAddressAccountSchema(
-		row.InternalTypeID, row.ExternalTypeID,
-	)
-}
-
-// derivedAddressGetAccountPubKey extracts the account public key from a row.
-func derivedAddressGetAccountPubKey(
-	row sqlc.GetAccountByWalletScopeAndNameRow) []byte {
-
-	return row.PublicKey
-}
-
-// importedAddressGetAccountID extracts the account ID from a row.
-func importedAddressGetAccountID(
-	row sqlc.GetAccountByWalletScopeAndNameRow) int64 {
-
-	return row.ID
-}
-
-// importedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
-// from a row.
-func importedAddressGetWalletWatchOnly(
-	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
-
-	return row.WalletIsWatchOnly
-}
-
 // accountRowToInfo converts a PostgreSQL account row to an AccountInfo
 // struct. It uses type conversion since all accountInfoRow types have
 // identical fields.
@@ -96,10 +40,9 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			RowID:             base.ID,
 			AccountNumber:     base.AccountNumber,
 			AccountName:       base.AccountName,
-			OriginID:          base.OriginID,
+			IsDerived:         base.IsDerived,
 			ExternalKeyCount:  base.ExternalKeyCount,
 			InternalKeyCount:  base.InternalKeyCount,
-			ImportedKeyCount:  base.ImportedKeyCount,
 			PublicKey:         base.PublicKey,
 			MasterFingerprint: base.MasterFingerprint,
 			IsWatchOnly:       base.WalletIsWatchOnly,
@@ -108,7 +51,6 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			CoinType:          base.CoinType,
 			InternalTypeID:    base.InternalTypeID,
 			ExternalTypeID:    base.ExternalTypeID,
-			IDToOriginType:    db.IDToAccountOrigin[int16],
 		},
 	)
 }

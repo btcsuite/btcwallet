@@ -507,9 +507,9 @@ func TestDecorateInputErrNotPubKey(t *testing.T) {
 	// a PubKey so buildScriptsForAddressInfo errors with ErrNotPubKeyAddress.
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
-			ScriptPubKey: p2wkhScript,
-			AddrType:     db.WitnessPubKey,
-			Origin:       db.DerivedAccount,
+			ScriptPubKey:      p2wkhScript,
+			AddrType:          db.WitnessPubKey,
+			HasDerivationPath: true,
 		}, nil)
 
 	utxo := &wire.TxOut{
@@ -1263,9 +1263,9 @@ func TestAddChangeOutputInfoErrNotPubKey(t *testing.T) {
 	// PubKey so buildScriptsForAddressInfo returns ErrNotPubKeyAddress.
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
-			ScriptPubKey: p2wkhScript,
-			AddrType:     db.WitnessPubKey,
-			Origin:       db.DerivedAccount,
+			ScriptPubKey:      p2wkhScript,
+			AddrType:          db.WitnessPubKey,
+			HasDerivationPath: true,
 		}, nil)
 
 	// Act: Call addChangeOutputInfo.
@@ -1312,7 +1312,7 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 		Return(&db.AddressInfo{
 			ScriptPubKey: p2wkhScript,
 			AddrType:     db.WitnessPubKey,
-			Origin:       db.ImportedAccount,
+			IsImported:   true,
 			PubKey:       pubKey.SerializeCompressed(),
 		}, nil)
 
@@ -1482,13 +1482,15 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 
 	// Arrange: Mock Address lookup (used for both input decoration and
 	// change output info).
+	accountNumber := uint32(0)
 	mocks.store.On("GetAddress", mock.Anything, mock.Anything).
 		Return(&db.AddressInfo{
 			ScriptPubKey:         p2wkhScript,
 			AddrType:             db.WitnessPubKey,
-			Origin:               db.DerivedAccount,
+			AccountNumber:        &accountNumber,
 			KeyScope:             db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			MasterKeyFingerprint: 1,
+			HasDerivationPath:    true,
 			PubKey:               pubKey.SerializeCompressed(),
 		}, nil)
 

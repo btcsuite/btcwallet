@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -70,10 +71,109 @@ func KeyScopeFromIDs(purpose, coinType int64) (KeyScope, error) {
 	return KeyScope{Purpose: p, Coin: c}, nil
 }
 
+// KeyScopeFromNullIDs builds a KeyScope from nullable purpose / coin_type
+// columns. It returns hasScope=false when both columns are NULL, which is the
+// expected shape for raw imported addresses.
+func KeyScopeFromNullIDs(purpose,
+	coinType sql.NullInt64) (KeyScope, bool, error) {
+
+	switch {
+	case !purpose.Valid && !coinType.Valid:
+		return KeyScope{}, false, nil
+
+	case purpose.Valid != coinType.Valid:
+		return KeyScope{}, false, fmt.Errorf("%w: incomplete key scope",
+			errAddressShapeCorruption)
+	}
+
+	scope, err := KeyScopeFromIDs(purpose.Int64, coinType.Int64)
+	if err != nil {
+		return KeyScope{}, false, err
+	}
+
+	return scope, true, nil
+}
+
+// UtxoAddressShape captures address/account shape metadata selected by UTXO
+// read queries.
+type UtxoAddressShape struct {
+	// IsDerived reports whether the credited address should have a
+	// derived_addresses child row.
+	IsDerived bool
+
+	// DerivedAddressID is set when the credited address has a derived_addresses
+	// child row.
+	DerivedAddressID sql.NullInt64
+
+	// AccountID is set when the credited address has derived account ownership
+	// metadata.
+	AccountID sql.NullInt64
+
+	// AccountIsDerived reports the owning account's structural shape when
+	// account
+	// metadata is present.
+	AccountIsDerived sql.NullBool
+
+	// AccountNumber is set when the owning account is wallet-derived.
+	AccountNumber sql.NullInt64
+}
+
+// validateImportedUtxoShape verifies that a raw imported address carries no
+// derived path row or account metadata.
+func validateImportedUtxoShape(shape UtxoAddressShape) error {
+	if shape.DerivedAddressID.Valid {
+		return fmt.Errorf("%w: raw imported address has path row",
+			errAddressShapeCorruption)
+	}
+
+	if shape.AccountID.Valid || shape.AccountIsDerived.Valid ||
+		shape.AccountNumber.Valid {
+
+		return fmt.Errorf("%w: raw imported address has account metadata",
+			errAddressShapeCorruption)
+	}
+
+	return nil
+}
+
+// ValidateUtxoAddressShape checks that UTXO address/account joins reflect a
+// valid persisted address shape.
+func ValidateUtxoAddressShape(shape UtxoAddressShape) error {
+	if !shape.IsDerived {
+		return validateImportedUtxoShape(shape)
+	}
+
+	if !shape.DerivedAddressID.Valid {
+		return fmt.Errorf("%w: derived address missing path row",
+			errAddressShapeCorruption)
+	}
+
+	if !shape.AccountID.Valid || !shape.AccountIsDerived.Valid {
+		return fmt.Errorf("%w: derived address missing account metadata",
+			errAddressShapeCorruption)
+	}
+
+	if !shape.AccountIsDerived.Bool {
+		if shape.AccountNumber.Valid {
+			return fmt.Errorf("%w: non-derived account has derived "+
+				"account number", errAccountShapeCorruption)
+		}
+
+		return nil
+	}
+
+	if !shape.AccountNumber.Valid {
+		return fmt.Errorf("%w: derived account missing account number",
+			errAccountShapeCorruption)
+	}
+
+	return nil
+}
+
 // BuildUtxoInfo converts the normalized base SQL result fields into the public
 // UtxoInfo shape. Backends set the per-row enrichment fields (AccountName,
-// Origin, AddrType, HasScript, IsLocked, KeyScope) directly on the returned
-// value after this call.
+// AddrType, HasScript, IsLocked, KeyScope) directly on the returned value after
+// this call.
 func BuildUtxoInfo(hash []byte, outputIndex uint32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
 	blockHeight *uint32) (*UtxoInfo, error) {

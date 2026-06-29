@@ -86,7 +86,6 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 				Valid: true,
 			},
 			AccountName: name,
-			OriginID:    int16(db.DerivedAccount),
 			PublicKey:   derived.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(derived.MasterKeyFingerprint),
@@ -112,6 +111,7 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	}
 
 	return db.CreateDerivedAccountRow{
+		AccountID:     row.ID,
 		AccountNumber: row.AccountNumber,
 		CreatedAt:     row.CreatedAt,
 	}, nil

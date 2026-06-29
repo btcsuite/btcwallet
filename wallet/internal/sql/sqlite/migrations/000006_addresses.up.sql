@@ -8,13 +8,9 @@
 -- tx_status soft-delete (see ADR 0006) and ON DELETE RESTRICT. See
 -- ADR 0011 for the full design rationale.
 --
--- Addresses table stores all addresses under each account. Addresses can be
--- either HD-derived (following BIP32/BIP44 derivation paths) or imported from
--- external sources (e.g., watch-only addresses, hardware wallet addresses).
---
--- The table supports both address types through nullable derivation fields:
--- - HD-derived addresses have address_branch and address_index values
--- - Imported addresses have NULL derivation fields and store pub_key
+-- Addresses table stores wallet-local address identity. HD derivation path and
+-- owning account data live in derived_addresses; raw imports have an addresses
+-- row without a derived_addresses child.
 CREATE TABLE addresses (
     -- DB ID of the address, primary key.
     id INTEGER PRIMARY KEY,
@@ -22,26 +18,20 @@ CREATE TABLE addresses (
     -- Reference to the wallet this address belongs to.
     wallet_id INTEGER NOT NULL,
 
-    -- Reference to the account this address belongs to.
-    account_id INTEGER NOT NULL,
+    -- Shape marker. TRUE means this address must have a derived_addresses child
+    -- row with account ownership and BIP44 path data. Raw imported addresses
+    -- leave this FALSE.
+    is_derived BOOLEAN NOT NULL,
 
     -- Script pubkey that locks funds on-chain (stored in plaintext per ADR 0009:
     -- docs/developer/adr/0009-single-passphrase-encryption.md).
     script_pub_key BLOB NOT NULL,
 
-    -- Reference to the address type (e.g., P2PKH, P2WPKH, P2TR). Determines
-    -- how the address is encoded and how funds can be spent.
-    type_id INTEGER NOT NULL,
+    -- Reference to the script type (e.g., P2PKH, P2WPKH, P2TR). Determines how
+    -- the address is encoded and how funds can be spent.
+    script_type_id INTEGER NOT NULL,
 
-    -- Branch number in BIP44 derivation path (typically 0 for external, 1 for
-    -- internal/change). NULL for imported addresses.
-    address_branch INTEGER,
-
-    -- Index number in BIP44 derivation path (sequential counter within each
-    -- branch). NULL for imported addresses.
-    address_index INTEGER,
-
-    -- Public key for imported addresses (stored in plaintext per ADR 0009:
+    -- Public key for raw imported addresses (stored in plaintext per ADR 0009:
     -- docs/developer/adr/0009-single-passphrase-encryption.md). NULL for
     -- HD-derived addresses since their public keys are derived from the
     -- account key.
@@ -50,55 +40,123 @@ CREATE TABLE addresses (
     -- Timestamp when the address was created. Automatically set by the database.
     created_at DATETIME NOT NULL DEFAULT current_timestamp,
 
-    -- Branch and index are set together for HD-derived addresses and both
-    -- NULL for imported addresses.
-    CHECK ((address_branch IS NULL) = (address_index IS NULL)),
+    -- Shape marker must be boolean.
+    CHECK (is_derived IN (0, 1)),
 
-    -- Branch must be a BIP44 branch number when set.
-    CHECK (address_branch IS NULL OR address_branch IN (0, 1)),
-
-    -- Address index must be non-negative when set.
-    CHECK (address_index IS NULL OR address_index >= 0),
-
-    -- Composite foreign key to accounts. This ensures account_id belongs to
-    -- the same wallet_id as the address row. Wallet ownership is transitively
-    -- enforced through accounts, which has its own FK to wallets. Using ON
-    -- DELETE RESTRICT to ensure that the wallet/account cannot be deleted if
-    -- addresses still exist.
-    FOREIGN KEY (wallet_id, account_id)
-    REFERENCES accounts (wallet_id, id) ON DELETE RESTRICT,
+    -- Foreign key constraint to wallets. Raw imported addresses are wallet-
+    -- local script identities and do not have key-scope derivation identity.
+    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
 
     -- Foreign key constraint to address types. Using ON DELETE RESTRICT to
-    -- ensure that the address type cannot be deleted if addresses still exist.
-    FOREIGN KEY (type_id) REFERENCES address_types (id) ON DELETE RESTRICT
+    -- ensure that the script type cannot be deleted if addresses still exist.
+    FOREIGN KEY (script_type_id) REFERENCES address_types (id) ON DELETE RESTRICT
 );
-
--- Unique partial index to prevent duplicate address derivations within the
--- same account. Only enforced when both branch and index are non-NULL
--- (HD-derived addresses). Imported addresses are excluded from this constraint.
-CREATE UNIQUE INDEX uidx_addresses_branch_index
-ON addresses (account_id, address_branch, address_index)
-WHERE
-    address_branch IS NOT NULL
-    AND address_index IS NOT NULL;
 
 -- Unique index to prevent duplicate script_pub_key within the same wallet.
 CREATE UNIQUE INDEX uidx_addresses_wallet_script_pub_key
 ON addresses (wallet_id, script_pub_key);
 
--- Index on (account_id, id) for efficient pagination of addresses by account.
--- Used by ListAddressesByAccount for cursor-based pagination.
-CREATE INDEX idx_addresses_account_id ON addresses (account_id, id);
+-- Unique index to support composite foreign keys from derived_addresses.
+CREATE UNIQUE INDEX uidx_addresses_id_wallet
+ON addresses (id, wallet_id);
 
--- Enforce that wallet ownership chosen at address creation time remains
--- immutable. This closes the database-boundary hole where a raw update could
--- reparent an existing address into another wallet after insert.
-CREATE TRIGGER trg_assert_address_wallet_id_immutable
-BEFORE UPDATE OF wallet_id ON addresses
+-- Index for raw-import address listing by wallet.
+CREATE INDEX idx_addresses_wallet_derived_id
+ON addresses (wallet_id, is_derived, id);
+
+-- Derived Addresses table stores HD child ownership and path data.
+CREATE TABLE derived_addresses (
+    -- Reference to the parent address. Also serves as the primary key,
+    -- enforcing one derived address row per address.
+    address_id INTEGER PRIMARY KEY,
+
+    -- Duplicate of addresses.wallet_id for account/address drift checks.
+    wallet_id INTEGER NOT NULL,
+
+    -- Reference to the account this derived address belongs to.
+    account_id INTEGER NOT NULL,
+
+    -- Branch number in BIP44 derivation path. We currently use only 0
+    -- (external) and 1 (internal/change).
+    address_branch INTEGER NOT NULL,
+
+    -- Index number in BIP44 derivation path.
+    address_index INTEGER NOT NULL,
+
+    -- Branch must be a BIP44 branch number.
+    CHECK (address_branch IN (0, 1)),
+
+    -- Address index must be non-negative.
+    CHECK (address_index >= 0),
+
+    -- Foreign key constraint to addresses. Using ON DELETE RESTRICT to ensure
+    -- that the address cannot be deleted if derived identity still exists.
+    FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT,
+
+    -- Foreign key constraint to accounts. Using ON DELETE RESTRICT to ensure
+    -- that the account cannot be deleted if addresses still exist.
+    FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE RESTRICT,
+
+    -- Composite foreign key to ensure duplicated wallet_id matches the parent
+    -- address row.
+    FOREIGN KEY (address_id, wallet_id)
+    REFERENCES addresses (id, wallet_id) ON DELETE RESTRICT,
+
+    -- Composite foreign key to ensure derived address account ownership matches
+    -- the address wallet. Scope is inherited from the owning account.
+    FOREIGN KEY (account_id, wallet_id)
+    REFERENCES accounts (id, wallet_id) ON DELETE RESTRICT
+) WITHOUT ROWID;
+
+-- Unique index to prevent duplicate address derivations within the same account.
+CREATE UNIQUE INDEX uidx_derived_addresses_account_branch_index
+ON derived_addresses (account_id, address_branch, address_index);
+
+-- Index for efficient pagination of addresses by wallet and account.
+CREATE INDEX idx_derived_addresses_wallet_account_address
+ON derived_addresses (wallet_id, account_id, address_id);
+
+-- Narrow index for account-address joins when wallet_id is already known.
+CREATE INDEX idx_derived_addresses_account_address
+ON derived_addresses (account_id, address_id);
+
+-- Enforce that structural address identity fields chosen at address creation
+-- time remain immutable.
+CREATE TRIGGER trg_assert_address_identity_immutable
+BEFORE UPDATE ON addresses
 FOR EACH ROW
-WHEN new.wallet_id != old.wallet_id
+WHEN
+    new.id != old.id
+    OR new.wallet_id != old.wallet_id
+    OR new.is_derived != old.is_derived
 BEGIN
-    SELECT raise(ABORT, 'address wallet_id cannot be changed after creation');
+    SELECT raise(ABORT, 'address identity cannot be changed after creation');
+END;
+
+-- Enforce that only addresses marked as derived can receive path/account rows.
+CREATE TRIGGER trg_assert_derived_address_parent_insert
+BEFORE INSERT ON derived_addresses
+FOR EACH ROW
+BEGIN
+    SELECT raise(ABORT, 'derived address parent must be marked derived')
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM addresses AS addr
+        WHERE
+            addr.id = new.address_id
+            AND addr.is_derived
+            AND addr.wallet_id = new.wallet_id
+    );
+END;
+
+-- Derived address identity/path rows are allocated once and never retargeted.
+CREATE TRIGGER trg_reject_derived_address_update
+BEFORE UPDATE ON derived_addresses
+FOR EACH ROW
+BEGIN
+    SELECT raise(
+        ABORT, 'derived address identity cannot be changed after creation'
+    );
 END;
 
 -- Address Secrets table stores sensitive encrypted material needed to spend
@@ -109,7 +167,7 @@ CREATE TABLE address_secrets (
     -- primary key, enforcing one-to-one relationship.
     address_id INTEGER PRIMARY KEY,
 
-    -- Encrypted private key for imported addresses. NULL for HD-derived
+    -- Encrypted private key for raw imported addresses. NULL for HD-derived
     -- addresses since their private keys are derived from the account key.
     encrypted_priv_key BLOB,
 
@@ -120,7 +178,7 @@ CREATE TABLE address_secrets (
     -- Foreign key constraint to addresses. Using ON DELETE RESTRICT to ensure
     -- that the address cannot be deleted if secrets still exist.
     FOREIGN KEY (address_id) REFERENCES addresses (id) ON DELETE RESTRICT
-);
+) WITHOUT ROWID;
 
 -- Enforce the watch-only address secret invariant at the database boundary.
 -- Watch-only parent wallets may track imported scripts, but addresses
@@ -158,24 +216,4 @@ BEGIN
                 addr.id = new.address_id
                 AND w.is_watch_only
         );
-END;
-
--- Increments imported_key_count when a new imported address is inserted.
-CREATE TRIGGER trg_addresses_imported_key_count_insert
-AFTER INSERT ON addresses
-WHEN new.address_branch IS NULL
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count + 1
-    WHERE id = new.account_id;
-END;
-
--- Decrements imported_key_count when an imported address is deleted.
-CREATE TRIGGER trg_addresses_imported_key_count_delete
-AFTER DELETE ON addresses
-WHEN old.address_branch IS NULL
-BEGIN
-    UPDATE accounts
-    SET imported_key_count = imported_key_count - 1
-    WHERE id = old.account_id;
 END;

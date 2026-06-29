@@ -45,20 +45,17 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.createDerivedAccountStmt, err = db.PrepareContext(ctx, CreateDerivedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAccount: %w", err)
 	}
-	if q.createDerivedAccountWithNumberStmt, err = db.PrepareContext(ctx, CreateDerivedAccountWithNumber); err != nil {
-		return nil, fmt.Errorf("error preparing query CreateDerivedAccountWithNumber: %w", err)
-	}
 	if q.createDerivedAddressStmt, err = db.PrepareContext(ctx, CreateDerivedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateDerivedAddress: %w", err)
+	}
+	if q.createDerivedAddressPathStmt, err = db.PrepareContext(ctx, CreateDerivedAddressPath); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateDerivedAddressPath: %w", err)
 	}
 	if q.createImportedAccountStmt, err = db.PrepareContext(ctx, CreateImportedAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAccount: %w", err)
 	}
 	if q.createImportedAddressStmt, err = db.PrepareContext(ctx, CreateImportedAddress); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateImportedAddress: %w", err)
-	}
-	if q.createImportedBucketAccountStmt, err = db.PrepareContext(ctx, CreateImportedBucketAccount); err != nil {
-		return nil, fmt.Errorf("error preparing query CreateImportedBucketAccount: %w", err)
 	}
 	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
@@ -222,6 +219,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listOwnedOutputsByTxIDsStmt, err = db.PrepareContext(ctx, ListOwnedOutputsByTxIDs); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOwnedOutputsByTxIDs: %w", err)
 	}
+	if q.listRawImportedAddressesStmt, err = db.PrepareContext(ctx, ListRawImportedAddresses); err != nil {
+		return nil, fmt.Errorf("error preparing query ListRawImportedAddresses: %w", err)
+	}
 	if q.listReplacedTxHashesByReplacementTxHashStmt, err = db.PrepareContext(ctx, ListReplacedTxHashesByReplacementTxHash); err != nil {
 		return nil, fmt.Errorf("error preparing query ListReplacedTxHashesByReplacementTxHash: %w", err)
 	}
@@ -325,14 +325,14 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing createDerivedAccountStmt: %w", cerr)
 		}
 	}
-	if q.createDerivedAccountWithNumberStmt != nil {
-		if cerr := q.createDerivedAccountWithNumberStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing createDerivedAccountWithNumberStmt: %w", cerr)
-		}
-	}
 	if q.createDerivedAddressStmt != nil {
 		if cerr := q.createDerivedAddressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createDerivedAddressStmt: %w", cerr)
+		}
+	}
+	if q.createDerivedAddressPathStmt != nil {
+		if cerr := q.createDerivedAddressPathStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createDerivedAddressPathStmt: %w", cerr)
 		}
 	}
 	if q.createImportedAccountStmt != nil {
@@ -343,11 +343,6 @@ func (q *Queries) Close() error {
 	if q.createImportedAddressStmt != nil {
 		if cerr := q.createImportedAddressStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createImportedAddressStmt: %w", cerr)
-		}
-	}
-	if q.createImportedBucketAccountStmt != nil {
-		if cerr := q.createImportedBucketAccountStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing createImportedBucketAccountStmt: %w", cerr)
 		}
 	}
 	if q.createKeyScopeStmt != nil {
@@ -620,6 +615,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listOwnedOutputsByTxIDsStmt: %w", cerr)
 		}
 	}
+	if q.listRawImportedAddressesStmt != nil {
+		if cerr := q.listRawImportedAddressesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listRawImportedAddressesStmt: %w", cerr)
+		}
+	}
 	if q.listReplacedTxHashesByReplacementTxHashStmt != nil {
 		if cerr := q.listReplacedTxHashesByReplacementTxHashStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listReplacedTxHashesByReplacementTxHashStmt: %w", cerr)
@@ -771,11 +771,10 @@ type Queries struct {
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
-	createDerivedAccountWithNumberStmt          *sql.Stmt
 	createDerivedAddressStmt                    *sql.Stmt
+	createDerivedAddressPathStmt                *sql.Stmt
 	createImportedAccountStmt                   *sql.Stmt
 	createImportedAddressStmt                   *sql.Stmt
-	createImportedBucketAccountStmt             *sql.Stmt
 	createKeyScopeStmt                          *sql.Stmt
 	createWalletStmt                            *sql.Stmt
 	deleteBlockStmt                             *sql.Stmt
@@ -830,6 +829,7 @@ type Queries struct {
 	listKeyScopesByWalletStmt                   *sql.Stmt
 	listOwnedInputPrevOutputsByTxHashesStmt     *sql.Stmt
 	listOwnedOutputsByTxIDsStmt                 *sql.Stmt
+	listRawImportedAddressesStmt                *sql.Stmt
 	listReplacedTxHashesByReplacementTxHashStmt *sql.Stmt
 	listReplacedTxIDsByReplacementTxIDStmt      *sql.Stmt
 	listReplacementTxHashesByReplacedTxHashStmt *sql.Stmt
@@ -864,11 +864,10 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
-		createDerivedAccountWithNumberStmt:          q.createDerivedAccountWithNumberStmt,
 		createDerivedAddressStmt:                    q.createDerivedAddressStmt,
+		createDerivedAddressPathStmt:                q.createDerivedAddressPathStmt,
 		createImportedAccountStmt:                   q.createImportedAccountStmt,
 		createImportedAddressStmt:                   q.createImportedAddressStmt,
-		createImportedBucketAccountStmt:             q.createImportedBucketAccountStmt,
 		createKeyScopeStmt:                          q.createKeyScopeStmt,
 		createWalletStmt:                            q.createWalletStmt,
 		deleteBlockStmt:                             q.deleteBlockStmt,
@@ -923,6 +922,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listKeyScopesByWalletStmt:                   q.listKeyScopesByWalletStmt,
 		listOwnedInputPrevOutputsByTxHashesStmt:     q.listOwnedInputPrevOutputsByTxHashesStmt,
 		listOwnedOutputsByTxIDsStmt:                 q.listOwnedOutputsByTxIDsStmt,
+		listRawImportedAddressesStmt:                q.listRawImportedAddressesStmt,
 		listReplacedTxHashesByReplacementTxHashStmt: q.listReplacedTxHashesByReplacementTxHashStmt,
 		listReplacedTxIDsByReplacementTxIDStmt:      q.listReplacedTxIDsByReplacementTxIDStmt,
 		listReplacementTxHashesByReplacedTxHashStmt: q.listReplacementTxHashesByReplacedTxHashStmt,

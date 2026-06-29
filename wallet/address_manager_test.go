@@ -41,12 +41,13 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 	t.Helper()
 
 	info := addressInfoFromAddr(t, addr)
+	accountNumber := uint32(0)
 	info.AddrType = addrType
-	info.Origin = db.DerivedAccount
 	info.AccountName = accountName
-	info.AccountNumber = 0
+	info.AccountNumber = &accountNumber
 	info.KeyScope = db.KeyScope(scope)
 	info.MasterKeyFingerprint = fingerprint
+	info.HasDerivationPath = true
 	info.Index = index
 
 	if change {
@@ -69,7 +70,7 @@ func importedPubKeyAddressInfoFromAddr(t *testing.T, addr address.Address,
 
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = db.WitnessPubKey
-	info.Origin = db.ImportedAccount
+	info.IsImported = true
 	info.AccountName = db.DefaultImportedAccountName
 	info.KeyScope = db.KeyScope(scope)
 	info.IsWatchOnly = true
@@ -150,11 +151,6 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	origin := db.DerivedAccount
-	if imported {
-		origin = db.ImportedAccount
-	}
-
 	var branch uint32
 	if internal {
 		branch = 1
@@ -166,12 +162,18 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	}
 
 	storeInfo := &db.AddressInfo{
-		ScriptPubKey: pkScript,
-		AddrType:     addrType,
-		Origin:       origin,
-		Branch:       branch,
-		PubKey:       pubKeyBytes,
+		ScriptPubKey:      pkScript,
+		AddrType:          addrType,
+		IsImported:        imported,
+		HasDerivationPath: !imported,
+		Branch:            branch,
+		PubKey:            pubKeyBytes,
 	}
+	if !imported {
+		accountNumber := uint32(0)
+		storeInfo.AccountNumber = &accountNumber
+	}
+
 	if keyScope != (waddrmgr.KeyScope{}) {
 		storeInfo.KeyScope = db.KeyScope(keyScope)
 		storeInfo.MasterKeyFingerprint = 1
@@ -197,9 +199,6 @@ func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
 	}
 }
 
-// TestNewAddress tests the NewAddress method, ensuring it can generate
-// various address types for different accounts and correctly handles both
-// internal and external address generation.
 // expectStoreAddressInfo configures mock expectations for address lookup.
 func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	addr address.Address, info *db.AddressInfo) {
@@ -218,6 +217,9 @@ func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	).Return(info, nil).Once()
 }
 
+// TestNewAddress tests the NewAddress method, ensuring it can generate
+// various address types for different accounts and correctly handles both
+// internal and external address generation.
 func TestNewAddress(t *testing.T) {
 	t.Parallel()
 
@@ -350,12 +352,16 @@ func TestNewAddress(t *testing.T) {
 func TestGetUnusedAddress(t *testing.T) {
 	t.Parallel()
 
+	const importedXpubName = "imported-xpub"
+
 	w, deps := createStartedWalletWithMocks(t)
 
 	firstAddr, _ := address.NewAddressWitnessPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope(scope)
+	defaultName := waddrmgr.DefaultAccountName
 	req, err := addressPageRequest()
 	require.NoError(t, err)
 
@@ -363,22 +369,52 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &defaultName,
+			Scope:       &dbScope,
 			Page:        req,
 		},
 	).Return(addressIter(*derivedAddressInfoFromAddr(
-		t, firstAddr, db.WitnessPubKey, "default", scope, false, 0, 0, nil,
+		t, firstAddr, db.WitnessPubKey, defaultName, scope, false, 0, 0,
+		nil,
 	))).Once()
 
 	unusedAddr, err := w.GetUnusedAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 	require.Equal(t, firstAddr.String(), unusedAddr.String())
 
+	importedXpubAddr, _ := address.NewAddressWitnessPubKeyHash(
+		[]byte{
+			31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+			41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+		}, w.cfg.ChainParams,
+	)
+	importedXpubInfo := derivedAddressInfoFromAddr(
+		t, importedXpubAddr, db.WitnessPubKey, importedXpubName, scope,
+		false, 0, 0, nil,
+	)
+	importedXpubInfo.IsImported = true
+	importedXpubInfo.AccountNumber = nil
+	importedXpubQueryName := importedXpubName
+
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID:    w.id,
+			AccountName: &importedXpubQueryName,
+			Scope:       &dbScope,
+			Page:        req,
+		},
+	).Return(addressIter(*importedXpubInfo)).Once()
+	unusedImportedAddr, err := w.GetUnusedAddress(
+		t.Context(), importedXpubName, waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, importedXpubAddr.String(), unusedImportedAddr.String())
+
 	usedFirstAddr := derivedAddressInfoFromAddr(
-		t, firstAddr, db.WitnessPubKey, "default", scope, false,
+		t, firstAddr, db.WitnessPubKey, defaultName, scope, false,
 		0, 0, nil,
 	)
 	usedFirstAddr.IsUsed = true
@@ -387,8 +423,8 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &defaultName,
+			Scope:       &dbScope,
 			Page:        req,
 		},
 	).Return(addressIter(*usedFirstAddr)).Once()
@@ -399,10 +435,10 @@ func TestGetUnusedAddress(t *testing.T) {
 			11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 		}, w.cfg.ChainParams,
 	)
-	expectStoreNewAddress(t, w, deps, "default", scope, false, nextAddrVal)
+	expectStoreNewAddress(t, w, deps, defaultName, scope, false, nextAddrVal)
 
 	nextAddr, err := w.GetUnusedAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 
@@ -420,16 +456,17 @@ func TestGetUnusedAddress(t *testing.T) {
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(scope),
+			AccountName: &defaultName,
+			Scope:       &dbScope,
 			Page:        req,
 		},
 	).Return(addressIter(*derivedAddressInfoFromAddr(
-		t, changeAddrVal, db.WitnessPubKey, "default", scope, true, 0, 0, nil,
+		t, changeAddrVal, db.WitnessPubKey, defaultName, scope, true, 0,
+		0, nil,
 	))).Once()
 
 	unusedChangeAddr, err := w.GetUnusedAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, true,
+		t.Context(), defaultName, waddrmgr.WitnessPubKey, true,
 	)
 	require.NoError(t, err)
 	require.Equal(t, changeAddrVal.String(), unusedChangeAddr.String())
@@ -606,7 +643,6 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 		"NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKey.SerializeCompressed(),
@@ -655,12 +691,15 @@ func TestListAddresses(t *testing.T) {
 	req, err := addressPageRequest()
 	require.NoError(t, err)
 
+	accountName := "default"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
+
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: "default",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &scope,
 			Page:        req,
 		},
 	).Return(addressIter(db.AddressInfo{ScriptPubKey: pkScript})).Once()
@@ -681,6 +720,69 @@ func TestListAddresses(t *testing.T) {
 	// We should have one address with a balance of 1000.
 	require.Len(t, addrs, 1)
 	require.Equal(t, addr.String(), addrs[0].Address.String())
+	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
+}
+
+// TestListAddressesImportedAlias tests that raw imported addresses are listed
+// through the public imported alias without a scoped account selector.
+func TestListAddressesImportedAlias(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	witnessAddr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	scriptAddr, err := address.NewAddressWitnessScriptHash(
+		make([]byte, 32), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	witnessScript, err := txscript.PayToAddrScript(witnessAddr)
+	require.NoError(t, err)
+
+	scriptScript, err := txscript.PayToAddrScript(scriptAddr)
+	require.NoError(t, err)
+
+	req, err := addressPageRequest()
+	require.NoError(t, err)
+
+	deps.store.On(
+		"ListUTXOs", mock.Anything, db.ListUtxosQuery{
+			WalletID: w.id,
+		},
+	).Return([]db.UtxoInfo{{
+		Amount:   1000,
+		PkScript: witnessScript,
+	}, {
+		Amount:   2000,
+		PkScript: scriptScript,
+	}}, nil).Once()
+
+	deps.store.On(
+		"IterAddresses", mock.Anything,
+		db.ListAddressesQuery{
+			WalletID: w.id,
+			Page:     req,
+		},
+	).Return(addressIter(db.AddressInfo{
+		ScriptPubKey: witnessScript,
+		AddrType:     db.WitnessPubKey,
+	}, db.AddressInfo{
+		ScriptPubKey: scriptScript,
+		AddrType:     db.WitnessScript,
+		HasScript:    true,
+	})).Once()
+
+	addrs, err := w.ListAddresses(
+		t.Context(), db.DefaultImportedAccountName,
+		waddrmgr.WitnessPubKey,
+	)
+	require.NoError(t, err)
+	require.Len(t, addrs, 1)
+	require.Equal(t, witnessAddr.String(), addrs[0].Address.String())
 	require.Equal(t, btcutil.Amount(1000), addrs[0].Balance)
 }
 
@@ -707,7 +809,6 @@ func TestImportPublicKey(t *testing.T) {
 		"NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKey.SerializeCompressed(),
@@ -777,15 +878,12 @@ func TestImportTaprootScript(t *testing.T) {
 	deps.store.On("NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:        w.id,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    pkScript,
 			EncryptedScript: encryptedScript,
 		}).Return(&db.AddressInfo{
 		AddrType:     db.TaprootPubKey,
-		Origin:       db.ImportedAccount,
-		AccountName:  db.DefaultImportedAccountName,
-		KeyScope:     db.KeyScope(waddrmgr.KeyScopeBIP0086),
+		IsImported:   true,
 		ScriptPubKey: pkScript,
 		HasScript:    true,
 		IsWatchOnly:  true,

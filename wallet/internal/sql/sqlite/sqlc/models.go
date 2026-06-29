@@ -13,20 +13,14 @@ type Account struct {
 	ID                int64
 	WalletID          int64
 	ScopeID           int64
-	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int64
+	IsDerived         bool
+	AccountNumber     sql.NullInt64
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
 	CreatedAt         time.Time
 	NextExternalIndex int64
 	NextInternalIndex int64
-	ImportedKeyCount  int64
-}
-
-type AccountOrigin struct {
-	ID          int64
-	Description string
 }
 
 type AccountSecret struct {
@@ -35,15 +29,13 @@ type AccountSecret struct {
 }
 
 type Address struct {
-	ID            int64
-	WalletID      int64
-	AccountID     int64
-	ScriptPubKey  []byte
-	TypeID        int64
-	AddressBranch sql.NullInt64
-	AddressIndex  sql.NullInt64
-	PubKey        []byte
-	CreatedAt     time.Time
+	ID           int64
+	WalletID     int64
+	IsDerived    bool
+	ScriptPubKey []byte
+	ScriptTypeID int64
+	PubKey       []byte
+	CreatedAt    time.Time
 }
 
 type AddressSecret struct {
@@ -61,6 +53,14 @@ type Block struct {
 	BlockHeight    int64
 	HeaderHash     []byte
 	BlockTimestamp int64
+}
+
+type DerivedAddress struct {
+	AddressID     int64
+	WalletID      int64
+	AccountID     int64
+	AddressBranch int64
+	AddressIndex  int64
 }
 
 type KeyScope struct {

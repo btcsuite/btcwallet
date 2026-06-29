@@ -43,10 +43,12 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint32(1), info.ID)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, "addr", info.AccountName)
-	require.Equal(t, props.AccountNumber, info.AccountID)
+	require.Nil(t, info.AccountID)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, props.AccountNumber, *info.AccountNumber)
 	require.NotEmpty(t, info.ScriptPubKey)
 	require.NotEmpty(t, info.PubKey)
 
@@ -61,17 +63,61 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+
+	accountName := "addr"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
 		t.Context(), db.ListAddressesQuery{
 			WalletID:    0,
-			AccountName: "addr",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &scope,
 			Page:        pageReq,
 		},
 	)
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	require.Equal(t, *info, result.Items[0])
+}
+
+// TestAddressStoreImportedXpubChildHasNoAccountNumber verifies that kvdb
+// matches SQL's imported-xpub contract: the address is imported key material,
+// but its account number is not exposed as a wallet-derived BIP44 account
+// number.
+func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+	accountName := "imported-xpub-address"
+	createImportedXpubAccount(
+		t, store, waddrmgr.KeyScopeBIP0084, accountName, 0xA5,
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    0,
+			AccountName: accountName,
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
+	require.Equal(t, accountName, info.AccountName)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.IsImported)
+	require.Nil(t, got.AccountNumber)
+	require.Equal(t, accountName, got.AccountName)
 }
 
 // TestAddressStoreNewDerivedAddressWatchOnlyWallet verifies that derived
@@ -110,11 +156,14 @@ func TestAddressStoreNewDerivedAddressWatchOnlyWallet(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+
+	accountName := "watch"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
 		t.Context(), db.ListAddressesQuery{
 			WalletID:    0,
-			AccountName: "watch",
-			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			AccountName: &accountName,
+			Scope:       &scope,
 			Page:        pageReq,
 		},
 	)
@@ -151,10 +200,12 @@ func TestAddressStoreListAddressesPagination(t *testing.T) {
 	pageReq, err := page.NewRequest[uint32](2)
 	require.NoError(t, err)
 
+	accountName := "page"
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	query := db.ListAddressesQuery{
 		WalletID:    0,
-		AccountName: "page",
-		Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AccountName: &accountName,
+		Scope:       &scope,
 		Page:        pageReq,
 	}
 
@@ -205,14 +256,13 @@ func TestAddressStoreImportedPublicKeyIsWatchOnly(t *testing.T) {
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     0,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKeyBytes,
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, pkScript, info.ScriptPubKey)
 	require.Equal(t, pubKeyBytes, info.PubKey)
@@ -261,7 +311,6 @@ func TestGetAddressBareMultisigReturnsNotFound(t *testing.T) {
 	_, err = store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     0,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0044),
 			AddressType:  db.PubKeyHash,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKeyBytes,
@@ -318,7 +367,6 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 		_, err = store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
 				WalletID:     0,
-				Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 				AddressType:  db.WitnessPubKey,
 				ScriptPubKey: script,
 				PubKey: privKey.PubKey().
@@ -512,10 +560,7 @@ func TestAddressStoreImportedPublicKeyRejectsMismatch(t *testing.T) {
 
 			_, err = store.NewImportedAddress(
 				t.Context(), db.NewImportedAddressParams{
-					WalletID: 0,
-					Scope: db.KeyScope(
-						waddrmgr.KeyScopeBIP0084,
-					),
+					WalletID:    0,
 					AddressType: tc.addrType,
 					ScriptPubKey: tc.scriptFunc(
 						t, actualScript, addrStore,
@@ -551,14 +596,13 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:        0,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    pkScript,
 			EncryptedScript: encryptedScript,
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.Equal(t, db.TaprootPubKey, info.AddrType)
 	require.True(t, info.HasScript)
 	require.Equal(t, pkScript, info.ScriptPubKey)

@@ -37,13 +37,25 @@ SELECT
     ), 0)::BIGINT AS unconfirmed_balance
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-INNER JOIN addresses AS addr ON u.address_id = addr.id
+INNER JOIN addresses AS a ON u.address_id = a.id
+INNER JOIN derived_addresses AS da ON a.id = da.address_id
+INNER JOIN accounts AS acc ON da.account_id = acc.id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
-    addr.wallet_id = $1
-    AND addr.account_id = $2
+    t.wallet_id = $1
+    AND a.wallet_id = $1
+    AND da.wallet_id = $1
+    AND acc.wallet_id = $1
+    AND da.account_id = $2
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
+    AND a.is_derived
+    AND da.address_id IS NOT NULL
+    AND acc.id IS NOT NULL
+    AND (
+        (acc.is_derived AND acc.account_number IS NOT NULL)
+        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+    )
 `
 
 type AccountBalanceParams struct {
@@ -56,11 +68,8 @@ type AccountBalanceRow struct {
 	UnconfirmedBalance int64
 }
 
-// AccountBalance returns the confirmed/unconfirmed balance for one
-// account, summed from the wallet's UTXO set at read time. Confirmed
-// means the funding tx is in a block at or below the wallet's synced
-// height; unconfirmed covers unmined and above-synced-tip outputs.
-// Spent outputs (`u.spent_by_tx_id IS NOT NULL`) are excluded.
+// AccountBalance returns the confirmed/unconfirmed balance for one account,
+// summed from the wallet's well-formed derived-address UTXO set at read time.
 func (q *Queries) AccountBalance(ctx context.Context, arg AccountBalanceParams) (AccountBalanceRow, error) {
 	row := q.queryRow(ctx, q.accountBalanceStmt, AccountBalance, arg.WalletID, arg.AccountID)
 	var i AccountBalanceRow
@@ -70,7 +79,7 @@ func (q *Queries) AccountBalance(ctx context.Context, arg AccountBalanceParams) 
 
 const AccountBalancesByIDs = `-- name: AccountBalancesByIDs :many
 SELECT
-    addr.account_id,
+    da.account_id,
     coalesce(sum(
         CASE
             WHEN
@@ -93,14 +102,26 @@ SELECT
     ), 0)::BIGINT AS unconfirmed_balance
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
-INNER JOIN addresses AS addr ON u.address_id = addr.id
+INNER JOIN addresses AS a ON u.address_id = a.id
+INNER JOIN derived_addresses AS da ON a.id = da.address_id
+INNER JOIN accounts AS acc ON da.account_id = acc.id
 LEFT JOIN wallet_sync_states AS s ON t.wallet_id = s.wallet_id
 WHERE
-    addr.wallet_id = $1
-    AND addr.account_id = any($2::BIGINT [])
+    t.wallet_id = $1
+    AND a.wallet_id = $1
+    AND da.wallet_id = $1
+    AND acc.wallet_id = $1
+    AND da.account_id = any($2::BIGINT [])
     AND u.spent_by_tx_id IS NULL
     AND t.tx_status IN (0, 1)
-GROUP BY addr.account_id
+    AND a.is_derived
+    AND da.address_id IS NOT NULL
+    AND acc.id IS NOT NULL
+    AND (
+        (acc.is_derived AND acc.account_number IS NOT NULL)
+        OR (acc.is_derived = FALSE AND acc.account_number IS NULL)
+    )
+GROUP BY da.account_id
 `
 
 type AccountBalancesByIDsParams struct {
@@ -115,10 +136,8 @@ type AccountBalancesByIDsRow struct {
 }
 
 // AccountBalancesByIDs returns the confirmed/unconfirmed balance for each
-// account in account_ids that has funded UTXOs, grouped by account_id. Accounts with no
-// spendable outputs do not appear in the result; the Go caller defaults
-// missing entries to zero. The confirmation predicate matches
-// AccountBalance.
+// account in account_ids that has well-formed funded UTXOs, grouped by
+// account_id.
 func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error) {
 	rows, err := q.query(ctx, q.accountBalancesByIDsStmt, AccountBalancesByIDs, arg.WalletID, pq.Array(arg.AccountIds))
 	if err != nil {
@@ -166,29 +185,28 @@ const CreateDerivedAccount = `-- name: CreateDerivedAccount :one
 INSERT INTO accounts (
     wallet_id,
     scope_id,
-    account_number,
     account_name,
-    origin_id,
+    is_derived,
+    account_number,
     public_key,
     master_fingerprint
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
-    $1 AS account_number,
-    $2 AS account_name,
-    $3 AS origin_id,
-    $4 AS public_key,
-    $5 AS master_fingerprint
+    $1 AS account_name,
+    TRUE AS is_derived,
+    $2 AS account_number,
+    $3 AS public_key,
+    $4 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $6
+WHERE ks.id = $5
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
-	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	AccountNumber     sql.NullInt64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	ScopeID           int64
@@ -200,13 +218,11 @@ type CreateDerivedAccountRow struct {
 	CreatedAt     time.Time
 }
 
-// Creates a new derived account under the given scope using a separately
-// allocated account number.
+// Creates the parent row for a wallet-derived account under the given scope.
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
-		arg.AccountNumber,
 		arg.AccountName,
-		arg.OriginID,
+		arg.AccountNumber,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
@@ -216,78 +232,29 @@ func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAcc
 	return i, err
 }
 
-const CreateDerivedAccountWithNumber = `-- name: CreateDerivedAccountWithNumber :one
-INSERT INTO accounts (
-    wallet_id,
-    scope_id,
-    account_number,
-    account_name,
-    origin_id
-)
-SELECT
-    ks.wallet_id,
-    ks.id AS scope_id,
-    $1 AS account_number,
-    $2 AS account_name,
-    $3 AS origin_id
-FROM key_scopes AS ks
-WHERE ks.id = $4
-RETURNING id, account_number, created_at
-`
-
-type CreateDerivedAccountWithNumberParams struct {
-	AccountNumber sql.NullInt64
-	AccountName   string
-	OriginID      int16
-	ScopeID       int64
-}
-
-type CreateDerivedAccountWithNumberRow struct {
-	ID            int64
-	AccountNumber sql.NullInt64
-	CreatedAt     time.Time
-}
-
-// Test-only: Creates a derived account with a specific account number.
-// Used for testing account number overflow without creating billions of accounts.
-func (q *Queries) CreateDerivedAccountWithNumber(ctx context.Context, arg CreateDerivedAccountWithNumberParams) (CreateDerivedAccountWithNumberRow, error) {
-	row := q.queryRow(ctx, q.createDerivedAccountWithNumberStmt, CreateDerivedAccountWithNumber,
-		arg.AccountNumber,
-		arg.AccountName,
-		arg.OriginID,
-		arg.ScopeID,
-	)
-	var i CreateDerivedAccountWithNumberRow
-	err := row.Scan(&i.ID, &i.AccountNumber, &i.CreatedAt)
-	return i, err
-}
-
 const CreateImportedAccount = `-- name: CreateImportedAccount :one
 INSERT INTO accounts (
     wallet_id,
     scope_id,
-    account_number,
     account_name,
-    origin_id,
+    is_derived,
     public_key,
     master_fingerprint
 )
 SELECT
     ks.wallet_id,
     ks.id AS scope_id,
-    NULL AS account_number,
     $1 AS account_name,
-    $2 AS origin_id,
-    $3 AS public_key,
-    $4 AS master_fingerprint
+    FALSE AS is_derived,
+    $2 AS public_key,
+    $3 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $5
+WHERE ks.id = $4
 RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
 	AccountName       string
-	OriginID          int16
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	ScopeID           int64
@@ -298,13 +265,11 @@ type CreateImportedAccountRow struct {
 	CreatedAt time.Time
 }
 
-// Creates a new imported account under the given scope with NULL account
-// number. Imported accounts don't follow BIP44 derivation, so they don't need
-// a sequential account number.
+// Creates a new imported xpub account under the given scope. Imported xpub
+// accounts are HD account-like rows but do not have BIP44 account numbers.
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
 		arg.AccountName,
-		arg.OriginID,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
@@ -314,48 +279,12 @@ func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedA
 	return i, err
 }
 
-const CreateImportedBucketAccount = `-- name: CreateImportedBucketAccount :exec
-INSERT INTO accounts (
-    wallet_id,
-    scope_id,
-    account_number,
-    account_name,
-    origin_id
-)
-SELECT
-    ks.wallet_id,
-    ks.id AS scope_id,
-    NULL AS account_number,
-    $1 AS account_name,
-    $2 AS origin_id
-FROM key_scopes AS ks
-WHERE ks.id = $3
-ON CONFLICT (scope_id, account_name) DO NOTHING
-`
-
-type CreateImportedBucketAccountParams struct {
-	AccountName string
-	OriginID    int16
-	ScopeID     int64
-}
-
-// Materializes the keyless wallet-level imported "bucket" account for a scope.
-// The bucket holds individually-imported addresses and carries no
-// account-level key material. ON CONFLICT DO NOTHING makes the insert an
-// idempotent get-or-create: concurrent first-imports into the same scope each
-// attempt this insert, one wins and the rest are no-ops, so callers re-read the
-// bucket instead of colliding on the (scope_id, account_name) unique index.
-func (q *Queries) CreateImportedBucketAccount(ctx context.Context, arg CreateImportedBucketAccountParams) error {
-	_, err := q.exec(ctx, q.createImportedBucketAccountStmt, CreateImportedBucketAccount, arg.AccountName, arg.OriginID, arg.ScopeID)
-	return err
-}
-
 const GetAccountByScopeAndName = `-- name: GetAccountByScopeAndName :one
 SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -363,7 +292,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -382,7 +310,7 @@ type GetAccountByScopeAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -390,7 +318,6 @@ type GetAccountByScopeAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -404,7 +331,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -412,7 +339,6 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -425,7 +351,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -433,14 +359,13 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE a.scope_id = $1 AND a.account_number = $2
+WHERE a.scope_id = $1 AND a.account_number = $2 AND a.is_derived
 `
 
 type GetAccountByScopeAndNumberParams struct {
@@ -452,7 +377,7 @@ type GetAccountByScopeAndNumberRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -460,13 +385,12 @@ type GetAccountByScopeAndNumberRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Returns a single account by scope id and account number.
+// Returns a single derived account by scope id and account number.
 func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccountByScopeAndNumberParams) (GetAccountByScopeAndNumberRow, error) {
 	row := q.queryRow(ctx, q.getAccountByScopeAndNumberStmt, GetAccountByScopeAndNumber, arg.ScopeID, arg.AccountNumber)
 	var i GetAccountByScopeAndNumberRow
@@ -474,7 +398,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -482,7 +406,6 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -495,7 +418,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -503,7 +426,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -528,7 +450,7 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -536,7 +458,6 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
@@ -555,7 +476,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -563,7 +484,6 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -576,7 +496,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -584,7 +504,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -596,6 +515,7 @@ WHERE
     AND ks.purpose = $2
     AND ks.coin_type = $3
     AND a.account_number = $4
+    AND a.is_derived
 `
 
 type GetAccountByWalletScopeAndNumberParams struct {
@@ -609,7 +529,7 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -617,13 +537,12 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Returns a single account by wallet id, scope tuple, and account number.
+// Returns a single derived account by wallet id, scope tuple, and account number.
 func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error) {
 	row := q.queryRow(ctx, q.getAccountByWalletScopeAndNumberStmt, GetAccountByWalletScopeAndNumber,
 		arg.WalletID,
@@ -636,7 +555,7 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ID,
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -644,7 +563,6 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.WalletIsWatchOnly,
@@ -656,7 +574,7 @@ const GetAccountPropsById = `-- name: GetAccountPropsById :one
 SELECT
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -666,7 +584,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     w.is_watch_only AS wallet_is_watch_only
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
@@ -677,7 +594,7 @@ WHERE a.id = $1
 type GetAccountPropsByIdRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	CreatedAt         time.Time
@@ -687,7 +604,6 @@ type GetAccountPropsByIdRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	WalletIsWatchOnly bool
 }
 
@@ -698,7 +614,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 	err := row.Scan(
 		&i.AccountNumber,
 		&i.AccountName,
-		&i.OriginID,
+		&i.IsDerived,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.CreatedAt,
@@ -708,7 +624,6 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.ExternalTypeID,
 		&i.ExternalKeyCount,
 		&i.InternalKeyCount,
-		&i.ImportedKeyCount,
 		&i.WalletIsWatchOnly,
 	)
 	return i, err
@@ -751,7 +666,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -759,7 +674,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -767,14 +681,14 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE a.scope_id = $1
-ORDER BY a.account_number NULLS LAST
+ORDER BY a.account_number NULLS LAST, a.account_name
 `
 
 type ListAccountsByScopeRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -782,14 +696,12 @@ type ListAccountsByScopeRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Lists all accounts in a scope, ordered by account number. Imported accounts
-// (with NULL account_number) appear last.
+// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error) {
 	rows, err := q.query(ctx, q.listAccountsByScopeStmt, ListAccountsByScope, scopeID)
 	if err != nil {
@@ -803,7 +715,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -811,7 +723,6 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -834,7 +745,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -842,7 +753,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -850,14 +760,14 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE ks.wallet_id = $1
-ORDER BY a.account_number NULLS LAST
+ORDER BY a.account_number NULLS LAST, a.account_name
 `
 
 type ListAccountsByWalletRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -865,14 +775,12 @@ type ListAccountsByWalletRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Lists all accounts for a wallet, ordered by account number. Imported
-// accounts (with NULL account_number) appear last.
+// Lists all accounts for a wallet.
 func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error) {
 	rows, err := q.query(ctx, q.listAccountsByWalletStmt, ListAccountsByWallet, walletID)
 	if err != nil {
@@ -886,7 +794,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -894,7 +802,6 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -917,7 +824,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -925,7 +832,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -933,7 +839,7 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE ks.wallet_id = $1 AND a.account_name = $2
-ORDER BY a.account_number NULLS LAST
+ORDER BY a.account_number NULLS LAST, a.account_name
 `
 
 type ListAccountsByWalletAndNameParams struct {
@@ -945,7 +851,7 @@ type ListAccountsByWalletAndNameRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -953,14 +859,12 @@ type ListAccountsByWalletAndNameRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Lists all accounts for a wallet filtered by account name, ordered by account
-// number. Imported accounts (with NULL account_number) appear last.
+// Lists all accounts for a wallet filtered by account name.
 func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error) {
 	rows, err := q.query(ctx, q.listAccountsByWalletAndNameStmt, ListAccountsByWalletAndName, arg.WalletID, arg.AccountName)
 	if err != nil {
@@ -974,7 +878,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -982,7 +886,6 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -1005,7 +908,7 @@ SELECT
     a.id,
     a.account_number,
     a.account_name,
-    a.origin_id,
+    a.is_derived,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -1013,7 +916,6 @@ SELECT
     ks.external_type_id,
     a.next_external_index AS external_key_count,
     a.next_internal_index AS internal_key_count,
-    a.imported_key_count,
     a.public_key,
     a.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only
@@ -1024,7 +926,7 @@ WHERE
     ks.wallet_id = $1
     AND ks.purpose = $2
     AND ks.coin_type = $3
-ORDER BY a.account_number NULLS LAST
+ORDER BY a.account_number NULLS LAST, a.account_name
 `
 
 type ListAccountsByWalletScopeParams struct {
@@ -1037,7 +939,7 @@ type ListAccountsByWalletScopeRow struct {
 	ID                int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
-	OriginID          int16
+	IsDerived         bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -1045,14 +947,12 @@ type ListAccountsByWalletScopeRow struct {
 	ExternalTypeID    int16
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
-	ImportedKeyCount  int64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	WalletIsWatchOnly bool
 }
 
-// Lists all accounts for a wallet and scope tuple, ordered by account number.
-// Imported accounts (with NULL account_number) appear last.
+// Lists all accounts for a wallet and scope tuple.
 func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error) {
 	rows, err := q.query(ctx, q.listAccountsByWalletScopeStmt, ListAccountsByWalletScope, arg.WalletID, arg.Purpose, arg.CoinType)
 	if err != nil {
@@ -1066,7 +966,7 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ID,
 			&i.AccountNumber,
 			&i.AccountName,
-			&i.OriginID,
+			&i.IsDerived,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -1074,7 +974,6 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.ExternalTypeID,
 			&i.ExternalKeyCount,
 			&i.InternalKeyCount,
-			&i.ImportedKeyCount,
 			&i.PublicKey,
 			&i.MasterFingerprint,
 			&i.WalletIsWatchOnly,
@@ -1105,7 +1004,6 @@ WHERE
             AND key_scopes.coin_type = $4
     )
     AND account_name = $5
-    AND account_number IS NOT NULL
 `
 
 type UpdateAccountNameByWalletScopeAndNameParams struct {
@@ -1116,7 +1014,7 @@ type UpdateAccountNameByWalletScopeAndNameParams struct {
 	OldName  string
 }
 
-// Renames an account identified by wallet id, scope tuple, and current account name.
+// Renames an account identified by wallet id, scope tuple, and current name.
 func (q *Queries) UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error) {
 	result, err := q.exec(ctx, q.updateAccountNameByWalletScopeAndNameStmt, UpdateAccountNameByWalletScopeAndName,
 		arg.NewName,
@@ -1144,6 +1042,7 @@ WHERE
             AND key_scopes.coin_type = $4
     )
     AND account_number = $5
+    AND is_derived
 `
 
 type UpdateAccountNameByWalletScopeAndNumberParams struct {
@@ -1154,7 +1053,7 @@ type UpdateAccountNameByWalletScopeAndNumberParams struct {
 	AccountNumber sql.NullInt64
 }
 
-// Renames an account identified by wallet id, scope tuple, and account number.
+// Renames a derived account identified by wallet id, scope tuple, and number.
 func (q *Queries) UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error) {
 	result, err := q.exec(ctx, q.updateAccountNameByWalletScopeAndNumberStmt, UpdateAccountNameByWalletScopeAndNumber,
 		arg.NewName,
