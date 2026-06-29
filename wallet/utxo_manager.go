@@ -215,9 +215,11 @@ func walletUtxoAccountName(info *db.UtxoInfo) string {
 // than a silent skip. Account filtering is the caller's responsibility
 // and is applied before this conversion.
 //
-// Spendability follows ADR 0012 (wallet-level watch-only invariant) unless the
-// store supplies a backend-specific override. Coinbase maturity remains a final
-// per-output adjustment.
+// Spendability follows ADR 0012 (wallet-level watch-only invariant) unless
+// the store supplies a backend-specific override. SQL stores leave the
+// override nil; kvdb uses it for grandfathered mixed-mode rows that can still
+// be non-spendable inside an otherwise spendable legacy wallet. Coinbase
+// maturity remains a final per-output adjustment.
 func (w *Wallet) buildWalletUtxoFromStore(info *db.UtxoInfo,
 	accountName string, currentHeight int32) (*Utxo, error) {
 

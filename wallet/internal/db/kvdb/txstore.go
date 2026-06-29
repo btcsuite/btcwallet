@@ -52,6 +52,10 @@ func (s *Store) CreateTx(ctx context.Context,
 		return notImplemented(ctx, "CreateTx confirmed")
 	}
 
+	if len(req.Params.Credits) > 0 && s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.CreateTx: %w", errMissingAddrStore)
+	}
+
 	txRec, err := wtxmgr.NewTxRecordFromMsgTx(req.Params.Tx, req.Received)
 	if err != nil {
 		return fmt.Errorf("build tx record: %w", err)
