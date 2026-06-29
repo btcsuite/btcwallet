@@ -42,6 +42,14 @@ func derivedAddressGetAccountNumber(
 	return db.DerivedAddressAccountNumber(row.AccountNumber)
 }
 
+// derivedAddressGetAccountIsDerived reports whether the account row is
+// wallet-derived.
+func derivedAddressGetAccountIsDerived(
+	row sqlc.GetAccountByWalletScopeAndNameRow) bool {
+
+	return row.OriginID == int16(db.DerivedAccount)
+}
+
 // derivedAddressGetWalletWatchOnly extracts the wallet-level watch-only state
 // from a row.
 func derivedAddressGetWalletWatchOnly(
