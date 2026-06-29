@@ -494,51 +494,19 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 
 	accountName := changeAccount.AccountName
 
-	accountInfo, err := w.cache.GetAccount(
-		ctx, db.GetAccountQuery{
-			WalletID: w.id,
-			Scope:    db.KeyScope(changeAccount.KeyScope),
-			Name:     &accountName,
-		},
+	// storeAddrType is the effective internal address type used to build the
+	// change script; derivationAccount is the account the change address is
+	// derived under.
+	var (
+		storeAddrType     db.AddressType
+		derivationAccount string
 	)
-	if errors.Is(err, db.ErrAccountNotFound) {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound, accountName)
-	}
 
-	if err != nil {
-		return nil, fmt.Errorf("get account %q: %w", accountName, err)
-	}
-
-	// Use the account's effective AddrSchema instead of the scope
-	// default so strict BIP49 imports (and any other per-account
-	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
-	// produce change scripts the external signer expects. SQL backends
-	// currently store schema at the key-scope level only and surface
-	// the effective scope schema here; per-account-only overrides
-	// under a shared scope still fall through to the scope default and
-	// are tracked as a known limitation in the AddrSchema docstring.
-	storeAddrType := accountInfo.AddrSchema.InternalAddrType
-
-	addrType, err := addresstype.ToWallet(storeAddrType, false)
-	if err != nil {
-		return nil, err
-	}
-
-	scriptSize, err := addrType.ScriptPubKeySize()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-	}
-
-	// The default imported bucket cannot derive its own change, so we
-	// redirect change to derived account 0 in the same scope, matching the
-	// legacy behaviour. Account 0 may have been renamed, so we resolve it
-	// by number rather than assuming the literal "default" name; looking it
-	// up by name would break change derivation after a rename.
-	derivationAccount := accountName
-	if accountInfo.IsImported &&
-		accountInfo.AccountName == db.DefaultImportedAccountName {
-
+	switch accountName {
+	// The reserved imported alias cannot derive its own change and has no
+	// account row on SQL stores, so skip the by-name lookup and redirect
+	// change to derived account 0 in the same scope.
+	case db.DefaultImportedAccountName:
 		derivedAccount := uint32(waddrmgr.DefaultAccountNum)
 
 		derivedInfo, err := w.cache.GetAccount(
@@ -558,7 +526,42 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 				derivedAccount, err)
 		}
 
+		storeAddrType = derivedInfo.AddrSchema.InternalAddrType
 		derivationAccount = derivedInfo.AccountName
+
+	// Use the account's effective AddrSchema instead of the scope default.
+	// This lets strict BIP49 imports, and any other per-account override
+	// carried by kvdb, produce change scripts the external signer expects.
+	default:
+		accountInfo, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(changeAccount.KeyScope),
+				Name:     &accountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				accountName)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w", accountName, err)
+		}
+
+		storeAddrType = accountInfo.AddrSchema.InternalAddrType
+		derivationAccount = accountName
+	}
+
+	addrType, err := addresstype.ToWallet(storeAddrType, false)
+	if err != nil {
+		return nil, err
+	}
+
+	scriptSize, err := addrType.ScriptPubKeySize()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
 	}
 
 	newChangeScript := func() ([]byte, error) {
@@ -910,21 +913,26 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
 	[]db.UtxoInfo, error) {
 
-	_, err := w.cache.GetAccount(
-		ctx, db.GetAccountQuery{
-			WalletID: w.id,
-			Scope:    db.KeyScope(source.KeyScope),
-			Name:     &source.AccountName,
-		},
-	)
-	if errors.Is(err, db.ErrAccountNotFound) {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			source.AccountName)
-	}
+	// The existence check rejects unknown real accounts up front. The reserved
+	// imported alias has no SQL account row, so raw imports are filtered locally
+	// by accountless UTXO metadata instead.
+	if source.AccountName != db.DefaultImportedAccountName {
+		_, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(source.KeyScope),
+				Name:     &source.AccountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				source.AccountName)
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("get account %q: %w",
-			source.AccountName, err)
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w",
+				source.AccountName, err)
+		}
 	}
 
 	return w.filterEligibleOutputs(
@@ -1121,67 +1129,38 @@ func nonNegativeHeightToUint32(height int32) (uint32, error) {
 
 // filterEligibleOutputs finds eligible outputs for the given key scope and
 // account name. The numeric account argument is retained for caller-side
-// symmetry but the store-facing filter uses the (Scope, AccountName) pair
-// because the numeric account number collapses to 0 for imported accounts
-// (NULL → zero on SQL read) and would silently scan the default
-// account instead.
+// symmetry. Real accounts use the store's (Scope, AccountName) filter, while
+// the reserved imported alias is filtered locally by accountless raw-import
+// metadata because raw imports have no SQL account identity.
 func (w *Wallet) filterEligibleOutputs(ctx context.Context,
 	keyScope *waddrmgr.KeyScope, accountName string, _ uint32,
 	minconf uint32, bs *waddrmgr.BlockStamp) ([]db.UtxoInfo, error) {
 
-	scope := db.KeyScope(*keyScope)
+	rawImported := accountName == db.DefaultImportedAccountName
+	query := db.ListUtxosQuery{WalletID: w.id}
 
-	unspent, err := w.store.ListUTXOs(
-		ctx, db.ListUtxosQuery{
-			WalletID:    w.id,
-			Scope:       &scope,
-			AccountName: &accountName,
-		},
-	)
+	if !rawImported {
+		scope := db.KeyScope(*keyScope)
+		query.Scope = &scope
+		query.AccountName = &accountName
+	}
+
+	unspent, err := w.store.ListUTXOs(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// The ListUTXOs query above already narrows results to the requested
-	// (Scope, AccountName), and the store enriches each UTXO with its
-	// authoritative KeyScope and lock state. So we only apply the
-	// confirmation, coinbase-maturity, lock and single-address
-	// spendability filters here.
+	// Real-account queries are already narrowed by (Scope, AccountName). For
+	// raw imports, the wallet-wide query is narrowed below using accountless
+	// metadata.
 	eligible := make([]db.UtxoInfo, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
 
-		// Only include this output if it meets the required number of
-		// confirmations. Coinbase transactions must have reached
-		// maturity before their outputs may be spent.
-		if !txCreatorHasMinConfs(minconf, output.Height, bs.Height) {
-			continue
-		}
-
-		if !w.txCreatorCoinbaseMature(output, bs.Height) {
-			continue
-		}
-
-		// Locked unspent outputs are skipped.
-		if output.IsLocked {
-			continue
-		}
-
-		// ListUTXOs reports outputs the wallet *owns* (it resolves a
-		// script through its first extracted address), but ownership of
-		// one member key is not the same as being able to *spend* the
-		// output. For a bare multisig script the wallet may hold only
-		// one of several required pubkeys, yet ListUTXOs would still
-		// surface it. Automatic coin selection must only draw on outputs
-		// the wallet can actually sign, so we restrict it to single-
-		// address scripts: ExtractPkScriptAddrs returning exactly one
-		// address covers the standard P2PKH/P2WPKH/P2SH/P2WSH cases and
-		// excludes multi-address / bare-multisig scripts whose
-		// spendability this path cannot guarantee.
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, w.cfg.ChainParams,
+		eligibleOutput := w.outputEligibleForSelection(
+			rawImported, keyScope, output, minconf, bs.Height,
 		)
-		if err != nil || len(addrs) != 1 {
+		if !eligibleOutput {
 			continue
 		}
 
@@ -1189,6 +1168,62 @@ func (w *Wallet) filterEligibleOutputs(ctx context.Context,
 	}
 
 	return eligible, nil
+}
+
+// outputEligibleForSelection reports whether one wallet UTXO may be used by
+// automatic coin selection for the requested source.
+func (w *Wallet) outputEligibleForSelection(rawImported bool,
+	keyScope *waddrmgr.KeyScope, output *db.UtxoInfo, minconf uint32,
+	currentHeight int32) bool {
+
+	if rawImported && !outputMatchesImportedAlias(output, keyScope) {
+		return false
+	}
+
+	// Only include this output if it meets the required number of
+	// confirmations. Coinbase transactions must have reached maturity before
+	// their outputs may be spent.
+	if !txCreatorHasMinConfs(minconf, output.Height, currentHeight) {
+		return false
+	}
+
+	if !w.txCreatorCoinbaseMature(output, currentHeight) {
+		return false
+	}
+
+	// Locked unspent outputs are skipped.
+	if output.IsLocked {
+		return false
+	}
+
+	// ListUTXOs reports outputs the wallet owns, but ownership of one member
+	// key is not the same as being able to spend the output. Automatic coin
+	// selection therefore restricts itself to single-address scripts.
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		output.PkScript, w.cfg.ChainParams,
+	)
+
+	return err == nil && len(addrs) == 1
+}
+
+// outputMatchesImportedAlias reports whether one enriched UTXO row belongs to
+// the wallet-facing imported alias.
+func outputMatchesImportedAlias(output *db.UtxoInfo,
+	keyScope *waddrmgr.KeyScope) bool {
+
+	if output.AccountName == "" && output.KeyScope == (db.KeyScope{}) {
+		return true
+	}
+
+	if output.AccountName != db.DefaultImportedAccountName {
+		return false
+	}
+
+	if keyScope == nil {
+		return true
+	}
+
+	return output.KeyScope == db.KeyScope(*keyScope)
 }
 
 // txCreatorHasMinConfs reports whether an output height satisfies a minimum
