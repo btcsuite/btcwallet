@@ -40,9 +40,6 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	// IsDerived reports whether the row represents a wallet-derived account.
 	IsDerived bool
 
-	// OriginID is the legacy account origin identifier.
-	OriginID AddrTypeId
-
 	// ExternalKeyCount is the number of external keys derived so far.
 	ExternalKeyCount int64
 
@@ -75,9 +72,6 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 
 	// ExternalTypeID is the SQL address type ID for receiving addresses.
 	ExternalTypeID AddrTypeId
-
-	// IDToOriginType converts the legacy origin ID to the AccountOrigin enum.
-	IDToOriginType func(AddrTypeId) (AccountOrigin, error)
 }
 
 // validateAccountNumber converts a database account number to uint32 while
@@ -202,12 +196,7 @@ func DerivedAddressAccountSchema[AddrTypeID ~int16 | ~int64](
 func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 	row AccountPropsRow[AddrTypeId]) (*AccountInfo, error) {
 
-	origin, err := row.IDToOriginType(row.OriginID)
-	if err != nil {
-		return nil, fmt.Errorf("origin: %w", err)
-	}
-
-	err = validateAccountShape(origin == DerivedAccount, row.AccountNumber)
+	err := validateAccountShape(row.IsDerived, row.AccountNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -258,8 +247,7 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 		AccountID:            accountID,
 		AccountNumber:        accountNum,
 		AccountName:          row.AccountName,
-		Origin:               origin,
-		IsImported:           origin == ImportedAccount,
+		IsImported:           !row.IsDerived,
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
 		ImportedKeyCount:     importedKeyCount,
@@ -350,16 +338,10 @@ func BuildAccountInfo(accountID *uint32, accountNum *uint32,
 	masterKeyFingerprint uint32,
 	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
 
-	origin := DerivedAccount
-	if isImported {
-		origin = ImportedAccount
-	}
-
 	return &AccountInfo{
 		AccountID:            accountID,
 		AccountNumber:        accountNum,
 		AccountName:          accountName,
-		Origin:               origin,
 		IsImported:           isImported,
 		ExternalKeyCount:     externalKeyCount,
 		InternalKeyCount:     internalKeyCount,
@@ -389,9 +371,6 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 
 	// IsDerived reports whether the row represents a wallet-derived account.
 	IsDerived bool
-
-	// OriginID is the legacy account origin identifier.
-	OriginID AccOriginId
 
 	// ExternalKeyCount is the number of external keys derived so far.
 	ExternalKeyCount int64
@@ -431,9 +410,6 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 
 	// UnconfirmedBalance is the unconfirmed account balance in satoshis.
 	UnconfirmedBalance int64
-
-	// IDToOriginType converts the legacy origin ID to the AccountOrigin enum.
-	IDToOriginType func(AccOriginId) (AccountOrigin, error)
 }
 
 // AccountRowToInfo converts raw database field values into an AccountInfo
@@ -441,12 +417,7 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	row AccountInfoRow[AccOriginId]) (*AccountInfo, error) {
 
-	origin, err := row.IDToOriginType(row.OriginID)
-	if err != nil {
-		return nil, fmt.Errorf("origin: %w", err)
-	}
-
-	err = validateAccountShape(origin == DerivedAccount, row.AccountNumber)
+	err := validateAccountShape(row.IsDerived, row.AccountNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +465,7 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	}
 
 	info := BuildAccountInfo(
-		accountID, accountNum, row.AccountName, origin == ImportedAccount,
+		accountID, accountNum, row.AccountName, !row.IsDerived,
 		externalKeyCount,
 		internalKeyCount, importedKeyCount, row.IsWatchOnly,
 		row.CreatedAt,
@@ -506,14 +477,4 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 	info.rowID = row.RowID
 
 	return info, nil
-}
-
-// IDToAccountOrigin safely converts an integer to AccountOrigin. It returns an
-// error if the value does not correspond to a known AccountOrigin value.
-func IDToAccountOrigin[T ~int16 | ~int64](v T) (AccountOrigin, error) {
-	if v < 0 || v > T(ImportedAccount) {
-		return 0, fmt.Errorf("%w: %d", errInvalidAccountOrigin, v)
-	}
-
-	return AccountOrigin(v), nil
 }

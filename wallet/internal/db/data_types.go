@@ -388,14 +388,10 @@ type AccountInfo struct {
 	// AccountName is the human-readable name of the account.
 	AccountName string
 
-	// Origin indicates whether the account was derived from the wallet's
-	// HD seed or imported from an external source. It is retained during the
-	// compatibility period while callers move to IsImported.
-	Origin AccountOrigin
-
 	// IsImported reports whether this account was imported rather than derived
-	// from the wallet seed. It mirrors Origin during the compatibility period so
-	// callers can move to the normalized shape before Origin is removed.
+	// from the wallet seed. Imported accounts have no wallet-derived BIP44
+	// account number, so callers that need AccountNumber must check this and
+	// the AccountNumber pointer.
 	IsImported bool
 
 	// ExternalKeyCount is the number of external keys that have been
@@ -649,14 +645,14 @@ type AddressInfo struct {
 	// databases (signed 64-bit integers).
 	ID uint32
 
-	// AccountID is the optional store-local identity of the owning account.
-	// Backends without a durable account row ID leave it nil rather than
-	// fabricating one from other account fields.
+	// AccountID is the optional store-local identity of the owning account. It is
+	// nil for raw imported addresses and for backends that cannot expose a
+	// durable account row identity.
 	AccountID *uint32
 
 	// AccountNumber is the BIP44 account index used for derived accounts.
-	// Imported addresses do not have a wallet-derived account number, so this is
-	// nil when the account number is not meaningful.
+	// It is nil for raw imports and imported-xpub HD children because those
+	// addresses must not be routed through wallet-seed account-number derivation.
 	AccountNumber *uint32
 
 	// AccountName is the human-readable account name that owns the address.
@@ -675,18 +671,14 @@ type AddressInfo struct {
 	// CreatedAt is when the address was created in the wallet database.
 	CreatedAt time.Time
 
-	// Origin indicates whether this is a derived HD address or an imported
-	// address. Reuses the AccountOrigin enum.
-	Origin AccountOrigin
-
 	// IsImported reports whether this address belongs to imported key material.
-	// It mirrors Origin during the compatibility period so callers can move to
-	// the normalized shape before Origin is removed.
+	// Raw imported addresses and imported-xpub children both report true;
+	// wallet-seed-derived addresses report false.
 	IsImported bool
 
 	// HasDerivationPath reports whether this address has BIP44 branch/index path
-	// metadata. During the compatibility period this mirrors the legacy derived
-	// address shape.
+	// metadata. Imported-xpub children have a path even though AccountNumber is
+	// nil because they are not derived from the wallet seed.
 	HasDerivationPath bool
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
@@ -1250,12 +1242,6 @@ type UtxoInfo struct {
 	// needed.
 	AccountName string
 
-	// Origin reports whether the UTXO belongs to a derived or imported
-	// account. The wallet's spendability rule combines this with the
-	// wallet-level Wallet.IsWatchOnly() to decide whether to surface
-	// imported-account outputs in coin selection (see Task 132).
-	Origin AccountOrigin
-
 	// AddrType is the address type of the UTXO's credited address (P2PKH,
 	// P2WKH, etc.). Sourced from addresses.type_id; lets coin selection
 	// reason about output type without a follow-up address read.
@@ -1559,14 +1545,6 @@ type AddressDerivationParams struct {
 	// database row ID. It is nil for imported accounts; callbacks deriving from
 	// an imported account xpub must use AccountPubKey, Branch, and Index only.
 	DerivedAccountNumber *uint32
-
-	// AccountNumber is the BIP44 account number, not the database row ID.
-	// It is 0 for imported accounts where no BIP44 account number applies;
-	// callbacks deriving for imported accounts must use AccountPubKey only.
-	//
-	// Deprecated: use DerivedAccountNumber. This compatibility field is retained
-	// only while existing tests and callers move to the normalized identity.
-	AccountNumber uint32
 
 	// Branch is the BIP44 branch number (0=external, 1=internal/change).
 	Branch uint32

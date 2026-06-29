@@ -24,15 +24,12 @@ SELECT
     a.created_at,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    coalesce(acc.is_derived, FALSE)::BOOLEAN AS account_is_derived,
     coalesce(da.address_id, 0)::BIGINT AS derived_address_id,
     coalesce(da.account_id, 0)::BIGINT AS account_id,
     coalesce(acc.account_name, '')::TEXT AS account_name,
     coalesce(ks.purpose, 0)::BIGINT AS purpose,
     coalesce(ks.coin_type, 0)::BIGINT AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END::SMALLINT AS origin_id,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -64,15 +61,12 @@ SELECT
     a.created_at,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
+    coalesce(acc.is_derived, FALSE)::BOOLEAN AS account_is_derived,
     coalesce(da.address_id, 0)::BIGINT AS derived_address_id,
     coalesce(da.account_id, 0)::BIGINT AS account_id,
     coalesce(acc.account_name, '')::TEXT AS account_name,
     coalesce(ks.purpose, 0)::BIGINT AS purpose,
     coalesce(ks.coin_type, 0)::BIGINT AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END::SMALLINT AS origin_id,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -167,6 +161,7 @@ SELECT
     da.address_branch,
     da.address_index,
     a.is_derived,
+    acc.is_derived AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -177,10 +172,6 @@ SELECT
     coalesce(acc.account_name, '')::TEXT AS account_name,
     coalesce(ks.purpose, 0)::BIGINT AS purpose,
     coalesce(ks.coin_type, 0)::BIGINT AS coin_type,
-    CASE
-        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
-        ELSE 1
-    END::SMALLINT AS origin_id,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1
@@ -218,6 +209,7 @@ SELECT
     NULL::SMALLINT AS address_branch,
     NULL::BIGINT AS address_index,
     a.is_derived,
+    FALSE::BOOLEAN AS account_is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
@@ -228,7 +220,6 @@ SELECT
     ''::TEXT AS account_name,
     0::BIGINT AS purpose,
     0::BIGINT AS coin_type,
-    1::SMALLINT AS origin_id,
     (s.encrypted_script IS NOT NULL)::BOOLEAN AS has_script,
     exists(
         SELECT 1

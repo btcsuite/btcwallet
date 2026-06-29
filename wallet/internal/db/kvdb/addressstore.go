@@ -883,8 +883,8 @@ func sortAddressInfos(items []db.AddressInfo) error {
 
 // addressLess reports whether a sorts before b in the synthetic address view.
 func addressLess(a, b db.AddressInfo) bool {
-	if a.Origin != b.Origin {
-		return a.Origin < b.Origin
+	if a.IsImported != b.IsImported {
+		return !a.IsImported
 	}
 
 	if a.Branch != b.Branch {
@@ -987,7 +987,6 @@ func managedAddressInfo(ns walletdb.ReadBucket,
 		KeyScope:             keyScope,
 		MasterKeyFingerprint: fingerprint,
 		AddrType:             addrType.Type,
-		Origin:               origin,
 		IsImported:           origin == db.ImportedAccount,
 		HasDerivationPath:    origin == db.DerivedAccount,
 		Branch:               branch,

@@ -217,11 +217,6 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		pubKey = []byte(props.AccountPubKey.String())
 	}
 
-	origin := db.DerivedAccount
-	if isImported {
-		origin = db.ImportedAccount
-	}
-
 	var accountNumber *uint32
 	if !isImported {
 		accountNumber = &props.AccountNumber
@@ -256,7 +251,6 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	return db.AccountInfo{
 		AccountNumber:        accountNumber,
 		AccountName:          props.AccountName,
-		Origin:               origin,
 		IsImported:           isImported,
 		ExternalKeyCount:     props.ExternalKeyCount,
 		InternalKeyCount:     props.InternalKeyCount,

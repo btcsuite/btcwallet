@@ -42,7 +42,6 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = addrType
-	info.Origin = db.DerivedAccount
 	info.IsImported = false
 	info.HasDerivationPath = true
 	info.AccountName = accountName
@@ -72,7 +71,6 @@ func importedPubKeyAddressInfoFromAddr(t *testing.T, addr address.Address,
 
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = db.WitnessPubKey
-	info.Origin = db.ImportedAccount
 	info.IsImported = true
 	info.HasDerivationPath = false
 	info.AccountName = db.DefaultImportedAccountName
@@ -155,11 +153,6 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	origin := db.DerivedAccount
-	if imported {
-		origin = db.ImportedAccount
-	}
-
 	var branch uint32
 	if internal {
 		branch = 1
@@ -173,7 +166,6 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	storeInfo := &db.AddressInfo{
 		ScriptPubKey:      pkScript,
 		AddrType:          addrType,
-		Origin:            origin,
 		IsImported:        imported,
 		HasDerivationPath: !imported,
 		Branch:            branch,
@@ -889,7 +881,6 @@ func TestImportTaprootScript(t *testing.T) {
 			EncryptedScript: encryptedScript,
 		}).Return(&db.AddressInfo{
 		AddrType:          db.TaprootPubKey,
-		Origin:            db.ImportedAccount,
 		IsImported:        true,
 		HasDerivationPath: false,
 		AccountName:       db.DefaultImportedAccountName,

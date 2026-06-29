@@ -20,16 +20,22 @@ import (
 )
 
 // mockDeriveFunc returns a test address derivation function. It generates
-// deterministic script pubkeys from scope, account number, branch, and index so
-// derived test addresses are unique across scopes.
+// deterministic script pubkeys from scope, derived account number, branch, and
+// index so derived test addresses are unique across scopes. Imported-xpub
+// children do not have a derived account number and use zero in that slot.
 func mockDeriveFunc() db.AddressDerivationFunc {
 	return func(ctx context.Context,
 		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 		_ = ctx
 
+		var accountNumber uint32
+		if params.DerivedAccountNumber != nil {
+			accountNumber = *params.DerivedAccountNumber
+		}
+
 		scriptPubKey := make([]byte, 20)
-		binary.BigEndian.PutUint32(scriptPubKey[0:4], params.AccountNumber)
+		binary.BigEndian.PutUint32(scriptPubKey[0:4], accountNumber)
 		binary.BigEndian.PutUint32(scriptPubKey[4:8], params.Branch)
 		binary.BigEndian.PutUint32(scriptPubKey[8:12], params.Index)
 		binary.BigEndian.PutUint32(scriptPubKey[12:16], params.Scope.Purpose)
@@ -2004,7 +2010,8 @@ func TestNewDerivedAddressUsesStoredScopeSchema(t *testing.T) {
 }
 
 // TestNewDerivedAddressDerivesByAccountNumber verifies that the derivation
-// callback receives the BIP44 account number, not the SQL account row ID.
+// callback receives the wallet-derived BIP44 account number, not the SQL
+// account row ID.
 func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
 	t.Parallel()
 
@@ -2014,7 +2021,8 @@ func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
 	deriveFn := func(ctx context.Context,
 		params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
-		derivedAccountNumber = params.AccountNumber
+		require.NotNil(t, params.DerivedAccountNumber)
+		derivedAccountNumber = *params.DerivedAccountNumber
 
 		return baseDerive(ctx, params)
 	}
@@ -2051,12 +2059,12 @@ func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
 // TestNewDerivedAddressOnImportedAccount verifies that an imported xpub
 // account can derive addresses through the store even though its
 // accounts.account_number column is NULL. The derivation callback uses
-// AccountPubKey from the imported account; AccountNumber is 0 because no
-// BIP44 number applies to imported xpub accounts.
+// AccountPubKey from the imported account; DerivedAccountNumber is nil because
+// no wallet-derived BIP44 number applies to imported xpub accounts.
 //
 // Regression for the rejection that returns ErrNilDBAccountNumber when an
 // imported xpub account row reaches NewDerivedAddressWithTx — the store
-// now tolerates NULL account_number and passes 0 through to the callback.
+// now tolerates NULL account_number and passes nil through to the callback.
 func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	t.Parallel()
 
@@ -2091,12 +2099,12 @@ func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 
-	// AddressInfo.Origin is the address-level origin set by
-	// createDerivedAddress (always DerivedAccount); the imported-account
-	// signal here is AccountNumber == 0 paired with a non-nil
-	// AccountInfo.PublicKey at lookup time.
-	require.Equal(t, db.DerivedAccount, info.Origin)
-	require.Zero(t, info.AccountNumber)
+	// The address has a real branch/index path because it is derived from the
+	// imported account xpub, but it has no wallet-derived BIP44 account number.
+	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
+	require.True(t, info.HasDerivationPath)
+	require.Nil(t, info.AccountNumber)
 }
 
 // TestNewDerivedAddressDerivationGuards verifies that NewDerivedAddress returns
