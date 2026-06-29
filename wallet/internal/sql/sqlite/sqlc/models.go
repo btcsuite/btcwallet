@@ -38,7 +38,7 @@ type AccountSecret struct {
 type Address struct {
 	ID            int64
 	WalletID      int64
-	AccountID     int64
+	AccountID     sql.NullInt64
 	IsDerived     bool
 	ScriptPubKey  []byte
 	TypeID        int64
