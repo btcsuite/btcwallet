@@ -59,6 +59,47 @@ func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAdd
 	return i, err
 }
 
+const CreateDerivedAddressPath = `-- name: CreateDerivedAddressPath :exec
+INSERT INTO derived_addresses (
+    address_id,
+    wallet_id,
+    account_id,
+    address_branch,
+    address_index
+)
+SELECT
+    a.id AS address_id,
+    a.wallet_id,
+    $1 AS account_id,
+    $2 AS address_branch,
+    $3 AS address_index
+FROM addresses AS a
+WHERE
+    a.id = $4
+    AND a.wallet_id = $5
+`
+
+type CreateDerivedAddressPathParams struct {
+	AccountID     int64
+	AddressBranch int16
+	AddressIndex  int64
+	AddressID     int64
+	WalletID      int64
+}
+
+// Stores normalized account ownership and BIP44 path data for an HD-derived
+// address while legacy address columns remain populated during migration.
+func (q *Queries) CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error {
+	_, err := q.exec(ctx, q.createDerivedAddressPathStmt, CreateDerivedAddressPath,
+		arg.AccountID,
+		arg.AddressBranch,
+		arg.AddressIndex,
+		arg.AddressID,
+		arg.WalletID,
+	)
+	return err
+}
+
 const CreateImportedAddress = `-- name: CreateImportedAddress :one
 INSERT INTO addresses (
     wallet_id,
