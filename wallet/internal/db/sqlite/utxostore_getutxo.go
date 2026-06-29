@@ -38,58 +38,70 @@ func (s *Store) GetUtxo(ctx context.Context,
 			return fmt.Errorf("get utxo: %w", err)
 		}
 
-		addrType, err := db.IDToAddressType(row.TypeID)
-		if err != nil {
-			return fmt.Errorf("addr type: %w", err)
-		}
-
-		keyScope, hasScope, err := db.KeyScopeFromNullIDs(
-			row.Purpose, row.CoinType,
-		)
-		if err != nil {
-			return fmt.Errorf("key scope: %w", err)
-		}
-
-		err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
-			IsDerived:        row.AddressIsDerived,
-			DerivedAddressID: row.DerivedAddressID,
-			AccountID:        row.AccountID,
-			AccountIsDerived: row.AccountIsDerived,
-			AccountNumber:    row.AccountNumber,
-		})
+		utxo, err = utxoInfoFromGetRow(row)
 		if err != nil {
 			return err
-		}
-
-		utxo, err = utxoInfoFromRow(
-			row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
-			row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
-		)
-		if err != nil {
-			return err
-		}
-
-		if row.AddressIsDerived && !hasScope {
-			return fmt.Errorf("key scope: %w",
-				db.ErrInvalidListAddressesQuery)
-		}
-
-		if row.AccountName.Valid {
-			utxo.AccountName = row.AccountName.String
-		}
-
-		utxo.AddrType = addrType
-		utxo.HasScript = row.HasScript
-		utxo.IsLocked = row.IsLocked != 0
-
-		if hasScope {
-			utxo.KeyScope = keyScope
 		}
 
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	return utxo, nil
+}
+
+// utxoInfoFromGetRow converts and enriches one GetUtxo query row.
+func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
+	error) {
+
+	addrType, err := db.IDToAddressType(row.TypeID)
+	if err != nil {
+		return nil, fmt.Errorf("addr type: %w", err)
+	}
+
+	keyScope, hasScope, err := db.KeyScopeFromNullIDs(
+		row.Purpose, row.CoinType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("key scope: %w", err)
+	}
+
+	err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
+		IsDerived:        row.AddressIsDerived,
+		DerivedAddressID: row.DerivedAddressID,
+		AccountID:        row.AccountID,
+		AccountIsDerived: row.AccountIsDerived,
+		AccountNumber:    row.AccountNumber,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	utxo, err := utxoInfoFromRow(
+		row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
+		row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if row.AddressIsDerived && !hasScope {
+		return nil, fmt.Errorf("key scope: %w",
+			db.ErrInvalidListAddressesQuery)
+	}
+
+	if row.AccountName.Valid {
+		utxo.AccountName = row.AccountName.String
+	}
+
+	utxo.AddrType = addrType
+	utxo.HasScript = row.HasScript
+	utxo.IsLocked = row.IsLocked != 0
+
+	if hasScope {
+		utxo.KeyScope = keyScope
 	}
 
 	return utxo, nil

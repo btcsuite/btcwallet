@@ -13,8 +13,8 @@ import (
 //
 // The result set is already constrained to outputs whose creating
 // transactions are still in `pending` or `published` status. Enrichment
-// columns (account name + origin, address type, has-script bit, lease status)
-// are populated by the same query.
+// columns (account name, address type, has-script bit, lease status) are
+// populated by the same query.
 func (s *Store) ListUTXOs(ctx context.Context,
 	query db.ListUtxosQuery) ([]db.UtxoInfo, error) {
 
@@ -81,8 +81,9 @@ func (s *Store) ListUTXOs(ctx context.Context,
 	return utxos, nil
 }
 
-// applyListRowEnrichment derives and sets the per-row UTXO enrichment fields
-// on utxo from a ListUtxos result row.
+// applyListRowEnrichment derives and sets the per-row UTXO enrichment
+// fields (account name, address type, has-script bit, lease status) on utxo
+// from a ListUtxos result row.
 func applyListRowEnrichment(utxo *db.UtxoInfo,
 	row sqlc.ListUtxosRow) error {
 
