@@ -14,18 +14,14 @@ INSERT INTO address_secrets (
 -- Retrieves an address by its script pubkey and account wallet.
 SELECT
     a.id,
-    a.account_id,
     acc.account_number,
-    acc.account_name,
-    ks.purpose,
-    ks.coin_type,
     a.type_id,
-    a.address_branch,
-    a.address_index,
+    da.address_branch,
+    da.address_index,
+    a.is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
-    acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
@@ -35,11 +31,21 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(da.address_id, 0) AS derived_address_id,
+    coalesce(da.account_id, 0) AS account_id,
+    coalesce(acc.account_name, '') AS account_name,
+    coalesce(ks.purpose, 0) AS purpose,
+    coalesce(ks.coin_type, 0) AS coin_type,
+    CASE
+        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
+        ELSE 1
+    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.script_pub_key = ? AND a.wallet_id = ?;
 
@@ -50,18 +56,14 @@ WHERE a.script_pub_key = ? AND a.wallet_id = ?;
 -- short-circuiting an empty script set before issuing this query.
 SELECT
     a.id,
-    a.account_id,
     acc.account_number,
-    acc.account_name,
-    ks.purpose,
-    ks.coin_type,
     a.type_id,
-    a.address_branch,
-    a.address_index,
+    da.address_branch,
+    da.address_index,
+    a.is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
-    acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
@@ -71,11 +73,21 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(da.address_id, 0) AS derived_address_id,
+    coalesce(da.account_id, 0) AS account_id,
+    coalesce(acc.account_name, '') AS account_name,
+    coalesce(ks.purpose, 0) AS purpose,
+    coalesce(ks.coin_type, 0) AS coin_type,
+    CASE
+        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
+        ELSE 1
+    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
 FROM addresses AS a
-INNER JOIN accounts AS acc ON a.account_id = acc.id
-INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
+LEFT JOIN derived_addresses AS da ON a.id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
+LEFT JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE
     a.wallet_id = ?
@@ -101,12 +113,13 @@ WHERE a.wallet_id = ? AND a.id = ?;
 INSERT INTO addresses (
     wallet_id,
     account_id,
+    is_derived,
     script_pub_key,
     type_id,
     address_branch,
     address_index,
     pub_key
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+) VALUES (?1, ?2, TRUE, ?3, ?4, ?5, ?6, ?7)
 RETURNING id, created_at;
 
 -- name: CreateDerivedAddressPath :exec
@@ -135,13 +148,14 @@ WHERE
 INSERT INTO addresses (
     wallet_id,
     account_id,
+    is_derived,
     script_pub_key,
     type_id,
     address_branch,
     address_index,
     pub_key
 ) VALUES (
-    ?1, ?2, ?3, ?4, NULL, NULL, ?5
+    ?1, ?2, FALSE, ?3, ?4, NULL, NULL, ?5
 )
 RETURNING id, created_at;
 
@@ -152,18 +166,14 @@ RETURNING id, created_at;
 -- returned. Returns up to page_limit rows.
 SELECT
     a.id,
-    a.account_id,
     acc.account_number,
-    acc.account_name,
-    ks.purpose,
-    ks.coin_type,
     a.type_id,
-    a.address_branch,
-    a.address_index,
+    da.address_branch,
+    da.address_index,
+    a.is_derived,
     a.script_pub_key,
     a.pub_key,
     a.created_at,
-    acc.origin_id,
     acc.master_fingerprint,
     w.is_watch_only AS wallet_is_watch_only,
     cast(
@@ -173,9 +183,19 @@ SELECT
             WHERE u.address_id = a.id
         ) AS BOOLEAN
     ) AS is_used,
+    coalesce(da.address_id, 0) AS derived_address_id,
+    coalesce(da.account_id, 0) AS account_id,
+    coalesce(acc.account_name, '') AS account_name,
+    coalesce(ks.purpose, 0) AS purpose,
+    coalesce(ks.coin_type, 0) AS coin_type,
+    CASE
+        WHEN a.is_derived THEN coalesce(acc.origin_id, 0)
+        ELSE 1
+    END AS origin_id,
     s.encrypted_script IS NOT NULL AS has_script
-FROM addresses AS a
-INNER JOIN accounts AS acc ON a.account_id = acc.id
+FROM derived_addresses AS da
+INNER JOIN addresses AS a ON da.address_id = a.id
+INNER JOIN accounts AS acc ON da.account_id = acc.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 INNER JOIN key_scopes AS ks ON acc.scope_id = ks.id
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
@@ -190,7 +210,7 @@ WHERE
     -- from column names in a multi-table JOIN context.
     AND (
         sqlc.narg('cursor_id') IS NULL -- noqa: RF02
-        OR a.id > sqlc.narg('cursor_id') -- noqa: RF02
+        OR da.address_id > sqlc.narg('cursor_id') -- noqa: RF02
     )
-ORDER BY a.id
+ORDER BY da.address_id
 LIMIT sqlc.arg('page_limit');
