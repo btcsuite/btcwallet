@@ -388,6 +388,11 @@ type AccountInfo struct {
 	// HD seed or imported from an external source.
 	Origin AccountOrigin
 
+	// IsImported reports whether this account was imported rather than derived
+	// from the wallet seed. It mirrors Origin during the compatibility period so
+	// callers can move to the normalized shape before Origin is removed.
+	IsImported bool
+
 	// ExternalKeyCount is the number of external keys that have been
 	// derived.
 	ExternalKeyCount uint32
