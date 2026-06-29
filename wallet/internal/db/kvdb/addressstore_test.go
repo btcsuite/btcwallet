@@ -46,7 +46,9 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	require.Equal(t, db.DerivedAccount, info.Origin)
 	require.Equal(t, db.WitnessPubKey, info.AddrType)
 	require.Equal(t, "addr", info.AccountName)
-	require.Equal(t, props.AccountNumber, info.AccountID)
+	require.Nil(t, info.AccountID)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, props.AccountNumber, *info.AccountNumber)
 	require.NotEmpty(t, info.ScriptPubKey)
 	require.NotEmpty(t, info.PubKey)
 

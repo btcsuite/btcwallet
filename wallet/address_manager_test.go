@@ -43,8 +43,11 @@ func derivedAddressInfoFromAddr(t *testing.T, addr address.Address,
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = addrType
 	info.Origin = db.DerivedAccount
+	info.IsImported = false
+	info.HasDerivationPath = true
 	info.AccountName = accountName
-	info.AccountNumber = 0
+	accountNumber := uint32(0)
+	info.AccountNumber = &accountNumber
 	info.KeyScope = db.KeyScope(scope)
 	info.MasterKeyFingerprint = fingerprint
 	info.Index = index
@@ -70,6 +73,8 @@ func importedPubKeyAddressInfoFromAddr(t *testing.T, addr address.Address,
 	info := addressInfoFromAddr(t, addr)
 	info.AddrType = db.WitnessPubKey
 	info.Origin = db.ImportedAccount
+	info.IsImported = true
+	info.HasDerivationPath = false
 	info.AccountName = db.DefaultImportedAccountName
 	info.KeyScope = db.KeyScope(scope)
 	info.IsWatchOnly = true
@@ -166,11 +171,17 @@ func expectSignerAddressInfoWithKeyScope(t *testing.T, w *Wallet,
 	}
 
 	storeInfo := &db.AddressInfo{
-		ScriptPubKey: pkScript,
-		AddrType:     addrType,
-		Origin:       origin,
-		Branch:       branch,
-		PubKey:       pubKeyBytes,
+		ScriptPubKey:      pkScript,
+		AddrType:          addrType,
+		Origin:            origin,
+		IsImported:        imported,
+		HasDerivationPath: !imported,
+		Branch:            branch,
+		PubKey:            pubKeyBytes,
+	}
+	if !imported {
+		accountNumber := uint32(0)
+		storeInfo.AccountNumber = &accountNumber
 	}
 	if keyScope != (waddrmgr.KeyScope{}) {
 		storeInfo.KeyScope = db.KeyScope(keyScope)
@@ -782,13 +793,15 @@ func TestImportTaprootScript(t *testing.T) {
 			ScriptPubKey:    pkScript,
 			EncryptedScript: encryptedScript,
 		}).Return(&db.AddressInfo{
-		AddrType:     db.TaprootPubKey,
-		Origin:       db.ImportedAccount,
-		AccountName:  db.DefaultImportedAccountName,
-		KeyScope:     db.KeyScope(waddrmgr.KeyScopeBIP0086),
-		ScriptPubKey: pkScript,
-		HasScript:    true,
-		IsWatchOnly:  true,
+		AddrType:          db.TaprootPubKey,
+		Origin:            db.ImportedAccount,
+		IsImported:        true,
+		HasDerivationPath: false,
+		AccountName:       db.DefaultImportedAccountName,
+		KeyScope:          db.KeyScope(waddrmgr.KeyScopeBIP0086),
+		ScriptPubKey:      pkScript,
+		HasScript:         true,
+		IsWatchOnly:       true,
 	}, nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).
 		Return(nil).Once()
