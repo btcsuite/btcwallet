@@ -145,9 +145,12 @@ func (s *Store) NewImportedAddress(ctx context.Context,
 
 	addrMgr := s.addrStore
 
-	manager, err := addrMgr.FetchScopedKeyManager(
-		waddrmgr.KeyScope(params.Scope),
-	)
+	legacyScope, err := legacyImportScope(params.AddressType)
+	if err != nil {
+		return nil, err
+	}
+
+	manager, err := addrMgr.FetchScopedKeyManager(legacyScope)
 	if err != nil {
 		return nil, fmt.Errorf("NewImportedAddress: fetch scoped manager: "+
 			"%w", err)
@@ -525,6 +528,36 @@ func (s *Store) importAddress(ns walletdb.ReadWriteBucket,
 	}
 
 	return managedAddr, nil
+}
+
+// legacyImportScope picks the scoped manager that can represent a raw import's
+// script family in the legacy waddrmgr backend.
+func legacyImportScope(addrType db.AddressType) (waddrmgr.KeyScope, error) {
+	switch addrType {
+	case db.RawPubKey, db.PubKeyHash, db.ScriptHash:
+		return waddrmgr.KeyScopeBIP0044, nil
+
+	case db.NestedWitnessPubKey:
+		return waddrmgr.KeyScopeBIP0049Plus, nil
+
+	case db.WitnessPubKey, db.WitnessScript:
+		return waddrmgr.KeyScopeBIP0084, nil
+
+	case db.TaprootPubKey:
+		return waddrmgr.KeyScopeBIP0086, nil
+
+	case db.Anchor:
+		return waddrmgr.KeyScope{}, fmt.Errorf(
+			"legacy import scope for type %d: %w", addrType,
+			db.ErrAddressTypeNotFound,
+		)
+
+	default:
+		return waddrmgr.KeyScope{}, fmt.Errorf(
+			"legacy import scope for type %d: %w", addrType,
+			db.ErrAddressTypeNotFound,
+		)
+	}
 }
 
 // validateImportedPubKeyRequest checks that a public-key import request matches

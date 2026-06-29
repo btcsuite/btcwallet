@@ -213,7 +213,6 @@ func TestAddressStoreImportedPublicKeyIsWatchOnly(t *testing.T) {
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     0,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKeyBytes,
@@ -269,7 +268,6 @@ func TestGetAddressBareMultisigReturnsNotFound(t *testing.T) {
 	_, err = store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:     0,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0044),
 			AddressType:  db.PubKeyHash,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKeyBytes,
@@ -326,7 +324,6 @@ func TestAddressStoreResolveOwnedAddresses(t *testing.T) {
 		_, err = store.NewImportedAddress(
 			t.Context(), db.NewImportedAddressParams{
 				WalletID:     0,
-				Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 				AddressType:  db.WitnessPubKey,
 				ScriptPubKey: script,
 				PubKey: privKey.PubKey().
@@ -520,10 +517,7 @@ func TestAddressStoreImportedPublicKeyRejectsMismatch(t *testing.T) {
 
 			_, err = store.NewImportedAddress(
 				t.Context(), db.NewImportedAddressParams{
-					WalletID: 0,
-					Scope: db.KeyScope(
-						waddrmgr.KeyScopeBIP0084,
-					),
+					WalletID:    0,
 					AddressType: tc.addrType,
 					ScriptPubKey: tc.scriptFunc(
 						t, actualScript, addrStore,
@@ -559,7 +553,6 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 	info, err := store.NewImportedAddress(
 		t.Context(), db.NewImportedAddressParams{
 			WalletID:        0,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    pkScript,
 			EncryptedScript: encryptedScript,

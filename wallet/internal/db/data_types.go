@@ -775,9 +775,6 @@ type NewImportedAddressParams struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// Scope is the key scope for the imported address.
-	Scope KeyScope
-
 	// AddressType specifies the address format being imported, such as
 	// P2PKH, P2WPKH, or P2TR.
 	AddressType AddressType

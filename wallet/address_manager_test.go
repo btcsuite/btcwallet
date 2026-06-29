@@ -208,9 +208,6 @@ func addressIter(items ...db.AddressInfo) iter.Seq2[db.AddressInfo, error] {
 	}
 }
 
-// TestNewAddress tests the NewAddress method, ensuring it can generate
-// various address types for different accounts and correctly handles both
-// internal and external address generation.
 // expectStoreAddressInfo configures mock expectations for address lookup.
 func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	addr address.Address, info *db.AddressInfo) {
@@ -229,6 +226,8 @@ func expectStoreAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	).Return(info, nil).Once()
 }
 
+// TestNewAddress tests that NewAddress can generate address types for regular
+// accounts and rejects unsupported imported-account generation.
 func TestNewAddress(t *testing.T) {
 	t.Parallel()
 
@@ -619,7 +618,6 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 		"NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKey.SerializeCompressed(),
@@ -785,7 +783,6 @@ func TestImportPublicKey(t *testing.T) {
 		"NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:     w.id,
-			Scope:        db.KeyScope(waddrmgr.KeyScopeBIP0084),
 			AddressType:  db.WitnessPubKey,
 			ScriptPubKey: pkScript,
 			PubKey:       pubKey.SerializeCompressed(),
@@ -855,7 +852,6 @@ func TestImportTaprootScript(t *testing.T) {
 	deps.store.On("NewImportedAddress", mock.Anything,
 		db.NewImportedAddressParams{
 			WalletID:        w.id,
-			Scope:           db.KeyScope(waddrmgr.KeyScopeBIP0086),
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    pkScript,
 			EncryptedScript: encryptedScript,
