@@ -63,6 +63,7 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+
 	accountName := "addr"
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
@@ -76,6 +77,47 @@ func TestAddressStoreNewDerivedAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Items, 1)
 	require.Equal(t, *info, result.Items[0])
+}
+
+// TestAddressStoreImportedXpubChildHasNoAccountNumber verifies that kvdb
+// matches SQL's imported-xpub contract: the address is imported key material,
+// but its account number is not exposed as a wallet-derived BIP44 account
+// number.
+func TestAddressStoreImportedXpubChildHasNoAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+	accountName := "imported-xpub-address"
+	createImportedXpubAccount(
+		t, store, waddrmgr.KeyScopeBIP0084, accountName, 0xA5,
+	)
+
+	info, err := store.NewDerivedAddress(
+		t.Context(), db.NewDerivedAddressParams{
+			WalletID:    0,
+			AccountName: accountName,
+			Scope:       db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
+	require.Equal(t, accountName, info.AccountName)
+
+	got, err := store.GetAddress(
+		t.Context(), db.GetAddressQuery{
+			WalletID:     0,
+			ScriptPubKey: info.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.IsImported)
+	require.Nil(t, got.AccountNumber)
+	require.Equal(t, accountName, got.AccountName)
 }
 
 // TestAddressStoreNewDerivedAddressWatchOnlyWallet verifies that derived
@@ -114,6 +156,7 @@ func TestAddressStoreNewDerivedAddressWatchOnlyWallet(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](10)
 	require.NoError(t, err)
+
 	accountName := "watch"
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 	result, err := store.ListAddresses(
@@ -156,9 +199,9 @@ func TestAddressStoreListAddressesPagination(t *testing.T) {
 
 	pageReq, err := page.NewRequest[uint32](2)
 	require.NoError(t, err)
+
 	accountName := "page"
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
-
 	query := db.ListAddressesQuery{
 		WalletID:    0,
 		AccountName: &accountName,

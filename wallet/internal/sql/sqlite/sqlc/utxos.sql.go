@@ -150,8 +150,8 @@ type BalanceRow struct {
 //     transaction is still `pending` or `published`.
 //   - Uses a filtered aggregate over active leases rather than issuing a second
 //     query for the locked subset.
-//   - Uses the address and optional account/scope joins to keep ownership
-//     validation and account filtering in one pass.
+//   - Uses the address/account/scope joins to keep ownership validation and
+//     account filtering in one pass.
 func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error) {
 	row := q.queryRow(ctx, q.balanceStmt, Balance,
 		arg.NowUtc,
@@ -253,10 +253,10 @@ SELECT
     da.account_id,
     acc.is_derived AS account_is_derived,
     acc.account_number,
-    acc.account_name, -- owning account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    acc.account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -308,10 +308,10 @@ type GetUtxoByOutpointRow struct {
 	AccountID        sql.NullInt64
 	AccountIsDerived sql.NullBool
 	AccountNumber    sql.NullInt64
-	AccountName      sql.NullString
 	TypeID           int64
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
+	AccountName      sql.NullString
 	HasScript        bool
 	IsLocked         int64
 }
@@ -352,10 +352,10 @@ func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointPa
 		&i.AccountID,
 		&i.AccountIsDerived,
 		&i.AccountNumber,
-		&i.AccountName,
 		&i.TypeID,
 		&i.Purpose,
 		&i.CoinType,
+		&i.AccountName,
 		&i.HasScript,
 		&i.IsLocked,
 	)
@@ -602,10 +602,10 @@ SELECT
     da.account_id,
     acc.is_derived AS account_is_derived,
     acc.account_number,
-    acc.account_name, -- owning account
-    a.type_id, -- address type, used for coin selection
-    ks.purpose, -- BIP-43 key scope purpose
-    ks.coin_type, -- BIP-43 key scope coin type
+    a.script_type_id AS type_id,
+    ks.purpose, -- script type, used for coin selection
+    ks.coin_type, -- BIP-43 key scope purpose
+    acc.account_name, -- BIP-43 key scope coin type
     -- has_script: the credited address has a persisted encrypted script (e.g. a
     -- P2WSH script-only import). LEFT JOIN, so addresses with no secret report
     -- FALSE instead of being dropped.
@@ -704,10 +704,10 @@ type ListUtxosRow struct {
 	AccountID        sql.NullInt64
 	AccountIsDerived sql.NullBool
 	AccountNumber    sql.NullInt64
-	AccountName      sql.NullString
 	TypeID           int64
 	Purpose          sql.NullInt64
 	CoinType         sql.NullInt64
+	AccountName      sql.NullString
 	HasScript        bool
 	IsLocked         int64
 }
@@ -728,8 +728,8 @@ type ListUtxosRow struct {
 //
 // Performance:
 //   - Restricts first by wallet, spend state, and transaction status.
-//   - Uses the address and optional account/scope joins to keep ownership
-//     validation and account filtering in one pass.
+//   - Uses the address/account/scope joins to keep ownership validation and
+//     account filtering in one pass.
 //   - Treats min/max confirmations as optional filters so callers can
 //     distinguish "not set" from an explicit zero-conf request.
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
@@ -763,10 +763,10 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 			&i.AccountID,
 			&i.AccountIsDerived,
 			&i.AccountNumber,
-			&i.AccountName,
 			&i.TypeID,
 			&i.Purpose,
 			&i.CoinType,
+			&i.AccountName,
 			&i.HasScript,
 			&i.IsLocked,
 		); err != nil {
