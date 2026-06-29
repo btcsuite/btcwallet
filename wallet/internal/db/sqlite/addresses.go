@@ -469,36 +469,85 @@ type addressInfoRow interface {
 
 // addressRowToInfo converts a SQLite address row to an AddressInfo struct.
 func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
-	// Direct conversion works only because all constraint types have
-	// identical fields. If sqlc types diverge, compilation will fail.
-	base := sqlc.GetAddressByScriptPubKeyRow(row)
+	switch base := any(row).(type) {
+	case sqlc.GetAddressByScriptPubKeyRow:
+		return addressFieldsToInfo(
+			base.ID, base.AccountID, base.AccountNumber,
+			base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.TypeID,
+			base.OriginID, base.WalletIsWatchOnly,
+			base.HasScript, base.CreatedAt, base.AddressBranch,
+			base.AddressIndex, base.ScriptPubKey, base.PubKey,
+			base.IsUsed,
+		)
 
-	info, err := db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
-		ID:                base.ID,
-		AccountID:         base.AccountID,
-		AccountNumber:     base.AccountNumber,
-		AccountName:       base.AccountName,
-		MasterFingerprint: base.MasterFingerprint,
-		Purpose:           base.Purpose,
-		CoinType:          base.CoinType,
-		TypeID:            base.TypeID,
-		OriginID:          base.OriginID,
-		WalletIsWatchOnly: base.WalletIsWatchOnly,
-		HasScript:         base.HasScript,
-		CreatedAt:         base.CreatedAt,
-		AddressBranch:     base.AddressBranch,
-		AddressIndex:      base.AddressIndex,
-		ScriptPubKey:      base.ScriptPubKey,
-		PubKey:            base.PubKey,
-		IsUsed:            base.IsUsed,
+	case sqlc.ListAddressesByAccountRow:
+		addressBranch := sql.NullInt64{
+			Int64: base.AddressBranch,
+			Valid: true,
+		}
+		addressIndex := sql.NullInt64{
+			Int64: base.AddressIndex,
+			Valid: true,
+		}
+
+		return addressFieldsToInfo(
+			base.ID, base.AccountID, base.AccountNumber,
+			base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.TypeID,
+			base.OriginID, base.WalletIsWatchOnly,
+			base.HasScript, base.CreatedAt,
+			addressBranch, addressIndex, base.ScriptPubKey,
+			base.PubKey, base.IsUsed,
+		)
+
+	case sqlc.ListAddressesByScriptPubKeysRow:
+		return addressFieldsToInfo(
+			base.ID, base.AccountID, base.AccountNumber,
+			base.AccountName, base.MasterFingerprint,
+			base.Purpose, base.CoinType, base.TypeID,
+			base.OriginID, base.WalletIsWatchOnly,
+			base.HasScript, base.CreatedAt, base.AddressBranch,
+			base.AddressIndex, base.ScriptPubKey, base.PubKey,
+			base.IsUsed,
+		)
+
+	default:
+		return nil, fmt.Errorf("unknown address row type: %T", row)
+	}
+}
+
+// addressFieldsToInfo converts SQLite address query fields into an AddressInfo
+// struct.
+func addressFieldsToInfo(id int64, accountID int64,
+	accountNumber sql.NullInt64, accountName string,
+	masterFingerprint sql.NullInt64, purpose int64, coinType int64,
+	typeID int64, originID int64, walletIsWatchOnly bool,
+	hasScript bool, createdAt time.Time, addressBranch sql.NullInt64,
+	addressIndex sql.NullInt64, scriptPubKey []byte, pubKey []byte,
+	isUsed bool) (*db.AddressInfo, error) {
+
+	return db.AddressRowToInfo(db.AddressInfoRow[int64, int64]{
+		ID:                id,
+		AccountID:         accountID,
+		AccountNumber:     accountNumber,
+		AccountName:       accountName,
+		MasterFingerprint: masterFingerprint,
+		Purpose:           purpose,
+		CoinType:          coinType,
+		TypeID:            typeID,
+		OriginID:          originID,
+		WalletIsWatchOnly: walletIsWatchOnly,
+		HasScript:         hasScript,
+		CreatedAt:         createdAt,
+		AddressBranch:     addressBranch,
+		AddressIndex:      addressIndex,
+		ScriptPubKey:      scriptPubKey,
+		PubKey:            pubKey,
+		IsUsed:            isUsed,
 		IDToAddrType:      db.IDToAddressType[int64],
 		IDToOrigin:        db.IDToOrigin[int64],
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	return info, nil
 }
 
 // listAddressesByAccount lists addresses filtered by wallet ID, key
