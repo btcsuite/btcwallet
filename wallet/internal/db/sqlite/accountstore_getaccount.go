@@ -50,10 +50,13 @@ func (s accountGetQueries) GetAccountByNumber(ctx context.Context,
 
 	row, err := s.q.GetAccountByWalletScopeAndNumber(
 		ctx, sqlc.GetAccountByWalletScopeAndNumberParams{
-			WalletID:      int64(query.WalletID),
-			Purpose:       int64(query.Scope.Purpose),
-			CoinType:      int64(query.Scope.Coin),
-			AccountNumber: db.NullableUint32ToSQLInt64(query.AccountNumber),
+			WalletID: int64(query.WalletID),
+			Purpose:  int64(query.Scope.Purpose),
+			CoinType: int64(query.Scope.Coin),
+			AccountNumber: sql.NullInt64{
+				Int64: int64(*query.AccountNumber),
+				Valid: true,
+			},
 		},
 	)
 	if err != nil {

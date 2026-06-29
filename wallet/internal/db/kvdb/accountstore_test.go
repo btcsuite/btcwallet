@@ -98,8 +98,9 @@ func TestGetAccountByName(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	require.Equal(t, accountName, info.AccountName)
-	require.Equal(t, accountNumber, info.AccountNumber)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, accountNumber, *info.AccountNumber)
+	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
 
 	// The plaintext account-level public key must be parseable.
@@ -169,8 +170,8 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, info.AccountName)
-	require.Equal(t, db.ImportedAccount, info.Origin)
-	require.Equal(t, uint32(0), info.AccountNumber)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
 }
 
 // TestListAccountsByNameIncludesImportedPseudoAccount verifies the
@@ -189,8 +190,8 @@ func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, infos, 1)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, infos[0].AccountName)
-	require.Equal(t, db.ImportedAccount, infos[0].Origin)
-	require.Equal(t, uint32(0), infos[0].AccountNumber)
+	require.True(t, infos[0].IsImported)
+	require.Nil(t, infos[0].AccountNumber)
 }
 
 // TestRenameAccountByName verifies that RenameAccount renames by old
@@ -224,7 +225,8 @@ func TestRenameAccountByName(t *testing.T) {
 		Name: &newName,
 	})
 	require.NoError(t, err)
-	require.Equal(t, accountNumber, info.AccountNumber)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, accountNumber, *info.AccountNumber)
 }
 
 // TestRenameAccountByNumber verifies the AccountNumber-keyed rename branch.
@@ -419,7 +421,7 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	require.Equal(t, savingsAccountName, info.AccountName)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.NotEmpty(t, info.PublicKey)
 	require.Equal(t, uint32(0xC0DEC0DE), info.MasterKeyFingerprint)
 
@@ -492,7 +494,9 @@ func TestCreateDerivedAccountRollsBackOnDeriveError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	require.Equal(t, info1.AccountNumber+1, info2.AccountNumber,
+	require.NotNil(t, info1.AccountNumber)
+	require.NotNil(t, info2.AccountNumber)
+	require.Equal(t, *info1.AccountNumber+1, *info2.AccountNumber,
 		"account numbers should be contiguous after rollback")
 }
 
@@ -530,7 +534,7 @@ func TestCreateDerivedAccountFallsBackToScopedKey(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, savingsAccountName, info.AccountName)
-	require.Equal(t, db.DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.NotEmpty(t, info.PublicKey)
 
 	parsed, err := hdkeychain.NewKeyFromString(string(info.PublicKey))
@@ -552,8 +556,8 @@ func TestCreateDerivedAccountFallsBackToScopedKey(t *testing.T) {
 var errTestBoom = errors.New("kvdb test boom")
 
 // TestCreateImportedAccount verifies the watch-only-imported account
-// path: kvdb persists the row, GetAccount returns Origin=ImportedAccount,
-// and the AccountInfo.MasterKeyFingerprint round-trips.
+// path: kvdb persists the row, GetAccount returns IsImported=true, and the
+// AccountInfo.MasterKeyFingerprint round-trips.
 func TestCreateImportedAccount(t *testing.T) {
 	t.Parallel()
 
@@ -581,7 +585,7 @@ func TestCreateImportedAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	require.Equal(t, "imported-xpub", info.AccountName)
-	require.Equal(t, db.ImportedAccount, info.Origin)
+	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
 	require.Equal(t, uint32(0xDEADBEEF), info.MasterKeyFingerprint)
 }
@@ -946,7 +950,7 @@ func TestGetAccountSkipBalanceZeros(t *testing.T) {
 
 // TestGetAccountImportedPopulatesBalance verifies that GetAccount attaches
 // the correct balance for imported accounts, even though their public
-// AccountNumber is masked to 0 in the contract.
+// AccountNumber is nil.
 func TestGetAccountImportedPopulatesBalance(t *testing.T) {
 	t.Parallel()
 
@@ -975,11 +979,9 @@ func TestGetAccountImportedPopulatesBalance(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, importedInfo.Origin)
-	require.Equal(
-		t, uint32(0), importedInfo.AccountNumber,
-		"imported account public number must be masked to 0",
-	)
+	require.True(t, importedInfo.IsImported)
+	require.Nil(t, importedInfo.AccountNumber,
+		"imported account public number must be nil")
 
 	// Resolve the internal waddrmgr account number by name so we can
 	// credit it with a UTXO.
@@ -1030,8 +1032,8 @@ func TestGetAccountImportedPopulatesBalance(t *testing.T) {
 		SkipBalance: false,
 	})
 	require.NoError(t, err)
-	require.Equal(t, db.ImportedAccount, info.Origin)
-	require.Equal(t, uint32(0), info.AccountNumber)
+	require.True(t, info.IsImported)
+	require.Nil(t, info.AccountNumber)
 	require.Equal(t, utxoAmount, info.ConfirmedBalance)
 	require.Zero(t, info.UnconfirmedBalance)
 }
@@ -1122,7 +1124,8 @@ func TestListAccountsSortedByAccountNumber(t *testing.T) {
 	require.Len(t, accounts, 257)
 
 	for i, account := range accounts {
-		require.Equal(t, uint32(i), account.AccountNumber)
+		require.NotNil(t, account.AccountNumber)
+		require.Equal(t, uint32(i), *account.AccountNumber)
 	}
 }
 
@@ -1155,7 +1158,7 @@ func TestListAccountsPopulatesBalance(t *testing.T) {
 
 	var found bool
 	for _, a := range accounts {
-		if a.AccountNumber != account {
+		if a.AccountNumber == nil || *a.AccountNumber != account {
 			continue
 		}
 

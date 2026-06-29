@@ -56,9 +56,8 @@ type accountGetOps struct {
 
 	// internalAccountNumber caches the resolved waddrmgr account number from
 	// loadAccountByNumber so AttachAccountBalance can use it for balance
-	// lookups. This is necessary because imported accounts mask their public
-	// AccountNumber to 0 in the contract, but balance lookups still need the
-	// original waddrmgr number to avoid colliding with derived account 0.
+	// lookups. Imported accounts expose no public AccountNumber, but kvdb
+	// balance rows still key by the original waddrmgr number.
 	internalAccountNumber uint32
 }
 
@@ -165,8 +164,7 @@ func (o *accountGetOps) resolveAccountNamespaceAndManager() (
 
 // sanitizeAccountNumber rejects legacy pseudo-account slots for number-based
 // lookups. The legacy imported-address pseudo-account is still queryable by
-// name, but its public account number is masked to 0 at the AccountInfo
-// boundary.
+// name, but it has no public account number.
 func sanitizeAccountNumber(acctNum uint32) (uint32, error) {
 	if acctNum == waddrmgr.ImportedAddrAccount {
 		return 0, db.ErrAccountNotFound
@@ -271,14 +269,9 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
-	// Imported accounts in kvdb share waddrmgr's per-scope counter
-	// internally, but the AccountInfo contract masks their
-	// AccountNumber to 0. Internal callers that need the real
-	// waddrmgr number (e.g. attachAccountBalances) carry it
-	// separately.
-	accountNumberForContract := props.AccountNumber
-	if origin == db.ImportedAccount {
-		accountNumberForContract = 0
+	var accountNumberForContract *uint32
+	if !accountIsImported {
+		accountNumberForContract = &props.AccountNumber
 	}
 
 	addrSchema, err := effectiveAddrSchema(

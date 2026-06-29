@@ -900,7 +900,7 @@ func (w *Wallet) getEligibleUTXOsFromDefaultAccount(ctx context.Context,
 
 	return w.filterEligibleOutputs(
 		ctx, &waddrmgr.KeyScopeBIP0086, info.AccountName,
-		info.AccountNumber, minconf, bs,
+		account, minconf, bs,
 	)
 }
 
@@ -910,7 +910,7 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
 	[]db.UtxoInfo, error) {
 
-	info, err := w.cache.GetAccount(
+	_, err := w.cache.GetAccount(
 		ctx, db.GetAccountQuery{
 			WalletID: w.id,
 			Scope:    db.KeyScope(source.KeyScope),
@@ -928,8 +928,7 @@ func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	}
 
 	return w.filterEligibleOutputs(
-		ctx, &source.KeyScope, source.AccountName, info.AccountNumber,
-		minconf, bs,
+		ctx, &source.KeyScope, source.AccountName, 0, minconf, bs,
 	)
 }
 

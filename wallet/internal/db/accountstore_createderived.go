@@ -52,6 +52,7 @@ func (params *CreateDerivedAccountParams) Validate() error {
 // CreateDerivedAccountRow contains the backend-independent fields the shared
 // CreateDerivedAccount workflow needs from the final insert row.
 type CreateDerivedAccountRow struct {
+	AccountID     int64
 	AccountNumber sql.NullInt64
 	CreatedAt     time.Time
 }
@@ -173,6 +174,22 @@ func allocateAndPreviewAccountNumber(ctx context.Context,
 	return allocated, accNumPreview, nil
 }
 
+// derivedAccountNumber converts a wallet-derived account's persisted account
+// number, which must always be present, into its uint32 form.
+func derivedAccountNumber(accountNumber sql.NullInt64) (uint32, error) {
+	if !accountNumber.Valid {
+		// This should never happen unless the query is modified incorrectly.
+		return 0, ErrNilDBAccountNumber
+	}
+
+	number, err := Int64ToUint32(accountNumber.Int64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrMaxAccountNumberReached, err)
+	}
+
+	return number, nil
+}
+
 // CreateDerivedAccountWithOps runs the backend-independent
 // CreateDerivedAccount workflow once the caller has opened a backend-specific
 // SQL transaction.
@@ -230,18 +247,18 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, fmt.Errorf("create account: %w", err)
 	}
 
-	if !row.AccountNumber.Valid {
-		// This should never happen unless the query is modified incorrectly.
-		return nil, ErrNilDBAccountNumber
+	accNumber, err := derivedAccountNumber(row.AccountNumber)
+	if err != nil {
+		return nil, err
 	}
 
-	accNumber, err := Int64ToUint32(row.AccountNumber.Int64)
+	accountID, err := optionalAccountID(row.AccountID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrMaxAccountNumberReached, err)
+		return nil, err
 	}
 
 	return BuildAccountInfo(
-		accNumber, params.Name, DerivedAccount, 0, 0, 0,
+		accountID, &accNumber, params.Name, false, 0, 0, 0,
 		walletIsWatchOnly, row.CreatedAt, params.Scope, addrSchema,
 		derived.PublicKey, derived.MasterKeyFingerprint,
 		0, 0,

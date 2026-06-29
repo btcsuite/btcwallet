@@ -83,9 +83,10 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	)
 
 	require.NoError(t, err)
-	require.Equal(t, uint32(12), info.AccountNumber)
+	require.NotNil(t, info.AccountNumber)
+	require.Equal(t, uint32(12), *info.AccountNumber)
 	require.Equal(t, params.Name, info.AccountName)
-	require.Equal(t, DerivedAccount, info.Origin)
+	require.False(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, params.Scope, info.KeyScope)
@@ -419,10 +420,8 @@ func TestCreateDerivedAccountWithOpsNilDeriveFn(t *testing.T) {
 	ops.AssertNotCalled(t, "CreateDerivedAccount")
 }
 
-// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedData verifies the
-// per-field validation rules that protect against malformed callbacks.
-// Validation runs after AllocateAccountNumber but before CreateDerivedAccount,
-// so the backend's CreateDerivedAccount step must NOT run.
+// TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil verifies that nil
+// callback data is rejected before the backend CreateDerivedAccount step runs.
 func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
 	t.Parallel()
 
@@ -668,6 +667,7 @@ type deriveFnRecorder struct {
 	returnErr  error
 }
 
+// deriveFnCall records one AccountDerivationFunc invocation.
 type deriveFnCall struct {
 	scope             KeyScope
 	accountNumber     uint32
