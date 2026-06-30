@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -188,6 +190,12 @@ type syncer struct {
 	// txStore is the transaction manager.
 	txStore wtxmgr.TxStore
 
+	// store is the transitional database store used by migrated runtime paths.
+	store db.Store
+
+	// walletID is the database wallet identifier used by store-backed paths.
+	walletID uint32
+
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
 
@@ -202,17 +210,34 @@ type syncer struct {
 	publisher TxPublisher
 }
 
+// syncerStoreConfig contains store-backed runtime options for the syncer.
+type syncerStoreConfig struct {
+	// store is the transitional database store used by migrated runtime paths.
+	store db.Store
+
+	// walletID is the database wallet identifier used by store-backed paths.
+	walletID uint32
+}
+
 // newSyncer creates a new syncer instance.
 func newSyncer(cfg Config, addrStore waddrmgr.AddrStore,
-	txStore wtxmgr.TxStore, publisher TxPublisher) *syncer {
+	txStore wtxmgr.TxStore, publisher TxPublisher,
+	storeConfigs ...syncerStoreConfig) *syncer {
 
-	return &syncer{
+	s := &syncer{
 		cfg:         cfg,
 		addrStore:   addrStore,
 		txStore:     txStore,
 		scanReqChan: make(chan *scanReq, 1),
 		publisher:   publisher,
 	}
+
+	if len(storeConfigs) > 0 {
+		s.store = storeConfigs[0].store
+		s.walletID = storeConfigs[0].walletID
+	}
+
+	return s
 }
 
 // syncState returns the current synchronization state of the wallet.
@@ -309,7 +334,11 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	// requests lightweight.
 	const batchSize = 10
 
-	syncedTo := s.addrStore.SyncedTo()
+	syncedTo, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
 	syncedHeight := syncedTo.Height
 
 	var (
@@ -325,7 +354,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 		startHeight := max(0, endHeight-batchSize+1)
 
 		// Fetch Local Batch (from wallet's database).
-		localHashes, err = s.DBGetSyncedBlocks(
+		localHashes, err = s.syncedBlockHashes(
 			ctx, startHeight, endHeight,
 		)
 		if err != nil {
@@ -375,7 +404,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 			}
 
 			// Perform the rollback.
-			return s.DBPutRewind(ctx, waddrmgr.BlockStamp{
+			return s.rewindToBlock(ctx, waddrmgr.BlockStamp{
 				Height:    forkHeight,
 				Hash:      *forkHash,
 				Timestamp: header.Timestamp,
@@ -388,6 +417,159 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// rewindToBlock rewinds wallet sync and transaction state to the given fork
+// point.
+func (s *syncer) rewindToBlock(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	if s.store == nil {
+		return s.DBPutRewind(ctx, block)
+	}
+
+	rollbackBoundary := int64(block.Height) + 1
+
+	rollbackHeight, err := db.Int64ToUint32(rollbackBoundary)
+	if err != nil {
+		return fmt.Errorf("rollback height %d: %w", rollbackBoundary, err)
+	}
+
+	// Roll transaction state back and rewind the wallet sync tip to the same
+	// fork point in one atomic store call so a failure cannot leave the sync
+	// tip rewound while transaction state still references the abandoned
+	// chain. RollbackToBlock derives the new sync tip from the stored
+	// fork-point block, so the caller only supplies the rollback boundary.
+	err = s.store.RollbackToBlock(ctx, rollbackHeight)
+	if err != nil {
+		return fmt.Errorf("rollback to block: %w", err)
+	}
+
+	return nil
+}
+
+// rewindWallet rewinds this wallet's sync and transaction state for a manual
+// rescan without requiring a DB-wide block rollback.
+func (s *syncer) rewindWallet(ctx context.Context,
+	block waddrmgr.BlockStamp) error {
+
+	if s.store == nil {
+		return s.DBPutRewind(ctx, block)
+	}
+
+	storeBlock, err := s.resolveRewindBlock(block)
+	if err != nil {
+		return fmt.Errorf("rewind wallet block: %w", err)
+	}
+
+	err = s.store.RewindWallet(ctx, db.RewindWalletParams{
+		WalletID: s.walletID,
+		Block:    *storeBlock,
+	})
+	if err != nil {
+		return fmt.Errorf("rewind wallet: %w", err)
+	}
+
+	return nil
+}
+
+// resolveRewindBlock resolves the requested manual-rewind height into the
+// canonical block metadata recorded as the wallet's new synced tip.
+func (s *syncer) resolveRewindBlock(
+	block waddrmgr.BlockStamp) (*db.Block, error) {
+
+	if block.Hash != (chainhash.Hash{}) && !block.Timestamp.IsZero() {
+		storeBlock, err := db.BlockFromBlockStamp(block)
+		if err != nil {
+			return nil, fmt.Errorf("convert rewind block: %w", err)
+		}
+
+		return storeBlock, nil
+	}
+
+	hash, err := s.cfg.Chain.GetBlockHash(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block hash: %w", err)
+	}
+
+	header, err := s.cfg.Chain.GetBlockHeader(hash)
+	if err != nil {
+		return nil, fmt.Errorf("get rewind block header: %w", err)
+	}
+
+	storeBlock, err := db.BlockFromBlockStamp(waddrmgr.BlockStamp{
+		Height:    block.Height,
+		Hash:      *hash,
+		Timestamp: header.Timestamp,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("convert resolved rewind block: %w", err)
+	}
+
+	return storeBlock, nil
+}
+
+// syncedBlockHashes returns the wallet's synced block hashes for the inclusive
+// height range.
+func (s *syncer) syncedBlockHashes(ctx context.Context, startHeight,
+	endHeight int32) ([]*chainhash.Hash, error) {
+
+	if s.store == nil {
+		return s.DBGetSyncedBlocks(ctx, startHeight, endHeight)
+	}
+
+	start, err := db.Int64ToUint32(int64(startHeight))
+	if err != nil {
+		return nil, fmt.Errorf("start height %d: %w", startHeight, err)
+	}
+
+	end, err := db.Int64ToUint32(int64(endHeight))
+	if err != nil {
+		return nil, fmt.Errorf("end height %d: %w", endHeight, err)
+	}
+
+	blocks, err := s.store.ListSyncedBlocks(
+		ctx, db.ListSyncedBlocksQuery{
+			StartHeight: start,
+			EndHeight:   end,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list synced blocks: %w", err)
+	}
+
+	hashes := make([]*chainhash.Hash, len(blocks))
+	for i := range blocks {
+		hashes[i] = &blocks[i].Hash
+	}
+
+	return hashes, nil
+}
+
+// syncedTo returns the wallet's current sync tip from the active runtime
+// backend.
+func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
+	if s.store == nil {
+		return s.addrStore.SyncedTo(), nil
+	}
+
+	walletInfo, err := s.store.GetWallet(ctx, s.cfg.Name)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("get wallet sync tip: %w",
+			err)
+	}
+
+	if walletInfo.SyncedTo == nil {
+		return waddrmgr.BlockStamp{}, nil
+	}
+
+	syncedTo, err := db.BlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		return waddrmgr.BlockStamp{}, fmt.Errorf("decode wallet sync tip: %w",
+			err)
+	}
+
+	return syncedTo, nil
 }
 
 // findForkPoint compares local and remote block hashes to find the last
@@ -481,7 +663,7 @@ func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
 // broadcastUnminedTxns retrieves all unmined transactions from the wallet and
 // attempts to re-broadcast them to the network.
 func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
-	txs, err := s.DBGetUnminedTxns(ctx)
+	txs, err := s.unminedTxns(ctx)
 	if err != nil {
 		log.Errorf("Unable to retrieve unconfirmed transactions to "+
 			"resend: %v", err)
@@ -498,6 +680,188 @@ func (s *syncer) broadcastUnminedTxns(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// unminedTxns returns transactions that are still active in the wallet's
+// unmined set.
+func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
+	if s.store == nil {
+		return s.DBGetUnminedTxns(ctx)
+	}
+
+	infos, err := s.store.ListTxns(
+		ctx, db.ListTxnsQuery{
+			WalletID:    s.walletID,
+			UnminedOnly: true,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list unmined txns: %w", err)
+	}
+
+	txSet := make(map[chainhash.Hash]*wire.MsgTx, len(infos))
+	for i := range infos {
+		info := infos[i]
+		if info.Status != db.TxStatusPublished {
+			continue
+		}
+
+		var tx wire.MsgTx
+
+		err := tx.Deserialize(bytes.NewReader(info.SerializedTx))
+		if err != nil {
+			return nil, fmt.Errorf("deserialize unmined tx %v: %w",
+				info.Hash, err)
+		}
+
+		txHash := tx.TxHash()
+		txSet[txHash] = &tx
+	}
+
+	return wtxmgr.DependencySort(txSet), nil
+}
+
+// updateSyncTip records the latest synced block for store-backed runtime paths.
+func (s *syncer) updateSyncTip(ctx context.Context,
+	block wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutSyncTip(ctx, block)
+	}
+
+	storeBlock, err := storeBlockFromBlockMeta(block)
+	if err != nil {
+		return err
+	}
+
+	err = s.store.UpdateWallet(
+		ctx, db.UpdateWalletParams{
+			WalletID: s.walletID,
+			SyncedTo: storeBlock,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update sync tip: %w", err)
+	}
+
+	return nil
+}
+
+// putTxNotifications records relevant transaction notifications through the
+// store when configured, falling back to the legacy walletdb path otherwise.
+func (s *syncer) putTxNotifications(ctx context.Context,
+	matches TxEntries, blockMeta *wtxmgr.BlockMeta) error {
+
+	if s.store == nil {
+		return s.DBPutTxns(ctx, matches, blockMeta)
+	}
+
+	var block *db.Block
+	if blockMeta != nil {
+		var err error
+
+		block, err = storeBlockFromBlockMeta(*blockMeta)
+		if err != nil {
+			return err
+		}
+	}
+
+	transactions := make([]db.CreateTxParams, 0, len(matches))
+	for i := range matches {
+		match := matches[i]
+		creditCandidates := make(
+			map[uint32][]address.Address, len(match.Entries),
+		)
+
+		for _, entry := range match.Entries {
+			index := entry.Credit.Index
+			if uint64(index) >= uint64(len(match.Rec.MsgTx.TxOut)) {
+				return fmt.Errorf("credit output %d: %w", index,
+					db.ErrInvalidParam)
+			}
+
+			creditCandidates[index] = append(
+				creditCandidates[index], entry.Address,
+			)
+		}
+
+		status, label, err := s.txNotificationState(
+			ctx, match.Rec.Hash, block,
+		)
+		if err != nil {
+			return err
+		}
+
+		transactions = append(transactions, db.CreateTxParams{
+			WalletID:         s.walletID,
+			Tx:               &match.Rec.MsgTx,
+			Received:         match.Rec.Received,
+			Block:            block,
+			Status:           status,
+			Label:            label,
+			CreditCandidates: creditCandidates,
+		})
+	}
+
+	err := s.store.ApplyTxBatch(
+		ctx, db.TxBatchParams{
+			WalletID:     s.walletID,
+			Transactions: transactions,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("apply tx notifications: %w", err)
+	}
+
+	return nil
+}
+
+// txNotificationState returns the status and label to use for a relevant tx
+// notification recorded through the Store path.
+func (s *syncer) txNotificationState(ctx context.Context,
+	txHash chainhash.Hash, block *db.Block) (db.TxStatus, string, error) {
+
+	const (
+		label  = ""
+		status = db.TxStatusPublished
+	)
+
+	if block != nil {
+		return status, label, nil
+	}
+
+	info, err := s.store.GetTx(ctx, db.GetTxQuery{
+		WalletID: s.walletID,
+		Txid:     txHash,
+	})
+	switch {
+	case errors.Is(err, db.ErrTxNotFound):
+		return status, label, nil
+
+	case err != nil:
+		return 0, "", fmt.Errorf("get tx %v: %w", txHash, err)
+	}
+
+	if info.Block != nil || !db.IsUnminedStatus(info.Status) {
+		return status, label, nil
+	}
+
+	return status, info.Label, nil
+}
+
+// storeBlockFromBlockMeta converts chain notification block metadata into the
+// store block shape.
+func storeBlockFromBlockMeta(block wtxmgr.BlockMeta) (*db.Block, error) {
+	height, err := db.Int64ToUint32(int64(block.Height))
+	if err != nil {
+		return nil, fmt.Errorf("block height %d: %w", block.Height, err)
+	}
+
+	return &db.Block{
+		Hash:      block.Hash,
+		Height:    height,
+		Timestamp: block.Time,
+	}, nil
 }
 
 // scanBatchHeadersOnly performs a lightweight scan by only fetching block
@@ -991,7 +1355,9 @@ func (s *syncer) advanceChainSync(ctx context.Context) (bool, error) {
 			err)
 	}
 
-	// Determine our current sync state.
+	// Determine our current sync state from the same backend scanBatch writes
+	// below. Store-backed scan commits are introduced in a later stack commit;
+	// until then, regular chain sync must continue reading the legacy tip.
 	syncedTo := s.addrStore.SyncedTo()
 
 	// If the wallet is caught up to the best known tip, log this and
@@ -1102,7 +1468,7 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	switch n := update.(type) {
 	case chain.BlockConnected:
-		return s.DBPutSyncTip(ctx, wtxmgr.BlockMeta(n))
+		return s.updateSyncTip(ctx, wtxmgr.BlockMeta(n))
 
 	// A block was disconnected. We use checkRollback to safely verify our
 	// chain state against the backend and rewind if necessary. This
@@ -1115,7 +1481,7 @@ func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	// handled atomically via FilteredBlockConnected.
 	case chain.RelevantTx:
 		matches := s.prepareTxMatches([]*wtxmgr.TxRecord{n.TxRecord})
-		return s.DBPutTxns(ctx, matches, n.Block)
+		return s.putTxNotifications(ctx, matches, n.Block)
 
 	case chain.FilteredBlockConnected:
 		matches := s.prepareTxMatches(n.RelevantTxs)
@@ -1215,7 +1581,15 @@ func (s *syncer) waitForEvent(ctx context.Context) error {
 // scanWithRewind rewinds the wallet's sync status to the requested start
 // block.
 func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
-	current := s.addrStore.SyncedTo()
+	// Read the synced tip through syncedTo so a Store-backed backend uses
+	// the Store's tip rather than the legacy addrStore tip. A backend that
+	// does not mirror ApplyScanBatch/RewindWallet into the legacy manager
+	// would otherwise compare against a stale legacy height and could
+	// wrongly conclude there is nothing to rewind for a full rescan.
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
 
 	if req.startBlock.Height >= current.Height {
 		// Requested start is ahead of or equal to current sync.
@@ -1226,8 +1600,7 @@ func (s *syncer) scanWithRewind(ctx context.Context, req *scanReq) error {
 	log.Infof("Rewinding sync status from %d to %d for rescan",
 		current.Height, req.startBlock.Height)
 
-	// Rewind the database status.
-	err := s.DBPutRewind(ctx, req.startBlock)
+	err = s.rewindWallet(ctx, req.startBlock)
 	if err != nil {
 		log.Errorf("Failed to rewind sync status: %v", err)
 

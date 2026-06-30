@@ -2201,6 +2201,117 @@ func TestRollbackToBlockRewindsSyncToStoredLowerBlock(t *testing.T) {
 	require.Equal(t, forkBlock.Hash, walletInfo.SyncedTo.Hash)
 }
 
+// TestRewindWalletLeavesOtherWalletState verifies manual rescan rewind is
+// wallet-scoped. It must detach only the selected wallet's confirmed
+// transactions and sync tip, leaving another wallet that shares the same Store
+// at the same block height untouched.
+func TestRewindWalletLeavesOtherWalletState(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	const (
+		walletAName = "wallet-rewind-scoped-a"
+		walletBName = "wallet-rewind-scoped-b"
+	)
+
+	walletA := newWallet(t, store, walletAName)
+	walletB := newWallet(t, store, walletBName)
+
+	rewindBlock := db.Block{
+		Hash:      chainhash.Hash{100},
+		Height:    100,
+		Timestamp: time.Unix(1710006100, 0),
+	}
+	tipBlock := db.Block{
+		Hash:      chainhash.Hash{101},
+		Height:    101,
+		Timestamp: time.Unix(1710006110, 0),
+	}
+
+	txA := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 1000}},
+	)
+	txB := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 2000}},
+	)
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletA,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletA,
+			Tx:       txA,
+			Received: time.Unix(1710006120, 0),
+			Block:    &tipBlock,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &tipBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletB,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletB,
+			Tx:       txB,
+			Received: time.Unix(1710006130, 0),
+			Block:    &tipBlock,
+			Status:   db.TxStatusPublished,
+		}},
+		SyncedTo: &tipBlock,
+	})
+	require.NoError(t, err)
+
+	err = store.RewindWallet(t.Context(), db.RewindWalletParams{
+		WalletID: walletA,
+		Block:    rewindBlock,
+	})
+	require.NoError(t, err)
+
+	infoA, err := store.GetWallet(t.Context(), walletAName)
+	require.NoError(t, err)
+	require.NotNil(t, infoA.SyncedTo)
+	require.Equal(t, rewindBlock.Height, infoA.SyncedTo.Height)
+	require.Equal(t, rewindBlock.Hash, infoA.SyncedTo.Hash)
+
+	infoB, err := store.GetWallet(t.Context(), walletBName)
+	require.NoError(t, err)
+	require.NotNil(t, infoB.SyncedTo)
+	require.Equal(t, tipBlock.Height, infoB.SyncedTo.Height)
+	require.Equal(t, tipBlock.Hash, infoB.SyncedTo.Hash)
+
+	confirmedA, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletA,
+		StartHeight: tipBlock.Height,
+		EndHeight:   tipBlock.Height,
+	})
+	require.NoError(t, err)
+	require.Empty(t, confirmedA)
+
+	unminedA, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletA,
+		UnminedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, unminedA, 1)
+	require.Equal(t, txA.TxHash(), unminedA[0].Hash)
+	require.Nil(t, unminedA[0].Block)
+	require.Equal(t, db.TxStatusPublished, unminedA[0].Status)
+
+	confirmedB, err := store.ListTxns(t.Context(), db.ListTxnsQuery{
+		WalletID:    walletB,
+		StartHeight: tipBlock.Height,
+		EndHeight:   tipBlock.Height,
+	})
+	require.NoError(t, err)
+	require.Len(t, confirmedB, 1)
+	require.Equal(t, txB.TxHash(), confirmedB[0].Hash)
+	require.NotNil(t, confirmedB[0].Block)
+	require.Equal(t, tipBlock.Height, confirmedB[0].Block.Height)
+}
+
 // TestCreateTxReconfirmsOrphanedCoinbase verifies that CreateTx can restore an
 // orphaned coinbase row to confirmed history when the same coinbase hash later
 // re-enters the best chain.
@@ -3527,6 +3638,53 @@ func TestApplyTxBatchChildBeforeParent(t *testing.T) {
 	}))
 }
 
+// TestApplyTxBatchResolvesCreditCandidates verifies ApplyTxBatch resolves
+// notification credit candidates inside the batch write transaction before it
+// records transaction credits.
+func TestApplyTxBatchResolvesCreditCandidates(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-apply-tx-batch-candidates",
+	)
+
+	memberAddr, memberScript, multiSigScript := newMultisigScript(t)
+	_, err := store.NewImportedAddress(
+		t.Context(), db.NewImportedAddressParams{
+			WalletID:        walletID,
+			AddressType:     db.RawPubKey,
+			PubKey:          memberAddr.ScriptAddress(),
+			ScriptPubKey:    memberScript,
+			EncryptedScript: RandomBytes(48),
+		},
+	)
+	require.NoError(t, err)
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: multiSigScript}},
+	)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000190, 0),
+			Status:   db.TxStatusPending,
+			CreditCandidates: map[uint32][]address.Address{
+				0: {memberAddr},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 0,
+	}))
+}
+
 // TestApplyScanBatchChildBeforeParent verifies that ApplyScanBatch records the
 // parent->child spend edge even when the child transaction is listed before the
 // in-batch parent whose output it spends.
@@ -3897,6 +4055,56 @@ func TestApplyTxBatchDuplicateUnminedKeepsConfirmed(t *testing.T) {
 	require.NotNil(t, txInfo.Block)
 	require.Equal(t, block.Height, txInfo.Block.Height)
 	require.Equal(t, block.Hash, txInfo.Block.Hash)
+}
+
+// TestApplyTxBatchPromotesPendingDuplicate verifies that an unmined mempool
+// notification can promote a locally-created pending transaction to published
+// without replacing the existing label.
+func TestApplyTxBatchPromotesPendingDuplicate(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-apply-tx-batch-publish-dupe")
+
+	tx := newRegularTx(
+		[]wire.OutPoint{randomOutPoint()},
+		[]*wire.TxOut{{Value: 7000, PkScript: RandomBytes(22)}},
+	)
+
+	const originalLabel = "original"
+
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000165, 0),
+			Status:   db.TxStatusPending,
+			Label:    originalLabel,
+		}},
+	})
+	require.NoError(t, err)
+
+	err = store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: walletID,
+		Transactions: []db.CreateTxParams{{
+			WalletID: walletID,
+			Tx:       tx,
+			Received: time.Unix(1710000166, 0),
+			Status:   db.TxStatusPublished,
+			Label:    "ignored",
+		}},
+	})
+	require.NoError(t, err)
+
+	txInfo, err := store.GetTx(t.Context(), db.GetTxQuery{
+		WalletID: walletID,
+		Txid:     tx.TxHash(),
+	})
+	require.NoError(t, err)
+	require.Nil(t, txInfo.Block)
+	require.Equal(t, db.TxStatusPublished, txInfo.Status)
+	require.Equal(t, originalLabel, txInfo.Label)
 }
 
 // TestApplyTxBatchDuplicateConfirmedChecksTimestamp verifies that an otherwise

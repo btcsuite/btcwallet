@@ -530,6 +530,68 @@ func TestDBGetScanData(t *testing.T) {
 	require.Empty(t, initialUnspent)
 }
 
+// TestLoadWalletScanDataKeepsImportedXpubHorizons verifies that full-scan setup
+// builds its horizon targets from the legacy address manager's active accounts.
+// Imported xpub accounts have real waddrmgr account numbers that must remain in
+// the lookahead set even though SQL account metadata may not expose a BIP44
+// account number for them.
+func TestLoadWalletScanDataKeepsImportedXpubHorizons(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+
+	const importedAccount = uint32(9)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	props := &waddrmgr.AccountProperties{
+		AccountNumber:    importedAccount,
+		AccountName:      "imported-xpub",
+		ExternalKeyCount: 5,
+		InternalKeyCount: 2,
+		KeyScope:         scope,
+		IsWatchOnly:      true,
+	}
+
+	scopedMgr := &bwmock.AccountStore{}
+	mocks.addrStore.On("ActiveScopedKeyManagers").Return(
+		[]waddrmgr.AccountStore{scopedMgr},
+	).Once()
+
+	scopedMgr.On("ActiveAccounts").Return([]uint32{importedAccount}).Once()
+	scopedMgr.On("Scope").Return(scope).Once()
+
+	mocks.addrStore.On("FetchScopedKeyManager", scope).Return(
+		scopedMgr, nil,
+	).Once()
+
+	scopedMgr.On("AccountProperties", mock.Anything, importedAccount).Return(
+		props, nil,
+	).Once()
+
+	mocks.addrStore.On("ForEachRelevantActiveAddress", mock.Anything,
+		mock.Anything,
+	).Return(nil).Once()
+
+	mocks.txStore.On("OutputsToWatch", mock.Anything).Return(
+		[]wtxmgr.Credit(nil), nil,
+	).Once()
+
+	horizonData, initialAddrs, initialUnspent, err := s.loadWalletScanData(
+		t.Context(),
+	)
+
+	require.NoError(t, err)
+	require.Len(t, horizonData, 1)
+	require.Equal(t, props, horizonData[0])
+	require.Equal(t, importedAccount, horizonData[0].AccountNumber)
+	require.Empty(t, initialAddrs)
+	require.Empty(t, initialUnspent)
+
+	mocks.addrStore.AssertExpectations(t)
+	scopedMgr.AssertExpectations(t)
+}
+
 // TestDBGetSyncedBlocks verifies that the wallet can successfully retrieve a
 // range of block hashes from its internal index.
 func TestDBGetSyncedBlocks(t *testing.T) {
@@ -566,6 +628,10 @@ func TestDBPutRewind(t *testing.T) {
 
 	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 
+	// DBPutRewind snapshots the synced tip inside the update so it can
+	// restore it on failure; the successful path never restores.
+	preRewindTip := waddrmgr.BlockStamp{Height: 50, Hash: chainhash.Hash{0x09}}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
 	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
 	mocks.txStore.On("Rollback",
 		mock.Anything, int32(101),
@@ -574,8 +640,47 @@ func TestDBPutRewind(t *testing.T) {
 	// Act: Rewind the wallet state to the specified block height.
 	err := s.DBPutRewind(t.Context(), bs)
 
-	// Assert: Verify that the rewind operation succeeded.
+	// Assert: Verify that the rewind operation succeeded. The mock's
+	// AssertExpectations confirms RestoreSyncedTo was not called.
 	require.NoError(t, err)
+}
+
+// TestDBPutRewind_RollbackFailureRestoresTip verifies that when SetSyncedTo
+// succeeds and advances the in-memory synced tip but the subsequent
+// txStore.Rollback fails, DBPutRewind conditionally restores the in-memory tip
+// to the pre-rewind value. SetSyncedTo writes the bucket and advances the live
+// manager's tip immediately, so a rolled-back update would otherwise leave the
+// tip rewound to a fork point that was never persisted.
+func TestDBPutRewind_RollbackFailureRestoresTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: SetSyncedTo succeeds (advancing the in-memory tip) and then
+	// Rollback fails, forcing the restore path.
+	w, mocks := createTestWalletWithMocks(t)
+	s := newSyncer(w.cfg, w.addrStore, w.txStore, nil)
+
+	bs := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+
+	preRewindTip := waddrmgr.BlockStamp{
+		Height: 150, Hash: chainhash.Hash{0x42},
+	}
+	mocks.addrStore.On("SyncedTo").Return(preRewindTip).Once()
+	mocks.addrStore.On("SetSyncedTo", mock.Anything, &bs).Return(nil).Once()
+	mocks.txStore.On("Rollback",
+		mock.Anything, int32(101),
+	).Return(errRollbackFail).Once()
+	mocks.addrStore.On("RestoreSyncedToIfCurrent", preRewindTip, bs).
+		Return(true).Once()
+
+	// Act: Rewind the wallet state, expecting the rollback to fail.
+	err := s.DBPutRewind(t.Context(), bs)
+
+	// Assert: The error propagates and the pre-rewind tip is restored if the
+	// live tip still points at the rewound fork point. The mock's
+	// AssertExpectations confirms the conditional restore was called with the
+	// snapshotted pre-rewind tip and the rewind target.
+	require.ErrorIs(t, err, errRollbackFail)
+	mocks.addrStore.AssertExpectations(t)
 }
 
 // TestDBPutBirthdayBlock_Error verifies that DBPutBirthdayBlock correctly
@@ -1296,12 +1401,23 @@ func TestDBPutRewind_Error(t *testing.T) {
 	mockAddrStore := &bwmock.AddrStore{}
 	s := newSyncer(Config{DB: db}, mockAddrStore, nil, nil)
 
+	// The synced tip is snapshotted before the update and conditionally
+	// restored after the update fails so the in-memory tip is not left at
+	// the never-persisted fork point.
+	preRewindTip := waddrmgr.BlockStamp{Height: 50, Hash: chainhash.Hash{0x09}}
+	rewindTip := waddrmgr.BlockStamp{}
+
+	mockAddrStore.On("SyncedTo").Return(preRewindTip).Once()
 	mockAddrStore.On("SetSyncedTo",
 		mock.Anything, mock.Anything).Return(errSetSync).Once()
+	mockAddrStore.On(
+		"RestoreSyncedToIfCurrent", preRewindTip, rewindTip,
+	).Return(false).Once()
 
 	// Act: Perform DBPutRewind.
-	err := s.DBPutRewind(t.Context(), waddrmgr.BlockStamp{})
+	err := s.DBPutRewind(t.Context(), rewindTip)
 
-	// Assert: Verify failure.
+	// Assert: Verify failure and that the pre-rewind tip was restored.
 	require.ErrorIs(t, err, errSetSync)
+	mockAddrStore.AssertExpectations(t)
 }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )
@@ -61,6 +63,11 @@ func (s *Store) ApplyTxBatch(ctx context.Context,
 func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 	params db.CreateTxParams) error {
 
+	params, err := resolveCreditCandidates(ctx, qtx, params)
+	if err != nil {
+		return fmt.Errorf("resolve credit candidates: %w", err)
+	}
+
 	req, err := db.NewCreateTxRequest(params)
 	if err != nil {
 		return fmt.Errorf("validate tx: %w", err)
@@ -87,20 +94,153 @@ func applyBatchTransaction(ctx context.Context, qtx *sqlc.Queries,
 	}
 
 	err = db.CreateTxWithOps(ctx, req, ops)
-	if err != nil && !errors.Is(err, db.ErrTxAlreadyExists) {
-		return err
+
+	return handleBatchDuplicate(ctx, qtx, req, ops, err)
+}
+
+// handleBatchDuplicate replays or promotes an existing transaction row after a
+// batch create attempt.
+func handleBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest, ops db.CreateTxOps, createErr error) error {
+
+	if createErr != nil && !errors.Is(createErr, db.ErrTxAlreadyExists) {
+		return createErr
 	}
 
-	skip, txID, skipErr := canSkipBatchDuplicate(ctx, qtx, req)
+	skip, promote, txID, skipErr := batchDuplicateAction(ctx, qtx, req)
 	if skipErr != nil {
 		return skipErr
 	}
 
 	if !skip {
-		return err
+		return createErr
+	}
+
+	if promote {
+		err := promoteBatchDuplicate(ctx, qtx, req, txID)
+		if err != nil {
+			return err
+		}
 	}
 
 	return replayBatchDuplicateEdges(ctx, req, txID, ops)
+}
+
+// resolveCreditCandidates resolves notification credit candidates inside the
+// batch write transaction and promotes owned outputs into Credits.
+func resolveCreditCandidates(ctx context.Context, qtx *sqlc.Queries,
+	params db.CreateTxParams) (db.CreateTxParams, error) {
+
+	if len(params.CreditCandidates) == 0 {
+		return params, nil
+	}
+
+	credits := make(
+		map[uint32]address.Address,
+		len(params.Credits)+len(params.CreditCandidates),
+	)
+	for index, addr := range params.Credits {
+		credits[index] = addr
+	}
+
+	for index, candidates := range params.CreditCandidates {
+		if _, ok := credits[index]; ok {
+			continue
+		}
+
+		if uint64(index) >= uint64(len(params.Tx.TxOut)) {
+			return params, fmt.Errorf("%w: credit candidate index %d: %w",
+				db.ErrInvalidParam, index, db.ErrIndexOutOfRange)
+		}
+
+		outputScript := params.Tx.TxOut[index].PkScript
+
+		owned, err := creditScriptOwned(
+			ctx, qtx, params.WalletID, outputScript,
+		)
+		if err != nil {
+			return params, fmt.Errorf("lookup output script %d: %w", index,
+				err)
+		}
+
+		if owned {
+			credits[index] = nil
+			continue
+		}
+
+		ownedAddr, err := ownedCreditCandidate(
+			ctx, qtx, params.WalletID, outputScript, candidates,
+		)
+		if err != nil {
+			return params, fmt.Errorf("lookup candidate %d: %w", index, err)
+		}
+
+		if ownedAddr != nil {
+			credits[index] = ownedAddr
+		}
+	}
+
+	params.Credits = credits
+	params.CreditCandidates = nil
+
+	return params, nil
+}
+
+// ownedCreditCandidate returns the first candidate address owned by the wallet.
+func ownedCreditCandidate(ctx context.Context, qtx *sqlc.Queries,
+	walletID uint32, outputScript []byte,
+	candidates []address.Address) (address.Address, error) {
+
+	for _, candidate := range candidates {
+		if candidate == nil {
+			return nil, fmt.Errorf("%w: nil credit candidate",
+				db.ErrInvalidParam)
+		}
+
+		err := db.ValidateCreditAddrMembership(candidate, outputScript)
+		if err != nil {
+			return nil, err
+		}
+
+		candidateScript, err := txscript.PayToAddrScript(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("candidate script: %w", err)
+		}
+
+		owned, err := creditScriptOwned(
+			ctx, qtx, walletID, candidateScript,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if owned {
+			return candidate, nil
+		}
+	}
+
+	return nil, nil //nolint:nilnil // A nil address means no candidate matched.
+}
+
+// creditScriptOwned reports whether walletID has an address row for script.
+func creditScriptOwned(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
+	script []byte) (bool, error) {
+
+	_, err := qtx.GetAddressByScriptPubKey(
+		ctx, sqlc.GetAddressByScriptPubKeyParams{
+			ScriptPubKey: script,
+			WalletID:     int64(walletID),
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // replayBatchDuplicateEdges fills in any credit or wallet-input-spend edges a
@@ -128,12 +268,36 @@ func replayBatchDuplicateEdges(ctx context.Context, req db.CreateTxRequest,
 	return nil
 }
 
-// canSkipBatchDuplicate reports whether an existing transaction row matches the
+// promoteBatchDuplicate marks one pending duplicate row as published while
+// preserving all existing metadata, including the user-visible label.
+func promoteBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest, txID int64) error {
+
+	rows, err := qtx.UpdateTransactionStatusByIDs(
+		ctx, sqlc.UpdateTransactionStatusByIDsParams{
+			WalletID: int64(req.Params.WalletID),
+			Status:   int64(db.TxStatusPublished),
+			TxIds:    []int64{txID},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("promote duplicate tx status: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("promote duplicate tx %s: %w", req.TxHash,
+			db.ErrTxNotFound)
+	}
+
+	return nil
+}
+
+// batchDuplicateAction reports whether an existing transaction row matches the
 // duplicate observation closely enough for ApplyTxBatch/ApplyScanBatch to
-// replay its edges instead of failing. It also returns the existing row ID so
-// the caller can replay the credit and wallet-input-spend writes against it.
-func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
-	req db.CreateTxRequest) (bool, int64, error) {
+// replay its edges instead of failing. It also reports whether the row must be
+// promoted from pending to published before edge replay.
+func batchDuplicateAction(ctx context.Context, qtx *sqlc.Queries,
+	req db.CreateTxRequest) (bool, bool, int64, error) {
 
 	row, err := qtx.GetTransactionByHash(
 		ctx, sqlc.GetTransactionByHashParams{
@@ -143,15 +307,16 @@ func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, 0, nil
+			return false, false, 0, nil
 		}
 
-		return false, 0, fmt.Errorf("get duplicate tx: %w", err)
+		return false, false, 0, fmt.Errorf("get duplicate tx: %w", err)
 	}
 
 	status, err := db.ParseTxStatus(row.TxStatus)
 	if err != nil {
-		return false, 0, fmt.Errorf("parse duplicate tx status: %w", err)
+		return false, false, 0, fmt.Errorf("parse duplicate tx status: %w",
+			err)
 	}
 
 	var block *db.Block
@@ -160,14 +325,27 @@ func canSkipBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 			row.BlockHeight, row.BlockHash, row.BlockTimestamp,
 		)
 		if err != nil {
-			return false, 0, fmt.Errorf("build duplicate tx block: %w",
-				err)
+			return false, false, 0, fmt.Errorf(
+				"build duplicate tx block: %w", err,
+			)
 		}
 	}
 
-	return db.CanSkipCreateTxDuplicate(
+	if db.CanSkipCreateTxDuplicate(
 		req, status, row.TxLabel, row.IsCoinbase, block,
-	), row.ID, nil
+	) {
+
+		return true, false, row.ID, nil
+	}
+
+	if db.CanPromoteUnminedCreateTxDuplicate(
+		req, status, row.IsCoinbase, block,
+	) {
+
+		return true, true, row.ID, nil
+	}
+
+	return false, false, row.ID, nil
 }
 
 // applyBatchSyncTip applies the optional sync-tip update within a batch.

@@ -1092,6 +1092,23 @@ type CreateTxParams struct {
 	// UTXO always records the on-chain output script, never the member
 	// script.
 	Credits map[uint32]address.Address
+
+	// CreditCandidates maps output indexes to addresses extracted from the
+	// output script that may make the output wallet-owned.
+	//
+	// Unlike Credits, candidates are not trusted ownership assertions. Batch
+	// writers resolve them inside the same write transaction that records the
+	// transaction, then copy only owned outputs into Credits before the normal
+	// CreateTx validation and insert path runs. This is used by notification
+	// paths where ownership can change between parsing a chain notification and
+	// committing the batch.
+	//
+	// If the output script itself is wallet-owned, the batch writer records a
+	// nil credit for that index so ownership is keyed on the on-chain script.
+	// Only when the output script is not owned does it try the candidate
+	// addresses, which supports bare-multisig outputs owned through one member
+	// pubkey.
+	CreditCandidates map[uint32][]address.Address
 }
 
 // TxBatchParams contains a wallet transaction batch and optional sync-tip
@@ -1106,6 +1123,17 @@ type TxBatchParams struct {
 	// SyncedTo optionally records the wallet's new chain sync tip as part of
 	// the same batch.
 	SyncedTo *Block
+}
+
+// RewindWalletParams contains the wallet-scoped rewind target for a manual
+// rescan. The block is the new synced tip for the wallet after transactions at
+// and above the next height are detached from confirmed history.
+type RewindWalletParams struct {
+	// WalletID is the ID of the wallet to rewind.
+	WalletID uint32
+
+	// Block is the wallet's new synced-to block after the rewind.
+	Block Block
 }
 
 // ScanHorizon records the highest recovered address index for one account
