@@ -700,8 +700,10 @@ func (w *Wallet) handleUnlockReq(req unlockReq) {
 		return
 	}
 
-	// Attempt to unlock the underlying address manager.
-	err = w.DBUnlock(w.lifetimeCtx, req.req.Passphrase)
+	// Attempt to unlock the key vault. We pass a negative timeout to
+	// disable the vault's own auto-lock: the controller keeps owning the
+	// auto-lock schedule through its lockTimer below.
+	err = w.keyVault.Unlock(w.lifetimeCtx, req.req.Passphrase, -1)
 	if err != nil {
 		req.resp <- err
 		return
@@ -752,22 +754,12 @@ func (w *Wallet) handleLockReq(req lockReq) {
 		}
 	}
 
-	// Signal the address manager to lock, clearing sensitive data.
-	err = w.addrStore.Lock()
-	if err != nil {
-		log.Errorf("Could not lock wallet: %v", err)
+	// Signal the key vault to lock, clearing sensitive data. Lock is void
+	// and idempotent: the vault swallows an already-locked condition and
+	// logs any other failure internally.
+	w.keyVault.Lock()
 
-		// If the wallet is already locked, we consider this a success
-		// (idempotency) and proceed to ensure our state is consistent.
-		if !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-			req.resp <- err
-
-			return
-		}
-	}
-
-	// Even if an error occurred (e.g. already locked), we ensure the
-	// wallet's high-level state is synchronized to 'locked'.
+	// Synchronize the wallet's high-level state to 'locked'.
 	w.state.toLocked()
 
 	// Report the result back to the caller.
@@ -786,8 +778,19 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		return
 	}
 
-	// Delegate the cryptographic rotation to the database layer.
+	// Persist the passphrase rotation to the database.
 	err = w.DBPutPassphrase(w.lifetimeCtx, req.req)
+	if err != nil {
+		req.resp <- err
+		return
+	}
+
+	// A private passphrase change rotates the secret crypto keys, so let
+	// the key vault refresh any runtime state it caches under the new
+	// passphrase.
+	if req.req.ChangePrivate {
+		err = w.keyVault.RefreshPrivatePassphrase(req.req.PrivateNew)
+	}
 
 	// Report the result back to the caller.
 	req.resp <- err

@@ -457,6 +457,37 @@ type AccountInfo struct {
 	rowID int64
 }
 
+// AccountSecret holds the encrypted account-level key material used by signing
+// operations. The encrypted private key must be decrypted by the caller through
+// the wallet key vault. This type intentionally carries no plaintext key
+// material.
+type AccountSecret struct {
+	// WalletID is the ID of the wallet that owns the account.
+	WalletID uint32
+
+	// Scope is the key scope the account belongs to.
+	Scope KeyScope
+
+	// AccountNumber is the BIP44 account index for derived accounts. Imported
+	// accounts have no account number and leave this field at zero.
+	AccountNumber uint32
+
+	// AccountName is the human-readable account name.
+	AccountName string
+
+	// PublicKey is the account-level extended public key in plaintext.
+	PublicKey []byte
+
+	// EncryptedPrivateKey is the account-level extended private key encrypted
+	// by the wallet's key vault. A nil value means the account has no private
+	// account material and cannot sign derived child keys.
+	EncryptedPrivateKey []byte
+
+	// MasterKeyFingerprint is the fingerprint of the root master key
+	// corresponding to the account key.
+	MasterKeyFingerprint uint32
+}
+
 // ScopeAddrSchema is the address schema of a particular KeyScope. It is
 // persisted on the key_scopes row and consulted when deriving any keys
 // for a particular scope to know how to encode the public keys as
@@ -577,6 +608,25 @@ type GetAccountQuery struct {
 	// coinbase maturity, locked-output exclusion) use Store.Balance with
 	// BalanceParams instead.
 	SkipBalance bool
+}
+
+// GetAccountSecretQuery contains the parameters for querying account-level
+// signing material. The query must specify either the account name or the
+// account number within the provided wallet and scope.
+type GetAccountSecretQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// Scope is the key scope of the account.
+	Scope KeyScope
+
+	// Name is the name of the account to query. If nil, the query uses
+	// AccountNumber.
+	Name *string
+
+	// AccountNumber is the account number to query. If nil, the query uses
+	// Name.
+	AccountNumber *uint32
 }
 
 // ListAccountsQuery holds the set of options for a ListAccounts query.

@@ -1562,9 +1562,10 @@ func TestParseBip32Path(t *testing.T) {
 			wantPath: BIP32Path{
 				KeyScope: waddrmgr.KeyScopeBIP0044,
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 0,
-					Branch:  0,
-					Index:   0,
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
 				},
 			},
 		},
@@ -1576,9 +1577,10 @@ func TestParseBip32Path(t *testing.T) {
 			wantPath: BIP32Path{
 				KeyScope: waddrmgr.KeyScopeBIP0084,
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 1,
-					Branch:  0,
-					Index:   5,
+					InternalAccount: 1,
+					Account:         1,
+					Branch:          0,
+					Index:           5,
 				},
 			},
 		},
@@ -1625,9 +1627,10 @@ func TestParseBip32Path(t *testing.T) {
 					Purpose: 999, Coin: 0,
 				},
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 0,
-					Branch:  0,
-					Index:   0,
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
 				},
 			},
 			expectedErr: nil,
@@ -2815,6 +2818,83 @@ func TestSignPsbt(t *testing.T) {
 	// Assert: Verify that the operation succeeded, the input is reported as
 	// signed, and the underlying PSBT packet contains the generated
 	// signature.
+	require.NoError(t, err)
+	require.Len(t, result.SignedInputs, 1)
+	require.Equal(t, uint32(0), result.SignedInputs[0])
+	require.Len(t, packet.Inputs[0].PartialSigs, 1)
+}
+
+// TestSignPsbtResolvesNonZeroInternalAccount verifies that signing a PSBT whose
+// BIP32 derivation path names a non-zero account threads that account into the
+// resolved DerivationPath.InternalAccount. The store account-secret lookup and
+// the legacy DeriveFromKeyPath both key on InternalAccount, so a path that
+// leaves it unset would silently resolve account 0 and sign with the wrong key.
+func TestSignPsbtResolvesNonZeroInternalAccount(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a private key whose P2WKH output the PSBT will spend.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKeyBytes := privKey.PubKey().SerializeCompressed()
+
+	// Arrange: a derivation path naming a non-zero account (account 2).
+	// CoinType is 1 to match the RegressionNet test params.
+	const wantAccount = 2
+
+	derivationPath := []uint32{
+		hdkeychain.HardenedKeyStart + 84,
+		hdkeychain.HardenedKeyStart + 1,
+		hdkeychain.HardenedKeyStart + wantAccount,
+		0, 0,
+	}
+	derivation := &psbt.Bip32Derivation{
+		PubKey:    pubKeyBytes,
+		Bip32Path: derivationPath,
+	}
+
+	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKeyBytes), &chainParams,
+	)
+	require.NoError(t, err)
+	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1000, PkScript: p2wkhScript}
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{})
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{}})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	packet.Inputs[0].WitnessUtxo = utxo
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{derivation}
+	packet.Inputs[0].SighashType = txscript.SigHashAll
+
+	signParams := &SignPsbtParams{Packet: packet}
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	// Assert (via matcher): the DerivationPath handed to the legacy
+	// manager carries the non-zero account in InternalAccount. This is the
+	// value both the legacy and SQL derivation paths key on.
+	wantInternalAccount := mock.MatchedBy(
+		func(kp waddrmgr.DerivationPath) bool {
+			return kp.InternalAccount == wantAccount
+		},
+	)
+	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
+		Return(mocks.accountManager, nil)
+	mocks.accountManager.On(
+		"DeriveFromKeyPath", mock.Anything, wantInternalAccount,
+	).Return(mocks.pubKeyAddr, nil)
+	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
+
+	// Act.
+	result, err := w.SignPsbt(t.Context(), signParams)
+
+	// Assert: signing succeeded for the input, which only happens when the
+	// matcher above accepted the resolved InternalAccount.
 	require.NoError(t, err)
 	require.Len(t, result.SignedInputs, 1)
 	require.Equal(t, uint32(0), result.SignedInputs[0])

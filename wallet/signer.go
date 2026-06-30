@@ -13,8 +13,10 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/internal/zero"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -34,6 +36,14 @@ var (
 	// ErrInvalidSignParam is returned when the parameters for the signing
 	// operation are invalid.
 	ErrInvalidSignParam = errors.New("invalid signing parameters")
+
+	// ErrWatchOnlyAccount is returned when account metadata exists but has no
+	// private key material available for signing.
+	ErrWatchOnlyAccount = errors.New("account is watch-only")
+
+	// ErrAccountNotInStore is returned when neither legacy waddrmgr nor the
+	// durable store can resolve the signing account.
+	ErrAccountNotInStore = errors.New("account not in store")
 )
 
 // Signer provides an interface for common, safe cryptographic operations,
@@ -460,7 +470,7 @@ var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
 var _ SpendDetails = (*TaprootSpendDetails)(nil)
 
 // DerivePubKey derives a public key from a full BIP-32 derivation path.
-func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
+func (w *Wallet) DerivePubKey(ctx context.Context, path BIP32Path) (
 	*btcec.PublicKey, error) {
 
 	err := w.state.validateStarted()
@@ -469,11 +479,32 @@ func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
 	}
 
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
-	if err != nil {
+	switch {
+	case err == nil:
+		return managedPubKeyAddr.PubKey(), nil
+
+	// SQL-only accounts have no mirrored legacy waddrmgr scope/account, so
+	// the lookup above misses. Mirror derivePathPrivKey's fallback and
+	// resolve the public key from the account-level extended public key in
+	// the store. Unlike the private-key fallback this works for watch-only
+	// accounts too, since it never needs the encrypted private material.
+	case isWaddrmgrAccountClassError(
+		err, waddrmgr.ErrScopeNotFound, waddrmgr.ErrAccountNotFound,
+	):
+
+		pubKey, storeErr := w.resolveDerivedPubKeyFromStore(
+			ctx, path.KeyScope, path.DerivationPath,
+		)
+		if storeErr != nil {
+			return nil, fmt.Errorf("store account fallback after "+
+				"legacy address miss: %w: %w", err, storeErr)
+		}
+
+		return pubKey, nil
+
+	default:
 		return nil, err
 	}
-
-	return managedPubKeyAddr.PubKey(), nil
 }
 
 // fetchManagedPubKeyAddress is a helper function that encapsulates the common
@@ -542,10 +573,54 @@ func (w *Wallet) fetchManagedPubKeyAddress(path BIP32Path) (
 	return managedPubKeyAddr, nil
 }
 
+// derivePathPrivKey resolves the signing private key for a full BIP-32 path.
+//
+// It first walks the legacy waddrmgr-backed managed-address lookup, which is
+// the fast path for accounts mirrored into waddrmgr. When that lookup misses
+// because the account or its scope only lives in the SQL store, it falls back
+// to the account-level encrypted secret resolved through keyVault. The
+// fallback is gated on a waddrmgr account/scope miss so legacy-backed accounts
+// keep their existing behavior and only genuine store-only accounts take the
+// slower path.
+//
+// The returned private key is owned by the caller, who is responsible for
+// zeroing it once signing completes.
+func (w *Wallet) derivePathPrivKey(ctx context.Context, path BIP32Path) (
+	*btcec.PrivateKey, error) {
+
+	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	switch {
+	case err == nil:
+		privKey, err := managedPubKeyAddr.PrivKey()
+		if err != nil {
+			return nil, fmt.Errorf("cannot get private key: %w", err)
+		}
+
+		return privKey, nil
+
+	case isWaddrmgrAccountClassError(
+		err, waddrmgr.ErrScopeNotFound, waddrmgr.ErrAccountNotFound,
+	):
+
+		privKey, storeErr := w.resolveDerivedPrivKeyFromStore(
+			ctx, path.KeyScope, path.DerivationPath,
+		)
+		if storeErr != nil {
+			return nil, fmt.Errorf("store account fallback after "+
+				"legacy address miss: %w: %w", err, storeErr)
+		}
+
+		return privKey, nil
+
+	default:
+		return nil, err
+	}
+}
+
 // ECDH performs a scalar multiplication (ECDH-like operation) between a key
 // from the wallet and a remote public key. The output returned will be the
 // sha256 of the resulting shared point serialized in compressed format.
-func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
+func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	pub *btcec.PublicKey) ([32]byte, error) {
 
 	err := w.state.canSign()
@@ -553,16 +628,9 @@ func (w *Wallet) ECDH(_ context.Context, path BIP32Path,
 		return [32]byte{}, err
 	}
 
-	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
 		return [32]byte{}, err
-	}
-
-	// Get the private key for the derived address.
-	privKey, err := managedPubKeyAddr.PrivKey()
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("cannot get private key: %w",
-			err)
 	}
 	defer privKey.Zero()
 
@@ -601,7 +669,7 @@ func validateSignDigestIntent(intent *SignDigestIntent) error {
 }
 
 // SignDigest signs a message digest based on the provided intent.
-func (w *Wallet) SignDigest(_ context.Context, path BIP32Path,
+func (w *Wallet) SignDigest(ctx context.Context, path BIP32Path,
 	intent *SignDigestIntent) (Signature, error) {
 
 	err := w.state.canSign()
@@ -614,15 +682,9 @@ func (w *Wallet) SignDigest(_ context.Context, path BIP32Path,
 		return nil, err
 	}
 
-	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
+	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
 		return nil, err
-	}
-
-	// Get the private key for the derived address.
-	privKey, err := managedPubKeyAddr.PrivKey()
-	if err != nil {
-		return nil, fmt.Errorf("cannot get private key: %w", err)
 	}
 	defer privKey.Zero()
 
@@ -698,7 +760,7 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 		return nil, err
 	}
 
-	privKey, err := w.privKeyForOutput(scriptInfo)
+	privKey, err := w.privKeyForOutput(ctx, scriptInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -720,11 +782,12 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 
 // privKeyForOutput returns the private key needed to sign for the given
 // wallet-controlled output.
-func (w *Wallet) privKeyForOutput(scriptInfo OutputScriptInfo) (
+func (w *Wallet) privKeyForOutput(ctx context.Context,
+	scriptInfo OutputScriptInfo) (
 	*btcec.PrivateKey, error) {
 
 	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
-		return w.privKeyForAddressInfo(scriptInfo.AddressInfo)
+		return w.privKeyForAddressInfo(ctx, scriptInfo.AddressInfo)
 	}
 
 	pubKeyAddr, err := w.loadManagedPubKeyAddr(scriptInfo.Addr)
@@ -732,7 +795,7 @@ func (w *Wallet) privKeyForOutput(scriptInfo OutputScriptInfo) (
 		return nil, err
 	}
 
-	return w.resolvePrivKey(pubKeyAddr)
+	return w.resolvePrivKey(ctx, pubKeyAddr)
 }
 
 // canUseAddressInfoDerivation reports whether address metadata contains enough
@@ -747,7 +810,8 @@ func canUseAddressInfoDerivation(addressInfo AddressInfo) bool {
 
 // privKeyForAddressInfo derives the private key described by store-backed
 // address metadata.
-func (w *Wallet) privKeyForAddressInfo(addressInfo AddressInfo) (
+func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
+	addressInfo AddressInfo) (
 	*btcec.PrivateKey, error) {
 
 	derivation := addressInfo.Derivation
@@ -764,7 +828,9 @@ func (w *Wallet) privKeyForAddressInfo(addressInfo AddressInfo) (
 		MasterKeyFingerprint: derivation.MasterKeyFingerprint,
 	}
 
-	return w.resolveDerivedPathPrivKey(derivation.KeyScope, derivationPath)
+	return w.resolveDerivedPathPrivKey(
+		ctx, derivation.KeyScope, derivationPath,
+	)
 }
 
 // loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
@@ -801,7 +867,8 @@ func (w *Wallet) loadManagedPubKeyAddr(addr address.Address) (
 
 // resolvePrivKey resolves the private key for a managed pubkey address without
 // using output-script inspection as the private-key lookup seam.
-func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
+func (w *Wallet) resolvePrivKey(ctx context.Context,
+	pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 	*btcec.PrivateKey, error) {
 
 	// Imported spendable keys have no derivation path, so we fall back to the
@@ -821,25 +888,39 @@ func (w *Wallet) resolvePrivKey(pubKeyAddr waddrmgr.ManagedPubKeyAddress) (
 			pubKeyAddr.Address())
 	}
 
-	return w.resolveDerivedPathPrivKey(keyScope, derivationPath)
+	return w.resolveDerivedPathPrivKey(ctx, keyScope, derivationPath)
 }
 
 // resolveDerivedPathPrivKey resolves one derived private key through the scoped
 // manager cache or the database-backed fallback.
-func (w *Wallet) resolveDerivedPathPrivKey(keyScope waddrmgr.KeyScope,
+func (w *Wallet) resolveDerivedPathPrivKey(ctx context.Context,
+	keyScope waddrmgr.KeyScope,
 	derivationPath waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
 
-	// TODO(yy): SQL-only accounts (created via Store.CreateDerivedAccount
-	// without a mirrored legacy waddrmgr account) miss both
-	// DeriveFromKeyPathCache and the DB-backed DeriveFromKeyPath fallback
-	// below because the legacy waddrmgr has no row for them. The
-	// signer-store PR (impl-tx-creator-store) will replace this path for
-	// SQL-only accounts with a keyVault-backed derivation: fetch
-	// account_secrets.encrypted_priv_key, decrypt via w.keyVault, and
-	// derive at branch/index locally — symmetric to deriveAddressData's
-	// AccountPubKey plumbing on the public-key side.
+	// SQL-only accounts (created via Store.CreateDerivedAccount without a
+	// mirrored legacy waddrmgr account) miss both DeriveFromKeyPathCache
+	// and the DB-backed DeriveFromKeyPath fallback below because the legacy
+	// waddrmgr has no row for them. Each of those misses therefore falls
+	// through to resolveDerivedPrivKeyFromStore, which fetches
+	// account_secrets.encrypted_priv_key, decrypts it via w.keyVault, and
+	// derives at branch/index locally.
 	accountManager, err := w.addrStore.FetchScopedKeyManager(keyScope)
 	if err != nil {
+		if isWaddrmgrAccountClassError(
+			err, waddrmgr.ErrScopeNotFound, waddrmgr.ErrAccountNotFound,
+		) {
+
+			privKey, storeErr := w.resolveDerivedPrivKeyFromStore(
+				ctx, keyScope, derivationPath,
+			)
+			if storeErr != nil {
+				return nil, fmt.Errorf("store account fallback after "+
+					"legacy scope miss: %w: %w", err, storeErr)
+			}
+
+			return privKey, nil
+		}
+
 		return nil, fmt.Errorf("fetch scoped key manager: %w", err)
 	}
 
@@ -851,11 +932,28 @@ func (w *Wallet) resolveDerivedPathPrivKey(keyScope waddrmgr.KeyScope,
 	// Only a cold account cache warrants the slower DB-backed fallback. Other
 	// derivation errors are real failures that re-running through the database
 	// will not repair.
-	if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotCached) {
+	if !isWaddrmgrAccountClassError(err, waddrmgr.ErrAccountNotCached) {
 		return nil, fmt.Errorf("derive private key from cache: %w", err)
 	}
 
-	return w.resolveDerivedPrivKey(accountManager, derivationPath)
+	privKey, err = w.resolveDerivedPrivKey(accountManager, derivationPath)
+	if err == nil {
+		return privKey, nil
+	}
+
+	if !isWaddrmgrAccountClassError(err, waddrmgr.ErrAccountNotFound) {
+		return nil, err
+	}
+
+	privKey, storeErr := w.resolveDerivedPrivKeyFromStore(
+		ctx, keyScope, derivationPath,
+	)
+	if storeErr != nil {
+		return nil, fmt.Errorf("store account fallback after legacy "+
+			"account miss: %w: %w", err, storeErr)
+	}
+
+	return privKey, nil
 }
 
 // resolveDerivedPrivKey resolves one derived private key through the normal
@@ -893,6 +991,177 @@ func (w *Wallet) resolveDerivedPrivKey(accountManager waddrmgr.AccountStore,
 	}
 
 	return privKey, nil
+}
+
+// resolveDerivedPrivKeyFromStore resolves one derived private key from the
+// account-level encrypted secret stored behind the wallet store.
+func (w *Wallet) resolveDerivedPrivKeyFromStore(ctx context.Context,
+	keyScope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	if w.cache == nil {
+		return nil, fmt.Errorf("%w: cache", ErrMissingParam)
+	}
+
+	secret, err := w.cache.GetAccountSecret(ctx, db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(keyScope),
+		AccountNumber: &path.InternalAccount,
+	})
+	switch {
+	case errors.Is(err, db.ErrAccountSecretUnavailable),
+		errors.Is(err, db.ErrAccountNotFound):
+
+		return nil, ErrAccountNotInStore
+
+	case err != nil:
+		return nil, fmt.Errorf("fetch account secret: %w", err)
+	}
+
+	if len(secret.EncryptedPrivateKey) == 0 {
+		return nil, ErrWatchOnlyAccount
+	}
+
+	if w.keyVault == nil {
+		return nil, fmt.Errorf("%w: keyVault", ErrMissingParam)
+	}
+
+	return deriveStoredAccountChildKey(
+		w.keyVault, secret.EncryptedPrivateKey, path,
+	)
+}
+
+// deriveStoredAccountChildKey decrypts an account's encrypted private key with
+// the wallet's keyVault and walks the branch and index derivation to produce
+// the leaf private key. The decrypted byte slice and intermediate HD keys are
+// zeroed before the call returns. Note that hdkeychain/base58 parsing allocates
+// a transient immutable string copy of the decrypted bytes that cannot be
+// wiped and is left to the garbage collector.
+func deriveStoredAccountChildKey(vault keyvault.Vault,
+	encryptedAccountPriv []byte,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
+
+	plaintext, err := vault.Decrypt(
+		waddrmgr.CKTPrivate, encryptedAccountPriv,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt account priv: %w", err)
+	}
+
+	acctPriv, err := hdkeychain.NewKeyFromString(string(plaintext))
+	if err != nil {
+		zero.Bytes(plaintext)
+		return nil, fmt.Errorf("parse account priv: %w", err)
+	}
+
+	zero.Bytes(plaintext)
+
+	defer acctPriv.Zero()
+
+	branchKey, err := deriveChildKey(acctPriv, path.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("derive branch: %w", err)
+	}
+	defer branchKey.Zero()
+
+	addrKey, err := deriveChildKey(branchKey, path.Index)
+	if err != nil {
+		return nil, fmt.Errorf("derive index: %w", err)
+	}
+	defer addrKey.Zero()
+
+	privKey, err := addrKey.ECPrivKey()
+	if err != nil {
+		return nil, fmt.Errorf("derive private key: %w", err)
+	}
+
+	return privKey, nil
+}
+
+// resolveDerivedPubKeyFromStore resolves one derived public key from the
+// account-level extended public key stored behind the wallet store. It is the
+// public-key counterpart of resolveDerivedPrivKeyFromStore and, since the
+// account xpub is stored in plaintext, it also serves watch-only accounts that
+// hold no encrypted private material.
+func (w *Wallet) resolveDerivedPubKeyFromStore(ctx context.Context,
+	keyScope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+
+	if w.cache == nil {
+		return nil, fmt.Errorf("%w: cache", ErrMissingParam)
+	}
+
+	secret, err := w.cache.GetAccountSecret(ctx, db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(keyScope),
+		AccountNumber: &path.InternalAccount,
+	})
+	switch {
+	case errors.Is(err, db.ErrAccountSecretUnavailable),
+		errors.Is(err, db.ErrAccountNotFound):
+
+		return nil, ErrAccountNotInStore
+
+	case err != nil:
+		return nil, fmt.Errorf("fetch account secret: %w", err)
+	}
+
+	if len(secret.PublicKey) == 0 {
+		return nil, fmt.Errorf("%w: account public key", ErrMissingParam)
+	}
+
+	return deriveStoredAccountChildPubKey(secret.PublicKey, path)
+}
+
+// deriveStoredAccountChildPubKey parses an account-level extended public key
+// and walks the branch and index derivation to produce the leaf public key.
+// The intermediate HD keys are zeroed before the call returns.
+func deriveStoredAccountChildPubKey(accountPubKey []byte,
+	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+
+	acctPub, err := hdkeychain.NewKeyFromString(string(accountPubKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse account pub: %w", err)
+	}
+	defer acctPub.Zero()
+
+	branchKey, err := deriveChildKey(acctPub, path.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("derive branch: %w", err)
+	}
+	defer branchKey.Zero()
+
+	addrKey, err := deriveChildKey(branchKey, path.Index)
+	if err != nil {
+		return nil, fmt.Errorf("derive index: %w", err)
+	}
+	defer addrKey.Zero()
+
+	pubKey, err := addrKey.ECPubKey()
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+
+	return pubKey, nil
+}
+
+// isWaddrmgrAccountClassError reports whether err wraps a waddrmgr
+// ManagerError whose code belongs to the supplied set.
+func isWaddrmgrAccountClassError(err error,
+	codes ...waddrmgr.ErrorCode) bool {
+
+	var mErr waddrmgr.ManagerError
+	if !errors.As(err, &mErr) {
+		return false
+	}
+
+	for _, code := range codes {
+		if mErr.ErrorCode == code {
+			return true
+		}
+	}
+
+	return false
 }
 
 // signAndAssembleScript is a helper function that performs the final signing
@@ -978,7 +1247,7 @@ func redeemSigScript(redeemScript []byte) ([]byte, error) {
 
 // ComputeRawSig generates a raw signature for a single transaction input. The
 // caller is responsible for assembling the final witness.
-func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
+func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	RawSignature, error) {
 
 	err := w.state.canSign()
@@ -986,17 +1255,9 @@ func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
 		return nil, err
 	}
 
-	// Get the managed address for the specified derivation path. This will
-	// be used to retrieve the private key.
-	managedAddr, err := w.fetchManagedPubKeyAddress(params.Path)
+	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
 		return nil, err
-	}
-
-	// Get the private key for the address.
-	privKey, err := managedAddr.PrivKey()
-	if err != nil {
-		return nil, fmt.Errorf("cannot get private key: %w", err)
 	}
 	defer privKey.Zero()
 
@@ -1023,7 +1284,7 @@ func (w *Wallet) ComputeRawSig(_ context.Context, params *RawSigParams) (
 // path.
 //
 // DANGER: This method exports sensitive key material.
-func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
+func (w *Wallet) DerivePrivKey(ctx context.Context, path BIP32Path) (
 	*btcec.PrivateKey, error) {
 
 	err := w.state.canSign()
@@ -1031,17 +1292,7 @@ func (w *Wallet) DerivePrivKey(_ context.Context, path BIP32Path) (
 		return nil, err
 	}
 
-	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
-	if err != nil {
-		return nil, err
-	}
-
-	privKey, err := managedPubKeyAddr.PrivKey()
-	if err != nil {
-		return nil, fmt.Errorf("cannot get private key: %w", err)
-	}
-
-	return privKey, nil
+	return w.derivePathPrivKey(ctx, path)
 }
 
 // GetPrivKeyForAddress returns the private key for a given address.
@@ -1064,7 +1315,7 @@ func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 	info, err := w.GetAddressInfo(ctx, a)
 	switch {
 	case err == nil && canUseAddressInfoDerivation(info):
-		return w.privKeyForAddressInfo(info)
+		return w.privKeyForAddressInfo(ctx, info)
 
 	case err == nil:
 		// Store record exists but no usable derivation info
