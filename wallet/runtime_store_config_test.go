@@ -28,10 +28,13 @@ func TestDBConfigValidate(t *testing.T) {
 			},
 		},
 		{
-			// A fully empty config defaults to KVDB, which needs no
-			// extra parameters, so it validates.
-			name: "empty config defaults to kvdb",
-			cfg:  DBConfig{},
+			// A fully empty config defaults to SQLite but has no
+			// kvdb path to derive the SQLite path from, so it is
+			// invalid.
+			name:       "empty config is invalid",
+			cfg:        DBConfig{},
+			wantErr:    ErrMissingParam,
+			wantErrMsg: "DB.SQLite.DBPath",
 		},
 		{
 			name: "kvdb explicit",
@@ -162,8 +165,8 @@ func TestConfigValidateRuntimeStore(t *testing.T) {
 }
 
 // TestDBConfigWithDefaults verifies the implicit runtime store defaults: an
-// unset backend selects KVDB, and an explicit SQLite backend with no SQLite
-// path derives one next to the legacy kvdb database.
+// unset backend selects SQLite and, when no SQLite path is given, a SQLite
+// path is derived next to the legacy kvdb database.
 func TestDBConfigWithDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -171,15 +174,18 @@ func TestDBConfigWithDefaults(t *testing.T) {
 
 	kvdbPath := filepath.Join(kvdbDir, "wallet.db")
 
-	t.Run("unset backend defaults to kvdb", func(t *testing.T) {
+	t.Run("unset backend defaults to sqlite", func(t *testing.T) {
 		t.Parallel()
 
 		got := DBConfig{
 			KVDB: KVDBConfig{DBPath: kvdbPath},
 		}.withDefaults()
 
-		require.Equal(t, DBBackendKVDB, got.Backend)
-		require.Empty(t, got.SQLite.DBPath)
+		require.Equal(t, DBBackendSQLite, got.Backend)
+		require.Equal(
+			t, filepath.Join(kvdbDir, defaultSQLiteDBName),
+			got.SQLite.DBPath,
+		)
 	})
 
 	t.Run("explicit sqlite path is preserved", func(t *testing.T) {
@@ -188,9 +194,8 @@ func TestDBConfigWithDefaults(t *testing.T) {
 		const customPath = "/custom/db.sqlite"
 
 		got := DBConfig{
-			Backend: DBBackendSQLite,
-			KVDB:    KVDBConfig{DBPath: kvdbPath},
-			SQLite:  SQLiteDBConfig{DBPath: customPath},
+			KVDB:   KVDBConfig{DBPath: kvdbPath},
+			SQLite: SQLiteDBConfig{DBPath: customPath},
 		}.withDefaults()
 
 		require.Equal(t, DBBackendSQLite, got.Backend)

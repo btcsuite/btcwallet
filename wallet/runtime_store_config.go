@@ -54,9 +54,9 @@ type PostgresDBConfig struct {
 }
 
 // DBConfig selects and configures the wallet runtime store backend. A
-// zero-valued Backend selects DBBackendKVDB, so wallets default to the
-// legacy walletdb store. Set Backend to DBBackendSQLite or
-// DBBackendPostgres explicitly to use the SQL runtime store.
+// zero-valued Backend selects DBBackendSQLite, so new library-created
+// wallets default to the SQLite runtime store. Existing kvdb-only wallets
+// must set Backend to DBBackendKVDB explicitly to keep using walletdb.
 type DBConfig struct {
 	// Backend identifies the selected runtime store backend.
 	Backend DBBackend
@@ -150,15 +150,15 @@ const defaultSQLiteDBName = "wallet.sqlite"
 
 // withDefaults returns c with the implicit runtime store defaults applied.
 //
-// An unset Backend selects DBBackendKVDB so wallets default to the legacy
-// walletdb store; callers must set Backend to DBBackendSQLite or
-// DBBackendPostgres explicitly to use the SQL runtime store. When the resolved
+// An unset Backend selects DBBackendSQLite so new library-created wallets
+// default to the SQLite runtime store; callers opening an existing kvdb-only
+// wallet must set Backend to DBBackendKVDB explicitly. When the resolved
 // backend is SQLite and no SQLite path was given, a deterministic default is
 // derived next to the legacy kvdb database (DB.KVDB.DBPath) so the runtime
 // store has a stable on-disk location.
 func (c DBConfig) withDefaults() DBConfig {
 	if c.Backend == "" {
-		c.Backend = DBBackendKVDB
+		c.Backend = DBBackendSQLite
 	}
 
 	if c.Backend == DBBackendSQLite && c.SQLite.DBPath == "" &&
