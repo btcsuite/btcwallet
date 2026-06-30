@@ -375,6 +375,8 @@ type AddressStore interface {
 }
 
 // TxStore defines the database actions for managing transaction records.
+//
+//nolint:interfacebloat // Transitional tx migration keeps routes grouped.
 type TxStore interface {
 	// CreateTx atomically records a transaction row and its associated credits
 	// in the database. This Store-layer API persists already-constructed
@@ -414,6 +416,9 @@ type TxStore interface {
 	// ApplyTxBatch atomically records a batch of transaction records and an
 	// optional wallet sync-tip update.
 	ApplyTxBatch(ctx context.Context, params TxBatchParams) error
+
+	// ApplyScanBatch atomically records recovery scan writes for one wallet.
+	ApplyScanBatch(ctx context.Context, params ScanBatchParams) error
 
 	// GetTx retrieves a transaction record by its hash. It takes a context
 	// and GetTxQuery, returning a TxInfo struct or an error if the
