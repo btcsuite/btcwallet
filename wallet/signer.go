@@ -470,7 +470,7 @@ var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
 var _ SpendDetails = (*TaprootSpendDetails)(nil)
 
 // DerivePubKey derives a public key from a full BIP-32 derivation path.
-func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
+func (w *Wallet) DerivePubKey(ctx context.Context, path BIP32Path) (
 	*btcec.PublicKey, error) {
 
 	err := w.state.validateStarted()
@@ -479,11 +479,32 @@ func (w *Wallet) DerivePubKey(_ context.Context, path BIP32Path) (
 	}
 
 	managedPubKeyAddr, err := w.fetchManagedPubKeyAddress(path)
-	if err != nil {
+	switch {
+	case err == nil:
+		return managedPubKeyAddr.PubKey(), nil
+
+	// SQL-only accounts have no mirrored legacy waddrmgr scope/account, so
+	// the lookup above misses. Mirror derivePathPrivKey's fallback and
+	// resolve the public key from the account-level extended public key in
+	// the store. Unlike the private-key fallback this works for watch-only
+	// accounts too, since it never needs the encrypted private material.
+	case isWaddrmgrAccountClassError(
+		err, waddrmgr.ErrScopeNotFound, waddrmgr.ErrAccountNotFound,
+	):
+
+		pubKey, storeErr := w.resolveDerivedPubKeyFromStore(
+			ctx, path.KeyScope, path.DerivationPath,
+		)
+		if storeErr != nil {
+			return nil, fmt.Errorf("store account fallback after "+
+				"legacy address miss: %w: %w", err, storeErr)
+		}
+
+		return pubKey, nil
+
+	default:
 		return nil, err
 	}
-
-	return managedPubKeyAddr.PubKey(), nil
 }
 
 // fetchManagedPubKeyAddress is a helper function that encapsulates the common
@@ -1055,6 +1076,73 @@ func deriveStoredAccountChildKey(vault keyvault.Vault,
 	}
 
 	return privKey, nil
+}
+
+// resolveDerivedPubKeyFromStore resolves one derived public key from the
+// account-level extended public key stored behind the wallet store. It is the
+// public-key counterpart of resolveDerivedPrivKeyFromStore and, since the
+// account xpub is stored in plaintext, it also serves watch-only accounts that
+// hold no encrypted private material.
+func (w *Wallet) resolveDerivedPubKeyFromStore(ctx context.Context,
+	keyScope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+
+	if w.cache == nil {
+		return nil, fmt.Errorf("%w: cache", ErrMissingParam)
+	}
+
+	secret, err := w.cache.GetAccountSecret(ctx, db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(keyScope),
+		AccountNumber: &path.InternalAccount,
+	})
+	switch {
+	case errors.Is(err, db.ErrAccountSecretUnavailable),
+		errors.Is(err, db.ErrAccountNotFound):
+
+		return nil, ErrAccountNotInStore
+
+	case err != nil:
+		return nil, fmt.Errorf("fetch account secret: %w", err)
+	}
+
+	if len(secret.PublicKey) == 0 {
+		return nil, fmt.Errorf("%w: account public key", ErrMissingParam)
+	}
+
+	return deriveStoredAccountChildPubKey(secret.PublicKey, path)
+}
+
+// deriveStoredAccountChildPubKey parses an account-level extended public key
+// and walks the branch and index derivation to produce the leaf public key.
+// The intermediate HD keys are zeroed before the call returns.
+func deriveStoredAccountChildPubKey(accountPubKey []byte,
+	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+
+	acctPub, err := hdkeychain.NewKeyFromString(string(accountPubKey))
+	if err != nil {
+		return nil, fmt.Errorf("parse account pub: %w", err)
+	}
+	defer acctPub.Zero()
+
+	branchKey, err := deriveChildKey(acctPub, path.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("derive branch: %w", err)
+	}
+	defer branchKey.Zero()
+
+	addrKey, err := deriveChildKey(branchKey, path.Index)
+	if err != nil {
+		return nil, fmt.Errorf("derive index: %w", err)
+	}
+	defer addrKey.Zero()
+
+	pubKey, err := addrKey.ECPubKey()
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+
+	return pubKey, nil
 }
 
 // isWaddrmgrAccountClassError reports whether err wraps a waddrmgr
