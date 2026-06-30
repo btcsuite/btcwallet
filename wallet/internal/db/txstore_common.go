@@ -780,8 +780,17 @@ type CreateTxExistingTarget struct {
 	// HasBlock reports whether the row already has confirming block metadata.
 	HasBlock bool
 
+	// BlockHeight is the confirmed block height when HasBlock is true.
+	BlockHeight *uint32
+
+	// BlockHash is the confirmed block hash when HasBlock is true.
+	BlockHash *chainhash.Hash
+
 	// IsCoinbase reports whether the row records coinbase history.
 	IsCoinbase bool
+
+	// Label is the stored user-visible transaction label.
+	Label string
 }
 
 // ErrCreateTxExistingNotFound reports that CreateTx found no existing row.
@@ -896,6 +905,72 @@ func checkReuseCreateTx(req CreateTxRequest,
 	}
 
 	return true
+}
+
+// createTxBlockMatches reports whether a stored row carries the same block
+// assignment as the incoming CreateTx observation.
+func createTxBlockMatches(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Block == nil {
+		return !existing.HasBlock
+	}
+
+	if !existing.HasBlock || existing.BlockHeight == nil ||
+		existing.BlockHash == nil {
+
+		return false
+	}
+
+	return *existing.BlockHeight == req.Params.Block.Height &&
+		*existing.BlockHash == req.Params.Block.Hash
+}
+
+// checkIdempotentCreateTx reports whether the incoming CreateTx observation is
+// already fully reflected by the stored row.
+func checkIdempotentCreateTx(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	if req.Params.Status != existing.Status {
+		return false
+	}
+
+	if req.IsCoinbase != existing.IsCoinbase {
+		return false
+	}
+
+	if req.Params.Label != existing.Label {
+		return false
+	}
+
+	return createTxBlockMatches(req, existing)
+}
+
+// validateCreateTxCreditRequests validates every caller-supplied credit before
+// an existing tx row is treated as an idempotent duplicate.
+func validateCreateTxCreditRequests(req CreateTxRequest) error {
+	for index, addr := range req.Params.Credits {
+		if addr == nil {
+			continue
+		}
+
+		err := ValidateCreditAddrMembership(
+			addr, req.Params.Tx.TxOut[index].PkScript,
+		)
+		if err != nil {
+			return fmt.Errorf("credit output %d: %w", index, err)
+		}
+	}
+
+	return nil
+}
+
+// canIgnoreUnminedConfirmedDuplicate reports whether an unmined observation may
+// be ignored because the same transaction is already recorded as confirmed.
+func canIgnoreUnminedConfirmedDuplicate(req CreateTxRequest,
+	existing CreateTxExistingTarget) bool {
+
+	return req.Params.Block == nil && existing.HasBlock
 }
 
 // loadCreateTxExisting resolves any wallet-scoped row already stored for the
@@ -1047,6 +1122,48 @@ func handleTxConflicts(ctx context.Context, req CreateTxRequest,
 	return nil
 }
 
+// ReplaceUnminedTxConflicts rewrites direct unmined conflict roots displaced by
+// the provided replacement transaction.
+//
+// Callers use this when the direct conflict roots were discovered outside the
+// normal spend-edge lookup path, such as when a parent credit is learned after
+// its children have already been stored as external-input spends. The function
+// preserves the standard replacement ordering: discover descendants from a
+// stable graph snapshot, mark direct roots replaced, then mark dependent
+// descendants failed.
+func ReplaceUnminedTxConflicts(ctx context.Context, walletID int64,
+	rootIDs []int64, rootHashes []chainhash.Hash, replacementTxID int64,
+	ops CreateTxOps) error {
+
+	if len(rootIDs) == 0 {
+		return nil
+	}
+
+	if len(rootIDs) != len(rootHashes) {
+		return fmt.Errorf("%w: conflict roots and hashes differ",
+			ErrInvalidParam)
+	}
+
+	descendantIDs, err := collectConflictDescendants(
+		ctx, walletID, rootHashes, rootIDs, ops,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = handleRootTxns(ctx, walletID, rootIDs, replacementTxID, ops)
+	if err != nil {
+		return err
+	}
+
+	err = handleTxDescendants(ctx, walletID, descendantIDs, ops)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // insertCreateTx completes the fresh-Insert CreateTx path.
 //
 // The order is important:
@@ -1075,21 +1192,93 @@ func insertCreateTx(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	// Credits only describe outputs created by the new tx itself, so they do
-	// not interfere with conflict discovery. Keep them after replacement
-	// handling so the branch rewrite stays grouped with the shared-input
-	// reconciliation.
-	err = ops.InsertCredits(ctx, req, txID)
+	err = recordCreateTxEdges(ctx, req, txID, ops)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// recordCreateTxEdges records wallet-owned credits and spent-input edges for a
+// transaction row that already exists in the backend.
+func recordCreateTxEdges(ctx context.Context, req CreateTxRequest, txID int64,
+	ops CreateTxOps) error {
+
+	// Credits only describe outputs created by the tx itself, so they do not
+	// interfere with conflict discovery. Keep them after replacement handling
+	// so the branch rewrite stays grouped with the shared-input reconciliation.
+	err := ops.InsertCredits(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx credits: %w", err)
 	}
 
-	// Claim wallet-owned parent inputs last. This is the write that makes the
-	// new tx the recorded spender of the shared parents, so doing it earlier
-	// would hide the displaced unmined branch from the replacement walk.
+	// Claim wallet-owned parent inputs last. This is the write that makes this
+	// tx the recorded spender of the shared parents, so doing it earlier would
+	// hide a displaced unmined branch from the replacement walk.
 	err = ops.MarkInputsSpent(ctx, req, txID)
 	if err != nil {
 		return fmt.Errorf("create tx spends: %w", err)
+	}
+
+	return nil
+}
+
+// handleExistingCreateTx handles a CreateTx request for a transaction hash that
+// already has a wallet-scoped row.
+func handleExistingCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	if canIgnoreUnminedConfirmedDuplicate(req, existing) {
+		return nil
+	}
+
+	if checkIdempotentCreateTx(req, existing) {
+		return replayIdempotentCreateTx(ctx, req, existing, ops)
+	}
+
+	if !checkReuseCreateTx(req, existing) {
+		return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxAlreadyExists)
+	}
+
+	err := ops.ConfirmExisting(ctx, req, existing)
+	if err != nil {
+		return fmt.Errorf("confirm existing tx: %w", err)
+	}
+
+	err = handleTxConflicts(ctx, req, existing.ID, ops)
+	if err != nil {
+		return err
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay confirmed tx edges: %w", err)
+	}
+
+	return nil
+}
+
+// replayIdempotentCreateTx validates and records any edge writes that an
+// idempotent duplicate transaction notification may still need.
+func replayIdempotentCreateTx(ctx context.Context, req CreateTxRequest,
+	existing CreateTxExistingTarget, ops CreateTxOps) error {
+
+	err := validateCreateTxCreditRequests(req)
+	if err != nil {
+		return err
+	}
+
+	if req.Params.Block != nil {
+		err = ops.PrepareBlock(ctx, req)
+		if err != nil {
+			return fmt.Errorf("prepare duplicate block assignment: %w", err)
+		}
+	}
+
+	err = recordCreateTxEdges(ctx, req, existing.ID, ops)
+	if err != nil {
+		return fmt.Errorf("replay duplicate tx edges: %w", err)
 	}
 
 	return nil
@@ -1110,25 +1299,16 @@ func CreateTxWithOps(ctx context.Context, req CreateTxRequest,
 		return err
 	}
 
-	if foundExisting {
-		if !checkReuseCreateTx(req, *existing) {
-			return fmt.Errorf("tx %s: %w", req.TxHash, ErrTxAlreadyExists)
-		}
-
-		err = ops.ConfirmExisting(ctx, req, *existing)
+	if !foundExisting {
+		err = ops.PrepareBlock(ctx, req)
 		if err != nil {
-			return fmt.Errorf("confirm existing tx: %w", err)
+			return fmt.Errorf("prepare create block assignment: %w", err)
 		}
 
-		return nil
+		return insertCreateTx(ctx, req, ops)
 	}
 
-	err = ops.PrepareBlock(ctx, req)
-	if err != nil {
-		return fmt.Errorf("prepare create block assignment: %w", err)
-	}
-
-	return insertCreateTx(ctx, req, ops)
+	return handleExistingCreateTx(ctx, req, *existing, ops)
 }
 
 // validateUpdateTxParams checks that UpdateTx received at least one mutable
@@ -1634,4 +1814,201 @@ func IsUnminedStatus(status TxStatus) bool {
 	default:
 		return false
 	}
+}
+
+// ValidateBatchTransactionsWalletID rejects a batch whose transactions are not
+// all owned by batchWalletID. A batch applies sync state (sync tip or scan
+// horizons) to batchWalletID but records each transaction under that
+// transaction's own WalletID, so a mismatched member would let one wallet's
+// sync state advance atomically with another wallet's transaction write. The
+// check runs before any backend write so the batch invariant is enforced
+// up front, before horizon derivation or synced-block work is wasted.
+func ValidateBatchTransactionsWalletID(batchWalletID uint32,
+	txs []CreateTxParams) error {
+
+	for i := range txs {
+		if txs[i].WalletID == batchWalletID {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d wallet id %d does not "+
+			"match batch wallet id %d", ErrInvalidParam, i,
+			txs[i].WalletID, batchWalletID)
+	}
+
+	return nil
+}
+
+// ValidateBatchTransactionsTx rejects a batch in which any transaction has a
+// nil Tx. A batch is reordered parents-first by SortTxBatchParentsFirst before
+// it is applied, and that sort dereferences each transaction's Tx to read its
+// hash and inputs. Per-transaction NewCreateTxRequest validation would catch a
+// nil Tx, but only inside the apply loop that runs after the sort, so a nil Tx
+// would panic during reordering. Running this check up front, before the sort,
+// turns that into the same ErrInvalidParam every backend returns uniformly.
+func ValidateBatchTransactionsTx(txs []CreateTxParams) error {
+	for i := range txs {
+		if txs[i].Tx != nil {
+			continue
+		}
+
+		return fmt.Errorf("%w: transaction %d tx is required",
+			ErrInvalidParam, i)
+	}
+
+	return nil
+}
+
+// SortTxBatchParentsFirst returns the batch transactions reordered so that any
+// transaction creating an output another batch member spends is positioned
+// before that spending member, regardless of the caller's original order.
+//
+// The SQL backends record a transaction's wallet-owned credits and then claim
+// its spent parent inputs in the same per-transaction step. Claiming a spent
+// input is an UPDATE on the parent credit's UTXO row, so the parent credit must
+// already exist when the child is recorded; otherwise the UPDATE matches no row
+// and, finding no conflicting spend either, silently drops the spend edge and
+// leaves the parent credit unspent. Applying a batch in caller order is
+// therefore unsafe whenever a child is listed before its in-batch parent.
+//
+// This makes ApplyTxBatch order-independent: it stably topologically sorts the
+// batch so every in-batch parent precedes its children while preserving the
+// caller's relative order among transactions that have no in-batch dependency.
+// A batch that is already parents-first, has a single transaction, or has no
+// in-batch parent/child edges is returned unchanged. Edges to outpoints created
+// outside the batch impose no ordering, since those parent rows either already
+// exist or never will.
+//
+// The returned slice is a fresh reordering of the same CreateTxParams values;
+// the input slice is not mutated.
+func SortTxBatchParentsFirst(txs []CreateTxParams) []CreateTxParams {
+	// Nothing to reorder: a single transaction (or none) cannot list a
+	// child ahead of an in-batch parent.
+	if len(txs) <= 1 {
+		return txs
+	}
+
+	children, inDegree := buildTxBatchDependencyGraph(txs)
+	order := topoSortTxBatchOrder(children, inDegree)
+
+	ordered := make([]CreateTxParams, 0, len(txs))
+	for _, idx := range order {
+		ordered = append(ordered, txs[idx])
+	}
+
+	return ordered
+}
+
+// buildTxBatchDependencyGraph builds the parent->child dependency edges of a
+// transaction batch. children[p] lists the positions of the batch transactions
+// spending an output of txs[p], and inDegree[c] counts the distinct in-batch
+// parents of txs[c]. Outpoints created outside the batch contribute no edge.
+func buildTxBatchDependencyGraph(txs []CreateTxParams) ([][]int, []int) {
+	// Map every in-batch transaction hash to its position so input lookups
+	// can tell an in-batch parent from an external outpoint. A hash that
+	// repeats in the batch keeps its first position; a later duplicate is
+	// rejected by CreateTxWithOps regardless of order, so the dependency
+	// edge only needs to point at one occurrence.
+	indexByHash := make(map[chainhash.Hash]int, len(txs))
+	for i := range txs {
+		hash := txs[i].Tx.TxHash()
+		if _, ok := indexByHash[hash]; !ok {
+			indexByHash[hash] = i
+		}
+	}
+
+	children := make([][]int, len(txs))
+
+	inDegree := make([]int, len(txs))
+	for child := range txs {
+		// Deduplicate parents within one child so a child spending two
+		// outputs of the same in-batch parent only adds one edge, which
+		// keeps the in-degree bookkeeping exact.
+		seen := make(map[int]struct{})
+		for _, txIn := range txs[child].Tx.TxIn {
+			parent, ok := indexByHash[txIn.PreviousOutPoint.Hash]
+			if !ok || parent == child {
+				continue
+			}
+
+			if _, dup := seen[parent]; dup {
+				continue
+			}
+
+			seen[parent] = struct{}{}
+			children[parent] = append(children[parent], child)
+			inDegree[child]++
+		}
+	}
+
+	return children, inDegree
+}
+
+// topoSortTxBatchOrder returns batch transaction positions in a stable
+// parents-first topological order using Kahn's algorithm with an
+// ascending-index ready set: among transactions whose in-batch parents are all
+// already emitted, the one with the lowest original position goes next. That
+// keeps the caller's relative order for independent transactions and leaves an
+// already parents-first batch unchanged.
+//
+// A dependency cycle is impossible for real transactions, since an output
+// cannot be spent before the transaction creating it exists. If a malformed
+// batch still encodes one, the cyclic members never reach the ready set; they
+// are appended in their original order so no transaction is dropped and
+// CreateTxWithOps can reject the bad input downstream.
+func topoSortTxBatchOrder(children [][]int, inDegree []int) []int {
+	total := len(inDegree)
+
+	ready := make([]int, 0, total)
+	for i := range inDegree {
+		if inDegree[i] == 0 {
+			ready = append(ready, i)
+		}
+	}
+
+	order := make([]int, 0, total)
+
+	emitted := make([]bool, total)
+	for len(ready) > 0 {
+		node := popLowestIndex(&ready)
+		order = append(order, node)
+		emitted[node] = true
+
+		for _, child := range children[node] {
+			inDegree[child]--
+			if inDegree[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+
+	// Append any cyclic leftover in original order.
+	if len(order) != total {
+		for i := range total {
+			if !emitted[i] {
+				order = append(order, i)
+			}
+		}
+	}
+
+	return order
+}
+
+// popLowestIndex removes and returns the smallest value from ready, preserving
+// the order of the remaining elements.
+func popLowestIndex(ready *[]int) int {
+	r := *ready
+
+	lowest := 0
+	for i := 1; i < len(r); i++ {
+		if r[i] < r[lowest] {
+			lowest = i
+		}
+	}
+
+	node := r[lowest]
+	r = append(r[:lowest], r[lowest+1:]...)
+	*ready = r
+
+	return node
 }

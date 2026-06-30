@@ -25,6 +25,18 @@ var _ db.TxStore = (*Store)(nil)
 // signed legacy wtxmgr height domain.
 var errLegacyHeightOverflow = errors.New("legacy height overflows int32")
 
+// kvdbTxStatusBucketKey is a kvdb-owned side bucket under the legacy wtxmgr
+// namespace that records transaction statuses wtxmgr cannot represent.
+var kvdbTxStatusBucketKey = []byte("db-tx-status")
+
+// legacyTxStatusValueLen is the byte width of one encoded db.TxStatus value.
+const legacyTxStatusValueLen = 1
+
+// errLegacyTxStatusUnexpectedSize reports a corrupt status side-bucket value.
+var errLegacyTxStatusUnexpectedSize = errors.New(
+	"legacy tx status bucket value has unexpected byte width",
+)
+
 // CreateTx records an unmined transaction through the legacy wtxmgr path.
 //
 // Unlike the SQL backends, kvdb does NOT route through the shared
@@ -103,6 +115,11 @@ func (s *Store) createTxWithTx(tx walletdb.ReadWriteTx,
 
 	if exists {
 		return db.ErrTxAlreadyExists
+	}
+
+	err = putLegacyTxStatus(txmgrNs, txRec.Hash, params.Status)
+	if err != nil {
+		return fmt.Errorf("put tx status: %w", err)
 	}
 
 	if len(params.Label) != 0 {
@@ -289,12 +306,620 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 	return nil
 }
 
-// GetTx retrieves one wallet-scoped transaction snapshot through the legacy
-// wtxmgr query path.
-func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
-	*db.TxInfo, error) {
+// ApplyTxBatch atomically records transactions and an optional sync-tip update
+// through the legacy walletdb managers.
+func (s *Store) ApplyTxBatch(_ context.Context,
+	params db.TxBatchParams) error {
 
-	var info *db.TxInfo
+	// A batch with no transactions and no sync-tip update has nothing to
+	// persist. Return before the addrStore guard and walletdb.Update so an
+	// empty batch neither requires an address manager nor opens a write
+	// transaction.
+	if len(params.Transactions) == 0 && params.SyncedTo == nil {
+		return nil
+	}
+
+	err := db.ValidateBatchTransactionsWalletID(
+		params.WalletID, params.Transactions,
+	)
+	if err != nil {
+		return fmt.Errorf("validate batch wallet ids: %w", err)
+	}
+
+	// Reject a nil-Tx member before the parents-first sort below
+	// dereferences each transaction; the per-tx NewCreateTxRequest check in
+	// the apply loop runs only after the sort.
+	err = db.ValidateBatchTransactionsTx(params.Transactions)
+	if err != nil {
+		return fmt.Errorf("validate batch transactions: %w", err)
+	}
+
+	// Record any in-batch parent before its children. The confirmed path
+	// records a debit only against an already-inserted parent credit, so a
+	// confirmed child applied before its in-batch parent would find no credit
+	// to spend and silently leave the parent output unspent. Sorting parents
+	// first makes the batch order-independent; an already parents-first or
+	// dependency-free batch is returned unchanged.
+	params.Transactions = db.SortTxBatchParentsFirst(params.Transactions)
+
+	if batchNeedsAddrStore(params) && s.addrStore == nil {
+		return fmt.Errorf("kvdb.Store.ApplyTxBatch: %w",
+			errMissingAddrStore)
+	}
+
+	var syncTipRestore batchSyncTipRestore
+
+	// Hold the Store write lock through the commit-failure restore below. This
+	// keeps the cache restore ordered before a following Store write can commit
+	// the same tip and create an ABA match.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	err = walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+		return s.applyLegacyBatchUpdate(tx, params, &syncTipRestore)
+	})
+	if err != nil {
+		if syncTipRestore.snapshotTaken {
+			s.addrStore.RestoreSyncedToIfCurrent(
+				syncTipRestore.previous,
+				syncTipRestore.attempted,
+			)
+		}
+
+		return fmt.Errorf("kvdb.Store.ApplyTxBatch: %w", err)
+	}
+
+	return nil
+}
+
+// batchNeedsAddrStore reports whether a transaction batch needs the address
+// manager namespace or live address store.
+func batchNeedsAddrStore(params db.TxBatchParams) bool {
+	if params.SyncedTo != nil {
+		return true
+	}
+
+	for _, tx := range params.Transactions {
+		if len(tx.Credits) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// batchSyncTipRestore tracks the live sync tip to restore when a batch update
+// fails after the address manager has changed its in-memory synced-to block.
+type batchSyncTipRestore struct {
+	previous  waddrmgr.BlockStamp
+	attempted waddrmgr.BlockStamp
+
+	snapshotTaken bool
+}
+
+// applyLegacyBatchUpdate performs the namespace lookups and write operations of
+// a transaction batch within a legacy walletdb write transaction, recording any
+// transactions and applying the optional sync-tip update.
+func (s *Store) applyLegacyBatchUpdate(tx walletdb.ReadWriteTx,
+	params db.TxBatchParams, syncTipRestore *batchSyncTipRestore) error {
+
+	var addrmgrNs walletdb.ReadWriteBucket
+	if batchNeedsAddrStore(params) {
+		addrmgrNs = tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		if addrmgrNs == nil {
+			return errMissingAddrmgrNamespace
+		}
+	}
+
+	if len(params.Transactions) > 0 {
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		if txmgrNs == nil {
+			return errMissingTxmgrNamespace
+		}
+
+		err := s.applyLegacyTxBatch(
+			addrmgrNs, txmgrNs, params.Transactions,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return s.applyLegacyBatchSyncTip(
+		addrmgrNs, params, syncTipRestore,
+	)
+}
+
+// applyLegacyBatchSyncTip applies the optional sync-tip update for a legacy
+// transaction batch.
+func (s *Store) applyLegacyBatchSyncTip(ns walletdb.ReadWriteBucket,
+	params db.TxBatchParams, syncTipRestore *batchSyncTipRestore) error {
+
+	if params.SyncedTo == nil {
+		return nil
+	}
+
+	block, err := db.BlockStampFromBlock(params.SyncedTo)
+	if err != nil {
+		return err
+	}
+
+	syncTipRestore.previous = s.addrStore.SyncedTo()
+	syncTipRestore.attempted = block
+	syncTipRestore.snapshotTaken = true
+
+	err = s.addrStore.SetSyncedTo(ns, &block)
+	if err != nil {
+		return fmt.Errorf("set synced tip: %w", err)
+	}
+
+	return nil
+}
+
+// applyLegacyTxBatch records one batch of relevant transaction notifications.
+func (s *Store) applyLegacyTxBatch(addrmgrNs walletdb.ReadWriteBucket,
+	txmgrNs walletdb.ReadWriteBucket, transactions []db.CreateTxParams) error {
+
+	for i := range transactions {
+		req, err := db.NewCreateTxRequest(transactions[i])
+		if err != nil {
+			return fmt.Errorf("validate tx %d: %w", i, err)
+		}
+
+		err = s.applyLegacyTxNotification(addrmgrNs, txmgrNs, req)
+		if err != nil {
+			return fmt.Errorf("apply tx %d: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+// applyLegacyTxNotification records one relevant transaction notification using
+// legacy wtxmgr semantics.
+func (s *Store) applyLegacyTxNotification(addrmgrNs walletdb.ReadWriteBucket,
+	txmgrNs walletdb.ReadWriteBucket, req db.CreateTxRequest) error {
+
+	txRec, err := wtxmgr.NewTxRecordFromMsgTx(
+		req.Params.Tx, req.Received,
+	)
+	if err != nil {
+		return fmt.Errorf("build tx record: %w", err)
+	}
+
+	if req.Params.Block == nil {
+		return s.applyUnconfirmedLegacyTx(addrmgrNs, txmgrNs, txRec, req)
+	}
+
+	block, err := kvdbTxBlockMeta(req.Params.Block)
+	if err != nil {
+		return err
+	}
+
+	handled, err := s.applyConfirmedDuplicate(
+		addrmgrNs, txmgrNs, txRec.Hash, block, req,
+	)
+	if err != nil {
+		return err
+	}
+
+	if handled {
+		return nil
+	}
+
+	label, err := s.confirmedBatchLabel(txmgrNs, txRec.Hash, req)
+	if err != nil {
+		return err
+	}
+
+	credits, err := s.legacyCreditEntries(addrmgrNs, req)
+	if err != nil {
+		return err
+	}
+
+	err = s.txStore.InsertConfirmedTx(txmgrNs, txRec, block, credits)
+	if err != nil {
+		return fmt.Errorf("insert confirmed tx: %w", err)
+	}
+
+	err = putLegacyTxStatus(txmgrNs, txRec.Hash, req.Params.Status)
+	if err != nil {
+		return fmt.Errorf("put tx status: %w", err)
+	}
+
+	return s.putLegacyTxLabel(txmgrNs, txRec, label)
+}
+
+// confirmedBatchLabel returns the label to keep after storing a confirmed batch
+// notification.
+func (s *Store) confirmedBatchLabel(txmgrNs walletdb.ReadBucket,
+	txHash chainhash.Hash, req db.CreateTxRequest) (string, error) {
+
+	existing, err := s.txStore.TxDetails(txmgrNs, &txHash)
+	if err != nil {
+		return "", fmt.Errorf("lookup existing tx label: %w", err)
+	}
+
+	if existing == nil || existing.Block.Height >= 0 {
+		return req.Params.Label, nil
+	}
+
+	return existing.Label, nil
+}
+
+// applyConfirmedDuplicate handles a confirmed batch notification for a
+// transaction hash already present in the legacy store.
+func (s *Store) applyConfirmedDuplicate(
+	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
+	txHash chainhash.Hash, block *wtxmgr.BlockMeta,
+	req db.CreateTxRequest) (bool, error) {
+
+	existing, err := s.txStore.TxDetails(txmgrNs, &txHash)
+	if err != nil {
+		return false, fmt.Errorf("lookup existing tx: %w", err)
+	}
+
+	if existing == nil || existing.Block.Height < 0 {
+		return false, nil
+	}
+
+	matches, err := s.legacyConfirmedDuplicateMatches(
+		addrmgrNs, txmgrNs, existing, txHash, block, req,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if matches {
+		return true, nil
+	}
+
+	return true, fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
+}
+
+// legacyConfirmedDuplicateMatches reports whether a confirmed duplicate batch
+// notification is already fully reflected by the legacy store.
+func (s *Store) legacyConfirmedDuplicateMatches(
+	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
+	existing *wtxmgr.TxDetails, txHash chainhash.Hash,
+	block *wtxmgr.BlockMeta, req db.CreateTxRequest) (bool, error) {
+
+	if existing.Block.Height != block.Height ||
+		existing.Block.Hash != block.Hash ||
+		!existing.Block.Time.Equal(block.Time) {
+
+		return false, nil
+	}
+
+	status, err := readLegacyTxStatus(txmgrNs, txHash)
+	if err != nil {
+		return false, fmt.Errorf("read duplicate tx status: %w", err)
+	}
+
+	return s.legacyDuplicateMatches(addrmgrNs, existing, status, req)
+}
+
+// applyUnconfirmedLegacyTx records an unmined transaction through the legacy
+// wtxmgr path. A duplicate unmined notification for a transaction the store
+// already has confirmed is a no-op: InsertUnconfirmedTx no-ops the record write
+// for an existing transaction, but the status write would otherwise mark the
+// confirmed transaction pending.
+func (s *Store) applyUnconfirmedLegacyTx(
+	addrmgrNs walletdb.ReadWriteBucket, txmgrNs walletdb.ReadWriteBucket,
+	txRec *wtxmgr.TxRecord, req db.CreateTxRequest) error {
+
+	existing, err := s.txStore.TxDetails(txmgrNs, &txRec.Hash)
+	if err != nil {
+		return fmt.Errorf("lookup existing tx: %w", err)
+	}
+
+	if existing != nil {
+		return s.applyUnconfirmedDuplicate(
+			addrmgrNs, txmgrNs, existing, txRec.Hash, req,
+		)
+	}
+
+	credits, err := s.legacyCreditEntries(addrmgrNs, req)
+	if err != nil {
+		return err
+	}
+
+	err = s.txStore.InsertUnconfirmedTx(txmgrNs, txRec, credits)
+	if err != nil {
+		return fmt.Errorf("insert unconfirmed tx: %w", err)
+	}
+
+	err = putLegacyTxStatus(txmgrNs, txRec.Hash, req.Params.Status)
+	if err != nil {
+		return fmt.Errorf("put tx status: %w", err)
+	}
+
+	return s.putLegacyTxLabel(txmgrNs, txRec, req.Params.Label)
+}
+
+// applyUnconfirmedDuplicate handles an unmined batch notification for a
+// transaction hash already present in the legacy store.
+func (s *Store) applyUnconfirmedDuplicate(
+	addrmgrNs walletdb.ReadBucket, txmgrNs walletdb.ReadBucket,
+	existing *wtxmgr.TxDetails, txHash chainhash.Hash,
+	req db.CreateTxRequest) error {
+
+	if existing.Block.Height >= 0 {
+		return nil
+	}
+
+	status, err := readLegacyTxStatus(txmgrNs, txHash)
+	if err != nil {
+		return fmt.Errorf("read duplicate tx status: %w", err)
+	}
+
+	matches, err := s.legacyDuplicateMatches(
+		addrmgrNs, existing, status, req,
+	)
+	if err != nil {
+		return err
+	}
+
+	if matches {
+		return nil
+	}
+
+	return fmt.Errorf("tx %s: %w", txHash, db.ErrTxAlreadyExists)
+}
+
+// legacyDuplicateMatches reports whether a duplicate batch notification's
+// wallet metadata is already fully reflected by the legacy store.
+func (s *Store) legacyDuplicateMatches(
+	addrmgrNs walletdb.ReadBucket, existing *wtxmgr.TxDetails,
+	status db.TxStatus, req db.CreateTxRequest) (bool, error) {
+
+	if status != req.Params.Status {
+		return false, nil
+	}
+
+	if existing.Label != req.Params.Label {
+		return false, nil
+	}
+
+	return s.legacyCreditsMatch(addrmgrNs, existing.Credits, req)
+}
+
+// legacyCreditsMatch reports whether requested credit ownership exactly matches
+// the legacy credit records already stored for an unconfirmed transaction.
+func (s *Store) legacyCreditsMatch(addrmgrNs walletdb.ReadBucket,
+	existing []wtxmgr.CreditRecord, req db.CreateTxRequest) (bool, error) {
+
+	if len(existing) != len(req.Params.Credits) {
+		return false, nil
+	}
+
+	existingCredits := make(map[uint32]bool, len(existing))
+	for _, credit := range existing {
+		existingCredits[credit.Index] = credit.Change
+	}
+
+	for index, addr := range req.Params.Credits {
+		existingChange, ok := existingCredits[index]
+		if !ok {
+			return false, nil
+		}
+
+		expectedChange := false
+		if addr != nil {
+			chainParams := s.addrStore.ChainParams()
+
+			err := validateCreditAddr(*req.Params.Tx, index, addr, chainParams)
+			if err != nil {
+				return false, err
+			}
+
+			managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
+			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+				return false, nil
+			}
+
+			if err != nil {
+				return false, fmt.Errorf("lookup credit address %d: %w",
+					index, err)
+			}
+
+			expectedChange = managedAddr.Internal()
+		}
+
+		if existingChange != expectedChange {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// putLegacyTxStatus writes or clears the kvdb status side-bucket entry for one
+// legacy transaction.
+func putLegacyTxStatus(txmgrNs walletdb.ReadWriteBucket,
+	txid chainhash.Hash, status db.TxStatus) error {
+
+	if status == db.TxStatusPublished {
+		return deleteLegacyTxStatus(txmgrNs, txid)
+	}
+
+	if status != db.TxStatusPending {
+		return fmt.Errorf("legacy tx status %s: %w", status,
+			db.ErrInvalidStatus)
+	}
+
+	statusBucket, err := txmgrNs.CreateBucketIfNotExists(
+		kvdbTxStatusBucketKey,
+	)
+	if err != nil {
+		return fmt.Errorf("create tx status bucket: %w", err)
+	}
+
+	return statusBucket.Put(txid[:], []byte{byte(status)})
+}
+
+// deleteLegacyTxStatus clears the kvdb status side-bucket entry for one legacy
+// transaction.
+func deleteLegacyTxStatus(txmgrNs walletdb.ReadWriteBucket,
+	txid chainhash.Hash) error {
+
+	statusBucket := txmgrNs.NestedReadWriteBucket(kvdbTxStatusBucketKey)
+	if statusBucket == nil {
+		return nil
+	}
+
+	return statusBucket.Delete(txid[:])
+}
+
+// readLegacyTxStatus reads the kvdb status side-bucket entry for one legacy
+// transaction. Missing entries mean wtxmgr's native published status.
+func readLegacyTxStatus(txmgrNs walletdb.ReadBucket,
+	txid chainhash.Hash) (db.TxStatus, error) {
+
+	statusBucket := txmgrNs.NestedReadBucket(kvdbTxStatusBucketKey)
+	if statusBucket == nil {
+		return db.TxStatusPublished, nil
+	}
+
+	raw := statusBucket.Get(txid[:])
+	if raw == nil {
+		return db.TxStatusPublished, nil
+	}
+
+	if len(raw) != legacyTxStatusValueLen {
+		return db.TxStatus(0), fmt.Errorf(
+			"%w: txid=%s: expected %d bytes, got %d",
+			errLegacyTxStatusUnexpectedSize, txid,
+			legacyTxStatusValueLen, len(raw),
+		)
+	}
+
+	status, err := db.ParseTxStatus(int64(raw[0]))
+	if err != nil {
+		return db.TxStatus(0), err
+	}
+
+	return status, nil
+}
+
+// putLegacyTxLabel records one non-empty transaction label through wtxmgr.
+func (s *Store) putLegacyTxLabel(txmgrNs walletdb.ReadWriteBucket,
+	txRec *wtxmgr.TxRecord, label string) error {
+
+	if len(label) == 0 {
+		return nil
+	}
+
+	err := s.txStore.PutTxLabel(txmgrNs, txRec.Hash, label)
+	if err != nil {
+		return fmt.Errorf("put transaction label: %w", err)
+	}
+
+	return nil
+}
+
+// legacyCreditEntries converts db-native credit addresses into legacy credit
+// entries and marks resolved addresses as used.
+//
+// Each non-nil credit is validated against the output script it claims to
+// credit using the same membership check the CreateTx path applies in
+// addCreateTxCredit, so the batch path cannot record a UTXO owned by an
+// address the output does not pay. A nil credit means the caller has no
+// resolved owner, so ownership is keyed on the output's own script: the entry
+// is recorded from the output index alone, with no address-manager lookup or
+// used-marking, matching CreateTx and the SQL backends.
+func (s *Store) legacyCreditEntries(addrmgrNs walletdb.ReadWriteBucket,
+	req db.CreateTxRequest) ([]wtxmgr.CreditEntry, error) {
+
+	if len(req.Params.Credits) == 0 {
+		return nil, nil
+	}
+
+	chainParams := s.addrStore.ChainParams()
+
+	credits := make([]wtxmgr.CreditEntry, 0, len(req.Params.Credits))
+	for index, addr := range req.Params.Credits {
+		// A nil credit address has no owner to resolve, so key the
+		// credit on the output's own script: record it from the index
+		// with change cleared, skipping the address-manager lookup and
+		// the membership check that has no caller address to validate.
+		if addr == nil {
+			if int(index) >= len(req.Params.Tx.TxOut) {
+				return nil, fmt.Errorf("credit output %d: %w: "+
+					"index out of range", index,
+					db.ErrInvalidParam)
+			}
+
+			credits = append(credits, wtxmgr.CreditEntry{
+				Index:  index,
+				Change: false,
+			})
+
+			continue
+		}
+
+		// Validate the caller-supplied credit against the actual output
+		// script before trusting it, rejecting a mismatch with the same
+		// error CreateTx uses.
+		err := validateCreditAddr(
+			*req.Params.Tx, index, addr, chainParams,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		managedAddr, err := s.addrStore.Address(addrmgrNs, addr)
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, fmt.Errorf("credit output %d: %w", index,
+				db.ErrAddressNotFound)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("lookup credit address %d: %w",
+				index, err)
+		}
+
+		credits = append(credits, wtxmgr.CreditEntry{
+			Index:  index,
+			Change: managedAddr.Internal(),
+		})
+
+		err = s.addrStore.MarkUsed(addrmgrNs, addr)
+		if err != nil {
+			return nil, fmt.Errorf("mark credit address used %d: %w",
+				index, err)
+		}
+	}
+
+	return credits, nil
+}
+
+// kvdbTxBlockMeta converts store block metadata into legacy transaction block
+// metadata.
+func kvdbTxBlockMeta(block *db.Block) (*wtxmgr.BlockMeta, error) {
+	height, err := db.Uint32ToInt32(block.Height)
+	if err != nil {
+		return nil, fmt.Errorf("convert block height: %w", err)
+	}
+
+	return &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   block.Hash,
+			Height: height,
+		},
+		Time: block.Timestamp,
+	}, nil
+}
+
+// fetchTxDetailsWithStatus loads the wtxmgr details and legacy status for a
+// transaction within a single read transaction.
+func (s *Store) fetchTxDetailsWithStatus(txid *chainhash.Hash) (
+	*wtxmgr.TxDetails, db.TxStatus, error) {
+
+	var (
+		details *wtxmgr.TxDetails
+		status  db.TxStatus
+	)
 
 	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -304,24 +929,40 @@ func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
 			)
 		}
 
-		details, err := s.txStore.TxDetails(ns, &query.Txid)
+		txDetails, err := s.txStore.TxDetails(ns, txid)
 		if err != nil {
 			return fmt.Errorf("lookup transaction details: %w", err)
 		}
 
-		if details == nil {
+		if txDetails == nil {
 			return db.ErrTxNotFound
 		}
 
-		info = kvdbTxInfo(details)
+		txStatus, err := readLegacyTxStatus(ns, txDetails.Hash)
+		if err != nil {
+			return fmt.Errorf("read tx status: %w", err)
+		}
+
+		details = txDetails
+		status = txStatus
 
 		return nil
 	})
+
+	return details, status, err
+}
+
+// GetTx retrieves one wallet-scoped transaction snapshot through the legacy
+// wtxmgr query path.
+func (s *Store) GetTx(_ context.Context, query db.GetTxQuery) (
+	*db.TxInfo, error) {
+
+	details, status, err := s.fetchTxDetailsWithStatus(&query.Txid)
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.GetTx: %w", err)
 	}
 
-	return info, nil
+	return kvdbTxInfo(details, status), nil
 }
 
 // ListTxns lists wallet-scoped transaction summaries through the legacy wtxmgr
@@ -375,7 +1016,16 @@ func (s *Store) listTxnsRange(ns walletdb.ReadBucket, begin, end int32,
 		ns, begin, end,
 		func(txDetails []wtxmgr.TxDetails) (bool, error) {
 			for i := range txDetails {
-				infos = append(infos, *kvdbTxInfo(&txDetails[i]))
+				status, err := readLegacyTxStatus(
+					ns, txDetails[i].Hash,
+				)
+				if err != nil {
+					return false, fmt.Errorf("read tx status: %w", err)
+				}
+
+				infos = append(
+					infos, *kvdbTxInfo(&txDetails[i], status),
+				)
 			}
 
 			return false, nil
@@ -393,34 +1043,12 @@ func (s *Store) listTxnsRange(ns walletdb.ReadBucket, begin, end int32,
 func (s *Store) GetTxDetail(_ context.Context, query db.GetTxDetailQuery) (
 	*db.TxDetailInfo, error) {
 
-	var detail *db.TxDetailInfo
-
-	err := walletdb.View(s.db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		if ns == nil {
-			return fmt.Errorf(
-				"wtxmgr namespace: %w", walletdb.ErrBucketNotFound,
-			)
-		}
-
-		txDetails, err := s.txStore.TxDetails(ns, &query.Txid)
-		if err != nil {
-			return fmt.Errorf("lookup transaction details: %w", err)
-		}
-
-		if txDetails == nil {
-			return db.ErrTxNotFound
-		}
-
-		detail = kvdbTxDetailInfo(txDetails)
-
-		return nil
-	})
+	details, status, err := s.fetchTxDetailsWithStatus(&query.Txid)
 	if err != nil {
 		return nil, fmt.Errorf("kvdb.Store.GetTxDetail: %w", err)
 	}
 
-	return detail, nil
+	return kvdbTxDetailInfo(details, status), nil
 }
 
 // ListTxDetails lists detailed wallet-scoped transaction views through the
@@ -442,8 +1070,18 @@ func (s *Store) ListTxDetails(_ context.Context, query db.ListTxDetailsQuery) (
 			ns, query.StartHeight, query.EndHeight,
 			func(txDetails []wtxmgr.TxDetails) (bool, error) {
 				for i := range txDetails {
+					status, err := readLegacyTxStatus(
+						ns, txDetails[i].Hash,
+					)
+					if err != nil {
+						return false, fmt.Errorf(
+							"read tx status: %w", err,
+						)
+					}
+
 					details = append(
-						details, *kvdbTxDetailInfo(&txDetails[i]),
+						details,
+						*kvdbTxDetailInfo(&txDetails[i], status),
 					)
 				}
 
@@ -491,7 +1129,12 @@ func (s *Store) InvalidateUnminedTx(_ context.Context,
 				db.ErrInvalidateTx)
 		}
 
-		return s.txStore.RemoveUnminedTx(ns, &details.TxRecord)
+		err = s.txStore.RemoveUnminedTx(ns, &details.TxRecord)
+		if err != nil {
+			return err
+		}
+
+		return deleteLegacyTxStatus(ns, params.Txid)
 	})
 	if err != nil {
 		return fmt.Errorf("kvdb.Store.InvalidateUnminedTx: %w", err)
@@ -1033,7 +1676,7 @@ func validateUpdateTxParams(params db.UpdateTxParams) (*string, error) {
 
 // kvdbTxInfo maps legacy wtxmgr detail data into the lightweight db-native
 // transaction summary model.
-func kvdbTxInfo(details *wtxmgr.TxDetails) *db.TxInfo {
+func kvdbTxInfo(details *wtxmgr.TxDetails, status db.TxStatus) *db.TxInfo {
 	var block *db.Block
 	if details.Block.Height >= 0 {
 		block = &db.Block{
@@ -1049,16 +1692,16 @@ func kvdbTxInfo(details *wtxmgr.TxDetails) *db.TxInfo {
 		Received:     details.Received.UTC(),
 		Block:        block,
 
-		// Legacy wtxmgr only exposes transactions it still treats as valid,
-		// and it does not persist pending/replaced/failed/orphaned state.
-		Status: db.TxStatusPublished,
+		Status: status,
 		Label:  details.Label,
 	}
 }
 
 // kvdbTxDetailInfo maps legacy wtxmgr detail data into the db-native
 // transaction detail model used by wallet tx-reader code.
-func kvdbTxDetailInfo(details *wtxmgr.TxDetails) *db.TxDetailInfo {
+func kvdbTxDetailInfo(details *wtxmgr.TxDetails,
+	status db.TxStatus) *db.TxDetailInfo {
+
 	var block *db.Block
 	if details.Block.Height >= 0 {
 		block = &db.Block{
@@ -1093,9 +1736,7 @@ func kvdbTxDetailInfo(details *wtxmgr.TxDetails) *db.TxDetailInfo {
 		Received:     details.Received.UTC(),
 		Block:        block,
 
-		// Legacy wtxmgr only exposes transactions it still treats as valid,
-		// and it does not persist pending/replaced/failed/orphaned state.
-		Status:       db.TxStatusPublished,
+		Status:       status,
 		Label:        details.Label,
 		OwnedInputs:  ownedInputs,
 		OwnedOutputs: ownedOutputs,
