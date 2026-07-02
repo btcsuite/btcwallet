@@ -341,7 +341,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		addrStore:         addrMgr,
 		store:             store,
 		cache:             newStoreRuntimeCache(store),
-		keyVault:          keyvault.NewDBVault(store, walletID),
+		keyVault:          keyvault.NewWalletVault(store, walletID),
 		txStore:           txMgr,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,
