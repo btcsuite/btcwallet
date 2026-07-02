@@ -2,23 +2,19 @@ package keyvault
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/snacl"
-	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
-// errWalletVaultNotImplemented marks wallet vault methods whose runtime state is
-// not available through db.Store yet.
-var errWalletVaultNotImplemented = errors.New("wallet vault method not implemented")
-
-// errUnexpectedState reports that the vault is in an unexpected state,
-// which may indicate a programming error or data corruption. Normal
-// operation should not return this error, and that's why it's unexported.
-var errUnexpectedState = errors.New("unexpected state")
+var (
+	// errUnexpectedState reports that the vault is in an unexpected state,
+	// which may indicate a programming error or data corruption. Normal
+	// operation should not return this error, and that's why it's unexported.
+	errUnexpectedState = errors.New("unexpected state")
+)
 
 // WalletVault adapts db.Store wallet secret storage to the wallet key-vault
 // boundary.
@@ -59,19 +55,6 @@ func NewWalletVault(store db.Store, walletID uint32) *WalletVault {
 		store:    store,
 		walletID: walletID,
 	}
-}
-
-// Decrypt is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
-	return nil, v.notImplemented("Decrypt")
-}
-
-// notImplemented returns a scoped error for wallet vault methods that are still
-// awaiting DB-backed runtime crypto support.
-func (v *WalletVault) notImplemented(method string) error {
-	return fmt.Errorf("wallet %d wallet vault %s: %w", v.walletID, method,
-		errWalletVaultNotImplemented)
 }
 
 // zero clears the runtime secret material held by the unlocked state.
