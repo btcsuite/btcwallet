@@ -68,10 +68,6 @@ func (v *WalletVault) Unlock(_ context.Context, _ []byte) error {
 	return v.notImplemented("Unlock")
 }
 
-// Lock is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) Lock() {}
-
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.
 func (v *WalletVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
