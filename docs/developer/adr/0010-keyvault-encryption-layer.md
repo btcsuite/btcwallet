@@ -81,8 +81,8 @@ wallet facing lock, unlock, encryption, decryption, and derivation APIs.
 ### Responsibilities
 
 1. **Own lock state and key lifecycle**
-   Keyvault manages unlock state, key material lifetime, auto lock behavior, and
-   secure memory zeroing.
+   Keyvault manages lock state, key material lifetime, and secure memory
+   zeroing.
 
 2. **Expose typed domain interfaces**
    Keyvault returns domain types such as `*btcec.PrivateKey`,
@@ -125,6 +125,9 @@ and parameters, consistent with ADR 0001. That routing is handled inside store
 implementations or keyvault adapters, not repeated throughout wallet domain
 code.
 
+Auto lock timeout scheduling is a wallet or controller lifecycle policy, not
+part of `keyvault.Vault`.
+
 ### Pros
 
 1. **Separation of concerns**
@@ -136,8 +139,8 @@ code.
    blobs.
 
 3. **Centralized lock management**
-   Lock state, unlock timers, cache lifetime, and secret zeroing are owned by
-   one component.
+   Lock state and secret zeroing are owned by one component, while timeout and
+   auto lock scheduling stay outside the vault.
 
 4. **Extensible responsibility boundary**
    Keyvault centralizes secret and key responsibilities, making it easier to
@@ -153,7 +156,7 @@ code.
    tested against mock vault implementations.
 
 7. **Per wallet isolation**
-   Each wallet has its own vault instance, lock state, cache, timers, and secret
+   Each wallet has its own vault instance, lock state, cache, and secret
    material lifetime.
 
 8. **Migration support**

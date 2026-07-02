@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
@@ -37,7 +35,7 @@ func NewDBVault(store db.Store, walletID uint32) *DBVault {
 
 // Unlock is not implemented yet.
 // TODO(gus): implement it.
-func (v *DBVault) Unlock(_ context.Context, _ []byte, _ time.Duration) error {
+func (v *DBVault) Unlock(_ context.Context, _ []byte) error {
 	return v.notImplemented("Unlock")
 }
 
