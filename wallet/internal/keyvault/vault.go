@@ -72,12 +72,6 @@ func (v *WalletVault) Unlock(_ context.Context, _ []byte) error {
 // TODO(gus): implement it.
 func (v *WalletVault) Lock() {}
 
-// IsLocked is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) IsLocked() bool {
-	return true
-}
-
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.
 func (v *WalletVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
