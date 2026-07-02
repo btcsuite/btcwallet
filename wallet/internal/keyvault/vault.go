@@ -62,12 +62,6 @@ func NewWalletVault(store db.Store, walletID uint32) *WalletVault {
 	}
 }
 
-// Unlock is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) Unlock(_ context.Context, _ []byte) error {
-	return v.notImplemented("Unlock")
-}
-
 // Encrypt is not implemented yet.
 // TODO(gus): implement it.
 func (v *WalletVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
