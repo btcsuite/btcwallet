@@ -7502,7 +7502,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		id:               walletID,
 		addrStore:        addrMgr,
 		store:            store,
-		keyVault:         keyvault.NewDBVault(store, walletID),
+		keyVault:         keyvault.NewWalletVault(store, walletID),
 		txStore:          txMgr,
 		walletDeprecated: deprecated,
 	}
