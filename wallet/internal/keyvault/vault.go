@@ -1,7 +1,6 @@
 package keyvault
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -72,12 +71,6 @@ func (v *WalletVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error
 // TODO(gus): implement it.
 func (v *WalletVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
 	return nil, v.notImplemented("Decrypt")
-}
-
-// ChangePassphrase is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) ChangePassphrase(_ context.Context, _ []byte) error {
-	return v.notImplemented("ChangePassphrase")
 }
 
 // notImplemented returns a scoped error for wallet vault methods that are still
