@@ -11,6 +11,10 @@ import (
 // ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
 var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
 
+// ErrVaultLocked reports that an operation requiring unlocked runtime state
+// was attempted while the vault was locked.
+var ErrVaultLocked = errors.New("vault is locked")
+
 // ErrVaultUnlocked reports that an unlock operation was attempted while the
 // vault was already unlocked.
 var ErrVaultUnlocked = errors.New("vault is already unlocked")
