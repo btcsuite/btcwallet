@@ -38,6 +38,32 @@ func (v *WalletVault) Encrypt(keyType waddrmgr.CryptoKeyType,
 	return ciphertext, nil
 }
 
+// Decrypt decrypts ciphertext with the selected unlocked runtime crypto key.
+func (v *WalletVault) Decrypt(keyType waddrmgr.CryptoKeyType,
+	ciphertext []byte) ([]byte, error) {
+
+	v.mtx.Lock()
+	defer v.mtx.Unlock()
+
+	if v.unlockedState == nil {
+		return nil, fmt.Errorf("wallet %d vault Decrypt: %w", v.walletID,
+			ErrVaultLocked)
+	}
+
+	cryptoKey, err := v.selectUnlockedCryptoKey(keyType)
+	if err != nil {
+		return nil, fmt.Errorf("wallet %d vault Decrypt: %w", v.walletID, err)
+	}
+
+	plaintext, err := cryptoKey.Decrypt(ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("wallet %d vault Decrypt: decrypt: %w",
+			v.walletID, err)
+	}
+
+	return plaintext, nil
+}
+
 // selectUnlockedCryptoKey returns a crypto key available in unlockedState.
 func (v *WalletVault) selectUnlockedCryptoKey(
 	keyType waddrmgr.CryptoKeyType) (*snacl.CryptoKey, error) {
