@@ -61,12 +61,6 @@ func NewWalletVault(store db.Store, walletID uint32) *WalletVault {
 	}
 }
 
-// Encrypt is not implemented yet.
-// TODO(gus): implement it.
-func (v *WalletVault) Encrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
-	return nil, v.notImplemented("Encrypt")
-}
-
 // Decrypt is not implemented yet.
 // TODO(gus): implement it.
 func (v *WalletVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
