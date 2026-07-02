@@ -61,10 +61,10 @@ func (v *DBVault) Decrypt(_ waddrmgr.CryptoKeyType, _ []byte) ([]byte, error) {
 	return nil, v.notImplemented("Decrypt")
 }
 
-// RefreshPrivatePassphrase is not implemented yet.
+// ChangePassphrase is not implemented yet.
 // TODO(gus): implement it.
-func (v *DBVault) RefreshPrivatePassphrase(_ []byte) error {
-	return v.notImplemented("RefreshPrivatePassphrase")
+func (v *DBVault) ChangePassphrase(_ context.Context, _ []byte) error {
+	return v.notImplemented("ChangePassphrase")
 }
 
 // notImplemented returns a scoped error for db vault methods that are still

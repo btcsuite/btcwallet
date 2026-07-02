@@ -11,7 +11,7 @@ import (
 type Vault interface {
 	// Unlock unlocks the vault with the provided passphrase.
 	// An invalid passphrase must leave the vault locked.
-	Unlock(ctx context.Context, passphrase []byte) error
+	Unlock(ctx context.Context, newPassphrase []byte) error
 
 	// Lock locks the vault and erases secret material from memory. Lock is
 	// idempotent.
@@ -28,10 +28,8 @@ type Vault interface {
 	// type.
 	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
 
-	// RefreshPrivatePassphrase refreshes vault owned runtime passphrase and
-	// crypto state after a successful private passphrase rotation.
-	//
-	// The vault must still be unlocked with the new passphrase when this method
+	// ChangePassphrase rotates persisted wallet secrets to the provided new
+	// private passphrase. The vault must already be unlocked when this method
 	// is called.
-	RefreshPrivatePassphrase(passphrase []byte) error
+	ChangePassphrase(ctx context.Context, newPassphrase []byte) error
 }
