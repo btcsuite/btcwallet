@@ -10,6 +10,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
 
+// Verify the PostgreSQL Store implements the full db.AddressStore interface.
+var _ db.AddressStore = (*Store)(nil)
+
 // errUnknownAddressRowType is returned when an address row has an
 // unrecognized concrete type.
 var errUnknownAddressRowType = errors.New("unknown address row type")
