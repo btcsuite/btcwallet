@@ -1996,7 +1996,7 @@ func TestNewDerivedAddressDerivesByAccountNumber(t *testing.T) {
 // imported xpub accounts.
 //
 // Regression for the rejection that returns ErrNilDBAccountNumber when an
-// imported xpub account row reaches NewDerivedAddressWithTx — the store
+// imported xpub account row reaches NewDerivedAddressWithOps — the store
 // now tolerates NULL account_number and passes nil through to the callback.
 func TestNewDerivedAddressOnImportedAccount(t *testing.T) {
 	t.Parallel()
