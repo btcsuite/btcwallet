@@ -336,12 +336,14 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
 
 	w := &Wallet{
-		cfg:               cfg,
-		id:                walletID,
-		addrStore:         addrMgr,
-		store:             store,
-		cache:             newStoreRuntimeCache(store),
-		keyVault:          keyvault.NewWalletVault(store, walletID),
+		cfg:       cfg,
+		id:        walletID,
+		addrStore: addrMgr,
+		store:     store,
+		cache:     newStoreRuntimeCache(store),
+		keyVault: keyvault.NewWalletVault(
+			store, walletID, addrMgr.WatchOnly(),
+		),
 		txStore:           txMgr,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,

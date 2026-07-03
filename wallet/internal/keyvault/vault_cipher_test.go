@@ -18,7 +18,7 @@ func TestWalletVaultEncryptSelectedRuntimeKeys(t *testing.T) {
 	scriptKey, err := snacl.GenerateCryptoKey()
 	require.NoError(t, err)
 
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	vault.unlockedState = &unlockedState{
 		cryptoKeyPrivate: *privateKey,
 		cryptoKeyScript:  *scriptKey,
@@ -65,7 +65,7 @@ func TestWalletVaultEncryptSelectedRuntimeKeys(t *testing.T) {
 func TestWalletVaultEncryptLocked(t *testing.T) {
 	t.Parallel()
 
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	ciphertext, err := vault.Encrypt(waddrmgr.CKTPrivate, []byte("plaintext"))
 	require.Nil(t, ciphertext)
 	require.Error(t, err)
@@ -79,7 +79,7 @@ func TestWalletVaultEncryptUnsupportedKeyTypes(t *testing.T) {
 	t.Parallel()
 
 	state := makeUnlockedState(t)
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	vault.unlockedState = state
 	t.Cleanup(vault.Lock)
 
@@ -124,7 +124,7 @@ func TestWalletVaultDecryptSelectedRuntimeKeys(t *testing.T) {
 	scriptKey, err := snacl.GenerateCryptoKey()
 	require.NoError(t, err)
 
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	vault.unlockedState = &unlockedState{
 		cryptoKeyPrivate: *privateKey,
 		cryptoKeyScript:  *scriptKey,
@@ -169,7 +169,7 @@ func TestWalletVaultDecryptSelectedRuntimeKeys(t *testing.T) {
 func TestWalletVaultDecryptLocked(t *testing.T) {
 	t.Parallel()
 
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	plaintext, err := vault.Decrypt(waddrmgr.CKTPrivate, []byte("ciphertext"))
 	require.Nil(t, plaintext)
 	require.Error(t, err)
@@ -183,7 +183,7 @@ func TestWalletVaultDecryptUnsupportedKeyTypes(t *testing.T) {
 	t.Parallel()
 
 	state := makeUnlockedState(t)
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	vault.unlockedState = state
 	t.Cleanup(vault.Lock)
 
@@ -224,7 +224,7 @@ func TestWalletVaultDecryptMalformedCiphertext(t *testing.T) {
 	t.Parallel()
 
 	state := makeUnlockedState(t)
-	vault := NewWalletVault(nil, 1)
+	vault := NewWalletVault(nil, 1, false)
 	vault.unlockedState = state
 	t.Cleanup(vault.Lock)
 

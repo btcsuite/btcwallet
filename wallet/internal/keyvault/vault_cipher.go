@@ -70,6 +70,11 @@ func (v *WalletVault) selectUnlockedCryptoKey(
 
 	switch keyType {
 	case waddrmgr.CKTPrivate:
+		if v.watchOnly {
+			return nil, fmt.Errorf("private crypto key: %w",
+				errUnsupportedCryptoKeyType)
+		}
+
 		return &v.unlockedState.cryptoKeyPrivate, nil
 	case waddrmgr.CKTScript:
 		return &v.unlockedState.cryptoKeyScript, nil
