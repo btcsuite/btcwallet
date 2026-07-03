@@ -40,9 +40,7 @@ func CreateWatchOnlyWalletParams(name string) db.CreateWalletParams {
 	params := CreateWalletParamsFixture(name)
 	params.IsWatchOnly = true
 	params.EncryptedMasterPrivKey = nil
-	params.MasterKeyPrivParams = nil
 	params.EncryptedCryptoPrivKey = nil
-	params.EncryptedCryptoScriptKey = nil
 
 	return params
 }

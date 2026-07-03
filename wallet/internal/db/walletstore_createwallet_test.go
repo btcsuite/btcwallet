@@ -317,3 +317,55 @@ func TestCreateWalletWithOpsPropagatesGetWalletError(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletNotFound)
 	require.ErrorContains(t, err, "fetch created wallet")
 }
+
+// TestCreateWalletParamsRejectSpendableMissingPrivateSecrets verifies
+// that spendable wallet creation requires private wallet secret material.
+func TestCreateWalletParamsRejectSpendableMissingPrivateSecrets(
+	t *testing.T) {
+
+	t.Parallel()
+
+	base := CreateWalletParams{
+		Name:                     "spendable",
+		MasterKeyPrivParams:      []byte{1},
+		EncryptedCryptoPrivKey:   []byte{2},
+		EncryptedCryptoScriptKey: []byte{3},
+		EncryptedMasterPrivKey:   []byte{4},
+	}
+	tests := []struct {
+		name        string
+		mutate      func(*CreateWalletParams)
+		wantErr     error
+		wantContain string
+	}{
+		{
+			name: "missing encrypted private crypto key",
+			mutate: func(p *CreateWalletParams) {
+				p.EncryptedCryptoPrivKey = nil
+			},
+			wantErr:     ErrMissingField,
+			wantContain: "wallet \"spendable\" private crypto key",
+		},
+		{
+			name: "missing encrypted master HD private key",
+			mutate: func(p *CreateWalletParams) {
+				p.EncryptedMasterPrivKey = nil
+			},
+			wantErr:     ErrMissingField,
+			wantContain: "wallet \"spendable\" master HD private key",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := base
+			test.mutate(&params)
+			err := params.Validate()
+
+			require.ErrorIs(t, err, test.wantErr)
+			require.ErrorContains(t, err, test.wantContain)
+		})
+	}
+}

@@ -66,10 +66,13 @@ func TestGetWalletSecretsWatchOnly(t *testing.T) {
 	secrets, err := store.GetWalletSecrets(t.Context(), created.ID)
 	require.NoError(t, err)
 	require.NotNil(t, secrets)
-	require.Empty(t, secrets.MasterPrivParams)
+	require.Equal(t, params.MasterKeyPrivParams, secrets.MasterPrivParams)
 	require.Empty(t, secrets.EncryptedCryptoPrivKey)
 	require.Empty(t, secrets.EncryptedMasterHdPrivKey)
-	require.Empty(t, secrets.EncryptedCryptoScriptKey)
+	require.Equal(
+		t, params.EncryptedCryptoScriptKey,
+		secrets.EncryptedCryptoScriptKey,
+	)
 }
 
 // TestGetWalletSecretsNotFound verifies missing wallets map to
