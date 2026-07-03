@@ -93,6 +93,9 @@ var (
 	// without a name.
 	ErrMissingAccountName = errors.New("account name is required")
 
+	// ErrMissingField is returned when required request fields are missing.
+	ErrMissingField = errors.New("missing required field")
+
 	// ErrReservedAccountName is returned when a caller-initiated account
 	// operation targets the reserved wallet-level imported bucket name
 	// (DefaultImportedAccountName). Raw single imports use that alias in
@@ -215,10 +218,10 @@ type WalletStore interface {
 	GetEncryptedHDSeed(ctx context.Context, walletID uint32) ([]byte, error)
 
 	// GetWalletSecrets retrieves the encrypted wallet secret material for the
-	// given wallet. Watch-only wallets may return empty secret fields without
-	// error when those values are absent in storage. If the wallet exists but
-	// its wallet_secrets row is missing, it returns ErrSecretNotFound rather
-	// than ErrWalletNotFound.
+	// given wallet. Every wallet secret row includes master private parameters
+	// and the encrypted script crypto key; watch-only wallets omit only private
+	// key material. If the wallet exists but its wallet_secrets row is missing,
+	// it returns ErrSecretNotFound rather than ErrWalletNotFound.
 	GetWalletSecrets(ctx context.Context, walletID uint32) (*WalletSecrets,
 		error)
 

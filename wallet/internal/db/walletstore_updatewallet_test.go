@@ -133,3 +133,108 @@ func TestUpdateWalletWithOpsWalletNotFound(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrWalletNotFound)
 }
+
+// TestCreateWalletParamsValidateAllowsWatchOnlyScriptSecrets verifies that
+// watch-only wallets accept required script-encryption material without
+// including spendable private material.
+func TestCreateWalletParamsValidateAllowsWatchOnlyScriptSecrets(t *testing.T) {
+	t.Parallel()
+
+	params := CreateWalletParams{
+		Name:                     "watch-only",
+		IsWatchOnly:              true,
+		MasterKeyPrivParams:      []byte{1, 2, 3},
+		EncryptedCryptoScriptKey: []byte{4, 5, 6},
+	}
+
+	err := params.Validate()
+
+	require.NoError(t, err)
+}
+
+// TestCreateWalletParamsValidateRejectsWatchOnlySpendableSecrets verifies that
+// watch-only wallet creation still rejects private wallet material.
+func TestCreateWalletParamsValidateRejectsWatchOnlySpendableSecrets(
+	t *testing.T) {
+
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params CreateWalletParams
+	}{
+		{
+			name: "private crypto key",
+			params: CreateWalletParams{
+				Name:                     "watch-only",
+				IsWatchOnly:              true,
+				MasterKeyPrivParams:      []byte{1, 2, 3},
+				EncryptedCryptoPrivKey:   []byte{1},
+				EncryptedCryptoScriptKey: []byte{4, 5, 6},
+			},
+		},
+		{
+			name: "master HD private key",
+			params: CreateWalletParams{
+				Name:                     "watch-only",
+				IsWatchOnly:              true,
+				EncryptedMasterPrivKey:   []byte{1},
+				MasterKeyPrivParams:      []byte{1, 2, 3},
+				EncryptedCryptoScriptKey: []byte{4, 5, 6},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.params.Validate()
+
+			require.ErrorIs(t, err, ErrWatchOnlyViolation)
+		})
+	}
+}
+
+// TestCreateWalletParamsValidateRejectsMissingRequiredSecrets verifies that
+// wallet creation rejects missing fields required by the wallet_secrets schema.
+func TestCreateWalletParamsValidateRejectsMissingRequiredSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		params      CreateWalletParams
+		wantErr     error
+		wantContain string
+	}{
+		{
+			name: "missing master private parameters",
+			params: CreateWalletParams{
+				Name:                     "wallet",
+				EncryptedCryptoScriptKey: []byte{4, 5, 6},
+			},
+			wantErr:     ErrMissingField,
+			wantContain: "wallet \"wallet\" master private parameters",
+		},
+		{
+			name: "missing encrypted script key",
+			params: CreateWalletParams{
+				Name:                "wallet",
+				MasterKeyPrivParams: []byte{1, 2, 3},
+			},
+			wantErr:     ErrMissingField,
+			wantContain: "wallet \"wallet\" encrypted script crypto key",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := test.params.Validate()
+
+			require.ErrorIs(t, err, test.wantErr)
+			require.ErrorContains(t, err, test.wantContain)
+		})
+	}
+}
