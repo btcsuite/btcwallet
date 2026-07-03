@@ -53,15 +53,11 @@ func (o updateWalletSecretsOps) UpdateWalletSecrets(ctx context.Context,
 
 	rowsAffected, err := o.q.UpdateWalletSecrets(
 		ctx, sqlc.UpdateWalletSecretsParams{
-			MasterPrivParams: db.NilIfEmptyBytes(
-				params.MasterPrivParams,
-			),
+			MasterPrivParams: params.MasterPrivParams,
 			EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
 				params.EncryptedCryptoPrivKey,
 			),
-			EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
-				params.EncryptedCryptoScriptKey,
-			),
+			EncryptedCryptoScriptKey: params.EncryptedCryptoScriptKey,
 			EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
 				params.EncryptedMasterHdPrivKey,
 			),

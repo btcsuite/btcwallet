@@ -68,16 +68,12 @@ func (o createWalletOps) InsertWalletSecrets(ctx context.Context,
 	walletID int64, params db.CreateWalletParams) error {
 
 	return o.q.InsertWalletSecrets(ctx, sqlc.InsertWalletSecretsParams{
-		WalletID: walletID,
-		MasterPrivParams: db.NilIfEmptyBytes(
-			params.MasterKeyPrivParams,
-		),
+		WalletID:         walletID,
+		MasterPrivParams: params.MasterKeyPrivParams,
 		EncryptedCryptoPrivKey: db.NilIfEmptyBytes(
 			params.EncryptedCryptoPrivKey,
 		),
-		EncryptedCryptoScriptKey: db.NilIfEmptyBytes(
-			params.EncryptedCryptoScriptKey,
-		),
+		EncryptedCryptoScriptKey: params.EncryptedCryptoScriptKey,
 		EncryptedMasterHdPrivKey: db.NilIfEmptyBytes(
 			params.EncryptedMasterPrivKey,
 		),

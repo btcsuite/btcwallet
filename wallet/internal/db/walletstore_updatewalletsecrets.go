@@ -6,15 +6,35 @@ import (
 )
 
 // Validate checks wallet secret update parameters for store-level invariants.
-// Watch-only wallets may keep the script crypto key so they can still encrypt
-// imported scripts, but they must not include private wallet secret material.
+// Every wallet must store the key-derivation parameters and script crypto key;
+// spendable wallets must include private wallet secret material, while
+// watch-only wallets must not include it.
 func (p *UpdateWalletSecretsParams) Validate(walletIsWatchOnly bool) error {
+	if len(p.MasterPrivParams) == 0 {
+		return fmt.Errorf("wallet %d master private parameters: %w", p.WalletID,
+			ErrMissingField)
+	}
+
+	if len(p.EncryptedCryptoScriptKey) == 0 {
+		return fmt.Errorf("wallet %d encrypted script crypto key: %w",
+			p.WalletID, ErrMissingField)
+	}
+
 	if !walletIsWatchOnly {
+		if len(p.EncryptedCryptoPrivKey) == 0 {
+			return fmt.Errorf("wallet %d private crypto key: %w", p.WalletID,
+				ErrMissingField)
+		}
+
+		if len(p.EncryptedMasterHdPrivKey) == 0 {
+			return fmt.Errorf("wallet %d master HD private key: %w", p.WalletID,
+				ErrMissingField)
+		}
+
 		return nil
 	}
 
-	if len(p.MasterPrivParams) == 0 &&
-		len(p.EncryptedCryptoPrivKey) == 0 &&
+	if len(p.EncryptedCryptoPrivKey) == 0 &&
 		len(p.EncryptedMasterHdPrivKey) == 0 {
 
 		return nil

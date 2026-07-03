@@ -42,37 +42,44 @@ END;
 -- Wallet Secrets table to store rarely accessed, highly sensitive encrypted
 -- material with a strict one-to-one relationship with the wallets table.
 -- Separated from the main wallets table for security and access pattern isolation.
--- Watch-only wallets may have no corresponding row in this table or may store
--- only script-encryption material while private wallet secret fields stay NULL.
+-- Every wallet has a corresponding row in this table. Watch-only wallets still
+-- require script-encryption material while private wallet secret fields stay NULL.
 CREATE TABLE wallet_secrets (
     -- Reference to the wallet these secrets belong to. Also serves as the
     -- primary key, enforcing one-to-one relationship.
     wallet_id INTEGER PRIMARY KEY,
 
-    -- Params to derive the private master key. NULL for watch-only wallets.
-    master_priv_params BLOB,
+    -- Params to derive the private master key. Required for every wallet,
+    -- including watch-only wallets, because these derive the key that protects
+    -- the script crypto key.
+    master_priv_params BLOB NOT NULL,
 
     -- Encrypted key used to encrypt/decrypt wallet data related to private keys.
     -- NULL for watch-only wallets.
     encrypted_crypto_priv_key BLOB,
 
     -- Encrypted key used to encrypt/decrypt wallet data related to scripts.
-    -- Watch-only wallets may still store this to protect imported scripts.
-    encrypted_crypto_script_key BLOB,
+    -- NOT NULL and required for every wallet, including watch-only wallets, to
+    -- protect script and imported-script material.
+    encrypted_crypto_script_key BLOB NOT NULL,
 
     -- Encrypted HD private key of the wallet. NULL for watch-only wallets.
     encrypted_master_hd_priv_key BLOB,
 
     -- Foreign key constraint to wallet. Using ON DELETE RESTRICT to ensure
     -- that the wallet cannot be deleted if secrets still exist.
-    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT
+    FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT,
+
+    -- NOT NULL still allows zero-length BLOB values, so these CHECKs keep the
+    -- required-secret blobs non-empty at the DB boundary.
+    CHECK (length(master_priv_params) > 0),
+    CHECK (length(encrypted_crypto_script_key) > 0)
 );
 
--- Enforce the watch-only wallet secret invariant at the database boundary.
--- Watch-only wallets may retain script-encryption material for imported
--- scripts, but must never store private key material; keeping these columns
--- NULL prevents an insert or update from silently turning a watch-only wallet
--- into a spend-capable wallet.
+-- Enforce wallet-mode secret invariants at the database boundary. Watch-only
+-- wallets require script-encryption material for imported scripts, but must
+-- never store private key material. Spendable wallets must store the encrypted
+-- private crypto key and encrypted master HD private key they need to unlock.
 CREATE TRIGGER trg_assert_watch_only_wallet_secrets_insert
 BEFORE INSERT ON wallet_secrets
 FOR EACH ROW
@@ -83,9 +90,23 @@ BEGIN
         FROM wallets AS w
         WHERE w.id = new.wallet_id
     ) AND (
-        new.master_priv_params IS NOT NULL
-        OR new.encrypted_crypto_priv_key IS NOT NULL
+        new.encrypted_crypto_priv_key IS NOT NULL
         OR new.encrypted_master_hd_priv_key IS NOT NULL
+    );
+
+    SELECT
+        raise(
+            ABORT, 'spendable wallet private secret columns must be non-empty'
+        )
+    WHERE NOT (
+        SELECT w.is_watch_only
+        FROM wallets AS w
+        WHERE w.id = new.wallet_id
+    ) AND (
+        new.encrypted_crypto_priv_key IS NULL
+        OR length(new.encrypted_crypto_priv_key) = 0
+        OR new.encrypted_master_hd_priv_key IS NULL
+        OR length(new.encrypted_master_hd_priv_key) = 0
     );
 END;
 
@@ -99,9 +120,23 @@ BEGIN
         FROM wallets AS w
         WHERE w.id = new.wallet_id
     ) AND (
-        new.master_priv_params IS NOT NULL
-        OR new.encrypted_crypto_priv_key IS NOT NULL
+        new.encrypted_crypto_priv_key IS NOT NULL
         OR new.encrypted_master_hd_priv_key IS NOT NULL
+    );
+
+    SELECT
+        raise(
+            ABORT, 'spendable wallet private secret columns must be non-empty'
+        )
+    WHERE NOT (
+        SELECT w.is_watch_only
+        FROM wallets AS w
+        WHERE w.id = new.wallet_id
+    ) AND (
+        new.encrypted_crypto_priv_key IS NULL
+        OR length(new.encrypted_crypto_priv_key) = 0
+        OR new.encrypted_master_hd_priv_key IS NULL
+        OR length(new.encrypted_master_hd_priv_key) = 0
     );
 END;
 
