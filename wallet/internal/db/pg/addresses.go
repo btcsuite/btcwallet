@@ -67,90 +67,6 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 	)
 }
 
-// NewImportedAddress imports a new address, script, or private key.
-func (s *Store) NewImportedAddress(ctx context.Context,
-	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
-
-	err := params.ValidateBasic()
-	if err != nil {
-		return nil, err
-	}
-
-	var info *db.AddressInfo
-
-	err = s.execWrite(ctx, func(qtx *sqlc.Queries) error {
-		created, err := s.createImportedAddress(ctx, qtx, params)
-		if err != nil {
-			return err
-		}
-
-		info = created
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return info, nil
-}
-
-// createImportedAddress performs the imported-address write within an existing
-// transaction and returns the resulting address info.
-func (s *Store) createImportedAddress(ctx context.Context, qtx *sqlc.Queries,
-	params db.NewImportedAddressParams) (*db.AddressInfo, error) {
-
-	walletIsWatchOnly, err := getWalletWatchOnly(ctx, qtx, params.WalletID)
-	if err != nil {
-		return nil, err
-	}
-
-	err = params.ValidateWatchOnly(walletIsWatchOnly)
-	if err != nil {
-		return nil, err
-	}
-
-	err = db.RequireAddressPrivKeyOnSpendable(
-		params.WalletID, walletIsWatchOnly, params.HasPrivateKey(),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	row, err := qtx.CreateImportedAddress(
-		ctx, createImportedAddressParams(params),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create imported address: %w", err)
-	}
-
-	if params.HasSecretMaterial() {
-		err = qtx.InsertAddressSecret(
-			ctx, insertAddressSecretParams(row.ID, params),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("insert address secret: %w", err)
-		}
-	}
-
-	addrID, err := db.Int64ToUint32(row.ID)
-	if err != nil {
-		return nil, fmt.Errorf("address ID: %w", err)
-	}
-
-	return &db.AddressInfo{
-		ID:           addrID,
-		AddrType:     params.AddressType,
-		CreatedAt:    row.CreatedAt,
-		IsImported:   true,
-		ScriptPubKey: params.ScriptPubKey,
-		PubKey:       params.PubKey,
-		HasScript:    params.HasScript(),
-		IsWatchOnly:  walletIsWatchOnly,
-		IsUsed:       false,
-	}, nil
-}
-
 // getAccountFromKey returns a helper to look up accounts by key.
 func getAccountFromKey(qtx *sqlc.Queries) func(context.Context,
 	db.AccountLookupKey) (sqlc.GetAccountByWalletScopeAndNameRow, error) {
@@ -252,33 +168,6 @@ func derivedAddressRowCreatedAt(
 	row sqlc.CreateDerivedAddressRow) time.Time {
 
 	return row.CreatedAt
-}
-
-// createImportedAddressParams maps imported params to sqlc params.
-func createImportedAddressParams(
-	params db.NewImportedAddressParams) sqlc.CreateImportedAddressParams {
-
-	return sqlc.CreateImportedAddressParams{
-		WalletID:     int64(params.WalletID),
-		ScriptPubKey: params.ScriptPubKey,
-		ScriptTypeID: int16(params.AddressType),
-		PubKey:       params.PubKey,
-	}
-}
-
-// insertAddressSecretParams maps imported params to secret params.
-func insertAddressSecretParams(addressID int64,
-	params db.NewImportedAddressParams) sqlc.InsertAddressSecretParams {
-
-	return sqlc.InsertAddressSecretParams{
-		AddressID: addressID,
-		EncryptedPrivKey: db.NilIfEmptyBytes(
-			params.EncryptedPrivateKey,
-		),
-		EncryptedScript: db.NilIfEmptyBytes(
-			params.EncryptedScript,
-		),
-	}
 }
 
 // applyAddressAccountMetadata copies account metadata from the account lookup
