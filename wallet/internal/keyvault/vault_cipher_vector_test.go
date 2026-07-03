@@ -29,6 +29,8 @@ type knownSecrets struct {
 	expectedCryptoScriptKeyHex  string
 	scriptPlaintext             string
 	scriptCiphertextHex         string
+
+	encryptedMasterHdPrivKeyHex string
 }
 
 // knownSecretsVector lists the fixed wallet crypto vectors exercised by the
@@ -66,6 +68,12 @@ var knownSecretsVector = []knownSecrets{
 		scriptCiphertextHex: "808182838485868788898a8b8c8d8e8f90919293949596" +
 			"97625f4959ccbe194fa059bab34e292c093d90ec9311a0a78a3105fde16a28b" +
 			"a378c0c",
+		encryptedMasterHdPrivKeyHex: "d372dde59df7a38987199bd8ac2890091372c6" +
+			"63808b5f02ff957f50d969b1fbf62f7719ec73fa29db6bdd13e6b90a1c68c02" +
+			"48a28ff60631862f17a31db9cde10d83968a3e5d3cec352eda6ce650eb54db5" +
+			"4e0bb6ca4657baef9f3cbf66bf9a087722bc14de65f55df0b5a77bd975164da" +
+			"8cf63151711f1766b26b6e7a1db92a29b669042c43c54996cb495775ccdc510" +
+			"249324d06f60",
 	},
 	{
 		name: "cactus",
@@ -99,6 +107,12 @@ var knownSecretsVector = []knownSecrets{
 		scriptCiphertextHex: "808182838485868788898a8b8c8d8e8f90919293949596" +
 			"9715d23fd581b57ca0117f583b2ee0198bf3b37d4770b55c05911d196893871" +
 			"95cb00c2b",
+		encryptedMasterHdPrivKeyHex: "3d5f5f2edd5b829fb3998550a2e72b80bbcff7" +
+			"0b3ffdbb5684720e045e3139340b3c4d5d3fc37b0cd5e71f333adf38a4233b0" +
+			"0f11f975d83351ce62a64472d605ba7a36878b350f6da192ed1a5fdad65c7ac" +
+			"258b8530cbed7b73f9db65c25804cc32226552528c7905416f934a36c0c3e57" +
+			"ab58d0364d28ef5762a872df37cd622be0410f8cdcf74307ea793f75b530d68" +
+			"0e12607c4bce",
 	},
 }
 
@@ -151,6 +165,9 @@ func TestWalletVaultKnownVectorUnlockAndDecrypt(t *testing.T) {
 				EncryptedCryptoScriptKey: decodeHex(
 					t, known.encryptedCryptoScriptKeyHex,
 				),
+				EncryptedMasterHdPrivKey: decodeHex(
+					t, known.encryptedMasterHdPrivKeyHex,
+				),
 			}
 
 			const walletID = uint32(1)
@@ -162,7 +179,7 @@ func TestWalletVaultKnownVectorUnlockAndDecrypt(t *testing.T) {
 				store.AssertExpectations(t)
 			})
 
-			vault := NewWalletVault(store, walletID)
+			vault := NewWalletVault(store, walletID, false)
 			require.NoError(
 				t, vault.Unlock(t.Context(), []byte(known.passphrase)),
 			)

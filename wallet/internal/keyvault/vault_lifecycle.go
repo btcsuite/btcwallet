@@ -59,7 +59,7 @@ func (v *WalletVault) Unlock(ctx context.Context, passphrase []byte) error {
 			v.walletID, err)
 	}
 
-	state, err := decryptWalletSecrets(secrets, passphrase)
+	state, err := decryptWalletSecrets(secrets, passphrase, v.watchOnly)
 	if err != nil {
 		return fmt.Errorf("wallet %d vault Unlock: decrypt secrets: %w",
 			v.walletID, err)
@@ -75,8 +75,8 @@ func (v *WalletVault) Unlock(ctx context.Context, passphrase []byte) error {
 // TODO(gus): wrap with secret.Do from golang 1.26+. There are functions that
 // actually leaks a lot of information in memory while waiting GC, like
 // hdkeychain.NewKeyFromString.
-func decryptWalletSecrets(secrets *db.WalletSecrets,
-	passphrase []byte) (*unlockedState, error) {
+func decryptWalletSecrets(secrets *db.WalletSecrets, passphrase []byte,
+	watchOnly bool) (*unlockedState, error) {
 
 	if secrets == nil {
 		// This error is not expected to happen.
@@ -99,45 +99,69 @@ func decryptWalletSecrets(secrets *db.WalletSecrets,
 		return nil, err
 	}
 
-	// With the master key, we can start decrypting the other encrypted keys,
-	// including the master HD private key that can spend coins.
-	cryptoKeyPrivate, err := decryptCryptoKey(
-		&masterPrivateKey, secrets.EncryptedCryptoPrivKey,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("crypto key private: %w", err)
+	if watchOnly {
+		return decryptWatchOnlyWalletSecrets(&masterPrivateKey, secrets)
 	}
-	defer cryptoKeyPrivate.Zero()
+
+	return decryptSpendableWalletSecrets(&masterPrivateKey, secrets)
+}
+
+// decryptWatchOnlyWalletSecrets decrypts watch-only secret material.
+func decryptWatchOnlyWalletSecrets(masterPrivateKey *snacl.SecretKey,
+	secrets *db.WalletSecrets) (*unlockedState, error) {
 
 	cryptoKeyScript, err := decryptCryptoKey(
-		&masterPrivateKey, secrets.EncryptedCryptoScriptKey,
+		masterPrivateKey, secrets.EncryptedCryptoScriptKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("crypto key script: %w", err)
 	}
 	defer cryptoKeyScript.Zero()
 
-	var hdRootKey *hdkeychain.ExtendedKey
+	return &unlockedState{
+		cryptoKeyScript: cryptoKeyScript,
+	}, nil
+}
 
-	// Watch-only wallets may retain encrypted script crypto material without an
-	// encrypted master HD private key. That persisted shape is legal and should
-	// unlock to script-only runtime state.
-	if len(secrets.EncryptedMasterHdPrivKey) != 0 {
-		decryptedHDPrivate, decryptErr := cryptoKeyPrivate.Decrypt(
-			secrets.EncryptedMasterHdPrivKey,
-		)
-		if decryptErr != nil {
-			return nil, fmt.Errorf("decrypt master HD private key: %w: %w",
-				errUnexpectedState, decryptErr)
-		}
-		defer clear(decryptedHDPrivate)
+// decryptSpendableWalletSecrets decrypts spendable secret material.
+func decryptSpendableWalletSecrets(masterPrivateKey *snacl.SecretKey,
+	secrets *db.WalletSecrets) (*unlockedState, error) {
 
-		hdRootKey, err = hdkeychain.NewKeyFromString(
-			string(decryptedHDPrivate),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("parse master HD private key: %w", err)
-		}
+	cryptoKeyPrivate, err := decryptCryptoKey(
+		masterPrivateKey, secrets.EncryptedCryptoPrivKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("crypto key private: %w", err)
+	}
+	defer cryptoKeyPrivate.Zero()
+
+	if len(secrets.EncryptedMasterHdPrivKey) == 0 {
+		return nil, fmt.Errorf("missing master HD private key: %w",
+			errUnexpectedState)
+	}
+
+	cryptoKeyScript, err := decryptCryptoKey(
+		masterPrivateKey, secrets.EncryptedCryptoScriptKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("crypto key script: %w", err)
+	}
+	defer cryptoKeyScript.Zero()
+
+	decryptedHDPrivate, decryptErr := cryptoKeyPrivate.Decrypt(
+		secrets.EncryptedMasterHdPrivKey,
+	)
+	if decryptErr != nil {
+		return nil, fmt.Errorf("decrypt master HD private key: %w: %w",
+			errUnexpectedState, decryptErr)
+	}
+	defer clear(decryptedHDPrivate)
+
+	hdRootKey, err := hdkeychain.NewKeyFromString(
+		string(decryptedHDPrivate),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parse master HD private key: %w", err)
 	}
 
 	state := &unlockedState{
@@ -250,7 +274,9 @@ func (v *WalletVault) validateRotatedWalletSecrets(
 		EncryptedMasterHdPrivKey: params.EncryptedMasterHdPrivKey,
 	}
 
-	validatedState, err := decryptWalletSecrets(&updatedSecrets, passphrase)
+	validatedState, err := decryptWalletSecrets(
+		&updatedSecrets, passphrase, v.watchOnly,
+	)
 	if err != nil {
 		return fmt.Errorf("decrypt rotated secrets: %w", err)
 	}
@@ -323,7 +349,22 @@ func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
 	}
 	defer newMasterPrivateKey.Zero()
 
-	// Third, reencrypt the already unlocked material and return it.
+	if v.watchOnly {
+		encryptedCryptoKeyScript, scriptErr := newMasterPrivateKey.Encrypt(
+			v.unlockedState.cryptoKeyScript[:],
+		)
+		if scriptErr != nil {
+			return db.UpdateWalletSecretsParams{},
+				fmt.Errorf("encrypt crypto key script: %w", scriptErr)
+		}
+
+		return db.UpdateWalletSecretsParams{
+			WalletID:                 v.walletID,
+			MasterPrivParams:         newMasterPrivateKey.Marshal(),
+			EncryptedCryptoScriptKey: encryptedCryptoKeyScript,
+		}, nil
+	}
+
 	encryptedCryptoKeyPrivate, err := newMasterPrivateKey.Encrypt(
 		v.unlockedState.cryptoKeyPrivate[:],
 	)

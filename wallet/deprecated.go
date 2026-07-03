@@ -7212,10 +7212,12 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	store := kvdb.NewStore(db, txMgr, addrMgr)
 
 	w := &Wallet{
-		id:               walletID,
-		addrStore:        addrMgr,
-		store:            store,
-		keyVault:         keyvault.NewWalletVault(store, walletID),
+		id:        walletID,
+		addrStore: addrMgr,
+		store:     store,
+		keyVault: keyvault.NewWalletVault(
+			store, walletID, addrMgr.WatchOnly(),
+		),
 		txStore:          txMgr,
 		walletDeprecated: deprecated,
 	}
