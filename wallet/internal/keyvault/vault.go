@@ -25,6 +25,9 @@ type WalletVault struct {
 	// walletID is the wallet row id that this vault is scoped to.
 	walletID uint32
 
+	// watchOnly reports whether this vault belongs to a watch-only wallet.
+	watchOnly bool
+
 	// mtx guards concurrent access.
 	mtx sync.Mutex
 
@@ -50,10 +53,13 @@ type unlockedState struct {
 var _ Vault = (*WalletVault)(nil)
 
 // NewWalletVault creates a key-vault bridge scoped to one wallet row.
-func NewWalletVault(store db.Store, walletID uint32) *WalletVault {
+func NewWalletVault(store db.Store, walletID uint32,
+	watchOnly bool) *WalletVault {
+
 	return &WalletVault{
-		store:    store,
-		walletID: walletID,
+		store:     store,
+		walletID:  walletID,
+		watchOnly: watchOnly,
 	}
 }
 
