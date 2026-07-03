@@ -10,6 +10,22 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
+// DefaultImportedAccountName is the default account name for imported
+// addresses.
+const DefaultImportedAccountName = "imported"
+
+// requireUnreservedAccountName rejects caller-initiated account operations
+// that target the reserved imported alias. Raw imported addresses use this
+// alias for compatibility, but SQL must not materialize it as an account row.
+// Centralized here so all account paths share one definition of "reserved".
+func requireUnreservedAccountName(name string) error {
+	if name == DefaultImportedAccountName {
+		return fmt.Errorf("%q: %w", name, ErrReservedAccountName)
+	}
+
+	return nil
+}
+
 var (
 	// ErrNilDBAccountNumber is returned when the database returns a nil account
 	// number. In practice, this should never happen, but it's possible if the
