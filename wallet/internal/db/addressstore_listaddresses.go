@@ -1,5 +1,15 @@
 package db
 
+import (
+	"errors"
+)
+
+// ErrInvalidListAddressesQuery is returned when a list-addresses request
+// mixes derived-account and raw-import selector fields.
+var ErrInvalidListAddressesQuery = errors.New(
+	"list addresses requires both Scope and AccountName, or neither",
+)
+
 // ListAddressesTarget identifies which address listing a ListAddresses query
 // selects.
 type ListAddressesTarget int
