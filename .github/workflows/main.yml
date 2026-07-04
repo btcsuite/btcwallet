@@ -25,7 +25,7 @@ env:
 
   # If you change this please run `make lint` to see where else it needs to be
   # updated as well.
-  GO_VERSION: 1.24.6
+  GO_VERSION: 1.25.11
 
   BITCOIND_VERSION: '22.0'
   BITCOIND_IMAGE: 'lightninglabs/bitcoin-core'
