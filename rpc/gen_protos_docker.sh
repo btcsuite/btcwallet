@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # golang docker image version used in this script.
-GO_IMAGE=docker.io/library/golang:1.23.12-alpine
+GO_IMAGE=docker.io/library/golang:1.25.11-alpine
 
 # protobuf generator version with legacy plugins=grpc support. Using v1.4.3 to
 # maintain backward compatibility - generates single file instead of separate
