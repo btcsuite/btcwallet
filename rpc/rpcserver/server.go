@@ -446,10 +446,19 @@ func (s *walletServer) SignTransaction(ctx context.Context, req *pb.SignTransact
 	defer zero.Bytes(req.Passphrase)
 
 	var tx wire.MsgTx
-	err := tx.Deserialize(bytes.NewReader(req.SerializedTransaction))
+	txReader := bytes.NewReader(req.SerializedTransaction)
+	err := tx.Deserialize(txReader)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"Bytes do not represent a valid raw transaction: %v", err)
+	}
+
+	// The transaction must consume the entire input. Extra trailing bytes
+	// indicate a malformed serialized transaction.
+	if txReader.Len() != 0 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"Bytes do not represent a valid raw transaction: "+
+				"unexpected trailing bytes")
 	}
 
 	lock := make(chan time.Time, 1)
@@ -496,10 +505,19 @@ func (s *walletServer) PublishTransaction(ctx context.Context, req *pb.PublishTr
 	*pb.PublishTransactionResponse, error) {
 
 	var msgTx wire.MsgTx
-	err := msgTx.Deserialize(bytes.NewReader(req.SignedTransaction))
+	txReader := bytes.NewReader(req.SignedTransaction)
+	err := msgTx.Deserialize(txReader)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument,
 			"Bytes do not represent a valid raw transaction: %v", err)
+	}
+
+	// The transaction must consume the entire input. Extra trailing bytes
+	// indicate a malformed serialized transaction.
+	if txReader.Len() != 0 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"Bytes do not represent a valid raw transaction: "+
+				"unexpected trailing bytes")
 	}
 
 	err = s.wallet.PublishTransaction(&msgTx, "")
