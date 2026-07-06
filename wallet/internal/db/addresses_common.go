@@ -111,16 +111,6 @@ func (p NewImportedAddressParams) HasScript() bool {
 	return len(p.EncryptedScript) > 0
 }
 
-// NextListAddressesQuery returns a query with its pagination cursor advanced to
-// the provided value.
-func NextListAddressesQuery(q ListAddressesQuery,
-	cursor uint32) ListAddressesQuery {
-
-	q.Page.After = &cursor
-
-	return q
-}
-
 // DerivedAddressAdapters groups the functions needed to create a
 // derived address across different database backends.
 type DerivedAddressAdapters[QTX any, AccountRow any, AccountParams any,
