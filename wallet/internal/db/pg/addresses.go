@@ -95,39 +95,6 @@ func (s *Store) IterAddresses(ctx context.Context,
 	)
 }
 
-// GetAddressSecret retrieves the encrypted secret information for an address.
-func (s *Store) GetAddressSecret(ctx context.Context,
-	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
-
-	getSecret := func(ctx context.Context, walletID int64,
-		addressID int64) (sqlc.GetAddressSecretRow, error) {
-
-		return s.queries.GetAddressSecret(
-			ctx, sqlc.GetAddressSecretParams{
-				WalletID: walletID,
-				ID:       addressID,
-			},
-		)
-	}
-
-	var secret *db.AddressSecret
-
-	err := s.execRead(ctx, func(_ *sqlc.Queries) error {
-		var err error
-
-		secret, err = db.GetAddressSecret(
-			ctx, getSecret, query, addressSecretRowToSecret,
-		)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return secret, nil
-}
-
 // NewDerivedAddress creates a new address for a given account and key
 // scope.
 func (s *Store) NewDerivedAddress(ctx context.Context,
