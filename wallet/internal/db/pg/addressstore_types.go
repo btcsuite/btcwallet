@@ -2,6 +2,9 @@ package pg
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
@@ -29,13 +32,22 @@ func (s *Store) ListAddressTypes(ctx context.Context) (
 	var infos []db.AddressTypeInfo
 
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
-		var err error
+		rows, err := q.ListAddressTypes(ctx)
+		if err != nil {
+			return fmt.Errorf("list address types: %w", err)
+		}
 
-		infos, err = db.ListAddressTypes(
-			ctx, q.ListAddressTypes, addressTypeRowToInfo,
-		)
+		infos = make([]db.AddressTypeInfo, len(rows))
+		for i, row := range rows {
+			info, err := addressTypeRowToInfo(row)
+			if err != nil {
+				return err
+			}
 
-		return err
+			infos[i] = info
+		}
+
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -52,12 +64,17 @@ func (s *Store) GetAddressType(ctx context.Context,
 	var info db.AddressTypeInfo
 
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
-		var err error
+		row, err := q.GetAddressTypeByID(ctx, int16(id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("address type %d: %w", id,
+				db.ErrAddressTypeNotFound)
+		}
 
-		info, err = db.GetAddressTypeByID(
-			ctx, q.GetAddressTypeByID, int16(id), id,
-			addressTypeRowToInfo,
-		)
+		if err != nil {
+			return fmt.Errorf("get address type: %w", err)
+		}
+
+		info, err = addressTypeRowToInfo(row)
 
 		return err
 	})
