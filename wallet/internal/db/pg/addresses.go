@@ -14,39 +14,6 @@ import (
 
 var _ db.AddressStore = (*Store)(nil)
 
-// GetAddress retrieves information about a specific address, identified by
-// its script pubkey.
-func (s *Store) GetAddress(ctx context.Context,
-	query db.GetAddressQuery) (*db.AddressInfo, error) {
-
-	var info *db.AddressInfo
-
-	err := s.execRead(ctx, func(q *sqlc.Queries) error {
-		getByScript := func(ctx context.Context,
-			query db.GetAddressQuery) (*db.AddressInfo, error) {
-
-			return db.GetAddress(
-				ctx, q.GetAddressByScriptPubKey,
-				sqlc.GetAddressByScriptPubKeyParams{
-					ScriptPubKey: query.ScriptPubKey,
-					WalletID:     int64(query.WalletID),
-				}, addressRowToInfo,
-			)
-		}
-
-		var err error
-
-		info, err = db.GetAddressByQuery(ctx, query, getByScript)
-
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return info, nil
-}
-
 // ResolveOwnedAddresses resolves a batch of script pubkeys to the wallet-owned
 // subset using a single query.
 func (s *Store) ResolveOwnedAddresses(ctx context.Context,

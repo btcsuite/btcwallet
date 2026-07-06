@@ -132,25 +132,6 @@ func (p NewImportedAddressParams) HasScript() bool {
 	return len(p.EncryptedScript) > 0
 }
 
-// GetAddress is a generic helper that retrieves a single address using the
-// provided getter function. It handles sql.ErrNoRows mapping and delegates
-// conversion to the toInfo function.
-func GetAddress[T any, Args any](ctx context.Context,
-	getter func(context.Context, Args) (T, error), args Args,
-	toInfo func(T) (*AddressInfo, error)) (*AddressInfo, error) {
-
-	row, err := getter(ctx, args)
-	if err == nil {
-		return toInfo(row)
-	}
-
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get address: %w", err)
-	}
-
-	return nil, ErrAddressNotFound
-}
-
 // NextListAddressesQuery returns a query with its pagination cursor advanced to
 // the provided value.
 func NextListAddressesQuery(q ListAddressesQuery,
@@ -241,20 +222,6 @@ func DerivedAddressCreateAddr[CreateParams any, AddrRow any](
 
 		return create(ctx, params)
 	}
-}
-
-// GetAddressFunc defines a function signature for retrieving a single address.
-type GetAddressFunc func(context.Context, GetAddressQuery) (*AddressInfo, error)
-
-// GetAddressByQuery validates the query and executes the script-based lookup.
-func GetAddressByQuery(ctx context.Context, query GetAddressQuery,
-	getter GetAddressFunc) (*AddressInfo, error) {
-
-	if len(query.ScriptPubKey) == 0 {
-		return nil, ErrInvalidAddressQuery
-	}
-
-	return getter(ctx, query)
 }
 
 // createDerivedAddress is a generic helper that encapsulates the shared
