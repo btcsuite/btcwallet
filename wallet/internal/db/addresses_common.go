@@ -43,27 +43,6 @@ var (
 	)
 )
 
-// GetAddressSecret is a generic helper that retrieves address secret
-// information using the provided getter function and converts it to an
-// AddressSecret with error handling.
-func GetAddressSecret[Row any](ctx context.Context,
-	getter func(context.Context, int64, int64) (Row, error),
-	query GetAddressSecretQuery,
-	toSecret func(Row) (*AddressSecret, error)) (*AddressSecret, error) {
-
-	row, err := getter(ctx, int64(query.WalletID), int64(query.AddressID))
-	if err == nil {
-		return toSecret(row)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("address secret for wallet %d address %d: %w",
-			query.WalletID, query.AddressID, ErrAddressNotFound)
-	}
-
-	return nil, fmt.Errorf("get address secret: %w", err)
-}
-
 // ValidateBasic checks imported address creation parameters that do not depend
 // on external state.
 func (p NewImportedAddressParams) ValidateBasic() error {
