@@ -1,12 +1,15 @@
 package keyvault
 
 import (
+	"context"
 	"errors"
 	"sync"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/snacl"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/signing"
 )
 
 var (
@@ -61,6 +64,20 @@ func NewWalletVault(store db.Store, walletID uint32,
 		walletID:  walletID,
 		watchOnly: watchOnly,
 	}
+}
+
+// DerivePubKey reports that WalletVault does not yet expose key operations.
+func (v *WalletVault) DerivePubKey(context.Context,
+	signing.KeyLocator) (*btcec.PublicKey, error) {
+
+	return nil, ErrVaultKeyOpsUnimplemented
+}
+
+// Sign reports that WalletVault does not yet expose key operations.
+func (v *WalletVault) Sign(context.Context, signing.Request) (signing.Signature,
+	error) {
+
+	return nil, ErrVaultKeyOpsUnimplemented
 }
 
 // zero clears the runtime secret material held by the unlocked state.
