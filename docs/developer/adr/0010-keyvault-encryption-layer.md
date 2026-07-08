@@ -30,6 +30,44 @@ to each lock, unlock, encrypt, decrypt, or derivation operation.
 Keyvault accesses persistence through `db.Store`. It does not talk directly to
 SQL backends.
 
+The vault API also includes a digest level signing method. `DerivePubKey` and
+`Sign` keep private key use inside the same wallet scoped boundary that owns
+lock state and key lifecycle. Callers identify keys with a sealed
+`wallet/signing.KeyLocator` variant: `FullHDKeyLocator` for a full HD
+derivation path, `AccountKeyLocator` for an account row child reference, or
+`ScriptPubKeyLocator` for raw or imported rows without exposing private key
+material or database routing.
+
+Wallet code builds a sealed `wallet/signing.Request` containing both the key
+locator and a caller computed `[32]byte` digest, then calls `Sign` with that
+request. Requests do not accept transactions, PSBTs, scripts, witnesses, or
+sighash types. Transaction sighash construction, PSBT assembly, signature
+serialization, appended sighash bytes, witness construction, and Taproot tree
+construction remain wallet layer responsibilities.
+
+`Sign` accepts a sealed `wallet/signing.Request` variant instead of a
+flag-heavy parameter struct. The sealed variants describe ECDSA, compact
+recoverable ECDSA, Schnorr, and tweaked Schnorr primitive operations, making
+invalid mode combinations unrepresentable outside the shared signing package.
+The shared package also defines sealed signature result variants so keyvault
+and later public wallet signing code can use the same primitive request and
+result machinery.
+
+The Schnorr tweak request uses BIP340 terminology for even-Y key normalization
+and carries an already computed additive secp256k1 scalar. This scalar is the
+final key-tweak value, not a Taproot script root, merkle root, or BIP341 tweak
+input byte string. These references describe the key and tweak concepts only.
+They do not move transaction, script, or Taproot tree knowledge into the vault.
+
+`wallet/signing.CompactECDSARequest` remains digest-level, and the returned
+compact recoverable ECDSA bytes remain the caller's responsibility for compact
+signature use and wallet-layer transaction assembly.
+
+`wallet/signing.SchnorrKeyTweak` is a value descriptor with a
+`Scalar btcec.ModNScalar` and `NormalizeEvenY bool`. Passing the additive scalar
+as data lets the vault apply the private key operation internally without
+accepting a private key callback from the wallet layer.
+
 ```mermaid
 flowchart TD
     wallet[Wallet]
@@ -85,9 +123,10 @@ wallet facing lock, unlock, encryption, decryption, and derivation APIs.
    zeroing.
 
 2. **Expose typed domain interfaces**
-   Keyvault returns domain types such as `*btcec.PrivateKey`,
-   `*btcec.PublicKey`, and `btcutil.Address` instead of exposing encrypted byte
-   slices to wallet code.
+   Keyvault exposes typed domain operations and results such as public keys,
+   signatures, and encrypted bytes as appropriate. Private key material remains
+   inside the vault instead of being returned to wallet code as raw key bytes or
+   blobs.
 
 3. **Handle HD derivation**
    Keyvault uses `btcutil/hdkeychain` for BIP32 and BIP44 derivation and returns
@@ -109,6 +148,11 @@ wallet facing lock, unlock, encryption, decryption, and derivation APIs.
    New code uses keyvault while legacy code continues to rely on `waddrmgr`
    until the migration is complete.
 
+8. **Sign caller computed digests**
+   Keyvault signs sealed ECDSA, compact recoverable ECDSA, Schnorr, and tweaked
+   Schnorr digest requests for located wallet keys while keeping transaction,
+   PSBT, script, witness, sighash, and Taproot tree logic in the wallet layer.
+
 ## 3. Consequences
 
 The wallet facing `keyvault.Vault` API intentionally does not expose wallet ID
@@ -127,6 +171,13 @@ code.
 
 Auto lock timeout scheduling is a wallet or controller lifecycle policy, not
 part of `keyvault.Vault`.
+
+The signing surface follows the same boundary. Wallet code chooses the key,
+constructs the 32-byte digest, builds the appropriate sealed
+`wallet/signing.Request` carrying both values, calls `Sign`, then serializes and
+attaches the returned sealed `wallet/signing.Signature` in the format required by
+the transaction or PSBT flow. This keeps private key access inside the vault
+without making the vault a Bitcoin transaction signer.
 
 ### Pros
 
@@ -162,6 +213,18 @@ part of `keyvault.Vault`.
 8. **Migration support**
    Keyvault can coexist with `waddrmgr`, allowing new SQL backed paths to move
    behind the new boundary before legacy paths are removed.
+
+9. **Narrow signing boundary**
+   Digest level signing keeps private key operations in one locked component
+   without duplicating transaction, PSBT, script, witness, or Taproot tree
+   responsibilities inside keyvault.
+
+10. **Tweak data stays explicit**
+    `wallet/signing.SchnorrKeyTweak` carries the already computed additive
+    secp256k1 scalar and even-Y normalization flag as data, so callers can
+    describe Taproot key tweaks without passing script roots, merkle roots,
+    BIP341 tweak input bytes, or private key callbacks across the vault
+    boundary.
 
 ### Cons
 
