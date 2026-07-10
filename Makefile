@@ -6,6 +6,8 @@ GOINSTALL := GO111MODULE=on go install -v
 
 GOFILES = $(shell find . -type f -name '*.go' -not -name "*.pb.go")
 
+SQL_DIR := wallet/internal/sql
+
 RM := rm -f
 CP := cp
 MAKE := make
@@ -159,6 +161,21 @@ tidy-module:
 tidy-module-check: tidy-module
 	if test -n "$$(git status --porcelain)"; then echo "modules not updated, please run `make tidy-module` again!"; git status; exit 1; fi
 
+#? sqlc: Generate type-safe Go code for the SQL backends
+sqlc: docker-tools
+	@$(call print, "Generating SQL models and queries.")
+	$(DOCKER_TOOLS) sqlc generate -f sqlc.yaml
+
+#? sqlc-check: Verify generated SQL code is up to date
+sqlc-check: sqlc
+	@$(call print, "Verifying generated SQL code.")
+	@if test -n "$$(git status --porcelain --untracked-files=all -- $(SQL_DIR))"; then \
+		echo "Generated SQL code is not up-to-date. Please run 'make sqlc' and commit the changes."; \
+		git status --short -- $(SQL_DIR); \
+		git diff -- $(SQL_DIR); \
+		exit 1; \
+	fi
+
 .PHONY: all \
 	default \
 	build \
@@ -172,6 +189,8 @@ tidy-module-check: tidy-module
 	fmt-check \
 	tidy-module \
 	tidy-module-check \
+	sqlc \
+	sqlc-check \
 	rpc-format \
 	lint \
 	lint-config-check \
