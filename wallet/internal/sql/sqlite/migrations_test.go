@@ -23,25 +23,31 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	})
 
 	require.NoError(t, ApplyMigrations(db))
-	requireBlocksTable(t, db, true)
+	requireSchemaTables(t, db, true)
 
 	require.NoError(t, RollbackMigrations(db))
-	requireBlocksTable(t, db, false)
+	requireSchemaTables(t, db, false)
 
 	require.NoError(t, ApplyMigrations(db))
-	requireBlocksTable(t, db, true)
+	requireSchemaTables(t, db, true)
 }
 
-func requireBlocksTable(t *testing.T, db *sql.DB, expected bool) {
+func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 	t.Helper()
 
-	var count int
+	tables := []string{
+		"blocks", "wallets", "wallet_sync_states", "address_types",
+		"key_scopes", "accounts", "addresses",
+	}
+	for _, table := range tables {
+		var count int
 
-	err := db.QueryRowContext(
-		context.Background(),
-		"SELECT count(*) FROM sqlite_master "+
-			"WHERE type = 'table' AND name = 'blocks'",
-	).Scan(&count)
-	require.NoError(t, err)
-	require.Equal(t, expected, count == 1)
+		err := db.QueryRowContext(
+			context.Background(),
+			"SELECT count(*) FROM sqlite_master "+
+				"WHERE type = 'table' AND name = ?", table,
+		).Scan(&count)
+		require.NoError(t, err)
+		require.Equal(t, expected, count == 1, table)
+	}
 }

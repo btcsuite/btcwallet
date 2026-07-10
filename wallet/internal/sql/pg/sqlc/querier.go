@@ -9,10 +9,30 @@ import (
 )
 
 type Querier interface {
+	CreateAccount(ctx context.Context, arg CreateAccountParams) error
+	CreateAddress(ctx context.Context, arg CreateAddressParams) error
+	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
+	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
+	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
+	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeyScope, error)
+	GetWalletByName(ctx context.Context, walletName string) (Wallet, error)
+	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	ListAccountAddresses(ctx context.Context, arg ListAccountAddressesParams) ([]Address, error)
+	ListAccounts(ctx context.Context, scopeID int64) ([]Account, error)
+	ListAddressTypes(ctx context.Context) ([]AddressType, error)
+	MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error)
+	PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error
+	RenameAccount(ctx context.Context, arg RenameAccountParams) (int64, error)
+	UpdateAccountIndexes(ctx context.Context, arg UpdateAccountIndexesParams) (int64, error)
+	UpdateKeyScopeKeys(ctx context.Context, arg UpdateKeyScopeKeysParams) (int64, error)
+	UpdateLastAccountNumber(ctx context.Context, arg UpdateLastAccountNumberParams) (int64, error)
+	UpdateWalletEncryption(ctx context.Context, arg UpdateWalletEncryptionParams) (int64, error)
+	UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

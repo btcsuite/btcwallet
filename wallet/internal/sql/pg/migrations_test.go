@@ -49,25 +49,32 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	require.NoError(t, ApplyMigrations(db))
 	require.Zero(t, db.Stats().InUse)
 	require.NoError(t, db.PingContext(ctx))
-	requireBlocksTable(t, db, true)
+	requireSchemaTables(t, db, true)
 
 	require.NoError(t, RollbackMigrations(db))
 	require.Zero(t, db.Stats().InUse)
 	require.NoError(t, db.PingContext(ctx))
-	requireBlocksTable(t, db, false)
+	requireSchemaTables(t, db, false)
 
 	require.NoError(t, ApplyMigrations(db))
-	requireBlocksTable(t, db, true)
+	requireSchemaTables(t, db, true)
 }
 
-func requireBlocksTable(t *testing.T, db *sql.DB, expected bool) {
+func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 	t.Helper()
 
-	var exists bool
-	err := db.QueryRow(
-		"SELECT EXISTS (SELECT 1 FROM information_schema.tables " +
-			"WHERE table_schema = 'public' AND table_name = 'blocks')",
-	).Scan(&exists)
-	require.NoError(t, err)
-	require.Equal(t, expected, exists)
+	tables := []string{
+		"blocks", "wallets", "wallet_sync_states", "address_types",
+		"key_scopes", "accounts", "addresses",
+	}
+	for _, table := range tables {
+		var exists bool
+		err := db.QueryRow(
+			"SELECT EXISTS (SELECT 1 FROM information_schema.tables "+
+				"WHERE table_schema = 'public' AND table_name = $1)",
+			table,
+		).Scan(&exists)
+		require.NoError(t, err)
+		require.Equal(t, expected, exists, table)
+	}
 }

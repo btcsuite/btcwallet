@@ -24,8 +24,26 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.createAccountStmt, err = db.PrepareContext(ctx, CreateAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateAccount: %w", err)
+	}
+	if q.createAddressStmt, err = db.PrepareContext(ctx, CreateAddress); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateAddress: %w", err)
+	}
+	if q.createKeyScopeStmt, err = db.PrepareContext(ctx, CreateKeyScope); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateKeyScope: %w", err)
+	}
+	if q.createWalletStmt, err = db.PrepareContext(ctx, CreateWallet); err != nil {
+		return nil, fmt.Errorf("error preparing query CreateWallet: %w", err)
+	}
 	if q.deleteBlockStmt, err = db.PrepareContext(ctx, DeleteBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteBlock: %w", err)
+	}
+	if q.getAccountStmt, err = db.PrepareContext(ctx, GetAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAccount: %w", err)
+	}
+	if q.getAddressStmt, err = db.PrepareContext(ctx, GetAddress); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAddress: %w", err)
 	}
 	if q.getBlockByHeightStmt, err = db.PrepareContext(ctx, GetBlockByHeight); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlockByHeight: %w", err)
@@ -33,17 +51,89 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getBlocksInRangeStmt, err = db.PrepareContext(ctx, GetBlocksInRange); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlocksInRange: %w", err)
 	}
+	if q.getKeyScopeStmt, err = db.PrepareContext(ctx, GetKeyScope); err != nil {
+		return nil, fmt.Errorf("error preparing query GetKeyScope: %w", err)
+	}
+	if q.getWalletByNameStmt, err = db.PrepareContext(ctx, GetWalletByName); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletByName: %w", err)
+	}
+	if q.getWalletSyncStateStmt, err = db.PrepareContext(ctx, GetWalletSyncState); err != nil {
+		return nil, fmt.Errorf("error preparing query GetWalletSyncState: %w", err)
+	}
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
+	}
+	if q.listAccountAddressesStmt, err = db.PrepareContext(ctx, ListAccountAddresses); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccountAddresses: %w", err)
+	}
+	if q.listAccountsStmt, err = db.PrepareContext(ctx, ListAccounts); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAccounts: %w", err)
+	}
+	if q.listAddressTypesStmt, err = db.PrepareContext(ctx, ListAddressTypes); err != nil {
+		return nil, fmt.Errorf("error preparing query ListAddressTypes: %w", err)
+	}
+	if q.markAddressUsedStmt, err = db.PrepareContext(ctx, MarkAddressUsed); err != nil {
+		return nil, fmt.Errorf("error preparing query MarkAddressUsed: %w", err)
+	}
+	if q.putWalletSyncStateStmt, err = db.PrepareContext(ctx, PutWalletSyncState); err != nil {
+		return nil, fmt.Errorf("error preparing query PutWalletSyncState: %w", err)
+	}
+	if q.renameAccountStmt, err = db.PrepareContext(ctx, RenameAccount); err != nil {
+		return nil, fmt.Errorf("error preparing query RenameAccount: %w", err)
+	}
+	if q.updateAccountIndexesStmt, err = db.PrepareContext(ctx, UpdateAccountIndexes); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateAccountIndexes: %w", err)
+	}
+	if q.updateKeyScopeKeysStmt, err = db.PrepareContext(ctx, UpdateKeyScopeKeys); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateKeyScopeKeys: %w", err)
+	}
+	if q.updateLastAccountNumberStmt, err = db.PrepareContext(ctx, UpdateLastAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateLastAccountNumber: %w", err)
+	}
+	if q.updateWalletEncryptionStmt, err = db.PrepareContext(ctx, UpdateWalletEncryption); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateWalletEncryption: %w", err)
+	}
+	if q.updateWalletSyncStateStmt, err = db.PrepareContext(ctx, UpdateWalletSyncState); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateWalletSyncState: %w", err)
 	}
 	return &q, nil
 }
 
 func (q *Queries) Close() error {
 	var err error
+	if q.createAccountStmt != nil {
+		if cerr := q.createAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createAccountStmt: %w", cerr)
+		}
+	}
+	if q.createAddressStmt != nil {
+		if cerr := q.createAddressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createAddressStmt: %w", cerr)
+		}
+	}
+	if q.createKeyScopeStmt != nil {
+		if cerr := q.createKeyScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createKeyScopeStmt: %w", cerr)
+		}
+	}
+	if q.createWalletStmt != nil {
+		if cerr := q.createWalletStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing createWalletStmt: %w", cerr)
+		}
+	}
 	if q.deleteBlockStmt != nil {
 		if cerr := q.deleteBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteBlockStmt: %w", cerr)
+		}
+	}
+	if q.getAccountStmt != nil {
+		if cerr := q.getAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAccountStmt: %w", cerr)
+		}
+	}
+	if q.getAddressStmt != nil {
+		if cerr := q.getAddressStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAddressStmt: %w", cerr)
 		}
 	}
 	if q.getBlockByHeightStmt != nil {
@@ -56,9 +146,79 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getBlocksInRangeStmt: %w", cerr)
 		}
 	}
+	if q.getKeyScopeStmt != nil {
+		if cerr := q.getKeyScopeStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getKeyScopeStmt: %w", cerr)
+		}
+	}
+	if q.getWalletByNameStmt != nil {
+		if cerr := q.getWalletByNameStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletByNameStmt: %w", cerr)
+		}
+	}
+	if q.getWalletSyncStateStmt != nil {
+		if cerr := q.getWalletSyncStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getWalletSyncStateStmt: %w", cerr)
+		}
+	}
 	if q.insertBlockStmt != nil {
 		if cerr := q.insertBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
+		}
+	}
+	if q.listAccountAddressesStmt != nil {
+		if cerr := q.listAccountAddressesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountAddressesStmt: %w", cerr)
+		}
+	}
+	if q.listAccountsStmt != nil {
+		if cerr := q.listAccountsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAccountsStmt: %w", cerr)
+		}
+	}
+	if q.listAddressTypesStmt != nil {
+		if cerr := q.listAddressTypesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listAddressTypesStmt: %w", cerr)
+		}
+	}
+	if q.markAddressUsedStmt != nil {
+		if cerr := q.markAddressUsedStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing markAddressUsedStmt: %w", cerr)
+		}
+	}
+	if q.putWalletSyncStateStmt != nil {
+		if cerr := q.putWalletSyncStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing putWalletSyncStateStmt: %w", cerr)
+		}
+	}
+	if q.renameAccountStmt != nil {
+		if cerr := q.renameAccountStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing renameAccountStmt: %w", cerr)
+		}
+	}
+	if q.updateAccountIndexesStmt != nil {
+		if cerr := q.updateAccountIndexesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateAccountIndexesStmt: %w", cerr)
+		}
+	}
+	if q.updateKeyScopeKeysStmt != nil {
+		if cerr := q.updateKeyScopeKeysStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateKeyScopeKeysStmt: %w", cerr)
+		}
+	}
+	if q.updateLastAccountNumberStmt != nil {
+		if cerr := q.updateLastAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateLastAccountNumberStmt: %w", cerr)
+		}
+	}
+	if q.updateWalletEncryptionStmt != nil {
+		if cerr := q.updateWalletEncryptionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateWalletEncryptionStmt: %w", cerr)
+		}
+	}
+	if q.updateWalletSyncStateStmt != nil {
+		if cerr := q.updateWalletSyncStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateWalletSyncStateStmt: %w", cerr)
 		}
 	}
 	return err
@@ -98,21 +258,61 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 }
 
 type Queries struct {
-	db                   DBTX
-	tx                   *sql.Tx
-	deleteBlockStmt      *sql.Stmt
-	getBlockByHeightStmt *sql.Stmt
-	getBlocksInRangeStmt *sql.Stmt
-	insertBlockStmt      *sql.Stmt
+	db                          DBTX
+	tx                          *sql.Tx
+	createAccountStmt           *sql.Stmt
+	createAddressStmt           *sql.Stmt
+	createKeyScopeStmt          *sql.Stmt
+	createWalletStmt            *sql.Stmt
+	deleteBlockStmt             *sql.Stmt
+	getAccountStmt              *sql.Stmt
+	getAddressStmt              *sql.Stmt
+	getBlockByHeightStmt        *sql.Stmt
+	getBlocksInRangeStmt        *sql.Stmt
+	getKeyScopeStmt             *sql.Stmt
+	getWalletByNameStmt         *sql.Stmt
+	getWalletSyncStateStmt      *sql.Stmt
+	insertBlockStmt             *sql.Stmt
+	listAccountAddressesStmt    *sql.Stmt
+	listAccountsStmt            *sql.Stmt
+	listAddressTypesStmt        *sql.Stmt
+	markAddressUsedStmt         *sql.Stmt
+	putWalletSyncStateStmt      *sql.Stmt
+	renameAccountStmt           *sql.Stmt
+	updateAccountIndexesStmt    *sql.Stmt
+	updateKeyScopeKeysStmt      *sql.Stmt
+	updateLastAccountNumberStmt *sql.Stmt
+	updateWalletEncryptionStmt  *sql.Stmt
+	updateWalletSyncStateStmt   *sql.Stmt
 }
 
 func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
-		db:                   tx,
-		tx:                   tx,
-		deleteBlockStmt:      q.deleteBlockStmt,
-		getBlockByHeightStmt: q.getBlockByHeightStmt,
-		getBlocksInRangeStmt: q.getBlocksInRangeStmt,
-		insertBlockStmt:      q.insertBlockStmt,
+		db:                          tx,
+		tx:                          tx,
+		createAccountStmt:           q.createAccountStmt,
+		createAddressStmt:           q.createAddressStmt,
+		createKeyScopeStmt:          q.createKeyScopeStmt,
+		createWalletStmt:            q.createWalletStmt,
+		deleteBlockStmt:             q.deleteBlockStmt,
+		getAccountStmt:              q.getAccountStmt,
+		getAddressStmt:              q.getAddressStmt,
+		getBlockByHeightStmt:        q.getBlockByHeightStmt,
+		getBlocksInRangeStmt:        q.getBlocksInRangeStmt,
+		getKeyScopeStmt:             q.getKeyScopeStmt,
+		getWalletByNameStmt:         q.getWalletByNameStmt,
+		getWalletSyncStateStmt:      q.getWalletSyncStateStmt,
+		insertBlockStmt:             q.insertBlockStmt,
+		listAccountAddressesStmt:    q.listAccountAddressesStmt,
+		listAccountsStmt:            q.listAccountsStmt,
+		listAddressTypesStmt:        q.listAddressTypesStmt,
+		markAddressUsedStmt:         q.markAddressUsedStmt,
+		putWalletSyncStateStmt:      q.putWalletSyncStateStmt,
+		renameAccountStmt:           q.renameAccountStmt,
+		updateAccountIndexesStmt:    q.updateAccountIndexesStmt,
+		updateKeyScopeKeysStmt:      q.updateKeyScopeKeysStmt,
+		updateLastAccountNumberStmt: q.updateLastAccountNumberStmt,
+		updateWalletEncryptionStmt:  q.updateWalletEncryptionStmt,
+		updateWalletSyncStateStmt:   q.updateWalletSyncStateStmt,
 	}
 }
