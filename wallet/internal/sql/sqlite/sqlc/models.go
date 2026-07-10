@@ -4,8 +4,87 @@
 
 package sqlc
 
+import (
+	"database/sql"
+)
+
+type Account struct {
+	WalletID             int64
+	ScopeID              int64
+	AccountNumber        int64
+	AccountType          int64
+	AccountName          string
+	EncryptedPubKey      []byte
+	EncryptedPrivKey     []byte
+	MasterKeyFingerprint sql.NullInt64
+	NextExternalIndex    int64
+	NextInternalIndex    int64
+	ExternalAddrType     sql.NullInt64
+	InternalAddrType     sql.NullInt64
+}
+
+type Address struct {
+	WalletID         int64
+	ScopeID          int64
+	AddressHash      []byte
+	AccountNumber    int64
+	AddressType      int64
+	AddedAt          int64
+	SyncStatus       int64
+	Branch           sql.NullInt64
+	AddressIndex     sql.NullInt64
+	EncryptedPubKey  []byte
+	EncryptedPrivKey []byte
+	EncryptedHash    []byte
+	EncryptedScript  []byte
+	WitnessVersion   sql.NullInt64
+	IsSecretScript   sql.NullBool
+	Used             bool
+}
+
+type AddressType struct {
+	ID       int64
+	TypeName string
+}
+
 type Block struct {
 	BlockHeight    int64
 	HeaderHash     []byte
 	BlockTimestamp int64
+}
+
+type KeyScope struct {
+	ID                   int64
+	WalletID             int64
+	Purpose              int64
+	CoinType             int64
+	EncryptedCoinPubKey  []byte
+	EncryptedCoinPrivKey []byte
+	LastAccountNumber    sql.NullInt64
+	ExternalAddrType     int64
+	InternalAddrType     int64
+}
+
+type Wallet struct {
+	ID                       int64
+	WalletName               string
+	ManagerVersion           int64
+	ManagerCreatedAt         int64
+	IsWatchOnly              bool
+	MasterPubParams          []byte
+	MasterPrivParams         []byte
+	EncryptedCryptoPubKey    []byte
+	EncryptedCryptoPrivKey   []byte
+	EncryptedCryptoScriptKey []byte
+	EncryptedMasterHdPubKey  []byte
+	EncryptedMasterHdPrivKey []byte
+}
+
+type WalletSyncState struct {
+	WalletID              int64
+	StartBlockHeight      int64
+	SyncedBlockHeight     int64
+	BirthdayTimestamp     int64
+	BirthdayBlockHeight   sql.NullInt64
+	BirthdayBlockVerified bool
 }
