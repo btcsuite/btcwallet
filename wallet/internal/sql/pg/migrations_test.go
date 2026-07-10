@@ -50,6 +50,7 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	require.Zero(t, db.Stats().InUse)
 	require.NoError(t, db.PingContext(ctx))
 	requireSchemaTables(t, db, true)
+	testTransactionSchema(t, db)
 
 	require.NoError(t, RollbackMigrations(db))
 	require.Zero(t, db.Stats().InUse)
@@ -66,6 +67,9 @@ func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 	tables := []string{
 		"blocks", "wallets", "wallet_sync_states", "address_types",
 		"key_scopes", "accounts", "addresses",
+		"transactions", "transaction_inputs", "transaction_labels",
+		"credits", "active_credit_incidences", "credit_spends",
+		"utxo_leases",
 	}
 	for _, table := range tables {
 		var exists bool
