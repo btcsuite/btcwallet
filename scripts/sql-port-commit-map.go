@@ -52,6 +52,9 @@ var dispositionOverrides = map[string]dispositionOverride{
 	"4376c7b89f97bff043bef3796f8c4d333310bea0": {
 		"defer", "post-port cut: retained invalidation and tx-status flow",
 	},
+	"4c4fed6dcebdc3f460f278091d96ddac7685a042": {
+		"defer", "post-port cut: retained transaction replacement queries",
+	},
 	"6bdb0b93fc82223c5ef40bf4750e5761a4895483": {
 		"superseded", "source-only: dummy sqlc bootstrap replaced by real schema",
 	},
