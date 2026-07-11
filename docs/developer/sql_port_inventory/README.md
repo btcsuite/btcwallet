@@ -182,8 +182,8 @@ also `superseded`.
 
 | Disposition | Commits |
 | --- | ---: |
-| `extract` | 229 |
-| `defer` | 242 |
+| `extract` | 228 |
+| `defer` | 243 |
 | `review` | 494 |
 | `superseded` | 4 |
 

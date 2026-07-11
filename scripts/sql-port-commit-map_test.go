@@ -102,6 +102,7 @@ func TestDispositionOverrides(t *testing.T) {
 		{"15d51b675fea5816b15c26851f9406eb6b630eee", "defer", "post-port cut: retained tx status and replacement-history ADR"},
 		{"1fab2b36e0bff55067e0a7170c848df5c54345b6", "defer", "post-port cut: retained tx status and replacement-history ADR"},
 		{"4376c7b89f97bff043bef3796f8c4d333310bea0", "defer", "post-port cut: retained invalidation and tx-status flow"},
+		{"4c4fed6dcebdc3f460f278091d96ddac7685a042", "defer", "post-port cut: retained transaction replacement queries"},
 		{"5d91700ca8181a2d5a08d299acf3967638e83752", "review", "Stage 2: internal store runtime helper parity review"},
 		{"48cb5077fbce74d8335a5f67523ab586ccbf38d8", "review", "Stage 2: internal store write-routing parity review"},
 		{"f17b01fa597e69e213dc2371abd5f4ac47fe7698", "review", "Stage 2: internal store read-routing parity review"},
