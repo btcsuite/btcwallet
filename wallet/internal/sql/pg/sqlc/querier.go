@@ -9,25 +9,51 @@ import (
 )
 
 type Querier interface {
+	AcquireOutputLease(ctx context.Context, arg AcquireOutputLeaseParams) (int64, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) error
 	CreateAddress(ctx context.Context, arg CreateAddressParams) error
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
+	DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendParams) (int64, error)
+	DeleteExpiredOutputLeases(ctx context.Context, arg DeleteExpiredOutputLeasesParams) (int64, error)
+	DeleteOutputLease(ctx context.Context, arg DeleteOutputLeaseParams) (int64, error)
+	DeleteTransactionByID(ctx context.Context, arg DeleteTransactionByIDParams) (int64, error)
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	GetCredit(ctx context.Context, arg GetCreditParams) (Credit, error)
 	GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeyScope, error)
+	GetMinedTransactionByIncidence(ctx context.Context, arg GetMinedTransactionByIncidenceParams) (Transaction, error)
+	GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (UtxoLease, error)
+	GetTransactionLabel(ctx context.Context, arg GetTransactionLabelParams) ([]byte, error)
+	GetUnminedTransactionByHash(ctx context.Context, arg GetUnminedTransactionByHashParams) (Transaction, error)
 	GetWalletByName(ctx context.Context, walletName string) (Wallet, error)
 	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)
+	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
+	InsertTransactionInput(ctx context.Context, arg InsertTransactionInputParams) error
 	ListAccountAddresses(ctx context.Context, arg ListAccountAddressesParams) ([]Address, error)
 	ListAccounts(ctx context.Context, scopeID int64) ([]Account, error)
+	ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]UtxoLease, error)
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
+	ListMinedTransactionsForward(ctx context.Context, arg ListMinedTransactionsForwardParams) ([]ListMinedTransactionsForwardRow, error)
+	ListMinedTransactionsReverse(ctx context.Context, arg ListMinedTransactionsReverseParams) ([]ListMinedTransactionsReverseRow, error)
+	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
+	ListTransactionCredits(ctx context.Context, arg ListTransactionCreditsParams) ([]ListTransactionCreditsRow, error)
+	ListTransactionIncidencesByHash(ctx context.Context, arg ListTransactionIncidencesByHashParams) ([]Transaction, error)
+	ListUnminedSpenders(ctx context.Context, arg ListUnminedSpendersParams) ([]ListUnminedSpendersRow, error)
+	ListUnminedTransactions(ctx context.Context, walletID int64) ([]Transaction, error)
+	ListUnspentCredits(ctx context.Context, arg ListUnspentCreditsParams) ([]ListUnspentCreditsRow, error)
 	MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error)
+	PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error)
+	PutTransactionLabel(ctx context.Context, arg PutTransactionLabelParams) error
 	PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error
+	RecordCreditSpend(ctx context.Context, arg RecordCreditSpendParams) (int64, error)
 	RenameAccount(ctx context.Context, arg RenameAccountParams) (int64, error)
+	SetActiveCreditIncidence(ctx context.Context, arg SetActiveCreditIncidenceParams) error
 	UpdateAccountIndexes(ctx context.Context, arg UpdateAccountIndexesParams) (int64, error)
 	UpdateKeyScopeKeys(ctx context.Context, arg UpdateKeyScopeKeysParams) (int64, error)
 	UpdateLastAccountNumber(ctx context.Context, arg UpdateLastAccountNumberParams) (int64, error)

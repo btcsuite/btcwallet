@@ -23,6 +23,13 @@ type Account struct {
 	InternalAddrType     sql.NullInt64
 }
 
+type ActiveCreditIncidence struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+	CreditID    int64
+}
+
 type Address struct {
 	WalletID         int64
 	ScopeID          int64
@@ -53,6 +60,25 @@ type Block struct {
 	BlockTimestamp int64
 }
 
+type Credit struct {
+	ID             int64
+	WalletID       int64
+	TransactionID  int64
+	OutputIndex    int64
+	Amount         int64
+	PkScript       []byte
+	IsChange       bool
+	AddressScopeID sql.NullInt64
+	AddressID      []byte
+}
+
+type CreditSpend struct {
+	WalletID     int64
+	CreditID     int64
+	SpendingTxID int64
+	InputIndex   int64
+}
+
 type KeyScope struct {
 	ID                   int64
 	WalletID             int64
@@ -63,6 +89,38 @@ type KeyScope struct {
 	LastAccountNumber    sql.NullInt64
 	ExternalAddrType     int64
 	InternalAddrType     int64
+}
+
+type Transaction struct {
+	ID             int64
+	WalletID       int64
+	TxHash         []byte
+	RawTx          []byte
+	ReceivedUnix   int64
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	IsCoinbase     bool
+}
+
+type TransactionInput struct {
+	SpendingTxID    int64
+	InputIndex      int64
+	PrevTxHash      []byte
+	PrevOutputIndex int64
+}
+
+type TransactionLabel struct {
+	WalletID int64
+	TxHash   []byte
+	Label    []byte
+}
+
+type UtxoLease struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+	LockID      []byte
+	ExpiresUnix int64
 }
 
 type Wallet struct {
