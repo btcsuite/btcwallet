@@ -2,12 +2,15 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package mock
+package vaultmock
 
 import (
 	"context"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/btcsuite/btcwallet/wallet/signing"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -15,6 +18,9 @@ import (
 type Vault struct {
 	mock.Mock
 }
+
+// Ensure Vault implements the keyvault.Vault interface.
+var _ keyvault.Vault = (*Vault)(nil)
 
 // Encrypt forwards to the configured testify expectations.
 func (m *Vault) Encrypt(keyType waddrmgr.CryptoKeyType,
@@ -32,6 +38,42 @@ func (m *Vault) Decrypt(keyType waddrmgr.CryptoKeyType,
 	args := m.Called(keyType, ciphertext)
 
 	return returnBytes(args, keyType, ciphertext), args.Error(1)
+}
+
+// DerivePubKey forwards to the configured testify expectations.
+func (m *Vault) DerivePubKey(ctx context.Context,
+	locator signing.KeyLocator) (*btcec.PublicKey, error) {
+
+	args := m.Called(ctx, locator)
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	pk, ok := args.Get(0).(*btcec.PublicKey)
+	if !ok {
+		return nil, args.Error(1)
+	}
+
+	return pk, args.Error(1)
+}
+
+// Sign forwards to the configured testify expectations.
+func (m *Vault) Sign(ctx context.Context,
+	req signing.Request) (signing.Signature, error) {
+
+	args := m.Called(ctx, req)
+
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	sig, ok := args.Get(0).(signing.Signature)
+	if !ok {
+		return nil, args.Error(1)
+	}
+
+	return sig, args.Error(1)
 }
 
 // Unlock forwards to the configured testify expectations.
