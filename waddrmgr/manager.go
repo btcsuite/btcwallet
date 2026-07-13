@@ -43,6 +43,13 @@ const (
 	// ImportedAddrAccountName is the name of the imported account.
 	ImportedAddrAccountName = "imported"
 
+	// BirthdaySafetyMargin is the duration subtracted from a wallet's
+	// requested birthday before it is persisted. Backing the birthday
+	// off by this margin guards against clock skew and deposits made in
+	// the window just before the stated birthday, so a rescan does not
+	// miss them.
+	BirthdaySafetyMargin = 48 * time.Hour
+
 	// DefaultAccountNum is the number of the default account.
 	DefaultAccountNum = 0
 
@@ -2104,6 +2111,6 @@ func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
 		return maybeConvertDbError(err)
 	}
 
-	// Use 48 hours as margin of safety for wallet birthday.
-	return putBirthday(ns, birthday.Add(-48*time.Hour))
+	// Apply the safety margin before persisting the wallet birthday.
+	return putBirthday(ns, birthday.Add(-BirthdaySafetyMargin))
 }
