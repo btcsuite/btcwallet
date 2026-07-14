@@ -36,6 +36,27 @@ func (q *Queries) DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendPa
 	return result.RowsAffected()
 }
 
+const GetActiveCreditID = `-- name: GetActiveCreditID :one
+SELECT credit.id
+FROM active_credit_incidences AS active
+INNER JOIN credits AS credit ON credit.id = active.credit_id
+WHERE active.wallet_id = ? AND active.tx_hash = ?
+  AND active.output_index = ?
+`
+
+type GetActiveCreditIDParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+}
+
+func (q *Queries) GetActiveCreditID(ctx context.Context, arg GetActiveCreditIDParams) (int64, error) {
+	row := q.queryRow(ctx, q.getActiveCreditIDStmt, GetActiveCreditID, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const GetCredit = `-- name: GetCredit :one
 SELECT id, wallet_id, transaction_id, output_index, amount, pk_script,
        is_change, address_scope_id, address_id
@@ -63,6 +84,52 @@ func (q *Queries) GetCredit(ctx context.Context, arg GetCreditParams) (Credit, e
 		&i.AddressID,
 	)
 	return i, err
+}
+
+const GetMinedPreviousPkScript = `-- name: GetMinedPreviousPkScript :one
+SELECT credit.pk_script
+FROM credit_spends AS spend
+INNER JOIN credits AS credit ON credit.id = spend.credit_id
+WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
+  AND spend.input_index = ?
+`
+
+type GetMinedPreviousPkScriptParams struct {
+	WalletID     int64
+	SpendingTxID int64
+	InputIndex   int64
+}
+
+func (q *Queries) GetMinedPreviousPkScript(ctx context.Context, arg GetMinedPreviousPkScriptParams) ([]byte, error) {
+	row := q.queryRow(ctx, q.getMinedPreviousPkScriptStmt, GetMinedPreviousPkScript, arg.WalletID, arg.SpendingTxID, arg.InputIndex)
+	var pk_script []byte
+	err := row.Scan(&pk_script)
+	return pk_script, err
+}
+
+const GetUnminedPreviousPkScript = `-- name: GetUnminedPreviousPkScript :one
+SELECT credit.pk_script
+FROM active_credit_incidences AS active
+INNER JOIN credits AS credit ON credit.id = active.credit_id
+WHERE active.wallet_id = ? AND active.tx_hash = ?
+  AND active.output_index = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM credit_spends AS spend
+      WHERE spend.credit_id = credit.id
+  )
+`
+
+type GetUnminedPreviousPkScriptParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+}
+
+func (q *Queries) GetUnminedPreviousPkScript(ctx context.Context, arg GetUnminedPreviousPkScriptParams) ([]byte, error) {
+	row := q.queryRow(ctx, q.getUnminedPreviousPkScriptStmt, GetUnminedPreviousPkScript, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var pk_script []byte
+	err := row.Scan(&pk_script)
+	return pk_script, err
 }
 
 const InsertCredit = `-- name: InsertCredit :one
@@ -104,6 +171,33 @@ func (q *Queries) InsertCredit(ctx context.Context, arg InsertCreditParams) (int
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const IsKnownOutput = `-- name: IsKnownOutput :one
+SELECT EXISTS (
+    SELECT 1
+    FROM active_credit_incidences AS active
+    INNER JOIN credits AS credit ON credit.id = active.credit_id
+    WHERE active.wallet_id = ? AND active.tx_hash = ?
+      AND active.output_index = ?
+      AND NOT EXISTS (
+          SELECT 1 FROM credit_spends AS spend
+          WHERE spend.credit_id = credit.id
+      )
+)
+`
+
+type IsKnownOutputParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+}
+
+func (q *Queries) IsKnownOutput(ctx context.Context, arg IsKnownOutputParams) (int64, error) {
+	row := q.queryRow(ctx, q.isKnownOutputStmt, IsKnownOutput, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const ListOutputsToWatch = `-- name: ListOutputsToWatch :many
@@ -156,6 +250,17 @@ SELECT c.id, c.output_index, c.amount, c.pk_script, c.is_change,
            SELECT 1
            FROM credit_spends AS spend
            WHERE spend.credit_id = c.id
+       ) OR EXISTS (
+           SELECT 1
+           FROM transaction_inputs AS input
+           INNER JOIN transactions AS spender
+               ON spender.id = input.spending_tx_id
+           INNER JOIN transactions AS funding
+               ON funding.id = c.transaction_id
+           WHERE spender.wallet_id = c.wallet_id
+             AND spender.block_height IS NULL
+             AND input.prev_tx_hash = funding.tx_hash
+             AND input.prev_output_index = c.output_index
        ) AS is_spent
 FROM credits AS c
 WHERE c.wallet_id = ? AND c.transaction_id = ?
@@ -175,7 +280,7 @@ type ListTransactionCreditsRow struct {
 	IsChange       bool
 	AddressScopeID sql.NullInt64
 	AddressID      []byte
-	IsSpent        int64
+	IsSpent        sql.NullBool
 }
 
 func (q *Queries) ListTransactionCredits(ctx context.Context, arg ListTransactionCreditsParams) ([]ListTransactionCreditsRow, error) {
@@ -210,16 +315,59 @@ func (q *Queries) ListTransactionCredits(ctx context.Context, arg ListTransactio
 	return items, nil
 }
 
+const ListTransactionDebits = `-- name: ListTransactionDebits :many
+SELECT spend.input_index, credit.amount
+FROM credit_spends AS spend
+INNER JOIN credits AS credit ON credit.id = spend.credit_id
+WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
+ORDER BY spend.input_index
+`
+
+type ListTransactionDebitsParams struct {
+	WalletID     int64
+	SpendingTxID int64
+}
+
+type ListTransactionDebitsRow struct {
+	InputIndex int64
+	Amount     int64
+}
+
+func (q *Queries) ListTransactionDebits(ctx context.Context, arg ListTransactionDebitsParams) ([]ListTransactionDebitsRow, error) {
+	rows, err := q.query(ctx, q.listTransactionDebitsStmt, ListTransactionDebits, arg.WalletID, arg.SpendingTxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTransactionDebitsRow
+	for rows.Next() {
+		var i ListTransactionDebitsRow
+		if err := rows.Scan(&i.InputIndex, &i.Amount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListUnspentCredits = `-- name: ListUnspentCredits :many
 WITH query_params AS (
     SELECT cast(?2 AS INTEGER) AS now_unix
 )
 SELECT c.id, funding.tx_hash, c.output_index, c.amount, c.pk_script,
        c.is_change, funding.received_unix, funding.block_height,
-       funding.is_coinbase, c.address_scope_id, c.address_id
+       funding.is_coinbase, c.address_scope_id, c.address_id,
+       block.header_hash, block.block_timestamp
 FROM credits AS c
 INNER JOIN transactions AS funding ON funding.id = c.transaction_id
 INNER JOIN active_credit_incidences AS active ON active.credit_id = c.id
+LEFT JOIN blocks AS block ON block.block_height = funding.block_height
 INNER JOIN query_params
 WHERE c.wallet_id = ?1
   AND NOT EXISTS (
@@ -262,6 +410,8 @@ type ListUnspentCreditsRow struct {
 	IsCoinbase     bool
 	AddressScopeID sql.NullInt64
 	AddressID      []byte
+	HeaderHash     []byte
+	BlockTimestamp sql.NullInt64
 }
 
 func (q *Queries) ListUnspentCredits(ctx context.Context, arg ListUnspentCreditsParams) ([]ListUnspentCreditsRow, error) {
@@ -285,6 +435,8 @@ func (q *Queries) ListUnspentCredits(ctx context.Context, arg ListUnspentCredits
 			&i.IsCoinbase,
 			&i.AddressScopeID,
 			&i.AddressID,
+			&i.HeaderHash,
+			&i.BlockTimestamp,
 		); err != nil {
 			return nil, err
 		}

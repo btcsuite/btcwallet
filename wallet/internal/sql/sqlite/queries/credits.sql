@@ -61,6 +61,17 @@ SELECT c.id, c.output_index, c.amount, c.pk_script, c.is_change,
            SELECT 1
            FROM credit_spends AS spend
            WHERE spend.credit_id = c.id
+       ) OR EXISTS (
+           SELECT 1
+           FROM transaction_inputs AS input
+           INNER JOIN transactions AS spender
+               ON spender.id = input.spending_tx_id
+           INNER JOIN transactions AS funding
+               ON funding.id = c.transaction_id
+           WHERE spender.wallet_id = c.wallet_id
+             AND spender.block_height IS NULL
+             AND input.prev_tx_hash = funding.tx_hash
+             AND input.prev_output_index = c.output_index
        ) AS is_spent
 FROM credits AS c
 WHERE c.wallet_id = ? AND c.transaction_id = ?
@@ -72,10 +83,12 @@ WITH query_params AS (
 )
 SELECT c.id, funding.tx_hash, c.output_index, c.amount, c.pk_script,
        c.is_change, funding.received_unix, funding.block_height,
-       funding.is_coinbase, c.address_scope_id, c.address_id
+       funding.is_coinbase, c.address_scope_id, c.address_id,
+       block.header_hash, block.block_timestamp
 FROM credits AS c
 INNER JOIN transactions AS funding ON funding.id = c.transaction_id
 INNER JOIN active_credit_incidences AS active ON active.credit_id = c.id
+LEFT JOIN blocks AS block ON block.block_height = funding.block_height
 INNER JOIN query_params
 WHERE c.wallet_id = sqlc.arg('wallet_id')
   AND NOT EXISTS (
@@ -112,3 +125,48 @@ WHERE c.wallet_id = sqlc.arg('wallet_id')
       WHERE spend.credit_id = c.id
   )
 ORDER BY funding.tx_hash, c.output_index;
+
+-- name: ListTransactionDebits :many
+SELECT spend.input_index, credit.amount
+FROM credit_spends AS spend
+INNER JOIN credits AS credit ON credit.id = spend.credit_id
+WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
+ORDER BY spend.input_index;
+
+-- name: GetActiveCreditID :one
+SELECT credit.id
+FROM active_credit_incidences AS active
+INNER JOIN credits AS credit ON credit.id = active.credit_id
+WHERE active.wallet_id = ? AND active.tx_hash = ?
+  AND active.output_index = ?;
+
+-- name: IsKnownOutput :one
+SELECT EXISTS (
+    SELECT 1
+    FROM active_credit_incidences AS active
+    INNER JOIN credits AS credit ON credit.id = active.credit_id
+    WHERE active.wallet_id = ? AND active.tx_hash = ?
+      AND active.output_index = ?
+      AND NOT EXISTS (
+          SELECT 1 FROM credit_spends AS spend
+          WHERE spend.credit_id = credit.id
+      )
+);
+
+-- name: GetUnminedPreviousPkScript :one
+SELECT credit.pk_script
+FROM active_credit_incidences AS active
+INNER JOIN credits AS credit ON credit.id = active.credit_id
+WHERE active.wallet_id = ? AND active.tx_hash = ?
+  AND active.output_index = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM credit_spends AS spend
+      WHERE spend.credit_id = credit.id
+  );
+
+-- name: GetMinedPreviousPkScript :one
+SELECT credit.pk_script
+FROM credit_spends AS spend
+INNER JOIN credits AS credit ON credit.id = spend.credit_id
+WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
+  AND spend.input_index = ?;

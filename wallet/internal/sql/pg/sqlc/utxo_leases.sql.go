@@ -89,6 +89,25 @@ func (q *Queries) DeleteOutputLease(ctx context.Context, arg DeleteOutputLeasePa
 	return result.RowsAffected()
 }
 
+const DeleteOutputLeaseAnyOwner = `-- name: DeleteOutputLeaseAnyOwner :execrows
+DELETE FROM utxo_leases
+WHERE wallet_id = $1 AND tx_hash = $2 AND output_index = $3
+`
+
+type DeleteOutputLeaseAnyOwnerParams struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+}
+
+func (q *Queries) DeleteOutputLeaseAnyOwner(ctx context.Context, arg DeleteOutputLeaseAnyOwnerParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteOutputLeaseAnyOwnerStmt, DeleteOutputLeaseAnyOwner, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetOutputLease = `-- name: GetOutputLease :one
 SELECT wallet_id, tx_hash, output_index, lock_id, expires_unix
 FROM utxo_leases

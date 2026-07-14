@@ -103,6 +103,175 @@ func (q *Queries) GetMinedTransactionByIncidence(ctx context.Context, arg GetMin
 	return i, err
 }
 
+const GetMinedTransactionDetails = `-- name: GetMinedTransactionDetails :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+INNER JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = ?1
+  AND t.tx_hash = ?2
+  AND t.block_height = cast(?3 AS INTEGER)
+  AND b.header_hash = ?4
+LIMIT 1
+`
+
+type GetMinedTransactionDetailsParams struct {
+	WalletID    int64
+	TxHash      []byte
+	BlockHeight int64
+	BlockHash   []byte
+}
+
+type GetMinedTransactionDetailsRow struct {
+	ID             int64
+	RawTx          []byte
+	ReceivedUnix   int64
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	HeaderHash     []byte
+	BlockTimestamp int64
+	Label          []byte
+}
+
+func (q *Queries) GetMinedTransactionDetails(ctx context.Context, arg GetMinedTransactionDetailsParams) (GetMinedTransactionDetailsRow, error) {
+	row := q.queryRow(ctx, q.getMinedTransactionDetailsStmt, GetMinedTransactionDetails,
+		arg.WalletID,
+		arg.TxHash,
+		arg.BlockHeight,
+		arg.BlockHash,
+	)
+	var i GetMinedTransactionDetailsRow
+	err := row.Scan(
+		&i.ID,
+		&i.RawTx,
+		&i.ReceivedUnix,
+		&i.BlockHeight,
+		&i.ConfirmedOrder,
+		&i.HeaderHash,
+		&i.BlockTimestamp,
+		&i.Label,
+	)
+	return i, err
+}
+
+const GetMinedTransactionID = `-- name: GetMinedTransactionID :one
+SELECT t.id
+FROM transactions AS t
+INNER JOIN blocks AS b ON b.block_height = t.block_height
+WHERE t.wallet_id = ?1
+  AND t.tx_hash = ?2
+  AND t.block_height = cast(?3 AS INTEGER)
+  AND b.header_hash = ?4
+`
+
+type GetMinedTransactionIDParams struct {
+	WalletID    int64
+	TxHash      []byte
+	BlockHeight int64
+	BlockHash   []byte
+}
+
+func (q *Queries) GetMinedTransactionID(ctx context.Context, arg GetMinedTransactionIDParams) (int64, error) {
+	row := q.queryRow(ctx, q.getMinedTransactionIDStmt, GetMinedTransactionID,
+		arg.WalletID,
+		arg.TxHash,
+		arg.BlockHeight,
+		arg.BlockHash,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const GetTransactionDetailsByHash = `-- name: GetTransactionDetailsByHash :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = ? AND t.tx_hash = ?
+ORDER BY t.block_height IS NULL DESC, t.block_height DESC, t.id DESC
+LIMIT 1
+`
+
+type GetTransactionDetailsByHashParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type GetTransactionDetailsByHashRow struct {
+	ID             int64
+	RawTx          []byte
+	ReceivedUnix   int64
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	HeaderHash     []byte
+	BlockTimestamp sql.NullInt64
+	Label          []byte
+}
+
+func (q *Queries) GetTransactionDetailsByHash(ctx context.Context, arg GetTransactionDetailsByHashParams) (GetTransactionDetailsByHashRow, error) {
+	row := q.queryRow(ctx, q.getTransactionDetailsByHashStmt, GetTransactionDetailsByHash, arg.WalletID, arg.TxHash)
+	var i GetTransactionDetailsByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.RawTx,
+		&i.ReceivedUnix,
+		&i.BlockHeight,
+		&i.ConfirmedOrder,
+		&i.HeaderHash,
+		&i.BlockTimestamp,
+		&i.Label,
+	)
+	return i, err
+}
+
+const GetTransactionDetailsByID = `-- name: GetTransactionDetailsByID :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = ? AND t.id = ?
+LIMIT 1
+`
+
+type GetTransactionDetailsByIDParams struct {
+	WalletID int64
+	ID       int64
+}
+
+type GetTransactionDetailsByIDRow struct {
+	ID             int64
+	RawTx          []byte
+	ReceivedUnix   int64
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	HeaderHash     []byte
+	BlockTimestamp sql.NullInt64
+	Label          []byte
+}
+
+func (q *Queries) GetTransactionDetailsByID(ctx context.Context, arg GetTransactionDetailsByIDParams) (GetTransactionDetailsByIDRow, error) {
+	row := q.queryRow(ctx, q.getTransactionDetailsByIDStmt, GetTransactionDetailsByID, arg.WalletID, arg.ID)
+	var i GetTransactionDetailsByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.RawTx,
+		&i.ReceivedUnix,
+		&i.BlockHeight,
+		&i.ConfirmedOrder,
+		&i.HeaderHash,
+		&i.BlockTimestamp,
+		&i.Label,
+	)
+	return i, err
+}
+
 const GetTransactionLabel = `-- name: GetTransactionLabel :one
 SELECT label FROM transaction_labels WHERE wallet_id = ? AND tx_hash = ?
 `
@@ -143,6 +312,49 @@ func (q *Queries) GetUnminedTransactionByHash(ctx context.Context, arg GetUnmine
 		&i.BlockHeight,
 		&i.ConfirmedOrder,
 		&i.IsCoinbase,
+	)
+	return i, err
+}
+
+const GetUnminedTransactionDetails = `-- name: GetUnminedTransactionDetails :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = ? AND t.tx_hash = ? AND t.block_height IS NULL
+LIMIT 1
+`
+
+type GetUnminedTransactionDetailsParams struct {
+	WalletID int64
+	TxHash   []byte
+}
+
+type GetUnminedTransactionDetailsRow struct {
+	ID             int64
+	RawTx          []byte
+	ReceivedUnix   int64
+	BlockHeight    sql.NullInt64
+	ConfirmedOrder sql.NullInt64
+	HeaderHash     []byte
+	BlockTimestamp sql.NullInt64
+	Label          []byte
+}
+
+func (q *Queries) GetUnminedTransactionDetails(ctx context.Context, arg GetUnminedTransactionDetailsParams) (GetUnminedTransactionDetailsRow, error) {
+	row := q.queryRow(ctx, q.getUnminedTransactionDetailsStmt, GetUnminedTransactionDetails, arg.WalletID, arg.TxHash)
+	var i GetUnminedTransactionDetailsRow
+	err := row.Scan(
+		&i.ID,
+		&i.RawTx,
+		&i.ReceivedUnix,
+		&i.BlockHeight,
+		&i.ConfirmedOrder,
+		&i.HeaderHash,
+		&i.BlockTimestamp,
+		&i.Label,
 	)
 	return i, err
 }
@@ -434,13 +646,15 @@ WHERE t.wallet_id = ?1
   AND t.block_height IS NULL
   AND i.prev_tx_hash = ?2
   AND i.prev_output_index = ?3
+  AND t.id <> ?4
 ORDER BY t.tx_hash, i.input_index
 `
 
 type ListUnminedSpendersParams struct {
-	WalletID        int64
-	PrevTxHash      []byte
-	PrevOutputIndex int64
+	WalletID             int64
+	PrevTxHash           []byte
+	PrevOutputIndex      int64
+	ExcludeTransactionID int64
 }
 
 type ListUnminedSpendersRow struct {
@@ -450,7 +664,12 @@ type ListUnminedSpendersRow struct {
 }
 
 func (q *Queries) ListUnminedSpenders(ctx context.Context, arg ListUnminedSpendersParams) ([]ListUnminedSpendersRow, error) {
-	rows, err := q.query(ctx, q.listUnminedSpendersStmt, ListUnminedSpenders, arg.WalletID, arg.PrevTxHash, arg.PrevOutputIndex)
+	rows, err := q.query(ctx, q.listUnminedSpendersStmt, ListUnminedSpenders,
+		arg.WalletID,
+		arg.PrevTxHash,
+		arg.PrevOutputIndex,
+		arg.ExcludeTransactionID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -555,10 +774,29 @@ func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) (
 	return items, nil
 }
 
-const PromoteUnminedTransaction = `-- name: PromoteUnminedTransaction :execrows
+const NextBlockTransactionOrder = `-- name: NextBlockTransactionOrder :one
+SELECT cast(COALESCE(MAX(confirmed_order) + 1, 0) AS INTEGER)
+FROM transactions
+WHERE wallet_id = ? AND block_height = ?
+`
+
+type NextBlockTransactionOrderParams struct {
+	WalletID    int64
+	BlockHeight sql.NullInt64
+}
+
+func (q *Queries) NextBlockTransactionOrder(ctx context.Context, arg NextBlockTransactionOrderParams) (int64, error) {
+	row := q.queryRow(ctx, q.nextBlockTransactionOrderStmt, NextBlockTransactionOrder, arg.WalletID, arg.BlockHeight)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const PromoteUnminedTransaction = `-- name: PromoteUnminedTransaction :one
 UPDATE transactions
 SET block_height = ?, confirmed_order = ?
 WHERE wallet_id = ? AND tx_hash = ? AND block_height IS NULL
+RETURNING id
 `
 
 type PromoteUnminedTransactionParams struct {
@@ -569,16 +807,15 @@ type PromoteUnminedTransactionParams struct {
 }
 
 func (q *Queries) PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error) {
-	result, err := q.exec(ctx, q.promoteUnminedTransactionStmt, PromoteUnminedTransaction,
+	row := q.queryRow(ctx, q.promoteUnminedTransactionStmt, PromoteUnminedTransaction,
 		arg.BlockHeight,
 		arg.ConfirmedOrder,
 		arg.WalletID,
 		arg.TxHash,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const PutTransactionLabel = `-- name: PutTransactionLabel :exec

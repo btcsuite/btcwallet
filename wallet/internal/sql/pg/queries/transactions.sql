@@ -20,6 +20,55 @@ SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_height,
 FROM transactions
 WHERE wallet_id = $1 AND tx_hash = $2 AND block_height IS NULL;
 
+-- name: GetTransactionDetailsByHash :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = $1 AND t.tx_hash = $2
+ORDER BY t.block_height DESC NULLS FIRST, t.id DESC
+LIMIT 1;
+
+-- name: GetUnminedTransactionDetails :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = $1 AND t.tx_hash = $2 AND t.block_height IS NULL
+LIMIT 1;
+
+-- name: GetMinedTransactionDetails :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+INNER JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = sqlc.arg('wallet_id')
+  AND t.tx_hash = sqlc.arg('tx_hash')
+  AND t.block_height = sqlc.arg('block_height')::INTEGER
+  AND b.header_hash = sqlc.arg('block_hash')
+LIMIT 1;
+
+-- name: GetTransactionDetailsByID :one
+SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+       t.confirmed_order, b.header_hash, b.block_timestamp, l.label
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN transaction_labels AS l
+    ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
+WHERE t.wallet_id = $1 AND t.id = $2
+LIMIT 1;
+
+-- name: NextBlockTransactionOrder :one
+SELECT cast(COALESCE(MAX(confirmed_order) + 1, 0) AS BIGINT)
+FROM transactions
+WHERE wallet_id = $1 AND block_height = $2;
+
 -- name: ListMinedTransactionsFromHeight :many
 SELECT id, tx_hash, is_coinbase
 FROM transactions
@@ -91,10 +140,11 @@ WHERE t.wallet_id = sqlc.arg('wallet_id')
                          AND sqlc.arg('start_height')::INTEGER
 ORDER BY t.block_height DESC, t.confirmed_order ASC;
 
--- name: PromoteUnminedTransaction :execrows
+-- name: PromoteUnminedTransaction :one
 UPDATE transactions
 SET block_height = $1, confirmed_order = $2
-WHERE wallet_id = $3 AND tx_hash = $4 AND block_height IS NULL;
+WHERE wallet_id = $3 AND tx_hash = $4 AND block_height IS NULL
+RETURNING id;
 
 -- name: ListUnminedSpenders :many
 SELECT t.id, t.tx_hash, i.input_index
@@ -104,6 +154,7 @@ WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.block_height IS NULL
   AND i.prev_tx_hash = sqlc.arg('prev_tx_hash')
   AND i.prev_output_index = sqlc.arg('prev_output_index')
+  AND t.id <> sqlc.arg('exclude_transaction_id')
 ORDER BY t.tx_hash, i.input_index;
 
 -- name: DeleteTransactionByID :execrows
@@ -116,3 +167,12 @@ ON CONFLICT (wallet_id, tx_hash) DO UPDATE SET label = excluded.label;
 
 -- name: GetTransactionLabel :one
 SELECT label FROM transaction_labels WHERE wallet_id = $1 AND tx_hash = $2;
+
+-- name: GetMinedTransactionID :one
+SELECT t.id
+FROM transactions AS t
+INNER JOIN blocks AS b ON b.block_height = t.block_height
+WHERE t.wallet_id = sqlc.arg('wallet_id')
+  AND t.tx_hash = sqlc.arg('tx_hash')
+  AND t.block_height = sqlc.arg('block_height')::INTEGER
+  AND b.header_hash = sqlc.arg('block_hash');

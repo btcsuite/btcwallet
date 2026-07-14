@@ -14,26 +14,37 @@ import (
 	sqldbsqlc "github.com/lightningnetwork/lnd/sqldb/sqlc"
 )
 
+// defaultCoinbaseMaturity is the Bitcoin mainnet coinbase maturity used when
+// the caller does not provide a network-specific value.
+const defaultCoinbaseMaturity = 100
+
 // Store owns SQL transactions for one wallet's address and transaction
 // managers.
 type Store struct {
-	walletID int64
-	executor *sqldb.TransactionExecutor[Queries]
+	walletID         int64
+	coinbaseMaturity int32
+	executor         *sqldb.TransactionExecutor[Queries]
 }
 
 // New creates a manager store over an existing SQL connection. Connection
 // setup, migrations, and wallet creation remain owned by the backend package.
 func New(conn *sql.DB, walletID int64,
-	newQueries func(*sql.Tx) Queries) *Store {
+	newQueries func(*sql.Tx) Queries, maturity ...uint16) *Store {
 
 	baseDB := &sqldb.BaseDB{
 		DB:      conn,
 		Queries: sqldbsqlc.New(conn),
 	}
 
+	coinbaseMaturity := int32(defaultCoinbaseMaturity)
+	if len(maturity) != 0 {
+		coinbaseMaturity = int32(maturity[0])
+	}
+
 	return &Store{
-		walletID: walletID,
-		executor: sqldb.NewTransactionExecutor(baseDB, newQueries),
+		walletID:         walletID,
+		coinbaseMaturity: coinbaseMaturity,
+		executor:         sqldb.NewTransactionExecutor(baseDB, newQueries),
 	}
 }
 
@@ -48,6 +59,12 @@ func (s *Store) View(ctx context.Context,
 					ctx:      ctx,
 					walletID: s.walletID,
 					queries:  queries,
+				},
+				txStore: &txStore{
+					ctx:              ctx,
+					walletID:         s.walletID,
+					coinbaseMaturity: s.coinbaseMaturity,
+					queries:          queries,
 				},
 			})
 		}, nonNilReset(reset),
@@ -67,15 +84,18 @@ func (s *Store) Update(ctx context.Context,
 					queries:  queries,
 				},
 				txStore: &txStore{
-					ctx:      ctx,
-					walletID: s.walletID,
-					queries:  queries,
+					ctx:              ctx,
+					walletID:         s.walletID,
+					coinbaseMaturity: s.coinbaseMaturity,
+					queries:          queries,
 				},
 			})
 		}, nonNilReset(reset),
 	)
 }
 
+// nonNilReset normalizes an optional reset callback for the SQL transaction
+// executor.
 func nonNilReset(reset func()) func() {
 	if reset != nil {
 		return reset
@@ -86,6 +106,7 @@ func nonNilReset(reset func()) func() {
 
 type readTx struct {
 	addrStore walletstore.AddrReadStore
+	txStore   walletstore.TxReadStore
 }
 
 // Addr returns the address-manager read view.
@@ -93,6 +114,13 @@ type readTx struct {
 //nolint:ireturn // The transaction contract returns a domain interface.
 func (t *readTx) Addr() walletstore.AddrReadStore {
 	return t.addrStore
+}
+
+// Tx returns the transaction-manager read view.
+//
+//nolint:ireturn // The transaction contract returns a domain interface.
+func (t *readTx) Tx() walletstore.TxReadStore {
+	return t.txStore
 }
 
 type readWriteTx struct {
@@ -195,9 +223,10 @@ type txStore struct {
 	// The manager view is scoped to the transaction callback that created it.
 	//
 	//nolint:containedctx // Domain methods intentionally omit backend context.
-	ctx      context.Context
-	walletID int64
-	queries  Queries
+	ctx              context.Context
+	walletID         int64
+	coinbaseMaturity int32
+	queries          Queries
 }
 
 // Rollback removes all mined transaction incidences at height onwards. The
@@ -222,6 +251,8 @@ func (s *txStore) Rollback(height int32) error {
 	return nil
 }
 
+// rollbackTransaction rewinds one mined transaction while preserving the
+// surviving incidence rules.
 func (s *txStore) rollbackTransaction(row MinedTransactionRow,
 	removed map[int64]struct{}) error {
 
@@ -270,6 +301,8 @@ func (s *txStore) rollbackTransaction(row MinedTransactionRow,
 	return nil
 }
 
+// detachMinedTransaction moves one mined transaction incidence back to the
+// unmined set.
 func (s *txStore) detachMinedTransaction(transactionID int64) error {
 	rows, err := s.queries.DetachMinedTransaction(
 		s.ctx, s.walletID, transactionID,
@@ -285,6 +318,8 @@ func (s *txStore) detachMinedTransaction(transactionID int64) error {
 	return nil
 }
 
+// activateTransactionCredits marks every credit on the surviving transaction
+// incidence as active.
 func (s *txStore) activateTransactionCredits(transactionID int64) error {
 	creditIDs, err := s.queries.ListTransactionCreditIDs(
 		s.ctx, s.walletID, transactionID,
@@ -305,6 +340,8 @@ func (s *txStore) activateTransactionCredits(transactionID int64) error {
 	return nil
 }
 
+// removeUnminedDescendants recursively removes unmined transactions that spend
+// the given transaction.
 func (s *txStore) removeUnminedDescendants(hash []byte,
 	removed map[int64]struct{}) error {
 
@@ -336,6 +373,8 @@ func (s *txStore) removeUnminedDescendants(hash []byte,
 	return nil
 }
 
+// deleteTransaction removes one transaction after clearing the related spend
+// state.
 func (s *txStore) deleteTransaction(transactionID int64) error {
 	rows, err := s.queries.DeleteTransaction(
 		s.ctx, s.walletID, transactionID,
@@ -357,5 +396,6 @@ var (
 	_ walletstore.ReadWriteTx        = (*readWriteTx)(nil)
 	_ walletstore.AddrReadStore      = (*addrStore)(nil)
 	_ walletstore.AddrReadWriteStore = (*addrStore)(nil)
+	_ walletstore.TxReadStore        = (*txStore)(nil)
 	_ walletstore.TxReadWriteStore   = (*txStore)(nil)
 )

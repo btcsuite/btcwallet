@@ -35,3 +35,7 @@ WHERE wallet_id = ? AND tx_hash = ? AND output_index = ? AND lock_id = ?;
 
 -- name: DeleteExpiredOutputLeases :execrows
 DELETE FROM utxo_leases WHERE wallet_id = ? AND expires_unix <= ?;
+
+-- name: DeleteOutputLeaseAnyOwner :execrows
+DELETE FROM utxo_leases
+WHERE wallet_id = ? AND tx_hash = ? AND output_index = ?;

@@ -15,12 +15,14 @@ type Store struct {
 }
 
 // NewStore creates a SQLite manager store for one wallet.
-func NewStore(conn *sql.DB, walletID int64) *Store {
+func NewStore(conn *sql.DB, walletID int64, maturity ...uint16) *Store {
 	return &Store{
 		Store: sqlstore.New(
 			conn, walletID, func(tx *sql.Tx) sqlstore.Queries {
-				return &queryAdapter{queries: sqlitedb.New(tx)}
-			},
+				return &queryAdapter{
+					queries: sqlitedb.New(tx),
+				}
+			}, maturity...,
 		),
 	}
 }
@@ -29,6 +31,7 @@ type queryAdapter struct {
 	queries *sqlitedb.Queries
 }
 
+// PutBlock stores block through the transaction-bound backend.
 func (q *queryAdapter) PutBlock(ctx context.Context,
 	row sqlstore.BlockRow) error {
 
@@ -39,6 +42,7 @@ func (q *queryAdapter) PutBlock(ctx context.Context,
 	})
 }
 
+// GetBlockByHeight reads block by height from the transaction-bound backend.
 func (q *queryAdapter) GetBlockByHeight(ctx context.Context,
 	height int32) (sqlstore.BlockRow, error) {
 
@@ -54,6 +58,8 @@ func (q *queryAdapter) GetBlockByHeight(ctx context.Context,
 	}, nil
 }
 
+// GetWalletStartBlock reads wallet start block from the transaction-bound
+// backend.
 func (q *queryAdapter) GetWalletStartBlock(ctx context.Context,
 	walletID int64) (sqlstore.BlockRow, error) {
 
@@ -69,6 +75,8 @@ func (q *queryAdapter) GetWalletStartBlock(ctx context.Context,
 	}, nil
 }
 
+// SetWalletSyncedTo updates wallet synced to through the transaction-bound
+// backend.
 func (q *queryAdapter) SetWalletSyncedTo(ctx context.Context, walletID int64,
 	height int32) (int64, error) {
 
@@ -80,6 +88,8 @@ func (q *queryAdapter) SetWalletSyncedTo(ctx context.Context, walletID int64,
 	)
 }
 
+// ListMinedTransactionsFromHeight reads mined transactions from height from the
+// transaction-bound backend in stable order.
 func (q *queryAdapter) ListMinedTransactionsFromHeight(
 	ctx context.Context, walletID int64,
 	height int32) ([]sqlstore.MinedTransactionRow, error) {
@@ -106,6 +116,8 @@ func (q *queryAdapter) ListMinedTransactionsFromHeight(
 	return transactions, nil
 }
 
+// GetUnminedTransactionID reads unmined transaction id from the
+// transaction-bound backend.
 func (q *queryAdapter) GetUnminedTransactionID(ctx context.Context,
 	walletID int64, hash []byte) (int64, error) {
 
@@ -119,6 +131,8 @@ func (q *queryAdapter) GetUnminedTransactionID(ctx context.Context,
 	return row.ID, err
 }
 
+// DeleteCreditSpendsBySpendingTx removes credit spends by spending tx through
+// the transaction-bound backend.
 func (q *queryAdapter) DeleteCreditSpendsBySpendingTx(
 	ctx context.Context, walletID, transactionID int64) (int64, error) {
 
@@ -130,6 +144,8 @@ func (q *queryAdapter) DeleteCreditSpendsBySpendingTx(
 	)
 }
 
+// DetachMinedTransaction detaches mined transaction in the transaction-bound
+// backend.
 func (q *queryAdapter) DetachMinedTransaction(ctx context.Context, walletID,
 	transactionID int64) (int64, error) {
 
@@ -141,6 +157,8 @@ func (q *queryAdapter) DetachMinedTransaction(ctx context.Context, walletID,
 	)
 }
 
+// ListTransactionCreditIDs reads transaction credit ids from the
+// transaction-bound backend in stable order.
 func (q *queryAdapter) ListTransactionCreditIDs(ctx context.Context, walletID,
 	transactionID int64) ([]int64, error) {
 
@@ -162,6 +180,8 @@ func (q *queryAdapter) ListTransactionCreditIDs(ctx context.Context, walletID,
 	return creditIDs, nil
 }
 
+// SetActiveCreditIncidence updates active credit incidence through the
+// transaction-bound backend.
 func (q *queryAdapter) SetActiveCreditIncidence(ctx context.Context, walletID,
 	creditID int64) error {
 
@@ -173,6 +193,8 @@ func (q *queryAdapter) SetActiveCreditIncidence(ctx context.Context, walletID,
 	)
 }
 
+// ListUnminedSpendersByPrevHash reads unmined spenders by prev hash from the
+// transaction-bound backend in stable order.
 func (q *queryAdapter) ListUnminedSpendersByPrevHash(
 	ctx context.Context, walletID int64,
 	hash []byte) ([]sqlstore.UnminedSpenderRow, error) {
@@ -198,6 +220,7 @@ func (q *queryAdapter) ListUnminedSpendersByPrevHash(
 	return spenders, nil
 }
 
+// DeleteTransaction removes transaction through the transaction-bound backend.
 func (q *queryAdapter) DeleteTransaction(ctx context.Context, walletID,
 	transactionID int64) (int64, error) {
 
