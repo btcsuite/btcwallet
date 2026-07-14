@@ -73,6 +73,12 @@ LEFT JOIN blocks AS birthday_block
     ON s.birthday_block_height = birthday_block.block_height
 WHERE s.wallet_id = $1;
 
+-- name: GetWalletStartBlock :one
+SELECT b.block_height, b.header_hash, b.block_timestamp
+FROM wallet_sync_states AS s
+INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+WHERE s.wallet_id = $1;
+
 -- name: UpdateWalletSyncState :execrows
 UPDATE wallet_sync_states
 SET
@@ -82,3 +88,8 @@ SET
     birthday_block_height = $4,
     birthday_block_verified = $5
 WHERE wallet_id = $6;
+
+-- name: SetWalletSyncedTo :execrows
+UPDATE wallet_sync_states
+SET synced_block_height = $1
+WHERE wallet_id = $2;

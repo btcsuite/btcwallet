@@ -16,9 +16,11 @@ type Querier interface {
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteBlock(ctx context.Context, blockHeight int32) error
 	DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendParams) (int64, error)
+	DeleteCreditSpendsBySpendingTx(ctx context.Context, arg DeleteCreditSpendsBySpendingTxParams) (int64, error)
 	DeleteExpiredOutputLeases(ctx context.Context, arg DeleteExpiredOutputLeasesParams) (int64, error)
 	DeleteOutputLease(ctx context.Context, arg DeleteOutputLeaseParams) (int64, error)
 	DeleteTransactionByID(ctx context.Context, arg DeleteTransactionByIDParams) (int64, error)
+	DetachMinedTransaction(ctx context.Context, arg DetachMinedTransactionParams) (int64, error)
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
@@ -30,6 +32,7 @@ type Querier interface {
 	GetTransactionLabel(ctx context.Context, arg GetTransactionLabelParams) ([]byte, error)
 	GetUnminedTransactionByHash(ctx context.Context, arg GetUnminedTransactionByHashParams) (Transaction, error)
 	GetWalletByName(ctx context.Context, walletName string) (Wallet, error)
+	GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error)
 	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)
@@ -40,20 +43,24 @@ type Querier interface {
 	ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]UtxoLease, error)
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	ListMinedTransactionsForward(ctx context.Context, arg ListMinedTransactionsForwardParams) ([]ListMinedTransactionsForwardRow, error)
+	ListMinedTransactionsFromHeight(ctx context.Context, arg ListMinedTransactionsFromHeightParams) ([]ListMinedTransactionsFromHeightRow, error)
 	ListMinedTransactionsReverse(ctx context.Context, arg ListMinedTransactionsReverseParams) ([]ListMinedTransactionsReverseRow, error)
 	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	ListTransactionCredits(ctx context.Context, arg ListTransactionCreditsParams) ([]ListTransactionCreditsRow, error)
 	ListTransactionIncidencesByHash(ctx context.Context, arg ListTransactionIncidencesByHashParams) ([]Transaction, error)
 	ListUnminedSpenders(ctx context.Context, arg ListUnminedSpendersParams) ([]ListUnminedSpendersRow, error)
+	ListUnminedSpendersByPrevHash(ctx context.Context, arg ListUnminedSpendersByPrevHashParams) ([]ListUnminedSpendersByPrevHashRow, error)
 	ListUnminedTransactions(ctx context.Context, walletID int64) ([]Transaction, error)
 	ListUnspentCredits(ctx context.Context, arg ListUnspentCreditsParams) ([]ListUnspentCreditsRow, error)
 	MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error)
 	PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error)
+	PutBlock(ctx context.Context, arg PutBlockParams) error
 	PutTransactionLabel(ctx context.Context, arg PutTransactionLabelParams) error
 	PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error
 	RecordCreditSpend(ctx context.Context, arg RecordCreditSpendParams) (int64, error)
 	RenameAccount(ctx context.Context, arg RenameAccountParams) (int64, error)
 	SetActiveCreditIncidence(ctx context.Context, arg SetActiveCreditIncidenceParams) error
+	SetWalletSyncedTo(ctx context.Context, arg SetWalletSyncedToParams) (int64, error)
 	UpdateAccountIndexes(ctx context.Context, arg UpdateAccountIndexesParams) (int64, error)
 	UpdateKeyScopeKeys(ctx context.Context, arg UpdateKeyScopeKeysParams) (int64, error)
 	UpdateLastAccountNumber(ctx context.Context, arg UpdateLastAccountNumberParams) (int64, error)

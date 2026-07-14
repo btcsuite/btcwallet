@@ -20,6 +20,31 @@ SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_height,
 FROM transactions
 WHERE wallet_id = $1 AND tx_hash = $2 AND block_height IS NULL;
 
+-- name: ListMinedTransactionsFromHeight :many
+SELECT id, tx_hash, is_coinbase
+FROM transactions
+WHERE wallet_id = sqlc.arg('wallet_id')
+  AND block_height >= sqlc.arg('height')::INTEGER
+ORDER BY block_height DESC, confirmed_order DESC, id DESC;
+
+-- name: DetachMinedTransaction :execrows
+UPDATE transactions
+SET block_height = NULL, confirmed_order = NULL
+WHERE wallet_id = $1 AND id = $2 AND block_height IS NOT NULL;
+
+-- name: DeleteCreditSpendsBySpendingTx :execrows
+DELETE FROM credit_spends
+WHERE wallet_id = $1 AND spending_tx_id = $2;
+
+-- name: ListUnminedSpendersByPrevHash :many
+SELECT DISTINCT spender.id, spender.tx_hash
+FROM transaction_inputs AS input
+INNER JOIN transactions AS spender ON spender.id = input.spending_tx_id
+WHERE spender.wallet_id = sqlc.arg('wallet_id')
+  AND spender.block_height IS NULL
+  AND input.prev_tx_hash = sqlc.arg('prev_tx_hash')
+ORDER BY spender.id;
+
 -- name: GetMinedTransactionByIncidence :one
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase

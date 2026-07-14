@@ -90,3 +90,22 @@ func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error 
 	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
 	return err
 }
+
+const PutBlock = `-- name: PutBlock :exec
+INSERT INTO blocks (block_height, header_hash, block_timestamp)
+VALUES (?, ?, ?)
+ON CONFLICT (block_height) DO UPDATE SET
+    header_hash = excluded.header_hash,
+    block_timestamp = excluded.block_timestamp
+`
+
+type PutBlockParams struct {
+	BlockHeight    int64
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) PutBlock(ctx context.Context, arg PutBlockParams) error {
+	_, err := q.exec(ctx, q.putBlockStmt, PutBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+	return err
+}
