@@ -48,6 +48,20 @@ func (q *Queries) CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) 
 	return id, err
 }
 
+const DeleteKeyScopePrivateKeys = `-- name: DeleteKeyScopePrivateKeys :execrows
+UPDATE key_scopes
+SET encrypted_coin_priv_key = NULL
+WHERE wallet_id = $1
+`
+
+func (q *Queries) DeleteKeyScopePrivateKeys(ctx context.Context, walletID int64) (int64, error) {
+	result, err := q.exec(ctx, q.deleteKeyScopePrivateKeysStmt, DeleteKeyScopePrivateKeys, walletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetKeyScope = `-- name: GetKeyScope :one
 SELECT
     id,
@@ -84,6 +98,102 @@ func (q *Queries) GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeySc
 		&i.InternalAddrType,
 	)
 	return i, err
+}
+
+const ListKeyScopes = `-- name: ListKeyScopes :many
+SELECT
+    id,
+    wallet_id,
+    purpose,
+    coin_type,
+    encrypted_coin_pub_key,
+    encrypted_coin_priv_key,
+    last_account_number,
+    external_addr_type,
+    internal_addr_type
+FROM key_scopes
+WHERE wallet_id = $1
+ORDER BY purpose, coin_type
+`
+
+func (q *Queries) ListKeyScopes(ctx context.Context, walletID int64) ([]KeyScope, error) {
+	rows, err := q.query(ctx, q.listKeyScopesStmt, ListKeyScopes, walletID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []KeyScope
+	for rows.Next() {
+		var i KeyScope
+		if err := rows.Scan(
+			&i.ID,
+			&i.WalletID,
+			&i.Purpose,
+			&i.CoinType,
+			&i.EncryptedCoinPubKey,
+			&i.EncryptedCoinPrivKey,
+			&i.LastAccountNumber,
+			&i.ExternalAddrType,
+			&i.InternalAddrType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const PutKeyScope = `-- name: PutKeyScope :one
+INSERT INTO key_scopes (
+    wallet_id,
+    purpose,
+    coin_type,
+    encrypted_coin_pub_key,
+    encrypted_coin_priv_key,
+    last_account_number,
+    external_addr_type,
+    internal_addr_type
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (wallet_id, purpose, coin_type) DO UPDATE SET
+    encrypted_coin_pub_key = excluded.encrypted_coin_pub_key,
+    encrypted_coin_priv_key = excluded.encrypted_coin_priv_key,
+    last_account_number = excluded.last_account_number,
+    external_addr_type = excluded.external_addr_type,
+    internal_addr_type = excluded.internal_addr_type
+RETURNING id
+`
+
+type PutKeyScopeParams struct {
+	WalletID             int64
+	Purpose              int64
+	CoinType             int64
+	EncryptedCoinPubKey  []byte
+	EncryptedCoinPrivKey []byte
+	LastAccountNumber    sql.NullInt64
+	ExternalAddrType     int16
+	InternalAddrType     int16
+}
+
+func (q *Queries) PutKeyScope(ctx context.Context, arg PutKeyScopeParams) (int64, error) {
+	row := q.queryRow(ctx, q.putKeyScopeStmt, PutKeyScope,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.EncryptedCoinPubKey,
+		arg.EncryptedCoinPrivKey,
+		arg.LastAccountNumber,
+		arg.ExternalAddrType,
+		arg.InternalAddrType,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const UpdateKeyScopeKeys = `-- name: UpdateKeyScopeKeys :execrows

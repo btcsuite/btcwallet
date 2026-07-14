@@ -20,17 +20,13 @@ import (
 // AddrReadStore exposes address-manager reads within an existing wallet
 // transaction. Backend transaction handles remain private to the adapter.
 type AddrReadStore interface {
-	// BlockHash returns the block hash at a particular block height.
-	BlockHash(height int32) (*chainhash.Hash, error)
+	waddrmgr.ManagerReadStore
 }
 
 // AddrReadWriteStore exposes address-manager reads and writes within an
 // existing wallet transaction.
 type AddrReadWriteStore interface {
-	AddrReadStore
-
-	// SetSyncedTo marks the address manager as synced through the block.
-	SetSyncedTo(block *waddrmgr.BlockStamp) error
+	waddrmgr.ManagerReadWriteStore
 }
 
 // TxReadStore exposes the existing transaction-manager read surface within an

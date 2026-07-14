@@ -142,6 +142,9 @@ func (s *Store) View(ctx context.Context, body func(walletstore.ReadTx) error,
 
 		return body(&readTx{
 			addrStore: &addrReadStore{
+				ManagerReadStore: waddrmgr.BindManagerReadStore(
+					tx.ReadBucket(addrmgrNamespaceKey),
+				),
 				ns:    tx.ReadBucket(addrmgrNamespaceKey),
 				store: s.addrStore,
 			},
@@ -172,6 +175,9 @@ func (s *Store) Update(ctx context.Context,
 
 		return body(&readWriteTx{
 			addrStore: &addrReadWriteStore{
+				ManagerReadWriteStore: waddrmgr.BindManagerReadWriteStore(
+					tx.ReadWriteBucket(addrmgrNamespaceKey),
+				),
 				ns:    tx.ReadWriteBucket(addrmgrNamespaceKey),
 				store: s.addrStore,
 			},
@@ -222,6 +228,8 @@ func (t *readWriteTx) Tx() walletstore.TxReadWriteStore {
 }
 
 type addrReadStore struct {
+	waddrmgr.ManagerReadStore
+
 	ns    walletdb.ReadBucket
 	store legacyAddrStore
 }
@@ -232,6 +240,8 @@ func (s *addrReadStore) BlockHash(height int32) (*chainhash.Hash, error) {
 }
 
 type addrReadWriteStore struct {
+	waddrmgr.ManagerReadWriteStore
+
 	ns    walletdb.ReadWriteBucket
 	store legacyAddrStore
 }

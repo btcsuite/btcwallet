@@ -51,8 +51,13 @@ func (q *queryAdapter) GetBlockByHeight(ctx context.Context,
 		return sqlstore.BlockRow{}, err
 	}
 
+	heightValue, err := sqlstore.CheckedInt32(row.BlockHeight, "block height")
+	if err != nil {
+		return sqlstore.BlockRow{}, err
+	}
+
 	return sqlstore.BlockRow{
-		Height:    int32(row.BlockHeight),
+		Height:    heightValue,
 		Hash:      row.HeaderHash,
 		Timestamp: row.BlockTimestamp,
 	}, nil
@@ -68,8 +73,13 @@ func (q *queryAdapter) GetWalletStartBlock(ctx context.Context,
 		return sqlstore.BlockRow{}, err
 	}
 
+	heightValue, err := sqlstore.CheckedInt32(row.BlockHeight, "block height")
+	if err != nil {
+		return sqlstore.BlockRow{}, err
+	}
+
 	return sqlstore.BlockRow{
-		Height:    int32(row.BlockHeight),
+		Height:    heightValue,
 		Hash:      row.HeaderHash,
 		Timestamp: row.BlockTimestamp,
 	}, nil
