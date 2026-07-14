@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"context"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -164,9 +166,14 @@ func (w *Wallet) handleChainNotifications() {
 				})
 				notificationName = "block connected"
 			case chain.BlockDisconnected:
-				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-					return w.disconnectBlock(tx, wtxmgr.BlockMeta(n))
-				})
+				err = w.store.Update(
+					context.Background(),
+					func(tx walletstore.ReadWriteTx) error {
+						return w.disconnectBlock(
+							tx, wtxmgr.BlockMeta(n),
+						)
+					}, func() {},
+				)
 				notificationName = "block disconnected"
 			case chain.RelevantTx:
 				err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
@@ -263,9 +270,11 @@ func (w *Wallet) connectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) err
 // disconnectBlock handles a chain server reorganize by rolling back all
 // block history from the reorged block for a wallet in-sync with the chain
 // server.
-func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) error {
-	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-	txmgrNs := dbtx.ReadWriteBucket(wtxmgrNamespaceKey)
+func (w *Wallet) disconnectBlock(dbtx walletstore.ReadWriteTx,
+	b wtxmgr.BlockMeta) error {
+
+	addrStore := dbtx.Addr()
+	txStore := dbtx.Tx()
 
 	if !w.ChainSynced() {
 		return nil
@@ -274,7 +283,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 	// Disconnect the removed block and all blocks after it if we know about
 	// the disconnected block. Otherwise, the block is in the future.
 	if b.Height <= w.Manager.SyncedTo().Height {
-		hash, err := w.Manager.BlockHash(addrmgrNs, b.Height)
+		hash, err := addrStore.BlockHash(b.Height)
 		if err != nil {
 			return err
 		}
@@ -282,7 +291,7 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			bs := waddrmgr.BlockStamp{
 				Height: b.Height - 1,
 			}
-			hash, err = w.Manager.BlockHash(addrmgrNs, bs.Height)
+			hash, err = addrStore.BlockHash(bs.Height)
 			if err != nil {
 				return err
 			}
@@ -295,12 +304,12 @@ func (w *Wallet) disconnectBlock(dbtx walletdb.ReadWriteTx, b wtxmgr.BlockMeta) 
 			}
 
 			bs.Timestamp = header.Timestamp
-			err = w.Manager.SetSyncedTo(addrmgrNs, &bs)
+			err = addrStore.SetSyncedTo(&bs)
 			if err != nil {
 				return err
 			}
 
-			err = w.TxStore.Rollback(txmgrNs, b.Height)
+			err = txStore.Rollback(b.Height)
 			if err != nil {
 				return err
 			}

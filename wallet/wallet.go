@@ -27,6 +27,8 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
+	walletkvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -126,6 +128,7 @@ type Wallet struct {
 
 	// Data stores
 	db      walletdb.DB
+	store   walletstore.Store
 	Manager *waddrmgr.Manager
 	TxStore *wtxmgr.Store
 
@@ -4484,6 +4487,7 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	w := &Wallet{
 		publicPassphrase:    pubPass,
 		db:                  db,
+		store:               walletkvdb.NewStore(db, addrMgr, txMgr),
 		Manager:             addrMgr,
 		TxStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
