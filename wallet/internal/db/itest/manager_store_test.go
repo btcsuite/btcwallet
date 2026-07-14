@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,6 +24,8 @@ type managerStoreHarness struct {
 	newStore func(int64) db.Store
 }
 
+// testManagerStore runs the shared manager-store conformance cases against one
+// SQL backend.
 func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -40,8 +44,195 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("birthday verification", func(t *testing.T) {
 		testBirthdayVerification(t, harness)
 	})
+	t.Run("wtxmgr compatibility", func(t *testing.T) {
+		testWtxmgrCompatibility(t, harness)
+	})
 }
 
+// testWtxmgrCompatibility verifies the complete wtxmgr surface against one SQL
+func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	ctx := context.Background()
+	start := testBlock(600)
+	synced := testBlock(601)
+	walletID := harness.createWallet(t, "wtxmgr-compatibility", start, synced)
+	store := harness.newStore(walletID)
+
+	fundingTx := wire.NewMsgTx(2)
+	fundingTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  testHash(60),
+		Index: 1,
+	}})
+	fundingTx.AddTxOut(&wire.TxOut{Value: 50_000, PkScript: []byte{0x51}})
+	funding, err := wtxmgr.NewTxRecordFromMsgTx(
+		fundingTx, time.Unix(3_000, 0),
+	)
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		exists, err := tx.Tx().InsertTxCheckIfExists(funding, nil)
+		require.NoError(t, err)
+		require.False(t, exists)
+
+		exists, err = tx.Tx().InsertTxCheckIfExists(funding, nil)
+		require.NoError(t, err)
+		require.True(t, exists)
+
+		err = tx.Tx().AddCredit(funding, nil, 0, false)
+		if err != nil {
+			return err
+		}
+
+		return tx.Tx().PutTxLabel(funding.Hash, "funding")
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		details, err := tx.Tx().TxDetails(&funding.Hash)
+		require.NoError(t, err)
+		require.Equal(t, int32(-1), details.Block.Height)
+		require.Equal(t, "funding", details.Label)
+		require.Equal(t, []wtxmgr.CreditRecord{{
+			Amount: 50_000,
+			Index:  0,
+		}}, details.Credits)
+
+		hashes, err := tx.Tx().UnminedTxHashes()
+		require.NoError(t, err)
+		require.Len(t, hashes, 1)
+		require.Equal(t, funding.Hash, *hashes[0])
+
+		transactions, err := tx.Tx().UnminedTxs()
+		require.NoError(t, err)
+		require.Len(t, transactions, 1)
+		require.Equal(t, funding.Hash, transactions[0].TxHash())
+
+		outputs, err := tx.Tx().UnspentOutputs()
+		require.NoError(t, err)
+		require.Len(t, outputs, 1)
+		require.Equal(t, int32(-1), outputs[0].Height)
+
+		balance, err := tx.Tx().Balance(0, synced.Height)
+		require.NoError(t, err)
+		require.Equal(t, int64(50_000), int64(balance))
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	lockID := wtxmgr.LockID{1, 2, 3}
+	output := wire.OutPoint{Hash: funding.Hash, Index: 0}
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		_, err := tx.Tx().LockOutput(lockID, output, time.Hour)
+		return err
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		locked, err := tx.Tx().ListLockedOutputs()
+		require.NoError(t, err)
+		require.Len(t, locked, 1)
+		require.Equal(t, output, locked[0].Outpoint)
+
+		unspent, err := tx.Tx().UnspentOutputs()
+		require.NoError(t, err)
+		require.Empty(t, unspent)
+
+		watch, err := tx.Tx().OutputsToWatch()
+		require.NoError(t, err)
+		require.Len(t, watch, 1)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().UnlockOutput(lockID, output)
+	}, func() {})
+	require.NoError(t, err)
+
+	spenderTx := wire.NewMsgTx(2)
+	spenderTx.AddTxIn(&wire.TxIn{PreviousOutPoint: output})
+	spenderTx.AddTxOut(&wire.TxOut{Value: 49_000, PkScript: []byte{0x51}})
+	spender, err := wtxmgr.NewTxRecordFromMsgTx(
+		spenderTx, time.Unix(3_001, 0),
+	)
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		err := tx.Tx().InsertTx(spender, nil)
+		if err != nil {
+			return err
+		}
+
+		scripts, err := tx.Tx().PreviousPkScripts(spender, nil)
+		require.NoError(t, err)
+		require.Equal(t, [][]byte{{0x51}}, scripts)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		outputs, err := tx.Tx().UnspentOutputs()
+		require.NoError(t, err)
+		require.Empty(t, outputs)
+
+		details, err := tx.Tx().TxDetails(&funding.Hash)
+		require.NoError(t, err)
+		require.True(t, details.Credits[0].Spent)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().RemoveUnminedTx(spender)
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().InsertTx(funding, &wtxmgr.BlockMeta{
+			Block: wtxmgr.Block{
+				Hash:   synced.Hash,
+				Height: synced.Height,
+			},
+			Time: synced.Timestamp,
+		})
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		details, err := tx.Tx().UniqueTxDetails(
+			&funding.Hash, &wtxmgr.Block{
+				Hash:   synced.Hash,
+				Height: synced.Height,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, synced.Height, details.Block.Height)
+
+		var visited []wtxmgr.TxDetails
+
+		err = tx.Tx().RangeTransactions(
+			synced.Height, synced.Height,
+			func(details []wtxmgr.TxDetails) (bool, error) {
+				visited = append(visited, details...)
+				return false, nil
+			},
+		)
+		require.NoError(t, err)
+		require.Len(t, visited, 1)
+		require.Equal(t, funding.Hash, visited[0].Hash)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+}
+
+// testManagerTransaction verifies transaction ownership, reset behavior, and
+// address-manager updates.
 func testManagerTransaction(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -105,6 +296,7 @@ func testManagerTransaction(t *testing.T, harness *managerStoreHarness) {
 	require.False(t, bodyCalled)
 }
 
+// testRollback verifies the base rollback behavior for mined transactions.
 func testRollback(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -165,6 +357,8 @@ func testRollback(t *testing.T, harness *managerStoreHarness) {
 	))
 }
 
+// testRollbackTransaction verifies that address and transaction rewinds commit
+// or abort together.
 func testRollbackTransaction(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -197,6 +391,8 @@ func testRollbackTransaction(t *testing.T, harness *managerStoreHarness) {
 	require.True(t, harness.transactionMined(t, txID))
 }
 
+// testDuplicateIncidence verifies rollback behavior when a transaction has
+// mined and unmined incidences.
 func testDuplicateIncidence(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -226,6 +422,8 @@ func testDuplicateIncidence(t *testing.T, harness *managerStoreHarness) {
 	))
 }
 
+// testBirthdayVerification verifies that birthday verification is independent
+// of the birthday block.
 func testBirthdayVerification(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -256,6 +454,7 @@ func testBirthdayVerification(t *testing.T, harness *managerStoreHarness) {
 	require.True(t, verified)
 }
 
+// createWallet creates the wallet and sync rows required by a conformance case.
 func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 	start, synced waddrmgr.BlockStamp) int64 {
 
@@ -284,6 +483,7 @@ func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 	return walletID
 }
 
+// putBlock stores one block fixture for a conformance case.
 func (h *managerStoreHarness) putBlock(t *testing.T,
 	block waddrmgr.BlockStamp) {
 
@@ -297,6 +497,8 @@ func (h *managerStoreHarness) putBlock(t *testing.T,
 	`, block.Height, block.Hash[:], block.Timestamp.Unix())
 }
 
+// insertTransaction inserts the transaction row and all of its input
+// dependencies.
 func (h *managerStoreHarness) insertTransaction(t *testing.T, walletID int64,
 	hash chainhash.Hash, height int32, order int64, coinbase bool) int64 {
 
@@ -317,6 +519,8 @@ func (h *managerStoreHarness) insertTransaction(t *testing.T, walletID int64,
 	return transactionID
 }
 
+// insertUnminedTransaction stores an unmined transaction fixture and returns
+// its SQL identifier.
 func (h *managerStoreHarness) insertUnminedTransaction(t *testing.T,
 	walletID int64, hash chainhash.Hash) int64 {
 
@@ -335,6 +539,7 @@ func (h *managerStoreHarness) insertUnminedTransaction(t *testing.T,
 	return transactionID
 }
 
+// insertInput stores one transaction-input fixture.
 func (h *managerStoreHarness) insertInput(t *testing.T, transactionID int64,
 	inputIndex int64, prevHash chainhash.Hash, prevIndex int64) {
 
@@ -346,6 +551,7 @@ func (h *managerStoreHarness) insertInput(t *testing.T, transactionID int64,
 	`, transactionID, inputIndex, prevHash[:], prevIndex)
 }
 
+// insertCredit stores one wallet-credit fixture and returns its SQL identifier.
 func (h *managerStoreHarness) insertCredit(t *testing.T, walletID,
 	transactionID int64) int64 {
 
@@ -365,6 +571,8 @@ func (h *managerStoreHarness) insertCredit(t *testing.T, walletID,
 	return creditID
 }
 
+// setActiveCredit selects the active transaction incidence for one credit
+// fixture.
 func (h *managerStoreHarness) setActiveCredit(t *testing.T, walletID,
 	creditID int64) {
 
@@ -382,6 +590,7 @@ func (h *managerStoreHarness) setActiveCredit(t *testing.T, walletID,
 	`, walletID, creditID)
 }
 
+// insertCreditSpend stores one credit-spend fixture.
 func (h *managerStoreHarness) insertCreditSpend(t *testing.T, walletID,
 	creditID, transactionID, inputIndex int64) {
 
@@ -393,6 +602,7 @@ func (h *managerStoreHarness) insertCreditSpend(t *testing.T, walletID,
 	`, walletID, creditID, transactionID, inputIndex)
 }
 
+// syncedHeight returns the synced height recorded for a wallet fixture.
 func (h *managerStoreHarness) syncedHeight(t *testing.T,
 	walletID int64) int32 {
 
@@ -409,6 +619,7 @@ func (h *managerStoreHarness) syncedHeight(t *testing.T,
 	return height
 }
 
+// blockHash returns the block hash recorded for a height fixture.
 func (h *managerStoreHarness) blockHash(t *testing.T,
 	height int32) chainhash.Hash {
 
@@ -427,6 +638,7 @@ func (h *managerStoreHarness) blockHash(t *testing.T,
 	return *hash
 }
 
+// transactionExists reports whether a transaction fixture still exists.
 func (h *managerStoreHarness) transactionExists(t *testing.T,
 	transactionID int64) bool {
 
@@ -442,6 +654,7 @@ func (h *managerStoreHarness) transactionExists(t *testing.T,
 	return count == 1
 }
 
+// transactionMined reports whether a transaction fixture has a mined incidence.
 func (h *managerStoreHarness) transactionMined(t *testing.T,
 	transactionID int64) bool {
 
@@ -457,6 +670,8 @@ func (h *managerStoreHarness) transactionMined(t *testing.T,
 	return mined
 }
 
+// creditSpendCount returns the number of spend rows attached to a transaction
+// fixture.
 func (h *managerStoreHarness) creditSpendCount(t *testing.T,
 	walletID int64) int64 {
 
@@ -472,6 +687,7 @@ func (h *managerStoreHarness) creditSpendCount(t *testing.T,
 	return count
 }
 
+// activeCreditID returns the active incidence selected for a credit fixture.
 func (h *managerStoreHarness) activeCreditID(t *testing.T, walletID int64,
 	hash chainhash.Hash, outputIndex int64) int64 {
 
@@ -488,6 +704,8 @@ func (h *managerStoreHarness) activeCreditID(t *testing.T, walletID int64,
 	return creditID
 }
 
+// exec executes a dialect-aware test statement after rebinding its
+// placeholders.
 func (h *managerStoreHarness) exec(t *testing.T, query string,
 	args ...any) {
 
@@ -499,6 +717,7 @@ func (h *managerStoreHarness) exec(t *testing.T, query string,
 	require.NoError(t, err)
 }
 
+// queryRow queries one dialect-aware test row after rebinding its placeholders.
 func (h *managerStoreHarness) queryRow(t *testing.T, query string,
 	args ...any) *sql.Row {
 
@@ -509,6 +728,7 @@ func (h *managerStoreHarness) queryRow(t *testing.T, query string,
 	)
 }
 
+// bind rewrites question-mark placeholders for the PostgreSQL test backend.
 func (h *managerStoreHarness) bind(query string) string {
 	if !h.postgres {
 		return query
@@ -531,6 +751,7 @@ func (h *managerStoreHarness) bind(query string) string {
 	return builder.String()
 }
 
+// testBlock constructs a deterministic block fixture for the given height.
 func testBlock(height int32) waddrmgr.BlockStamp {
 	var hash chainhash.Hash
 
@@ -544,6 +765,7 @@ func testBlock(height int32) waddrmgr.BlockStamp {
 	}
 }
 
+// testHash constructs a deterministic hash fixture from one byte.
 func testHash(value byte) chainhash.Hash {
 	var hash chainhash.Hash
 	for i := range hash {
