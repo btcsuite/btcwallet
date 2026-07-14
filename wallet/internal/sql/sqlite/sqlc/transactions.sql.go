@@ -10,6 +10,24 @@ import (
 	"database/sql"
 )
 
+const DeleteCreditSpendsBySpendingTx = `-- name: DeleteCreditSpendsBySpendingTx :execrows
+DELETE FROM credit_spends
+WHERE wallet_id = ? AND spending_tx_id = ?
+`
+
+type DeleteCreditSpendsBySpendingTxParams struct {
+	WalletID     int64
+	SpendingTxID int64
+}
+
+func (q *Queries) DeleteCreditSpendsBySpendingTx(ctx context.Context, arg DeleteCreditSpendsBySpendingTxParams) (int64, error) {
+	result, err := q.exec(ctx, q.deleteCreditSpendsBySpendingTxStmt, DeleteCreditSpendsBySpendingTx, arg.WalletID, arg.SpendingTxID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const DeleteTransactionByID = `-- name: DeleteTransactionByID :execrows
 DELETE FROM transactions WHERE wallet_id = ? AND id = ?
 `
@@ -21,6 +39,25 @@ type DeleteTransactionByIDParams struct {
 
 func (q *Queries) DeleteTransactionByID(ctx context.Context, arg DeleteTransactionByIDParams) (int64, error) {
 	result, err := q.exec(ctx, q.deleteTransactionByIDStmt, DeleteTransactionByID, arg.WalletID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const DetachMinedTransaction = `-- name: DetachMinedTransaction :execrows
+UPDATE transactions
+SET block_height = NULL, confirmed_order = NULL
+WHERE wallet_id = ? AND id = ? AND block_height IS NOT NULL
+`
+
+type DetachMinedTransactionParams struct {
+	WalletID int64
+	ID       int64
+}
+
+func (q *Queries) DetachMinedTransaction(ctx context.Context, arg DetachMinedTransactionParams) (int64, error) {
+	result, err := q.exec(ctx, q.detachMinedTransactionStmt, DetachMinedTransaction, arg.WalletID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -237,6 +274,48 @@ func (q *Queries) ListMinedTransactionsForward(ctx context.Context, arg ListMine
 	return items, nil
 }
 
+const ListMinedTransactionsFromHeight = `-- name: ListMinedTransactionsFromHeight :many
+SELECT id, tx_hash, is_coinbase
+FROM transactions
+WHERE wallet_id = ?1
+  AND block_height >= cast(?2 AS INTEGER)
+ORDER BY block_height DESC, confirmed_order DESC, id DESC
+`
+
+type ListMinedTransactionsFromHeightParams struct {
+	WalletID int64
+	Height   int64
+}
+
+type ListMinedTransactionsFromHeightRow struct {
+	ID         int64
+	TxHash     []byte
+	IsCoinbase bool
+}
+
+func (q *Queries) ListMinedTransactionsFromHeight(ctx context.Context, arg ListMinedTransactionsFromHeightParams) ([]ListMinedTransactionsFromHeightRow, error) {
+	rows, err := q.query(ctx, q.listMinedTransactionsFromHeightStmt, ListMinedTransactionsFromHeight, arg.WalletID, arg.Height)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMinedTransactionsFromHeightRow
+	for rows.Next() {
+		var i ListMinedTransactionsFromHeightRow
+		if err := rows.Scan(&i.ID, &i.TxHash, &i.IsCoinbase); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ListMinedTransactionsReverse = `-- name: ListMinedTransactionsReverse :many
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase,
@@ -380,6 +459,49 @@ func (q *Queries) ListUnminedSpenders(ctx context.Context, arg ListUnminedSpende
 	for rows.Next() {
 		var i ListUnminedSpendersRow
 		if err := rows.Scan(&i.ID, &i.TxHash, &i.InputIndex); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListUnminedSpendersByPrevHash = `-- name: ListUnminedSpendersByPrevHash :many
+SELECT DISTINCT spender.id, spender.tx_hash
+FROM transaction_inputs AS input
+INNER JOIN transactions AS spender ON spender.id = input.spending_tx_id
+WHERE spender.wallet_id = ?1
+  AND spender.block_height IS NULL
+  AND input.prev_tx_hash = ?2
+ORDER BY spender.id
+`
+
+type ListUnminedSpendersByPrevHashParams struct {
+	WalletID   int64
+	PrevTxHash []byte
+}
+
+type ListUnminedSpendersByPrevHashRow struct {
+	ID     int64
+	TxHash []byte
+}
+
+func (q *Queries) ListUnminedSpendersByPrevHash(ctx context.Context, arg ListUnminedSpendersByPrevHashParams) ([]ListUnminedSpendersByPrevHashRow, error) {
+	rows, err := q.query(ctx, q.listUnminedSpendersByPrevHashStmt, ListUnminedSpendersByPrevHash, arg.WalletID, arg.PrevTxHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUnminedSpendersByPrevHashRow
+	for rows.Next() {
+		var i ListUnminedSpendersByPrevHashRow
+		if err := rows.Scan(&i.ID, &i.TxHash); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

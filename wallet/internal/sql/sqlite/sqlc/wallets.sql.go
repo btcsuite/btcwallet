@@ -98,6 +98,20 @@ func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (Walle
 	return i, err
 }
 
+const GetWalletStartBlock = `-- name: GetWalletStartBlock :one
+SELECT b.block_height, b.header_hash, b.block_timestamp
+FROM wallet_sync_states AS s
+INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+WHERE s.wallet_id = ?
+`
+
+func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error) {
+	row := q.queryRow(ctx, q.getWalletStartBlockStmt, GetWalletStartBlock, walletID)
+	var i Block
+	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
+	return i, err
+}
+
 const GetWalletSyncState = `-- name: GetWalletSyncState :one
 SELECT
     s.wallet_id,
@@ -178,6 +192,25 @@ func (q *Queries) PutWalletSyncState(ctx context.Context, arg PutWalletSyncState
 		arg.BirthdayBlockVerified,
 	)
 	return err
+}
+
+const SetWalletSyncedTo = `-- name: SetWalletSyncedTo :execrows
+UPDATE wallet_sync_states
+SET synced_block_height = ?
+WHERE wallet_id = ?
+`
+
+type SetWalletSyncedToParams struct {
+	SyncedBlockHeight int64
+	WalletID          int64
+}
+
+func (q *Queries) SetWalletSyncedTo(ctx context.Context, arg SetWalletSyncedToParams) (int64, error) {
+	result, err := q.exec(ctx, q.setWalletSyncedToStmt, SetWalletSyncedTo, arg.SyncedBlockHeight, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const UpdateWalletEncryption = `-- name: UpdateWalletEncryption :execrows

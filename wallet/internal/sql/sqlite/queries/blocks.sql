@@ -21,6 +21,13 @@ ORDER BY block_height;
 INSERT OR IGNORE INTO blocks (block_height, header_hash, block_timestamp)
 VALUES (?, ?, ?);
 
+-- name: PutBlock :exec
+INSERT INTO blocks (block_height, header_hash, block_timestamp)
+VALUES (?, ?, ?)
+ON CONFLICT (block_height) DO UPDATE SET
+    header_hash = excluded.header_hash,
+    block_timestamp = excluded.block_timestamp;
+
 -- name: DeleteBlock :exec
 DELETE FROM blocks
 WHERE block_height = ?;
