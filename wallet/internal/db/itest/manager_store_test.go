@@ -32,6 +32,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("manager transaction", func(t *testing.T) {
 		testManagerTransaction(t, harness)
 	})
+	t.Run("address manager persistence", func(t *testing.T) {
+		testAddressManagerPersistence(t, harness)
+	})
 	t.Run("rollback", func(t *testing.T) {
 		testRollback(t, harness)
 	})
@@ -50,6 +53,7 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 }
 
 // testWtxmgrCompatibility verifies the complete wtxmgr surface against one SQL
+// backend.
 func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -225,6 +229,281 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		require.NoError(t, err)
 		require.Len(t, visited, 1)
 		require.Equal(t, funding.Hash, visited[0].Hash)
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+}
+
+// testAddressManagerPersistence verifies the complete waddrmgr persistence
+// surface against one SQL backend.
+//
+//nolint:maintidx // One vector deliberately covers the complete store surface.
+func testAddressManagerPersistence(t *testing.T,
+	harness *managerStoreHarness) {
+
+	t.Helper()
+
+	ctx := t.Context()
+	start := testBlock(600)
+	synced := testBlock(601)
+	walletID := harness.createWallet(
+		t, "address-manager-persistence", start, synced,
+	)
+	store := harness.newStore(walletID)
+
+	managerState := waddrmgr.ManagerState{
+		Version:                  9,
+		CreatedAt:                time.Unix(6_001, 0),
+		MasterPubParams:          []byte{1},
+		MasterPrivParams:         []byte{2},
+		EncryptedCryptoPubKey:    []byte{3},
+		EncryptedCryptoPrivKey:   []byte{4},
+		EncryptedCryptoScriptKey: []byte{5},
+		EncryptedMasterHDPubKey:  []byte{6},
+		EncryptedMasterHDPrivKey: []byte{7},
+	}
+	birthdayBlock := testBlock(602)
+	syncState := waddrmgr.SyncState{
+		StartBlock:            start,
+		SyncedTo:              synced,
+		Birthday:              time.Unix(6_002, 0),
+		BirthdayBlock:         &birthdayBlock,
+		BirthdayBlockVerified: true,
+	}
+	scope := waddrmgr.KeyScopeBIP0084
+	scopeState := waddrmgr.KeyScopeState{
+		Scope:                scope,
+		AddrSchema:           waddrmgr.ScopeAddrMap[scope],
+		EncryptedCoinPubKey:  []byte{8},
+		EncryptedCoinPrivKey: []byte{9},
+		LastAccount:          4,
+	}
+	defaultAccount := waddrmgr.AccountState{
+		Scope:             scope,
+		Account:           1,
+		Type:              waddrmgr.AccountDefault,
+		Name:              "default",
+		EncryptedPubKey:   []byte{10},
+		EncryptedPrivKey:  []byte{11},
+		NextExternalIndex: 2,
+		NextInternalIndex: 3,
+	}
+	watchSchema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0086]
+	watchOnlyAccount := waddrmgr.AccountState{
+		Scope:                scope,
+		Account:              2,
+		Type:                 waddrmgr.AccountWatchOnly,
+		Name:                 "watch-only",
+		EncryptedPubKey:      []byte{12},
+		MasterKeyFingerprint: 13,
+		NextExternalIndex:    4,
+		NextInternalIndex:    5,
+		AddrSchema:           &watchSchema,
+	}
+	branch, index := uint32(0), uint32(7)
+	chainAddressID := []byte("chain-address")
+	chainAddress := waddrmgr.AddressState{
+		Scope:      scope,
+		Account:    defaultAccount.Account,
+		Type:       waddrmgr.AddressChain,
+		AddedAt:    time.Unix(6_003, 0),
+		SyncStatus: waddrmgr.AddressSyncFull,
+		Branch:     &branch,
+		Index:      &index,
+	}
+	witnessVersion, secret := uint8(0), true
+	witnessAddressID := []byte("witness-address")
+	witnessAddress := waddrmgr.AddressState{
+		Scope:           scope,
+		Account:         watchOnlyAccount.Account,
+		Type:            waddrmgr.AddressWitnessScript,
+		AddedAt:         time.Unix(6_004, 0),
+		SyncStatus:      waddrmgr.AddressSyncPartial,
+		EncryptedHash:   []byte{14},
+		EncryptedScript: []byte{15},
+		WitnessVersion:  &witnessVersion,
+		IsSecretScript:  &secret,
+		Used:            true,
+	}
+
+	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
+		addr := tx.Addr()
+
+		operations := []func() error{
+			func() error { return addr.PutManagerState(managerState) },
+			func() error { return addr.PutSyncState(syncState) },
+			func() error { return addr.PutKeyScope(scopeState) },
+			func() error { return addr.PutAccount(defaultAccount) },
+			func() error { return addr.PutAccount(watchOnlyAccount) },
+			func() error {
+				return addr.PutAddress(chainAddressID, chainAddress)
+			},
+			func() error {
+				return addr.PutAddress(witnessAddressID, witnessAddress)
+			},
+		}
+		for _, operation := range operations {
+			err := operation()
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		addr := tx.Addr()
+		gotManager, err := addr.ManagerState()
+		require.NoError(t, err)
+		require.Equal(t, managerState, gotManager)
+
+		gotSync, err := addr.SyncState()
+		require.NoError(t, err)
+		require.Equal(t, syncState, gotSync)
+
+		gotScope, err := addr.KeyScope(scope)
+		require.NoError(t, err)
+		require.Equal(t, scopeState, gotScope)
+
+		scopes, err := addr.KeyScopes()
+		require.NoError(t, err)
+		require.Equal(t, []waddrmgr.KeyScopeState{scopeState}, scopes)
+
+		gotDefault, err := addr.Account(scope, defaultAccount.Account)
+		require.NoError(t, err)
+		require.Equal(t, defaultAccount, gotDefault)
+
+		gotWatchOnly, err := addr.AccountByName(
+			scope, watchOnlyAccount.Name,
+		)
+		require.NoError(t, err)
+		require.Equal(t, watchOnlyAccount, gotWatchOnly)
+
+		accounts, err := addr.Accounts(scope)
+		require.NoError(t, err)
+		require.Equal(
+			t, []waddrmgr.AccountState{defaultAccount, watchOnlyAccount},
+			accounts,
+		)
+
+		gotChain, err := addr.Address(scope, chainAddressID)
+		require.NoError(t, err)
+
+		chainAddress.Hash = gotChain.Hash
+		require.Equal(t, chainAddress, gotChain)
+
+		gotWitness, err := addr.Address(scope, witnessAddressID)
+		require.NoError(t, err)
+
+		witnessAddress.Hash = gotWitness.Hash
+		require.Equal(t, witnessAddress, gotWitness)
+
+		accountAddresses, err := addr.AccountAddresses(
+			scope, defaultAccount.Account,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, []waddrmgr.AddressState{chainAddress}, accountAddresses,
+		)
+
+		activeAddresses, err := addr.ActiveAddresses(scope)
+		require.NoError(t, err)
+		require.ElementsMatch(
+			t, []waddrmgr.AddressState{chainAddress, witnessAddress},
+			activeAddresses,
+		)
+
+		_, err = addr.KeyScope(waddrmgr.KeyScope{Purpose: 999, Coin: 1})
+		require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+		_, err = addr.Account(scope, 999)
+		require.True(t, waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound))
+		_, err = addr.Address(scope, []byte("missing-address"))
+		require.True(t, waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound))
+
+		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	renamed := "renamed"
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		addr := tx.Addr()
+
+		err := addr.SetCoinTypeKeys(
+			scope, []byte{16}, []byte{17},
+		)
+		if err != nil {
+			return err
+		}
+
+		err = addr.SetLastAccount(scope, 8)
+		if err != nil {
+			return err
+		}
+
+		err = addr.RenameAccount(
+			scope, defaultAccount.Account, renamed,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = addr.SetAccountIndexes(
+			scope, defaultAccount.Account, 9, 10,
+		)
+		if err != nil {
+			return err
+		}
+
+		err = addr.MarkAddressUsed(scope, chainAddressID)
+		if err != nil {
+			return err
+		}
+
+		err = addr.SetBirthdayBlock(nil)
+		if err != nil {
+			return err
+		}
+
+		return addr.DeletePrivateKeys()
+	}, func() {})
+	require.NoError(t, err)
+
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		addr := tx.Addr()
+		gotManager, err := addr.ManagerState()
+		require.NoError(t, err)
+		require.False(t, gotManager.WatchOnly)
+		require.Nil(t, gotManager.MasterPrivParams)
+		require.Nil(t, gotManager.EncryptedCryptoPrivKey)
+		require.Nil(t, gotManager.EncryptedMasterHDPrivKey)
+
+		gotSync, err := addr.SyncState()
+		require.NoError(t, err)
+		require.Nil(t, gotSync.BirthdayBlock)
+		require.True(t, gotSync.BirthdayBlockVerified)
+
+		gotScope, err := addr.KeyScope(scope)
+		require.NoError(t, err)
+		require.Equal(t, []byte{16}, gotScope.EncryptedCoinPubKey)
+		require.Nil(t, gotScope.EncryptedCoinPrivKey)
+		require.Equal(t, uint32(8), gotScope.LastAccount)
+
+		gotAccount, err := addr.AccountByName(scope, renamed)
+		require.NoError(t, err)
+		require.Nil(t, gotAccount.EncryptedPrivKey)
+		require.Equal(t, uint32(9), gotAccount.NextExternalIndex)
+		require.Equal(t, uint32(10), gotAccount.NextInternalIndex)
+
+		gotChain, err := addr.Address(scope, chainAddressID)
+		require.NoError(t, err)
+		require.True(t, gotChain.Used)
+
+		gotWitness, err := addr.Address(scope, witnessAddressID)
+		require.NoError(t, err)
+		require.Nil(t, gotWitness.EncryptedScript)
 
 		return nil
 	}, func() {})
