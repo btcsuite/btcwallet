@@ -60,6 +60,71 @@ func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int
 	return id, err
 }
 
+const DeleteManagerPrivateKeys = `-- name: DeleteManagerPrivateKeys :execrows
+UPDATE wallets
+SET
+    master_priv_params = NULL,
+    encrypted_crypto_priv_key = NULL,
+    encrypted_crypto_script_key = NULL,
+    encrypted_master_hd_priv_key = NULL
+WHERE id = ?
+`
+
+func (q *Queries) DeleteManagerPrivateKeys(ctx context.Context, id int64) (int64, error) {
+	result, err := q.exec(ctx, q.deleteManagerPrivateKeysStmt, DeleteManagerPrivateKeys, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const GetManagerState = `-- name: GetManagerState :one
+SELECT
+    manager_version,
+    manager_created_at,
+    is_watch_only,
+    master_pub_params,
+    master_priv_params,
+    encrypted_crypto_pub_key,
+    encrypted_crypto_priv_key,
+    encrypted_crypto_script_key,
+    encrypted_master_hd_pub_key,
+    encrypted_master_hd_priv_key
+FROM wallets
+WHERE id = ?
+`
+
+type GetManagerStateRow struct {
+	ManagerVersion           int64
+	ManagerCreatedAt         int64
+	IsWatchOnly              bool
+	MasterPubParams          []byte
+	MasterPrivParams         []byte
+	EncryptedCryptoPubKey    []byte
+	EncryptedCryptoPrivKey   []byte
+	EncryptedCryptoScriptKey []byte
+	EncryptedMasterHdPubKey  []byte
+	EncryptedMasterHdPrivKey []byte
+}
+
+func (q *Queries) GetManagerState(ctx context.Context, id int64) (GetManagerStateRow, error) {
+	row := q.queryRow(ctx, q.getManagerStateStmt, GetManagerState, id)
+	var i GetManagerStateRow
+	err := row.Scan(
+		&i.ManagerVersion,
+		&i.ManagerCreatedAt,
+		&i.IsWatchOnly,
+		&i.MasterPubParams,
+		&i.MasterPrivParams,
+		&i.EncryptedCryptoPubKey,
+		&i.EncryptedCryptoPrivKey,
+		&i.EncryptedCryptoScriptKey,
+		&i.EncryptedMasterHdPubKey,
+		&i.EncryptedMasterHdPrivKey,
+	)
+	return i, err
+}
+
 const GetWalletByName = `-- name: GetWalletByName :one
 SELECT
     id,
@@ -117,11 +182,14 @@ SELECT
     s.wallet_id,
     s.start_block_height,
     start_block.header_hash AS start_block_hash,
+    start_block.block_timestamp AS start_block_timestamp,
     s.synced_block_height,
     synced_block.header_hash AS synced_block_hash,
+    synced_block.block_timestamp AS synced_block_timestamp,
     s.birthday_timestamp,
     s.birthday_block_height,
     birthday_block.header_hash AS birthday_block_hash,
+    birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
 INNER JOIN blocks AS start_block
@@ -134,15 +202,18 @@ WHERE s.wallet_id = ?
 `
 
 type GetWalletSyncStateRow struct {
-	WalletID              int64
-	StartBlockHeight      int64
-	StartBlockHash        []byte
-	SyncedBlockHeight     int64
-	SyncedBlockHash       []byte
-	BirthdayTimestamp     int64
-	BirthdayBlockHeight   sql.NullInt64
-	BirthdayBlockHash     []byte
-	BirthdayBlockVerified bool
+	WalletID               int64
+	StartBlockHeight       int64
+	StartBlockHash         []byte
+	StartBlockTimestamp    int64
+	SyncedBlockHeight      int64
+	SyncedBlockHash        []byte
+	SyncedBlockTimestamp   int64
+	BirthdayTimestamp      int64
+	BirthdayBlockHeight    sql.NullInt64
+	BirthdayBlockHash      []byte
+	BirthdayBlockTimestamp sql.NullInt64
+	BirthdayBlockVerified  bool
 }
 
 func (q *Queries) GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error) {
@@ -152,14 +223,67 @@ func (q *Queries) GetWalletSyncState(ctx context.Context, walletID int64) (GetWa
 		&i.WalletID,
 		&i.StartBlockHeight,
 		&i.StartBlockHash,
+		&i.StartBlockTimestamp,
 		&i.SyncedBlockHeight,
 		&i.SyncedBlockHash,
+		&i.SyncedBlockTimestamp,
 		&i.BirthdayTimestamp,
 		&i.BirthdayBlockHeight,
 		&i.BirthdayBlockHash,
+		&i.BirthdayBlockTimestamp,
 		&i.BirthdayBlockVerified,
 	)
 	return i, err
+}
+
+const PutManagerState = `-- name: PutManagerState :execrows
+UPDATE wallets
+SET
+    manager_version = ?,
+    manager_created_at = ?,
+    is_watch_only = ?,
+    master_pub_params = ?,
+    master_priv_params = ?,
+    encrypted_crypto_pub_key = ?,
+    encrypted_crypto_priv_key = ?,
+    encrypted_crypto_script_key = ?,
+    encrypted_master_hd_pub_key = ?,
+    encrypted_master_hd_priv_key = ?
+WHERE id = ?
+`
+
+type PutManagerStateParams struct {
+	ManagerVersion           int64
+	ManagerCreatedAt         int64
+	IsWatchOnly              bool
+	MasterPubParams          []byte
+	MasterPrivParams         []byte
+	EncryptedCryptoPubKey    []byte
+	EncryptedCryptoPrivKey   []byte
+	EncryptedCryptoScriptKey []byte
+	EncryptedMasterHdPubKey  []byte
+	EncryptedMasterHdPrivKey []byte
+	ID                       int64
+}
+
+func (q *Queries) PutManagerState(ctx context.Context, arg PutManagerStateParams) (int64, error) {
+	result, err := q.exec(ctx, q.putManagerStateStmt, PutManagerState,
+		arg.ManagerVersion,
+		arg.ManagerCreatedAt,
+		arg.IsWatchOnly,
+		arg.MasterPubParams,
+		arg.MasterPrivParams,
+		arg.EncryptedCryptoPubKey,
+		arg.EncryptedCryptoPrivKey,
+		arg.EncryptedCryptoScriptKey,
+		arg.EncryptedMasterHdPubKey,
+		arg.EncryptedMasterHdPrivKey,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const PutWalletSyncState = `-- name: PutWalletSyncState :exec
@@ -192,6 +316,63 @@ func (q *Queries) PutWalletSyncState(ctx context.Context, arg PutWalletSyncState
 		arg.BirthdayBlockVerified,
 	)
 	return err
+}
+
+const SetWalletBirthday = `-- name: SetWalletBirthday :execrows
+UPDATE wallet_sync_states
+SET birthday_timestamp = ?
+WHERE wallet_id = ?
+`
+
+type SetWalletBirthdayParams struct {
+	BirthdayTimestamp int64
+	WalletID          int64
+}
+
+func (q *Queries) SetWalletBirthday(ctx context.Context, arg SetWalletBirthdayParams) (int64, error) {
+	result, err := q.exec(ctx, q.setWalletBirthdayStmt, SetWalletBirthday, arg.BirthdayTimestamp, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const SetWalletBirthdayBlock = `-- name: SetWalletBirthdayBlock :execrows
+UPDATE wallet_sync_states
+SET birthday_block_height = ?
+WHERE wallet_id = ?
+`
+
+type SetWalletBirthdayBlockParams struct {
+	BirthdayBlockHeight sql.NullInt64
+	WalletID            int64
+}
+
+func (q *Queries) SetWalletBirthdayBlock(ctx context.Context, arg SetWalletBirthdayBlockParams) (int64, error) {
+	result, err := q.exec(ctx, q.setWalletBirthdayBlockStmt, SetWalletBirthdayBlock, arg.BirthdayBlockHeight, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const SetWalletBirthdayBlockVerified = `-- name: SetWalletBirthdayBlockVerified :execrows
+UPDATE wallet_sync_states
+SET birthday_block_verified = ?
+WHERE wallet_id = ?
+`
+
+type SetWalletBirthdayBlockVerifiedParams struct {
+	BirthdayBlockVerified bool
+	WalletID              int64
+}
+
+func (q *Queries) SetWalletBirthdayBlockVerified(ctx context.Context, arg SetWalletBirthdayBlockVerifiedParams) (int64, error) {
+	result, err := q.exec(ctx, q.setWalletBirthdayBlockVerifiedStmt, SetWalletBirthdayBlockVerified, arg.BirthdayBlockVerified, arg.WalletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const SetWalletSyncedTo = `-- name: SetWalletSyncedTo :execrows

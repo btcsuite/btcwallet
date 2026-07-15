@@ -31,6 +31,21 @@ SELECT
 FROM wallets
 WHERE wallet_name = $1;
 
+-- name: GetManagerState :one
+SELECT
+    manager_version,
+    manager_created_at,
+    is_watch_only,
+    master_pub_params,
+    master_priv_params,
+    encrypted_crypto_pub_key,
+    encrypted_crypto_priv_key,
+    encrypted_crypto_script_key,
+    encrypted_master_hd_pub_key,
+    encrypted_master_hd_priv_key
+FROM wallets
+WHERE id = $1;
+
 -- name: UpdateWalletEncryption :execrows
 UPDATE wallets
 SET
@@ -42,6 +57,30 @@ SET
     encrypted_master_hd_pub_key = $6,
     encrypted_master_hd_priv_key = $7
 WHERE id = $8;
+
+-- name: PutManagerState :execrows
+UPDATE wallets
+SET
+    manager_version = $1,
+    manager_created_at = $2,
+    is_watch_only = $3,
+    master_pub_params = $4,
+    master_priv_params = $5,
+    encrypted_crypto_pub_key = $6,
+    encrypted_crypto_priv_key = $7,
+    encrypted_crypto_script_key = $8,
+    encrypted_master_hd_pub_key = $9,
+    encrypted_master_hd_priv_key = $10
+WHERE id = $11;
+
+-- name: DeleteManagerPrivateKeys :execrows
+UPDATE wallets
+SET
+    master_priv_params = NULL,
+    encrypted_crypto_priv_key = NULL,
+    encrypted_crypto_script_key = NULL,
+    encrypted_master_hd_priv_key = NULL
+WHERE id = $1;
 
 -- name: PutWalletSyncState :exec
 INSERT INTO wallet_sync_states (
@@ -58,11 +97,14 @@ SELECT
     s.wallet_id,
     s.start_block_height,
     start_block.header_hash AS start_block_hash,
+    start_block.block_timestamp AS start_block_timestamp,
     s.synced_block_height,
     synced_block.header_hash AS synced_block_hash,
+    synced_block.block_timestamp AS synced_block_timestamp,
     s.birthday_timestamp,
     s.birthday_block_height,
     birthday_block.header_hash AS birthday_block_hash,
+    birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
 INNER JOIN blocks AS start_block
@@ -72,6 +114,21 @@ INNER JOIN blocks AS synced_block
 LEFT JOIN blocks AS birthday_block
     ON s.birthday_block_height = birthday_block.block_height
 WHERE s.wallet_id = $1;
+
+-- name: SetWalletBirthday :execrows
+UPDATE wallet_sync_states
+SET birthday_timestamp = $1
+WHERE wallet_id = $2;
+
+-- name: SetWalletBirthdayBlock :execrows
+UPDATE wallet_sync_states
+SET birthday_block_height = $1
+WHERE wallet_id = $2;
+
+-- name: SetWalletBirthdayBlockVerified :execrows
+UPDATE wallet_sync_states
+SET birthday_block_verified = $1
+WHERE wallet_id = $2;
 
 -- name: GetWalletStartBlock :one
 SELECT b.block_height, b.header_hash, b.block_timestamp

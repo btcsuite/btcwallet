@@ -2,6 +2,7 @@ package sqlstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -149,6 +150,402 @@ type addrStore struct {
 	ctx      context.Context
 	walletID int64
 	queries  Queries
+}
+
+// expectWalletRow requires a manager update to affect exactly one wallet row.
+func (s *addrStore) expectWalletRow(operation string, rows int64) error {
+	if rows == 1 {
+		return nil
+	}
+
+	return fmt.Errorf("%s: wallet %d state not found", operation, s.walletID)
+}
+
+// managerNotFound translates a missing SQL row into the requested legacy
+// waddrmgr error.
+func managerNotFound(err error, code waddrmgr.ErrorCode,
+	description string) error {
+
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	return waddrmgr.ManagerError{
+		ErrorCode:   code,
+		Description: description,
+		Err:         err,
+	}
+}
+
+// missingManagerRow constructs a legacy waddrmgr error for a missing update
+// target.
+func missingManagerRow(code waddrmgr.ErrorCode,
+	description string) error {
+
+	return waddrmgr.ManagerError{
+		ErrorCode:   code,
+		Description: description,
+	}
+}
+
+// ManagerState returns the durable root address-manager state.
+func (s *addrStore) ManagerState() (waddrmgr.ManagerState, error) {
+	state, err := s.queries.GetManagerState(s.ctx, s.walletID)
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrNoExist, "address manager does not exist",
+	)
+}
+
+// SyncState returns the durable address-manager chain position.
+func (s *addrStore) SyncState() (waddrmgr.SyncState, error) {
+	state, err := s.queries.GetSyncState(s.ctx, s.walletID)
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrNoExist, "address manager sync state does not exist",
+	)
+}
+
+// KeyScope returns the durable state for one key scope.
+func (s *addrStore) KeyScope(
+	scope waddrmgr.KeyScope) (waddrmgr.KeyScopeState, error) {
+
+	state, err := s.queries.GetKeyScope(s.ctx, s.walletID, scope)
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrScopeNotFound,
+		fmt.Sprintf("key scope %s not found", scope),
+	)
+}
+
+// KeyScopes returns all durable key-scope states.
+func (s *addrStore) KeyScopes() ([]waddrmgr.KeyScopeState, error) {
+	return s.queries.ListKeyScopes(s.ctx, s.walletID)
+}
+
+// Account returns one durable scoped account.
+func (s *addrStore) Account(scope waddrmgr.KeyScope,
+	account uint32) (waddrmgr.AccountState, error) {
+
+	state, err := s.queries.GetAccount(s.ctx, s.walletID, scope, account)
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrAccountNotFound,
+		fmt.Sprintf("account %d not found", account),
+	)
+}
+
+// AccountByName returns one durable scoped account by name.
+func (s *addrStore) AccountByName(scope waddrmgr.KeyScope,
+	name string) (waddrmgr.AccountState, error) {
+
+	state, err := s.queries.GetAccountByName(s.ctx, s.walletID, scope, name)
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrAccountNotFound,
+		fmt.Sprintf("account name %q not found", name),
+	)
+}
+
+// Accounts returns all durable accounts in one key scope.
+func (s *addrStore) Accounts(
+	scope waddrmgr.KeyScope) ([]waddrmgr.AccountState, error) {
+
+	return s.queries.ListAccounts(s.ctx, s.walletID, scope)
+}
+
+// Address returns one durable address by its legacy address identifier.
+func (s *addrStore) Address(scope waddrmgr.KeyScope,
+	addressID []byte) (waddrmgr.AddressState, error) {
+
+	hash := sha256.Sum256(addressID)
+	state, err := s.queries.GetAddress(s.ctx, s.walletID, scope, hash[:])
+
+	return state, managerNotFound(
+		err, waddrmgr.ErrAddressNotFound, "address not found",
+	)
+}
+
+// AccountAddresses returns all addresses belonging to one scoped account.
+func (s *addrStore) AccountAddresses(scope waddrmgr.KeyScope,
+	account uint32) ([]waddrmgr.AddressState, error) {
+
+	return s.queries.ListAccountAddresses(
+		s.ctx, s.walletID, scope, account,
+	)
+}
+
+// ActiveAddresses returns all addresses in one key scope.
+func (s *addrStore) ActiveAddresses(
+	scope waddrmgr.KeyScope) ([]waddrmgr.AddressState, error) {
+
+	return s.queries.ListActiveAddresses(s.ctx, s.walletID, scope)
+}
+
+// PutManagerState replaces the durable root address-manager state.
+func (s *addrStore) PutManagerState(state waddrmgr.ManagerState) error {
+	rows, err := s.queries.PutManagerState(s.ctx, s.walletID, state)
+	if err != nil {
+		return fmt.Errorf("put manager state: %w", err)
+	}
+
+	return s.expectWalletRow("put manager state", rows)
+}
+
+// PutSyncState replaces the complete durable address-manager chain position.
+func (s *addrStore) PutSyncState(state waddrmgr.SyncState) error {
+	blocks := []waddrmgr.BlockStamp{state.StartBlock, state.SyncedTo}
+	if state.BirthdayBlock != nil {
+		blocks = append(blocks, *state.BirthdayBlock)
+	}
+
+	for _, block := range blocks {
+		err := s.queries.PutBlock(s.ctx, BlockRow{
+			Height:    block.Height,
+			Hash:      block.Hash[:],
+			Timestamp: block.Timestamp.Unix(),
+		})
+		if err != nil {
+			return fmt.Errorf("put sync block %d: %w", block.Height, err)
+		}
+	}
+
+	rows, err := s.queries.PutSyncState(s.ctx, s.walletID, state)
+	if err != nil {
+		return fmt.Errorf("put sync state: %w", err)
+	}
+
+	return s.expectWalletRow("put sync state", rows)
+}
+
+// SetBirthday sets the wallet birthday timestamp.
+func (s *addrStore) SetBirthday(birthday time.Time) error {
+	rows, err := s.queries.SetWalletBirthday(
+		s.ctx, s.walletID, birthday.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("set wallet birthday: %w", err)
+	}
+
+	return s.expectWalletRow("set wallet birthday", rows)
+}
+
+// SetBirthdayBlock sets or clears the wallet birthday block.
+func (s *addrStore) SetBirthdayBlock(block *waddrmgr.BlockStamp) error {
+	var height *int32
+	if block != nil {
+		err := s.queries.PutBlock(s.ctx, BlockRow{
+			Height:    block.Height,
+			Hash:      block.Hash[:],
+			Timestamp: block.Timestamp.Unix(),
+		})
+		if err != nil {
+			return fmt.Errorf("put birthday block %d: %w", block.Height, err)
+		}
+
+		height = &block.Height
+	}
+
+	rows, err := s.queries.SetWalletBirthdayBlock(
+		s.ctx, s.walletID, height,
+	)
+	if err != nil {
+		return fmt.Errorf("set wallet birthday block: %w", err)
+	}
+
+	return s.expectWalletRow("set wallet birthday block", rows)
+}
+
+// SetBirthdayBlockVerified sets birthday-block verification state.
+func (s *addrStore) SetBirthdayBlockVerified(verified bool) error {
+	rows, err := s.queries.SetWalletBirthdayBlockVerified(
+		s.ctx, s.walletID, verified,
+	)
+	if err != nil {
+		return fmt.Errorf("set birthday block verification: %w", err)
+	}
+
+	return s.expectWalletRow("set birthday block verification", rows)
+}
+
+// PutKeyScope creates or replaces one durable key-scope state.
+func (s *addrStore) PutKeyScope(state waddrmgr.KeyScopeState) error {
+	err := s.queries.PutKeyScope(s.ctx, s.walletID, state)
+	if err != nil {
+		return fmt.Errorf("put key scope: %w", err)
+	}
+
+	return nil
+}
+
+// SetCoinTypeKeys replaces one key scope's encrypted coin-type keys.
+func (s *addrStore) SetCoinTypeKeys(scope waddrmgr.KeyScope,
+	encryptedPub, encryptedPriv []byte) error {
+
+	rows, err := s.queries.SetCoinTypeKeys(
+		s.ctx, s.walletID, scope, encryptedPub, encryptedPriv,
+	)
+	if err != nil {
+		return managerNotFound(
+			err, waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	return nil
+}
+
+// SetLastAccount sets the last allocated account for one key scope.
+func (s *addrStore) SetLastAccount(scope waddrmgr.KeyScope,
+	account uint32) error {
+
+	rows, err := s.queries.SetLastAccount(
+		s.ctx, s.walletID, scope, account,
+	)
+	if err != nil {
+		return managerNotFound(
+			err, waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	return nil
+}
+
+// PutAccount creates or replaces one durable scoped account.
+func (s *addrStore) PutAccount(state waddrmgr.AccountState) error {
+	rows, err := s.queries.PutAccount(s.ctx, s.walletID, state)
+	if err != nil {
+		return fmt.Errorf("put account: %w", err)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", state.Scope),
+		)
+	}
+
+	return nil
+}
+
+// RenameAccount renames one durable scoped account.
+func (s *addrStore) RenameAccount(scope waddrmgr.KeyScope,
+	account uint32, name string) error {
+
+	rows, err := s.queries.RenameAccount(
+		s.ctx, s.walletID, scope, account, name,
+	)
+	if err != nil {
+		return managerNotFound(
+			err, waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrAccountNotFound,
+			fmt.Sprintf("account %d not found", account),
+		)
+	}
+
+	return nil
+}
+
+// SetAccountIndexes replaces one account's next derivation indexes.
+func (s *addrStore) SetAccountIndexes(scope waddrmgr.KeyScope, account,
+	nextExternal, nextInternal uint32) error {
+
+	rows, err := s.queries.SetAccountIndexes(
+		s.ctx, s.walletID, scope, account, nextExternal, nextInternal,
+	)
+	if err != nil {
+		return managerNotFound(
+			err, waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrAccountNotFound,
+			fmt.Sprintf("account %d not found", account),
+		)
+	}
+
+	return nil
+}
+
+// PutAddress creates or replaces one durable managed address.
+func (s *addrStore) PutAddress(addressID []byte,
+	state waddrmgr.AddressState) error {
+
+	hash := sha256.Sum256(addressID)
+	state.Hash = hash[:]
+
+	rows, err := s.queries.PutAddress(s.ctx, s.walletID, state)
+	if err != nil {
+		return fmt.Errorf("put address: %w", err)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", state.Scope),
+		)
+	}
+
+	return nil
+}
+
+// MarkAddressUsed marks one managed address as used.
+func (s *addrStore) MarkAddressUsed(scope waddrmgr.KeyScope,
+	addressID []byte) error {
+
+	hash := sha256.Sum256(addressID)
+
+	rows, err := s.queries.MarkAddressUsed(
+		s.ctx, s.walletID, scope, hash[:],
+	)
+	if err != nil {
+		return managerNotFound(
+			err, waddrmgr.ErrScopeNotFound,
+			fmt.Sprintf("key scope %s not found", scope),
+		)
+	}
+
+	if rows != 1 {
+		return missingManagerRow(
+			waddrmgr.ErrAddressNotFound, "address not found",
+		)
+	}
+
+	return nil
+}
+
+// DeletePrivateKeys removes every persisted private key from the manager.
+func (s *addrStore) DeletePrivateKeys() error {
+	err := s.queries.DeletePrivateKeys(s.ctx, s.walletID)
+	if err != nil {
+		return fmt.Errorf("delete manager private keys: %w", err)
+	}
+
+	return nil
 }
 
 // BlockHash returns the block hash at a particular block height.

@@ -72,6 +72,26 @@ func (q *Queries) CreateAddress(ctx context.Context, arg CreateAddressParams) er
 	return err
 }
 
+const DeleteAddressPrivateKeys = `-- name: DeleteAddressPrivateKeys :execrows
+UPDATE addresses
+SET
+    encrypted_priv_key = NULL,
+    encrypted_script = CASE
+        WHEN address_type = 2 THEN NULL
+        WHEN address_type = 3 AND is_secret_script = TRUE THEN NULL
+        ELSE encrypted_script
+    END
+WHERE wallet_id = ?
+`
+
+func (q *Queries) DeleteAddressPrivateKeys(ctx context.Context, walletID int64) (int64, error) {
+	result, err := q.exec(ctx, q.deleteAddressPrivateKeysStmt, DeleteAddressPrivateKeys, walletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetAddress = `-- name: GetAddress :one
 SELECT
     wallet_id,
@@ -102,6 +122,66 @@ type GetAddressParams struct {
 
 func (q *Queries) GetAddress(ctx context.Context, arg GetAddressParams) (Address, error) {
 	row := q.queryRow(ctx, q.getAddressStmt, GetAddress, arg.WalletID, arg.ScopeID, arg.AddressHash)
+	var i Address
+	err := row.Scan(
+		&i.WalletID,
+		&i.ScopeID,
+		&i.AddressHash,
+		&i.AccountNumber,
+		&i.AddressType,
+		&i.AddedAt,
+		&i.SyncStatus,
+		&i.Branch,
+		&i.AddressIndex,
+		&i.EncryptedPubKey,
+		&i.EncryptedPrivKey,
+		&i.EncryptedHash,
+		&i.EncryptedScript,
+		&i.WitnessVersion,
+		&i.IsSecretScript,
+		&i.Used,
+	)
+	return i, err
+}
+
+const GetManagerAddress = `-- name: GetManagerAddress :one
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.address_hash,
+    a.account_number,
+    a.address_type,
+    a.added_at,
+    a.sync_status,
+    a.branch,
+    a.address_index,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.encrypted_hash,
+    a.encrypted_script,
+    a.witness_version,
+    a.is_secret_script,
+    a.used
+FROM addresses AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+  AND a.address_hash = ?
+`
+
+type GetManagerAddressParams struct {
+	WalletID    int64
+	Purpose     int64
+	CoinType    int64
+	AddressHash []byte
+}
+
+func (q *Queries) GetManagerAddress(ctx context.Context, arg GetManagerAddressParams) (Address, error) {
+	row := q.queryRow(ctx, q.getManagerAddressStmt, GetManagerAddress,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AddressHash,
+	)
 	var i Address
 	err := row.Scan(
 		&i.WalletID,
@@ -192,6 +272,153 @@ func (q *Queries) ListAccountAddresses(ctx context.Context, arg ListAccountAddre
 	return items, nil
 }
 
+const ListManagerAccountAddresses = `-- name: ListManagerAccountAddresses :many
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.address_hash,
+    a.account_number,
+    a.address_type,
+    a.added_at,
+    a.sync_status,
+    a.branch,
+    a.address_index,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.encrypted_hash,
+    a.encrypted_script,
+    a.witness_version,
+    a.is_secret_script,
+    a.used
+FROM addresses AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+  AND a.account_number = ?
+ORDER BY a.address_hash
+`
+
+type ListManagerAccountAddressesParams struct {
+	WalletID      int64
+	Purpose       int64
+	CoinType      int64
+	AccountNumber int64
+}
+
+func (q *Queries) ListManagerAccountAddresses(ctx context.Context, arg ListManagerAccountAddressesParams) ([]Address, error) {
+	rows, err := q.query(ctx, q.listManagerAccountAddressesStmt, ListManagerAccountAddresses,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AccountNumber,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Address
+	for rows.Next() {
+		var i Address
+		if err := rows.Scan(
+			&i.WalletID,
+			&i.ScopeID,
+			&i.AddressHash,
+			&i.AccountNumber,
+			&i.AddressType,
+			&i.AddedAt,
+			&i.SyncStatus,
+			&i.Branch,
+			&i.AddressIndex,
+			&i.EncryptedPubKey,
+			&i.EncryptedPrivKey,
+			&i.EncryptedHash,
+			&i.EncryptedScript,
+			&i.WitnessVersion,
+			&i.IsSecretScript,
+			&i.Used,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ListManagerActiveAddresses = `-- name: ListManagerActiveAddresses :many
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.address_hash,
+    a.account_number,
+    a.address_type,
+    a.added_at,
+    a.sync_status,
+    a.branch,
+    a.address_index,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.encrypted_hash,
+    a.encrypted_script,
+    a.witness_version,
+    a.is_secret_script,
+    a.used
+FROM addresses AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+ORDER BY a.address_hash
+`
+
+type ListManagerActiveAddressesParams struct {
+	WalletID int64
+	Purpose  int64
+	CoinType int64
+}
+
+func (q *Queries) ListManagerActiveAddresses(ctx context.Context, arg ListManagerActiveAddressesParams) ([]Address, error) {
+	rows, err := q.query(ctx, q.listManagerActiveAddressesStmt, ListManagerActiveAddresses, arg.WalletID, arg.Purpose, arg.CoinType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Address
+	for rows.Next() {
+		var i Address
+		if err := rows.Scan(
+			&i.WalletID,
+			&i.ScopeID,
+			&i.AddressHash,
+			&i.AccountNumber,
+			&i.AddressType,
+			&i.AddedAt,
+			&i.SyncStatus,
+			&i.Branch,
+			&i.AddressIndex,
+			&i.EncryptedPubKey,
+			&i.EncryptedPrivKey,
+			&i.EncryptedHash,
+			&i.EncryptedScript,
+			&i.WitnessVersion,
+			&i.IsSecretScript,
+			&i.Used,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const MarkAddressUsed = `-- name: MarkAddressUsed :execrows
 UPDATE addresses
 SET used = TRUE
@@ -206,6 +433,108 @@ type MarkAddressUsedParams struct {
 
 func (q *Queries) MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error) {
 	result, err := q.exec(ctx, q.markAddressUsedStmt, MarkAddressUsed, arg.WalletID, arg.ScopeID, arg.AddressHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const PutManagerAddress = `-- name: PutManagerAddress :execrows
+INSERT INTO addresses (
+    wallet_id,
+    scope_id,
+    address_hash,
+    account_number,
+    address_type,
+    added_at,
+    sync_status,
+    branch,
+    address_index,
+    encrypted_pub_key,
+    encrypted_priv_key,
+    encrypted_hash,
+    encrypted_script,
+    witness_version,
+    is_secret_script,
+    used
+)
+SELECT
+    s.wallet_id,
+    s.id,
+    ?1,
+    ?2,
+    ?3,
+    ?4,
+    ?5,
+    cast(?6 AS INTEGER),
+    cast(?7 AS INTEGER),
+    ?8,
+    ?9,
+    ?10,
+    ?11,
+    cast(?12 AS INTEGER),
+    ?13,
+    ?14
+FROM key_scopes AS s
+WHERE s.wallet_id = ?15
+  AND s.purpose = ?16
+  AND s.coin_type = ?17
+ON CONFLICT (wallet_id, scope_id, address_hash) DO UPDATE SET
+    account_number = excluded.account_number,
+    address_type = excluded.address_type,
+    added_at = excluded.added_at,
+    sync_status = excluded.sync_status,
+    branch = excluded.branch,
+    address_index = excluded.address_index,
+    encrypted_pub_key = excluded.encrypted_pub_key,
+    encrypted_priv_key = excluded.encrypted_priv_key,
+    encrypted_hash = excluded.encrypted_hash,
+    encrypted_script = excluded.encrypted_script,
+    witness_version = excluded.witness_version,
+    is_secret_script = excluded.is_secret_script,
+    used = excluded.used
+`
+
+type PutManagerAddressParams struct {
+	AddressHash      []byte
+	AccountNumber    int64
+	AddressType      int64
+	AddedAt          int64
+	SyncStatus       int64
+	Branch           sql.NullInt64
+	AddressIndex     sql.NullInt64
+	EncryptedPubKey  []byte
+	EncryptedPrivKey []byte
+	EncryptedHash    []byte
+	EncryptedScript  []byte
+	WitnessVersion   sql.NullInt64
+	IsSecretScript   sql.NullBool
+	Used             bool
+	WalletID         int64
+	Purpose          int64
+	CoinType         int64
+}
+
+func (q *Queries) PutManagerAddress(ctx context.Context, arg PutManagerAddressParams) (int64, error) {
+	result, err := q.exec(ctx, q.putManagerAddressStmt, PutManagerAddress,
+		arg.AddressHash,
+		arg.AccountNumber,
+		arg.AddressType,
+		arg.AddedAt,
+		arg.SyncStatus,
+		arg.Branch,
+		arg.AddressIndex,
+		arg.EncryptedPubKey,
+		arg.EncryptedPrivKey,
+		arg.EncryptedHash,
+		arg.EncryptedScript,
+		arg.WitnessVersion,
+		arg.IsSecretScript,
+		arg.Used,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+	)
 	if err != nil {
 		return 0, err
 	}

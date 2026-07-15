@@ -60,6 +60,20 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) er
 	return err
 }
 
+const DeleteAccountPrivateKeys = `-- name: DeleteAccountPrivateKeys :execrows
+UPDATE accounts
+SET encrypted_priv_key = NULL
+WHERE wallet_id = ?
+`
+
+func (q *Queries) DeleteAccountPrivateKeys(ctx context.Context, walletID int64) (int64, error) {
+	result, err := q.exec(ctx, q.deleteAccountPrivateKeysStmt, DeleteAccountPrivateKeys, walletID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const GetAccount = `-- name: GetAccount :one
 SELECT
     wallet_id,
@@ -85,6 +99,110 @@ type GetAccountParams struct {
 
 func (q *Queries) GetAccount(ctx context.Context, arg GetAccountParams) (Account, error) {
 	row := q.queryRow(ctx, q.getAccountStmt, GetAccount, arg.ScopeID, arg.AccountNumber)
+	var i Account
+	err := row.Scan(
+		&i.WalletID,
+		&i.ScopeID,
+		&i.AccountNumber,
+		&i.AccountType,
+		&i.AccountName,
+		&i.EncryptedPubKey,
+		&i.EncryptedPrivKey,
+		&i.MasterKeyFingerprint,
+		&i.NextExternalIndex,
+		&i.NextInternalIndex,
+		&i.ExternalAddrType,
+		&i.InternalAddrType,
+	)
+	return i, err
+}
+
+const GetManagerAccount = `-- name: GetManagerAccount :one
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.account_number,
+    a.account_type,
+    a.account_name,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.master_key_fingerprint,
+    a.next_external_index,
+    a.next_internal_index,
+    a.external_addr_type,
+    a.internal_addr_type
+FROM accounts AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+  AND a.account_number = ?
+`
+
+type GetManagerAccountParams struct {
+	WalletID      int64
+	Purpose       int64
+	CoinType      int64
+	AccountNumber int64
+}
+
+func (q *Queries) GetManagerAccount(ctx context.Context, arg GetManagerAccountParams) (Account, error) {
+	row := q.queryRow(ctx, q.getManagerAccountStmt, GetManagerAccount,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AccountNumber,
+	)
+	var i Account
+	err := row.Scan(
+		&i.WalletID,
+		&i.ScopeID,
+		&i.AccountNumber,
+		&i.AccountType,
+		&i.AccountName,
+		&i.EncryptedPubKey,
+		&i.EncryptedPrivKey,
+		&i.MasterKeyFingerprint,
+		&i.NextExternalIndex,
+		&i.NextInternalIndex,
+		&i.ExternalAddrType,
+		&i.InternalAddrType,
+	)
+	return i, err
+}
+
+const GetManagerAccountByName = `-- name: GetManagerAccountByName :one
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.account_number,
+    a.account_type,
+    a.account_name,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.master_key_fingerprint,
+    a.next_external_index,
+    a.next_internal_index,
+    a.external_addr_type,
+    a.internal_addr_type
+FROM accounts AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+  AND a.account_name = ?
+`
+
+type GetManagerAccountByNameParams struct {
+	WalletID    int64
+	Purpose     int64
+	CoinType    int64
+	AccountName string
+}
+
+func (q *Queries) GetManagerAccountByName(ctx context.Context, arg GetManagerAccountByNameParams) (Account, error) {
+	row := q.queryRow(ctx, q.getManagerAccountByNameStmt, GetManagerAccountByName,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AccountName,
+	)
 	var i Account
 	err := row.Scan(
 		&i.WalletID,
@@ -156,6 +274,150 @@ func (q *Queries) ListAccounts(ctx context.Context, scopeID int64) ([]Account, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const ListManagerAccounts = `-- name: ListManagerAccounts :many
+SELECT
+    a.wallet_id,
+    a.scope_id,
+    a.account_number,
+    a.account_type,
+    a.account_name,
+    a.encrypted_pub_key,
+    a.encrypted_priv_key,
+    a.master_key_fingerprint,
+    a.next_external_index,
+    a.next_internal_index,
+    a.external_addr_type,
+    a.internal_addr_type
+FROM accounts AS a
+INNER JOIN key_scopes AS s ON s.id = a.scope_id
+WHERE s.wallet_id = ? AND s.purpose = ? AND s.coin_type = ?
+ORDER BY a.account_number
+`
+
+type ListManagerAccountsParams struct {
+	WalletID int64
+	Purpose  int64
+	CoinType int64
+}
+
+func (q *Queries) ListManagerAccounts(ctx context.Context, arg ListManagerAccountsParams) ([]Account, error) {
+	rows, err := q.query(ctx, q.listManagerAccountsStmt, ListManagerAccounts, arg.WalletID, arg.Purpose, arg.CoinType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Account
+	for rows.Next() {
+		var i Account
+		if err := rows.Scan(
+			&i.WalletID,
+			&i.ScopeID,
+			&i.AccountNumber,
+			&i.AccountType,
+			&i.AccountName,
+			&i.EncryptedPubKey,
+			&i.EncryptedPrivKey,
+			&i.MasterKeyFingerprint,
+			&i.NextExternalIndex,
+			&i.NextInternalIndex,
+			&i.ExternalAddrType,
+			&i.InternalAddrType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const PutManagerAccount = `-- name: PutManagerAccount :execrows
+INSERT INTO accounts (
+    wallet_id,
+    scope_id,
+    account_number,
+    account_type,
+    account_name,
+    encrypted_pub_key,
+    encrypted_priv_key,
+    master_key_fingerprint,
+    next_external_index,
+    next_internal_index,
+    external_addr_type,
+    internal_addr_type
+)
+SELECT
+    s.wallet_id,
+    s.id,
+    ?1,
+    ?2,
+    ?3,
+    ?4,
+    ?5,
+    cast(?6 AS INTEGER),
+    ?7,
+    ?8,
+    cast(?9 AS INTEGER),
+    cast(?10 AS INTEGER)
+FROM key_scopes AS s
+WHERE s.wallet_id = ?11
+  AND s.purpose = ?12
+  AND s.coin_type = ?13
+ON CONFLICT (scope_id, account_number) DO UPDATE SET
+    account_type = excluded.account_type,
+    account_name = excluded.account_name,
+    encrypted_pub_key = excluded.encrypted_pub_key,
+    encrypted_priv_key = excluded.encrypted_priv_key,
+    master_key_fingerprint = excluded.master_key_fingerprint,
+    next_external_index = excluded.next_external_index,
+    next_internal_index = excluded.next_internal_index,
+    external_addr_type = excluded.external_addr_type,
+    internal_addr_type = excluded.internal_addr_type
+`
+
+type PutManagerAccountParams struct {
+	AccountNumber        int64
+	AccountType          int64
+	AccountName          string
+	EncryptedPubKey      []byte
+	EncryptedPrivKey     []byte
+	MasterKeyFingerprint sql.NullInt64
+	NextExternalIndex    int64
+	NextInternalIndex    int64
+	ExternalAddrType     sql.NullInt64
+	InternalAddrType     sql.NullInt64
+	WalletID             int64
+	Purpose              int64
+	CoinType             int64
+}
+
+func (q *Queries) PutManagerAccount(ctx context.Context, arg PutManagerAccountParams) (int64, error) {
+	result, err := q.exec(ctx, q.putManagerAccountStmt, PutManagerAccount,
+		arg.AccountNumber,
+		arg.AccountType,
+		arg.AccountName,
+		arg.EncryptedPubKey,
+		arg.EncryptedPrivKey,
+		arg.MasterKeyFingerprint,
+		arg.NextExternalIndex,
+		arg.NextInternalIndex,
+		arg.ExternalAddrType,
+		arg.InternalAddrType,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const RenameAccount = `-- name: RenameAccount :execrows
