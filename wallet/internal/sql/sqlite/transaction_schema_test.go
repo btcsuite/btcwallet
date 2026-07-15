@@ -112,7 +112,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 		},
 	)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, firstCredits[0].IsSpent)
+	require.True(t, firstCredits[0].IsSpent.Bool)
 
 	secondCredits, err := q.ListTransactionCredits(
 		ctx, sqlc.ListTransactionCreditsParams{
@@ -120,7 +120,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 		},
 	)
 	require.NoError(t, err)
-	require.Zero(t, secondCredits[0].IsSpent)
+	require.False(t, secondCredits[0].IsSpent.Bool)
 
 	unspent, err = q.ListUnspentCredits(
 		ctx, sqlc.ListUnspentCreditsParams{WalletID: 1, NowUnix: 2000},
@@ -230,7 +230,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 	)
 	require.NoError(t, err)
 	require.Len(t, credits, 1)
-	require.Zero(t, credits[0].IsSpent)
+	require.True(t, credits[0].IsSpent.Bool)
 
 	unspent, err = q.ListUnspentCredits(
 		ctx, sqlc.ListUnspentCreditsParams{WalletID: 1, NowUnix: 2000},
@@ -281,6 +281,8 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 	require.Equal(t, testHash(7), lease.LockID)
 }
 
+// insertUnminedTransaction stores an unmined transaction fixture and returns
+// its SQL identifier.
 func insertUnminedTransaction(t *testing.T, ctx context.Context,
 	q *sqlc.Queries, txHash []byte) int64 {
 
@@ -297,6 +299,7 @@ func insertUnminedTransaction(t *testing.T, ctx context.Context,
 	return id
 }
 
+// testHash constructs a deterministic hash fixture from one byte.
 func testHash(value byte) []byte {
 	return bytes.Repeat([]byte{value}, 32)
 }

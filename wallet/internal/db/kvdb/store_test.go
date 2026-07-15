@@ -28,6 +28,7 @@ var (
 
 type testAddrStore struct{}
 
+// BlockHash returns the fixture's block hash at the requested height.
 func (testAddrStore) BlockHash(ns walletdb.ReadBucket,
 	_ int32) (*chainhash.Hash, error) {
 
@@ -42,18 +43,24 @@ func (testAddrStore) BlockHash(ns walletdb.ReadBucket,
 	return &hash, nil
 }
 
+// SetSyncedTo records the fixture's synced-to block stamp.
 func (testAddrStore) SetSyncedTo(ns walletdb.ReadWriteBucket,
 	block *waddrmgr.BlockStamp) error {
 
 	return ns.Put(syncedToHeightKey, encodeHeight(block.Height))
 }
 
-type testTxStore struct{}
+type testTxStore struct {
+	legacyTxStore
+}
 
+// Rollback rewinds mined transaction incidences at and above the given height.
 func (testTxStore) Rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	return ns.Put(rollbackHeightKey, encodeHeight(height))
 }
 
+// TestStoreUpdateSharesTransaction verifies that both manager adapters share
+// one writable walletdb transaction.
 func TestStoreUpdateSharesTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -136,6 +143,8 @@ func TestStoreUpdateSharesTransaction(t *testing.T) {
 	}
 }
 
+// TestStoreView verifies that both manager adapters share one read-only
+// walletdb transaction.
 func TestStoreView(t *testing.T) {
 	t.Parallel()
 
@@ -167,6 +176,8 @@ func TestStoreView(t *testing.T) {
 	require.Equal(t, 1, resetCount)
 }
 
+// TestStoreRejectsCanceledContext verifies that a canceled context prevents a
+// walletdb transaction from starting.
 func TestStoreRejectsCanceledContext(t *testing.T) {
 	t.Parallel()
 
@@ -195,6 +206,8 @@ func TestStoreRejectsCanceledContext(t *testing.T) {
 	require.False(t, resetCalled)
 }
 
+// testDB creates a walletdb fixture with initialized manager namespaces.
+//
 //nolint:ireturn // The test helper returns the walletdb driver interface.
 func testDB(t *testing.T) walletdb.DB {
 	t.Helper()
@@ -226,6 +239,7 @@ func testDB(t *testing.T) walletdb.DB {
 	return db
 }
 
+// encodeHeight encodes a test height using the adapter fixture format.
 func encodeHeight(height int32) []byte {
 	var value [4]byte
 	binary.BigEndian.PutUint32(value[:], uint32(height))
@@ -233,6 +247,7 @@ func encodeHeight(height int32) []byte {
 	return value[:]
 }
 
+// decodeHeight decodes a test height from the adapter fixture format.
 func decodeHeight(value []byte) int32 {
 	return int32(binary.BigEndian.Uint32(value))
 }
