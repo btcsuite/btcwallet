@@ -374,20 +374,17 @@ func (q *queryAdapter) GetSyncState(ctx context.Context,
 func (q *queryAdapter) PutSyncState(ctx context.Context, walletID int64,
 	state waddrmgr.SyncState) (int64, error) {
 
-	birthdayHeight := sql.NullInt64{}
+	var birthdayHash []byte
 	if state.BirthdayBlock != nil {
-		birthdayHeight = sql.NullInt64{
-			Int64: int64(state.BirthdayBlock.Height),
-			Valid: true,
-		}
+		birthdayHash = state.BirthdayBlock.Hash[:]
 	}
 
 	return q.queries.UpdateWalletSyncState(
 		ctx, sqlitedb.UpdateWalletSyncStateParams{
-			StartBlockHeight:      int64(state.StartBlock.Height),
-			SyncedBlockHeight:     int64(state.SyncedTo.Height),
+			StartBlockHash:        state.StartBlock.Hash[:],
+			SyncedBlockHash:       state.SyncedTo.Hash[:],
 			BirthdayTimestamp:     state.Birthday.Unix(),
-			BirthdayBlockHeight:   birthdayHeight,
+			BirthdayBlockHash:     birthdayHash,
 			BirthdayBlockVerified: state.BirthdayBlockVerified,
 			WalletID:              walletID,
 		},
@@ -408,17 +405,12 @@ func (q *queryAdapter) SetWalletBirthday(ctx context.Context, walletID,
 // SetWalletBirthdayBlock updates wallet birthday block through the
 // transaction-bound backend.
 func (q *queryAdapter) SetWalletBirthdayBlock(ctx context.Context,
-	walletID int64, height *int32) (int64, error) {
-
-	value := sql.NullInt64{}
-	if height != nil {
-		value = sql.NullInt64{Int64: int64(*height), Valid: true}
-	}
+	walletID int64, blockHash []byte) (int64, error) {
 
 	return q.queries.SetWalletBirthdayBlock(
 		ctx, sqlitedb.SetWalletBirthdayBlockParams{
-			BirthdayBlockHeight: value,
-			WalletID:            walletID,
+			BlockHash: blockHash,
+			WalletID:  walletID,
 		},
 	)
 }

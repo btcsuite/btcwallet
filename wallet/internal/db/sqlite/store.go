@@ -96,12 +96,12 @@ func (q *queryAdapter) GetWalletStartBlock(ctx context.Context,
 // SetWalletSyncedTo updates wallet synced to through the transaction-bound
 // backend.
 func (q *queryAdapter) SetWalletSyncedTo(ctx context.Context, walletID int64,
-	height int32) (int64, error) {
+	blockHash []byte) (int64, error) {
 
 	return q.queries.SetWalletSyncedTo(
 		ctx, sqlitedb.SetWalletSyncedToParams{
-			SyncedBlockHeight: int64(height),
-			WalletID:          walletID,
+			BlockHash: blockHash,
+			WalletID:  walletID,
 		},
 	)
 }

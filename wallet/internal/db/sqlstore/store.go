@@ -332,7 +332,7 @@ func (s *addrStore) SetBirthday(birthday time.Time) error {
 
 // SetBirthdayBlock sets or clears the wallet birthday block.
 func (s *addrStore) SetBirthdayBlock(block *waddrmgr.BlockStamp) error {
-	var height *int32
+	var blockHash []byte
 	if block != nil {
 		err := s.queries.PutBlock(s.ctx, BlockRow{
 			Height:    block.Height,
@@ -343,11 +343,11 @@ func (s *addrStore) SetBirthdayBlock(block *waddrmgr.BlockStamp) error {
 			return fmt.Errorf("put birthday block %d: %w", block.Height, err)
 		}
 
-		height = &block.Height
+		blockHash = block.Hash[:]
 	}
 
 	rows, err := s.queries.SetWalletBirthdayBlock(
-		s.ctx, s.walletID, height,
+		s.ctx, s.walletID, blockHash,
 	)
 	if err != nil {
 		return fmt.Errorf("set wallet birthday block: %w", err)
@@ -643,7 +643,7 @@ func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 	}
 
 	rows, err := s.queries.SetWalletSyncedTo(
-		s.ctx, s.walletID, block.Height,
+		s.ctx, s.walletID, block.Hash[:],
 	)
 	if err != nil {
 		return fmt.Errorf("set wallet synced-to block: %w", err)

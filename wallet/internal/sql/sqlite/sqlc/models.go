@@ -55,6 +55,7 @@ type AddressType struct {
 }
 
 type Block struct {
+	ID             int64
 	BlockHeight    int64
 	HeaderHash     []byte
 	BlockTimestamp int64
@@ -104,7 +105,7 @@ type Transaction struct {
 	TxHash         []byte
 	RawTx          []byte
 	ReceivedUnix   int64
-	BlockHeight    sql.NullInt64
+	BlockID        sql.NullInt64
 	ConfirmedOrder sql.NullInt64
 	IsCoinbase     bool
 }
@@ -147,9 +148,9 @@ type Wallet struct {
 
 type WalletSyncState struct {
 	WalletID              int64
-	StartBlockHeight      int64
-	SyncedBlockHeight     int64
+	StartBlockID          int64
+	SyncedBlockID         int64
 	BirthdayTimestamp     int64
-	BirthdayBlockHeight   sql.NullInt64
+	BirthdayBlockID       sql.NullInt64
 	BirthdayBlockVerified bool
 }

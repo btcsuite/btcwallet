@@ -31,16 +31,18 @@ func TestLegacySchemaQueries(t *testing.T) {
 	genesisHash := bytesOf(0x01, 32)
 	birthdayHash := bytesOf(0x02, 32)
 
-	require.NoError(t, queries.InsertBlock(ctx, sqlc.InsertBlockParams{
+	_, err = queries.InsertBlock(ctx, sqlc.InsertBlockParams{
 		BlockHeight:    0,
 		HeaderHash:     genesisHash,
 		BlockTimestamp: 1,
-	}))
-	require.NoError(t, queries.InsertBlock(ctx, sqlc.InsertBlockParams{
+	})
+	require.NoError(t, err)
+	_, err = queries.InsertBlock(ctx, sqlc.InsertBlockParams{
 		BlockHeight:    100,
 		HeaderHash:     birthdayHash,
 		BlockTimestamp: 2,
-	}))
+	})
+	require.NoError(t, err)
 
 	walletID, err := queries.CreateWallet(ctx, sqlc.CreateWalletParams{
 		WalletName:            "watch-only",
@@ -66,10 +68,10 @@ func TestLegacySchemaQueries(t *testing.T) {
 	require.NoError(t, queries.PutWalletSyncState(
 		ctx, sqlc.PutWalletSyncStateParams{
 			WalletID:              walletID,
-			StartBlockHeight:      0,
-			SyncedBlockHeight:     100,
+			StartBlockHash:        genesisHash,
+			SyncedBlockHash:       birthdayHash,
 			BirthdayTimestamp:     1234,
-			BirthdayBlockHeight:   sql.NullInt64{Int64: 100, Valid: true},
+			BirthdayBlockHash:     birthdayHash,
 			BirthdayBlockVerified: true,
 		},
 	))

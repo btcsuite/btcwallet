@@ -166,13 +166,19 @@ func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (Walle
 const GetWalletStartBlock = `-- name: GetWalletStartBlock :one
 SELECT b.block_height, b.header_hash, b.block_timestamp
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+INNER JOIN blocks AS b ON b.id = s.start_block_id
 WHERE s.wallet_id = ?
 `
 
-func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error) {
+type GetWalletStartBlockRow struct {
+	BlockHeight    int64
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (GetWalletStartBlockRow, error) {
 	row := q.queryRow(ctx, q.getWalletStartBlockStmt, GetWalletStartBlock, walletID)
-	var i Block
+	var i GetWalletStartBlockRow
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
 }
@@ -180,24 +186,24 @@ func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (Bloc
 const GetWalletSyncState = `-- name: GetWalletSyncState :one
 SELECT
     s.wallet_id,
-    s.start_block_height,
+    start_block.block_height AS start_block_height,
     start_block.header_hash AS start_block_hash,
     start_block.block_timestamp AS start_block_timestamp,
-    s.synced_block_height,
+    synced_block.block_height AS synced_block_height,
     synced_block.header_hash AS synced_block_hash,
     synced_block.block_timestamp AS synced_block_timestamp,
     s.birthday_timestamp,
-    s.birthday_block_height,
+    birthday_block.block_height AS birthday_block_height,
     birthday_block.header_hash AS birthday_block_hash,
     birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
 INNER JOIN blocks AS start_block
-    ON s.start_block_height = start_block.block_height
+    ON start_block.id = s.start_block_id
 INNER JOIN blocks AS synced_block
-    ON s.synced_block_height = synced_block.block_height
+    ON synced_block.id = s.synced_block_id
 LEFT JOIN blocks AS birthday_block
-    ON s.birthday_block_height = birthday_block.block_height
+    ON birthday_block.id = s.birthday_block_id
 WHERE s.wallet_id = ?
 `
 
@@ -289,30 +295,39 @@ func (q *Queries) PutManagerState(ctx context.Context, arg PutManagerStateParams
 const PutWalletSyncState = `-- name: PutWalletSyncState :exec
 INSERT INTO wallet_sync_states (
     wallet_id,
-    start_block_height,
-    synced_block_height,
+    start_block_id,
+    synced_block_id,
     birthday_timestamp,
-    birthday_block_height,
+    birthday_block_id,
     birthday_block_verified
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (
+    ?1,
+    (SELECT sb.id FROM blocks AS sb WHERE sb.header_hash = ?2),
+    (SELECT yb.id FROM blocks AS yb WHERE yb.header_hash = ?3),
+    ?4,
+    (SELECT bb.id FROM blocks AS bb WHERE bb.header_hash = ?5),
+    ?6
+)
 `
 
 type PutWalletSyncStateParams struct {
 	WalletID              int64
-	StartBlockHeight      int64
-	SyncedBlockHeight     int64
+	StartBlockHash        []byte
+	SyncedBlockHash       []byte
 	BirthdayTimestamp     int64
-	BirthdayBlockHeight   sql.NullInt64
+	BirthdayBlockHash     []byte
 	BirthdayBlockVerified bool
 }
 
+// Block references resolve from the globally unique header hash, so the blocks
+// must already exist before this insert runs.
 func (q *Queries) PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error {
 	_, err := q.exec(ctx, q.putWalletSyncStateStmt, PutWalletSyncState,
 		arg.WalletID,
-		arg.StartBlockHeight,
-		arg.SyncedBlockHeight,
+		arg.StartBlockHash,
+		arg.SyncedBlockHash,
 		arg.BirthdayTimestamp,
-		arg.BirthdayBlockHeight,
+		arg.BirthdayBlockHash,
 		arg.BirthdayBlockVerified,
 	)
 	return err
@@ -339,17 +354,18 @@ func (q *Queries) SetWalletBirthday(ctx context.Context, arg SetWalletBirthdayPa
 
 const SetWalletBirthdayBlock = `-- name: SetWalletBirthdayBlock :execrows
 UPDATE wallet_sync_states
-SET birthday_block_height = ?
-WHERE wallet_id = ?
+SET birthday_block_id =
+    (SELECT id FROM blocks WHERE header_hash = ?1)
+WHERE wallet_id = ?2
 `
 
 type SetWalletBirthdayBlockParams struct {
-	BirthdayBlockHeight sql.NullInt64
-	WalletID            int64
+	BlockHash []byte
+	WalletID  int64
 }
 
 func (q *Queries) SetWalletBirthdayBlock(ctx context.Context, arg SetWalletBirthdayBlockParams) (int64, error) {
-	result, err := q.exec(ctx, q.setWalletBirthdayBlockStmt, SetWalletBirthdayBlock, arg.BirthdayBlockHeight, arg.WalletID)
+	result, err := q.exec(ctx, q.setWalletBirthdayBlockStmt, SetWalletBirthdayBlock, arg.BlockHash, arg.WalletID)
 	if err != nil {
 		return 0, err
 	}
@@ -377,17 +393,18 @@ func (q *Queries) SetWalletBirthdayBlockVerified(ctx context.Context, arg SetWal
 
 const SetWalletSyncedTo = `-- name: SetWalletSyncedTo :execrows
 UPDATE wallet_sync_states
-SET synced_block_height = ?
-WHERE wallet_id = ?
+SET synced_block_id =
+    (SELECT id FROM blocks WHERE header_hash = ?1)
+WHERE wallet_id = ?2
 `
 
 type SetWalletSyncedToParams struct {
-	SyncedBlockHeight int64
-	WalletID          int64
+	BlockHash []byte
+	WalletID  int64
 }
 
 func (q *Queries) SetWalletSyncedTo(ctx context.Context, arg SetWalletSyncedToParams) (int64, error) {
-	result, err := q.exec(ctx, q.setWalletSyncedToStmt, SetWalletSyncedTo, arg.SyncedBlockHeight, arg.WalletID)
+	result, err := q.exec(ctx, q.setWalletSyncedToStmt, SetWalletSyncedTo, arg.BlockHash, arg.WalletID)
 	if err != nil {
 		return 0, err
 	}
@@ -438,29 +455,32 @@ func (q *Queries) UpdateWalletEncryption(ctx context.Context, arg UpdateWalletEn
 const UpdateWalletSyncState = `-- name: UpdateWalletSyncState :execrows
 UPDATE wallet_sync_states
 SET
-    start_block_height = ?,
-    synced_block_height = ?,
-    birthday_timestamp = ?,
-    birthday_block_height = ?,
-    birthday_block_verified = ?
-WHERE wallet_id = ?
+    start_block_id =
+        (SELECT sb.id FROM blocks AS sb WHERE sb.header_hash = ?1),
+    synced_block_id =
+        (SELECT yb.id FROM blocks AS yb WHERE yb.header_hash = ?2),
+    birthday_timestamp = ?3,
+    birthday_block_id =
+        (SELECT bb.id FROM blocks AS bb WHERE bb.header_hash = ?4),
+    birthday_block_verified = ?5
+WHERE wallet_id = ?6
 `
 
 type UpdateWalletSyncStateParams struct {
-	StartBlockHeight      int64
-	SyncedBlockHeight     int64
+	StartBlockHash        []byte
+	SyncedBlockHash       []byte
 	BirthdayTimestamp     int64
-	BirthdayBlockHeight   sql.NullInt64
+	BirthdayBlockHash     []byte
 	BirthdayBlockVerified bool
 	WalletID              int64
 }
 
 func (q *Queries) UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error) {
 	result, err := q.exec(ctx, q.updateWalletSyncStateStmt, UpdateWalletSyncState,
-		arg.StartBlockHeight,
-		arg.SyncedBlockHeight,
+		arg.StartBlockHash,
+		arg.SyncedBlockHash,
 		arg.BirthdayTimestamp,
-		arg.BirthdayBlockHeight,
+		arg.BirthdayBlockHash,
 		arg.BirthdayBlockVerified,
 		arg.WalletID,
 	)

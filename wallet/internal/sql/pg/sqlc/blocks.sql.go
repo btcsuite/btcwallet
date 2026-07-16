@@ -11,11 +11,11 @@ import (
 
 const DeleteBlock = `-- name: DeleteBlock :exec
 DELETE FROM blocks
-WHERE block_height = $1
+WHERE id = $1
 `
 
-func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
-	_, err := q.exec(ctx, q.deleteBlockStmt, DeleteBlock, blockHeight)
+func (q *Queries) DeleteBlock(ctx context.Context, id int64) error {
+	_, err := q.exec(ctx, q.deleteBlockStmt, DeleteBlock, id)
 	return err
 }
 
@@ -26,11 +26,22 @@ SELECT
     block_timestamp
 FROM blocks
 WHERE block_height = $1
+ORDER BY id
+LIMIT 1
 `
 
-func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error) {
+type GetBlockByHeightRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+// A height can host competing blocks, so the oldest recorded block at the
+// height is returned deterministically. Fork disambiguation by id is a later
+// increment.
+func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (GetBlockByHeightRow, error) {
 	row := q.queryRow(ctx, q.getBlockByHeightStmt, GetBlockByHeight, blockHeight)
-	var i Block
+	var i GetBlockByHeightRow
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
 }
@@ -53,15 +64,21 @@ type GetBlocksInRangeParams struct {
 	EndHeight   int32
 }
 
-func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error) {
+type GetBlocksInRangeRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]GetBlocksInRangeRow, error) {
 	rows, err := q.query(ctx, q.getBlocksInRangeStmt, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Block
+	var items []GetBlocksInRangeRow
 	for rows.Next() {
-		var i Block
+		var i GetBlocksInRangeRow
 		if err := rows.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp); err != nil {
 			return nil, err
 		}
@@ -76,10 +93,10 @@ func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangePara
 	return items, nil
 }
 
-const InsertBlock = `-- name: InsertBlock :exec
+const InsertBlock = `-- name: InsertBlock :one
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO NOTHING
+RETURNING id
 `
 
 type InsertBlockParams struct {
@@ -88,9 +105,11 @@ type InsertBlockParams struct {
 	BlockTimestamp int64
 }
 
-func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
-	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
-	return err
+func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) (int64, error) {
+	row := q.queryRow(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const PruneStaleSyncBlock = `-- name: PruneStaleSyncBlock :exec
@@ -98,21 +117,21 @@ DELETE FROM blocks
 WHERE blocks.block_height = $1
   AND NOT EXISTS (
       SELECT 1 FROM transactions
-      WHERE transactions.block_height = blocks.block_height
+      WHERE transactions.block_id = blocks.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM wallet_sync_states
-      WHERE wallet_sync_states.start_block_height = blocks.block_height
-          OR wallet_sync_states.synced_block_height = blocks.block_height
-          OR wallet_sync_states.birthday_block_height = blocks.block_height
+      WHERE wallet_sync_states.start_block_id = blocks.id
+          OR wallet_sync_states.synced_block_id = blocks.id
+          OR wallet_sync_states.birthday_block_id = blocks.id
   )
 `
 
-// PruneStaleSyncBlock removes one block that has aged out of the recent-block
-// retention window, mirroring the legacy address manager's per-tip pruning.
-// The shared blocks table is foreign-keyed by transactions and wallet sync
-// states with ON DELETE RESTRICT, so the block is only removed when nothing
-// still references it.
+// PruneStaleSyncBlock removes blocks that have aged out of the recent-block
+// retention window at the given height, mirroring the legacy address manager's
+// per-tip pruning. The shared blocks table is foreign-keyed by transactions and
+// wallet sync states with ON DELETE RESTRICT, so a block is only removed when
+// nothing still references it.
 func (q *Queries) PruneStaleSyncBlock(ctx context.Context, blockHeight int32) error {
 	_, err := q.exec(ctx, q.pruneStaleSyncBlockStmt, PruneStaleSyncBlock, blockHeight)
 	return err
@@ -121,9 +140,7 @@ func (q *Queries) PruneStaleSyncBlock(ctx context.Context, blockHeight int32) er
 const PutBlock = `-- name: PutBlock :exec
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO UPDATE SET
-    header_hash = excluded.header_hash,
-    block_timestamp = excluded.block_timestamp
+ON CONFLICT (header_hash) DO NOTHING
 `
 
 type PutBlockParams struct {
@@ -132,6 +149,10 @@ type PutBlockParams struct {
 	BlockTimestamp int64
 }
 
+// PutBlock inserts the block or, when a block with the same globally unique
+// header hash already exists, leaves it untouched. A different hash at the same
+// height inserts a distinct row, so competing same-height blocks coexist and no
+// block is ever overwritten.
 func (q *Queries) PutBlock(ctx context.Context, arg PutBlockParams) error {
 	_, err := q.exec(ctx, q.putBlockStmt, PutBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
 	return err

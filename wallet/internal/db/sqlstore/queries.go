@@ -29,10 +29,9 @@ type TransactionDetailsRow struct {
 
 // TransactionRow contains one transaction incidence.
 type TransactionRow struct {
-	ID          int64
-	Hash        []byte
-	RawTx       []byte
-	BlockHeight sql.NullInt64
+	ID    int64
+	Hash  []byte
+	RawTx []byte
 }
 
 // TransactionIncidenceRow identifies one mined transaction incidence.
@@ -95,7 +94,7 @@ type InsertTransactionParams struct {
 	Hash           []byte
 	RawTx          []byte
 	Received       int64
-	BlockHeight    sql.NullInt64
+	BlockHash      []byte
 	ConfirmedOrder sql.NullInt64
 	IsCoinbase     bool
 }
@@ -120,7 +119,7 @@ type Queries interface {
 	// SetWalletSyncedTo updates wallet synced to through the transaction-bound
 	// backend.
 	SetWalletSyncedTo(ctx context.Context, walletID int64,
-		height int32) (int64, error)
+		blockHash []byte) (int64, error)
 	// GetManagerState reads manager state from the transaction-bound backend.
 	GetManagerState(ctx context.Context,
 		walletID int64) (waddrmgr.ManagerState, error)
@@ -141,7 +140,7 @@ type Queries interface {
 	// SetWalletBirthdayBlock updates wallet birthday block through the
 	// transaction-bound backend.
 	SetWalletBirthdayBlock(ctx context.Context, walletID int64,
-		height *int32) (int64, error)
+		blockHash []byte) (int64, error)
 	// SetWalletBirthdayBlockVerified updates wallet birthday block verified
 	// through the transaction-bound backend.
 	SetWalletBirthdayBlockVerified(ctx context.Context, walletID int64,
@@ -278,7 +277,7 @@ type Queries interface {
 	// NextBlockTransactionOrder returns next block transaction order from the
 	// transaction-bound backend.
 	NextBlockTransactionOrder(ctx context.Context, walletID int64,
-		height int32) (int64, error)
+		blockHash []byte) (int64, error)
 	// InsertTransaction records transaction through the transaction-bound
 	// backend.
 	InsertTransaction(ctx context.Context,
@@ -286,7 +285,7 @@ type Queries interface {
 	// PromoteUnminedTransaction promotes unmined transaction in the
 	// transaction-bound backend.
 	PromoteUnminedTransaction(ctx context.Context, walletID int64,
-		hash []byte, height int32, order int64) (int64, error)
+		hash, blockHash []byte, order int64) (int64, error)
 	// InsertTransactionInput records transaction input through the
 	// transaction-bound backend.
 	InsertTransactionInput(ctx context.Context, transactionID int64,

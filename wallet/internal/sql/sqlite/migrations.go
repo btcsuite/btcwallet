@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	gomigrate "github.com/golang-migrate/migrate/v4"
 	migrate "github.com/golang-migrate/migrate/v4/database/sqlite"
@@ -13,6 +14,17 @@ import (
 
 //go:embed migrations/*.sql
 var migrationFS embed.FS
+
+// ErrIrreversibleMigration is returned when a rollback would discard data the
+// target schema cannot represent, such as competing same-height blocks.
+var ErrIrreversibleMigration = errors.New("irreversible migration")
+
+// IsIrreversibleMigration reports whether a migration error is the block
+// identity rollback guard rejecting a fork of competing same-height blocks.
+func IsIrreversibleMigration(err error) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), "no_competing_same_height_blocks")
+}
 
 func newMigrationInstance(db *sql.DB) (*gomigrate.Migrate, error) {
 	sourceDriver, err := iofs.New(migrationFS, "migrations")
@@ -59,6 +71,10 @@ func RollbackMigrations(db *sql.DB) error {
 
 	err = m.Down()
 	if err != nil && !errors.Is(err, gomigrate.ErrNoChange) {
+		if IsIrreversibleMigration(err) {
+			return fmt.Errorf("%w: %v", ErrIrreversibleMigration, err)
+		}
+
 		return fmt.Errorf("rollback sqlite migrations: %w", err)
 	}
 

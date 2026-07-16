@@ -83,36 +83,45 @@ SET
 WHERE id = $1;
 
 -- name: PutWalletSyncState :exec
+-- Block references resolve from the globally unique header hash, so the blocks
+-- must already exist before this insert runs.
 INSERT INTO wallet_sync_states (
     wallet_id,
-    start_block_height,
-    synced_block_height,
+    start_block_id,
+    synced_block_id,
     birthday_timestamp,
-    birthday_block_height,
+    birthday_block_id,
     birthday_block_verified
-) VALUES ($1, $2, $3, $4, $5, $6);
+) VALUES (
+    sqlc.arg('wallet_id'),
+    (SELECT sb.id FROM blocks AS sb WHERE sb.header_hash = sqlc.arg('start_block_hash')),
+    (SELECT yb.id FROM blocks AS yb WHERE yb.header_hash = sqlc.arg('synced_block_hash')),
+    sqlc.arg('birthday_timestamp'),
+    (SELECT bb.id FROM blocks AS bb WHERE bb.header_hash = sqlc.narg('birthday_block_hash')),
+    sqlc.arg('birthday_block_verified')
+);
 
 -- name: GetWalletSyncState :one
 SELECT
     s.wallet_id,
-    s.start_block_height,
+    start_block.block_height AS start_block_height,
     start_block.header_hash AS start_block_hash,
     start_block.block_timestamp AS start_block_timestamp,
-    s.synced_block_height,
+    synced_block.block_height AS synced_block_height,
     synced_block.header_hash AS synced_block_hash,
     synced_block.block_timestamp AS synced_block_timestamp,
     s.birthday_timestamp,
-    s.birthday_block_height,
+    birthday_block.block_height AS birthday_block_height,
     birthday_block.header_hash AS birthday_block_hash,
     birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
 INNER JOIN blocks AS start_block
-    ON s.start_block_height = start_block.block_height
+    ON start_block.id = s.start_block_id
 INNER JOIN blocks AS synced_block
-    ON s.synced_block_height = synced_block.block_height
+    ON synced_block.id = s.synced_block_id
 LEFT JOIN blocks AS birthday_block
-    ON s.birthday_block_height = birthday_block.block_height
+    ON birthday_block.id = s.birthday_block_id
 WHERE s.wallet_id = $1;
 
 -- name: SetWalletBirthday :execrows
@@ -122,8 +131,9 @@ WHERE wallet_id = $2;
 
 -- name: SetWalletBirthdayBlock :execrows
 UPDATE wallet_sync_states
-SET birthday_block_height = $1
-WHERE wallet_id = $2;
+SET birthday_block_id =
+    (SELECT id FROM blocks WHERE header_hash = sqlc.narg('block_hash'))
+WHERE wallet_id = sqlc.arg('wallet_id');
 
 -- name: SetWalletBirthdayBlockVerified :execrows
 UPDATE wallet_sync_states
@@ -133,20 +143,24 @@ WHERE wallet_id = $2;
 -- name: GetWalletStartBlock :one
 SELECT b.block_height, b.header_hash, b.block_timestamp
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+INNER JOIN blocks AS b ON b.id = s.start_block_id
 WHERE s.wallet_id = $1;
 
 -- name: UpdateWalletSyncState :execrows
 UPDATE wallet_sync_states
 SET
-    start_block_height = $1,
-    synced_block_height = $2,
-    birthday_timestamp = $3,
-    birthday_block_height = $4,
-    birthday_block_verified = $5
-WHERE wallet_id = $6;
+    start_block_id =
+        (SELECT sb.id FROM blocks AS sb WHERE sb.header_hash = sqlc.arg('start_block_hash')),
+    synced_block_id =
+        (SELECT yb.id FROM blocks AS yb WHERE yb.header_hash = sqlc.arg('synced_block_hash')),
+    birthday_timestamp = sqlc.arg('birthday_timestamp'),
+    birthday_block_id =
+        (SELECT bb.id FROM blocks AS bb WHERE bb.header_hash = sqlc.narg('birthday_block_hash')),
+    birthday_block_verified = sqlc.arg('birthday_block_verified')
+WHERE wallet_id = sqlc.arg('wallet_id');
 
 -- name: SetWalletSyncedTo :execrows
 UPDATE wallet_sync_states
-SET synced_block_height = $1
-WHERE wallet_id = $2;
+SET synced_block_id =
+    (SELECT id FROM blocks WHERE header_hash = sqlc.arg('block_hash'))
+WHERE wallet_id = sqlc.arg('wallet_id');

@@ -47,8 +47,8 @@ func (q *Queries) DeleteTransactionByID(ctx context.Context, arg DeleteTransacti
 
 const DetachMinedTransaction = `-- name: DetachMinedTransaction :execrows
 UPDATE transactions
-SET block_height = NULL, confirmed_order = NULL
-WHERE wallet_id = ? AND id = ? AND block_height IS NOT NULL
+SET block_id = NULL, confirmed_order = NULL
+WHERE wallet_id = ? AND id = ? AND block_id IS NOT NULL
 `
 
 type DetachMinedTransactionParams struct {
@@ -66,19 +66,19 @@ func (q *Queries) DetachMinedTransaction(ctx context.Context, arg DetachMinedTra
 
 const GetMinedTransactionByIncidence = `-- name: GetMinedTransactionByIncidence :one
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
-       t.block_height, t.confirmed_order, t.is_coinbase
+       t.block_id, t.confirmed_order, t.is_coinbase
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN blocks AS b ON b.id = t.block_id
 WHERE t.wallet_id = ?1
   AND t.tx_hash = ?2
-  AND t.block_height = ?3
+  AND b.block_height = ?3
   AND b.header_hash = ?4
 `
 
 type GetMinedTransactionByIncidenceParams struct {
 	WalletID    int64
 	TxHash      []byte
-	BlockHeight sql.NullInt64
+	BlockHeight int64
 	BlockHash   []byte
 }
 
@@ -96,7 +96,7 @@ func (q *Queries) GetMinedTransactionByIncidence(ctx context.Context, arg GetMin
 		&i.TxHash,
 		&i.RawTx,
 		&i.ReceivedUnix,
-		&i.BlockHeight,
+		&i.BlockID,
 		&i.ConfirmedOrder,
 		&i.IsCoinbase,
 	)
@@ -104,15 +104,15 @@ func (q *Queries) GetMinedTransactionByIncidence(ctx context.Context, arg GetMin
 }
 
 const GetMinedTransactionDetails = `-- name: GetMinedTransactionDetails :one
-SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+SELECT t.id, t.raw_tx, t.received_unix, b.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN blocks AS b ON b.id = t.block_id
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ?1
   AND t.tx_hash = ?2
-  AND t.block_height = cast(?3 AS INTEGER)
+  AND b.block_height = cast(?3 AS INTEGER)
   AND b.header_hash = ?4
 LIMIT 1
 `
@@ -128,7 +128,7 @@ type GetMinedTransactionDetailsRow struct {
 	ID             int64
 	RawTx          []byte
 	ReceivedUnix   int64
-	BlockHeight    sql.NullInt64
+	BlockHeight    int64
 	ConfirmedOrder sql.NullInt64
 	HeaderHash     []byte
 	BlockTimestamp int64
@@ -159,10 +159,10 @@ func (q *Queries) GetMinedTransactionDetails(ctx context.Context, arg GetMinedTr
 const GetMinedTransactionID = `-- name: GetMinedTransactionID :one
 SELECT t.id
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN blocks AS b ON b.id = t.block_id
 WHERE t.wallet_id = ?1
   AND t.tx_hash = ?2
-  AND t.block_height = cast(?3 AS INTEGER)
+  AND b.block_height = cast(?3 AS INTEGER)
   AND b.header_hash = ?4
 `
 
@@ -186,14 +186,14 @@ func (q *Queries) GetMinedTransactionID(ctx context.Context, arg GetMinedTransac
 }
 
 const GetTransactionDetailsByHash = `-- name: GetTransactionDetailsByHash :one
-SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+SELECT t.id, t.raw_tx, t.received_unix, b.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN blocks AS b ON b.id = t.block_id
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.tx_hash = ?
-ORDER BY t.block_height IS NULL DESC, t.block_height DESC, t.id DESC
+ORDER BY t.block_id IS NULL DESC, b.block_height DESC, t.id DESC
 LIMIT 1
 `
 
@@ -230,10 +230,10 @@ func (q *Queries) GetTransactionDetailsByHash(ctx context.Context, arg GetTransa
 }
 
 const GetTransactionDetailsByID = `-- name: GetTransactionDetailsByID :one
-SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+SELECT t.id, t.raw_tx, t.received_unix, b.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN blocks AS b ON b.id = t.block_id
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.id = ?
@@ -289,10 +289,10 @@ func (q *Queries) GetTransactionLabel(ctx context.Context, arg GetTransactionLab
 }
 
 const GetUnminedTransactionByHash = `-- name: GetUnminedTransactionByHash :one
-SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_height,
+SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_id,
        confirmed_order, is_coinbase
 FROM transactions
-WHERE wallet_id = ? AND tx_hash = ? AND block_height IS NULL
+WHERE wallet_id = ? AND tx_hash = ? AND block_id IS NULL
 `
 
 type GetUnminedTransactionByHashParams struct {
@@ -309,7 +309,7 @@ func (q *Queries) GetUnminedTransactionByHash(ctx context.Context, arg GetUnmine
 		&i.TxHash,
 		&i.RawTx,
 		&i.ReceivedUnix,
-		&i.BlockHeight,
+		&i.BlockID,
 		&i.ConfirmedOrder,
 		&i.IsCoinbase,
 	)
@@ -317,13 +317,13 @@ func (q *Queries) GetUnminedTransactionByHash(ctx context.Context, arg GetUnmine
 }
 
 const GetUnminedTransactionDetails = `-- name: GetUnminedTransactionDetails :one
-SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
+SELECT t.id, t.raw_tx, t.received_unix, b.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN blocks AS b ON b.id = t.block_id
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
-WHERE t.wallet_id = ? AND t.tx_hash = ? AND t.block_height IS NULL
+WHERE t.wallet_id = ? AND t.tx_hash = ? AND t.block_id IS NULL
 LIMIT 1
 `
 
@@ -361,12 +361,12 @@ func (q *Queries) GetUnminedTransactionDetails(ctx context.Context, arg GetUnmin
 
 const InsertTransaction = `-- name: InsertTransaction :one
 INSERT INTO transactions (
-    wallet_id, tx_hash, raw_tx, received_unix, block_height,
+    wallet_id, tx_hash, raw_tx, received_unix, block_id,
     confirmed_order, is_coinbase
 ) VALUES (
     ?1, ?2, ?3,
     ?4,
-    cast(?5 AS INTEGER),
+    (SELECT id FROM blocks WHERE header_hash = ?5),
     cast(?6 AS INTEGER),
     ?7
 )
@@ -378,7 +378,7 @@ type InsertTransactionParams struct {
 	TxHash         []byte
 	RawTx          []byte
 	ReceivedUnix   int64
-	BlockHeight    sql.NullInt64
+	BlockHash      []byte
 	ConfirmedOrder sql.NullInt64
 	IsCoinbase     bool
 }
@@ -389,7 +389,7 @@ func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionPa
 		arg.TxHash,
 		arg.RawTx,
 		arg.ReceivedUnix,
-		arg.BlockHeight,
+		arg.BlockHash,
 		arg.ConfirmedOrder,
 		arg.IsCoinbase,
 	)
@@ -423,14 +423,14 @@ func (q *Queries) InsertTransactionInput(ctx context.Context, arg InsertTransact
 
 const ListMinedTransactionsForward = `-- name: ListMinedTransactionsForward :many
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
-       t.block_height, t.confirmed_order, t.is_coinbase,
+       b.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN blocks AS b ON b.id = t.block_id
 WHERE t.wallet_id = ?1
-  AND t.block_height BETWEEN cast(?2 AS INTEGER)
+  AND b.block_height BETWEEN cast(?2 AS INTEGER)
                          AND cast(?3 AS INTEGER)
-ORDER BY t.block_height ASC, t.confirmed_order ASC
+ORDER BY b.block_height ASC, t.confirmed_order ASC
 `
 
 type ListMinedTransactionsForwardParams struct {
@@ -445,7 +445,7 @@ type ListMinedTransactionsForwardRow struct {
 	TxHash         []byte
 	RawTx          []byte
 	ReceivedUnix   int64
-	BlockHeight    sql.NullInt64
+	BlockHeight    int64
 	ConfirmedOrder sql.NullInt64
 	IsCoinbase     bool
 	HeaderHash     []byte
@@ -487,11 +487,12 @@ func (q *Queries) ListMinedTransactionsForward(ctx context.Context, arg ListMine
 }
 
 const ListMinedTransactionsFromHeight = `-- name: ListMinedTransactionsFromHeight :many
-SELECT id, tx_hash, is_coinbase
-FROM transactions
-WHERE wallet_id = ?1
-  AND block_height >= cast(?2 AS INTEGER)
-ORDER BY block_height DESC, confirmed_order DESC, id DESC
+SELECT t.id, t.tx_hash, t.is_coinbase
+FROM transactions AS t
+INNER JOIN blocks AS b ON b.id = t.block_id
+WHERE t.wallet_id = ?1
+  AND b.block_height >= cast(?2 AS INTEGER)
+ORDER BY b.block_height DESC, t.confirmed_order DESC, t.id DESC
 `
 
 type ListMinedTransactionsFromHeightParams struct {
@@ -530,14 +531,14 @@ func (q *Queries) ListMinedTransactionsFromHeight(ctx context.Context, arg ListM
 
 const ListMinedTransactionsReverse = `-- name: ListMinedTransactionsReverse :many
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
-       t.block_height, t.confirmed_order, t.is_coinbase,
+       b.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN blocks AS b ON b.id = t.block_id
 WHERE t.wallet_id = ?1
-  AND t.block_height BETWEEN cast(?2 AS INTEGER)
+  AND b.block_height BETWEEN cast(?2 AS INTEGER)
                          AND cast(?3 AS INTEGER)
-ORDER BY t.block_height DESC, t.confirmed_order ASC
+ORDER BY b.block_height DESC, t.confirmed_order ASC
 `
 
 type ListMinedTransactionsReverseParams struct {
@@ -552,7 +553,7 @@ type ListMinedTransactionsReverseRow struct {
 	TxHash         []byte
 	RawTx          []byte
 	ReceivedUnix   int64
-	BlockHeight    sql.NullInt64
+	BlockHeight    int64
 	ConfirmedOrder sql.NullInt64
 	IsCoinbase     bool
 	HeaderHash     []byte
@@ -594,11 +595,12 @@ func (q *Queries) ListMinedTransactionsReverse(ctx context.Context, arg ListMine
 }
 
 const ListTransactionIncidencesByHash = `-- name: ListTransactionIncidencesByHash :many
-SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_height,
-       confirmed_order, is_coinbase
-FROM transactions
-WHERE wallet_id = ? AND tx_hash = ?
-ORDER BY block_height IS NOT NULL, block_height DESC, id DESC
+SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
+       t.block_id, t.confirmed_order, t.is_coinbase
+FROM transactions AS t
+LEFT JOIN blocks AS b ON b.id = t.block_id
+WHERE t.wallet_id = ? AND t.tx_hash = ?
+ORDER BY t.block_id IS NOT NULL, b.block_height DESC, t.id DESC
 `
 
 type ListTransactionIncidencesByHashParams struct {
@@ -621,7 +623,7 @@ func (q *Queries) ListTransactionIncidencesByHash(ctx context.Context, arg ListT
 			&i.TxHash,
 			&i.RawTx,
 			&i.ReceivedUnix,
-			&i.BlockHeight,
+			&i.BlockID,
 			&i.ConfirmedOrder,
 			&i.IsCoinbase,
 		); err != nil {
@@ -643,7 +645,7 @@ SELECT t.id, t.tx_hash, i.input_index
 FROM transaction_inputs AS i
 INNER JOIN transactions AS t ON t.id = i.spending_tx_id
 WHERE t.wallet_id = ?1
-  AND t.block_height IS NULL
+  AND t.block_id IS NULL
   AND i.prev_tx_hash = ?2
   AND i.prev_output_index = ?3
   AND t.id <> ?4
@@ -696,7 +698,7 @@ SELECT DISTINCT spender.id, spender.tx_hash
 FROM transaction_inputs AS input
 INNER JOIN transactions AS spender ON spender.id = input.spending_tx_id
 WHERE spender.wallet_id = ?1
-  AND spender.block_height IS NULL
+  AND spender.block_id IS NULL
   AND input.prev_tx_hash = ?2
 ORDER BY spender.id
 `
@@ -735,29 +737,38 @@ func (q *Queries) ListUnminedSpendersByPrevHash(ctx context.Context, arg ListUnm
 }
 
 const ListUnminedTransactions = `-- name: ListUnminedTransactions :many
-SELECT id, wallet_id, tx_hash, raw_tx, received_unix, block_height,
-       confirmed_order, is_coinbase
+SELECT id, wallet_id, tx_hash, raw_tx, received_unix, confirmed_order,
+       is_coinbase
 FROM transactions
-WHERE wallet_id = ? AND block_height IS NULL
+WHERE wallet_id = ? AND block_id IS NULL
 ORDER BY tx_hash
 `
 
-func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) ([]Transaction, error) {
+type ListUnminedTransactionsRow struct {
+	ID             int64
+	WalletID       int64
+	TxHash         []byte
+	RawTx          []byte
+	ReceivedUnix   int64
+	ConfirmedOrder sql.NullInt64
+	IsCoinbase     bool
+}
+
+func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) ([]ListUnminedTransactionsRow, error) {
 	rows, err := q.query(ctx, q.listUnminedTransactionsStmt, ListUnminedTransactions, walletID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Transaction
+	var items []ListUnminedTransactionsRow
 	for rows.Next() {
-		var i Transaction
+		var i ListUnminedTransactionsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WalletID,
 			&i.TxHash,
 			&i.RawTx,
 			&i.ReceivedUnix,
-			&i.BlockHeight,
 			&i.ConfirmedOrder,
 			&i.IsCoinbase,
 		); err != nil {
@@ -777,16 +788,17 @@ func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) (
 const NextBlockTransactionOrder = `-- name: NextBlockTransactionOrder :one
 SELECT cast(COALESCE(MAX(confirmed_order) + 1, 0) AS INTEGER)
 FROM transactions
-WHERE wallet_id = ? AND block_height = ?
+WHERE wallet_id = ?
+  AND block_id = (SELECT id FROM blocks WHERE header_hash = ?2)
 `
 
 type NextBlockTransactionOrderParams struct {
-	WalletID    int64
-	BlockHeight sql.NullInt64
+	WalletID  int64
+	BlockHash []byte
 }
 
 func (q *Queries) NextBlockTransactionOrder(ctx context.Context, arg NextBlockTransactionOrderParams) (int64, error) {
-	row := q.queryRow(ctx, q.nextBlockTransactionOrderStmt, NextBlockTransactionOrder, arg.WalletID, arg.BlockHeight)
+	row := q.queryRow(ctx, q.nextBlockTransactionOrderStmt, NextBlockTransactionOrder, arg.WalletID, arg.BlockHash)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -794,13 +806,15 @@ func (q *Queries) NextBlockTransactionOrder(ctx context.Context, arg NextBlockTr
 
 const PromoteUnminedTransaction = `-- name: PromoteUnminedTransaction :one
 UPDATE transactions
-SET block_height = ?, confirmed_order = ?
-WHERE wallet_id = ? AND tx_hash = ? AND block_height IS NULL
+SET block_id = (SELECT id FROM blocks WHERE header_hash = ?1),
+    confirmed_order = ?2
+WHERE wallet_id = ?3 AND tx_hash = ?4
+  AND block_id IS NULL
 RETURNING id
 `
 
 type PromoteUnminedTransactionParams struct {
-	BlockHeight    sql.NullInt64
+	BlockHash      []byte
 	ConfirmedOrder sql.NullInt64
 	WalletID       int64
 	TxHash         []byte
@@ -808,7 +822,7 @@ type PromoteUnminedTransactionParams struct {
 
 func (q *Queries) PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error) {
 	row := q.queryRow(ctx, q.promoteUnminedTransactionStmt, PromoteUnminedTransaction,
-		arg.BlockHeight,
+		arg.BlockHash,
 		arg.ConfirmedOrder,
 		arg.WalletID,
 		arg.TxHash,

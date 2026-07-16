@@ -16,7 +16,7 @@ type Querier interface {
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteAccountPrivateKeys(ctx context.Context, walletID int64) (int64, error)
 	DeleteAddressPrivateKeys(ctx context.Context, walletID int64) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int32) error
+	DeleteBlock(ctx context.Context, id int64) error
 	DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendParams) (int64, error)
 	DeleteCreditSpendsBySpendingTx(ctx context.Context, arg DeleteCreditSpendsBySpendingTxParams) (int64, error)
 	DeleteExpiredOutputLeases(ctx context.Context, arg DeleteExpiredOutputLeasesParams) (int64, error)
@@ -29,8 +29,11 @@ type Querier interface {
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetActiveCreditID(ctx context.Context, arg GetActiveCreditIDParams) (int64, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	// A height can host competing blocks, so the oldest recorded block at the
+	// height is returned deterministically. Fork disambiguation by id is a later
+	// increment.
+	GetBlockByHeight(ctx context.Context, blockHeight int32) (GetBlockByHeightRow, error)
+	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]GetBlocksInRangeRow, error)
 	GetCredit(ctx context.Context, arg GetCreditParams) (Credit, error)
 	GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeyScope, error)
 	GetManagerAccount(ctx context.Context, arg GetManagerAccountParams) (Account, error)
@@ -38,7 +41,7 @@ type Querier interface {
 	GetManagerAddress(ctx context.Context, arg GetManagerAddressParams) (Address, error)
 	GetManagerState(ctx context.Context, id int64) (GetManagerStateRow, error)
 	GetMinedPreviousPkScript(ctx context.Context, arg GetMinedPreviousPkScriptParams) ([]byte, error)
-	GetMinedTransactionByIncidence(ctx context.Context, arg GetMinedTransactionByIncidenceParams) (Transaction, error)
+	GetMinedTransactionByIncidence(ctx context.Context, arg GetMinedTransactionByIncidenceParams) (GetMinedTransactionByIncidenceRow, error)
 	GetMinedTransactionDetails(ctx context.Context, arg GetMinedTransactionDetailsParams) (GetMinedTransactionDetailsRow, error)
 	GetMinedTransactionID(ctx context.Context, arg GetMinedTransactionIDParams) (int64, error)
 	GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (UtxoLease, error)
@@ -46,12 +49,12 @@ type Querier interface {
 	GetTransactionDetailsByID(ctx context.Context, arg GetTransactionDetailsByIDParams) (GetTransactionDetailsByIDRow, error)
 	GetTransactionLabel(ctx context.Context, arg GetTransactionLabelParams) ([]byte, error)
 	GetUnminedPreviousPkScript(ctx context.Context, arg GetUnminedPreviousPkScriptParams) ([]byte, error)
-	GetUnminedTransactionByHash(ctx context.Context, arg GetUnminedTransactionByHashParams) (Transaction, error)
+	GetUnminedTransactionByHash(ctx context.Context, arg GetUnminedTransactionByHashParams) (GetUnminedTransactionByHashRow, error)
 	GetUnminedTransactionDetails(ctx context.Context, arg GetUnminedTransactionDetailsParams) (GetUnminedTransactionDetailsRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (Wallet, error)
-	GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error)
+	GetWalletStartBlock(ctx context.Context, walletID int64) (GetWalletStartBlockRow, error)
 	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
-	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	InsertBlock(ctx context.Context, arg InsertBlockParams) (int64, error)
 	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
 	InsertTransactionInput(ctx context.Context, arg InsertTransactionInputParams) error
@@ -70,26 +73,32 @@ type Querier interface {
 	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	ListTransactionCredits(ctx context.Context, arg ListTransactionCreditsParams) ([]ListTransactionCreditsRow, error)
 	ListTransactionDebits(ctx context.Context, arg ListTransactionDebitsParams) ([]ListTransactionDebitsRow, error)
-	ListTransactionIncidencesByHash(ctx context.Context, arg ListTransactionIncidencesByHashParams) ([]Transaction, error)
+	ListTransactionIncidencesByHash(ctx context.Context, arg ListTransactionIncidencesByHashParams) ([]ListTransactionIncidencesByHashRow, error)
 	ListUnminedSpenders(ctx context.Context, arg ListUnminedSpendersParams) ([]ListUnminedSpendersRow, error)
 	ListUnminedSpendersByPrevHash(ctx context.Context, arg ListUnminedSpendersByPrevHashParams) ([]ListUnminedSpendersByPrevHashRow, error)
-	ListUnminedTransactions(ctx context.Context, walletID int64) ([]Transaction, error)
+	ListUnminedTransactions(ctx context.Context, walletID int64) ([]ListUnminedTransactionsRow, error)
 	ListUnspentCredits(ctx context.Context, arg ListUnspentCreditsParams) ([]ListUnspentCreditsRow, error)
 	MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error)
 	NextBlockTransactionOrder(ctx context.Context, arg NextBlockTransactionOrderParams) (int64, error)
 	PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error)
-	// PruneStaleSyncBlock removes one block that has aged out of the recent-block
-	// retention window, mirroring the legacy address manager's per-tip pruning.
-	// The shared blocks table is foreign-keyed by transactions and wallet sync
-	// states with ON DELETE RESTRICT, so the block is only removed when nothing
-	// still references it.
+	// PruneStaleSyncBlock removes blocks that have aged out of the recent-block
+	// retention window at the given height, mirroring the legacy address manager's
+	// per-tip pruning. The shared blocks table is foreign-keyed by transactions and
+	// wallet sync states with ON DELETE RESTRICT, so a block is only removed when
+	// nothing still references it.
 	PruneStaleSyncBlock(ctx context.Context, blockHeight int32) error
+	// PutBlock inserts the block or, when a block with the same globally unique
+	// header hash already exists, leaves it untouched. A different hash at the same
+	// height inserts a distinct row, so competing same-height blocks coexist and no
+	// block is ever overwritten.
 	PutBlock(ctx context.Context, arg PutBlockParams) error
 	PutKeyScope(ctx context.Context, arg PutKeyScopeParams) (int64, error)
 	PutManagerAccount(ctx context.Context, arg PutManagerAccountParams) (int64, error)
 	PutManagerAddress(ctx context.Context, arg PutManagerAddressParams) (int64, error)
 	PutManagerState(ctx context.Context, arg PutManagerStateParams) (int64, error)
 	PutTransactionLabel(ctx context.Context, arg PutTransactionLabelParams) error
+	// Block references resolve from the globally unique header hash, so the blocks
+	// must already exist before this insert runs.
 	PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error
 	RecordCreditSpend(ctx context.Context, arg RecordCreditSpendParams) (int64, error)
 	RenameAccount(ctx context.Context, arg RenameAccountParams) (int64, error)

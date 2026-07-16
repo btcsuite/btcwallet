@@ -27,12 +27,16 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 
 	q := sqlc.New(db)
+	blockIDs := make(map[int32]int64)
 	for height := int32(100); height <= 101; height++ {
-		require.NoError(t, q.InsertBlock(ctx, sqlc.InsertBlockParams{
+		id, err := q.InsertBlock(ctx, sqlc.InsertBlockParams{
 			BlockHeight:    height,
 			HeaderHash:     testHash(byte(height)),
 			BlockTimestamp: 1000 + int64(height),
-		}))
+		})
+		require.NoError(t, err)
+
+		blockIDs[height] = id
 	}
 
 	minedHash := testHash(1)
@@ -43,7 +47,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 			TxHash:         minedHash,
 			RawTx:          []byte{byte(i + 1)},
 			ReceivedUnix:   2000,
-			BlockHeight:    sql.NullInt32{Int32: height, Valid: true},
+			BlockHash:      testHash(byte(height)),
 			ConfirmedOrder: sql.NullInt64{Int64: int64(i), Valid: true},
 		})
 		require.NoError(t, err)
@@ -83,7 +87,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 		ctx, sqlc.InsertTransactionParams{
 			WalletID: 1, TxHash: testHash(21), RawTx: []byte{21},
 			ReceivedUnix:   2000,
-			BlockHeight:    sql.NullInt32{Int32: 101, Valid: true},
+			BlockHash:      testHash(101),
 			ConfirmedOrder: sql.NullInt64{Int64: 2, Valid: true},
 		},
 	)
@@ -120,7 +124,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 	require.Len(t, unspent, 1)
 	require.Equal(t, minedCreditIDs[1], unspent[0].ID)
-	require.Error(t, q.DeleteBlock(ctx, 100))
+	require.Error(t, q.DeleteBlock(ctx, blockIDs[100]))
 
 	unminedHash := testHash(2)
 	unminedID := insertUnminedTransaction(t, ctx, q, unminedHash)

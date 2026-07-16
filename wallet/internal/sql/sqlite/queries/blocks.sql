@@ -1,10 +1,15 @@
 -- name: GetBlockByHeight :one
+-- A height can host competing blocks, so the oldest recorded block at the
+-- height is returned deterministically. Fork disambiguation by id is a later
+-- increment.
 SELECT
     block_height,
     header_hash,
     block_timestamp
 FROM blocks
-WHERE block_height = ?;
+WHERE block_height = ?
+ORDER BY id
+LIMIT 1;
 
 -- name: GetBlocksInRange :many
 SELECT
@@ -17,36 +22,39 @@ WHERE
     AND block_height <= cast(sqlc.arg('end_height') AS INTEGER)
 ORDER BY block_height;
 
--- name: InsertBlock :exec
-INSERT OR IGNORE INTO blocks (block_height, header_hash, block_timestamp)
-VALUES (?, ?, ?);
-
--- name: PutBlock :exec
+-- name: InsertBlock :one
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES (?, ?, ?)
-ON CONFLICT (block_height) DO UPDATE SET
-    header_hash = excluded.header_hash,
-    block_timestamp = excluded.block_timestamp;
+RETURNING id;
+
+-- name: PutBlock :exec
+-- PutBlock inserts the block or, when a block with the same globally unique
+-- header hash already exists, leaves it untouched. A different hash at the same
+-- height inserts a distinct row, so competing same-height blocks coexist and no
+-- block is ever overwritten.
+INSERT INTO blocks (block_height, header_hash, block_timestamp)
+VALUES (?, ?, ?)
+ON CONFLICT (header_hash) DO NOTHING;
 
 -- name: DeleteBlock :exec
 DELETE FROM blocks
-WHERE block_height = ?;
+WHERE id = ?;
 
 -- name: PruneStaleSyncBlock :exec
--- PruneStaleSyncBlock removes one block that has aged out of the recent-block
--- retention window, mirroring the legacy address manager's per-tip pruning.
--- The shared blocks table is foreign-keyed by transactions and wallet sync
--- states with ON DELETE RESTRICT, so the block is only removed when nothing
--- still references it.
+-- PruneStaleSyncBlock removes blocks that have aged out of the recent-block
+-- retention window at the given height, mirroring the legacy address manager's
+-- per-tip pruning. The shared blocks table is foreign-keyed by transactions and
+-- wallet sync states with ON DELETE RESTRICT, so a block is only removed when
+-- nothing still references it.
 DELETE FROM blocks
 WHERE blocks.block_height = ?
   AND NOT EXISTS (
       SELECT 1 FROM transactions
-      WHERE transactions.block_height = blocks.block_height
+      WHERE transactions.block_id = blocks.id
   )
   AND NOT EXISTS (
       SELECT 1 FROM wallet_sync_states
-      WHERE wallet_sync_states.start_block_height = blocks.block_height
-          OR wallet_sync_states.synced_block_height = blocks.block_height
-          OR wallet_sync_states.birthday_block_height = blocks.block_height
+      WHERE wallet_sync_states.start_block_id = blocks.id
+          OR wallet_sync_states.synced_block_id = blocks.id
+          OR wallet_sync_states.birthday_block_id = blocks.id
   );

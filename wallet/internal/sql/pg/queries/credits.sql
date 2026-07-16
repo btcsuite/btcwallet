@@ -37,7 +37,7 @@ WHERE c.wallet_id = $1
   AND i.spending_tx_id = $3
   AND i.input_index = $4
   AND spender.wallet_id = c.wallet_id
-  AND spender.block_height IS NOT NULL
+  AND spender.block_id IS NOT NULL
 ON CONFLICT (credit_id) DO UPDATE SET
     spending_tx_id = excluded.spending_tx_id,
     input_index = excluded.input_index;
@@ -68,7 +68,7 @@ SELECT c.id, c.output_index, c.amount, c.pk_script, c.is_change,
            INNER JOIN transactions AS funding
                ON funding.id = c.transaction_id
            WHERE spender.wallet_id = c.wallet_id
-             AND spender.block_height IS NULL
+             AND spender.block_id IS NULL
              AND input.prev_tx_hash = funding.tx_hash
              AND input.prev_output_index = c.output_index
        ) AS is_spent
@@ -78,13 +78,13 @@ ORDER BY c.output_index;
 
 -- name: ListUnspentCredits :many
 SELECT c.id, funding.tx_hash, c.output_index, c.amount, c.pk_script,
-       c.is_change, funding.received_unix, funding.block_height,
+       c.is_change, funding.received_unix, block.block_height,
        funding.is_coinbase, c.address_scope_id, c.address_id,
        block.header_hash, block.block_timestamp
 FROM credits AS c
 INNER JOIN transactions AS funding ON funding.id = c.transaction_id
 INNER JOIN active_credit_incidences AS active ON active.credit_id = c.id
-LEFT JOIN blocks AS block ON block.block_height = funding.block_height
+LEFT JOIN blocks AS block ON block.id = funding.block_id
 WHERE c.wallet_id = sqlc.arg('wallet_id')
   AND NOT EXISTS (
       SELECT 1 FROM credit_spends AS spend WHERE spend.credit_id = c.id
@@ -94,7 +94,7 @@ WHERE c.wallet_id = sqlc.arg('wallet_id')
       FROM transaction_inputs AS i
       INNER JOIN transactions AS spender ON spender.id = i.spending_tx_id
       WHERE spender.wallet_id = c.wallet_id
-        AND spender.block_height IS NULL
+        AND spender.block_id IS NULL
         AND i.prev_tx_hash = funding.tx_hash
         AND i.prev_output_index = c.output_index
   )

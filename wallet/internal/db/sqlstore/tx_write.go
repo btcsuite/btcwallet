@@ -131,7 +131,7 @@ func (s *txStore) insertMined(record *wtxmgr.TxRecord, rawTx []byte,
 		return false, fmt.Errorf("put transaction block: %w", err)
 	}
 
-	order, err := s.nextBlockOrder(block.Height)
+	order, err := s.nextBlockOrder(block.Hash[:])
 	if err != nil {
 		return false, err
 	}
@@ -164,9 +164,9 @@ func (s *txStore) insertMined(record *wtxmgr.TxRecord, rawTx []byte,
 }
 
 // nextBlockOrder returns the next stable transaction order within a block.
-func (s *txStore) nextBlockOrder(height int32) (int64, error) {
+func (s *txStore) nextBlockOrder(blockHash []byte) (int64, error) {
 	order, err := s.queries.NextBlockTransactionOrder(
-		s.ctx, s.walletID, height,
+		s.ctx, s.walletID, blockHash,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("get next block transaction order: %w", err)
@@ -180,12 +180,12 @@ func (s *txStore) nextBlockOrder(height int32) (int64, error) {
 func (s *txStore) insertTransaction(record *wtxmgr.TxRecord, rawTx []byte,
 	block *wtxmgr.BlockMeta, order int64) (int64, error) {
 
-	var blockHeight, blockOrder sql.NullInt64
+	var (
+		blockHash  []byte
+		blockOrder sql.NullInt64
+	)
 	if block != nil {
-		blockHeight = sql.NullInt64{
-			Int64: int64(block.Height),
-			Valid: true,
-		}
+		blockHash = block.Hash[:]
 		blockOrder = sql.NullInt64{
 			Int64: order,
 			Valid: true,
@@ -198,7 +198,7 @@ func (s *txStore) insertTransaction(record *wtxmgr.TxRecord, rawTx []byte,
 			Hash:           record.Hash[:],
 			RawTx:          rawTx,
 			Received:       record.Received.Unix(),
-			BlockHeight:    blockHeight,
+			BlockHash:      blockHash,
 			ConfirmedOrder: blockOrder,
 			IsCoinbase:     blockchain.IsCoinBaseTx(&record.MsgTx),
 		},
@@ -215,7 +215,7 @@ func (s *txStore) promoteUnmined(hash chainhash.Hash,
 	block *wtxmgr.BlockMeta, order int64) (int64, error) {
 
 	return s.queries.PromoteUnminedTransaction(
-		s.ctx, s.walletID, hash[:], block.Height, order,
+		s.ctx, s.walletID, hash[:], block.Hash[:], order,
 	)
 }
 

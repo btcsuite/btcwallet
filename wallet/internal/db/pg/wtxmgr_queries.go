@@ -96,8 +96,10 @@ func (q *queryAdapter) GetMinedTransactionDetails(ctx context.Context,
 	)
 
 	return pgDetailsRow(
-		row.ID, row.RawTx, row.ReceivedUnix, row.BlockHeight,
-		row.ConfirmedOrder, row.HeaderHash, sql.NullInt64{
+		row.ID, row.RawTx, row.ReceivedUnix, sql.NullInt32{
+			Int32: row.BlockHeight,
+			Valid: true,
+		}, row.ConfirmedOrder, row.HeaderHash, sql.NullInt64{
 			Int64: row.BlockTimestamp,
 			Valid: true,
 		}, row.Label,
@@ -202,10 +204,9 @@ func (q *queryAdapter) ListUnminedTransactions(ctx context.Context,
 	result := make([]sqlstore.TransactionRow, 0, len(rows))
 	for _, row := range rows {
 		result = append(result, sqlstore.TransactionRow{
-			ID:          row.ID,
-			Hash:        row.TxHash,
-			RawTx:       row.RawTx,
-			BlockHeight: pgNullInt64(row.BlockHeight),
+			ID:    row.ID,
+			Hash:  row.TxHash,
+			RawTx: row.RawTx,
 		})
 	}
 
@@ -233,7 +234,7 @@ func (q *queryAdapter) ListMinedTransactionsForward(ctx context.Context,
 	for _, row := range rows {
 		result = append(result, sqlstore.TransactionIncidenceRow{
 			ID:     row.ID,
-			Height: row.BlockHeight.Int32,
+			Height: row.BlockHeight,
 		})
 	}
 
@@ -261,7 +262,7 @@ func (q *queryAdapter) ListMinedTransactionsReverse(ctx context.Context,
 	for _, row := range rows {
 		result = append(result, sqlstore.TransactionIncidenceRow{
 			ID:     row.ID,
-			Height: row.BlockHeight.Int32,
+			Height: row.BlockHeight,
 		})
 	}
 
@@ -370,15 +371,12 @@ func (q *queryAdapter) GetMinedPreviousPkScript(ctx context.Context,
 // NextBlockTransactionOrder returns next block transaction order from the
 // transaction-bound backend.
 func (q *queryAdapter) NextBlockTransactionOrder(ctx context.Context,
-	walletID int64, height int32) (int64, error) {
+	walletID int64, blockHash []byte) (int64, error) {
 
 	return q.queries.NextBlockTransactionOrder(
 		ctx, pgdb.NextBlockTransactionOrderParams{
-			WalletID: walletID,
-			BlockHeight: sql.NullInt32{
-				Int32: height,
-				Valid: true,
-			},
+			WalletID:  walletID,
+			BlockHash: blockHash,
 		},
 	)
 }
@@ -392,7 +390,7 @@ func (q *queryAdapter) InsertTransaction(ctx context.Context,
 		TxHash:         params.Hash,
 		RawTx:          params.RawTx,
 		ReceivedUnix:   params.Received,
-		BlockHeight:    pgNullInt32(params.BlockHeight),
+		BlockHash:      params.BlockHash,
 		ConfirmedOrder: params.ConfirmedOrder,
 		IsCoinbase:     params.IsCoinbase,
 	})
@@ -401,14 +399,11 @@ func (q *queryAdapter) InsertTransaction(ctx context.Context,
 // PromoteUnminedTransaction promotes unmined transaction in the
 // transaction-bound backend.
 func (q *queryAdapter) PromoteUnminedTransaction(ctx context.Context,
-	walletID int64, hash []byte, height int32, order int64) (int64, error) {
+	walletID int64, hash, blockHash []byte, order int64) (int64, error) {
 
 	return q.queries.PromoteUnminedTransaction(
 		ctx, pgdb.PromoteUnminedTransactionParams{
-			BlockHeight: sql.NullInt32{
-				Int32: height,
-				Valid: true,
-			},
+			BlockHash: blockHash,
 			ConfirmedOrder: sql.NullInt64{
 				Int64: order,
 				Valid: true,

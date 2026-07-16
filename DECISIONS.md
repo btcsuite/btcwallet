@@ -519,3 +519,186 @@ fixture schema run only when `harness.kv == nil`.
   new neutral case.
 - `make sqlc` was not run (no query change); consequently `make sqlc-check` was
   not exercised for this increment.
+
+## Phase 0B: block identity re-key
+
+Implements only the first Phase 0B increment: the block and transaction
+incidence identity re-key (migration `000012`). The runtime-state journal,
+funding plans, and address/runtime guards are separate later increments and are
+NOT touched here.
+
+### Target identity and column naming
+
+- `blocks` gains a surrogate primary key `id`. `block_height` becomes a plain
+  `NOT NULL` non-unique column with its own index (`idx_blocks_height`), and
+  `header_hash` keeps its global `UNIQUE`. Two different hashes at one height now
+  coexist as distinct rows (competing same-height blocks).
+- **Kept the existing column names** `block_height`/`header_hash`/
+  `block_timestamp` instead of the plan's shorthand `height`/`hash`/`timestamp`.
+  This is a pure naming judgment call: reusing the names keeps every read query,
+  result struct, and adapter field stable, and matches the surrounding schema
+  style. The structural change (surrogate id, height no longer unique) is what
+  the plan requires.
+- `transactions.block_height` -> `transactions.block_id` (FK -> `blocks(id)`,
+  `ON DELETE RESTRICT`, nullable for unmined).
+- `wallet_sync_states.{start,synced,birthday}_block_height` ->
+  `*_block_id` (FK -> `blocks(id)`, `ON DELETE RESTRICT`; start/synced NOT NULL,
+  birthday nullable).
+- Mined incidence uniqueness is now `(wallet_id, tx_hash, block_id)`; the unmined
+  incidence stays `(wallet_id, tx_hash) WHERE block_id IS NULL`; per-block order
+  is `(wallet_id, block_id, confirmed_order)`.
+
+### PutBlock and the Store interface boundary (judgment call)
+
+- `PutBlock` is `INSERT ... ON CONFLICT (header_hash) DO NOTHING`. A different
+  hash at the same height inserts a distinct row, so it **never overwrites**
+  another block; re-putting the same hash is a no-op. This replaces the old
+  `ON CONFLICT (block_height) DO UPDATE` overwrite.
+- **Block identity is threaded by header hash, not by a returned id.** Every
+  write that pins a specific block already materializes it with `PutBlock`
+  first, so the write queries resolve the id from the globally unique hash with a
+  scalar subquery `(SELECT id FROM blocks WHERE header_hash = ?)`. This keeps
+  `PutBlock` a plain `:exec` and confines the change to the columns/params that
+  actually carry a block:
+  - `InsertTransactionParams.BlockHeight` -> `BlockHash []byte` (nil = unmined).
+  - `NextBlockTransactionOrder`, `PromoteUnminedTransaction`,
+    `SetWalletSyncedTo`, `SetWalletBirthdayBlock` take a `blockHash []byte`
+    instead of a height.
+  - `PutSyncState` still takes the whole `SyncState`; the adapter maps the three
+    block stamps to their hashes.
+- Reads resolve height from the joined block: the transaction/credit detail and
+  sync-state read queries `JOIN blocks ON blocks.id = <fk>` and select
+  `blocks.block_height`. Result struct field names are unchanged, so the row
+  decoders are untouched. `GetMinedTransactionDetails`/`GetMinedTransactionID`
+  keep their `(height, block_hash)` incidence lookup (now matched against the
+  joined block).
+- `TransactionRow` dropped its unused `BlockHeight` field (only produced by the
+  unmined lister, which never populated a real height).
+- `GetBlockByHeight` is now `ORDER BY id LIMIT 1` because height is no longer
+  unique. In the common no-fork case there is exactly one row; fork
+  disambiguation by id/hash is a later increment (rewind/birthday-by-id).
+
+### SQLite migration: full transaction-cluster rebuild (scope ripple)
+
+The plan's 7-step rebuild assumes the classic SQLite `PRAGMA foreign_keys=OFF`
+drop/rename pattern so the pure child tables (`transaction_inputs`, `credits`,
+`active_credit_incidences`, `credit_spends`) keep their rows untouched while the
+parents are swapped. That pattern is **unavailable here**, verified empirically
+against `modernc.org/sqlite` + golang-migrate v4.19.0:
+
+- golang-migrate wraps each SQLite migration in a transaction, and
+  `PRAGMA foreign_keys` is a no-op inside a transaction, so foreign keys cannot
+  be turned off for the rebuild.
+- `PRAGMA legacy_alter_table` is ignored by modernc, so `ALTER TABLE RENAME`
+  always smart-retargets child foreign keys to the `*_old` copies.
+- `PRAGMA defer_foreign_keys=ON` defers RESTRICT checks to COMMIT but does **not**
+  stop `ON DELETE CASCADE` from firing on a parent `DROP TABLE`.
+
+Consequently the `.up.sql` rebuilds the **whole foreign-key cluster** (blocks,
+wallet_sync_states, transactions, transaction_inputs, credits,
+active_credit_incidences, credit_spends; `transaction_labels` is left alone as it
+only references `wallets`): `defer_foreign_keys=ON` -> rename all seven to
+`*_old` -> create the new tables (blocks with `id`, transactions with `block_id`,
+sync state with block ids, the four children with identical schema) -> copy data
+in dependency order **preserving all surrogate ids** (a temporary
+`block_height_map` maps old heights to new ids) -> assert -> drop the `*_old`
+tables child-first (so no parent drop cascades into live rows) -> drop the map.
+So the children are physically recreated, but their ids/rows/observable shape are
+identical, satisfying "existing credit/input/spend references remain stable".
+
+- **Index recreation is deferred to the end.** A renamed table keeps its explicit
+  indexes under the same names, so every `CREATE [UNIQUE] INDEX` runs only after
+  the `*_old` tables (and their indexes) are dropped, avoiding a name collision.
+- **In-migration verification (step 6)** is a `CREATE TEMP TABLE ... CHECK`
+  assertion that aborts the migration when row counts differ, a mined
+  transaction lost its block id, or a sync state lost its start/synced id.
+  `PRAGMA foreign_key_check` cannot gate a pure-SQL migration, so it is asserted
+  clean in the Go tests instead.
+
+### PostgreSQL migration: in-place ALTERs
+
+PostgreSQL alters foreign keys in place, so the `.up.sql` keeps every table and
+every child row untouched: add a `blocks.id` (`BIGINT` + owned sequence + default
++ NOT NULL), add `block_id`/`*_block_id` columns and backfill them by height,
+drop the old height columns (which drops their foreign keys, the block/order
+check, and the height indexes), swap the blocks primary key from height to id,
+add the new foreign keys/NOT NULLs/check, and recreate the transaction indexes on
+`block_id`. The PG foreign-key-check equivalent is an orphan-reference query in
+the Go test (PG enforces the constraints continuously, so a violation would have
+failed the migration).
+
+### Down migration and the irreversible guard
+
+A rollback is only valid while there is at most one block per height; a fork of
+competing same-height blocks cannot be represented by a height primary key.
+
+- The `.down.sql` aborts on a fork before touching data: SQLite uses a
+  `CREATE TEMP TABLE ... CHECK (no_competing_same_height_blocks = 1)` assertion;
+  PostgreSQL uses `DO $$ ... RAISE EXCEPTION 'irreversible migration: competing
+  same-height blocks exist' ... $$`.
+- Each dialect exports `ErrIrreversibleMigration` and
+  `IsIrreversibleMigration(err)`. `RollbackMigrations` wraps a guard abort with
+  the sentinel so callers get `errors.Is(err, ErrIrreversibleMigration)`.
+- **Judgment / limitation:** golang-migrate surfaces the SQL abort as an opaque
+  error, so `IsIrreversibleMigration` recognizes it by a distinctive marker
+  substring in the message (`no_competing_same_height_blocks` for SQLite, the
+  RAISE text for PostgreSQL). This is best-effort typing over the framework's
+  opaque error; a Go pre-flight check on the migration connection is the
+  future-proof path once the runtime open path calls the migrator directly.
+- When no fork exists, the down migration performs the mirror rebuild back to the
+  height-keyed schema (SQLite full-cluster rebuild; PG reverse ALTERs), restoring
+  `blocks.block_height` as the primary key.
+
+### Phase 0A behaviors preserved
+
+- `SetSyncedTo` keeps its predecessor guard, reset-to-start, same-height, and
+  rewind behavior; it now materializes the block with `PutBlock` and sets
+  `synced_block_id` by hash. A same-height re-sync now points the tip at the new
+  competing block instead of overwriting the old one (both coexist).
+- `PruneStaleSyncBlock` still prunes only unreferenced blocks at the stale
+  height; its guard now checks `transactions.block_id` and the three
+  `wallet_sync_states.*_block_id` references.
+
+### sqlc
+
+- Query text changed across `blocks`/`transactions`/`credits`/`wallets` for both
+  dialects, so `wallet/internal/sql/{sqlite,pg}/sqlc/**` was regenerated with the
+  pinned Docker sqlc (`make sqlc`, v1.30.0; local sqlc is v1.31.1 and was not
+  used). Regeneration is idempotent (a second run produced no diff).
+- The multi-subquery sync-state writes (`PutWalletSyncState`,
+  `UpdateWalletSyncState`) alias each `blocks` subquery (`AS sb`/`yb`/`bb`)
+  because sqlc merges the subqueries into one scope and would otherwise flag
+  `header_hash` as ambiguous.
+
+### Schema-identity generation NOT bumped (deliverable for end of 0B)
+
+`schemaid.Generation` is intentionally left at `1` and no migration checksums
+were added. Migration `000012` changes the runtime schema, so once **all** Phase
+0B migrations (runtime-state journal, funding plans, address/runtime guards) have
+landed, the end-of-0B finalization must bump `schemaid.Generation` to `2`
+(raising `MinGeneration` only if generation-1 databases can no longer be opened)
+and define the runtime-migration checksums/fingerprints.
+
+### Independence
+
+Built solely on the salvage `#1296` foundation; the `wallet-default-sqlite`
+branch was not consulted or copied.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/...` — pass (exit 0; also `-tags
+  test_db_postgres` on the itest package).
+- `GOWORK=off go test ./wallet/internal/sql/... ./wallet/internal/db/...` — pass
+  (SQLite migration forward/down-guard/down-clean, schema round-trip, SQLite +
+  KV conformance).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/
+  ./wallet/internal/sql/sqlite/` — pass.
+- `-tags test_db_postgres` against real `postgres:18-alpine` testcontainers:
+  `sql/pg` (block identity migration forward/down-guard/down-clean, schema
+  round-trip, legacy schema) and `db/itest` `TestPostgresManagerStore` (all
+  sub-tests including competing same height) — pass.
+- Migrations validated end-to-end through the real golang-migrate driver on a
+  populated fixture (blocks at distinct heights + mined/unmined txs + credit +
+  sync/birthday state, plus a competing same-height pair) for both dialects.
+- `make sqlc` idempotent; `git diff --check` clean.

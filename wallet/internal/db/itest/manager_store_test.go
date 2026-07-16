@@ -614,7 +614,7 @@ func testManagerTransaction(t *testing.T, harness *managerStoreHarness) {
 	require.Equal(t, replacement.Height, harness.syncedHeight(t, walletID))
 	require.Equal(
 		t, replacement.Hash,
-		harness.blockHash(t, walletID, replacement.Height),
+		harness.syncedBlockHash(t, walletID),
 	)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
@@ -678,7 +678,7 @@ func testSyncedToSemantics(t *testing.T, harness *managerStoreHarness) {
 		)
 	})
 
-	t.Run("same height replace", func(t *testing.T) {
+	t.Run("competing same height", func(t *testing.T) {
 		start := testBlock(1_100)
 		synced := testBlock(1_101)
 		walletID := harness.createWallet(
@@ -686,8 +686,8 @@ func testSyncedToSemantics(t *testing.T, harness *managerStoreHarness) {
 		)
 		store := harness.newStore(walletID)
 
-		// Replacing the tip at the same height rewrites the recorded hash
-		// rather than erroring.
+		// A different block at the same height does not overwrite the
+		// existing one; the synced tip advances to the competing block.
 		replacement := testBlock(1_101)
 		replacement.Hash = testHash(0x5a)
 		replacement.Timestamp = time.Unix(9_100, 0)
@@ -701,8 +701,13 @@ func testSyncedToSemantics(t *testing.T, harness *managerStoreHarness) {
 		)
 		require.Equal(
 			t, replacement.Hash,
-			harness.blockHash(t, walletID, replacement.Height),
+			harness.syncedBlockHash(t, walletID),
 		)
+
+		// The surrogate-keyed SQL schema keeps both blocks at the height.
+		if harness.kv == nil {
+			require.Equal(t, 2, harness.blockCountAtHeight(t, 1_101))
+		}
 	})
 
 	t.Run("rewind", func(t *testing.T) {
@@ -1102,12 +1107,14 @@ func testBirthdayVerification(t *testing.T, harness *managerStoreHarness) {
 
 	harness.exec(t, `
 		UPDATE wallet_sync_states
-		SET birthday_block_height = ?, birthday_block_verified = TRUE
+		SET birthday_block_id =
+			(SELECT id FROM blocks WHERE block_height = ? ORDER BY id LIMIT 1),
+			birthday_block_verified = TRUE
 		WHERE wallet_id = ?
 	`, block.Height, walletID)
 	harness.exec(t, `
 		UPDATE wallet_sync_states
-		SET birthday_block_height = NULL
+		SET birthday_block_id = NULL
 		WHERE wallet_id = ?
 	`, walletID)
 
@@ -1787,10 +1794,15 @@ func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 
 	h.exec(t, `
 		INSERT INTO wallet_sync_states (
-			wallet_id, start_block_height, synced_block_height,
+			wallet_id, start_block_id, synced_block_id,
 			birthday_timestamp, birthday_block_verified
-		) VALUES (?, ?, ?, 1, FALSE)
-	`, walletID, start.Height, synced.Height)
+		) VALUES (
+			?,
+			(SELECT id FROM blocks WHERE header_hash = ?),
+			(SELECT id FROM blocks WHERE header_hash = ?),
+			1, FALSE
+		)
+	`, walletID, start.Hash[:], synced.Hash[:])
 
 	return walletID
 }
@@ -1803,9 +1815,7 @@ func (h *managerStoreHarness) putBlock(t *testing.T,
 	h.exec(t, `
 		INSERT INTO blocks (block_height, header_hash, block_timestamp)
 		VALUES (?, ?, ?)
-		ON CONFLICT (block_height) DO UPDATE SET
-			header_hash = excluded.header_hash,
-			block_timestamp = excluded.block_timestamp
+		ON CONFLICT (header_hash) DO NOTHING
 	`, block.Height, block.Hash[:], block.Timestamp.Unix())
 }
 
@@ -1863,9 +1873,11 @@ func (h *managerStoreHarness) insertTransaction(t *testing.T, walletID int64,
 
 	err := h.queryRow(t, `
 		INSERT INTO transactions (
-			wallet_id, tx_hash, raw_tx, received_unix, block_height,
+			wallet_id, tx_hash, raw_tx, received_unix, block_id,
 			confirmed_order, is_coinbase
-		) VALUES (?, ?, ?, 1, ?, ?, ?)
+		) VALUES (?, ?, ?, 1,
+			(SELECT id FROM blocks WHERE block_height = ? ORDER BY id LIMIT 1),
+			?, ?)
 		RETURNING id
 	`, walletID, hash[:], []byte{hash[0]}, height, order, coinbase).
 		Scan(&transactionID)
@@ -1984,19 +1996,22 @@ func (h *managerStoreHarness) syncedHeight(t *testing.T,
 	var height int32
 
 	err := h.queryRow(t, `
-		SELECT synced_block_height FROM wallet_sync_states
-		WHERE wallet_id = ?
+		SELECT b.block_height
+		FROM wallet_sync_states AS s
+		INNER JOIN blocks AS b ON b.id = s.synced_block_id
+		WHERE s.wallet_id = ?
 	`, walletID).Scan(&height)
 	require.NoError(t, err)
 
 	return height
 }
 
-// blockHash returns the block hash recorded for a height fixture in the given
-// wallet. The SQL backends share one global blocks table, so they ignore the
-// wallet identifier; the KV backend reads the wallet's own recent-block index.
-func (h *managerStoreHarness) blockHash(t *testing.T, walletID int64,
-	height int32) chainhash.Hash {
+// syncedBlockHash returns the header hash of the wallet's current synced block.
+// The KV backend reads its recent-block index; the SQL backends read the block
+// referenced by the wallet sync state so competing same-height blocks stay
+// distinguishable.
+func (h *managerStoreHarness) syncedBlockHash(t *testing.T,
+	walletID int64) chainhash.Hash {
 
 	t.Helper()
 
@@ -2004,11 +2019,11 @@ func (h *managerStoreHarness) blockHash(t *testing.T, walletID int64,
 		var hash chainhash.Hash
 		err := h.newStore(walletID).View(
 			context.Background(), func(tx db.ReadTx) error {
-				got, err := tx.Addr().BlockHash(height)
+				state, err := tx.Addr().SyncState()
 				if err != nil {
 					return err
 				}
-				hash = *got
+				hash = state.SyncedTo.Hash
 
 				return nil
 			}, func() {},
@@ -2021,14 +2036,33 @@ func (h *managerStoreHarness) blockHash(t *testing.T, walletID int64,
 	var hashBytes []byte
 
 	err := h.queryRow(t, `
-		SELECT header_hash FROM blocks WHERE block_height = ?
-	`, height).Scan(&hashBytes)
+		SELECT b.header_hash
+		FROM wallet_sync_states AS s
+		INNER JOIN blocks AS b ON b.id = s.synced_block_id
+		WHERE s.wallet_id = ?
+	`, walletID).Scan(&hashBytes)
 	require.NoError(t, err)
 
 	hash, err := chainhash.NewHash(hashBytes)
 	require.NoError(t, err)
 
 	return *hash
+}
+
+// blockCountAtHeight returns the number of block fixtures recorded at a height.
+func (h *managerStoreHarness) blockCountAtHeight(t *testing.T,
+	height int32) int {
+
+	t.Helper()
+
+	var count int
+
+	err := h.queryRow(t, `
+		SELECT count(*) FROM blocks WHERE block_height = ?
+	`, height).Scan(&count)
+	require.NoError(t, err)
+
+	return count
 }
 
 // transactionExists reports whether a transaction fixture still exists.
@@ -2056,7 +2090,7 @@ func (h *managerStoreHarness) transactionMined(t *testing.T,
 	var mined bool
 
 	err := h.queryRow(t, `
-		SELECT block_height IS NOT NULL FROM transactions WHERE id = ?
+		SELECT block_id IS NOT NULL FROM transactions WHERE id = ?
 	`, transactionID).Scan(&mined)
 	require.NoError(t, err)
 

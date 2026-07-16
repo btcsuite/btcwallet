@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	gomigrate "github.com/golang-migrate/migrate/v4"
 	migrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
@@ -16,6 +17,17 @@ import (
 
 //go:embed migrations/*.sql
 var migrationFS embed.FS
+
+// ErrIrreversibleMigration is returned when a rollback would discard data the
+// target schema cannot represent, such as competing same-height blocks.
+var ErrIrreversibleMigration = errors.New("irreversible migration")
+
+// IsIrreversibleMigration reports whether a migration error is the block
+// identity rollback guard rejecting a fork of competing same-height blocks.
+func IsIrreversibleMigration(err error) bool {
+	return err != nil &&
+		strings.Contains(err.Error(), "competing same-height blocks")
+}
 
 func newMigrationInstance(db *sql.DB) (*gomigrate.Migrate, error) {
 	migrationDB, err := cloneDatabase(db)
@@ -99,6 +111,10 @@ func runMigrations(db *sql.DB, operation string,
 
 	err = migrateFunc(m)
 	if err != nil && !errors.Is(err, gomigrate.ErrNoChange) {
+		if IsIrreversibleMigration(err) {
+			return fmt.Errorf("%w: %v", ErrIrreversibleMigration, err)
+		}
+
 		return fmt.Errorf("%s postgres migrations: %w", operation, err)
 	}
 
