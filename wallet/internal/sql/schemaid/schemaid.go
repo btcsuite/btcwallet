@@ -22,7 +22,7 @@ const (
 	// Generation is the current salvage schema generation. It increases
 	// monotonically as the runtime schema evolves so an older binary can
 	// detect a newer database.
-	Generation = 1
+	Generation = 2
 
 	// MinGeneration is the oldest schema generation this binary can still
 	// open. Databases below it are rejected as unsupported.

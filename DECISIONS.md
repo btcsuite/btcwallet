@@ -1056,3 +1056,7 @@ is Phase 2A1/Phase 4.
   `TestPostgresManagerStore` (funding vector) — pass.
 - `make sqlc` idempotent (pinned Docker v1.30.0; local v1.31.1 not used); gofmt
   clean.
+
+## Phase 0B: generation finalization
+
+Bumped schemaid.Generation 1->2 (gen 2 = runtime schema; migrations 000012-000014: block identity, operation journal, funding plans, address/runtime guards). MinGeneration stays 1 so gen-1 DBs remain upgradeable; fresh SQL wallets are created at gen 2. DEFERRED to Workstream C (only exercised in cross-version upgrade/migration, not the fresh-wallet recovery vertical): (1) marker-update-on-upgrade of an existing lower-gen marker after ApplyMigrations; (2) the migration-set checksum/fingerprint mechanism.
