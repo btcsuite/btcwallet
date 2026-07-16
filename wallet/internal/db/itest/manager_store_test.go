@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlstore"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -25,6 +26,11 @@ type managerStoreHarness struct {
 	reconnect func(*testing.T) *sql.DB
 	kv        *kvBackend
 	newStore  func(int64) db.Store
+
+	// newRuntime builds a runtime store for one wallet on the SQL backend.
+	// It is nil for the KV backend, which uses natural record guards instead
+	// of the SQL runtime-state journal.
+	newRuntime func(int64) *sqlstore.Store
 }
 
 // testManagerStore runs the shared manager-store conformance cases against one
@@ -96,6 +102,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	})
 	t.Run("wtxmgr compatibility", func(t *testing.T) {
 		testWtxmgrCompatibility(t, harness)
+	})
+	t.Run("runtime store", func(t *testing.T) {
+		testRuntimeStore(t, harness)
 	})
 }
 

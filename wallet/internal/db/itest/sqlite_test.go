@@ -8,6 +8,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbsqlite "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlstore"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +35,9 @@ func TestSQLiteManagerStore(t *testing.T) {
 	require.NoError(t, sqlite.ApplyMigrations(harness.conn))
 	harness.newStore = func(walletID int64) db.Store {
 		return dbsqlite.NewStore(harness.conn, walletID)
+	}
+	harness.newRuntime = func(walletID int64) *sqlstore.Store {
+		return dbsqlite.NewStore(harness.conn, walletID).Store
 	}
 	t.Cleanup(func() {
 		require.NoError(t, harness.conn.Close())

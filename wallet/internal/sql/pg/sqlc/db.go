@@ -27,6 +27,18 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.acquireOutputLeaseStmt, err = db.PrepareContext(ctx, AcquireOutputLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireOutputLease: %w", err)
 	}
+	if q.bumpHistoryEpochStmt, err = db.PrepareContext(ctx, BumpHistoryEpoch); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpHistoryEpoch: %w", err)
+	}
+	if q.bumpSecretVersionStmt, err = db.PrepareContext(ctx, BumpSecretVersion); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpSecretVersion: %w", err)
+	}
+	if q.bumpStateVersionStmt, err = db.PrepareContext(ctx, BumpStateVersion); err != nil {
+		return nil, fmt.Errorf("error preparing query BumpStateVersion: %w", err)
+	}
+	if q.collectExpiredOperationsStmt, err = db.PrepareContext(ctx, CollectExpiredOperations); err != nil {
+		return nil, fmt.Errorf("error preparing query CollectExpiredOperations: %w", err)
+	}
 	if q.createAccountStmt, err = db.PrepareContext(ctx, CreateAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateAccount: %w", err)
 	}
@@ -75,6 +87,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.detachMinedTransactionStmt, err = db.PrepareContext(ctx, DetachMinedTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query DetachMinedTransaction: %w", err)
 	}
+	if q.ensureRuntimeStateStmt, err = db.PrepareContext(ctx, EnsureRuntimeState); err != nil {
+		return nil, fmt.Errorf("error preparing query EnsureRuntimeState: %w", err)
+	}
 	if q.getAccountStmt, err = db.PrepareContext(ctx, GetAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccount: %w", err)
 	}
@@ -120,8 +135,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getMinedTransactionIDStmt, err = db.PrepareContext(ctx, GetMinedTransactionID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetMinedTransactionID: %w", err)
 	}
+	if q.getOperationStmt, err = db.PrepareContext(ctx, GetOperation); err != nil {
+		return nil, fmt.Errorf("error preparing query GetOperation: %w", err)
+	}
 	if q.getOutputLeaseStmt, err = db.PrepareContext(ctx, GetOutputLease); err != nil {
 		return nil, fmt.Errorf("error preparing query GetOutputLease: %w", err)
+	}
+	if q.getRuntimeStateStmt, err = db.PrepareContext(ctx, GetRuntimeState); err != nil {
+		return nil, fmt.Errorf("error preparing query GetRuntimeState: %w", err)
 	}
 	if q.getTransactionDetailsByHashStmt, err = db.PrepareContext(ctx, GetTransactionDetailsByHash); err != nil {
 		return nil, fmt.Errorf("error preparing query GetTransactionDetailsByHash: %w", err)
@@ -153,8 +174,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
 	}
+	if q.insertCommittedOperationStmt, err = db.PrepareContext(ctx, InsertCommittedOperation); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertCommittedOperation: %w", err)
+	}
 	if q.insertCreditStmt, err = db.PrepareContext(ctx, InsertCredit); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertCredit: %w", err)
+	}
+	if q.insertOperationResultFactStmt, err = db.PrepareContext(ctx, InsertOperationResultFact); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertOperationResultFact: %w", err)
 	}
 	if q.insertTransactionStmt, err = db.PrepareContext(ctx, InsertTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertTransaction: %w", err)
@@ -197,6 +224,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.listMinedTransactionsReverseStmt, err = db.PrepareContext(ctx, ListMinedTransactionsReverse); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMinedTransactionsReverse: %w", err)
+	}
+	if q.listOperationResultFactsStmt, err = db.PrepareContext(ctx, ListOperationResultFacts); err != nil {
+		return nil, fmt.Errorf("error preparing query ListOperationResultFacts: %w", err)
 	}
 	if q.listOutputsToWatchStmt, err = db.PrepareContext(ctx, ListOutputsToWatch); err != nil {
 		return nil, fmt.Errorf("error preparing query ListOutputsToWatch: %w", err)
@@ -301,6 +331,26 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing acquireOutputLeaseStmt: %w", cerr)
 		}
 	}
+	if q.bumpHistoryEpochStmt != nil {
+		if cerr := q.bumpHistoryEpochStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpHistoryEpochStmt: %w", cerr)
+		}
+	}
+	if q.bumpSecretVersionStmt != nil {
+		if cerr := q.bumpSecretVersionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpSecretVersionStmt: %w", cerr)
+		}
+	}
+	if q.bumpStateVersionStmt != nil {
+		if cerr := q.bumpStateVersionStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing bumpStateVersionStmt: %w", cerr)
+		}
+	}
+	if q.collectExpiredOperationsStmt != nil {
+		if cerr := q.collectExpiredOperationsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing collectExpiredOperationsStmt: %w", cerr)
+		}
+	}
 	if q.createAccountStmt != nil {
 		if cerr := q.createAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing createAccountStmt: %w", cerr)
@@ -381,6 +431,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing detachMinedTransactionStmt: %w", cerr)
 		}
 	}
+	if q.ensureRuntimeStateStmt != nil {
+		if cerr := q.ensureRuntimeStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing ensureRuntimeStateStmt: %w", cerr)
+		}
+	}
 	if q.getAccountStmt != nil {
 		if cerr := q.getAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAccountStmt: %w", cerr)
@@ -456,9 +511,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getMinedTransactionIDStmt: %w", cerr)
 		}
 	}
+	if q.getOperationStmt != nil {
+		if cerr := q.getOperationStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getOperationStmt: %w", cerr)
+		}
+	}
 	if q.getOutputLeaseStmt != nil {
 		if cerr := q.getOutputLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getOutputLeaseStmt: %w", cerr)
+		}
+	}
+	if q.getRuntimeStateStmt != nil {
+		if cerr := q.getRuntimeStateStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getRuntimeStateStmt: %w", cerr)
 		}
 	}
 	if q.getTransactionDetailsByHashStmt != nil {
@@ -511,9 +576,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
 		}
 	}
+	if q.insertCommittedOperationStmt != nil {
+		if cerr := q.insertCommittedOperationStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertCommittedOperationStmt: %w", cerr)
+		}
+	}
 	if q.insertCreditStmt != nil {
 		if cerr := q.insertCreditStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertCreditStmt: %w", cerr)
+		}
+	}
+	if q.insertOperationResultFactStmt != nil {
+		if cerr := q.insertOperationResultFactStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertOperationResultFactStmt: %w", cerr)
 		}
 	}
 	if q.insertTransactionStmt != nil {
@@ -584,6 +659,11 @@ func (q *Queries) Close() error {
 	if q.listMinedTransactionsReverseStmt != nil {
 		if cerr := q.listMinedTransactionsReverseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listMinedTransactionsReverseStmt: %w", cerr)
+		}
+	}
+	if q.listOperationResultFactsStmt != nil {
+		if cerr := q.listOperationResultFactsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listOperationResultFactsStmt: %w", cerr)
 		}
 	}
 	if q.listOutputsToWatchStmt != nil {
@@ -781,6 +861,10 @@ type Queries struct {
 	db                                  DBTX
 	tx                                  *sql.Tx
 	acquireOutputLeaseStmt              *sql.Stmt
+	bumpHistoryEpochStmt                *sql.Stmt
+	bumpSecretVersionStmt               *sql.Stmt
+	bumpStateVersionStmt                *sql.Stmt
+	collectExpiredOperationsStmt        *sql.Stmt
 	createAccountStmt                   *sql.Stmt
 	createAddressStmt                   *sql.Stmt
 	createKeyScopeStmt                  *sql.Stmt
@@ -797,6 +881,7 @@ type Queries struct {
 	deleteOutputLeaseAnyOwnerStmt       *sql.Stmt
 	deleteTransactionByIDStmt           *sql.Stmt
 	detachMinedTransactionStmt          *sql.Stmt
+	ensureRuntimeStateStmt              *sql.Stmt
 	getAccountStmt                      *sql.Stmt
 	getActiveCreditIDStmt               *sql.Stmt
 	getAddressStmt                      *sql.Stmt
@@ -812,7 +897,9 @@ type Queries struct {
 	getMinedTransactionByIncidenceStmt  *sql.Stmt
 	getMinedTransactionDetailsStmt      *sql.Stmt
 	getMinedTransactionIDStmt           *sql.Stmt
+	getOperationStmt                    *sql.Stmt
 	getOutputLeaseStmt                  *sql.Stmt
+	getRuntimeStateStmt                 *sql.Stmt
 	getTransactionDetailsByHashStmt     *sql.Stmt
 	getTransactionDetailsByIDStmt       *sql.Stmt
 	getTransactionLabelStmt             *sql.Stmt
@@ -823,7 +910,9 @@ type Queries struct {
 	getWalletStartBlockStmt             *sql.Stmt
 	getWalletSyncStateStmt              *sql.Stmt
 	insertBlockStmt                     *sql.Stmt
+	insertCommittedOperationStmt        *sql.Stmt
 	insertCreditStmt                    *sql.Stmt
+	insertOperationResultFactStmt       *sql.Stmt
 	insertTransactionStmt               *sql.Stmt
 	insertTransactionInputStmt          *sql.Stmt
 	isKnownOutputStmt                   *sql.Stmt
@@ -838,6 +927,7 @@ type Queries struct {
 	listMinedTransactionsForwardStmt    *sql.Stmt
 	listMinedTransactionsFromHeightStmt *sql.Stmt
 	listMinedTransactionsReverseStmt    *sql.Stmt
+	listOperationResultFactsStmt        *sql.Stmt
 	listOutputsToWatchStmt              *sql.Stmt
 	listTransactionCreditsStmt          *sql.Stmt
 	listTransactionDebitsStmt           *sql.Stmt
@@ -876,6 +966,10 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		db:                                  tx,
 		tx:                                  tx,
 		acquireOutputLeaseStmt:              q.acquireOutputLeaseStmt,
+		bumpHistoryEpochStmt:                q.bumpHistoryEpochStmt,
+		bumpSecretVersionStmt:               q.bumpSecretVersionStmt,
+		bumpStateVersionStmt:                q.bumpStateVersionStmt,
+		collectExpiredOperationsStmt:        q.collectExpiredOperationsStmt,
 		createAccountStmt:                   q.createAccountStmt,
 		createAddressStmt:                   q.createAddressStmt,
 		createKeyScopeStmt:                  q.createKeyScopeStmt,
@@ -892,6 +986,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteOutputLeaseAnyOwnerStmt:       q.deleteOutputLeaseAnyOwnerStmt,
 		deleteTransactionByIDStmt:           q.deleteTransactionByIDStmt,
 		detachMinedTransactionStmt:          q.detachMinedTransactionStmt,
+		ensureRuntimeStateStmt:              q.ensureRuntimeStateStmt,
 		getAccountStmt:                      q.getAccountStmt,
 		getActiveCreditIDStmt:               q.getActiveCreditIDStmt,
 		getAddressStmt:                      q.getAddressStmt,
@@ -907,7 +1002,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getMinedTransactionByIncidenceStmt:  q.getMinedTransactionByIncidenceStmt,
 		getMinedTransactionDetailsStmt:      q.getMinedTransactionDetailsStmt,
 		getMinedTransactionIDStmt:           q.getMinedTransactionIDStmt,
+		getOperationStmt:                    q.getOperationStmt,
 		getOutputLeaseStmt:                  q.getOutputLeaseStmt,
+		getRuntimeStateStmt:                 q.getRuntimeStateStmt,
 		getTransactionDetailsByHashStmt:     q.getTransactionDetailsByHashStmt,
 		getTransactionDetailsByIDStmt:       q.getTransactionDetailsByIDStmt,
 		getTransactionLabelStmt:             q.getTransactionLabelStmt,
@@ -918,7 +1015,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getWalletStartBlockStmt:             q.getWalletStartBlockStmt,
 		getWalletSyncStateStmt:              q.getWalletSyncStateStmt,
 		insertBlockStmt:                     q.insertBlockStmt,
+		insertCommittedOperationStmt:        q.insertCommittedOperationStmt,
 		insertCreditStmt:                    q.insertCreditStmt,
+		insertOperationResultFactStmt:       q.insertOperationResultFactStmt,
 		insertTransactionStmt:               q.insertTransactionStmt,
 		insertTransactionInputStmt:          q.insertTransactionInputStmt,
 		isKnownOutputStmt:                   q.isKnownOutputStmt,
@@ -933,6 +1032,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listMinedTransactionsForwardStmt:    q.listMinedTransactionsForwardStmt,
 		listMinedTransactionsFromHeightStmt: q.listMinedTransactionsFromHeightStmt,
 		listMinedTransactionsReverseStmt:    q.listMinedTransactionsReverseStmt,
+		listOperationResultFactsStmt:        q.listOperationResultFactsStmt,
 		listOutputsToWatchStmt:              q.listOutputsToWatchStmt,
 		listTransactionCreditsStmt:          q.listTransactionCreditsStmt,
 		listTransactionDebitsStmt:           q.listTransactionDebitsStmt,

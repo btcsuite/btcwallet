@@ -370,4 +370,45 @@ type Queries interface {
 	// backend.
 	DeleteTransaction(ctx context.Context, walletID,
 		transactionID int64) (int64, error)
+
+	// EnsureRuntimeState creates the zeroed runtime-state row for the wallet
+	// if it does not exist yet.
+	EnsureRuntimeState(ctx context.Context, walletID int64) error
+	// GetRuntimeState reads the wallet's runtime-state versions from the
+	// transaction-bound backend.
+	GetRuntimeState(ctx context.Context,
+		walletID int64) (RuntimeStateRow, error)
+	// BumpStateVersion increments the wallet state version only when it still
+	// equals expected, returning the number of rows affected.
+	BumpStateVersion(ctx context.Context, walletID,
+		expected int64) (int64, error)
+	// BumpHistoryEpoch increments the wallet history epoch only when it still
+	// equals expected, returning the number of rows affected.
+	BumpHistoryEpoch(ctx context.Context, walletID,
+		expected int64) (int64, error)
+	// BumpSecretVersion increments the wallet secret version only when it
+	// still equals expected, returning the number of rows affected.
+	BumpSecretVersion(ctx context.Context, walletID,
+		expected int64) (int64, error)
+	// GetOperation reads one operation-journal row by its key from the
+	// transaction-bound backend.
+	GetOperation(ctx context.Context, walletID int64, domain string,
+		operationID []byte) (OperationRow, error)
+	// InsertCommittedOperation records a committed journal row through the
+	// transaction-bound backend.
+	InsertCommittedOperation(ctx context.Context,
+		params InsertCommittedOperationParams) error
+	// InsertOperationResultFact records one ordered result fact through the
+	// transaction-bound backend.
+	InsertOperationResultFact(ctx context.Context,
+		params InsertOperationResultFactParams) error
+	// ListOperationResultFacts reads one operation's result facts from the
+	// transaction-bound backend in ordinal order.
+	ListOperationResultFacts(ctx context.Context, walletID int64,
+		domain string, operationID []byte) ([]OperationResultFactRow, error)
+	// CollectExpiredOperations deletes terminal journal rows past their
+	// retention deadline, cascading their result facts, and returns the
+	// number of journal rows removed.
+	CollectExpiredOperations(ctx context.Context, walletID,
+		nowUnix int64) (int64, error)
 }

@@ -10,6 +10,22 @@ import (
 
 type Querier interface {
 	AcquireOutputLease(ctx context.Context, arg AcquireOutputLeaseParams) (int64, error)
+	// BumpHistoryEpoch advances the history epoch only while it still equals the
+	// expected value. Zero affected rows means the snapshot was stale.
+	BumpHistoryEpoch(ctx context.Context, arg BumpHistoryEpochParams) (int64, error)
+	// BumpSecretVersion advances the secret version only while it still equals the
+	// expected value. Zero affected rows means the snapshot was stale.
+	BumpSecretVersion(ctx context.Context, arg BumpSecretVersionParams) (int64, error)
+	// BumpStateVersion increments the address/transaction/sync state version only
+	// while it still equals the expected value, implementing the optimistic
+	// compare-and-swap guard. Zero affected rows means the caller's snapshot was
+	// stale and no version was advanced.
+	BumpStateVersion(ctx context.Context, arg BumpStateVersionParams) (int64, error)
+	// CollectExpiredOperations deletes terminal journal rows whose retention
+	// deadline has passed, cascading their result facts. The expires_at predicate
+	// guarantees an unexpired row is never collected, and the status filter leaves
+	// an in-flight started row untouched.
+	CollectExpiredOperations(ctx context.Context, arg CollectExpiredOperationsParams) (int64, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) error
 	CreateAddress(ctx context.Context, arg CreateAddressParams) error
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
@@ -26,6 +42,10 @@ type Querier interface {
 	DeleteOutputLeaseAnyOwner(ctx context.Context, arg DeleteOutputLeaseAnyOwnerParams) (int64, error)
 	DeleteTransactionByID(ctx context.Context, arg DeleteTransactionByIDParams) (int64, error)
 	DetachMinedTransaction(ctx context.Context, arg DetachMinedTransactionParams) (int64, error)
+	// EnsureRuntimeState creates the zeroed runtime-state row for a wallet when it
+	// does not exist yet so the guard queries always operate on an existing row. It
+	// is idempotent: an existing row is left untouched.
+	EnsureRuntimeState(ctx context.Context, walletID int64) error
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetActiveCreditID(ctx context.Context, arg GetActiveCreditIDParams) (int64, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
@@ -44,7 +64,9 @@ type Querier interface {
 	GetMinedTransactionByIncidence(ctx context.Context, arg GetMinedTransactionByIncidenceParams) (GetMinedTransactionByIncidenceRow, error)
 	GetMinedTransactionDetails(ctx context.Context, arg GetMinedTransactionDetailsParams) (GetMinedTransactionDetailsRow, error)
 	GetMinedTransactionID(ctx context.Context, arg GetMinedTransactionIDParams) (int64, error)
+	GetOperation(ctx context.Context, arg GetOperationParams) (GetOperationRow, error)
 	GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (UtxoLease, error)
+	GetRuntimeState(ctx context.Context, walletID int64) (GetRuntimeStateRow, error)
 	GetTransactionDetailsByHash(ctx context.Context, arg GetTransactionDetailsByHashParams) (GetTransactionDetailsByHashRow, error)
 	GetTransactionDetailsByID(ctx context.Context, arg GetTransactionDetailsByIDParams) (GetTransactionDetailsByIDRow, error)
 	GetTransactionLabel(ctx context.Context, arg GetTransactionLabelParams) ([]byte, error)
@@ -55,7 +77,13 @@ type Querier interface {
 	GetWalletStartBlock(ctx context.Context, walletID int64) (GetWalletStartBlockRow, error)
 	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) (int64, error)
+	// InsertCommittedOperation records a semantic operation that has already
+	// committed. Callers write this row and its result facts in the same
+	// transaction as the domain mutation, so the started state is never durably
+	// visible and a later retry is served from the journal.
+	InsertCommittedOperation(ctx context.Context, arg InsertCommittedOperationParams) error
 	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)
+	InsertOperationResultFact(ctx context.Context, arg InsertOperationResultFactParams) error
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
 	InsertTransactionInput(ctx context.Context, arg InsertTransactionInputParams) error
 	IsKnownOutput(ctx context.Context, arg IsKnownOutputParams) (bool, error)
@@ -70,6 +98,7 @@ type Querier interface {
 	ListMinedTransactionsForward(ctx context.Context, arg ListMinedTransactionsForwardParams) ([]ListMinedTransactionsForwardRow, error)
 	ListMinedTransactionsFromHeight(ctx context.Context, arg ListMinedTransactionsFromHeightParams) ([]ListMinedTransactionsFromHeightRow, error)
 	ListMinedTransactionsReverse(ctx context.Context, arg ListMinedTransactionsReverseParams) ([]ListMinedTransactionsReverseRow, error)
+	ListOperationResultFacts(ctx context.Context, arg ListOperationResultFactsParams) ([]ListOperationResultFactsRow, error)
 	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	ListTransactionCredits(ctx context.Context, arg ListTransactionCreditsParams) ([]ListTransactionCreditsRow, error)
 	ListTransactionDebits(ctx context.Context, arg ListTransactionDebitsParams) ([]ListTransactionDebitsRow, error)

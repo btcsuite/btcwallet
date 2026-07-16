@@ -702,3 +702,169 @@ branch was not consulted or copied.
   populated fixture (blocks at distinct heights + mined/unmined txs + credit +
   sync/birthday state, plus a competing same-height pair) for both dialects.
 - `make sqlc` idempotent; `git diff --check` clean.
+
+## Phase 0B: runtime state + operation journal
+
+Implements only the runtime-state row, the operation journal, and the operation
+result facts (migration `000013`) with their supporting sqlc queries and a small
+typed Go API. Funding plans/leases, address/runtime guards, the
+`schemaid.Generation` bump, and migration checksums are separate later
+increments and are NOT touched here. No semantic operation is wired to the
+journal yet; that integration is Phase 1.
+
+### Runtime-state row and version columns (judgment call)
+
+- New table `wallet_runtime_states(wallet_id PK, state_version, history_epoch,
+  secret_version)`, each version `NOT NULL DEFAULT 0 CHECK (>= 0)`, with
+  `FOREIGN KEY (wallet_id) REFERENCES wallets (id) ON DELETE RESTRICT` — the
+  same one-row-per-wallet relationship and dialect type style as
+  `wallet_sync_states` (SQLite `INTEGER`, PostgreSQL `BIGINT`).
+- **Collapsed the plan's `addr_state_version`/`tx_state_version`/
+  `sync_state_version` triple into a single generic `state_version` for this
+  increment.** This increment establishes the *mechanism* (a versioned
+  runtime-state row + guarded CAS bump + typed stale error) with one
+  representative state version plus `history_epoch` and `secret_version`. The
+  guard table's finer per-domain split (and its `ErrStaleAddressState`/
+  `ErrStaleTransactionState`/`ErrStaleSyncState` errors) is part of the
+  address/runtime **guards** increment that is explicitly out of scope here, so
+  splitting now would add unused columns. The three sentinels defined map
+  one-to-one to the three columns: `ErrStaleWalletState`↔`state_version`,
+  `ErrStaleHistoryEpoch`↔`history_epoch`, `ErrStaleSecretState`↔`secret_version`.
+
+### Row initialization
+
+- The up migration backfills a zeroed row for every existing wallet
+  (`INSERT INTO wallet_runtime_states (wallet_id) SELECT id FROM wallets`) so a
+  populated database upgraded through `000013` satisfies the one-row-per-wallet
+  invariant immediately.
+- New wallets established after the migration use the idempotent
+  `EnsureState` building block (`INSERT ... ON CONFLICT (wallet_id) DO NOTHING`).
+  Reads and guarded bumps assume the row exists (a missing row makes a CAS bump
+  affect zero rows, which surfaces as the domain's typed stale error). The
+  production wallet-creation path (out of scope) will call `EnsureState`; tests
+  call it explicitly.
+
+### Operation journal and result facts
+
+- `operation_journal(wallet_id, domain, operation_id, request_hash,
+  history_epoch, status, result_ref, result_hash, created_at, expires_at,
+  PRIMARY KEY(wallet_id, domain, operation_id))`, verbatim from the plan.
+  - `domain`/`status`/`fact_type` are `TEXT`; `operation_id`/`request_hash`/
+    `result_ref`/`result_hash`/`fact_key`/`fact_payload` are `BLOB`/`BYTEA`
+    (opaque binary keys/hashes, matching `lock_id` style). `created_at`/
+    `expires_at` are Unix seconds (`INTEGER`/`BIGINT`, `CHECK (>= 0)`), matching
+    the existing timestamp columns.
+  - `status` is restricted to the accepted set with
+    `CHECK (status IN ('started','committed','aborted','expired','rejected'))`.
+  - Added an invariant `CHECK (status <> 'committed' OR (result_ref IS NOT NULL
+    AND result_hash IS NOT NULL))` so a committed row always carries the
+    reference/hash identifying its fact set.
+  - `result_ref`/`result_hash`/`fact_key` are nullable; a non-committed row
+    leaves the result columns null.
+  - One index `idx_operation_journal_expiry (wallet_id, expires_at)` supports the
+    per-wallet retention scan.
+- `operation_result_facts(wallet_id, domain, operation_id, ordinal, fact_type,
+  fact_key, fact_payload, PRIMARY KEY(wallet_id, domain, operation_id, ordinal))`
+  with a **composite** `FOREIGN KEY (wallet_id, domain, operation_id) REFERENCES
+  operation_journal(...) ON DELETE CASCADE` (references the journal PK). Ordinal
+  order is the canonical fact order that `result_hash` commits to.
+- The down migration drops the three tables child-first
+  (`operation_result_facts` -> `operation_journal` -> `wallet_runtime_states`).
+
+### PostgreSQL integer widths (avoids adapter conversions)
+
+- Every runtime integer column is `BIGINT` in PostgreSQL (not `INTEGER`),
+  including `ordinal`, so sqlc generates `int64` for both dialects. The neutral
+  `sqlstore` row/param types are all `int64`/`[]byte`/`string`, so the SQLite and
+  PostgreSQL adapters are pure 1:1 field mappings with no width conversion.
+
+### Go API placement and the "committed, not started" building block
+
+- `sqlstore.RuntimeStore` (ctx + walletID + tx-bound `Queries`) exposes the
+  typed API: `EnsureState`, `State`, `BumpStateVersion`/`BumpHistoryEpoch`/
+  `BumpSecretVersion` (guarded CAS returning the typed stale error on a no-op
+  update), `RecordCommittedOperation` (journal row + ordered facts),
+  `CommittedResult` (prior committed result by key), and
+  `CollectExpiredOperations` (GC).
+- `Store.RuntimeUpdate`/`RuntimeView` run a standalone runtime transaction and
+  hand a `*RuntimeStore`. **The neutral `db.Store`/`ReadWriteTx` contract is
+  deliberately NOT changed** — the plan assigns the separate `RuntimeStore`
+  interface placement to Phase 1A. Runtime methods are reached through the
+  concrete `*sqlstore.Store` (embedded by the SQLite/PostgreSQL stores).
+- **"committed, not started":** `RecordCommittedOperation` inserts the row with
+  `status = 'committed'` directly (no durable `started` row). Its doc comment
+  states callers must invoke it inside the same write transaction as the domain
+  mutation it commits, so the journal row, its facts, and the mutation commit
+  atomically; `RuntimeUpdate` is the standalone path for operations with no
+  domain mutation and for tests. Recording is idempotent for the exact request
+  (same `request_hash` + `history_epoch`) via a pre-`SELECT`; reusing the id with
+  a different request returns `ErrOperationConflict`. The journal PK is the
+  cross-process backstop; the plan's blocking insert-or-detect arbitration is a
+  Phase 1 concern.
+
+### Shared sentinels live in the neutral `db` package
+
+- `ErrStaleWalletState`, `ErrStaleHistoryEpoch`, `ErrStaleSecretState`, and
+  `ErrOperationConflict` live in `wallet/internal/db` (new `runtime.go`), the
+  backend-neutral contract package, so the Phase 1 prepare/commit orchestration
+  and both backends match them via `errors.Is` without importing a specific
+  backend. `ErrOperationConflict` is added because the duplicate-request case
+  needs a typed error; `ErrOperationExpired` and the finer per-domain stale
+  errors are deferred to the increments that use them.
+
+### Version Go type is int64 (gosec G115)
+
+- The typed API exposes versions as `int64`, matching the signed
+  `BIGINT`/`INTEGER` columns (non-negative by `CHECK`). An earlier `uint64` API
+  forced `int64<->uint64` conversions that gosec `G115` flags as overflow-prone;
+  `int64` removes the conversions and the findings. Values are monotonic
+  counters that never approach the `int64` range in practice.
+
+### KV asymmetry (SQL only)
+
+- No KV mirror. Per the plan's "KV Semantic Commit (Asymmetric)", Bolt's single
+  atomic non-retried writer needs no persisted versions, retry journal, or
+  result facts — it re-validates natural records and rolls back on a failed
+  precondition. The runtime schema is SQL-only; the KV backend skips this
+  vector.
+
+### sqlc
+
+- New `runtime.sql` query files for both dialects; regenerated with the pinned
+  Docker sqlc (`make sqlc`, v1.30.0; local v1.31.1 not used). Regeneration is
+  idempotent (a second run produced no diff). Guarded bumps use `:execrows`
+  (rows affected drives the stale decision); the GC delete is `:execrows` with an
+  `expires_at <= now` predicate and a terminal-status filter so it never removes
+  an unexpired or in-flight `started` row.
+
+### Schema-identity generation NOT bumped
+
+- `schemaid.Generation` stays at `1` and no checksums were added. Migration
+  `000013` changes the runtime schema, so the end-of-0B finalization increment
+  (after funding plans and guards land) still owns bumping `Generation` to `2`
+  and defining the runtime-migration checksums, as recorded in the block
+  identity section.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/...` — pass (exit 0; also `-tags
+  test_db_postgres`).
+- `GOWORK=off go test ./wallet/internal/sql/... ./wallet/internal/db/...` — pass
+  (SQLite migration round-trip incl. the three new tables + drop; runtime vector:
+  version CAS success/stale, journal duplicate-request conflict, committed-retry
+  result, result-fact cascade, retention GC skips unexpired/started and collects
+  expired terminal rows).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/
+  ./wallet/internal/sql/sqlite/` — pass.
+- `-tags test_db_postgres` against real `postgres:18-alpine` testcontainers:
+  `sql/pg` migration round-trip and `db/itest` `TestPostgresManagerStore`
+  runtime vector — pass.
+- Authoritative `golangci-lint` v2.4.1 (Docker `btcwallet-tools`, module cache
+  mounted) reports zero new findings on the added/modified lines.
+- `make sqlc` idempotent.

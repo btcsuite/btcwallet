@@ -41,7 +41,8 @@ func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 		"key_scopes", "accounts", "addresses",
 		"transactions", "transaction_inputs", "transaction_labels",
 		"credits", "active_credit_incidences", "credit_spends",
-		"utxo_leases",
+		"utxo_leases", "wallet_runtime_states", "operation_journal",
+		"operation_result_facts",
 	}
 	for _, table := range tables {
 		var count int

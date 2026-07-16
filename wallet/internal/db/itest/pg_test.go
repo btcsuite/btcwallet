@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbpg "github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlstore"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -60,6 +61,9 @@ func TestPostgresManagerStore(t *testing.T) {
 	require.NoError(t, pg.ApplyMigrations(harness.conn))
 	harness.newStore = func(walletID int64) db.Store {
 		return dbpg.NewStore(harness.conn, walletID)
+	}
+	harness.newRuntime = func(walletID int64) *sqlstore.Store {
+		return dbpg.NewStore(harness.conn, walletID).Store
 	}
 	t.Cleanup(func() {
 		require.NoError(t, harness.conn.Close())

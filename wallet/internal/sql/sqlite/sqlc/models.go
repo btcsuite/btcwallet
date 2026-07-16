@@ -99,6 +99,29 @@ type KeyScope struct {
 	InternalAddrType     int64
 }
 
+type OperationJournal struct {
+	WalletID     int64
+	Domain       string
+	OperationID  []byte
+	RequestHash  []byte
+	HistoryEpoch int64
+	Status       string
+	ResultRef    []byte
+	ResultHash   []byte
+	CreatedAt    int64
+	ExpiresAt    int64
+}
+
+type OperationResultFact struct {
+	WalletID    int64
+	Domain      string
+	OperationID []byte
+	Ordinal     int64
+	FactType    string
+	FactKey     []byte
+	FactPayload []byte
+}
+
 type Transaction struct {
 	ID             int64
 	WalletID       int64
@@ -144,6 +167,13 @@ type Wallet struct {
 	EncryptedCryptoScriptKey []byte
 	EncryptedMasterHdPubKey  []byte
 	EncryptedMasterHdPrivKey []byte
+}
+
+type WalletRuntimeState struct {
+	WalletID      int64
+	StateVersion  int64
+	HistoryEpoch  int64
+	SecretVersion int64
 }
 
 type WalletSyncState struct {
