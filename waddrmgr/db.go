@@ -1023,7 +1023,7 @@ func fetchLastAccount(ns walletdb.ReadBucket, scope *KeyScope) (uint32, error) {
 
 	val := metaBucket.Get(lastAccountName)
 	if val == nil {
-		return (1 << 32) - 1, nil
+		return NoAccountAllocated, nil
 	}
 	if len(val) != 4 {
 		str := fmt.Sprintf("malformed metadata '%s' stored in database",
@@ -1713,6 +1713,30 @@ func putAddress(ns walletdb.ReadWriteBucket, scope *KeyScope,
 		return managerError(ErrDatabase, str, err)
 	}
 
+	// If this address previously belonged to a different account, drop its
+	// stale account-address index entry. Otherwise the address would be
+	// listed under both the old and the new account. This never fires for
+	// the legacy callers, which always re-write an address under its
+	// existing account, but it makes address re-homing consistent.
+	idxBucket := scopedBucket.NestedReadWriteBucket(addrAcctIdxBucketName)
+	if prev := idxBucket.Get(addrHash[:]); prev != nil {
+		prevAccount := binary.LittleEndian.Uint32(prev)
+		if prevAccount != row.account {
+			oldBucket := idxBucket.NestedReadWriteBucket(
+				uint32ToBytes(prevAccount),
+			)
+			if oldBucket != nil {
+				err := oldBucket.Delete(addrHash[:])
+				if err != nil {
+					str := fmt.Sprintf("failed to delete "+
+						"stale address account index "+
+						"%x", addrHash)
+					return managerError(ErrDatabase, str, err)
+				}
+			}
+		}
+	}
+
 	// Update address account index
 	return putAddrAccountIndex(ns, scope, row.account, addrHash[:])
 }
@@ -2136,7 +2160,12 @@ func deletePrivateKeys(ns walletdb.ReadWriteBucket) error {
 					return managerError(ErrDatabase, str, err)
 				}
 
-			case adtWitnessScript:
+			// Witness and taproot script addresses share the
+			// witness-script row encoding, so a secret tapscript
+			// must be cleared here too. Omitting adtTaprootScript
+			// would leak an encrypted secret script through a
+			// watch-only conversion.
+			case adtWitnessScript, adtTaprootScript:
 				srow, err := deserializeWitnessScriptAddress(row)
 				if err != nil {
 					return err
@@ -2330,6 +2359,11 @@ func staleHeight(height int32) int32 {
 
 // FetchStartBlock loads the start block stamp for the manager from the
 // database.
+//
+// NOTE: The legacy start-block encoding stores only the height and hash, so the
+// returned BlockStamp.Timestamp is always the zero time even though the caller
+// may have supplied a timestamp when the start block was written. See
+// putStartBlock.
 func FetchStartBlock(ns walletdb.ReadBucket) (*BlockStamp, error) {
 	bucket := ns.NestedReadBucket(syncBucketName)
 
@@ -2350,6 +2384,10 @@ func FetchStartBlock(ns walletdb.ReadBucket) (*BlockStamp, error) {
 }
 
 // putStartBlock stores the provided start block stamp to the database.
+//
+// NOTE: Unlike updateSyncedTo, the legacy start-block encoding does not store
+// bs.Timestamp. The timestamp is intentionally dropped to preserve the historic
+// 36-byte on-disk format, and FetchStartBlock therefore never returns it.
 func putStartBlock(ns walletdb.ReadWriteBucket, bs *BlockStamp) error {
 	bucket := ns.NestedReadWriteBucket(syncBucketName)
 

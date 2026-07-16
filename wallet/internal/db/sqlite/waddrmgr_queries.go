@@ -52,7 +52,10 @@ func sqliteKeyScope(
 		return waddrmgr.KeyScopeState{}, err
 	}
 
-	var lastAccount uint32
+	// A NULL last-account column means the scope has never allocated an
+	// account, which the legacy manager reports with the no-account
+	// sentinel rather than a real account 0.
+	lastAccount := waddrmgr.NoAccountAllocated
 	if row.LastAccountNumber.Valid {
 		lastAccount, err = sqlstore.CheckedUint32(
 			row.LastAccountNumber.Int64, "last account number",
@@ -478,12 +481,9 @@ func (q *queryAdapter) PutKeyScope(ctx context.Context, walletID int64,
 		CoinType:             int64(state.Scope.Coin),
 		EncryptedCoinPubKey:  state.EncryptedCoinPubKey,
 		EncryptedCoinPrivKey: state.EncryptedCoinPrivKey,
-		LastAccountNumber: sql.NullInt64{
-			Int64: int64(state.LastAccount),
-			Valid: true,
-		},
-		ExternalAddrType: int64(state.AddrSchema.ExternalAddrType),
-		InternalAddrType: int64(state.AddrSchema.InternalAddrType),
+		LastAccountNumber:    sqlstore.NullableLastAccount(state.LastAccount),
+		ExternalAddrType:     int64(state.AddrSchema.ExternalAddrType),
+		InternalAddrType:     int64(state.AddrSchema.InternalAddrType),
 	})
 
 	return err
@@ -528,12 +528,9 @@ func (q *queryAdapter) SetLastAccount(ctx context.Context, walletID int64,
 
 	return q.queries.UpdateLastAccountNumber(
 		ctx, sqlitedb.UpdateLastAccountNumberParams{
-			LastAccountNumber: sql.NullInt64{
-				Int64: int64(account),
-				Valid: true,
-			},
-			ID:       scopeID,
-			WalletID: walletID,
+			LastAccountNumber: sqlstore.NullableLastAccount(account),
+			ID:                scopeID,
+			WalletID:          walletID,
 		},
 	)
 }

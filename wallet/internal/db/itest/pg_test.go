@@ -4,6 +4,7 @@ package itest
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -43,18 +44,26 @@ func TestPostgresManagerStore(t *testing.T) {
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
-	conn, err := pg.Open(ctx, pg.Config{DSN: dsn})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, conn.Close())
-	})
-	require.NoError(t, pg.ApplyMigrations(conn))
 
-	testManagerStore(t, &managerStoreHarness{
-		conn:     conn,
+	harness := &managerStoreHarness{
 		postgres: true,
-		newStore: func(walletID int64) db.Store {
-			return dbpg.NewStore(conn, walletID)
+		reconnect: func(t *testing.T) *sql.DB {
+			conn, err := pg.Open(
+				context.Background(), pg.Config{DSN: dsn},
+			)
+			require.NoError(t, err)
+
+			return conn
 		},
+	}
+	harness.conn = harness.reconnect(t)
+	require.NoError(t, pg.ApplyMigrations(harness.conn))
+	harness.newStore = func(walletID int64) db.Store {
+		return dbpg.NewStore(harness.conn, walletID)
+	}
+	t.Cleanup(func() {
+		require.NoError(t, harness.conn.Close())
 	})
+
+	testManagerStore(t, harness)
 }

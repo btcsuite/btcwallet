@@ -46,6 +46,12 @@ const (
 	// DefaultAccountNum is the number of the default account.
 	DefaultAccountNum = 0
 
+	// NoAccountAllocated is the last-account sentinel a key scope reports
+	// when it has never allocated an account. It is the twos-complement
+	// representation of -1 (2^32-1), chosen so the first allocated account
+	// wraps to zero, and it stays distinct from a real account 0.
+	NoAccountAllocated uint32 = (1 << 32) - 1
+
 	// defaultAccountName is the initial name of the default account.  Note
 	// that the default account may be renamed and is not a reserved name,
 	// so the default account might not be named "default" and non-default

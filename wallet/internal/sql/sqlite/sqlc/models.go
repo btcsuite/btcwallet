@@ -60,6 +60,13 @@ type Block struct {
 	BlockTimestamp int64
 }
 
+type BtcwalletSchemaIdentity struct {
+	ID         int64
+	Family     string
+	Generation int64
+	CreatedAt  int64
+}
+
 type Credit struct {
 	ID             int64
 	WalletID       int64

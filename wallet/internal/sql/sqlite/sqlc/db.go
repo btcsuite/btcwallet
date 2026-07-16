@@ -231,6 +231,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.promoteUnminedTransactionStmt, err = db.PrepareContext(ctx, PromoteUnminedTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query PromoteUnminedTransaction: %w", err)
 	}
+	if q.pruneStaleSyncBlockStmt, err = db.PrepareContext(ctx, PruneStaleSyncBlock); err != nil {
+		return nil, fmt.Errorf("error preparing query PruneStaleSyncBlock: %w", err)
+	}
 	if q.putBlockStmt, err = db.PrepareContext(ctx, PutBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query PutBlock: %w", err)
 	}
@@ -638,6 +641,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing promoteUnminedTransactionStmt: %w", cerr)
 		}
 	}
+	if q.pruneStaleSyncBlockStmt != nil {
+		if cerr := q.pruneStaleSyncBlockStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing pruneStaleSyncBlockStmt: %w", cerr)
+		}
+	}
 	if q.putBlockStmt != nil {
 		if cerr := q.putBlockStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing putBlockStmt: %w", cerr)
@@ -841,6 +849,7 @@ type Queries struct {
 	markAddressUsedStmt                 *sql.Stmt
 	nextBlockTransactionOrderStmt       *sql.Stmt
 	promoteUnminedTransactionStmt       *sql.Stmt
+	pruneStaleSyncBlockStmt             *sql.Stmt
 	putBlockStmt                        *sql.Stmt
 	putKeyScopeStmt                     *sql.Stmt
 	putManagerAccountStmt               *sql.Stmt
@@ -935,6 +944,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		markAddressUsedStmt:                 q.markAddressUsedStmt,
 		nextBlockTransactionOrderStmt:       q.nextBlockTransactionOrderStmt,
 		promoteUnminedTransactionStmt:       q.promoteUnminedTransactionStmt,
+		pruneStaleSyncBlockStmt:             q.pruneStaleSyncBlockStmt,
 		putBlockStmt:                        q.putBlockStmt,
 		putKeyScopeStmt:                     q.putKeyScopeStmt,
 		putManagerAccountStmt:               q.putManagerAccountStmt,

@@ -447,6 +447,25 @@ func (s *addrStore) PutAccount(state waddrmgr.AccountState) error {
 func (s *addrStore) RenameAccount(scope waddrmgr.KeyScope,
 	account uint32, name string) error {
 
+	// Reject a rename onto a name already owned by a different account,
+	// matching the legacy manager and the KV store. Renaming an account to
+	// its own current name stays a permitted no-op. Without this guard the
+	// bare UPDATE would surface a raw unique-constraint error instead of the
+	// typed ErrDuplicateAccount.
+	existing, err := s.queries.GetAccountByName(s.ctx, s.walletID, scope, name)
+	switch {
+	case err == nil:
+		if existing.Account != account {
+			return missingManagerRow(
+				waddrmgr.ErrDuplicateAccount,
+				fmt.Sprintf("account name %q already exists", name),
+			)
+		}
+
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
+
 	rows, err := s.queries.RenameAccount(
 		s.ctx, s.walletID, scope, account, name,
 	)
@@ -573,7 +592,20 @@ func (s *addrStore) BlockHash(height int32) (*chainhash.Hash, error) {
 	return hash, nil
 }
 
-// SetSyncedTo marks the address manager as synced through the block.
+// SetSyncedTo marks the address manager as synced through the block. When the
+// block is nil the wallet is reset to its start block, matching the legacy
+// Manager.SetSyncedTo reset semantics.
+//
+// It reproduces the durable side effects of legacy waddrmgr.PutSyncedTo:
+//
+//   - Predecessor guard: once the birthday block is known, the block preceding
+//     a non-genesis tip must already be recorded. This mirrors the legacy
+//     reorg-safety check and rejects recording a tip whose ancestry has not
+//     been observed. Before the birthday block is set the recent-block index
+//     is intentionally sparse, so the guard is skipped during initial sync.
+//   - Recent-block retention: the block that ages out of the reorg window
+//     (tip minus waddrmgr.MaxReorgDepth) is pruned so the shared blocks table
+//     does not grow without bound, matching the legacy per-tip prune.
 func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 	if block == nil {
 		row, err := s.queries.GetWalletStartBlock(s.ctx, s.walletID)
@@ -593,6 +625,10 @@ func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 		}
 	}
 
+	if err := s.checkSyncedToPredecessor(block.Height); err != nil {
+		return err
+	}
+
 	err := s.queries.PutBlock(s.ctx, BlockRow{
 		Height:    block.Height,
 		Hash:      block.Hash[:],
@@ -600,6 +636,10 @@ func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 	})
 	if err != nil {
 		return fmt.Errorf("put synced-to block %d: %w", block.Height, err)
+	}
+
+	if err := s.pruneStaleSyncBlock(block.Height); err != nil {
+		return err
 	}
 
 	rows, err := s.queries.SetWalletSyncedTo(
@@ -611,6 +651,66 @@ func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 
 	if rows != 1 {
 		return fmt.Errorf("wallet %d sync state not found", s.walletID)
+	}
+
+	return nil
+}
+
+// checkSyncedToPredecessor enforces the legacy predecessor guard: once the
+// birthday block is recorded, the block immediately preceding a non-genesis
+// synced-to tip must already exist in storage. It returns a legacy
+// ErrBlockNotFound manager error when the predecessor is missing.
+func (s *addrStore) checkSyncedToPredecessor(height int32) error {
+	if height <= 0 {
+		return nil
+	}
+
+	// The recent-block index is only guaranteed contiguous once initial sync
+	// has completed, which the legacy manager tracks through the birthday
+	// block. Skip the guard until then.
+	state, err := s.queries.GetSyncState(s.ctx, s.walletID)
+	if err != nil {
+		return fmt.Errorf("get sync state: %w", err)
+	}
+	if state.BirthdayBlock == nil {
+		return nil
+	}
+
+	_, err = s.queries.GetBlockByHeight(s.ctx, height-1)
+	if errors.Is(err, sql.ErrNoRows) {
+		return waddrmgr.ManagerError{
+			ErrorCode: waddrmgr.ErrBlockNotFound,
+			Description: fmt.Sprintf(
+				"missing block at height %d preceding synced-to "+
+					"height %d", height-1, height,
+			),
+			Err: err,
+		}
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"get predecessor block %d: %w", height-1, err,
+		)
+	}
+
+	return nil
+}
+
+// pruneStaleSyncBlock removes the block that has aged out of the reorg-depth
+// retention window, mirroring the legacy per-tip prune. The salvage schema
+// shares one foreign-keyed blocks table, so the block is only removed when no
+// transaction or sync state still references it.
+func (s *addrStore) pruneStaleSyncBlock(height int32) error {
+	staleHeight := height - waddrmgr.MaxReorgDepth
+	if staleHeight <= 0 {
+		return nil
+	}
+
+	err := s.queries.PruneStaleSyncBlock(s.ctx, staleHeight)
+	if err != nil {
+		return fmt.Errorf(
+			"prune stale sync block %d: %w", staleHeight, err,
+		)
 	}
 
 	return nil

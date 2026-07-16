@@ -78,6 +78,12 @@ type Querier interface {
 	MarkAddressUsed(ctx context.Context, arg MarkAddressUsedParams) (int64, error)
 	NextBlockTransactionOrder(ctx context.Context, arg NextBlockTransactionOrderParams) (int64, error)
 	PromoteUnminedTransaction(ctx context.Context, arg PromoteUnminedTransactionParams) (int64, error)
+	// PruneStaleSyncBlock removes one block that has aged out of the recent-block
+	// retention window, mirroring the legacy address manager's per-tip pruning.
+	// The shared blocks table is foreign-keyed by transactions and wallet sync
+	// states with ON DELETE RESTRICT, so the block is only removed when nothing
+	// still references it.
+	PruneStaleSyncBlock(ctx context.Context, blockHeight int64) error
 	PutBlock(ctx context.Context, arg PutBlockParams) error
 	PutKeyScope(ctx context.Context, arg PutKeyScopeParams) (int64, error)
 	PutManagerAccount(ctx context.Context, arg PutManagerAccountParams) (int64, error)

@@ -2,6 +2,7 @@ package itest
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -18,19 +19,25 @@ import (
 func TestSQLiteManagerStore(t *testing.T) {
 	t.Parallel()
 
-	conn, err := sqlite.Open(context.Background(), sqlite.Config{
-		DBPath: filepath.Join(t.TempDir(), "wallet.db"),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, conn.Close())
-	})
-	require.NoError(t, sqlite.ApplyMigrations(conn))
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+	harness := &managerStoreHarness{
+		reconnect: func(t *testing.T) *sql.DB {
+			conn, err := sqlite.Open(
+				context.Background(), sqlite.Config{DBPath: dbPath},
+			)
+			require.NoError(t, err)
 
-	testManagerStore(t, &managerStoreHarness{
-		conn: conn,
-		newStore: func(walletID int64) db.Store {
-			return dbsqlite.NewStore(conn, walletID)
+			return conn
 		},
+	}
+	harness.conn = harness.reconnect(t)
+	require.NoError(t, sqlite.ApplyMigrations(harness.conn))
+	harness.newStore = func(walletID int64) db.Store {
+		return dbsqlite.NewStore(harness.conn, walletID)
+	}
+	t.Cleanup(func() {
+		require.NoError(t, harness.conn.Close())
 	})
+
+	testManagerStore(t, harness)
 }

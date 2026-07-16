@@ -110,6 +110,10 @@ type Queries interface {
 	// GetBlockByHeight reads block by height from the transaction-bound
 	// backend.
 	GetBlockByHeight(ctx context.Context, height int32) (BlockRow, error)
+	// PruneStaleSyncBlock removes the block at height once it has aged out of
+	// the reorg-depth retention window, but only when no transaction or wallet
+	// sync state still references it.
+	PruneStaleSyncBlock(ctx context.Context, height int32) error
 	// GetWalletStartBlock reads wallet start block from the transaction-bound
 	// backend.
 	GetWalletStartBlock(ctx context.Context, walletID int64) (BlockRow, error)

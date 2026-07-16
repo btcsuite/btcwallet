@@ -93,6 +93,31 @@ func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error 
 	return err
 }
 
+const PruneStaleSyncBlock = `-- name: PruneStaleSyncBlock :exec
+DELETE FROM blocks
+WHERE blocks.block_height = $1
+  AND NOT EXISTS (
+      SELECT 1 FROM transactions
+      WHERE transactions.block_height = blocks.block_height
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM wallet_sync_states
+      WHERE wallet_sync_states.start_block_height = blocks.block_height
+          OR wallet_sync_states.synced_block_height = blocks.block_height
+          OR wallet_sync_states.birthday_block_height = blocks.block_height
+  )
+`
+
+// PruneStaleSyncBlock removes one block that has aged out of the recent-block
+// retention window, mirroring the legacy address manager's per-tip pruning.
+// The shared blocks table is foreign-keyed by transactions and wallet sync
+// states with ON DELETE RESTRICT, so the block is only removed when nothing
+// still references it.
+func (q *Queries) PruneStaleSyncBlock(ctx context.Context, blockHeight int32) error {
+	_, err := q.exec(ctx, q.pruneStaleSyncBlockStmt, PruneStaleSyncBlock, blockHeight)
+	return err
+}
+
 const PutBlock = `-- name: PutBlock :exec
 INSERT INTO blocks (block_height, header_hash, block_timestamp)
 VALUES ($1, $2, $3)

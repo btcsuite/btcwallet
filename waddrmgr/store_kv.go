@@ -106,6 +106,11 @@ func (s *kvManagerReadStore) ManagerState() (ManagerState, error) {
 // SyncState assembles the complete durable chain position from the legacy sync
 // bucket. A missing birthday block is represented by a nil BirthdayBlock while
 // preserving its independent verification bit.
+//
+// NOTE: The legacy start-block encoding does not persist a timestamp, so the
+// returned StartBlock.Timestamp is always the zero time regardless of what was
+// stored. This narrows the BlockStamp contract for StartBlock only; SyncedTo
+// and BirthdayBlock retain their timestamps.
 func (s *kvManagerReadStore) SyncState() (SyncState, error) {
 	start, err := FetchStartBlock(s.ns)
 	if err != nil {
@@ -438,8 +443,30 @@ func (s *kvManagerReadStore) ActiveAddresses(
 	)
 }
 
+// deleteMainKeyIfAbsent removes an optional main-bucket value when the
+// replacement state omits it. The legacy key writers skip nil fields so they
+// can serve partial updates, so replacement operations must delete the omitted
+// fields explicitly to avoid retaining stale key material.
+func deleteMainKeyIfAbsent(bucket walletdb.ReadWriteBucket, value,
+	key []byte, desc string) error {
+
+	if value != nil {
+		return nil
+	}
+
+	if err := bucket.Delete(key); err != nil {
+		return managerError(ErrDatabase, desc, err)
+	}
+
+	return nil
+}
+
 // PutManagerState writes the complete durable manager state with the existing
 // walletdb encodings and helper functions.
+//
+// It has full replacement semantics: any optional key material the caller
+// leaves nil is deleted, so converting a manager to watch-only cannot leave
+// the previous encrypted private keys behind while reporting WatchOnly.
 func (s *kvManagerReadWriteStore) PutManagerState(state ManagerState) error {
 	// Store the manager version and creation time before the encrypted key
 	// material that depends on this root state.
@@ -484,6 +511,32 @@ func (s *kvManagerReadWriteStore) PutManagerState(state ManagerState) error {
 		return err
 	}
 
+	// The key writers above skip nil fields, so enforce replacement by
+	// deleting any optional key material the caller omitted. Without this a
+	// watch-only replacement would retain the previous private keys.
+	deletions := []struct {
+		value []byte
+		key   []byte
+		desc  string
+	}{
+		{state.MasterPrivParams, masterPrivKeyName,
+			"failed to delete master private key parameters"},
+		{state.EncryptedCryptoPrivKey, cryptoPrivKeyName,
+			"failed to delete encrypted crypto private key"},
+		{state.EncryptedCryptoScriptKey, cryptoScriptKeyName,
+			"failed to delete encrypted crypto script key"},
+		{state.EncryptedMasterHDPrivKey, masterHDPrivName,
+			"failed to delete encrypted master HD private key"},
+		{state.EncryptedMasterHDPubKey, masterHDPubName,
+			"failed to delete encrypted master HD public key"},
+	}
+	for _, d := range deletions {
+		err = deleteMainKeyIfAbsent(mainBucket, d.value, d.key, d.desc)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Record the watching-only bit last so a failed key write can't leave the
 	// manager marked watch-only with incomplete root state.
 	return putWatchingOnly(s.ns, state.WatchOnly)
@@ -492,6 +545,9 @@ func (s *kvManagerReadWriteStore) PutManagerState(state ManagerState) error {
 // PutSyncState writes the complete durable chain position. It deliberately
 // uses the low-level block writers because bulk restore must not require the
 // predecessor checks used by an incremental SetSyncedTo update.
+//
+// NOTE: state.StartBlock.Timestamp is not persisted; see putStartBlock. Only
+// StartBlock.Height and StartBlock.Hash round-trip through SyncState.
 func (s *kvManagerReadWriteStore) PutSyncState(state SyncState) error {
 	err := putStartBlock(s.ns, &state.StartBlock)
 	if err != nil {
@@ -599,11 +655,36 @@ func (s *kvManagerReadWriteStore) PutKeyScope(state KeyScopeState) error {
 }
 
 // SetCoinTypeKeys replaces the encrypted public and private coin-type keys for
-// one legacy key scope.
+// one legacy key scope. When the private key is omitted it is deleted rather
+// than retained, so a watch-only scope cannot keep a stale encrypted private
+// coin-type key.
 func (s *kvManagerReadWriteStore) SetCoinTypeKeys(scope KeyScope,
 	encryptedPub, encryptedPriv []byte) error {
 
-	return putCoinTypeKeys(s.ns, &scope, encryptedPub, encryptedPriv)
+	err := putCoinTypeKeys(s.ns, &scope, encryptedPub, encryptedPriv)
+	if err != nil {
+		return err
+	}
+
+	// The skip-nil putCoinTypeKeys helper alone would keep a previous
+	// encrypted private key, so delete it explicitly when the replacement
+	// clears it.
+	if encryptedPriv == nil {
+		scopedBucket, err := fetchWriteScopeBucket(s.ns, &scope)
+		if err != nil {
+			return err
+		}
+
+		err = scopedBucket.Delete(coinTypePrivKeyName)
+		if err != nil {
+			return managerError(
+				ErrDatabase, "failed to delete encrypted "+
+					"cointype private key", err,
+			)
+		}
+	}
+
+	return nil
 }
 
 // SetLastAccount records the last allocated account for one legacy key scope.
@@ -614,8 +695,24 @@ func (s *kvManagerReadWriteStore) SetLastAccount(scope KeyScope,
 }
 
 // PutAccount writes one account with the existing row encoding selected by its
-// durable account type.
+// durable account type. When it replaces an existing account whose name
+// changed, the stale name index for the previous name is removed so the
+// account is no longer resolvable by its former name.
 func (s *kvManagerReadWriteStore) PutAccount(state AccountState) error {
+	// Drop the stale name index when replacing an existing account with a
+	// different name. A new account (ErrAccountNotFound) has no prior name.
+	existing, err := s.Account(state.Scope, state.Account)
+	switch {
+	case err == nil && existing.Name != state.Name:
+		err = deleteAccountNameIndex(s.ns, &state.Scope, existing.Name)
+		if err != nil {
+			return err
+		}
+
+	case err != nil && !IsError(err, ErrAccountNotFound):
+		return err
+	}
+
 	switch state.Type {
 	// Default accounts preserve both encrypted extended keys and derivation
 	// indexes.
@@ -644,27 +741,32 @@ func (s *kvManagerReadWriteStore) PutAccount(state AccountState) error {
 }
 
 // RenameAccount replaces one account name while keeping both legacy account
-// indexes consistent.
+// indexes consistent. A rename that collides with a different account's name is
+// rejected with ErrDuplicateAccount, matching the ScopedKeyManager validation.
 func (s *kvManagerReadWriteStore) RenameAccount(scope KeyScope,
 	account uint32, name string) error {
+
+	// Reject a rename that would overwrite another account's name index.
+	// Renaming an account to its own current name is a no-op and allowed.
+	existing, err := fetchAccountByName(s.ns, &scope, name)
+	switch {
+	case err == nil && existing != account:
+		str := "account with the same name already exists"
+		return managerError(ErrDuplicateAccount, str, nil)
+
+	case err != nil && !IsError(err, ErrAccountNotFound):
+		return err
+	}
 
 	state, err := s.Account(scope, account)
 	if err != nil {
 		return err
 	}
 
-	err = deleteAccountNameIndex(s.ns, &scope, state.Name)
-	if err != nil {
-		return err
-	}
-
-	err = deleteAccountIDIndex(s.ns, &scope, account)
-	if err != nil {
-		return err
-	}
-
 	state.Name = name
 
+	// PutAccount rewrites the row and id index and removes the stale name
+	// index for the previous name.
 	return s.PutAccount(state)
 }
 

@@ -184,7 +184,7 @@ ON CONFLICT (wallet_id, scope_id, address_hash) DO UPDATE SET
     encrypted_script = excluded.encrypted_script,
     witness_version = excluded.witness_version,
     is_secret_script = excluded.is_secret_script,
-    used = excluded.used;
+    used = addresses.used OR excluded.used;
 
 -- name: MarkAddressUsed :execrows
 UPDATE addresses
@@ -198,6 +198,7 @@ SET
     encrypted_script = CASE
         WHEN address_type = 2 THEN NULL
         WHEN address_type = 3 AND is_secret_script = TRUE THEN NULL
+        WHEN address_type = 4 AND is_secret_script = TRUE THEN NULL
         ELSE encrypted_script
     END
 WHERE wallet_id = ?;

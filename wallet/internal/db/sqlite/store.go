@@ -63,6 +63,14 @@ func (q *queryAdapter) GetBlockByHeight(ctx context.Context,
 	}, nil
 }
 
+// PruneStaleSyncBlock removes the stale recent-sync block at height through the
+// transaction-bound backend.
+func (q *queryAdapter) PruneStaleSyncBlock(ctx context.Context,
+	height int32) error {
+
+	return q.queries.PruneStaleSyncBlock(ctx, int64(height))
+}
+
 // GetWalletStartBlock reads wallet start block from the transaction-bound
 // backend.
 func (q *queryAdapter) GetWalletStartBlock(ctx context.Context,
