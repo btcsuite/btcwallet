@@ -36,4 +36,15 @@ var (
 	ErrOperationConflict = errors.New(
 		"operation id reused with a different request",
 	)
+
+	// ErrStaleAccountIndex indicates a guarded branch-index allocation failed
+	// because the account's next index no longer matched the caller's expected
+	// value, or the account was missing. The caller rereads the account before
+	// preparing the allocation again.
+	ErrStaleAccountIndex = errors.New("stale account branch index")
+
+	// ErrReservationConflict indicates a funding-plan state transition was
+	// rejected because the plan was missing or no longer in the state the
+	// transition requires, for example consuming a plan that is not reserved.
+	ErrReservationConflict = errors.New("funding reservation conflict")
 )

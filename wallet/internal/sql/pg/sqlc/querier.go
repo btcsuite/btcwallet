@@ -9,7 +9,21 @@ import (
 )
 
 type Querier interface {
+	// AcquireFundingPlanLease adds one plan-owned lease under a reserved plan,
+	// reusing the plan's reservation id as the durable lease lock id so the plan
+	// and its leases share one owner token. Zero affected rows means the plan was
+	// missing or no longer reserved.
+	AcquireFundingPlanLease(ctx context.Context, arg AcquireFundingPlanLeaseParams) (int64, error)
 	AcquireOutputLease(ctx context.Context, arg AcquireOutputLeaseParams) (int64, error)
+	// AdvanceExternalBranchIndex sets the external branch's next index to new_index,
+	// but only while it still equals expected_index, so an address allocation is an
+	// optimistic compare-and-swap. It returns no row when the account is missing or
+	// the expected index no longer matches.
+	AdvanceExternalBranchIndex(ctx context.Context, arg AdvanceExternalBranchIndexParams) (int64, error)
+	// AdvanceInternalBranchIndex sets the internal branch's next index to new_index,
+	// but only while it still equals expected_index. It returns no row when the
+	// account is missing or the expected index no longer matches.
+	AdvanceInternalBranchIndex(ctx context.Context, arg AdvanceInternalBranchIndexParams) (int64, error)
 	// BumpHistoryEpoch advances the history epoch only while it still equals the
 	// expected value. Zero affected rows means the snapshot was stale.
 	BumpHistoryEpoch(ctx context.Context, arg BumpHistoryEpochParams) (int64, error)
@@ -21,11 +35,19 @@ type Querier interface {
 	// compare-and-swap guard. Zero affected rows means the caller's snapshot was
 	// stale and no version was advanced.
 	BumpStateVersion(ctx context.Context, arg BumpStateVersionParams) (int64, error)
+	// CollectExpiredFundingPlans deletes terminal plans past their retention
+	// deadline, but never a plan that still owns leases, so a plan's durable lease
+	// rows are always removed before the plan row.
+	CollectExpiredFundingPlans(ctx context.Context, arg CollectExpiredFundingPlansParams) (int64, error)
 	// CollectExpiredOperations deletes terminal journal rows whose retention
 	// deadline has passed, cascading their result facts. The expires_at predicate
 	// guarantees an unexpired row is never collected, and the status filter leaves
 	// an in-flight started row untouched.
 	CollectExpiredOperations(ctx context.Context, arg CollectExpiredOperationsParams) (int64, error)
+	// ConsumeFundingPlan transitions a reserved plan to consumed and records the
+	// transaction it funded. Zero affected rows means the plan was missing or no
+	// longer reserved, which the caller reports as a reservation conflict.
+	ConsumeFundingPlan(ctx context.Context, arg ConsumeFundingPlanParams) (int64, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) error
 	CreateAddress(ctx context.Context, arg CreateAddressParams) error
 	CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error)
@@ -36,6 +58,9 @@ type Querier interface {
 	DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendParams) (int64, error)
 	DeleteCreditSpendsBySpendingTx(ctx context.Context, arg DeleteCreditSpendsBySpendingTxParams) (int64, error)
 	DeleteExpiredOutputLeases(ctx context.Context, arg DeleteExpiredOutputLeasesParams) (int64, error)
+	// DeleteFundingPlanLeases removes only the leases owned by one plan and leaves
+	// external leases untouched.
+	DeleteFundingPlanLeases(ctx context.Context, arg DeleteFundingPlanLeasesParams) (int64, error)
 	DeleteKeyScopePrivateKeys(ctx context.Context, walletID int64) (int64, error)
 	DeleteManagerPrivateKeys(ctx context.Context, id int64) (int64, error)
 	DeleteOutputLease(ctx context.Context, arg DeleteOutputLeaseParams) (int64, error)
@@ -46,6 +71,9 @@ type Querier interface {
 	// does not exist yet so the guard queries always operate on an existing row. It
 	// is idempotent: an existing row is left untouched.
 	EnsureRuntimeState(ctx context.Context, walletID int64) error
+	// ExpireFundingPlan transitions a reserved plan to expired. Zero affected rows
+	// means the plan was missing or no longer reserved.
+	ExpireFundingPlan(ctx context.Context, arg ExpireFundingPlanParams) (int64, error)
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetActiveCreditID(ctx context.Context, arg GetActiveCreditIDParams) (int64, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
@@ -55,6 +83,7 @@ type Querier interface {
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (GetBlockByHeightRow, error)
 	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]GetBlocksInRangeRow, error)
 	GetCredit(ctx context.Context, arg GetCreditParams) (Credit, error)
+	GetFundingPlan(ctx context.Context, arg GetFundingPlanParams) (GetFundingPlanRow, error)
 	GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeyScope, error)
 	GetManagerAccount(ctx context.Context, arg GetManagerAccountParams) (Account, error)
 	GetManagerAccountByName(ctx context.Context, arg GetManagerAccountByNameParams) (Account, error)
@@ -65,7 +94,7 @@ type Querier interface {
 	GetMinedTransactionDetails(ctx context.Context, arg GetMinedTransactionDetailsParams) (GetMinedTransactionDetailsRow, error)
 	GetMinedTransactionID(ctx context.Context, arg GetMinedTransactionIDParams) (int64, error)
 	GetOperation(ctx context.Context, arg GetOperationParams) (GetOperationRow, error)
-	GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (UtxoLease, error)
+	GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (GetOutputLeaseRow, error)
 	GetRuntimeState(ctx context.Context, walletID int64) (GetRuntimeStateRow, error)
 	GetTransactionDetailsByHash(ctx context.Context, arg GetTransactionDetailsByHashParams) (GetTransactionDetailsByHashRow, error)
 	GetTransactionDetailsByID(ctx context.Context, arg GetTransactionDetailsByIDParams) (GetTransactionDetailsByIDRow, error)
@@ -83,13 +112,16 @@ type Querier interface {
 	// visible and a later retry is served from the journal.
 	InsertCommittedOperation(ctx context.Context, arg InsertCommittedOperationParams) error
 	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)
+	// InsertFundingPlan reserves a new funding plan and returns its surrogate id. A
+	// plan starts in the reserved state and names no committed transaction.
+	InsertFundingPlan(ctx context.Context, arg InsertFundingPlanParams) (int64, error)
 	InsertOperationResultFact(ctx context.Context, arg InsertOperationResultFactParams) error
 	InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error)
 	InsertTransactionInput(ctx context.Context, arg InsertTransactionInputParams) error
 	IsKnownOutput(ctx context.Context, arg IsKnownOutputParams) (bool, error)
 	ListAccountAddresses(ctx context.Context, arg ListAccountAddressesParams) ([]Address, error)
 	ListAccounts(ctx context.Context, scopeID int64) ([]Account, error)
-	ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]UtxoLease, error)
+	ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]ListActiveOutputLeasesRow, error)
 	ListAddressTypes(ctx context.Context) ([]AddressType, error)
 	ListKeyScopes(ctx context.Context, walletID int64) ([]KeyScope, error)
 	ListManagerAccountAddresses(ctx context.Context, arg ListManagerAccountAddressesParams) ([]Address, error)
@@ -130,6 +162,9 @@ type Querier interface {
 	// must already exist before this insert runs.
 	PutWalletSyncState(ctx context.Context, arg PutWalletSyncStateParams) error
 	RecordCreditSpend(ctx context.Context, arg RecordCreditSpendParams) (int64, error)
+	// ReleaseFundingPlan transitions a reserved plan to released. Zero affected
+	// rows means the plan was missing or no longer reserved.
+	ReleaseFundingPlan(ctx context.Context, arg ReleaseFundingPlanParams) (int64, error)
 	RenameAccount(ctx context.Context, arg RenameAccountParams) (int64, error)
 	SetActiveCreditIncidence(ctx context.Context, arg SetActiveCreditIncidenceParams) error
 	SetWalletBirthday(ctx context.Context, arg SetWalletBirthdayParams) (int64, error)

@@ -10,6 +10,69 @@ import (
 	"database/sql"
 )
 
+const AdvanceExternalBranchIndex = `-- name: AdvanceExternalBranchIndex :one
+UPDATE accounts
+SET next_external_index = $1
+WHERE scope_id = $2
+    AND account_number = $3
+    AND next_external_index = $4
+RETURNING next_external_index
+`
+
+type AdvanceExternalBranchIndexParams struct {
+	NewIndex      int64
+	ScopeID       int64
+	AccountNumber int64
+	ExpectedIndex int64
+}
+
+// AdvanceExternalBranchIndex sets the external branch's next index to new_index,
+// but only while it still equals expected_index, so an address allocation is an
+// optimistic compare-and-swap. It returns no row when the account is missing or
+// the expected index no longer matches.
+func (q *Queries) AdvanceExternalBranchIndex(ctx context.Context, arg AdvanceExternalBranchIndexParams) (int64, error) {
+	row := q.queryRow(ctx, q.advanceExternalBranchIndexStmt, AdvanceExternalBranchIndex,
+		arg.NewIndex,
+		arg.ScopeID,
+		arg.AccountNumber,
+		arg.ExpectedIndex,
+	)
+	var next_external_index int64
+	err := row.Scan(&next_external_index)
+	return next_external_index, err
+}
+
+const AdvanceInternalBranchIndex = `-- name: AdvanceInternalBranchIndex :one
+UPDATE accounts
+SET next_internal_index = $1
+WHERE scope_id = $2
+    AND account_number = $3
+    AND next_internal_index = $4
+RETURNING next_internal_index
+`
+
+type AdvanceInternalBranchIndexParams struct {
+	NewIndex      int64
+	ScopeID       int64
+	AccountNumber int64
+	ExpectedIndex int64
+}
+
+// AdvanceInternalBranchIndex sets the internal branch's next index to new_index,
+// but only while it still equals expected_index. It returns no row when the
+// account is missing or the expected index no longer matches.
+func (q *Queries) AdvanceInternalBranchIndex(ctx context.Context, arg AdvanceInternalBranchIndexParams) (int64, error) {
+	row := q.queryRow(ctx, q.advanceInternalBranchIndexStmt, AdvanceInternalBranchIndex,
+		arg.NewIndex,
+		arg.ScopeID,
+		arg.AccountNumber,
+		arg.ExpectedIndex,
+	)
+	var next_internal_index int64
+	err := row.Scan(&next_internal_index)
+	return next_internal_index, err
+}
+
 const CreateAccount = `-- name: CreateAccount :exec
 INSERT INTO accounts (
     wallet_id,

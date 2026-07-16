@@ -70,7 +70,7 @@ func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 		"transactions", "transaction_inputs", "transaction_labels",
 		"credits", "active_credit_incidences", "credit_spends",
 		"utxo_leases", "wallet_runtime_states", "operation_journal",
-		"operation_result_facts",
+		"operation_result_facts", "funding_plans",
 	}
 	for _, table := range tables {
 		var exists bool

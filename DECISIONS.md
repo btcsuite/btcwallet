@@ -868,3 +868,191 @@ journal yet; that integration is Phase 1.
 - Authoritative `golangci-lint` v2.4.1 (Docker `btcwallet-tools`, module cache
   mounted) reports zero new findings on the added/modified lines.
 - `make sqlc` idempotent.
+
+## Phase 0B: funding plans + guards
+
+Implements the last Phase 0B schema increment: funding plans, the lease-grouping
+extension, and the address/runtime guards (migration `000014`), with their sqlc
+queries, a typed Go API, and both-dialect tests. The `schemaid.Generation` bump
+and migration checksums are the separate end-of-0B finalization increment and
+are NOT touched here; no semantic operation is wired to these guards yet, which
+is Phase 2A1/Phase 4.
+
+### Lease grouping: one coin-exclusion system
+
+- New `funding_plans` keyed by a surrogate `id` with `UNIQUE (wallet_id,
+  reservation_id)` and `UNIQUE (wallet_id, id)`; `status` is CHECK-constrained to
+  `reserved`/`consumed`/`released`/`expired`; `FOREIGN KEY (wallet_id)` is
+  `ON DELETE RESTRICT`. SQLite `id INTEGER PRIMARY KEY`, PostgreSQL `id BIGSERIAL
+  PRIMARY KEY` (the CREATE-TABLE style the other tables use).
+- **Chose the plan's "plan_id column on leases" grouping.** `utxo_leases` gains
+  `owner_type` (`external`/`funding_plan`, default `external`) and a nullable
+  `funding_plan_id`, with a composite `FOREIGN KEY (wallet_id, funding_plan_id)
+  REFERENCES funding_plans (wallet_id, id) ON DELETE RESTRICT` and a CHECK that
+  external ⟺ null plan / funding_plan ⟺ non-null plan. `utxo_leases` stays the
+  **only** durable outpoint-exclusion relation; no second lock table is added.
+- **Funding-plan leases reuse the plan's `reservation_id` as their `lock_id`.**
+  `reservation_id` carries a `length = 32` CHECK so it fits `lock_id`'s width
+  constraint, and `AcquireFundingPlanLease` writes `lock_id = fp.reservation_id`
+  directly (INSERT ... SELECT gated on `status = 'reserved'`). External leases
+  keep their own `lock_id` unchanged, so a plan and its leases share one owner
+  token while external leases are undisturbed.
+- **`committed_tx_id`** is a nullable composite FK `(wallet_id, committed_tx_id)
+  -> transactions (wallet_id, id) ON DELETE RESTRICT` plus a CHECK
+  `committed_tx_id IS NULL OR status = 'consumed'`. RESTRICT (not SET NULL)
+  matches the schema-wide "never silently rewrite a referenced row" rule: a
+  consumed plan pins the transaction it funded until the plan itself is
+  collected.
+
+### Terminal transitions delete only the plan's own leases
+
+- `reserved -> consumed/released/expired` are explicit `:execrows` updates
+  guarded on `status = 'reserved'` (zero rows -> `ErrReservationConflict`), so an
+  illegal transition or a missing/terminal plan is rejected. Each terminal
+  transition then deletes only that plan's leases (`DeleteFundingPlanLeases`
+  keyed by `owner_type = 'funding_plan'` and the plan resolved from
+  `reservation_id`); external leases are never touched. The plan row is retained
+  for its retry window; `CollectExpiredFundingPlans` removes terminal,
+  past-deadline plans that own no leases (`NOT EXISTS` guard, so it never
+  collects a plan that still owns leases and never trips the RESTRICT FK).
+- Fine-grained selection-time conflict precedence (`ErrOutputLeased`,
+  `ErrFundingPlanConflict`, `ErrCreditAlreadySpent`) is Phase 4; this increment
+  provides the schema and the reserve/consume/release/expire building blocks.
+
+### Derived-address derivation-path uniqueness
+
+- Partial `UNIQUE INDEX uidx_addresses_derivation_path` on `(wallet_id,
+  scope_id, account_number, branch, address_index) WHERE branch IS NOT NULL AND
+  address_index IS NOT NULL`, dialect-identical in both engines. Derived rows
+  (`address_type = 0`) always carry a branch and index; imported and script rows
+  (`address_type 1-4`) always leave them null, so the partial predicate excludes
+  imported rows exactly, as required.
+- **Scope ripple.** The `sticky used monotonic` conformance case had put two
+  distinct addresses at the same path (branch 0/index 0) purely as an upsert
+  fixture. A wallet never derives two addresses at one path, so the fixture was
+  corrected to distinct indexes (0 and 1); its sticky-used intent is unchanged.
+
+### Branch-index compare-and-swap
+
+- `AdvanceExternalBranchIndex`/`AdvanceInternalBranchIndex` are
+  `UPDATE accounts SET next_*_index = @new_index WHERE scope_id = ? AND
+  account_number = ? AND next_*_index = @expected_index RETURNING
+  next_*_index` (`:one`). Modeled as a true compare-and-swap (set a caller-chosen
+  new value guarded on the expected old value, not a blind `+1`) so Phase 2A1 can
+  allocate a single address or jump a gap. A mismatch (or missing account) makes
+  the `:one` return `sql.ErrNoRows`, which `RuntimeStore.AdvanceBranchIndex`
+  maps to `db.ErrStaleAccountIndex` — the typed stale signal.
+- **No branch version column added.** The two next-index columns are themselves
+  the CAS targets, so index CAS covers the required mutation; the plan permits a
+  branch version only when it cannot.
+- The account is addressed by `KeyScope` + account number (resolved to the
+  surrogate `scope_id` through the existing `sqliteScopeID`/`pgScopeID` adapters,
+  matching `SetAccountIndexes`); `branch` dispatches to the external/internal
+  column via `waddrmgr.ExternalBranch`/`InternalBranch`, and any other branch is
+  a programming error.
+
+### SQLite rebuild vs PostgreSQL in-place ALTER (constraint-name collision)
+
+- SQLite cannot add a composite foreign key with `ALTER TABLE`, so `000014`
+  rebuilds the leaf `utxo_leases` (rename -> create with owner columns -> copy
+  external rows -> drop old -> recreate indexes). No table references
+  `utxo_leases`, so nothing smart-retargets to the temporary copy, and copied
+  rows carry a null plan reference so the composite FK is never exercised. Index
+  recreation is deferred until after the old table (and its identically named
+  index) is dropped, as in the block-identity rebuild.
+- PostgreSQL alters in place: `ADD COLUMN owner_type NOT NULL DEFAULT 'external'`
+  backfills existing rows, plus `funding_plan_id`, the composite FK, and the
+  consistency CHECK.
+- **Bug avoided (judgment call).** PostgreSQL auto-names the inline column check
+  `CHECK (owner_type IN (...))` as `utxo_leases_owner_type_check`; naming the
+  explicit consistency constraint the same collided (`42710` on apply). The
+  explicit constraint was renamed to `utxo_leases_owner_plan_check`. SQLite is
+  unaffected because the rebuilt table uses anonymous inline checks.
+
+### Down migrations preserve the exclusion primitive
+
+- Both down migrations drop the uniqueness index and the plan grouping while
+  preserving **every** lease outpoint: a plan-owned lease is demoted to a plain
+  external lease (its durable exclusion is kept; only the grouping metadata is
+  dropped). SQLite rebuilds `utxo_leases` back to the owner-less shape copying
+  all rows; PostgreSQL drops the constraints/columns then the table. No
+  irreversible guard is needed because no exclusion is discarded — distinct from
+  the block-identity fork guard, where a competing same-height block genuinely
+  cannot be represented. `utxo_leases` is reduced (its FK dropped) before
+  `DROP TABLE funding_plans`, so the RESTRICT FK never blocks the drop.
+
+### Retry and ambiguous-commit behavior (SQLite vs PostgreSQL)
+
+- Every transition is a guarded `:execrows` (zero rows -> typed conflict/stale),
+  so a retry is inherently safe: re-running a terminal transition on an
+  already-terminal plan is a no-op returning `ErrReservationConflict` rather than
+  double-applying, and a duplicate branch advance sees the moved index and
+  returns `ErrStaleAccountIndex`.
+- **SQLite** serializes writers, so an ambiguous commit (client unsure whether a
+  commit landed) is resolved by re-reading: the guard makes the re-read
+  authoritative (the plan is already terminal, or the index already moved).
+- **PostgreSQL** concurrent writers contend on the `funding_plans`/`accounts`
+  row; the guarded UPDATE serializes on the row lock and the loser observes zero
+  rows (typed conflict/stale). On an ambiguous commit the caller re-reads and the
+  same guard decides. Neither dialect retries inside the SQL callback — this
+  mirrors the runtime-journal rule ("reread the affected domain, do not retry in
+  the callback"). Funding's multi-step `reserved` state lives in `funding_plans`,
+  not the operation journal, exactly as the plan specifies.
+
+### Compatibility primitives vs production runtime APIs
+
+- **Compatibility/building-block primitives** are the low-level `sqlstore.
+  Queries` methods (implemented 1:1 in the SQLite and PostgreSQL adapters), each
+  mirroring one SQL statement with no orchestration and returning raw
+  affected-row counts or `sql.ErrNoRows`: `InsertFundingPlan`, `GetFundingPlan`,
+  `ConsumeFundingPlan`, `ReleaseFundingPlan`, `ExpireFundingPlan`,
+  `AcquireFundingPlanLease`, `DeleteFundingPlanLeases`,
+  `CollectExpiredFundingPlans`, and `AdvanceBranchIndex`
+  (`AdvanceExternal`/`InternalBranchIndex`).
+- **Production runtime APIs** are the typed `RuntimeStore` methods that compose
+  those primitives, own the transition semantics and lease deletion, and
+  translate to the neutral sentinels: `ReserveFundingPlan`, `AddFundingPlanLease`,
+  `FundingPlan`, `ConsumeFundingPlan`, `ReleaseFundingPlan`, `ExpireFundingPlan`,
+  `CollectExpiredFundingPlans`, and `AdvanceBranchIndex`. They live on
+  `RuntimeStore` (reached through `Store.RuntimeUpdate`/`RuntimeView`) as Stage 3
+  building blocks; Phase 2A1/Phase 4 compose them into the domain write
+  transaction, exactly as the runtime-journal increment framed
+  `RecordCommittedOperation`. They are not yet wired to any semantic operation.
+
+### Shared sentinels
+
+- `ErrStaleAccountIndex` and `ErrReservationConflict` are added to the neutral
+  `db` package (`runtime.go`), joining the runtime-journal sentinels, so
+  backend-neutral orchestration matches them via `errors.Is`. These are the two
+  entries from the plan's typed-error list this increment uses; `ErrStaleTip` and
+  the finer per-domain stale errors stay deferred to their increments.
+
+### Schema-identity generation NOT bumped
+
+- `schemaid.Generation` stays at `1` and no checksums were added. `000014` is the
+  last 0B schema migration, so the end-of-0B finalization increment still owns
+  bumping `Generation` to `2` and defining the runtime-migration checksums, as
+  recorded in the block-identity and runtime-journal sections.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/...` — pass (exit 0; also `-tags
+  test_db_postgres`).
+- `GOWORK=off go test ./wallet/internal/sql/... ./wallet/internal/db/...` — pass
+  (SQLite `000014` forward/down migration + round-trip incl. `funding_plans`;
+  funding vector: plan lifecycle with committed-tx and illegal transition, lease
+  grouping affecting only own leases, retention GC skipping reserved/lease-owning
+  plans, derivation-path uniqueness rejecting a duplicate derived path while
+  allowing imported rows, and branch-index CAS advancing on match / typed-stale
+  on mismatch).
+- `-tags test_db_postgres` against real `postgres:18-alpine` testcontainers:
+  `sql/pg` (`000014` forward/down migration + round-trip) and `db/itest`
+  `TestPostgresManagerStore` (funding vector) — pass.
+- `make sqlc` idempotent (pinned Docker v1.30.0; local v1.31.1 not used); gofmt
+  clean.

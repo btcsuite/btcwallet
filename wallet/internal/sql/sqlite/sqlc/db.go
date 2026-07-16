@@ -24,8 +24,17 @@ func New(db DBTX) *Queries {
 func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	q := Queries{db: db}
 	var err error
+	if q.acquireFundingPlanLeaseStmt, err = db.PrepareContext(ctx, AcquireFundingPlanLease); err != nil {
+		return nil, fmt.Errorf("error preparing query AcquireFundingPlanLease: %w", err)
+	}
 	if q.acquireOutputLeaseStmt, err = db.PrepareContext(ctx, AcquireOutputLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireOutputLease: %w", err)
+	}
+	if q.advanceExternalBranchIndexStmt, err = db.PrepareContext(ctx, AdvanceExternalBranchIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceExternalBranchIndex: %w", err)
+	}
+	if q.advanceInternalBranchIndexStmt, err = db.PrepareContext(ctx, AdvanceInternalBranchIndex); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceInternalBranchIndex: %w", err)
 	}
 	if q.bumpHistoryEpochStmt, err = db.PrepareContext(ctx, BumpHistoryEpoch); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpHistoryEpoch: %w", err)
@@ -36,8 +45,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.bumpStateVersionStmt, err = db.PrepareContext(ctx, BumpStateVersion); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpStateVersion: %w", err)
 	}
+	if q.collectExpiredFundingPlansStmt, err = db.PrepareContext(ctx, CollectExpiredFundingPlans); err != nil {
+		return nil, fmt.Errorf("error preparing query CollectExpiredFundingPlans: %w", err)
+	}
 	if q.collectExpiredOperationsStmt, err = db.PrepareContext(ctx, CollectExpiredOperations); err != nil {
 		return nil, fmt.Errorf("error preparing query CollectExpiredOperations: %w", err)
+	}
+	if q.consumeFundingPlanStmt, err = db.PrepareContext(ctx, ConsumeFundingPlan); err != nil {
+		return nil, fmt.Errorf("error preparing query ConsumeFundingPlan: %w", err)
 	}
 	if q.createAccountStmt, err = db.PrepareContext(ctx, CreateAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateAccount: %w", err)
@@ -69,6 +84,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteExpiredOutputLeasesStmt, err = db.PrepareContext(ctx, DeleteExpiredOutputLeases); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteExpiredOutputLeases: %w", err)
 	}
+	if q.deleteFundingPlanLeasesStmt, err = db.PrepareContext(ctx, DeleteFundingPlanLeases); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteFundingPlanLeases: %w", err)
+	}
 	if q.deleteKeyScopePrivateKeysStmt, err = db.PrepareContext(ctx, DeleteKeyScopePrivateKeys); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteKeyScopePrivateKeys: %w", err)
 	}
@@ -90,6 +108,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.ensureRuntimeStateStmt, err = db.PrepareContext(ctx, EnsureRuntimeState); err != nil {
 		return nil, fmt.Errorf("error preparing query EnsureRuntimeState: %w", err)
 	}
+	if q.expireFundingPlanStmt, err = db.PrepareContext(ctx, ExpireFundingPlan); err != nil {
+		return nil, fmt.Errorf("error preparing query ExpireFundingPlan: %w", err)
+	}
 	if q.getAccountStmt, err = db.PrepareContext(ctx, GetAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccount: %w", err)
 	}
@@ -107,6 +128,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.getCreditStmt, err = db.PrepareContext(ctx, GetCredit); err != nil {
 		return nil, fmt.Errorf("error preparing query GetCredit: %w", err)
+	}
+	if q.getFundingPlanStmt, err = db.PrepareContext(ctx, GetFundingPlan); err != nil {
+		return nil, fmt.Errorf("error preparing query GetFundingPlan: %w", err)
 	}
 	if q.getKeyScopeStmt, err = db.PrepareContext(ctx, GetKeyScope); err != nil {
 		return nil, fmt.Errorf("error preparing query GetKeyScope: %w", err)
@@ -179,6 +203,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertCreditStmt, err = db.PrepareContext(ctx, InsertCredit); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertCredit: %w", err)
+	}
+	if q.insertFundingPlanStmt, err = db.PrepareContext(ctx, InsertFundingPlan); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertFundingPlan: %w", err)
 	}
 	if q.insertOperationResultFactStmt, err = db.PrepareContext(ctx, InsertOperationResultFact); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertOperationResultFact: %w", err)
@@ -288,6 +315,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.recordCreditSpendStmt, err = db.PrepareContext(ctx, RecordCreditSpend); err != nil {
 		return nil, fmt.Errorf("error preparing query RecordCreditSpend: %w", err)
 	}
+	if q.releaseFundingPlanStmt, err = db.PrepareContext(ctx, ReleaseFundingPlan); err != nil {
+		return nil, fmt.Errorf("error preparing query ReleaseFundingPlan: %w", err)
+	}
 	if q.renameAccountStmt, err = db.PrepareContext(ctx, RenameAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query RenameAccount: %w", err)
 	}
@@ -326,9 +356,24 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 
 func (q *Queries) Close() error {
 	var err error
+	if q.acquireFundingPlanLeaseStmt != nil {
+		if cerr := q.acquireFundingPlanLeaseStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing acquireFundingPlanLeaseStmt: %w", cerr)
+		}
+	}
 	if q.acquireOutputLeaseStmt != nil {
 		if cerr := q.acquireOutputLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing acquireOutputLeaseStmt: %w", cerr)
+		}
+	}
+	if q.advanceExternalBranchIndexStmt != nil {
+		if cerr := q.advanceExternalBranchIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceExternalBranchIndexStmt: %w", cerr)
+		}
+	}
+	if q.advanceInternalBranchIndexStmt != nil {
+		if cerr := q.advanceInternalBranchIndexStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceInternalBranchIndexStmt: %w", cerr)
 		}
 	}
 	if q.bumpHistoryEpochStmt != nil {
@@ -346,9 +391,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing bumpStateVersionStmt: %w", cerr)
 		}
 	}
+	if q.collectExpiredFundingPlansStmt != nil {
+		if cerr := q.collectExpiredFundingPlansStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing collectExpiredFundingPlansStmt: %w", cerr)
+		}
+	}
 	if q.collectExpiredOperationsStmt != nil {
 		if cerr := q.collectExpiredOperationsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing collectExpiredOperationsStmt: %w", cerr)
+		}
+	}
+	if q.consumeFundingPlanStmt != nil {
+		if cerr := q.consumeFundingPlanStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing consumeFundingPlanStmt: %w", cerr)
 		}
 	}
 	if q.createAccountStmt != nil {
@@ -401,6 +456,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteExpiredOutputLeasesStmt: %w", cerr)
 		}
 	}
+	if q.deleteFundingPlanLeasesStmt != nil {
+		if cerr := q.deleteFundingPlanLeasesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteFundingPlanLeasesStmt: %w", cerr)
+		}
+	}
 	if q.deleteKeyScopePrivateKeysStmt != nil {
 		if cerr := q.deleteKeyScopePrivateKeysStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteKeyScopePrivateKeysStmt: %w", cerr)
@@ -436,6 +496,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing ensureRuntimeStateStmt: %w", cerr)
 		}
 	}
+	if q.expireFundingPlanStmt != nil {
+		if cerr := q.expireFundingPlanStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing expireFundingPlanStmt: %w", cerr)
+		}
+	}
 	if q.getAccountStmt != nil {
 		if cerr := q.getAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAccountStmt: %w", cerr)
@@ -464,6 +529,11 @@ func (q *Queries) Close() error {
 	if q.getCreditStmt != nil {
 		if cerr := q.getCreditStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getCreditStmt: %w", cerr)
+		}
+	}
+	if q.getFundingPlanStmt != nil {
+		if cerr := q.getFundingPlanStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getFundingPlanStmt: %w", cerr)
 		}
 	}
 	if q.getKeyScopeStmt != nil {
@@ -584,6 +654,11 @@ func (q *Queries) Close() error {
 	if q.insertCreditStmt != nil {
 		if cerr := q.insertCreditStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertCreditStmt: %w", cerr)
+		}
+	}
+	if q.insertFundingPlanStmt != nil {
+		if cerr := q.insertFundingPlanStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertFundingPlanStmt: %w", cerr)
 		}
 	}
 	if q.insertOperationResultFactStmt != nil {
@@ -766,6 +841,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing recordCreditSpendStmt: %w", cerr)
 		}
 	}
+	if q.releaseFundingPlanStmt != nil {
+		if cerr := q.releaseFundingPlanStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing releaseFundingPlanStmt: %w", cerr)
+		}
+	}
 	if q.renameAccountStmt != nil {
 		if cerr := q.renameAccountStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing renameAccountStmt: %w", cerr)
@@ -860,11 +940,16 @@ func (q *Queries) queryRow(ctx context.Context, stmt *sql.Stmt, query string, ar
 type Queries struct {
 	db                                  DBTX
 	tx                                  *sql.Tx
+	acquireFundingPlanLeaseStmt         *sql.Stmt
 	acquireOutputLeaseStmt              *sql.Stmt
+	advanceExternalBranchIndexStmt      *sql.Stmt
+	advanceInternalBranchIndexStmt      *sql.Stmt
 	bumpHistoryEpochStmt                *sql.Stmt
 	bumpSecretVersionStmt               *sql.Stmt
 	bumpStateVersionStmt                *sql.Stmt
+	collectExpiredFundingPlansStmt      *sql.Stmt
 	collectExpiredOperationsStmt        *sql.Stmt
+	consumeFundingPlanStmt              *sql.Stmt
 	createAccountStmt                   *sql.Stmt
 	createAddressStmt                   *sql.Stmt
 	createKeyScopeStmt                  *sql.Stmt
@@ -875,6 +960,7 @@ type Queries struct {
 	deleteCreditSpendStmt               *sql.Stmt
 	deleteCreditSpendsBySpendingTxStmt  *sql.Stmt
 	deleteExpiredOutputLeasesStmt       *sql.Stmt
+	deleteFundingPlanLeasesStmt         *sql.Stmt
 	deleteKeyScopePrivateKeysStmt       *sql.Stmt
 	deleteManagerPrivateKeysStmt        *sql.Stmt
 	deleteOutputLeaseStmt               *sql.Stmt
@@ -882,12 +968,14 @@ type Queries struct {
 	deleteTransactionByIDStmt           *sql.Stmt
 	detachMinedTransactionStmt          *sql.Stmt
 	ensureRuntimeStateStmt              *sql.Stmt
+	expireFundingPlanStmt               *sql.Stmt
 	getAccountStmt                      *sql.Stmt
 	getActiveCreditIDStmt               *sql.Stmt
 	getAddressStmt                      *sql.Stmt
 	getBlockByHeightStmt                *sql.Stmt
 	getBlocksInRangeStmt                *sql.Stmt
 	getCreditStmt                       *sql.Stmt
+	getFundingPlanStmt                  *sql.Stmt
 	getKeyScopeStmt                     *sql.Stmt
 	getManagerAccountStmt               *sql.Stmt
 	getManagerAccountByNameStmt         *sql.Stmt
@@ -912,6 +1000,7 @@ type Queries struct {
 	insertBlockStmt                     *sql.Stmt
 	insertCommittedOperationStmt        *sql.Stmt
 	insertCreditStmt                    *sql.Stmt
+	insertFundingPlanStmt               *sql.Stmt
 	insertOperationResultFactStmt       *sql.Stmt
 	insertTransactionStmt               *sql.Stmt
 	insertTransactionInputStmt          *sql.Stmt
@@ -948,6 +1037,7 @@ type Queries struct {
 	putTransactionLabelStmt             *sql.Stmt
 	putWalletSyncStateStmt              *sql.Stmt
 	recordCreditSpendStmt               *sql.Stmt
+	releaseFundingPlanStmt              *sql.Stmt
 	renameAccountStmt                   *sql.Stmt
 	setActiveCreditIncidenceStmt        *sql.Stmt
 	setWalletBirthdayStmt               *sql.Stmt
@@ -965,11 +1055,16 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 	return &Queries{
 		db:                                  tx,
 		tx:                                  tx,
+		acquireFundingPlanLeaseStmt:         q.acquireFundingPlanLeaseStmt,
 		acquireOutputLeaseStmt:              q.acquireOutputLeaseStmt,
+		advanceExternalBranchIndexStmt:      q.advanceExternalBranchIndexStmt,
+		advanceInternalBranchIndexStmt:      q.advanceInternalBranchIndexStmt,
 		bumpHistoryEpochStmt:                q.bumpHistoryEpochStmt,
 		bumpSecretVersionStmt:               q.bumpSecretVersionStmt,
 		bumpStateVersionStmt:                q.bumpStateVersionStmt,
+		collectExpiredFundingPlansStmt:      q.collectExpiredFundingPlansStmt,
 		collectExpiredOperationsStmt:        q.collectExpiredOperationsStmt,
+		consumeFundingPlanStmt:              q.consumeFundingPlanStmt,
 		createAccountStmt:                   q.createAccountStmt,
 		createAddressStmt:                   q.createAddressStmt,
 		createKeyScopeStmt:                  q.createKeyScopeStmt,
@@ -980,6 +1075,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteCreditSpendStmt:               q.deleteCreditSpendStmt,
 		deleteCreditSpendsBySpendingTxStmt:  q.deleteCreditSpendsBySpendingTxStmt,
 		deleteExpiredOutputLeasesStmt:       q.deleteExpiredOutputLeasesStmt,
+		deleteFundingPlanLeasesStmt:         q.deleteFundingPlanLeasesStmt,
 		deleteKeyScopePrivateKeysStmt:       q.deleteKeyScopePrivateKeysStmt,
 		deleteManagerPrivateKeysStmt:        q.deleteManagerPrivateKeysStmt,
 		deleteOutputLeaseStmt:               q.deleteOutputLeaseStmt,
@@ -987,12 +1083,14 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteTransactionByIDStmt:           q.deleteTransactionByIDStmt,
 		detachMinedTransactionStmt:          q.detachMinedTransactionStmt,
 		ensureRuntimeStateStmt:              q.ensureRuntimeStateStmt,
+		expireFundingPlanStmt:               q.expireFundingPlanStmt,
 		getAccountStmt:                      q.getAccountStmt,
 		getActiveCreditIDStmt:               q.getActiveCreditIDStmt,
 		getAddressStmt:                      q.getAddressStmt,
 		getBlockByHeightStmt:                q.getBlockByHeightStmt,
 		getBlocksInRangeStmt:                q.getBlocksInRangeStmt,
 		getCreditStmt:                       q.getCreditStmt,
+		getFundingPlanStmt:                  q.getFundingPlanStmt,
 		getKeyScopeStmt:                     q.getKeyScopeStmt,
 		getManagerAccountStmt:               q.getManagerAccountStmt,
 		getManagerAccountByNameStmt:         q.getManagerAccountByNameStmt,
@@ -1017,6 +1115,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertBlockStmt:                     q.insertBlockStmt,
 		insertCommittedOperationStmt:        q.insertCommittedOperationStmt,
 		insertCreditStmt:                    q.insertCreditStmt,
+		insertFundingPlanStmt:               q.insertFundingPlanStmt,
 		insertOperationResultFactStmt:       q.insertOperationResultFactStmt,
 		insertTransactionStmt:               q.insertTransactionStmt,
 		insertTransactionInputStmt:          q.insertTransactionInputStmt,
@@ -1053,6 +1152,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		putTransactionLabelStmt:             q.putTransactionLabelStmt,
 		putWalletSyncStateStmt:              q.putWalletSyncStateStmt,
 		recordCreditSpendStmt:               q.recordCreditSpendStmt,
+		releaseFundingPlanStmt:              q.releaseFundingPlanStmt,
 		renameAccountStmt:                   q.renameAccountStmt,
 		setActiveCreditIncidenceStmt:        q.setActiveCreditIncidenceStmt,
 		setWalletBirthdayStmt:               q.setWalletBirthdayStmt,

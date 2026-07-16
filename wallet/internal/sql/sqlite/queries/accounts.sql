@@ -163,3 +163,26 @@ WHERE wallet_id = ?;
 UPDATE accounts
 SET next_external_index = ?, next_internal_index = ?
 WHERE scope_id = ? AND account_number = ?;
+
+-- name: AdvanceExternalBranchIndex :one
+-- AdvanceExternalBranchIndex sets the external branch's next index to new_index,
+-- but only while it still equals expected_index, so an address allocation is an
+-- optimistic compare-and-swap. It returns no row when the account is missing or
+-- the expected index no longer matches.
+UPDATE accounts
+SET next_external_index = sqlc.arg('new_index')
+WHERE scope_id = sqlc.arg('scope_id')
+    AND account_number = sqlc.arg('account_number')
+    AND next_external_index = sqlc.arg('expected_index')
+RETURNING next_external_index;
+
+-- name: AdvanceInternalBranchIndex :one
+-- AdvanceInternalBranchIndex sets the internal branch's next index to new_index,
+-- but only while it still equals expected_index. It returns no row when the
+-- account is missing or the expected index no longer matches.
+UPDATE accounts
+SET next_internal_index = sqlc.arg('new_index')
+WHERE scope_id = sqlc.arg('scope_id')
+    AND account_number = sqlc.arg('account_number')
+    AND next_internal_index = sqlc.arg('expected_index')
+RETURNING next_internal_index;

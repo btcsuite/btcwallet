@@ -106,6 +106,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("runtime store", func(t *testing.T) {
 		testRuntimeStore(t, harness)
 	})
+	t.Run("funding store", func(t *testing.T) {
+		testFundingStore(t, harness)
+	})
 }
 
 // testWtxmgrCompatibility verifies the complete wtxmgr surface against one SQL
@@ -810,8 +813,11 @@ func testStickyUsedMonotonic(t *testing.T, harness *managerStoreHarness) {
 	account := uint32(0)
 	harness.seedScope(t, store, scope, account)
 
-	chainAddress := func(used bool) waddrmgr.AddressState {
-		branch, index := uint32(0), uint32(0)
+	// Each fixture address occupies a distinct derivation path so the
+	// derived-address uniqueness guard is respected; the two rows only exist
+	// to exercise the sticky-used upsert independently.
+	chainAddress := func(index uint32, used bool) waddrmgr.AddressState {
+		branch := uint32(0)
 
 		return waddrmgr.AddressState{
 			Scope:      scope,
@@ -829,12 +835,12 @@ func testStickyUsedMonotonic(t *testing.T, harness *managerStoreHarness) {
 	// instead of erroring.
 	usedID := []byte("sticky-used")
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
-		return tx.Addr().PutAddress(usedID, chainAddress(true))
+		return tx.Addr().PutAddress(usedID, chainAddress(0, true))
 	}, func() {})
 	require.NoError(t, err)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
-		return tx.Addr().PutAddress(usedID, chainAddress(false))
+		return tx.Addr().PutAddress(usedID, chainAddress(0, false))
 	}, func() {})
 	require.NoError(t, err)
 
@@ -851,12 +857,12 @@ func testStickyUsedMonotonic(t *testing.T, harness *managerStoreHarness) {
 	// monotonic upsert does not freeze the bit at its initial value.
 	unusedID := []byte("sticky-unused")
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
-		return tx.Addr().PutAddress(unusedID, chainAddress(false))
+		return tx.Addr().PutAddress(unusedID, chainAddress(1, false))
 	}, func() {})
 	require.NoError(t, err)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
-		return tx.Addr().PutAddress(unusedID, chainAddress(true))
+		return tx.Addr().PutAddress(unusedID, chainAddress(1, true))
 	}, func() {})
 	require.NoError(t, err)
 

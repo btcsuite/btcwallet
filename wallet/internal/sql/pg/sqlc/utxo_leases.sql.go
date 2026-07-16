@@ -120,9 +120,17 @@ type GetOutputLeaseParams struct {
 	OutputIndex int64
 }
 
-func (q *Queries) GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (UtxoLease, error) {
+type GetOutputLeaseRow struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+	LockID      []byte
+	ExpiresUnix int64
+}
+
+func (q *Queries) GetOutputLease(ctx context.Context, arg GetOutputLeaseParams) (GetOutputLeaseRow, error) {
 	row := q.queryRow(ctx, q.getOutputLeaseStmt, GetOutputLease, arg.WalletID, arg.TxHash, arg.OutputIndex)
-	var i UtxoLease
+	var i GetOutputLeaseRow
 	err := row.Scan(
 		&i.WalletID,
 		&i.TxHash,
@@ -145,15 +153,23 @@ type ListActiveOutputLeasesParams struct {
 	ExpiresUnix int64
 }
 
-func (q *Queries) ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]UtxoLease, error) {
+type ListActiveOutputLeasesRow struct {
+	WalletID    int64
+	TxHash      []byte
+	OutputIndex int64
+	LockID      []byte
+	ExpiresUnix int64
+}
+
+func (q *Queries) ListActiveOutputLeases(ctx context.Context, arg ListActiveOutputLeasesParams) ([]ListActiveOutputLeasesRow, error) {
 	rows, err := q.query(ctx, q.listActiveOutputLeasesStmt, ListActiveOutputLeases, arg.WalletID, arg.ExpiresUnix)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []UtxoLease
+	var items []ListActiveOutputLeasesRow
 	for rows.Next() {
-		var i UtxoLease
+		var i ListActiveOutputLeasesRow
 		if err := rows.Scan(
 			&i.WalletID,
 			&i.TxHash,

@@ -87,6 +87,17 @@ type CreditSpend struct {
 	InputIndex   int64
 }
 
+type FundingPlan struct {
+	ID            int64
+	WalletID      int64
+	ReservationID []byte
+	Purpose       string
+	Status        string
+	CreatedAt     int64
+	ExpiresAt     int64
+	CommittedTxID sql.NullInt64
+}
+
 type KeyScope struct {
 	ID                   int64
 	WalletID             int64
@@ -147,11 +158,13 @@ type TransactionLabel struct {
 }
 
 type UtxoLease struct {
-	WalletID    int64
-	TxHash      []byte
-	OutputIndex int64
-	LockID      []byte
-	ExpiresUnix int64
+	WalletID      int64
+	TxHash        []byte
+	OutputIndex   int64
+	LockID        []byte
+	ExpiresUnix   int64
+	OwnerType     string
+	FundingPlanID sql.NullInt64
 }
 
 type Wallet struct {

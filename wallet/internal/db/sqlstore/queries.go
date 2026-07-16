@@ -411,4 +411,43 @@ type Queries interface {
 	// number of journal rows removed.
 	CollectExpiredOperations(ctx context.Context, walletID,
 		nowUnix int64) (int64, error)
+
+	// InsertFundingPlan reserves a funding plan and returns its surrogate id.
+	InsertFundingPlan(ctx context.Context,
+		params InsertFundingPlanParams) (int64, error)
+	// GetFundingPlan reads one funding plan by its reservation id from the
+	// transaction-bound backend.
+	GetFundingPlan(ctx context.Context, walletID int64,
+		reservationID []byte) (FundingPlanRow, error)
+	// ConsumeFundingPlan transitions a reserved plan to consumed, recording
+	// the transaction it funded, and returns the number of rows affected.
+	ConsumeFundingPlan(ctx context.Context, walletID int64,
+		reservationID []byte, committedTxID sql.NullInt64) (int64, error)
+	// ReleaseFundingPlan transitions a reserved plan to released and returns
+	// the number of rows affected.
+	ReleaseFundingPlan(ctx context.Context, walletID int64,
+		reservationID []byte) (int64, error)
+	// ExpireFundingPlan transitions a reserved plan to expired and returns the
+	// number of rows affected.
+	ExpireFundingPlan(ctx context.Context, walletID int64,
+		reservationID []byte) (int64, error)
+	// AcquireFundingPlanLease adds one plan-owned lease under a reserved plan
+	// and returns the number of rows affected.
+	AcquireFundingPlanLease(ctx context.Context,
+		params AcquireFundingPlanLeaseParams) (int64, error)
+	// DeleteFundingPlanLeases removes only the leases owned by one plan and
+	// returns the number of rows removed.
+	DeleteFundingPlanLeases(ctx context.Context, walletID int64,
+		reservationID []byte) (int64, error)
+	// CollectExpiredFundingPlans deletes terminal plans past their retention
+	// deadline that own no leases, returning the number of plans removed.
+	CollectExpiredFundingPlans(ctx context.Context, walletID,
+		nowUnix int64) (int64, error)
+	// AdvanceBranchIndex advances the account's next index for one branch, but
+	// only while it still equals expected, returning the advanced index. It
+	// returns sql.ErrNoRows when the account is missing or the expected index
+	// no longer matches.
+	AdvanceBranchIndex(ctx context.Context, walletID int64,
+		scope waddrmgr.KeyScope, account, branch, expected,
+		next uint32) (int64, error)
 }
