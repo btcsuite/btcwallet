@@ -2255,3 +2255,147 @@ The syncer rehome was harder than "route the batch SQL" in three concrete ways:
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 3c: btcd recovery itest (Gate 2)
+
+Proves the Gate-2 recovery vertical against a **real btcd backend**, not the
+Phase 3b mock: a pre-funded seed recovers all of its funds over SQLite by
+scanning a live regtest chain through the production `chain.RPCClient`, then
+survives a restart and reconciles a real reorg. The whole increment is one new
+test file — no production code changed — which is itself the central Gate-2
+finding: the 3b `ChainSource` abstraction, designed against a mock, wired to the
+real backend unchanged. Built solely on the salvage foundation; the
+`wallet-default-sqlite` branch was not consulted.
+
+### Harness
+
+- The repo's existing chain-backed harness is reused: `rpctest.Harness`
+  (`github.com/btcsuite/btcd/integration/rpctest`), the same regtest btcd harness
+  `chain/bitcoind_events_test.go` uses. `rpctest` compiles the module's pinned
+  btcd (v0.26.0) on demand, so the node under test matches the `chain.RPCClient`
+  driving it; no btcd process is hand-managed. The miner is set up with a small
+  number of mature coinbase outputs (`SetUp(true, 5)`), and each funding
+  transaction locks a distinct mature output, so consecutive sends never depend
+  on an unconfirmed change output.
+- The itest is gated behind the `test_chain_btcd` build tag (matching the
+  `test_db_postgres` itest-tag convention), so the default unit run neither
+  compiles it nor spawns btcd. It lives in `package sqlwallet` (internal) so it
+  reuses the durable-state assertion helpers (`durableBalance`, `durableUnspent`,
+  `durableTip`, `externalIndex`, `durableAddresses`) and the fixed lifecycle
+  seed, and it creates the wallet with **regtest params** so the wallet's genesis
+  block equals the node's genesis and derivations match the funded scripts.
+
+### ChainSource wiring to real btcd (zero production change)
+
+- The live client is constructed with `chain.NewRPCClient(regtestParams,
+  cfg.Host, cfg.User, cfg.Pass, cfg.Certificates, false, 5)` from the harness's
+  `RPCConfig()`, started, and passed **directly** as `SyncerConfig.Chain`. The
+  `*chain.RPCClient` satisfies `ChainSource` with no adapter; the itest adds a
+  fresh `var _ ChainSource = (*chain.RPCClient)(nil)` alongside the 3b
+  `var _ ChainSource = (chain.Interface)(nil)` to pin the concrete client.
+- `Recover` is called **synchronously** (the plan's preferred simple path); no
+  background sync goroutine was added. The only goroutine the itest starts is a
+  drain of the client's `Notifications()` channel (the `chain.Interface` contract
+  requires the channel be read), whose `for range` exits when `Stop` closes it —
+  a clean shutdown path.
+- No change was needed to `syncer.go`, `scan.go`, or any production file. The
+  change set is the single 400-line `recovery_btcd_test.go`.
+
+### Abstraction adjustments the real backend forced: none
+
+The real backend exposed exactly one behavioral difference from the mock, and it
+was already handled correctly by the 3b design:
+
+- **Compact-filter FilterBlocks.** The mock's `FilterBlocks` scans every full
+  block with `chain.BlockFilterer`. The real `RPCClient.FilterBlocks` first
+  fetches each block's BIP158 compact filter (`GetCFilter`) and only fetches and
+  scans the full block on a GCS match (btcd serves regular cfilters by default;
+  `--nocfilters` would disable them). Because 3b deliberately built the mock to
+  reuse the production `chain.BlockFilterer` and the real
+  `chain.FilterBlocksRequest`/`Response` types rather than neutral twins, the
+  compact-filter prefilter changed **nothing observable**: the same found
+  addresses, credits, and outpoints came back, so the prepared batch was
+  identical.
+- **Real block shape.** Real blocks carry a coinbase and a change output back to
+  the miner (the mock's blocks had neither). The `ExtractPkScriptAddrs` +
+  watch-set credit rule correctly ignored both and credited only wallet outputs,
+  so the balance and utxo counts matched the funded amounts exactly.
+- **Multi-batch over a long chain.** The real chain is ~105-108 blocks (coinbase
+  maturity + funding), most empty of wallet funds, scanned across three batches
+  of 50; the mock had ≤3 blocks in one batch. Empty intermediate batches
+  correctly advanced the durable tip through `CommitScanResults`, exercising a
+  path the mock did not.
+
+### Properties proven against real btcd
+
+Three itests, ~3-7s total after the one-time btcd compile, race-clean under
+`-race`:
+
+- `TestBtcdRecoversPrefundedSeed` — **the Gate-2 PASS condition.** A seed funded
+  at external indexes 0, 2, and 5 (index 5 beyond the recovery window of 3, so
+  only reachable by progressive horizon widening) recovers all funds over SQLite
+  through the semantic runtime store; the balance (150 000 sat), unspent set (3),
+  synced tip (height and the real best-block hash), branch index (6, the
+  last-unused index), and persisted addresses 0..5 are all correct.
+- `TestBtcdRecoveryRestartResume` — close and reopen reconstructs the synced tip
+  from durable state; a re-Recover with no new blocks is a clean no-op (nothing
+  scanned/committed, balance/tip/index unchanged, session chain empty, address
+  count unchanged).
+- `TestBtcdRecoveryReorg` — a real btcd reorg via `InvalidateBlock` (orphaning an
+  empty wallet-tip block) plus a longer competing branch funding indexes 2 and 3;
+  a re-Recover on the **same** syncer detects the fork against the real chain,
+  rewinds through `CommitWalletRewind` to the fork point, and re-discovers the
+  branch funds (balance 150 000 sat, 3 utxos, tip = new best hash).
+  Reconciliation is validated against real block hashes, not just mock ones.
+
+### Mock-only / not covered against real btcd (carried forward)
+
+- **Reorg across a restart.** The reorg itest reuses one syncer session, whose
+  in-memory `synced` chain locates the fork. A reorg detected on a fresh restart
+  (empty session chain) still falls back to `genesisRef` (full re-scan). Durable
+  per-wallet recent-block retention (Phase 3a deferred) remains the real fix and
+  is the main carried-forward item, unchanged from the 3b finding.
+- **Forced-retry idempotency** and **concurrent-derivation conflict** are
+  storage-layer concurrency properties, proven through the SQL failpoint and the
+  `beforeScanCommit` seam over the mock chain; the real chain backend adds nothing
+  to them, so they are not re-run here.
+- **Birthday-block location and sanity-check** — the scan floors at the genesis
+  synced tip; no birthday-block discovery is exercised.
+- **Background sync goroutine and cancellation/backend-disconnect** — `Recover`
+  is synchronous, so no goroutine lifecycle is tested against btcd.
+- **Non-default-scope / all-registered-scope recovery** — only the default
+  account under the single BIP84 scope is recovered.
+- **CatchUp over real btcd** — the header-only tip advance is covered by the mock
+  `TestSyncerCatchUp` only; it shares the `AdvanceTip` path the recovery scan
+  already drives over real btcd.
+
+### Gate-2 verdict: PASS
+
+A pre-funded seed recovers all its funds over SQLite against a real btcd backend,
+and the recovered state survives a restart and reconciles a real reorg — with
+**zero** changes to the 3b recovery driver or its `ChainSource` abstraction. The
+salvage schema and semantic runtime store back the recovery vertical against the
+production chain client without recreating the legacy ambient transaction, which
+is the gate's stop/go question. The one remaining blocker for a *complete*
+recovery vertical (beyond Gate-2 itself) is durable per-wallet recent-block
+retention, needed only for reorg-across-restart.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet -tags test_chain_btcd ./wallet/internal/sqlwallet/` — pass.
+- `GOWORK=off go test -tags test_chain_btcd -run TestBtcd
+  ./wallet/internal/sqlwallet/` — pass, twice, non-flaky (~3-4s after the
+  one-time btcd compile).
+- `GOWORK=off go test -tags test_chain_btcd -race -run TestBtcd
+  ./wallet/internal/sqlwallet/` — pass (~7s).
+- `GOWORK=off go test ./wallet/internal/...` (default tags, no itest) — pass; the
+  tag-gated file is excluded from the normal run.
+- `gofmt -s` clean on the new file; within ~80 cols.
+- Change set: one new file, `wallet/internal/sqlwallet/recovery_btcd_test.go`
+  (+400); no production code changed.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.
