@@ -164,3 +164,16 @@ UPDATE wallet_sync_states
 SET synced_block_id =
     (SELECT id FROM blocks WHERE header_hash = sqlc.arg('block_hash'))
 WHERE wallet_id = sqlc.arg('wallet_id');
+
+-- name: AdvanceWalletSyncedTo :execrows
+-- AdvanceWalletSyncedTo advances the wallet's synced block to new_block_hash,
+-- but only while the current synced block still equals expected_block_hash, so a
+-- tip advance is an optimistic compare-and-swap. The new block must already
+-- exist. Zero affected rows means the caller's expected tip was stale and no
+-- advance was made.
+UPDATE wallet_sync_states
+SET synced_block_id =
+    (SELECT nb.id FROM blocks AS nb WHERE nb.header_hash = sqlc.arg('new_block_hash'))
+WHERE wallet_id = sqlc.arg('wallet_id')
+    AND synced_block_id =
+        (SELECT eb.id FROM blocks AS eb WHERE eb.header_hash = sqlc.arg('expected_block_hash'));

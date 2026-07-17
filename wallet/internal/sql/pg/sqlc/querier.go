@@ -24,6 +24,12 @@ type Querier interface {
 	// but only while it still equals expected_index. It returns no row when the
 	// account is missing or the expected index no longer matches.
 	AdvanceInternalBranchIndex(ctx context.Context, arg AdvanceInternalBranchIndexParams) (int64, error)
+	// AdvanceWalletSyncedTo advances the wallet's synced block to new_block_hash,
+	// but only while the current synced block still equals expected_block_hash, so a
+	// tip advance is an optimistic compare-and-swap. The new block must already
+	// exist. Zero affected rows means the caller's expected tip was stale and no
+	// advance was made.
+	AdvanceWalletSyncedTo(ctx context.Context, arg AdvanceWalletSyncedToParams) (int64, error)
 	// BumpHistoryEpoch advances the history epoch only while it still equals the
 	// expected value. Zero affected rows means the snapshot was stale.
 	BumpHistoryEpoch(ctx context.Context, arg BumpHistoryEpochParams) (int64, error)

@@ -1262,3 +1262,207 @@ standalone `TestRuntimeStoreBoundary`:
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 1B: semantic commit foundation
+
+Generalizes the Phase 1A spike into the reusable semantic-commit foundation:
+the prepared-batch / committed-facts framework, the full guard set, a per-call
+failure-injection seam, the asymmetric KV runtime store, and a representative
+second operation (`AdvanceWalletTip`). It deliberately stops short of the heavy
+batch operations (scan/tx/recovery/funding) of Phases 2A1/3/4/5, which will
+instantiate this framework. Built solely on the salvage foundation; the
+`wallet-default-sqlite` branch was not consulted.
+
+### Framework shape (Notification Contract)
+
+- **`db.CommittedFacts`** (new, `wallet/internal/db/semantic.go`) is the common
+  shape every semantic result embeds: `Replayed bool` plus `Events []Event`.
+  Each result type embeds it, so `ReserveBranchIndexResult` (Phase 1A, now
+  embeds it; a reservation emits no event) and the new `AdvanceTipResult` follow
+  one shape. Field promotion keeps `result.Replayed` working unchanged.
+- **`db.Event` + `db.EventID` + `db.DeriveEventID`.** An event carries a stable
+  `EventID = sha256(kind || payload)` and its canonical immutable `Payload`, so
+  notification delivery needs no DB txn (the Notification Contract) and a replay
+  re-emits a byte-identical event. `DeriveEventID` is the single derivation both
+  backends call, so event identities match across KV/SQL by construction.
+- **`db.BlockRef`** is the neutral block currency (height, header hash,
+  timestamp) so neither the SQL surrogate `block_id` nor the KV recent-block
+  encoding leaks across the contract. **`db.WalletTipEvent` / `db.DecodeWalletTip`**
+  are the single tip-payload codec, defined in the neutral package so SQL and KV
+  build a byte-identical payload (hence identical event id).
+- The rule: every semantic method returns fully materialized committed facts
+  (immutable details + stable event ids). The SQL journal stores the canonical
+  event payload as the single result fact, so a replay decodes the fact and
+  rebuilds the identical tip and event.
+
+### Guard set (two families, one mechanism)
+
+The Stage 3 guard set is delivered as two families, both returning the typed
+stale errors in `wallet/internal/db/runtime.go` (added `ErrStaleTip`; also added
+the request-shape `ErrNonContiguousTip`):
+
+- **Version family** (per-wallet runtime-state row, SQL only): `db.Guards`
+  (`ExpectedStateVersion` / `ExpectedHistoryEpoch` / `ExpectedSecretVersion`,
+  each a `*int64` — nil is unguarded). Applied by the new
+  `sqlstore.RuntimeStore.ApplyGuards`, which composes the Phase-0
+  `BumpStateVersion`/`BumpHistoryEpoch`/`BumpSecretVersion` CAS bumps and returns
+  `ErrStaleWalletState`/`ErrStaleHistoryEpoch`/`ErrStaleSecretState`. A present
+  guard both requires the snapshot to match and advances it; a stale guard rolls
+  the whole txn back so **no version advances** (Guard And Version Rules).
+- **Natural-record family** (per record, both backends): expected branch index
+  (`ReserveBranchIndexRequest.ExpectedIndex`, `AdvanceBranchIndex` CAS →
+  `ErrStaleAccountIndex`), expected synced tip (`AdvanceTipRequest.ExpectedTip`,
+  the new `AdvanceWalletSyncedTo` CAS → `ErrStaleTip`), and funding reservation
+  ownership (`ErrReservationConflict`, Phase 0B). These are the guards that live
+  on each operation's own request, not on `db.Guards`.
+
+`AdvanceTipRequest` carries **both** families: `ExpectedTip` (natural CAS, the
+cross-process conflict guard, present on both backends) and `Guards` (version
+family, SQL-only, empty in the Coordinator's default path so the cross-backend
+path stays symmetric; a caller that must invalidate concurrent scan preparation
+sets it). This wires the version-guard mechanism through a real operation while
+keeping the observable parity path backend-symmetric.
+
+### Failure-injection wrapper (per-call, context-carried)
+
+Replaced Phase 1A's per-construction `sqlstore.Failpoints` (and dropped the `fp`
+param from `sqlstore.NewRuntimeStore`) with **`db.Failpoints`** carried on the
+operation's `context.Context` via `db.WithFailpoints` / `db.FailpointsFromContext`
+(`wallet/internal/db/failpoints.go`). It is nil in production; every accessor is
+a nil-safe method (`RunBeforeStatement`/`RunBeforeCommit`/`RunAfterCommit`/
+`RunBeforeNotify`/`RunOnTxAttempt`/`Retries`/`Dropped`). Hooks fire in order:
+
+    BeforeStatement -> [mutations] -> BeforeCommit -> (commit) -> AfterCommit
+    -> (gate released) -> BeforeNotify -> (notify)
+
+- `ForceTxRetries`+`OnTxAttempt`: SQL only — the backend returns a real
+  `sqldb.ErrSerializationError` at the end of the first N attempts (drives the
+  executor's genuine callback-retry). KV (single-writer, non-retried) ignores
+  them.
+- `BeforeCommit` returning an error forces a non-retryable rollback;
+  `AfterCommit` returning `db.ErrAmbiguousCommit` models an ambiguous commit;
+  `BeforeNotify`/`DropNotify` model a delayed/dropped post-commit notification.
+
+**Why context, not a decorator/wrapper:** forcing a callback retry requires
+returning a serialization error from *inside* the executor body, which a
+`db.RuntimeStore` decorator cannot reach (Phase 1A already noted this). Context
+keeps the neutral request/contract free of test fields, is per-call, and is
+consulted uniformly by both backends and the Coordinator. `sqldb` stays out of
+the neutral `db` package: `Retries()` returns a count, and the SQL backend does
+the serialization-error translation.
+
+### KV asymmetric RuntimeStore
+
+`kvdb.NewRuntimeStore(walletdb.DB)` (`wallet/internal/db/kvdb/runtime.go`)
+implements the same `db.RuntimeStore` with **no operation journal, no result
+facts, no persisted versions, no result tombstones**. Each op is one
+`walletdb.Update` that revalidates a natural precondition and mutates in place:
+
+- `ReserveNextBranchIndex`: `BindManagerReadWriteStore(bucket).Account(...)` →
+  compare next index to `ExpectedIndex` → `SetAccountIndexes(...)`. Mismatch (or
+  account missing) → `ErrStaleAccountIndex`, full rollback.
+- `AdvanceWalletTip`: `SyncState().SyncedTo` compared to `ExpectedTip` →
+  `SetSyncedTo(newBlock)` (the legacy call already records the block, so no
+  separate block-identity write). Mismatch → `ErrStaleTip`. `req.Guards` is
+  ignored (no runtime-state row).
+- Idempotency is by full rollback + re-preparation, not a journal: Bolt's atomic
+  single-writer txn is never ambiguous, so `LookupBranchIndexReservation` /
+  `LookupTipAdvance` always report "not found" (the Coordinator never needs them
+  on KV) and `Replayed` is always false.
+
+The shared `runtime.Coordinator` drives both stores identically; stale/guard/
+ambiguous signals are internal to each backend and never observed differently.
+
+### Coordinator generalization
+
+`runtime.Coordinator` (`wallet/internal/runtime/coordinator.go`) keeps the
+Phase-1A gate + Cache And Commit Protocol and generalizes the gated section into
+one audited generic helper `runGated[R]` reused by both `ReserveNextIndex` and
+the new `AdvanceTip`: prepare (no gate) → gate exclusive → commit → on
+`ErrAmbiguousCommit` reread (never repeat), on the op's stale error reload cache,
+else publish under the gate → release gate → notify. `WithNotifier` delivers
+post-commit events after the gate is released (Notification Contract);
+`WithBeforePublish` is retained for the commit/publish-window tests. The tip
+cache is a single per-wallet `BlockRef`; the index cache is unchanged.
+
+### Observable-parity vector
+
+`testSemanticParity` (`semantic_parity_test.go`, wired for **all** backends)
+drives the `db.RuntimeStore` directly with one fixed operation vector and
+asserts identical **observable** results: committed facts (allocated/next index,
+committed tip), public typed errors (`ErrStaleAccountIndex`, `ErrStaleTip`,
+`ErrNonContiguousTip`), and event identity (`WalletTipEvent(newTip).ID`). It
+**never** inspects a journal, result fact, or version — the asymmetric test
+boundary — because those exist only on SQL. Backend-symmetry is guaranteed by
+construction: the event id is derived deterministically from the caller-passed
+`BlockRef`, and the vector avoids operation-replay-by-id (idempotent on SQL via
+the journal, stale on KV via the natural guard) precisely because that is the
+one behavior that differs across the asymmetry.
+
+The failure-injection exit-gate tests are separate: `testSemanticTip`
+(`semantic_tip_test.go`, SQL-only, via the Coordinator) proves for the tip op
+that a forced callback retry advances durable state once and emits its event
+once, a rejected commit leaves no partial write (tip unchanged, new block not
+recorded, no journal row, no cache/notification), an ambiguous commit is
+resolved by durable reread (tip once, event recovered), a notification is
+delivered and can be deterministically dropped (durable tip still advanced,
+committed event still returned to the caller for restart reconciliation), and a
+stale expected tip reloads the cache. The migrated `spike_store_test.go` proves
+the same exit gate for the reserve op through the new context seam.
+
+### Scope ripples / judgment calls
+
+- **One new SQL query + regen (unlike the spike).** The expected-synced-block
+  guard is a genuine conditional CAS (`AdvanceWalletSyncedTo`), so — per
+  "conditional SQL updates, not read-then-unconditional-write" — it needed a new
+  query in both dialects, `make sqlc` (v1.30.0), a `Queries` method, and both
+  adapters. sqlc rejected the unaliased twin-subquery as "ambiguous
+  `header_hash`"; aliasing each `blocks` subquery (matching `PutWalletSyncState`)
+  fixed it. Verified idempotent.
+- **`AdvanceWalletTip` takes no version bump by default.** Like the spike's
+  branch-index decision, the natural tip CAS is self-guarding; the `state_version`
+  bump (to invalidate concurrent scan preparation) is opt-in via `req.Guards`
+  and exercised by the SQL-only guard test. This keeps the Coordinator's
+  cross-backend path symmetric and avoids a read-then-write version advance.
+  Wiring an automatic sync-domain bump belongs with the scan/rewind ops that
+  actually guard on it (Phase 2A1/3).
+- **KV natural-guard path was slightly harder than the plan implied.** Two
+  wrinkles: (1) the `db.RuntimeStore` interface still requires the
+  `Lookup*Reservation`/`LookupTipAdvance` reread methods, which are meaningless
+  on KV (no journal); they are honest no-ops (`found=false`) and the Coordinator
+  never calls them on KV because KV never returns `ErrAmbiguousCommit` — the
+  asymmetry is real and lives at the interface, absorbed by the shared
+  orchestration. (2) Operation-replay-by-id is **not** an observable parity
+  property: SQL replays from the journal (`Replayed=true`, no advance) while KV
+  re-runs and hits the natural guard (`ErrStaleAccountIndex`). The parity vector
+  is structured to avoid asserting it; the SQL journal's replay idempotency is
+  proven only in the SQL-only failure-injection tests. This is the crux of the
+  "compare observable behavior, not internal state" boundary and required care
+  when designing the vector.
+- **`db.Failpoints` lives in the neutral `db` package.** It is a test seam in a
+  production package (nil in production, one context lookup), chosen because
+  `db` is the sole common dependency of `sqlstore`, `kvdb`, and `runtime`, and
+  because keeping it off the request preserves the Phase-1A "no test fields on
+  the contract" decision. `sqldb` is not imported into `db`.
+- **Migrated the spike tests rather than duplicating.** `sqlstore.Failpoints`
+  and the `NewRuntimeStore(store, fp)` signature were removed; the spike vector
+  now injects through `db.WithFailpoints`, so the reserve op runs through the
+  same wrapper as the tip op (no parallel test suites).
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/...` — pass (exit 0; also `-tags
+  test_db_postgres`).
+- `GOWORK=off go test ./wallet/internal/...` — pass (semantic parity on KV +
+  SQLite, guards, migrated spike, semantic tip failure-injection).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/ ./wallet/internal/runtime/`
+  — pass.
+- `GOWORK=off go test -tags test_db_postgres ./wallet/internal/db/itest/...` —
+  pass (semantic parity + tip + guards confirmed on PostgreSQL).
+- `make sqlc` idempotent; `gofmt -s` clean on all new/edited files.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

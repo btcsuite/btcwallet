@@ -450,4 +450,11 @@ type Queries interface {
 	AdvanceBranchIndex(ctx context.Context, walletID int64,
 		scope waddrmgr.KeyScope, account, branch, expected,
 		next uint32) (int64, error)
+	// AdvanceWalletSyncedTo advances the wallet's synced block from the block
+	// with expectedBlockHash to the block with newBlockHash, but only while
+	// the current synced block still matches expectedBlockHash. It returns the
+	// number of rows affected; zero means the expected tip was stale. The new
+	// block must already exist.
+	AdvanceWalletSyncedTo(ctx context.Context, walletID int64,
+		expectedBlockHash, newBlockHash []byte) (int64, error)
 }

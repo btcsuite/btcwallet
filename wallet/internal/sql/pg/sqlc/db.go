@@ -36,6 +36,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.advanceInternalBranchIndexStmt, err = db.PrepareContext(ctx, AdvanceInternalBranchIndex); err != nil {
 		return nil, fmt.Errorf("error preparing query AdvanceInternalBranchIndex: %w", err)
 	}
+	if q.advanceWalletSyncedToStmt, err = db.PrepareContext(ctx, AdvanceWalletSyncedTo); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceWalletSyncedTo: %w", err)
+	}
 	if q.bumpHistoryEpochStmt, err = db.PrepareContext(ctx, BumpHistoryEpoch); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpHistoryEpoch: %w", err)
 	}
@@ -374,6 +377,11 @@ func (q *Queries) Close() error {
 	if q.advanceInternalBranchIndexStmt != nil {
 		if cerr := q.advanceInternalBranchIndexStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing advanceInternalBranchIndexStmt: %w", cerr)
+		}
+	}
+	if q.advanceWalletSyncedToStmt != nil {
+		if cerr := q.advanceWalletSyncedToStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceWalletSyncedToStmt: %w", cerr)
 		}
 	}
 	if q.bumpHistoryEpochStmt != nil {
@@ -944,6 +952,7 @@ type Queries struct {
 	acquireOutputLeaseStmt              *sql.Stmt
 	advanceExternalBranchIndexStmt      *sql.Stmt
 	advanceInternalBranchIndexStmt      *sql.Stmt
+	advanceWalletSyncedToStmt           *sql.Stmt
 	bumpHistoryEpochStmt                *sql.Stmt
 	bumpSecretVersionStmt               *sql.Stmt
 	bumpStateVersionStmt                *sql.Stmt
@@ -1059,6 +1068,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		acquireOutputLeaseStmt:              q.acquireOutputLeaseStmt,
 		advanceExternalBranchIndexStmt:      q.advanceExternalBranchIndexStmt,
 		advanceInternalBranchIndexStmt:      q.advanceInternalBranchIndexStmt,
+		advanceWalletSyncedToStmt:           q.advanceWalletSyncedToStmt,
 		bumpHistoryEpochStmt:                q.bumpHistoryEpochStmt,
 		bumpSecretVersionStmt:               q.bumpSecretVersionStmt,
 		bumpStateVersionStmt:                q.bumpStateVersionStmt,

@@ -187,6 +187,9 @@ func TestKVManagerStore(t *testing.T) {
 	harness.newStore = func(walletID int64) db.Store {
 		return backend.wallets[walletID].store
 	}
+	harness.newRuntimeStore = func(walletID int64) db.RuntimeStore {
+		return kvdb.NewRuntimeStore(backend.wallets[walletID].db)
+	}
 
 	testManagerStore(t, harness)
 }

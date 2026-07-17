@@ -250,6 +250,36 @@ func (r *RuntimeStore) BumpSecretVersion(expected int64) error {
 	)
 }
 
+// ApplyGuards applies the version-domain guards declared in g within the
+// current runtime transaction. For each present expected version it runs the
+// domain's optimistic compare-and-swap bump, returning the domain's typed stale
+// error on a mismatch so a stale operation advances no version. A nil field is
+// skipped. It is the reusable version-guard family of the Stage 3 guard set;
+// the natural-record guards (expected index, expected tip, reservation
+// ownership) live on each operation's own request. The wallet runtime-state row
+// must already exist; callers ensure it once at wallet creation.
+func (r *RuntimeStore) ApplyGuards(g walletstore.Guards) error {
+	if g.ExpectedStateVersion != nil {
+		if err := r.BumpStateVersion(*g.ExpectedStateVersion); err != nil {
+			return err
+		}
+	}
+
+	if g.ExpectedHistoryEpoch != nil {
+		if err := r.BumpHistoryEpoch(*g.ExpectedHistoryEpoch); err != nil {
+			return err
+		}
+	}
+
+	if g.ExpectedSecretVersion != nil {
+		if err := r.BumpSecretVersion(*g.ExpectedSecretVersion); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 // bump runs one guarded version increment, translating a no-op update into the
 // domain's typed stale error.
 func (r *RuntimeStore) bump(update func(context.Context, int64,

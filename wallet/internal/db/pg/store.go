@@ -96,6 +96,21 @@ func (q *queryAdapter) SetWalletSyncedTo(ctx context.Context, walletID int64,
 	)
 }
 
+// AdvanceWalletSyncedTo advances the wallet's synced block through the
+// transaction-bound backend, but only while the current synced block still
+// matches the expected block hash.
+func (q *queryAdapter) AdvanceWalletSyncedTo(ctx context.Context,
+	walletID int64, expectedBlockHash, newBlockHash []byte) (int64, error) {
+
+	return q.queries.AdvanceWalletSyncedTo(
+		ctx, pgdb.AdvanceWalletSyncedToParams{
+			NewBlockHash:      newBlockHash,
+			WalletID:          walletID,
+			ExpectedBlockHash: expectedBlockHash,
+		},
+	)
+}
+
 // ListMinedTransactionsFromHeight reads mined transactions from height from the
 // transaction-bound backend in stable order.
 func (q *queryAdapter) ListMinedTransactionsFromHeight(

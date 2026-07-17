@@ -10,6 +10,34 @@ import (
 	"database/sql"
 )
 
+const AdvanceWalletSyncedTo = `-- name: AdvanceWalletSyncedTo :execrows
+UPDATE wallet_sync_states
+SET synced_block_id =
+    (SELECT nb.id FROM blocks AS nb WHERE nb.header_hash = ?1)
+WHERE wallet_id = ?2
+    AND synced_block_id =
+        (SELECT eb.id FROM blocks AS eb WHERE eb.header_hash = ?3)
+`
+
+type AdvanceWalletSyncedToParams struct {
+	NewBlockHash      []byte
+	WalletID          int64
+	ExpectedBlockHash []byte
+}
+
+// AdvanceWalletSyncedTo advances the wallet's synced block to new_block_hash,
+// but only while the current synced block still equals expected_block_hash, so a
+// tip advance is an optimistic compare-and-swap. The new block must already
+// exist. Zero affected rows means the caller's expected tip was stale and no
+// advance was made.
+func (q *Queries) AdvanceWalletSyncedTo(ctx context.Context, arg AdvanceWalletSyncedToParams) (int64, error) {
+	result, err := q.exec(ctx, q.advanceWalletSyncedToStmt, AdvanceWalletSyncedTo, arg.NewBlockHash, arg.WalletID, arg.ExpectedBlockHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const CreateWallet = `-- name: CreateWallet :one
 INSERT INTO wallets (
     wallet_name,

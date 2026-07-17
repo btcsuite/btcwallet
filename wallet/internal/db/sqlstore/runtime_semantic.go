@@ -13,8 +13,8 @@ import (
 	"github.com/lightningnetwork/lnd/sqldb"
 )
 
-// branchIndexDomain names the operation-journal domain the spike reservation
-// records its committed operations under.
+// branchIndexDomain names the operation-journal domain the reservation records
+// its committed operations under.
 const branchIndexDomain = "branch-index"
 
 // factTypeBranchIndex is the result-fact type whose payload carries a
@@ -26,7 +26,7 @@ const factTypeBranchIndex = "branch-index"
 const reservationPayloadLen = 8
 
 // branchIndexRetention is how long a committed reservation's journal row is
-// retained so a late retry is still served from the journal. The spike value is
+// retained so a late retry is still served from the journal. The value is
 // deliberately generous; retention tuning is a later phase.
 const branchIndexRetention = 24 * time.Hour
 
@@ -35,44 +35,16 @@ const branchIndexRetention = 24 * time.Hour
 // the commit body.
 var errForcedRetry = errors.New("forced serialization retry")
 
-// errForcedCommitFailure is the injected non-retryable error the commit-failure
-// failpoint returns to roll a commit back, proving no durable or cache state
-// changes before a successful commit.
-var errForcedCommitFailure = errors.New("forced commit failure")
-
-// Failpoints injects deterministic faults into the runtime spike commit so
-// tests can exercise the retry, commit-failure, and ambiguous-commit contract.
-// A nil *Failpoints, the production value, injects nothing. It is a test seam
-// wired only through NewRuntimeStore; the neutral RuntimeStore contract carries
-// no test hooks.
-type Failpoints struct {
-	// ForceTxRetries makes the commit body return a serialization error on
-	// its first ForceTxRetries transaction attempts, after the durable work
-	// of each attempt has run, forcing the executor to roll back and re-run
-	// the body so idempotency under callback retry is testable.
-	ForceTxRetries int
-
-	// ForceCommitFailure makes the commit body return a non-retryable error
-	// after the compare-and-swap, rolling the whole transaction back.
-	ForceCommitFailure bool
-
-	// ForceAmbiguousCommit makes a durably committed reservation report
-	// ErrAmbiguousCommit to the caller so the ambiguous-commit resolution
-	// path is exercised.
-	ForceAmbiguousCommit bool
-
-	// OnTxAttempt, when set, is called with the zero-based attempt number at
-	// the start of every transaction attempt, letting a test observe retries.
-	OnTxAttempt func(attempt int)
-}
-
 // runtimeStore implements walletstore.RuntimeStore over one SQL wallet store.
 // It owns its database transactions through the store's RuntimeUpdate and
 // RuntimeView and holds the concrete store as an unexported, non-embedded field
 // so it exposes no View/Update boundary or raw transaction handle.
+//
+// Failure injection is a per-call test seam carried on the operation's context
+// (see walletstore.Failpoints), so the concrete store carries no test state and
+// the neutral RuntimeStore contract carries no test fields.
 type runtimeStore struct {
 	store *Store
-	fp    *Failpoints
 }
 
 // Compile-time assertion that the semantic runtime store implements the neutral
@@ -80,11 +52,48 @@ type runtimeStore struct {
 var _ walletstore.RuntimeStore = (*runtimeStore)(nil)
 
 // NewRuntimeStore constructs a semantic RuntimeStore over a concrete SQL store.
-// The optional failpoints are a test seam; production callers pass nil.
 //
 //nolint:ireturn // The runtime contract is returned as its neutral interface.
-func NewRuntimeStore(store *Store, fp *Failpoints) walletstore.RuntimeStore {
-	return &runtimeStore{store: store, fp: fp}
+func NewRuntimeStore(store *Store) walletstore.RuntimeStore {
+	return &runtimeStore{store: store}
+}
+
+// onTxAttempt reports one zero-based transaction attempt to any failpoint
+// observer carried on ctx.
+func onTxAttempt(ctx context.Context, attempt int) {
+	walletstore.FailpointsFromContext(ctx).RunOnTxAttempt(attempt)
+}
+
+// beforeStatement applies the before-statement failpoint carried on ctx, if
+// any, before an operation's first domain mutation.
+func beforeStatement(ctx context.Context) error {
+	return walletstore.FailpointsFromContext(ctx).RunBeforeStatement()
+}
+
+// injectCommitFaults applies the end-of-attempt failpoints after a transaction
+// attempt's durable work has run: an arbitrary rollback through the
+// before-commit hook, then a forced serialization retry for the first
+// configured attempts, driving the executor's real callback-retry path. It
+// returns nil in production.
+func injectCommitFaults(ctx context.Context, attempt int) error {
+	fp := walletstore.FailpointsFromContext(ctx)
+
+	if err := fp.RunBeforeCommit(); err != nil {
+		return err
+	}
+
+	if attempt < fp.Retries() {
+		return &sqldb.ErrSerializationError{DBError: errForcedRetry}
+	}
+
+	return nil
+}
+
+// afterCommit applies the after-commit failpoint carried on ctx, if any, after
+// a durable commit and before the result is returned. A test returns
+// walletstore.ErrAmbiguousCommit here to model an ambiguous commit.
+func afterCommit(ctx context.Context) error {
+	return walletstore.FailpointsFromContext(ctx).RunAfterCommit()
 }
 
 // CurrentBranchIndex reads a durable snapshot of the account's next index for
@@ -125,7 +134,7 @@ func (r *runtimeStore) ReserveNextBranchIndex(ctx context.Context,
 	err := r.store.RuntimeUpdate(ctx, func(rt *RuntimeStore) error {
 		var err error
 
-		out, err = r.commitAttempt(rt, req, &attempt)
+		out, err = r.reserveAttempt(ctx, rt, req, &attempt)
 
 		return err
 	}, nil)
@@ -135,28 +144,25 @@ func (r *runtimeStore) ReserveNextBranchIndex(ctx context.Context,
 
 	// A durably committed reservation may still be reported ambiguous so the
 	// caller resolves it by durable reread.
-	if r.fp != nil && r.fp.ForceAmbiguousCommit {
-		return walletstore.ReserveBranchIndexResult{},
-			walletstore.ErrAmbiguousCommit
+	if err := afterCommit(ctx); err != nil {
+		return walletstore.ReserveBranchIndexResult{}, err
 	}
 
 	return out, nil
 }
 
-// commitAttempt runs one transaction attempt of a reservation commit: it
+// reserveAttempt runs one transaction attempt of a reservation commit: it
 // replays a committed operation from the journal, or advances the branch index
 // and journals the new reservation, before applying the end-of-attempt
 // failpoints. The executor re-runs it on a serialization error.
-func (r *runtimeStore) commitAttempt(rt *RuntimeStore,
+func (r *runtimeStore) reserveAttempt(ctx context.Context, rt *RuntimeStore,
 	req walletstore.ReserveBranchIndexRequest, attempt *int) (
 	walletstore.ReserveBranchIndexResult, error) {
 
 	current := *attempt
 	*attempt++
 
-	if r.fp != nil && r.fp.OnTxAttempt != nil {
-		r.fp.OnTxAttempt(current)
-	}
+	onTxAttempt(ctx, current)
 
 	// A committed operation short-circuits the compare-and-swap so a replay
 	// is served from the journal instead of advancing again.
@@ -169,31 +175,16 @@ func (r *runtimeStore) commitAttempt(rt *RuntimeStore,
 		return replayed, nil
 	}
 
+	if err := beforeStatement(ctx); err != nil {
+		return walletstore.ReserveBranchIndexResult{}, err
+	}
+
 	result, err := commitReservation(rt, req)
 	if err != nil {
 		return walletstore.ReserveBranchIndexResult{}, err
 	}
 
-	return result, r.injectCommitFaults(current)
-}
-
-// injectCommitFaults applies the commit-failure and retry failpoints at the end
-// of a transaction attempt, after the durable work has run. It returns nil in
-// production.
-func (r *runtimeStore) injectCommitFaults(attempt int) error {
-	if r.fp == nil {
-		return nil
-	}
-
-	if r.fp.ForceCommitFailure {
-		return errForcedCommitFailure
-	}
-
-	if attempt < r.fp.ForceTxRetries {
-		return &sqldb.ErrSerializationError{DBError: errForcedRetry}
-	}
-
-	return nil
+	return result, injectCommitFaults(ctx, current)
 }
 
 // LookupBranchIndexReservation reads a committed reservation from the
@@ -265,9 +256,9 @@ func readCommittedReservation(rt *RuntimeStore,
 	}
 
 	return walletstore.ReserveBranchIndexResult{
+		CommittedFacts: walletstore.CommittedFacts{Replayed: true},
 		AllocatedIndex: alloc,
 		NextIndex:      next,
-		Replayed:       true,
 	}, true, nil
 }
 

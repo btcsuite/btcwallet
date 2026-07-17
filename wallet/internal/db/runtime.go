@@ -43,6 +43,18 @@ var (
 	// preparing the allocation again.
 	ErrStaleAccountIndex = errors.New("stale account branch index")
 
+	// ErrStaleTip indicates a guarded wallet-tip advance failed because the
+	// wallet's current synced block no longer matched the caller's expected
+	// tip, for example a concurrent advance or a reorg. The caller rereads the
+	// synced tip before preparing the advance again.
+	ErrStaleTip = errors.New("stale synced tip")
+
+	// ErrNonContiguousTip indicates a wallet-tip advance was rejected because
+	// the requested new tip does not extend the caller's expected tip by
+	// exactly one block. It is a request-shape error, not an optimistic
+	// concurrency conflict, so it never rolls back partial durable state.
+	ErrNonContiguousTip = errors.New("new tip does not extend current tip")
+
 	// ErrReservationConflict indicates a funding-plan state transition was
 	// rejected because the plan was missing or no longer in the state the
 	// transition requires, for example consuming a plan that is not reserved.

@@ -19,6 +19,9 @@ func testRuntimeStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("version cas", func(t *testing.T) {
 		testRuntimeVersionCAS(t, harness)
 	})
+	t.Run("guards", func(t *testing.T) {
+		testRuntimeGuards(t, harness)
+	})
 	t.Run("journal duplicate operation", func(t *testing.T) {
 		testRuntimeJournalDuplicate(t, harness)
 	})
@@ -112,6 +115,89 @@ func testRuntimeVersionCAS(t *testing.T, harness *managerStoreHarness) {
 		require.NoError(t, err)
 		require.Equal(t, sqlstore.RuntimeState{
 			StateVersion:  1,
+			HistoryEpoch:  1,
+			SecretVersion: 1,
+		}, state)
+
+		return nil
+	})
+}
+
+// testRuntimeGuards verifies the reusable version-guard family applied through
+// ApplyGuards: every declared guard advances its domain by one, a nil field is
+// skipped, and a single stale guard rolls the whole application back so no
+// version advances.
+func testRuntimeGuards(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	ctx := context.Background()
+	walletID := harness.createWallet(
+		t, "runtime-guards", testBlock(920), testBlock(921),
+	)
+	store := harness.newRuntime(walletID)
+
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		return rt.EnsureState()
+	})
+
+	// Applying all three version guards at their current values advances each
+	// domain by one in one transaction.
+	zero := int64(0)
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		return rt.ApplyGuards(db.Guards{
+			ExpectedStateVersion:  &zero,
+			ExpectedHistoryEpoch:  &zero,
+			ExpectedSecretVersion: &zero,
+		})
+	})
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		state, err := rt.State()
+		require.NoError(t, err)
+		require.Equal(t, sqlstore.RuntimeState{
+			StateVersion:  1,
+			HistoryEpoch:  1,
+			SecretVersion: 1,
+		}, state)
+
+		return nil
+	})
+
+	// A nil field is not guarded, so only the declared domain advances.
+	one := int64(1)
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		return rt.ApplyGuards(db.Guards{ExpectedStateVersion: &one})
+	})
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		state, err := rt.State()
+		require.NoError(t, err)
+		require.Equal(t, sqlstore.RuntimeState{
+			StateVersion:  2,
+			HistoryEpoch:  1,
+			SecretVersion: 1,
+		}, state)
+
+		return nil
+	})
+
+	// A stale guard rolls the whole application back: the matching state guard
+	// is applied first but the stale history guard fails, so no version
+	// advances and the typed history error surfaces.
+	two := int64(2)
+	staleErr := store.RuntimeUpdate(
+		ctx, func(rt *sqlstore.RuntimeStore) error {
+			return rt.ApplyGuards(db.Guards{
+				ExpectedStateVersion: &two,
+				ExpectedHistoryEpoch: &zero,
+			})
+		}, nil,
+	)
+	require.ErrorIs(t, staleErr, db.ErrStaleHistoryEpoch)
+
+	runtimeUpdate(t, store, func(rt *sqlstore.RuntimeStore) error {
+		state, err := rt.State()
+		require.NoError(t, err)
+		require.Equal(t, sqlstore.RuntimeState{
+			StateVersion:  2,
 			HistoryEpoch:  1,
 			SecretVersion: 1,
 		}, state)

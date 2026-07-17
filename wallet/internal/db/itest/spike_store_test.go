@@ -2,6 +2,7 @@ package itest
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,10 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/runtime"
 	"github.com/stretchr/testify/require"
 )
+
+// errForcedCommitFailure is the sentinel the runtime failure-injection tests
+// return from the before-commit failpoint to force a non-retryable rollback.
+var errForcedCommitFailure = errors.New("forced commit failure")
 
 // spikeScope is the key scope every spike wallet seeds its account under.
 var spikeScope = waddrmgr.KeyScopeBIP0084
@@ -47,7 +52,7 @@ func TestRuntimeStoreBoundary(t *testing.T) {
 	// A concrete runtime store must not satisfy the low-level
 	// PersistenceStore (View/Update) contract, so a migrated runtime path
 	// cannot reach the raw transaction boundary.
-	runtimeVal := sqlstore.NewRuntimeStore(nil, nil)
+	runtimeVal := sqlstore.NewRuntimeStore(nil)
 	_, isPersistence := runtimeVal.(db.PersistenceStore)
 	require.False(t, isPersistence,
 		"runtime store must not satisfy PersistenceStore")
@@ -94,24 +99,24 @@ func testSpikeForcedRetryIdempotent(t *testing.T,
 	t.Run("callback retry", func(t *testing.T) {
 		var attempts atomic.Int32
 
-		fp := &sqlstore.Failpoints{
+		fpCtx := db.WithFailpoints(ctx, &db.Failpoints{
 			ForceTxRetries: 1,
 			OnTxAttempt: func(int) {
 				attempts.Add(1)
 			},
-		}
+		})
 
 		var publishes atomic.Int32
 
 		setup := newSpikeSetup(
-			t, harness, "spike-callback-retry", fp,
+			t, harness, "spike-callback-retry",
 			runtime.WithBeforePublish(func() {
 				publishes.Add(1)
 			}),
 		)
 
 		res, err := setup.coord.ReserveNextIndex(
-			ctx, setup.key, []byte("op-callback-retry"),
+			fpCtx, setup.key, []byte("op-callback-retry"),
 		)
 		require.NoError(t, err)
 		require.Equal(t, uint32(5), res.AllocatedIndex)
@@ -135,7 +140,7 @@ func testSpikeForcedRetryIdempotent(t *testing.T,
 		var publishes atomic.Int32
 
 		setup := newSpikeSetup(
-			t, harness, "spike-op-replay", nil,
+			t, harness, "spike-op-replay",
 			runtime.WithBeforePublish(func() {
 				publishes.Add(1)
 			}),
@@ -174,9 +179,13 @@ func testSpikeNoChangeBeforeCommit(t *testing.T,
 
 	var publishes atomic.Int32
 
-	fp := &sqlstore.Failpoints{ForceCommitFailure: true}
+	fpCtx := db.WithFailpoints(ctx, &db.Failpoints{
+		BeforeCommit: func() error {
+			return errForcedCommitFailure
+		},
+	})
 	setup := newSpikeSetup(
-		t, harness, "spike-no-change", fp,
+		t, harness, "spike-no-change",
 		runtime.WithBeforePublish(func() {
 			publishes.Add(1)
 		}),
@@ -184,7 +193,7 @@ func testSpikeNoChangeBeforeCommit(t *testing.T,
 
 	// The forced commit failure rolls the whole transaction back.
 	_, err := setup.coord.ReserveNextIndex(
-		ctx, setup.key, []byte("op-fail"),
+		fpCtx, setup.key, []byte("op-fail"),
 	)
 	require.Error(t, err)
 
@@ -199,7 +208,7 @@ func testSpikeNoChangeBeforeCommit(t *testing.T,
 
 	// A later successful commit through a clean store does change state,
 	// confirming the seeded account was otherwise reservable.
-	clean := runtime.New(sqlstore.NewRuntimeStore(setup.store, nil))
+	clean := runtime.New(sqlstore.NewRuntimeStore(setup.store))
 	res, err := clean.ReserveNextIndex(ctx, setup.key, []byte("op-ok"))
 	require.NoError(t, err)
 	require.Equal(t, uint32(5), res.AllocatedIndex)
@@ -214,13 +223,17 @@ func testSpikeAmbiguousResolved(t *testing.T, harness *managerStoreHarness) {
 
 	ctx := context.Background()
 
-	fp := &sqlstore.Failpoints{ForceAmbiguousCommit: true}
-	setup := newSpikeSetup(t, harness, "spike-ambiguous", fp)
+	fpCtx := db.WithFailpoints(ctx, &db.Failpoints{
+		AfterCommit: func() error {
+			return db.ErrAmbiguousCommit
+		},
+	})
+	setup := newSpikeSetup(t, harness, "spike-ambiguous")
 
 	// The commit lands durably but is reported ambiguous; the coordinator
 	// resolves it by durable reread and publishes the committed result.
 	res, err := setup.coord.ReserveNextIndex(
-		ctx, setup.key, []byte("op-ambiguous"),
+		fpCtx, setup.key, []byte("op-ambiguous"),
 	)
 	require.NoError(t, err)
 	require.True(t, res.Replayed)
@@ -252,7 +265,7 @@ func testSpikeLinearizableGate(t *testing.T, harness *managerStoreHarness) {
 	var publishes atomic.Int32
 
 	setup := newSpikeSetup(
-		t, harness, "spike-linearizable", nil,
+		t, harness, "spike-linearizable",
 		runtime.WithBeforePublish(func() {
 			// Pause only on the second publication (the observed op),
 			// holding the gate between commit and cache publication.
@@ -336,7 +349,7 @@ func testSpikeStaleReloadsCache(t *testing.T, harness *managerStoreHarness) {
 
 	ctx := context.Background()
 
-	setup := newSpikeSetup(t, harness, "spike-stale", nil)
+	setup := newSpikeSetup(t, harness, "spike-stale")
 
 	// Warm the cache to the durable value.
 	_, err := setup.coord.ReserveNextIndex(ctx, setup.key, []byte("op-warm"))
@@ -378,10 +391,10 @@ type spikeSetup struct {
 }
 
 // newSpikeSetup creates an isolated wallet, seeds one account at the spike seed
-// index, and builds a coordinator over a runtime store with the given
-// failpoints.
+// index, and builds a coordinator over a runtime store. Failure injection is
+// per call through db.WithFailpoints on the operation context.
 func newSpikeSetup(t *testing.T, harness *managerStoreHarness, name string,
-	fp *sqlstore.Failpoints, opts ...runtime.Option) *spikeSetup {
+	opts ...runtime.Option) *spikeSetup {
 
 	t.Helper()
 
@@ -393,7 +406,7 @@ func newSpikeSetup(t *testing.T, harness *managerStoreHarness, name string,
 
 	seedSpikeAccount(t, harness.newStore(walletID))
 
-	coord := runtime.New(sqlstore.NewRuntimeStore(store, fp), opts...)
+	coord := runtime.New(sqlstore.NewRuntimeStore(store), opts...)
 
 	return &spikeSetup{
 		harness:  harness,
@@ -441,7 +454,7 @@ func seedSpikeAccount(t *testing.T, store db.Store) {
 func (s *spikeSetup) durableIndex(t *testing.T) uint32 {
 	t.Helper()
 
-	index, err := sqlstore.NewRuntimeStore(s.store, nil).CurrentBranchIndex(
+	index, err := sqlstore.NewRuntimeStore(s.store).CurrentBranchIndex(
 		context.Background(), s.key.Scope, s.key.Account, s.key.Branch,
 	)
 	require.NoError(t, err)

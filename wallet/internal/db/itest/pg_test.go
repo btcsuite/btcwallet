@@ -65,6 +65,11 @@ func TestPostgresManagerStore(t *testing.T) {
 	harness.newRuntime = func(walletID int64) *sqlstore.Store {
 		return dbpg.NewStore(harness.conn, walletID).Store
 	}
+	harness.newRuntimeStore = func(walletID int64) db.RuntimeStore {
+		return sqlstore.NewRuntimeStore(
+			dbpg.NewStore(harness.conn, walletID).Store,
+		)
+	}
 	t.Cleanup(func() {
 		require.NoError(t, harness.conn.Close())
 	})

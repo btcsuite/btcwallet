@@ -28,12 +28,20 @@ type PersistenceStore = Store
 // preparation, chain I/O, or cache mutation into a durable runtime commit. It
 // deliberately does not embed PersistenceStore.
 //
-// For the Phase 1A transaction-contract spike it carries a single semantic
-// operation, the address-branch index reservation, plus the durable snapshot
-// read it prepares from and the durable reread that resolves an ambiguous
-// commit. Later phases extend this interface with the remaining semantic
-// operations such as scan commit and funding reservation, following the same
-// transaction-ownership and conflict contract.
+// For the Phase 1A transaction-contract spike it carried a single semantic
+// operation, the address-branch index reservation. Phase 1B adds the
+// representative second operation, the wallet-tip advance, plus the durable
+// snapshot reads each operation prepares from and the durable rereads that
+// resolve an ambiguous commit. Later phases extend this interface with the
+// remaining semantic operations such as scan commit and funding reservation,
+// following the same transaction-ownership and conflict contract.
+//
+// Every method returns fully materialized committed facts, so cache updates and
+// notification delivery never need the original write transaction. The SQL
+// backend backs the operations with compare-and-swap guards, a runtime-state
+// version row, and an operation journal; the KV backend backs them with the
+// managers' natural records and Bolt's atomic single-writer transaction. Both
+// return the same observable facts and typed errors.
 type RuntimeStore interface {
 	// CurrentBranchIndex reads a durable snapshot of the account's next
 	// index for one branch. It is the prepare-phase read taken before the
@@ -58,9 +66,38 @@ type RuntimeStore interface {
 	// from the operation journal by its operation id. It is the durable
 	// reread that resolves an ambiguous commit without repeating the
 	// compare-and-swap. The boolean is false when no committed reservation
-	// exists for the id.
+	// exists for the id; a backend without a journal, such as KV, always
+	// reports false because its commits are never ambiguous.
 	LookupBranchIndexReservation(ctx context.Context,
 		operationID []byte) (ReserveBranchIndexResult, bool, error)
+
+	// CurrentSyncedTip reads a durable snapshot of the wallet's synced block.
+	// It is the prepare-phase read the tip advance guards against and never
+	// mutates state.
+	CurrentSyncedTip(ctx context.Context) (BlockRef, error)
+
+	// AdvanceWalletTip records the new tip block, if not already present, and
+	// advances the wallet's synced tip to it through an optimistic
+	// compare-and-swap against the caller's expected tip, all in one durable
+	// transaction. The new tip must extend the expected tip by exactly one
+	// block.
+	//
+	// It returns ErrNonContiguousTip when the new tip does not extend the
+	// expected tip, ErrStaleTip when the durable synced tip no longer matches
+	// the expected tip, and ErrAmbiguousCommit when the durable outcome is
+	// unknown and the caller must resolve it with a durable reread. A retry
+	// that reuses the request's operation id is served from the journal
+	// instead of advancing the tip again.
+	AdvanceWalletTip(ctx context.Context,
+		req AdvanceTipRequest) (AdvanceTipResult, error)
+
+	// LookupTipAdvance reads a previously committed tip advance from the
+	// operation journal by its operation id, resolving an ambiguous commit
+	// without repeating the advance. The boolean is false when no committed
+	// advance exists for the id; a backend without a journal always reports
+	// false.
+	LookupTipAdvance(ctx context.Context,
+		operationID []byte) (AdvanceTipResult, bool, error)
 }
 
 // ReserveBranchIndexRequest is the prepared input to a branch-index
@@ -88,17 +125,51 @@ type ReserveBranchIndexRequest struct {
 
 // ReserveBranchIndexResult is the committed result of a branch-index
 // reservation, materialized so cache publication and any notification never
-// need the original write transaction.
+// need the original write transaction. It embeds CommittedFacts; a reservation
+// emits no post-commit event, so its Events are always empty.
 type ReserveBranchIndexResult struct {
+	CommittedFacts
+
 	// AllocatedIndex is the index the caller reserved, the value the branch's
 	// next index held before the advance.
 	AllocatedIndex uint32
 
 	// NextIndex is the account's new next index after the advance.
 	NextIndex uint32
+}
 
-	// Replayed is true when the result was served from the operation journal
-	// because the operation had already committed, rather than by advancing
-	// the index in this call.
-	Replayed bool
+// AdvanceTipRequest is the prepared input to a wallet-tip advance. ExpectedTip
+// is the synced block observed during preparation; the compare-and-swap
+// advances the tip only while the durable synced block still equals it. NewTip
+// must extend ExpectedTip by exactly one block.
+type AdvanceTipRequest struct {
+	// ExpectedTip is the wallet's synced block observed during preparation.
+	ExpectedTip BlockRef
+
+	// NewTip is the block to advance the wallet's synced tip to. It is
+	// recorded if not already present and must be the block immediately
+	// following ExpectedTip.
+	NewTip BlockRef
+
+	// Guards declares the optimistic version-domain preconditions applied in
+	// the same transaction. It is empty for a plain tip advance; a caller that
+	// must also invalidate concurrent preparation (for example a scan) sets
+	// the affected version guards. The KV backend has no version row and
+	// ignores it.
+	Guards Guards
+
+	// OperationID keys the durable journal (SQL only) so a replay is served
+	// from the journal instead of advancing the tip again.
+	OperationID []byte
+}
+
+// AdvanceTipResult is the committed result of a wallet-tip advance, materialized
+// so cache publication and notification never need the original write
+// transaction. It embeds CommittedFacts, whose single event is the wallet-tip
+// advance.
+type AdvanceTipResult struct {
+	CommittedFacts
+
+	// Tip is the wallet's synced tip after the advance.
+	Tip BlockRef
 }

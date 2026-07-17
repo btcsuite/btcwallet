@@ -27,10 +27,15 @@ type managerStoreHarness struct {
 	kv        *kvBackend
 	newStore  func(int64) db.Store
 
-	// newRuntime builds a runtime store for one wallet on the SQL backend.
-	// It is nil for the KV backend, which uses natural record guards instead
-	// of the SQL runtime-state journal.
+	// newRuntime builds a low-level SQL runtime store for one wallet. It is
+	// nil for the KV backend, which uses natural record guards instead of the
+	// SQL runtime-state journal.
 	newRuntime func(int64) *sqlstore.Store
+
+	// newRuntimeStore builds the semantic db.RuntimeStore for one wallet. It
+	// is set for every backend, including KV, so the cross-backend semantic
+	// parity vector runs on all three.
+	newRuntimeStore func(int64) db.RuntimeStore
 }
 
 // testManagerStore runs the shared manager-store conformance cases against one
@@ -83,6 +88,13 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 		testCloseReopen(t, harness)
 	})
 
+	// Cross-backend semantic parity vector: the semantic RuntimeStore
+	// operations must produce identical observable results on KV, SQLite, and
+	// PostgreSQL.
+	t.Run("semantic parity", func(t *testing.T) {
+		testSemanticParity(t, harness)
+	})
+
 	// SQL-only transaction-incidence vector: depends on the SQL fixture
 	// schema, so it is skipped for the KV backend.
 	if harness.kv != nil {
@@ -111,6 +123,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	})
 	t.Run("spike store", func(t *testing.T) {
 		testSpikeStore(t, harness)
+	})
+	t.Run("semantic tip", func(t *testing.T) {
+		testSemanticTip(t, harness)
 	})
 }
 
