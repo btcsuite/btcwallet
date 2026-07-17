@@ -2073,3 +2073,185 @@ recent-block retention.
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 3b: recovery flow + syncer
+
+Builds the recovery/scan loop and a minimal syncer for the SQL wallet, wired to
+the Phase 2B `SQLWallet` and driving the Phase 3a `CommitScanResults` /
+`CommitWalletRewind` store ops through the `runtime.Coordinator`. It proves the
+Gate-2 recovery vertical — a pre-funded seed recovers over SQLite — against a
+controllable mock chain source, so the recovery logic is deterministic without a
+real btcd. The chain-backed btcd itest is the next increment (3c). Built solely
+on the salvage foundation; the `wallet-default-sqlite` branch was not consulted.
+
+### Chain-source abstraction
+
+- `sqlwallet.ChainSource` is the minimal, read-only chain surface the scan needs:
+  `GetBestBlock`, `GetBlock`, `GetBlockHash`, `GetBlockHeader`, and
+  `FilterBlocks`. Every method matches `chain.Interface`, so a production wallet
+  passes its live chain client and a test passes a mock; a compile-time
+  assertion `var _ ChainSource = (chain.Interface)(nil)` pins that a live client
+  satisfies it. Using the real `chain.FilterBlocksRequest`/`FilterBlocksResponse`
+  types (rather than inventing neutral twins) is what lets the mock reuse the
+  production `chain.BlockFilterer`, so the mock's match/credit/outpoint semantics
+  are byte-for-byte the real backend's, not a reimplementation.
+- The scan performs **all** chain I/O, address derivation, and script parsing
+  through this interface outside any write transaction, then commits the prepared
+  batch through the semantic runtime store — the Stage 3 contract inversion of
+  the legacy code, which held a `walletdb.Update` open across `FilterBlocks` and
+  large derivations.
+
+### Scan-loop prepare/commit structure
+
+The driver (`sqlwallet.Syncer`) mirrors the legacy `recovery` /
+`recoverScopedAddresses` flow but restructured so the durable commit is short:
+
+- `Recover` reconciles any fork (below), reads the chain's best height, then
+  scans forward in bounded batches. Each batch re-reads the **durable** synced
+  tip as its base, so the batch's expected base tip is always current.
+- `prepareBatch` (no gate, no txn) iterates `FilterBlocks` over the block range
+  exactly as legacy `recoverScopedAddresses` does: expand every branch horizon,
+  filter the remaining blocks, record the found addresses / outpoints / relevant
+  txns from the first matching block, then continue from just after that block.
+  It assembles a deterministic `CommitScanResultsRequest` — discovered address
+  rows, per-branch horizon advances, relevant-tx incidences with their credits,
+  sticky usage marks, the batch blocks, and the new tip.
+- `scanBatch` commits the request through `Coordinator.CommitScan`. On
+  `ErrStaleTip` or `ErrStaleAccountIndex` it re-reads durable state and
+  **recomputes** the batch (re-running `FilterBlocks` outside the txn), never
+  replaying chain I/O inside a transaction callback. On success it captures the
+  materialized events and appends the batch's blocks to the in-memory session
+  chain.
+- Credit determination reuses the legacy `addRelevantTx` rule: for each output,
+  `txscript.ExtractPkScriptAddrs` then a lookup against the derived watch-set;
+  the change flag is set for an internal-branch address. Mined spends of
+  wallet credits are recorded automatically inside `InsertTxCheckIfExists`
+  (Phase 3a), so the driver records only incidences + credits and lets the store
+  compose spends.
+
+### Horizon / gap-limit
+
+- `branchScan` is a per-branch horizon tracker that mirrors the legacy
+  `BranchRecoveryState`: it derives a lookahead (`waddrmgr.DeriveChainedAddresses`,
+  which skips invalid children) to keep `recoveryWindow` valid addresses ahead of
+  the last found index, records found indexes, and advances the last-unfound
+  boundary. The `Address` field added to `waddrmgr.DerivedAddress` (the one
+  `waddrmgr` change) carries the `address.Address` alongside the identity bytes,
+  so the watch-set the filter matches on and the discovered-address rows share
+  one derivation and cannot diverge.
+- The commit persists only the range `[durableIndex .. lastFound]` and advances
+  the branch index to `lastFound + 1` (the next-unused index), reading the
+  durable branch index fresh per batch as the CAS expected value. Addresses in
+  the recovery-window lookahead beyond `lastFound` are derived for the filter but
+  **not** persisted and do not advance the index — the correct last-unused / gap
+  behavior, matching legacy `ExtendExternalAddresses(..., lastFound)`. Invalid
+  children leave a gap in the persisted rows; the horizon advance accounts for
+  the skipped index, so a future `NextAddress` never re-derives it.
+
+### Restart resume
+
+- The syncer keeps no durable per-session state; on (re)start `Recover` reads the
+  durable synced tip via `LoadManagerSnapshot`/`CurrentSyncedTip` and scans from
+  `tip + 1`. With no new blocks the forward loop's start exceeds the best height,
+  so **no** batch is prepared, nothing is re-derived, and the branch index,
+  address set, and balance are unchanged — proven by reopening the wallet and
+  recovering again. Resume is from the durable tip, never from genesis.
+
+### Reorg / startup rollback
+
+- `reconcile` runs before the forward scan: it compares the durable synced tip
+  against the chain source's hash at that height; if they differ it locates the
+  fork point and commits `CommitWalletRewind(expected=tip, target=fork)`, then
+  forward scan re-discovers on the new branch. Fork discovery and the rewind CAS
+  are both outside the write transaction.
+- **Fork discovery uses an in-memory session chain**, not durable history — see
+  the syncer-rehome finding below. The mock reorg test drives this within one
+  session (recover, reorg the mock above the fork, recover again on the same
+  syncer): it rewinds to the fork and re-scans the competing branch, recovering
+  funds in the reorg block that a stale-tip advance would have skipped.
+
+### catchUpHashes-equivalent
+
+- `CatchUp` advances the synced tip to the best block **without** filtering, one
+  contiguous block at a time: it fetches each header outside the txn and reuses
+  `Coordinator.AdvanceTip` (the Phase 1B `AdvanceWalletTip`, which enforces a
+  single-block contiguous advance), retrying from the fresh durable tip on
+  `ErrStaleTip`. This is the "not in recovery, just track new blocks" path; the
+  recovery scan itself advances the tip batch-by-batch through `CommitScanResults`.
+
+### Mirrored vs simplified (minimal boundary)
+
+- **Mirrored:** the `FilterBlocks` iteration and horizon-expansion structure of
+  `recoverScopedAddresses`; the `BranchRecoveryState` gap-limit accounting; the
+  `addRelevantTx` credit/change determination; the startup rollback walk-back of
+  legacy `syncWithChain`. The credit/incidence/spend/tip writes all reuse the
+  Phase 3a store ops verbatim.
+- **Simplified for minimal:** only the default account is recovered (legacy
+  resurrects all registered scopes for a change-address bug — not needed here);
+  birthday handling is a plain height floor (`start = max(tip+1, birthday)`)
+  rather than the full birthday-block location/sanity-check dance; recent-block
+  retention and pruning are an in-memory session chain rather than durable
+  (Phase 3a explicitly deferred durable retention); recovery runs synchronously
+  with no background goroutine, so there is no goroutine-shutdown surface yet.
+
+### Syncer-rehome difficulty (key finding)
+
+The syncer rehome was harder than "route the batch SQL" in three concrete ways:
+
+- **Recent-block retention is a real gap, not a detail.** Phase 3a deferred
+  durable recent-block retention, but reorg fork discovery fundamentally needs
+  the wallet's historical block hashes to find where its chain diverges. With
+  only a durable synced *tip* (one block) and a shared, not-per-wallet `blocks`
+  table, there is no durable way to walk the wallet's own chain back. The minimal
+  driver keeps an in-memory session chain (the "live recovery cache" the plan
+  names) and documents that reorg-across-restart needs durable per-wallet
+  recent-block retention — this is the main carried-forward item for 3c.
+- **`CommitScan` reloads only the tip cache, not the branch cache, on a stale
+  conflict.** The Phase 3a `Coordinator.CommitScan` passes `ErrStaleTip` as its
+  `runGated` stale error, so an `ErrStaleAccountIndex` from a horizon CAS falls to
+  the default branch and returns without reloading the branch cache. Rather than
+  widen the coordinator (kept minimal), the driver reads all durable state
+  (`CurrentSyncedTip`, `CurrentBranchIndex`) directly for preparation and
+  recomputes on either stale error, so recompute is correct regardless of which
+  cache the coordinator refreshed.
+- **The `SQLWallet.syncedTip` field is a Phase-2B open-time snapshot** and is not
+  updated by the syncer; the coordinator's tip cache is the live authority during
+  recovery. Tests assert the durable tip (`CurrentSyncedTip`) rather than
+  `SyncedTip()`. Reconciling the two caches (or dropping the vestigial field) is
+  wallet-integration cleanup, not recovery logic.
+
+### What 3c (real btcd itest) still needs
+
+- A `chain.Interface` btcd/bitcoind backend driving `Recover` end to end (the
+  `ChainSource` abstraction already admits it unchanged), including compact-filter
+  `FilterBlocks` fetching real blocks.
+- Durable per-wallet recent-block retention so a reorg detected on a fresh
+  restart (empty session chain) finds the fork durably instead of falling back to
+  a full re-scan from genesis.
+- Birthday-block location and sanity-check, and the reorg-past-birthday
+  re-derivation of a new birthday block.
+- A background sync goroutine with a shutdown path and cancellation handling
+  (the plan's "cancellation and backend disconnect without leaving live recovery
+  caches ahead of durable state"); the current driver is synchronous.
+- Non-default-scope / all-registered-scope recovery if the legacy change-address
+  bug's coverage must be preserved.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/... ./waddrmgr/` — pass (exit 0).
+- `GOWORK=off go test ./wallet/internal/... ./waddrmgr/` — pass (recovery:
+  pre-funded seed recovers all funds incl. beyond the initial horizon; gap-limit
+  + last-unused after restart; forced scan-batch retry idempotent (no duplicate
+  credit/notification); concurrent derivation clean conflict + recompute; reorg
+  reconcile + re-scan; catch-up; plus all prior Phase 0-3a vectors).
+- `GOWORK=off go test -race ./wallet/internal/sqlwallet/ ./wallet/internal/runtime/
+  ./wallet/internal/db/itest/` — pass.
+- `gofmt -s` clean on all new/edited files; new production code within ~80 cols.
+- One `waddrmgr` change only (`DerivedAddress.Address`); no SQL, sqlc, schema, or
+  adapter changes — the recovery driver composes the Phase 3a store ops.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

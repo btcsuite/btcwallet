@@ -113,6 +113,12 @@ type DerivedAddress struct {
 	// and the KV backend stores directly.
 	AddressID []byte
 
+	// Address is the derived address itself, retained so a recovery scan can
+	// build the chain watch-set (which matches by encoded address) without
+	// recomputing the per-type address from the identity bytes. It shares the
+	// exact address-computation source as AddressID, so the two never diverge.
+	Address address.Address
+
 	// Branch is the derivation branch the address belongs to.
 	Branch uint32
 
@@ -226,6 +232,7 @@ func deriveChainedAddresses(deriveChild childDeriver, branch uint32,
 
 		addrs = append(addrs, DerivedAddress{
 			AddressID: addr.ScriptAddress(),
+			Address:   addr,
 			Branch:    branch,
 			Index:     nextIndex,
 		})
