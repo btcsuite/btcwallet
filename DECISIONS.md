@@ -1060,3 +1060,205 @@ is Phase 2A1/Phase 4.
 ## Phase 0B: generation finalization
 
 Bumped schemaid.Generation 1->2 (gen 2 = runtime schema; migrations 000012-000014: block identity, operation journal, funding plans, address/runtime guards). MinGeneration stays 1 so gen-1 DBs remain upgradeable; fresh SQL wallets are created at gen 2. DEFERRED to Workstream C (only exercised in cross-version upgrade/migration, not the fresh-wallet recovery vertical): (1) marker-update-on-upgrade of an existing lower-gen marker after ApplyMigrations; (2) the migration-set checksum/fingerprint mechanism.
+
+## Phase 1A: transaction contract spike
+
+Settles the transaction/cache/retry contract on ONE narrow operation over
+SQLite, plus the interface placement it requires. This is the minimum that
+proves the pattern; the full cross-backend semantic foundation (batch types,
+KV/PostgreSQL parity, expected-domain-version guards) is Phase 1B. It reuses the
+Phase 0 branch-index CAS and operation journal verbatim, so it adds **no SQL, no
+sqlc regeneration, and no adapter methods** — the spike is purely additive Go.
+The chosen boundary, lock order, spike op, journal decision, and failure
+seam become the template for 1B and every later phase.
+
+### RuntimeStore / PersistenceStore boundary (Runtime Store Placement)
+
+- **`db.PersistenceStore = Store` (type alias).** `PersistenceStore` is the
+  low-level View/Update boundary retained for migration, compatibility
+  conformance, and backend implementation tests. Aliasing (rather than renaming
+  `Store`) keeps every existing `db.Store` caller — migration, itest, the KV and
+  SQL adapters, all `var _ db.Store` assertions — compiling unchanged. The
+  distinct name marks call sites that deliberately use the raw boundary.
+- **`db.RuntimeStore` (new interface).** Semantic methods only; each owns its
+  own database transaction and exposes no callback or raw `*sql.Tx`/`walletdb`
+  handle. It does NOT embed `PersistenceStore`. For the spike it carries three
+  methods: `CurrentBranchIndex` (the prepare-phase durable snapshot read),
+  `ReserveNextBranchIndex` (the semantic commit), and
+  `LookupBranchIndexReservation` (the durable reread that resolves an ambiguous
+  commit). Later phases extend this same interface with `CommitScanResults`,
+  `ReserveFundingPlan`, etc.
+- **Layering (avoids an import cycle).** The interface + request/result types
+  live in the neutral `wallet/internal/db` package (it already imports
+  `waddrmgr`; it must not import `sqlstore`). The concrete implementation
+  `sqlstore.runtimeStore` (unexported) lives in `sqlstore` and holds the
+  concrete `*sqlstore.Store` as an **unexported, non-embedded** field, so it
+  cannot promote `View`/`Update`. It drives durable work through the Phase 0
+  `Store.RuntimeUpdate`/`RuntimeView`, which own the transactions.
+  `sqlstore.NewRuntimeStore(store, failpoints) db.RuntimeStore` is the
+  constructor.
+- **Package-boundary check** (`TestRuntimeStoreBoundary`, no DB needed):
+  reflection asserts the `db.RuntimeStore` interface method set contains
+  `ReserveNextBranchIndex` and **neither `View` nor `Update`**; a negative type
+  assertion `_, ok := runtimeVal.(db.PersistenceStore)` asserts a concrete
+  runtime store does **not** satisfy the low-level contract. A `var _
+  walletstore.RuntimeStore = (*runtimeStore)(nil)` compile-time assertion pins
+  the positive direction.
+- The wallet-side consumer (gate + cache + orchestration) lives in a new neutral
+  package `wallet/internal/runtime` (`Coordinator`), analogous to how the real
+  `wallet.Wallet` will receive a `db.RuntimeStore`. Keeping it out of `db`
+  preserves `db` as a thin contract package.
+
+### Mutation-gate lock order (Cache And Commit Protocol)
+
+- The per-wallet mutation gate is a `*sync.RWMutex` **held by pointer** on the
+  `Coordinator` (created in the constructor). It is the **sole and outermost
+  lock**. The spike's per-account next-index cache (`map[BranchKey]uint32`) is
+  accessed **only while holding the gate** — shared (`RLock`) for
+  cache-sensitive reads, exclusive (`Lock`) for the commit + publication — so no
+  separate cache mutex exists.
+- **The one documented lock order: gate -> manager mutex -> scoped-manager
+  mutex.** The spike has only the gate; the order is documented so 1B+ acquire
+  the real manager/scoped-manager mutexes strictly *after* the gate, never
+  before. `-race` on the concurrency test validates there is no inversion.
+- Protocol (`Coordinator.ReserveNextIndex`): (1) prepare the expected-index
+  snapshot WITHOUT the gate — warm cache via a shared-gate read, else a durable
+  `CurrentBranchIndex` snapshot (a real caller derives/encrypts here); (2)
+  acquire the gate exclusively; (3) revalidate the prepared expected value
+  against the cache; (4) run the short DB-only CAS commit; (5) on success
+  publish the new index into the cache while still holding the gate, then
+  release; (6) on ordinary failure leave the cache unchanged; (7) on
+  `ErrStaleAccountIndex` (cross-process advance) reload the cache from durable
+  state; (8) on `ErrAmbiguousCommit` keep the gate, reread the durable journal,
+  and publish-or-reload. Publication is skipped when the cached value already
+  equals the committed value, so an idempotent replay causes no duplicate cache
+  mutation.
+- The gate spans only the short DB commit + cache publication; it never spans
+  the snapshot read's I/O, derivation, or notification. Ambiguous resolution
+  does a short durable reread while retaining the gate, matching the plan's
+  "fresh bounded internal context while retaining the gate".
+
+### Spike op: reserve the next branch index
+
+- `ReserveNextBranchIndex` composes, in ONE `RuntimeUpdate` transaction: the
+  Phase 0 branch-index CAS (`AdvanceBranchIndex`, advancing
+  `expected -> expected+1` with a typed `ErrStaleAccountIndex` on mismatch) plus
+  a journal `RecordCommittedOperation`. `AllocatedIndex = expected`,
+  `NextIndex = expected+1`.
+- **The branch-index CAS is the conflict guard for the spike; no
+  `addr_state_version` bump is taken.** The next-index column is itself the
+  compare-and-swap target (per the Phase 0 "no branch version column" decision),
+  so the index move is self-guarding. Wiring the `addr_state_version` /
+  `secret_version` guards from the Phase 0B guard table is a Phase 2A1 concern
+  and out of the spike's scope.
+
+### Journal-integration decision: INTEGRATED
+
+Journal recording is done in the SAME transaction as the CAS (not deferred),
+because it is the mechanism that makes both idempotency properties provable and
+is the direct precursor to 1B's scan/funding idempotency keys:
+
+- **Durable idempotency across operation replay.** The commit body first calls
+  `CommittedResult(domain, operationID)`; a hit short-circuits the CAS and
+  returns the journaled result with `Replayed = true`. So re-invoking the whole
+  operation with the same operation id advances the index exactly once.
+- **Ambiguous-commit resolution.** `LookupBranchIndexReservation` rereads the
+  journal by operation id; a committed row proves the durable commit landed and
+  yields the result to publish, so resolution never repeats the CAS.
+- The result is encoded as one result fact (`branch-index`, 8-byte payload =
+  allocated||next, both big-endian uint32); `result_hash = sha256(payload)`,
+  `result_ref = operationID`, `history_epoch = 0` (the spike does not track
+  history epoch), retention 24h. `request_hash = sha256(scope||account||branch||
+  expected)` so reusing an id with different parameters is an
+  `ErrOperationConflict` via the Phase 0 journal.
+
+### Failure-injection seam
+
+- **`sqlstore.Failpoints`, injected only via `NewRuntimeStore`** (nil in
+  production) — the neutral `db.RuntimeStore` request carries **no** test hooks,
+  keeping the contract clean. Fields: `ForceTxRetries` (return a
+  `sqldb.ErrSerializationError` at the END of the first N attempts, after the
+  durable work has run, so the executor rolls back and re-runs the body — this
+  is the real `sqldb.ExecuteSQLTransactionWithRetry` callback-retry path, not a
+  simulated one); `ForceCommitFailure` (return a non-retryable error after the
+  CAS, rolling the whole txn back); `ForceAmbiguousCommit` (return
+  `db.ErrAmbiguousCommit` to the caller AFTER a genuine commit landed);
+  `OnTxAttempt` (observe attempt count). The `Coordinator` has one separate test
+  option, `WithBeforePublish`, a hook fired under the exclusive gate between the
+  durable commit and the cache publication — the seam for the linearizability
+  test's commit/publish window.
+- Why the retry seam lives inside the impl (not a decorator): forcing a callback
+  retry requires returning a serialization error from *inside* the executor's
+  transaction body; a `db.RuntimeStore` decorator cannot reach inside
+  `RuntimeUpdate`.
+
+### Exit-gate tests (SQLite; also run against PostgreSQL under the tag)
+
+Wired into the SQL-only section of the shared `testManagerStore` vector plus the
+standalone `TestRuntimeStoreBoundary`:
+
+- **Forced retry idempotent** — `callback retry` (`ForceTxRetries=1`): the body
+  runs twice (`OnTxAttempt` count = 2) but the durable index advances once, the
+  journal has one row, and the cache publishes once (`WithBeforePublish` count =
+  1). `operation replay`: a second call with the same id returns
+  `Replayed = true`, advances nothing, publishes nothing more.
+- **No change before commit** — `ForceCommitFailure`: durable index and journal
+  unchanged, cache never published; a later clean store still commits.
+- **Ambiguous resolved by reread** — `ForceAmbiguousCommit`: the coordinator
+  resolves via `LookupBranchIndexReservation`, the index advanced exactly once,
+  no second CAS.
+- **Linearizable gate+CAS+publish** — a writer parks under the exclusive gate
+  after commit but before publish (`WithBeforePublish`); a concurrent shared
+  reader (`CachedNextIndex`) is confirmed blocked during that window (DB already
+  advanced) and observes the new value only after publication. Clean under
+  `-race`.
+- (bonus) **Stale reloads cache** — a direct out-of-band durable advance makes
+  the next CAS return `ErrStaleAccountIndex`; the coordinator reloads the cache
+  from durable state and can then re-allocate.
+
+### Scope ripples / judgment calls
+
+- **No schema/sqlc/adapter changes needed** — the spike composes existing Phase
+  0 queries only, which is why it stayed small. This confirms the Phase 0
+  building blocks were the right shape.
+- **New neutral consumer package** `wallet/internal/runtime` was introduced
+  rather than wiring the real `wallet.Wallet` (which owns `NewAddress` and the
+  real manager caches). Integrating the gate into the live wallet is Phase 2A1
+  and is genuinely larger than the spike: it must replace the spike's toy
+  next-index map with the scoped-manager caches and take the manager mutexes
+  under the gate in the documented order.
+- **Failpoints on the concrete impl, not the contract** — chosen so the neutral
+  `db.RuntimeStore` request has no test fields. Trade-off: failpoints are
+  per-construction, which suits the spike (each test builds its own store) but
+  1B's richer `TransactionExecutor` wrapper (before-statement / before-commit /
+  after-commit / before-notification hooks) will likely want per-call control.
+- **contextcheck on test helpers** — the spike test's harness wrappers
+  (`durableIndex`, `journalRows`, `newSpikeSetup`) use `context.Background()`
+  internally, identical to the CI-green Phase 0 `manager_store_test.go` helpers;
+  this is the established harness pattern, not a new leak.
+- **Lint version note** — local `golangci-lint` v2.12.2 flags `lll` on some
+  81-char comment lines and `wsl_v5`/`noinlineerr`/`modernize` items that the
+  repo's pinned `tools/go.mod` linter era does not block (Phase 0 files ship the
+  same patterns CI-green). The new production files were still written clean of
+  all of these; only the test-helper `contextcheck` (established pattern) and the
+  version-specific noise remain, matching Phase 0.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/...` — pass (exit 0; also `-tags
+  test_db_postgres`).
+- `GOWORK=off go test ./wallet/internal/...` — pass (spike vector: boundary
+  check, forced callback retry + operation replay idempotency, no-change-before-
+  commit, ambiguous-resolved-by-reread, gate linearizability, stale reload).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/` (incl. the spike
+  linearizability test) — pass.
+- `gofmt -s` clean; new production files report zero golangci findings under
+  local v2.12.2 (modulo the version noise above).
+- No `sqlstore.Queries`, SQL, sqlc, or adapter changes — spike is additive Go
+  over existing Phase 0 building blocks.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

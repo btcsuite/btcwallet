@@ -47,4 +47,11 @@ var (
 	// rejected because the plan was missing or no longer in the state the
 	// transition requires, for example consuming a plan that is not reserved.
 	ErrReservationConflict = errors.New("funding reservation conflict")
+
+	// ErrAmbiguousCommit indicates a semantic runtime commit whose durable
+	// outcome is unknown to the caller: the transaction may or may not have
+	// landed. The caller must resolve it by rereading durable state rather
+	// than blindly repeating the operation, since a repeat of a landed commit
+	// would either double-apply or fail an optimistic guard.
+	ErrAmbiguousCommit = errors.New("ambiguous runtime commit")
 )

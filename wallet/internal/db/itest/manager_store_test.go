@@ -109,6 +109,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("funding store", func(t *testing.T) {
 		testFundingStore(t, harness)
 	})
+	t.Run("spike store", func(t *testing.T) {
+		testSpikeStore(t, harness)
+	})
 }
 
 // testWtxmgrCompatibility verifies the complete wtxmgr surface against one SQL
