@@ -162,6 +162,55 @@ type RuntimeStore interface {
 	// through the semantic runtime contract rather than the low-level
 	// PersistenceStore boundary. It never mutates state.
 	LoadManagerSnapshot(ctx context.Context) (ManagerSnapshot, error)
+
+	// CommitScanResults commits one prepared recovery scan batch atomically:
+	// the discovered addresses, the mined and unmined transaction incidences
+	// with their credits and spends, the sticky address-usage marks, the block
+	// rows, the branch-index horizon advances, and the wallet synced-tip
+	// advance, all in one short transaction. The batch is fully prepared, so no
+	// chain I/O, derivation, or parsing happens inside the transaction. It
+	// advances the synced tip through an optimistic compare-and-swap against the
+	// request's expected base tip and advances each branch index through a
+	// compare-and-swap against its expected index.
+	//
+	// It returns ErrStaleTip when the durable synced tip no longer matches the
+	// expected base tip, ErrStaleAccountIndex when a branch's expected index no
+	// longer matches, and ErrAmbiguousCommit when the durable outcome is unknown
+	// and the caller must resolve it with a durable reread. A retry that reuses
+	// the request's operation id is served from the journal instead of
+	// reapplying the batch.
+	CommitScanResults(ctx context.Context,
+		req CommitScanResultsRequest) (CommitScanResultsResult, error)
+
+	// LookupScanResults reads a previously committed scan batch from the
+	// operation journal by its operation id, resolving an ambiguous commit
+	// without reapplying the batch. The boolean is false when no committed
+	// batch exists for the id; a backend without a journal always reports false.
+	LookupScanResults(ctx context.Context,
+		operationID []byte) (CommitScanResultsResult, bool, error)
+
+	// CommitWalletRewind reconciles the wallet back to a target block after a
+	// reorg or startup rollback: it verifies the detached tip, atomically
+	// reconciles the transaction incidences, credits, and spends above the
+	// target, and moves the synced tip back to the target block, all in one
+	// short transaction. It is guarded by an optimistic compare-and-swap against
+	// the request's expected current tip.
+	//
+	// It returns ErrStaleTip when the durable synced tip no longer matches the
+	// expected tip, and ErrAmbiguousCommit when the durable outcome is unknown
+	// and the caller must resolve it with a durable reread. A retry that reuses
+	// the request's operation id is served from the journal instead of
+	// reapplying the rewind.
+	CommitWalletRewind(ctx context.Context,
+		req CommitWalletRewindRequest) (CommitWalletRewindResult, error)
+
+	// LookupWalletRewind reads a previously committed wallet rewind from the
+	// operation journal by its operation id, resolving an ambiguous commit
+	// without reapplying the rewind. The boolean is false when no committed
+	// rewind exists for the id; a backend without a journal always reports
+	// false.
+	LookupWalletRewind(ctx context.Context,
+		operationID []byte) (CommitWalletRewindResult, bool, error)
 }
 
 // ReserveBranchIndexRequest is the prepared input to a branch-index

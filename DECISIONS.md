@@ -1920,3 +1920,156 @@ scan batching does not.
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 3a: scan-batch + rewind store ops
+
+Adds the recovery vertical's two batch semantic operations to the runtime layer,
+driven by the `runtime.Coordinator`: `CommitScanResults` (apply a prepared,
+deterministic scan batch atomically) and `CommitWalletRewind` (reconcile the
+wallet back to a target block after a reorg or startup rollback). This is the
+store-op layer only; the recovery-flow/syncer wiring is the next increment (3b)
+and the chain itest is 3c. Built solely on the salvage foundation; the
+`wallet-default-sqlite` branch was not consulted.
+
+### CommitScanResults batch shape + guard composition
+
+- The neutral contract (`wallet/internal/db/scan.go`) is
+  `db.CommitScanResultsRequest`: expected base tip, new tip, block rows,
+  `[]BranchHorizon` (branch-index horizon advances), `[]PreparedAddress`
+  (reusing the 2A1 discovered-address rows), `[]ScanTransaction` (each a
+  `*wtxmgr.TxRecord` + optional `*wtxmgr.BlockMeta` + `[]ScanCredit`),
+  `[]AddressUse` (sticky usage marks), version `Guards`, and an operation id.
+  Every field is prepared outside the write transaction; no chain I/O,
+  derivation, or parsing happens inside it.
+- The commit (`sqlstore.commitScanResults`) fails fast on the guards, then
+  applies the batch, in one `RuntimeUpdate` transaction and one journal entry:
+  version `ApplyGuards` → each branch horizon `AdvanceBranchIndex`
+  (`ErrStaleAccountIndex`) → `PutBlock` every batch block and the new tip →
+  `AdvanceSyncedTip` compare-and-swap base→new tip (`ErrStaleTip`) → insert
+  addresses/transactions/credits/usage marks → `RecordCommittedOperation`. The
+  CAS guards run before any address or transaction row is written, so a stale
+  caller rolls the whole transaction back with nothing committed.
+- **The tip advance is a pure reference-swap CAS, not a single-block advance**
+  (unlike `AdvanceWalletTip`). A scan batch spans the whole scanned range, so
+  the guard is the optimistic CAS on the expected base tip against the durable
+  synced block; contiguity/ancestry is validated during preparation by the
+  syncer (3b). Both backends deliberately skip the incremental predecessor
+  guard: SQL uses the raw `AdvanceWalletSyncedTo` CAS (which only swaps the
+  synced-block reference); KV reads the sync state, guards `SyncedTo == base`,
+  then `PutSyncState` with the new synced block, which is documented to record
+  the block and swap the reference without the predecessor check that
+  `SetSyncedTo` applies. This keeps the two backends observably identical for a
+  multi-block batch.
+
+### How credits/incidences/spends compose from the #1295 primitives
+
+- **No new SQL queries were needed.** The whole credit/incidence/spend/horizon/
+  block/tip write path composes from existing building blocks, so `make sqlc`
+  was not run and no schema changed (like Phases 1A/2B). The scan commit binds a
+  `txStore` (new `RuntimeStore.tx()` helper, threading the store's
+  `coinbaseMaturity` into the runtime store) and an `addrStore`
+  (`RuntimeStore.addr()`) to the same transaction queries and reuses:
+  `InsertTxCheckIfExists` (mined/unmined incidence, block materialization,
+  unmined promotion, mined-conflict removal, and `recordMinedSpends`), `AddCredit`
+  (credit + active-incidence), `PutAddress`, `MarkAddressUsed`,
+  `AdvanceBranchIndex`, and `PutBlock`. Credit spends are therefore recorded
+  automatically inside `InsertTxCheckIfExists` for a mined transaction that spends
+  a wallet credit added earlier in the same batch (verified by the "credit spend
+  within batch" case: the funding credit becomes spent and only the spending
+  tx's own credit stays unspent).
+- **The credit/incidence write path was NOT harder than expected on SQL** — the
+  #1295 primitives dropped in directly. The two wrinkles were on the KV side
+  (scope findings below).
+
+### CommitWalletRewind reconciliation
+
+- `db.CommitWalletRewindRequest` carries the expected current tip (the block
+  being detached), the target block to rewind to, version `Guards`, and an
+  operation id. The commit verifies the detached tip and reconciles the sync
+  state in one CAS (`AdvanceSyncedTip` expected→target, `ErrStaleTip`), then rolls
+  back every mined incidence above the target through the shared
+  `txStore.Rollback` / `wtxmgr.Store.Rollback` (detach surviving incidences to
+  the unmined set, remove coinbase incidences and descendants, clear credit
+  spends), then journals. It reuses the existing rollback primitives verbatim; no
+  new removal query was written. Idempotency is by full re-preparation (a rewind
+  re-prepared from the now-current tip to the same target is a no-op) plus, on
+  SQL, journal replay (a retry with the same operation id returns the committed
+  result even after the tip already moved, instead of `ErrStaleTip`).
+
+### Coordinator, events, and journal facts
+
+- `runtime.Coordinator.CommitScan`/`CommitRewind` run the shared `runGated`
+  protocol (`ErrStaleTip` staleErr, `LookupScanResults`/`LookupWalletRewind`
+  ambiguous-resolve, tip reload). On a successful scan the coordinator publishes
+  the new tip and every advanced horizon's final index to its caches; a rewind
+  publishes the target tip.
+- Events are materialized once, in the neutral package
+  (`db.ScanResultEvents` = one `relevant-tx` event per committed incidence then a
+  `block-connected` event; rewind emits one `block-disconnected` event), so both
+  backends build byte-identical events and identical event ids by construction —
+  the observable-parity property. The block codec was generalized to the shared
+  `EncodeBlockRef`/`DecodeBlockRef` (the wallet-tip, block-connected, and
+  block-disconnected payloads all share it).
+- SQL journal replay stores a leading `committed-tip` result fact followed by one
+  fact per event, uniform across scan and rewind; a replay decodes the tip and
+  rebuilds the events with the same deterministic ids and `Replayed = true`. KV
+  keeps no journal (`Lookup*` are `found=false` no-ops), so operation-replay-by-id
+  is SQL-only and excluded from the parity vector, exactly as Phase 1B
+  established.
+
+### Scope ripples / judgment calls
+
+- **KV needed the `*wtxmgr.Store` injected.** The KV runtime store binds the
+  address manager through the bucket-free `BindManagerReadWriteStore`, but the
+  transaction manager still needs a `*wtxmgr.Store` for the incidence, credit,
+  spend, and rollback logic, so `kvdb.NewRuntimeStore(db, txStore)` gained a
+  second parameter (the one existing caller, the itest harness, was updated). Its
+  scan/rewind commit runs one `walletdb.Update` binding both the `waddrmgr` and
+  `wtxmgr` buckets.
+- **KV horizon apply must re-read per horizon.** SQL's `AdvanceBranchIndex`
+  updates a single branch column, so two horizons on the same account (external +
+  internal) are independent. The KV `SetAccountIndexes` writes both columns at
+  once, so applying two same-account horizons requires re-reading the account
+  between them to preserve the sibling branch's just-written value; the guards are
+  still checked up front against the original state.
+- **`req.Blocks` is SQL-oriented.** SQL records each batch block in the shared
+  `blocks` table; KV records blocks implicitly (via the transactions' `BlockMeta`
+  and the tip's `PutSyncState`) and ignores standalone empty blocks, since blocks
+  are not a separately addressable relation there. This is an internal
+  representation difference, not observable through the `BlockRef`-by-hash
+  contract, so parity holds.
+- **Recent-block pruning is deferred.** The scan tip advance does not prune stale
+  sync blocks (the legacy per-tip `pruneStaleSyncBlock`); a multi-block batch
+  makes several heights stale at once, and retention belongs with the syncer
+  wiring (3b). Both backends skip it identically.
+
+### Nothing blocking 3b
+
+The store-op layer is complete: a scan batch and a rewind commit atomically with
+their guards and materialized events across KV, SQLite, and PostgreSQL. 3b (the
+recovery-flow/syncer wiring) can build on these ops plus `LoadManagerSnapshot`
+(watch-set reconstruction) and the Coordinator's tip/branch caches; it owns
+ancestry validation during preparation, per-batch scan-session identity, and
+recent-block retention.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/... ./waddrmgr/` — pass (exit 0).
+- `GOWORK=off go test ./wallet/internal/...` — pass (scan atomic commit + parity,
+  credit spend within batch, unmined incidence, partial-failure rollback, stale
+  base tip, stale branch index, rewind reconcile + idempotent on KV and SQLite;
+  SQL-only journal vector: forced retry, operation replay, ambiguous resolve,
+  rewind replay).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/ ./wallet/internal/runtime/`
+  — pass.
+- `GOWORK=off go test -tags test_db_postgres ./wallet/internal/db/itest/ -run
+  TestPostgresManagerStore` — pass (full scan + rewind vector on real
+  PostgreSQL).
+- No `make sqlc`, SQL, or adapter query changes — the batch ops compose existing
+  #1295 and Phase 0B building blocks. `gofmt -s` clean on all new/edited files.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

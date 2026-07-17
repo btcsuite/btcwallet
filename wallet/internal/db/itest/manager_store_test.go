@@ -100,6 +100,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("manager snapshot", func(t *testing.T) {
 		testManagerSnapshot(t, harness)
 	})
+	t.Run("scan store", func(t *testing.T) {
+		testScanStore(t, harness)
+	})
 
 	// SQL-only transaction-incidence vector: depends on the SQL fixture
 	// schema, so it is skipped for the KV backend.
@@ -136,6 +139,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	})
 	t.Run("semantic tip", func(t *testing.T) {
 		testSemanticTip(t, harness)
+	})
+	t.Run("scan journal", func(t *testing.T) {
+		testScanJournal(t, harness)
 	})
 }
 

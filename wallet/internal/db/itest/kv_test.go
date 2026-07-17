@@ -34,6 +34,7 @@ type kvWallet struct {
 	dbPath string
 	db     walletdb.DB
 	mgr    *waddrmgr.Manager
+	txs    *wtxmgr.Store
 	store  db.Store
 }
 
@@ -124,6 +125,7 @@ func (b *kvBackend) openWallet(t *testing.T, dbPath string, create bool,
 		dbPath: dbPath,
 		db:     wdb,
 		mgr:    mgr,
+		txs:    txs,
 		store:  kvdb.NewStore(wdb, mgr, txs),
 	}
 }
@@ -188,7 +190,9 @@ func TestKVManagerStore(t *testing.T) {
 		return backend.wallets[walletID].store
 	}
 	harness.newRuntimeStore = func(walletID int64) db.RuntimeStore {
-		return kvdb.NewRuntimeStore(backend.wallets[walletID].db)
+		w := backend.wallets[walletID]
+
+		return kvdb.NewRuntimeStore(w.db, w.txs)
 	}
 
 	testManagerStore(t, harness)

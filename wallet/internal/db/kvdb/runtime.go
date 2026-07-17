@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
 // runtimeStore implements the semantic walletstore.RuntimeStore over walletdb
@@ -25,6 +26,12 @@ import (
 // stale and guard signals are internal here and never differ observably.
 type runtimeStore struct {
 	db walletdb.DB
+
+	// txStore is the transaction manager the scan and rewind operations bind
+	// to the wtxmgr bucket, so they reuse the same incidence, credit, spend,
+	// and rollback logic as the legacy store. The index, account, tip, and
+	// snapshot operations do not need it.
+	txStore *wtxmgr.Store
 }
 
 // Compile-time assertion that the KV runtime store implements the neutral
@@ -33,11 +40,15 @@ var _ walletstore.RuntimeStore = (*runtimeStore)(nil)
 
 // NewRuntimeStore constructs a semantic RuntimeStore over a walletdb database.
 // It binds the legacy address-manager bucket for each operation, so it composes
-// with the existing managers without a separate schema.
+// with the existing managers without a separate schema. The transaction store
+// is bound to the wtxmgr bucket by the scan and rewind operations; the other
+// operations ignore it and it may be nil for a store that never runs them.
 //
 //nolint:ireturn // The runtime contract is returned as its neutral interface.
-func NewRuntimeStore(db walletdb.DB) walletstore.RuntimeStore {
-	return &runtimeStore{db: db}
+func NewRuntimeStore(db walletdb.DB,
+	txStore *wtxmgr.Store) walletstore.RuntimeStore {
+
+	return &runtimeStore{db: db, txStore: txStore}
 }
 
 // branchNextIndex returns the account's next index for one branch.

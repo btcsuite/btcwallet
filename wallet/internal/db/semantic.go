@@ -115,12 +115,22 @@ type Guards struct {
 	ExpectedSecretVersion *int64
 }
 
-// walletTipPayloadLen is the byte length of a wallet-tip event payload: a
-// big-endian height, the 32-byte header hash, and a big-endian Unix timestamp.
-const walletTipPayloadLen = 4 + chainhash.HashSize + 8
+// blockRefPayloadLen is the byte length of a canonical block-reference payload:
+// a big-endian height, the 32-byte header hash, and a big-endian Unix
+// timestamp. The wallet-tip, block-connected, and block-disconnected events all
+// share it, so their payloads round-trip through the one block codec.
+const blockRefPayloadLen = 4 + chainhash.HashSize + 8
 
 // WalletTipAdvancedKind is the Kind of the event a wallet-tip advance emits.
 const WalletTipAdvancedKind = "wallet-tip-advanced"
+
+// BlockConnectedKind is the Kind of the event a scan batch emits for the block
+// its committed tip advanced to.
+const BlockConnectedKind = "block-connected"
+
+// BlockDisconnectedKind is the Kind of the event a wallet rewind emits for the
+// block it detached from the wallet's chain.
+const BlockDisconnectedKind = "block-disconnected"
 
 // DeriveEventID derives an event's stable identity from its kind and canonical
 // payload. It is the single derivation both backends use, so a given kind and
@@ -141,7 +151,7 @@ func DeriveEventID(kind string, payload []byte) EventID {
 // SQL and KV backends build a byte-identical payload and therefore an identical
 // event identity for the same committed tip.
 func WalletTipEvent(tip BlockRef) Event {
-	payload := encodeWalletTip(tip)
+	payload := EncodeBlockRef(tip)
 
 	return Event{
 		ID:      DeriveEventID(WalletTipAdvancedKind, payload),
@@ -150,42 +160,76 @@ func WalletTipEvent(tip BlockRef) Event {
 	}
 }
 
-// encodeWalletTip packs a block reference into the canonical wallet-tip payload.
-func encodeWalletTip(tip BlockRef) []byte {
-	payload := make([]byte, walletTipPayloadLen)
+// BlockConnectedEvent builds the fully materialized post-commit event a scan
+// batch emits for the block its committed tip advanced to. Both backends derive
+// it from the same block payload, so the event identity matches across backends
+// and across a journal replay.
+func BlockConnectedEvent(block BlockRef) Event {
+	payload := EncodeBlockRef(block)
 
-	//nolint:gosec // A synced block height is non-negative; the round trip is
-	// exact.
-	binary.BigEndian.PutUint32(payload[0:4], uint32(tip.Height))
-	copy(payload[4:4+chainhash.HashSize], tip.Hash[:])
+	return Event{
+		ID:      DeriveEventID(BlockConnectedKind, payload),
+		Kind:    BlockConnectedKind,
+		Payload: payload,
+	}
+}
+
+// BlockDisconnectedEvent builds the fully materialized post-commit event a
+// wallet rewind emits for the block it detached from the wallet's chain.
+func BlockDisconnectedEvent(block BlockRef) Event {
+	payload := EncodeBlockRef(block)
+
+	return Event{
+		ID:      DeriveEventID(BlockDisconnectedKind, payload),
+		Kind:    BlockDisconnectedKind,
+		Payload: payload,
+	}
+}
+
+// EncodeBlockRef packs a block reference into its canonical payload: a
+// big-endian height, the 32-byte header hash, and a big-endian Unix timestamp.
+// It is the single block codec both backends use, so a block-carrying event or
+// durable result fact is byte-identical across backends.
+func EncodeBlockRef(block BlockRef) []byte {
+	payload := make([]byte, blockRefPayloadLen)
+
+	//nolint:gosec // A block height is non-negative; the round trip is exact.
+	binary.BigEndian.PutUint32(payload[0:4], uint32(block.Height))
+	copy(payload[4:4+chainhash.HashSize], block.Hash[:])
 
 	//nolint:gosec // A block timestamp is a positive Unix second.
 	binary.BigEndian.PutUint64(
-		payload[4+chainhash.HashSize:], uint64(tip.Timestamp.Unix()),
+		payload[4+chainhash.HashSize:], uint64(block.Timestamp.Unix()),
 	)
 
 	return payload
 }
 
-// DecodeWalletTip reconstructs the block reference from a canonical wallet-tip
-// payload. It is the inverse of the encoding WalletTipEvent uses, so a backend
-// that stores the payload as a durable result fact can rebuild the identical
-// tip and event on a replay.
-func DecodeWalletTip(payload []byte) (BlockRef, error) {
-	if len(payload) != walletTipPayloadLen {
-		return BlockRef{}, fmt.Errorf("wallet-tip payload is %d bytes, "+
-			"want %d", len(payload), walletTipPayloadLen)
+// DecodeBlockRef reconstructs a block reference from its canonical payload. It
+// is the inverse of EncodeBlockRef, so a backend that stores the payload as a
+// durable result fact rebuilds the identical block and event on a replay.
+func DecodeBlockRef(payload []byte) (BlockRef, error) {
+	if len(payload) != blockRefPayloadLen {
+		return BlockRef{}, fmt.Errorf("block-ref payload is %d bytes, "+
+			"want %d", len(payload), blockRefPayloadLen)
 	}
 
-	var tip BlockRef
+	var block BlockRef
 
-	//nolint:gosec // The height round-trips the value encodeWalletTip wrote.
-	tip.Height = int32(binary.BigEndian.Uint32(payload[0:4]))
-	copy(tip.Hash[:], payload[4:4+chainhash.HashSize])
+	//nolint:gosec // The height round-trips the value EncodeBlockRef wrote.
+	block.Height = int32(binary.BigEndian.Uint32(payload[0:4]))
+	copy(block.Hash[:], payload[4:4+chainhash.HashSize])
 
-	//nolint:gosec // The timestamp round-trips the value encodeWalletTip wrote.
+	//nolint:gosec // The timestamp round-trips the value EncodeBlockRef wrote.
 	seconds := int64(binary.BigEndian.Uint64(payload[4+chainhash.HashSize:]))
-	tip.Timestamp = time.Unix(seconds, 0)
+	block.Timestamp = time.Unix(seconds, 0)
 
-	return tip, nil
+	return block, nil
+}
+
+// DecodeWalletTip reconstructs a block reference from a canonical wallet-tip
+// payload. It is retained for the wallet-tip advance callers and delegates to
+// the shared block codec.
+func DecodeWalletTip(payload []byte) (BlockRef, error) {
+	return DecodeBlockRef(payload)
 }

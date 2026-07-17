@@ -155,16 +155,22 @@ type RuntimeStore struct {
 	// The runtime view is scoped to the transaction callback that created it.
 	//
 	//nolint:containedctx // Domain methods intentionally omit backend context.
-	ctx      context.Context
-	walletID int64
-	queries  Queries
+	ctx              context.Context
+	walletID         int64
+	coinbaseMaturity int32
+	queries          Queries
 }
 
 // newRuntimeStore binds a runtime store to one transaction's queries.
 func (s *Store) newRuntimeStore(ctx context.Context,
 	queries Queries) *RuntimeStore {
 
-	return &RuntimeStore{ctx: ctx, walletID: s.walletID, queries: queries}
+	return &RuntimeStore{
+		ctx:              ctx,
+		walletID:         s.walletID,
+		coinbaseMaturity: s.coinbaseMaturity,
+		queries:          queries,
+	}
 }
 
 // RuntimeView executes body against a runtime store in a read-only SQL
