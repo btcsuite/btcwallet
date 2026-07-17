@@ -30,6 +30,13 @@ type Querier interface {
 	// exist. Zero affected rows means the caller's expected tip was stale and no
 	// advance was made.
 	AdvanceWalletSyncedTo(ctx context.Context, arg AdvanceWalletSyncedToParams) (int64, error)
+	// AllocateAccountNumber advances the scope's last allocated account to
+	// new_account, but only while it still equals expected_account, so allocating a
+	// new account number is an optimistic compare-and-swap. The absent last-account
+	// sentinel is stored as NULL, so the guard coalesces NULL to the sentinel value
+	// 4294967295. It affects no row when the scope is missing or the expected value
+	// no longer matches.
+	AllocateAccountNumber(ctx context.Context, arg AllocateAccountNumberParams) (int64, error)
 	// BumpHistoryEpoch advances the history epoch only while it still equals the
 	// expected value. Zero affected rows means the snapshot was stale.
 	BumpHistoryEpoch(ctx context.Context, arg BumpHistoryEpochParams) (int64, error)

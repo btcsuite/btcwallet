@@ -94,6 +94,16 @@ type Coordinator struct {
 	// allocation once warm and is accessed only while holding gate.
 	cache map[BranchKey]uint32
 
+	// lastAccount maps a key scope to its cached last allocated account,
+	// authoritative for local account-number allocation once warm and
+	// accessed only while holding gate. It stands in for the manager's account
+	// map, which the live wallet integrates in Phase 2B.
+	lastAccount map[waddrmgr.KeyScope]uint32
+
+	// scopes is the set of key scopes known to exist, published after a scope
+	// is created. It is accessed only while holding gate.
+	scopes map[waddrmgr.KeyScope]struct{}
+
 	// tip is the wallet's cached synced tip, authoritative once tipSet is
 	// true, accessed only while holding gate.
 	tip    walletstore.BlockRef
@@ -134,9 +144,11 @@ func WithNotifier(notifier func([]walletstore.Event)) Option {
 // New constructs a Coordinator over a semantic runtime store.
 func New(store walletstore.RuntimeStore, opts ...Option) *Coordinator {
 	c := &Coordinator{
-		gate:  &sync.RWMutex{},
-		store: store,
-		cache: make(map[BranchKey]uint32),
+		gate:        &sync.RWMutex{},
+		store:       store,
+		cache:       make(map[BranchKey]uint32),
+		lastAccount: make(map[waddrmgr.KeyScope]uint32),
+		scopes:      make(map[waddrmgr.KeyScope]struct{}),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -318,12 +330,17 @@ func (c *Coordinator) AdvanceTip(ctx context.Context,
 }
 
 // runGated runs one semantic operation under the exclusive mutation gate,
-// following the Cache And Commit Protocol so both operations share one audited
+// following the Cache And Commit Protocol so every operation shares one audited
 // implementation. commit runs the durable operation; on an ambiguous commit
 // resolve rereads durable state without repeating the mutation; on a conflict
 // matching staleErr reload refreshes the cache; publish records the committed
 // result into the cache and returns the events to deliver. The gate is held
 // across commit and publication and released before notification.
+//
+// resolve may be nil for a naturally idempotent operation that keeps no
+// operation journal to reread; an ambiguous commit then reloads the affected
+// cache domain and surfaces ErrAmbiguousCommit, so the caller re-prepares and
+// re-runs the idempotent operation rather than repeating a non-idempotent one.
 func runGated[R any](c *Coordinator, ctx context.Context, staleErr error,
 	commit func() (R, error), resolve func() (R, bool, error),
 	reload func(), publish func(R) []walletstore.Event) (R, error) {
@@ -337,6 +354,13 @@ func runGated[R any](c *Coordinator, ctx context.Context, staleErr error,
 	// The durable outcome is unknown: resolve it by durable reread while still
 	// holding the gate, never by repeating the mutation.
 	case errors.Is(err, walletstore.ErrAmbiguousCommit):
+		if resolve == nil {
+			reload()
+			c.gate.Unlock()
+
+			return zero, walletstore.ErrAmbiguousCommit
+		}
+
 		resolved, found, rerr := resolve()
 		if rerr != nil {
 			c.gate.Unlock()
@@ -355,8 +379,8 @@ func runGated[R any](c *Coordinator, ctx context.Context, staleErr error,
 
 	// A cross-process writer moved the durable record: reload the cache from
 	// durable state and let the caller re-prepare. The cache is otherwise
-	// unchanged.
-	case errors.Is(err, staleErr):
+	// unchanged. A nil staleErr means the operation has no stale conflict.
+	case staleErr != nil && errors.Is(err, staleErr):
 		reload()
 		c.gate.Unlock()
 
@@ -372,6 +396,7 @@ func runGated[R any](c *Coordinator, ctx context.Context, staleErr error,
 	// Publish the committed result into the cache while holding the gate, then
 	// release it before delivering notifications.
 	events := publish(result)
+
 	c.gate.Unlock()
 
 	c.notify(ctx, events)
@@ -388,6 +413,7 @@ func (c *Coordinator) notify(ctx context.Context, events []walletstore.Event) {
 
 	fp := walletstore.FailpointsFromContext(ctx)
 	fp.RunBeforeNotify()
+
 	if fp.Dropped() {
 		return
 	}

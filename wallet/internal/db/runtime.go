@@ -43,6 +43,12 @@ var (
 	// preparing the allocation again.
 	ErrStaleAccountIndex = errors.New("stale account branch index")
 
+	// ErrStaleLastAccount indicates a guarded account-number allocation failed
+	// because the scope's last allocated account no longer matched the
+	// caller's expected value, for example a concurrent account creation. The
+	// caller rereads the last account before preparing the allocation again.
+	ErrStaleLastAccount = errors.New("stale last allocated account")
+
 	// ErrStaleTip indicates a guarded wallet-tip advance failed because the
 	// wallet's current synced block no longer matched the caller's expected
 	// tip, for example a concurrent advance or a reorg. The caller rereads the

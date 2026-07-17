@@ -450,6 +450,13 @@ type Queries interface {
 	AdvanceBranchIndex(ctx context.Context, walletID int64,
 		scope waddrmgr.KeyScope, account, branch, expected,
 		next uint32) (int64, error)
+	// AllocateAccountNumber advances the scope's last allocated account to
+	// newAccount, but only while it still equals expected, returning the number
+	// of rows affected. Zero means the scope is missing or the expected value
+	// no longer matches. The absent last-account sentinel is compared as its
+	// numeric value.
+	AllocateAccountNumber(ctx context.Context, walletID int64,
+		scope waddrmgr.KeyScope, expected, newAccount uint32) (int64, error)
 	// AdvanceWalletSyncedTo advances the wallet's synced block from the block
 	// with expectedBlockHash to the block with newBlockHash, but only while
 	// the current synced block still matches expectedBlockHash. It returns the

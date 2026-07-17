@@ -74,3 +74,17 @@ WHERE wallet_id = ?;
 UPDATE key_scopes
 SET last_account_number = ?
 WHERE id = ? AND wallet_id = ?;
+
+-- name: AllocateAccountNumber :execrows
+-- AllocateAccountNumber advances the scope's last allocated account to
+-- new_account, but only while it still equals expected_account, so allocating a
+-- new account number is an optimistic compare-and-swap. The absent last-account
+-- sentinel is stored as NULL, so the guard coalesces NULL to the sentinel value
+-- 4294967295. It affects no row when the scope is missing or the expected value
+-- no longer matches.
+UPDATE key_scopes
+SET last_account_number = sqlc.arg('new_account')
+WHERE wallet_id = sqlc.arg('wallet_id')
+    AND purpose = sqlc.arg('purpose')
+    AND coin_type = sqlc.arg('coin_type')
+    AND coalesce(last_account_number, 4294967295) = sqlc.arg('expected_account');

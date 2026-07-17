@@ -42,6 +42,8 @@ type PersistenceStore = Store
 // version row, and an operation journal; the KV backend backs them with the
 // managers' natural records and Bolt's atomic single-writer transaction. Both
 // return the same observable facts and typed errors.
+//
+//nolint:interfacebloat // The semantic surface owns every runtime operation.
 type RuntimeStore interface {
 	// CurrentBranchIndex reads a durable snapshot of the account's next
 	// index for one branch. It is the prepare-phase read taken before the
@@ -98,6 +100,61 @@ type RuntimeStore interface {
 	// false.
 	LookupTipAdvance(ctx context.Context,
 		operationID []byte) (AdvanceTipResult, bool, error)
+
+	// CommitDerivedAddresses inserts the prepared derived addresses and
+	// advances the branch's next index from the request's expected index to
+	// its final index through an optimistic compare-and-swap, all in one
+	// durable transaction, so the address rows and the index advance become
+	// durable together. The final index accounts for skipped invalid children,
+	// so a blind reservation of the address count is insufficient. The unique
+	// derivation-path index rejects a duplicate scope/account/branch/index.
+	//
+	// It returns ErrStaleAccountIndex when the expected index no longer matches
+	// the durable value, and ErrAmbiguousCommit when the durable outcome is
+	// unknown and the caller must resolve it with a durable reread. A retry
+	// that reuses the request's operation id is served from the journal
+	// instead of inserting and advancing again.
+	CommitDerivedAddresses(ctx context.Context,
+		req CommitDerivedAddressesRequest) (
+		CommitDerivedAddressesResult, error)
+
+	// LookupDerivedAddresses reads a previously committed derived-address
+	// commit from the operation journal by its operation id, resolving an
+	// ambiguous commit without repeating the insert and advance. The boolean
+	// is false when no committed operation exists for the id; a backend
+	// without a journal always reports false.
+	LookupDerivedAddresses(ctx context.Context,
+		operationID []byte) (CommitDerivedAddressesResult, bool, error)
+
+	// CurrentLastAccount reads a durable snapshot of the scope's last allocated
+	// account. It is the prepare-phase read taken before an account allocation
+	// and returns waddrmgr.NoAccountAllocated for a scope that has never
+	// allocated an account. It never mutates state.
+	CurrentLastAccount(ctx context.Context,
+		scope waddrmgr.KeyScope) (uint32, error)
+
+	// EnsureScope creates the key scope if it is absent and is otherwise a
+	// no-op, so it is idempotent across retries and re-preparation. The result
+	// reports whether the scope was created.
+	EnsureScope(ctx context.Context, req EnsureScopeRequest) (
+		EnsureScopeResult, error)
+
+	// EnsureAccount ensures an account with the requested name exists in the
+	// scope. An existing account with that name is returned unchanged;
+	// otherwise the next account number is allocated through an optimistic
+	// compare-and-swap against the request's expected last account and the
+	// account is created at it. It returns ErrStaleLastAccount when the
+	// expected last account no longer matches the durable value, so the caller
+	// rereads it and re-prepares.
+	EnsureAccount(ctx context.Context, req EnsureAccountRequest) (
+		EnsureAccountResult, error)
+
+	// RenameAccount renames one account, rejecting a name already owned by a
+	// different account with waddrmgr.ErrDuplicateAccount and treating a rename
+	// to the account's own current name as a no-op. The name-index maintenance
+	// is atomic with the rename.
+	RenameAccount(ctx context.Context, req RenameAccountRequest) (
+		RenameAccountResult, error)
 }
 
 // ReserveBranchIndexRequest is the prepared input to a branch-index

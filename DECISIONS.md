@@ -1466,3 +1466,219 @@ the same exit gate for the reserve op through the new context seam.
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 2A1: address/account/index
+
+Adds the address-derivation, scope, account-allocation, and rename operations to
+the semantic runtime layer, driven by the `runtime.Coordinator`, following the
+Phase 1A/1B pattern (prepare outside the gate → gate → CAS commit → publish cache
+after commit → release). It reuses the Phase 0B branch-index CAS
+(`AdvanceBranchIndex`) and the derived-address derivation-path unique index, adds
+one new account-number CAS query, and shares one address-identity derivation with
+the real `waddrmgr` manager. Built solely on the salvage foundation; the
+`wallet-default-sqlite` branch was not consulted.
+
+### Derivation op design (`CommitDerivedAddresses`)
+
+- The neutral contract is `db.CommitDerivedAddressesRequest` (scope, account,
+  branch, `ExpectedIndex`, `FinalIndex`, `[]PreparedAddress`, operation id) →
+  `db.CommitDerivedAddressesResult` (embeds `CommittedFacts`; committed
+  addresses, `AllocatedStart`, `NextIndex`). A `db.PreparedAddress` carries the
+  legacy `AddressID` (the address's `ScriptAddress` bytes) plus the
+  `waddrmgr.AddressState`, so either backend persists it: the KV store keys its
+  legacy row by `AddressID`, the SQL store stores `sha256(AddressID)` in
+  `address_hash`. The derivation happens entirely in preparation, outside the
+  write transaction.
+- **The commit is CAS-first, then insert.** In one durable transaction it runs
+  the Phase 0B branch-index CAS `AdvanceBranchIndex(expected → final)`, then
+  inserts each prepared address, then journals the committed range (SQL). Running
+  the CAS before the inserts means a stale caller bails on `ErrStaleAccountIndex`
+  before touching the address table, so two instances racing the same index
+  produce one winner and one clean typed stale error rather than a raw
+  unique-constraint violation. A stale index rolls the whole transaction back, so
+  no address row is ever left dangling. The **unique scope/account/branch/index**
+  is enforced durably by the Phase 0B `uidx_addresses_derivation_path` partial
+  index (defence in depth; the CAS is the primary guard), and the **legacy
+  address identity** is the shared `sha256(ScriptAddress)` the existing addrStore
+  and KV store already compute.
+- **SQL journal integration (asymmetric).** Like the 1A/1B ops, the SQL commit
+  journals the operation, but stores only the range fact (allocated‖final, 8
+  bytes) — not the address rows, which are already durable. A replay or
+  ambiguous-commit reread (`LookupDerivedAddresses`) returns the committed range
+  with `Replayed = true` and an empty address list; the caller/manager reloads
+  the durable address rows during cache reconstruction. KV keeps no journal
+  (`LookupDerivedAddresses` is a `found=false` no-op), so operation-replay-by-id
+  is SQL-only and is deliberately excluded from the observable-parity vector,
+  exactly as Phase 1B established for the reserve/tip ops.
+- **Coordinator.** `DeriveNextAddresses(key, prepare, opID)` reads the expected
+  next index (warm cache or durable snapshot), runs the caller's `AddressPreparer`
+  outside the gate, then commits under the gate through the shared `runGated`
+  helper. Under the gate it revalidates that the cache still equals the expected
+  index the rows were derived for; if it moved, it returns `ErrStaleAccountIndex`
+  (the prepared rows are stale) and reloads the cache, so the caller re-derives
+  from the fresh index rather than committing rows for the wrong range. The new
+  next index is published to the branch cache only after the durable commit.
+
+### ErrInvalidChild range accounting
+
+- A blind reserve-N is wrong because an invalid child (`hdkeychain.ErrInvalidChild`)
+  consumes an index without producing an address, so the consumed range can
+  exceed the address count. The derivation preparer therefore returns both the
+  prepared rows and an explicit `FinalIndex` (one past the last consumed child),
+  and the CAS advances the branch to that `FinalIndex` in one step, so the skipped
+  index is accounted for and never re-derived.
+- The real accounting lives in `waddrmgr.deriveChainedAddresses` (a faithful copy
+  of the manager's `nextAddresses` loop): it derives valid children starting at
+  the expected index, incrementing the index and continuing on
+  `ErrInvalidChild`, and returns the addresses plus the next index. A `childDeriver`
+  seam lets `waddrmgr/derive_test.go` inject an invalid child at a known index and
+  assert the exact accounting: start 5, count 3, invalid at 6 ⇒ addresses at
+  {5,7,8}, next = 9. The itest exit gate proves the same end-to-end through the
+  commit: a gapped preparer (indices {5,7}, final 8) advances the durable branch
+  to 8 (past the skipped 6) and persists exactly the two rows at 5 and 7, on KV,
+  SQLite, and PostgreSQL. `CommitDerivedAddresses` also validates that every
+  prepared index lies in `[ExpectedIndex, FinalIndex)` before any durable work.
+
+### Real-waddrmgr-integration boundary (key scope-exploration finding)
+
+The realistic, clean boundary is: **the address-identity derivation is refactored
+to be shared with the real manager; the atomic commit + index CAS is the runtime
+op; the loaded/unlocked-manager plumbing is deferred to Phase 2B.** Concretely:
+
+- **Routed / refactored now.** The per-type address-computation switch was
+  extracted verbatim from `newManagedAddressWithoutPrivKey` into the pure
+  `waddrmgr.deriveAddressFromPubKey(pubKey, compressed, addrType, params)`, and
+  `newManagedAddressWithoutPrivKey` now calls it — so the live manager and the
+  runtime preparation share **one** address-identity source and cannot diverge.
+  `waddrmgr.DeriveChainedAddresses` (the derivation loop) and
+  `runtime.ChainedAddressPreparer` (which turns derived identities into
+  `db.PreparedAddress` rows) are the production preparation path a real
+  `NextExternalAddresses`/`NextInternalAddresses` will call in 2B. The atomic
+  commit — insert rows + branch-index CAS + cache publication under the mutation
+  gate — is fully routed through `RuntimeStore.CommitDerivedAddresses` and the
+  Coordinator on both backends.
+- **Deferred to 2B (openable-wallet wiring).** A derived *chained* address row is
+  keyless in the salvage schema (the Phase 0B `addresses` CHECK requires
+  `address_type = 0` to store no key material; keys are re-derived on demand), so
+  the runtime op needs only the public identity. The parts that genuinely require
+  a fully loaded, unlocked `ScopedKeyManager` are **not** rewired here: obtaining
+  the account extended key from `loadAccountInfo` (decrypting `acctKeyPriv` when
+  unlocked, or using `acctKeyPub` when watch-only/locked), the address-schema /
+  lock-state resolution (`accountAddrType`), the in-memory `ManagedAddress`
+  construction with private-key encryption + `Validate`/re-derive, the
+  `deriveOnUnlock` queue, the disk read-back verification, and the `onCommit`
+  cache closure. The real `nextAddresses` cannot simply call
+  `CommitDerivedAddresses` until 2B constructs the manager over the SQL store;
+  the natural 2B seam is to split `nextAddresses` into a `deriveNextAddresses`
+  preparation (already mirrored by `DeriveChainedAddresses`) and a commit that
+  calls the runtime op. This split-not-rewrite boundary is the main scope finding:
+  the operation layer is complete and shares the identity computation, while the
+  manager-state plumbing stays with the manager for 2B.
+
+### Account/scope/rename CAS design
+
+- **`EnsureScope`** is idempotent by a natural existence check inside the
+  transaction (read `KeyScope`; create only when `ErrScopeNotFound`). No journal
+  and no CAS are needed; a concurrent duplicate simply observes the created scope.
+- **`EnsureAccount`** allocates the next account number through a new **last-account
+  compare-and-swap** query, `AllocateAccountNumber`, modelled directly on the
+  Phase 0B branch-index CAS: `UPDATE key_scopes SET last_account_number =
+  @new_account WHERE … AND coalesce(last_account_number, 4294967295) =
+  @expected_account`. The absent-account sentinel (`waddrmgr.NoAccountAllocated`,
+  the max uint32, stored as SQL `NULL`) is coalesced to its numeric value so the
+  first allocation (`expected = sentinel`, `new = 0`, via well-defined uint32
+  wrap-around in `db.NextAccountNumber`) is a normal CAS; a mismatch (zero rows) →
+  the new `db.ErrStaleLastAccount`. The op is idempotent by **name** (an existing
+  account with the requested name is returned unchanged, `Created = false`) and
+  allocates the number **before** writing the account row so a stale caller never
+  writes a row it does not own. It reuses the existing addrStore/KV `PutAccount`,
+  so the created account is byte-identical to one made through the low-level store.
+  KV enforces the same CAS as a natural guard: it re-reads the scope's
+  `LastAccount` and rejects a mismatch with `ErrStaleLastAccount`, so KV and SQL
+  are observably identical. The Coordinator caches the last account per scope and
+  publishes it only after a creating commit; on `ErrStaleLastAccount` it reloads
+  and the caller re-derives for the new number.
+- **`RenameAccount`** reuses the Phase 0A collision guard already in
+  `addrStore.RenameAccount` / KV `RenameAccount`: a name owned by a *different*
+  account is rejected with the typed `waddrmgr.ErrDuplicateAccount`, renaming to
+  the account's own current name is a permitted no-op, and the name index is
+  maintained atomically with the rename (the SQL `UNIQUE (scope_id,
+  account_name)` plus the pre-check; the KV name-index rewrite inside one
+  `walletdb.Update`). It runs under the mutation gate but takes no journal (the
+  rename is naturally idempotent).
+- **Coordinator generalization.** `runGated` was extended to accept a `nil`
+  resolve (a naturally idempotent op with no journal to reread): an ambiguous
+  commit then reloads the affected cache domain and surfaces
+  `ErrAmbiguousCommit`, and the stale-error branch is guarded so a `nil` staleErr
+  never matches. `EnsureScope`/`RenameAccount` pass `nil` staleErr + `nil`
+  resolve; `EnsureAccount` passes `ErrStaleLastAccount` + a last-account reload;
+  `DeriveNextAddresses` passes the full journal-backed resolve like the 1A/1B ops.
+
+### Exit gate
+
+- **Two instances cannot allocate the same address or account index.** SQL-only
+  concurrent tests race two Coordinators over two runtime stores backed by one
+  database (with a two-party barrier so both read the same expected value before
+  either commits): exactly one wins and the other gets the typed stale error
+  (`ErrStaleAccountIndex` for addresses, `ErrStaleLastAccount` for accounts),
+  then re-prepares and allocates a distinct value. Verified on SQLite and
+  PostgreSQL.
+- **Commit failure does not mutate caches.** A `db.Failpoints` before-commit
+  rollback leaves the durable index/last-account and the address rows unchanged
+  and never publishes the branch or last-account cache, for both derivation and
+  account allocation, on every backend. (The account/scope/rename ops consult the
+  before-commit seam directly via `beforeCommit`, since they take no callback
+  retry.)
+- **Invalid-child derivation consumes exactly the committed range.** Proven by
+  the `waddrmgr` unit test (injected invalid child) and the cross-backend itest
+  (gapped commit advances past the skipped index and persists only the derived
+  rows).
+- **Scope/account creation and rename pass the KV/SQL differential vector.** The
+  `address store` vector runs identically on KV, SQLite, and PostgreSQL, asserting
+  the same public results and typed errors, never inspecting the journal or
+  versions (the asymmetric boundary).
+
+### Scope ripples / judgment calls
+
+- **One new SQL query + sqlc regen.** `AllocateAccountNumber` (both dialects,
+  `:execrows`) is the only schema-adjacent addition; it needed `make sqlc`
+  (Docker-pinned v1.30.0), a `Queries` method, and both adapters. No migration or
+  schema change — it reuses the existing `key_scopes.last_account_number` column.
+- **`waddrmgr` refactor.** Extracting `deriveAddressFromPubKey` removed the
+  `txscript` import from `address.go` (its only uses moved to the new
+  `derive.go`); behaviour is byte-identical and the existing `waddrmgr` tests pass
+  unchanged.
+- **Account cache in the Coordinator is a stand-in.** The per-scope last-account
+  and known-scope caches model the manager's account map for the operation layer,
+  exactly as Phase 1A's toy next-index map stands in for the scoped-manager
+  caches the live wallet integrates in 2B.
+- **`db.NextAccountNumber` is shared** by both backends and the Coordinator so the
+  derivation preparation and the allocation always agree on the next number,
+  including the sentinel wrap-around.
+- **Tooling caution (recorded).** `make lint` runs `golangci-lint --fix`, which
+  rewrites the whole tree and can corrupt files; lint was verified with a
+  non-`--fix` `golangci-lint run` instead. New production files carry only the
+  established version-noise (lll on comment lines, wsl_v5, noinlineerr, ireturn,
+  revive) that Phase 0/1 files ship CI-green; `cyclop`/`exhaustive`/`interfacebloat`
+  were addressed with the repo's own nolint convention or a `gosec`-avoiding
+  counter.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/... ./waddrmgr/` — pass (exit 0).
+- `GOWORK=off go test ./waddrmgr/ ./wallet/internal/...` — pass (derivation
+  accounting, address-store vector on KV + SQLite, scope/account/rename, commit
+  failure, invalid-child range, stale reload).
+- `GOWORK=off go test -race ./wallet/internal/db/itest/ ./wallet/internal/runtime/`
+  — pass (concurrent allocation, commit/publish gate).
+- `GOWORK=off go test -tags test_db_postgres ./wallet/internal/db/itest/...` —
+  pass (full vector incl. concurrent address/account allocation on real
+  PostgreSQL).
+- `make sqlc` idempotent (pinned Docker v1.30.0); `gofmt -s` clean on all new and
+  edited files.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

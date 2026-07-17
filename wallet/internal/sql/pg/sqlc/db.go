@@ -39,6 +39,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.advanceWalletSyncedToStmt, err = db.PrepareContext(ctx, AdvanceWalletSyncedTo); err != nil {
 		return nil, fmt.Errorf("error preparing query AdvanceWalletSyncedTo: %w", err)
 	}
+	if q.allocateAccountNumberStmt, err = db.PrepareContext(ctx, AllocateAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query AllocateAccountNumber: %w", err)
+	}
 	if q.bumpHistoryEpochStmt, err = db.PrepareContext(ctx, BumpHistoryEpoch); err != nil {
 		return nil, fmt.Errorf("error preparing query BumpHistoryEpoch: %w", err)
 	}
@@ -382,6 +385,11 @@ func (q *Queries) Close() error {
 	if q.advanceWalletSyncedToStmt != nil {
 		if cerr := q.advanceWalletSyncedToStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing advanceWalletSyncedToStmt: %w", cerr)
+		}
+	}
+	if q.allocateAccountNumberStmt != nil {
+		if cerr := q.allocateAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing allocateAccountNumberStmt: %w", cerr)
 		}
 	}
 	if q.bumpHistoryEpochStmt != nil {
@@ -953,6 +961,7 @@ type Queries struct {
 	advanceExternalBranchIndexStmt      *sql.Stmt
 	advanceInternalBranchIndexStmt      *sql.Stmt
 	advanceWalletSyncedToStmt           *sql.Stmt
+	allocateAccountNumberStmt           *sql.Stmt
 	bumpHistoryEpochStmt                *sql.Stmt
 	bumpSecretVersionStmt               *sql.Stmt
 	bumpStateVersionStmt                *sql.Stmt
@@ -1069,6 +1078,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		advanceExternalBranchIndexStmt:      q.advanceExternalBranchIndexStmt,
 		advanceInternalBranchIndexStmt:      q.advanceInternalBranchIndexStmt,
 		advanceWalletSyncedToStmt:           q.advanceWalletSyncedToStmt,
+		allocateAccountNumberStmt:           q.allocateAccountNumberStmt,
 		bumpHistoryEpochStmt:                q.bumpHistoryEpochStmt,
 		bumpSecretVersionStmt:               q.bumpSecretVersionStmt,
 		bumpStateVersionStmt:                q.bumpStateVersionStmt,

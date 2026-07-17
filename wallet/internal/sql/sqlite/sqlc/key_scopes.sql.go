@@ -10,6 +10,43 @@ import (
 	"database/sql"
 )
 
+const AllocateAccountNumber = `-- name: AllocateAccountNumber :execrows
+UPDATE key_scopes
+SET last_account_number = ?1
+WHERE wallet_id = ?2
+    AND purpose = ?3
+    AND coin_type = ?4
+    AND coalesce(last_account_number, 4294967295) = ?5
+`
+
+type AllocateAccountNumberParams struct {
+	NewAccount      sql.NullInt64
+	WalletID        int64
+	Purpose         int64
+	CoinType        int64
+	ExpectedAccount sql.NullInt64
+}
+
+// AllocateAccountNumber advances the scope's last allocated account to
+// new_account, but only while it still equals expected_account, so allocating a
+// new account number is an optimistic compare-and-swap. The absent last-account
+// sentinel is stored as NULL, so the guard coalesces NULL to the sentinel value
+// 4294967295. It affects no row when the scope is missing or the expected value
+// no longer matches.
+func (q *Queries) AllocateAccountNumber(ctx context.Context, arg AllocateAccountNumberParams) (int64, error) {
+	result, err := q.exec(ctx, q.allocateAccountNumberStmt, AllocateAccountNumber,
+		arg.NewAccount,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.ExpectedAccount,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const CreateKeyScope = `-- name: CreateKeyScope :one
 INSERT INTO key_scopes (
     wallet_id,

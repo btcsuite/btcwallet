@@ -170,3 +170,21 @@ func (q *queryAdapter) AdvanceBranchIndex(ctx context.Context, walletID int64,
 		)
 	}
 }
+
+// AllocateAccountNumber advances the scope's last allocated account to
+// newAccount through an optimistic compare-and-swap against expected, returning
+// the number of rows affected. Zero means the scope is missing or the expected
+// value no longer matches.
+func (q *queryAdapter) AllocateAccountNumber(ctx context.Context, walletID int64,
+	scope waddrmgr.KeyScope, expected, newAccount uint32) (int64, error) {
+
+	return q.queries.AllocateAccountNumber(
+		ctx, sqlitedb.AllocateAccountNumberParams{
+			NewAccount:      sql.NullInt64{Int64: int64(newAccount), Valid: true},
+			WalletID:        walletID,
+			Purpose:         int64(scope.Purpose),
+			CoinType:        int64(scope.Coin),
+			ExpectedAccount: sql.NullInt64{Int64: int64(expected), Valid: true},
+		},
+	)
+}

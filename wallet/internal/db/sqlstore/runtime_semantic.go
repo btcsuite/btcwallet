@@ -78,7 +78,8 @@ func beforeStatement(ctx context.Context) error {
 func injectCommitFaults(ctx context.Context, attempt int) error {
 	fp := walletstore.FailpointsFromContext(ctx)
 
-	if err := fp.RunBeforeCommit(); err != nil {
+	err := fp.RunBeforeCommit()
+	if err != nil {
 		return err
 	}
 
@@ -94,6 +95,15 @@ func injectCommitFaults(ctx context.Context, attempt int) error {
 // walletstore.ErrAmbiguousCommit here to model an ambiguous commit.
 func afterCommit(ctx context.Context) error {
 	return walletstore.FailpointsFromContext(ctx).RunAfterCommit()
+}
+
+// beforeCommit applies the before-commit failpoint carried on ctx, if any, at
+// the end of a single-attempt operation's transaction body, so a test forces a
+// non-retryable rollback. Operations that run the executor's retry loop use
+// injectCommitFaults instead; the account, scope, and rename operations keep no
+// journal and take no callback retry, so they consult the seam directly.
+func beforeCommit(ctx context.Context) error {
+	return walletstore.FailpointsFromContext(ctx).RunBeforeCommit()
 }
 
 // CurrentBranchIndex reads a durable snapshot of the account's next index for

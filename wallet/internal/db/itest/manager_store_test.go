@@ -94,12 +94,19 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("semantic parity", func(t *testing.T) {
 		testSemanticParity(t, harness)
 	})
+	t.Run("address store", func(t *testing.T) {
+		testAddressStore(t, harness)
+	})
 
 	// SQL-only transaction-incidence vector: depends on the SQL fixture
 	// schema, so it is skipped for the KV backend.
 	if harness.kv != nil {
 		return
 	}
+
+	t.Run("concurrent allocation", func(t *testing.T) {
+		testAddressConcurrentAllocation(t, harness)
+	})
 	t.Run("rollback", func(t *testing.T) {
 		testRollback(t, harness)
 	})
@@ -694,6 +701,7 @@ func testSyncedToSemantics(t *testing.T, harness *managerStoreHarness) {
 		target := testBlock(2_000)
 
 		var syncErr error
+
 		err = store.Update(ctx, func(tx db.ReadWriteTx) error {
 			syncErr = tx.Addr().SetSyncedTo(&target)
 
@@ -788,6 +796,7 @@ func testSyncedToSemantics(t *testing.T, harness *managerStoreHarness) {
 		// referenced by a mined transaction.
 		staleUnref := int32(2_000_010)
 		staleRef := int32(2_000_020)
+
 		harness.putBlock(t, testBlock(staleUnref))
 		harness.putBlock(t, testBlock(staleRef))
 		harness.insertTransaction(
@@ -962,7 +971,8 @@ func testScriptPrivateKeyDeletion(t *testing.T,
 			},
 		}
 		for _, put := range puts {
-			if err := addr.PutAddress(put.id, put.state); err != nil {
+			err := addr.PutAddress(put.id, put.state)
+			if err != nil {
 				return err
 			}
 		}
@@ -1365,10 +1375,12 @@ func testAccountNameDedup(t *testing.T, harness *managerStoreHarness) {
 	store := harness.newStore(walletID)
 
 	scope := waddrmgr.KeyScopeBIP0084
+
 	const account = uint32(1)
 
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:      scope,
 			AddrSchema: waddrmgr.ScopeAddrMap[scope],
@@ -1417,6 +1429,7 @@ func testRenameAccountCollision(t *testing.T, harness *managerStoreHarness) {
 	store := harness.newStore(walletID)
 
 	scope := waddrmgr.KeyScopeBIP0084
+
 	const (
 		accountA = uint32(1)
 		accountB = uint32(2)
@@ -1424,6 +1437,7 @@ func testRenameAccountCollision(t *testing.T, harness *managerStoreHarness) {
 
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:      scope,
 			AddrSchema: waddrmgr.ScopeAddrMap[scope],
@@ -1431,6 +1445,7 @@ func testRenameAccountCollision(t *testing.T, harness *managerStoreHarness) {
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAccount(managerAccount(scope, accountA, "alpha"))
 		if err != nil {
 			return err
@@ -1520,6 +1535,7 @@ func testAddressRehome(t *testing.T, harness *managerStoreHarness) {
 	// Seed the scope and both accounts, then store the address under A.
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:      scope,
 			AddrSchema: waddrmgr.ScopeAddrMap[scope],
@@ -1527,10 +1543,12 @@ func testAddressRehome(t *testing.T, harness *managerStoreHarness) {
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAccount(managerAccount(scope, accountA, "account-a"))
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAccount(managerAccount(scope, accountB, "account-b"))
 		if err != nil {
 			return err
@@ -1597,6 +1615,7 @@ func testLastAccountSentinel(t *testing.T, harness *managerStoreHarness) {
 	// sentinel; a scope whose last account is zero stays distinct from it.
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:       sentinelScope,
 			AddrSchema:  waddrmgr.ScopeAddrMap[sentinelScope],
@@ -1669,6 +1688,7 @@ func testPartialWriteRollback(t *testing.T, harness *managerStoreHarness) {
 	// error, so the whole transaction must roll back.
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:      scope,
 			AddrSchema: waddrmgr.ScopeAddrMap[scope],
@@ -1676,10 +1696,12 @@ func testPartialWriteRollback(t *testing.T, harness *managerStoreHarness) {
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAccount(managerAccount(scope, account, "doomed"))
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAddress(addressID, waddrmgr.AddressState{
 			Scope:      scope,
 			Account:    account,
@@ -1734,6 +1756,7 @@ func testCloseReopen(t *testing.T, harness *managerStoreHarness) {
 
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
+
 		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
 			Scope:       scope,
 			AddrSchema:  waddrmgr.ScopeAddrMap[scope],
@@ -1742,6 +1765,7 @@ func testCloseReopen(t *testing.T, harness *managerStoreHarness) {
 		if err != nil {
 			return err
 		}
+
 		err = addr.PutAccount(managerAccount(scope, account, "persist"))
 		if err != nil {
 			return err
@@ -1760,6 +1784,7 @@ func testCloseReopen(t *testing.T, harness *managerStoreHarness) {
 
 		got, err := addr.Address(scope, addressID)
 		require.NoError(t, err)
+
 		wantHash := sha256.Sum256(addressID)
 		address.Hash = wantHash[:]
 		require.Equal(t, address, got)
@@ -2010,12 +2035,14 @@ func (h *managerStoreHarness) syncedHeight(t *testing.T,
 
 	if h.kv != nil {
 		var height int32
+
 		err := h.newStore(walletID).View(
 			context.Background(), func(tx db.ReadTx) error {
 				state, err := tx.Addr().SyncState()
 				if err != nil {
 					return err
 				}
+
 				height = state.SyncedTo.Height
 
 				return nil
@@ -2050,12 +2077,14 @@ func (h *managerStoreHarness) syncedBlockHash(t *testing.T,
 
 	if h.kv != nil {
 		var hash chainhash.Hash
+
 		err := h.newStore(walletID).View(
 			context.Background(), func(tx db.ReadTx) error {
 				state, err := tx.Addr().SyncState()
 				if err != nil {
 					return err
 				}
+
 				hash = state.SyncedTo.Hash
 
 				return nil
