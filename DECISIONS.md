@@ -1682,3 +1682,241 @@ op; the loaded/unlocked-manager plumbing is deferred to Phase 2B.** Concretely:
 
 - Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
   not consulted or copied.
+
+## Phase 2B: minimal SQL lifecycle harness
+
+Builds the first openable native-SQL wallet on the salvage foundation: create,
+open, unlock, and derive one address over SQLite with no walletdb (KV) sidecar,
+driven end to end by the Phase 2A1 `CommitDerivedAddresses` runtime op through
+the `runtime.Coordinator`. It completes the minimum 2A1-deferred
+loaded/unlocked-manager plumbing and begins the Workstream B `SQLLoader`/
+`SQLWallet` public API. Built solely on the salvage foundation; the
+`wallet-default-sqlite` branch was not consulted.
+
+### Create / open / unlock / derive design
+
+The lifecycle lives in a new self-contained package `wallet/internal/sqlwallet`
+(`SQLLoader`, `SQLWallet`), kept out of the giant `wallet` package for now so the
+harness stays independent; its final home is the `wallet` package once the shared
+behavioral method set is frozen (Workstream B).
+
+- **Create** (`SQLLoader.CreateWallet`). All secret material is prepared outside
+  any write transaction by the new `waddrmgr.PrepareWalletSecrets`, which mirrors
+  the secret-generation half of `waddrmgr.Create` but returns durable rows
+  instead of writing a bucket: the manager root state (master-key params,
+  encrypted crypto pub/priv/script keys, encrypted master-HD pub/priv keys) plus,
+  per requested scope, a `KeyScopeState` (encrypted coin-type keys,
+  `LastAccount = NoAccountAllocated`) and a default `AccountState` (account 0,
+  encrypted account pub/priv keys). The loader then, in one backend-owned write
+  transaction using the generated queries directly (wallet-row creation is a
+  backend concern, per the Phase-0 `sqlstore` boundary), inserts the genesis
+  block, the `wallets` row carrying the manager root, the initial
+  `wallet_sync_states` row (start = synced = genesis), and the zeroed
+  runtime-state row. It then commits the scopes and default accounts **through the
+  semantic runtime store** by reusing the Phase 2A1 `Coordinator.EnsureScope` and
+  `Coordinator.EnsureAccount` ops (CAS account-number allocation, name
+  idempotency). Finally it loads the wallet back through the same path `Open`
+  uses, so create and open produce a byte-identical in-memory wallet, and runs the
+  optional typed `afterCreate(ctx, *SQLWallet)` post-create callback (no raw
+  transaction).
+
+- **Open** (`SQLLoader.OpenWallet`). Opens+migrates the salvage-schema database
+  (`sql/sqlite.OpenAndMigrate`, which runs the schema-family gate), resolves the
+  wallet id by name, and reconstructs the in-memory caches from durable state
+  through the **semantic runtime store**, never the callback `PersistenceStore`.
+  The new `RuntimeStore.LoadManagerSnapshot` reads the manager root, chain sync
+  state, and every key scope with its accounts in one consistent read; the loader
+  rebuilds the secret core (`waddrmgr.OpenManagerKeyring`), the per-scope account
+  cache, and the synced-tip cache before any further op — the restart
+  cache-reconstruction the exit gate requires.
+
+- **Unlock** (`SQLWallet.Unlock`). Delegates to `ManagerKeyring.Unlock`, which
+  mirrors the crypto half of `Manager.Unlock`: it derives the private master key
+  from the private passphrase (snacl scrypt KDF), decrypts the private and script
+  crypto keys, and makes account private keys available. This exercises the full
+  dual-passphrase hierarchy the salvage schema preserves (public passphrase
+  decrypts the public crypto key at open; private passphrase decrypts the private
+  crypto key at unlock). Wrong-passphrase errors are returned unwrapped so callers
+  can classify them with `waddrmgr.IsError` (which does not unwrap).
+
+- **Derive** (`SQLWallet.NextAddress`). Snapshots the account extended key
+  (`ManagerKeyring.AccountKey`, private when unlocked else public) and the branch
+  address type under the wallet mutex, releases it, then derives and commits the
+  next chained address end to end via `Coordinator.DeriveNextAddresses` with the
+  production `runtime.ChainedAddressPreparer` — the exact Phase 2A1
+  prepare-outside → gate → CAS-commit (insert rows + `AdvanceBranchIndex`) →
+  cache-publish path, now driven by a real loaded+unlocked wallet over a real SQL
+  store. Because only child public keys are used, derivation also works while
+  locked; unlocking only additionally exposes the private account key. The itest
+  and the lifecycle test both confirm the committed identity equals the manager's
+  own `DeriveChainedAddresses` output.
+
+### Manager-from-SQL: the key scope finding
+
+**Constructing a full `waddrmgr.Manager` from SQL is not feasible under the
+salvage design without a large refactor, so Phase 2B builds a minimal
+manager/cache stand-in instead — exactly the option the plan permits — and the
+"how hard is it" answer is the main finding.**
+
+- The real `Manager` is bucket-bound end to end: `loadManager`, `loadAccountInfo`,
+  `deriveKey`, `keyToManaged`, and `nextAddresses` all take a
+  `walletdb.ReadBucket`/`ReadWriteBucket`, and `Unlock` walks `scopedManagers`/
+  `acctInfo` that were themselves populated from buckets. There is no seam to hand
+  those functions a neutral store. Constructing a real `Manager` over SQL would
+  therefore require either (a) a walletdb-over-SQL shim — which is precisely the
+  KV sidecar the salvage design rejects — or (b) refactoring the whole
+  `loadManager`/`loadAccountInfo`/`deriveKey`/`nextAddresses` chain to take the
+  neutral `waddrmgr` store types instead of `walletdb` buckets. Option (b) is the
+  genuine, large Phase 3+/production work; it is well out of a "minimal" harness.
+
+- What Phase 2B built instead is `waddrmgr.ManagerKeyring` (new `secrets.go`), the
+  **crypto core** of a loaded manager expressed against the neutral store types
+  (`ManagerState`, `KeyScopeState`, `AccountState`). It reuses the *exact* live
+  primitives — `snacl.SecretKey`, the unexported `cryptoKey`, `newSecretKey`,
+  `newCryptoKey`, `deriveCoinTypeKey`, `deriveAccountKey`, `checkBranchKeys` — so
+  every byte it produces is identical to a wallet made through `Create` and opened
+  through `Open` (the salvage schema's whole premise). It implements exactly the
+  parts the 2A1 boundary deferred that derivation needs:
+  `OpenManagerKeyring` (loadManager's crypto half: unmarshal + derive master pub,
+  decrypt crypto pub, retain priv params/ciphertext), `Unlock` (Unlock's crypto
+  half), `Lock`/`Close` (zeroing), and `AccountKey` (loadAccountInfo's key-select
+  half: decrypt the stored account extended key, private when unlocked else
+  public). The per-scope account map and synced-tip are reconstructed as plain
+  caches on `SQLWallet` from `LoadManagerSnapshot`, standing in for the scoped
+  manager's `acctInfo` and the manager's sync-state cache — the same "stand-in"
+  role the Phase 1A/2A1 coordinator caches play for the operation layer.
+
+- **Explicitly deferred to the full-Manager integration (Phase 3+):** the
+  in-memory `ManagedAddress` construction with private-key encryption +
+  `Validate`/re-derive, the `deriveOnUnlock` queue (deriving pending private keys
+  on unlock for addresses created while locked), the disk read-back verification,
+  the `onCommit` cache closure that swaps `lastExternalAddr`/`lastInternalAddr`,
+  runtime creation of *new* accounts from the encrypted master-HD key, imported
+  keys/scripts and watch-only conversion (Phase 2A2), and the imported-address
+  account. `NextAddress` returns the committed script-address identity and path;
+  it does not yet materialize a `ManagedAddress`. None of these are needed to
+  create, open, unlock, derive, and restart, which is the 2B exit gate. The
+  remaining production integration is the `nextAddresses` split the 2A1 finding
+  named — a `deriveNextAddresses` preparation (already mirrored by
+  `DeriveChainedAddresses`/`ChainedAddressPreparer`) plus a commit that calls the
+  runtime op — plus rehoming the manager's bucket reads onto the neutral store so
+  the real `Manager` can be constructed over SQL.
+
+### Load path: RuntimeStore addition (all adapters)
+
+`LoadManagerSnapshot(ctx) (ManagerSnapshot, error)` was added to the neutral
+`db.RuntimeStore` contract and implemented in **both** adapters, so construction
+uses the semantic runtime store rather than the callback `PersistenceStore` (the
+exit-gate boundary), and the KV backend stays at parity:
+
+- SQL (`sqlstore`): a new `RuntimeStore.ManagerSnapshot` reads manager root, sync
+  state, key scopes, and per-scope accounts via the existing addr-store reads in
+  one `RuntimeView`; `runtimeStore.LoadManagerSnapshot` wraps it. No new sqlc
+  query or schema change was needed — `GetManagerState`, `GetSyncState`,
+  `ListKeyScopes`, and `ListAccounts` already existed in the `Queries` surface.
+- KV (`kvdb`): a `walletdb.View` over the bound `waddrmgr` manager store reads the
+  same fields. The shared itest vector (`manager snapshot`) proves observable
+  parity on KV, SQLite, and PostgreSQL.
+
+### API boundary
+
+`SQLWallet` has only unexported fields: `runtime *runtime.Coordinator`, the
+semantic `runtimeStore`, the `*waddrmgr.ManagerKeyring`, the scope/account
+caches, the synced-tip cache, and the `*sql.DB` handle. It exposes **no**
+`Database()`, `AddrManager()`, exported `Manager`/`TxStore`, or raw `walletdb`
+callback. Construction takes a `RuntimeStore`, never a `PersistenceStore`. The
+`afterCreate` post-create callback receives the narrowed `*SQLWallet`, not a raw
+transaction. A `BehavioralWallet` interface (lifecycle + derivation subset) is
+declared with a positive compile-time assertion
+`var _ BehavioralWallet = (*SQLWallet)(nil)`; because Go has no negative interface
+assertion, a reflection API-surface test enforces the *absence* of the escape
+hatches (no `Database`/`AddrManager`/`Manager`/`TxStore` method and all struct
+fields unexported). The positive `*wallet.Wallet` assertion and the full
+`go/types` surface test are left to the interface's promotion into the `wallet`
+package (Workstream B), which must first freeze the full behavioral method list
+from the existing backend-neutral callers.
+
+### Exit gate
+
+- **Creates, opens, unlocks, derives over SQLite with no legacy DB.**
+  `TestSQLWalletCreateOpenUnlockDerive` runs the full path and asserts the
+  committed identity matches an independent `DeriveChainedAddresses`.
+  `TestSQLWalletNoBboltSidecar` asserts every file in the wallet directory belongs
+  to the single SQLite database (no separately named KV sidecar) and that the DB
+  file carries the `SQLite format 3` header, not a bbolt one — proving no walletdb
+  file is created or read. (The `sqlwallet` package imports no `walletdb`/`bbolt`.)
+- **Construction uses RuntimeStore, not PersistenceStore.**
+  `TestSQLWalletRuntimeStoreConstruction` asserts the wallet's store satisfies
+  `db.RuntimeStore` and does **not** satisfy `db.PersistenceStore`
+  (View/Update), so the runtime path cannot reach the raw transaction boundary.
+- **Restart reconstructs caches from durable state before further ops.**
+  `TestSQLWalletRestartReconstructsCache` derives address A (index 0), closes,
+  reopens, and — after cache reconstruction — derives address B, asserting
+  `B.Index == A.Index + 1`, that A and B differ, that both address rows persist at
+  indices 0 and 1, and that the synced tip is reconstructed identically across the
+  restart. `TestSQLWalletLockedDerivation` proves a locked wallet still derives
+  (public key) and continues the same index sequence after unlock;
+  `TestSQLWalletWrongPassphrase` proves a wrong public passphrase fails open and a
+  wrong private passphrase fails unlock, both classifiable via `waddrmgr.IsError`.
+
+### Scope ripples / judgment calls
+
+- **`waddrmgr.PrepareWalletSecrets` reuses the exact `Create` crypto.** It is the
+  create-time preparation of the same material `Create` writes, returned as
+  durable rows so the write happens through the store. It creates only the default
+  account per scope (no imported-address account) — a Phase 2A2 concern noted in
+  code.
+- **Random operation ids for derivation.** Each `NextAddress` uses a fresh random
+  runtime operation id, so the branch-index CAS is the sole allocation guard. A
+  production wallet would derive a deterministic id so a crash-retry is served
+  idempotently from the journal; that is deferred and documented at the call site.
+- **Lock order.** `SQLWallet.mu` (guarding the keyring lock-state and the scope
+  caches) is taken only to snapshot the derivation inputs and released before the
+  `Coordinator`'s mutation gate, extending the Phase 1A documented order to wallet
+  mutex -> coordinator gate. `AccountKey` returns a freshly parsed extended key
+  the caller zeroes, unaffected by a concurrent `Lock`.
+- **Wrong-passphrase errors are returned unwrapped** from the keyring so
+  `waddrmgr.IsError` (a type assertion, not `errors.Is`) keeps working for
+  callers, matching the manager's own contract.
+- **No new sqlc / schema.** The load path composed existing queries;
+  `LoadManagerSnapshot` is additive Go over the Phase-0 building blocks in both
+  adapters. `make sqlc` was therefore not required.
+- **Lint.** `make lint` was not run (it runs `golangci-lint --fix`, which corrupts
+  the tree). A non-`--fix` `golangci-lint run --new-from-rev=HEAD` reports zero
+  CI-enforced findings (lll, cyclop, funlen) on all new/edited files;
+  `PrepareWalletSecrets`/`prepareScopeSecrets`/`CreateWallet` carry a documented
+  `//nolint:cyclop` for their linear generate-encrypt sequences, matching the
+  Phase 2A1 convention. The remaining `wsl_v5`/`noinlineerr`/`ireturn`/`revive`
+  items are the established v2.12.2-only version-noise the pinned CI linter
+  (v2.4.1) does not block, confirmed by the committed CI-green `sqlstore` package
+  carrying the same patterns.
+
+### Phase 3 readiness
+
+Nothing here blocks the Phase 3 recovery vertical: an SQL wallet can now be
+created, opened, unlocked, and can derive addresses and reconstruct its caches
+from durable state, all over the semantic runtime store. Phase 3 recovery can
+build on `LoadManagerSnapshot` (watch-set reconstruction) and the same
+Coordinator-driven commit path. The one carried-forward item is the
+full-`Manager`-over-SQL integration described above (the `nextAddresses` split
+plus rehoming the manager's bucket reads onto the neutral store), which
+production address materialization, imports, and signing will need but recovery
+scan batching does not.
+
+### Verification status
+
+- `GOWORK=off go build ./...` — pass (exit 0).
+- `GOWORK=off go vet ./wallet/internal/... ./waddrmgr/` — pass (exit 0).
+- `GOWORK=off go test ./waddrmgr/ ./wallet/internal/...` — pass (secret-core unit
+  tests; SQL lifecycle create/open/unlock/derive, restart cache reconstruction,
+  no-bbolt-sidecar, RuntimeStore-construction boundary, API surface, locked
+  derivation, wrong passphrase; manager-snapshot parity on KV + SQLite).
+- `GOWORK=off go test -race ./wallet/internal/sqlwallet/` — pass.
+- `GOWORK=off go test -tags test_db_postgres ./wallet/internal/db/itest/ -run
+  manager_snapshot` — pass (LoadManagerSnapshot on real PostgreSQL).
+- `gofmt -s` clean; non-`--fix` golangci-lint reports zero CI-enforced findings.
+
+### Independence
+
+- Built solely on the salvage foundation; the `wallet-default-sqlite` branch was
+  not consulted or copied.

@@ -155,6 +155,13 @@ type RuntimeStore interface {
 	// is atomic with the rename.
 	RenameAccount(ctx context.Context, req RenameAccountRequest) (
 		RenameAccountResult, error)
+
+	// LoadManagerSnapshot reads the durable manager root state, chain sync
+	// state, and every key scope with its accounts in one consistent read, so
+	// a restarting wallet reconstructs its in-memory caches from durable state
+	// through the semantic runtime contract rather than the low-level
+	// PersistenceStore boundary. It never mutates state.
+	LoadManagerSnapshot(ctx context.Context) (ManagerSnapshot, error)
 }
 
 // ReserveBranchIndexRequest is the prepared input to a branch-index

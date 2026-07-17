@@ -97,6 +97,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("address store", func(t *testing.T) {
 		testAddressStore(t, harness)
 	})
+	t.Run("manager snapshot", func(t *testing.T) {
+		testManagerSnapshot(t, harness)
+	})
 
 	// SQL-only transaction-incidence vector: depends on the SQL fixture
 	// schema, so it is skipped for the KV backend.
@@ -1796,6 +1799,64 @@ func testCloseReopen(t *testing.T, harness *managerStoreHarness) {
 		return nil
 	}, func() {})
 	require.NoError(t, err)
+}
+
+// testManagerSnapshot proves the runtime store loads the durable manager root,
+// chain sync state, and every key scope with its accounts in one consistent
+// read, so a restarting wallet reconstructs its caches through the semantic
+// contract. It runs on KV, SQLite, and PostgreSQL, so passing on every backend
+// proves LoadManagerSnapshot is implemented and observably identical in all
+// adapters.
+func testManagerSnapshot(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	ctx := context.Background()
+	start := testBlock(6200)
+	synced := testBlock(6201)
+	walletID := harness.createWallet(t, "manager-snapshot", start, synced)
+	store := harness.newStore(walletID)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
+		addr := tx.Addr()
+
+		err := addr.PutKeyScope(waddrmgr.KeyScopeState{
+			Scope:       scope,
+			AddrSchema:  waddrmgr.ScopeAddrMap[scope],
+			LastAccount: 0,
+		})
+		if err != nil {
+			return err
+		}
+
+		return addr.PutAccount(waddrmgr.AccountState{
+			Scope:           scope,
+			Account:         0,
+			Type:            waddrmgr.AccountDefault,
+			Name:            "snapshot-account",
+			EncryptedPubKey: []byte{7},
+		})
+	}, func() {})
+	require.NoError(t, err)
+
+	snapshot, err := harness.newRuntimeStore(walletID).LoadManagerSnapshot(ctx)
+	require.NoError(t, err)
+
+	// The manager root and synced tip are loaded.
+	require.NotEmpty(t, snapshot.Manager.MasterPubParams)
+	require.Equal(t, synced.Height, snapshot.SyncState.SyncedTo.Height)
+	require.Equal(t, synced.Hash, snapshot.SyncState.SyncedTo.Hash)
+
+	// The seeded scope and its account are loaded.
+	require.Len(t, snapshot.Scopes, 1)
+	require.Equal(t, scope, snapshot.Scopes[0].Scope.Scope)
+	require.Equal(t, waddrmgr.ScopeAddrMap[scope],
+		snapshot.Scopes[0].Scope.AddrSchema)
+
+	require.Len(t, snapshot.Scopes[0].Accounts, 1)
+	require.Equal(t, uint32(0), snapshot.Scopes[0].Accounts[0].Account)
+	require.Equal(t, "snapshot-account",
+		snapshot.Scopes[0].Accounts[0].Name)
 }
 
 // managerAccount builds a minimal default AccountState for the neutral vector.
