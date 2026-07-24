@@ -1808,6 +1808,20 @@ func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
 	chainParams *chaincfg.Params, config *ScryptOptions,
 	birthday time.Time) error {
 
+	return CreateWithScryptOptions(
+		ns, rootKey, pubPassphrase, privPassphrase, chainParams, config,
+		config, birthday,
+	)
+}
+
+// CreateWithScryptOptions creates an address manager with independent scrypt
+// parameters for the public and private master keys. Separate parameters are
+// applied even when both passphrases contain the same bytes.
+func CreateWithScryptOptions(ns walletdb.ReadWriteBucket,
+	rootKey *hdkeychain.ExtendedKey, pubPassphrase, privPassphrase []byte,
+	chainParams *chaincfg.Params, publicConfig,
+	privateConfig *ScryptOptions, birthday time.Time) error {
+
 	// If the seed argument is nil we create in watchingOnly mode.
 	isWatchingOnly := rootKey == nil
 
@@ -1833,13 +1847,16 @@ func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
 		return maybeConvertDbError(err)
 	}
 
-	if config == nil {
-		config = &DefaultScryptOptions
+	if publicConfig == nil {
+		publicConfig = &DefaultScryptOptions
+	}
+	if privateConfig == nil {
+		privateConfig = &DefaultScryptOptions
 	}
 
 	// Generate new master keys.  These master keys are used to protect the
 	// crypto keys that will be generated next.
-	masterKeyPub, err := newSecretKey(&pubPassphrase, config)
+	masterKeyPub, err := newSecretKey(&pubPassphrase, publicConfig)
 	if err != nil {
 		str := "failed to master public key"
 		return managerError(ErrCrypto, str, err)
@@ -1879,7 +1896,7 @@ func Create(ns walletdb.ReadWriteBucket, rootKey *hdkeychain.ExtendedKey,
 	var cryptoKeyPrivEnc []byte
 	var cryptoKeyScriptEnc []byte
 	if !isWatchingOnly {
-		masterKeyPriv, err = newSecretKey(&privPassphrase, config)
+		masterKeyPriv, err = newSecretKey(&privPassphrase, privateConfig)
 		if err != nil {
 			str := "failed to master private key"
 			return managerError(ErrCrypto, str, err)
