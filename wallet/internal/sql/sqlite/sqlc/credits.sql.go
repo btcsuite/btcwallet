@@ -39,7 +39,8 @@ func (q *Queries) DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendPa
 const GetActiveCreditID = `-- name: GetActiveCreditID :one
 SELECT credit.id
 FROM active_credit_incidences AS active
-INNER JOIN credits AS credit ON credit.id = active.credit_id
+INNER JOIN credits AS credit
+    ON credit.wallet_id = active.wallet_id AND credit.id = active.credit_id
 WHERE active.wallet_id = ? AND active.tx_hash = ?
   AND active.output_index = ?
 `
@@ -61,16 +62,17 @@ const GetCredit = `-- name: GetCredit :one
 SELECT id, wallet_id, transaction_id, output_index, amount, pk_script,
        is_change, address_scope_id, address_id
 FROM credits
-WHERE transaction_id = ? AND output_index = ?
+WHERE wallet_id = ? AND transaction_id = ? AND output_index = ?
 `
 
 type GetCreditParams struct {
+	WalletID      int64
 	TransactionID int64
 	OutputIndex   int64
 }
 
 func (q *Queries) GetCredit(ctx context.Context, arg GetCreditParams) (Credit, error) {
-	row := q.queryRow(ctx, q.getCreditStmt, GetCredit, arg.TransactionID, arg.OutputIndex)
+	row := q.queryRow(ctx, q.getCreditStmt, GetCredit, arg.WalletID, arg.TransactionID, arg.OutputIndex)
 	var i Credit
 	err := row.Scan(
 		&i.ID,
@@ -89,7 +91,8 @@ func (q *Queries) GetCredit(ctx context.Context, arg GetCreditParams) (Credit, e
 const GetMinedPreviousPkScript = `-- name: GetMinedPreviousPkScript :one
 SELECT credit.pk_script
 FROM credit_spends AS spend
-INNER JOIN credits AS credit ON credit.id = spend.credit_id
+INNER JOIN credits AS credit
+    ON credit.wallet_id = spend.wallet_id AND credit.id = spend.credit_id
 WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
   AND spend.input_index = ?
 `
@@ -110,12 +113,14 @@ func (q *Queries) GetMinedPreviousPkScript(ctx context.Context, arg GetMinedPrev
 const GetUnminedPreviousPkScript = `-- name: GetUnminedPreviousPkScript :one
 SELECT credit.pk_script
 FROM active_credit_incidences AS active
-INNER JOIN credits AS credit ON credit.id = active.credit_id
+INNER JOIN credits AS credit
+    ON credit.wallet_id = active.wallet_id AND credit.id = active.credit_id
 WHERE active.wallet_id = ? AND active.tx_hash = ?
   AND active.output_index = ?
   AND NOT EXISTS (
       SELECT 1 FROM credit_spends AS spend
-      WHERE spend.credit_id = credit.id
+      WHERE spend.wallet_id = credit.wallet_id
+        AND spend.credit_id = credit.id
   )
 `
 
@@ -177,12 +182,14 @@ const IsKnownOutput = `-- name: IsKnownOutput :one
 SELECT EXISTS (
     SELECT 1
     FROM active_credit_incidences AS active
-    INNER JOIN credits AS credit ON credit.id = active.credit_id
+    INNER JOIN credits AS credit
+        ON credit.wallet_id = active.wallet_id AND credit.id = active.credit_id
     WHERE active.wallet_id = ? AND active.tx_hash = ?
       AND active.output_index = ?
       AND NOT EXISTS (
           SELECT 1 FROM credit_spends AS spend
-          WHERE spend.credit_id = credit.id
+          WHERE spend.wallet_id = credit.wallet_id
+            AND spend.credit_id = credit.id
       )
 )
 `
@@ -203,13 +210,15 @@ func (q *Queries) IsKnownOutput(ctx context.Context, arg IsKnownOutputParams) (i
 const ListOutputsToWatch = `-- name: ListOutputsToWatch :many
 SELECT funding.tx_hash, c.output_index, c.pk_script
 FROM credits AS c
-INNER JOIN transactions AS funding ON funding.id = c.transaction_id
-INNER JOIN active_credit_incidences AS active ON active.credit_id = c.id
+INNER JOIN transactions AS funding
+    ON funding.wallet_id = c.wallet_id AND funding.id = c.transaction_id
+INNER JOIN active_credit_incidences AS active
+    ON active.wallet_id = c.wallet_id AND active.credit_id = c.id
 WHERE c.wallet_id = ?1
   AND NOT EXISTS (
       SELECT 1
       FROM credit_spends AS spend
-      WHERE spend.credit_id = c.id
+      WHERE spend.wallet_id = c.wallet_id AND spend.credit_id = c.id
   )
 ORDER BY funding.tx_hash, c.output_index
 `
@@ -249,14 +258,16 @@ SELECT c.id, c.output_index, c.amount, c.pk_script, c.is_change,
        EXISTS (
            SELECT 1
            FROM credit_spends AS spend
-           WHERE spend.credit_id = c.id
+           WHERE spend.wallet_id = c.wallet_id AND spend.credit_id = c.id
        ) OR EXISTS (
            SELECT 1
            FROM transaction_inputs AS input
            INNER JOIN transactions AS spender
-               ON spender.id = input.spending_tx_id
+               ON spender.wallet_id = c.wallet_id
+               AND spender.id = input.spending_tx_id
            INNER JOIN transactions AS funding
-               ON funding.id = c.transaction_id
+               ON funding.wallet_id = c.wallet_id
+               AND funding.id = c.transaction_id
            WHERE spender.wallet_id = c.wallet_id
              AND spender.block_height IS NULL
              AND input.prev_tx_hash = funding.tx_hash
@@ -316,16 +327,37 @@ func (q *Queries) ListTransactionCredits(ctx context.Context, arg ListTransactio
 }
 
 const ListTransactionDebits = `-- name: ListTransactionDebits :many
-SELECT spend.input_index, credit.amount
-FROM credit_spends AS spend
-INNER JOIN credits AS credit ON credit.id = spend.credit_id
-WHERE spend.wallet_id = ? AND spend.spending_tx_id = ?
-ORDER BY spend.input_index
+SELECT debit.input_index, debit.amount
+FROM (
+    SELECT spend.input_index, credit.amount
+    FROM credit_spends AS spend
+    INNER JOIN credits AS credit
+        ON credit.wallet_id = spend.wallet_id AND credit.id = spend.credit_id
+    WHERE spend.wallet_id = ?1
+      AND spend.spending_tx_id = ?2
+
+    UNION ALL
+
+    SELECT input.input_index, credit.amount
+    FROM transactions AS spender
+    INNER JOIN transaction_inputs AS input
+        ON input.spending_tx_id = spender.id
+    INNER JOIN active_credit_incidences AS active
+        ON active.wallet_id = spender.wallet_id
+        AND active.tx_hash = input.prev_tx_hash
+        AND active.output_index = input.prev_output_index
+    INNER JOIN credits AS credit
+        ON credit.wallet_id = active.wallet_id AND credit.id = active.credit_id
+    WHERE spender.wallet_id = ?1
+      AND spender.id = ?2
+      AND spender.block_height IS NULL
+) AS debit
+ORDER BY debit.input_index
 `
 
 type ListTransactionDebitsParams struct {
-	WalletID     int64
-	SpendingTxID int64
+	WalletID      int64
+	TransactionID int64
 }
 
 type ListTransactionDebitsRow struct {
@@ -334,7 +366,7 @@ type ListTransactionDebitsRow struct {
 }
 
 func (q *Queries) ListTransactionDebits(ctx context.Context, arg ListTransactionDebitsParams) ([]ListTransactionDebitsRow, error) {
-	rows, err := q.query(ctx, q.listTransactionDebitsStmt, ListTransactionDebits, arg.WalletID, arg.SpendingTxID)
+	rows, err := q.query(ctx, q.listTransactionDebitsStmt, ListTransactionDebits, arg.WalletID, arg.TransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -365,18 +397,25 @@ SELECT c.id, funding.tx_hash, c.output_index, c.amount, c.pk_script,
        funding.is_coinbase, c.address_scope_id, c.address_id,
        block.header_hash, block.block_timestamp
 FROM credits AS c
-INNER JOIN transactions AS funding ON funding.id = c.transaction_id
-INNER JOIN active_credit_incidences AS active ON active.credit_id = c.id
-LEFT JOIN blocks AS block ON block.block_height = funding.block_height
+INNER JOIN transactions AS funding
+    ON funding.wallet_id = c.wallet_id AND funding.id = c.transaction_id
+INNER JOIN active_credit_incidences AS active
+    ON active.wallet_id = c.wallet_id AND active.credit_id = c.id
+LEFT JOIN wallet_blocks AS block
+    ON block.wallet_id = funding.wallet_id
+    AND block.block_height = funding.block_height
 INNER JOIN query_params
 WHERE c.wallet_id = ?1
   AND NOT EXISTS (
-      SELECT 1 FROM credit_spends AS spend WHERE spend.credit_id = c.id
+      SELECT 1 FROM credit_spends AS spend
+      WHERE spend.wallet_id = c.wallet_id AND spend.credit_id = c.id
   )
   AND NOT EXISTS (
       SELECT 1
       FROM transaction_inputs AS i
-      INNER JOIN transactions AS spender ON spender.id = i.spending_tx_id
+      INNER JOIN transactions AS spender
+          ON spender.wallet_id = c.wallet_id
+          AND spender.id = i.spending_tx_id
       WHERE spender.wallet_id = c.wallet_id
         AND spender.block_height IS NULL
         AND i.prev_tx_hash = funding.tx_hash
@@ -457,11 +496,13 @@ INSERT INTO credit_spends (
 )
 SELECT c.wallet_id, c.id, i.spending_tx_id, i.input_index
 FROM credits AS c
-INNER JOIN transactions AS funding ON funding.id = c.transaction_id
+INNER JOIN transactions AS funding
+    ON funding.wallet_id = c.wallet_id AND funding.id = c.transaction_id
 INNER JOIN transaction_inputs AS i
     ON i.prev_tx_hash = funding.tx_hash
     AND i.prev_output_index = c.output_index
-INNER JOIN transactions AS spender ON spender.id = i.spending_tx_id
+INNER JOIN transactions AS spender
+    ON spender.wallet_id = c.wallet_id AND spender.id = i.spending_tx_id
 WHERE c.wallet_id = ?
   AND c.id = ?
   AND i.spending_tx_id = ?
@@ -499,7 +540,8 @@ INSERT INTO active_credit_incidences (
 )
 SELECT c.wallet_id, funding.tx_hash, c.output_index, c.id
 FROM credits AS c
-INNER JOIN transactions AS funding ON funding.id = c.transaction_id
+INNER JOIN transactions AS funding
+    ON funding.wallet_id = c.wallet_id AND funding.id = c.transaction_id
 WHERE c.wallet_id = ? AND c.id = ?
 ON CONFLICT (wallet_id, tx_hash, output_index) DO UPDATE SET
     credit_id = excluded.credit_id

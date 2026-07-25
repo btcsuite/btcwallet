@@ -82,7 +82,9 @@ func (s *txStore) transactionID(hash chainhash.Hash,
 func (s *txStore) insertUnmined(record *wtxmgr.TxRecord,
 	rawTx []byte) (bool, error) {
 
-	_, err := s.transactionID(record.Hash, nil)
+	_, err := s.queries.GetTransactionDetailsByHash(
+		s.ctx, s.walletID, record.Hash[:],
+	)
 	if err == nil {
 		return true, nil
 	}
@@ -122,7 +124,7 @@ func (s *txStore) insertMined(record *wtxmgr.TxRecord, rawTx []byte,
 	}
 
 	// Materialize the containing block before any transaction references it.
-	err = s.queries.PutBlock(s.ctx, BlockRow{
+	err = s.queries.PutBlock(s.ctx, s.walletID, BlockRow{
 		Height:    block.Height,
 		Hash:      block.Hash[:],
 		Timestamp: block.Time.Unix(),
@@ -322,13 +324,14 @@ func (s *txStore) recordMinedSpends(transactionID int64,
 	return nil
 }
 
-// AddCredit marks a recorded output as wallet-owned. Repeated calls for the
-// same transaction incidence and output index are idempotent.
+// AddCredit marks a recorded output as wallet-owned and reports whether the
+// credit is new. Repeated calls for the same transaction incidence and output
+// index are idempotent.
 func (s *txStore) AddCredit(record *wtxmgr.TxRecord,
-	block *wtxmgr.BlockMeta, index uint32, change bool) error {
+	block *wtxmgr.BlockMeta, index uint32, change bool) (bool, error) {
 
 	if index >= uint32(len(record.MsgTx.TxOut)) {
-		return fmt.Errorf("transaction output %d does not exist", index)
+		return false, fmt.Errorf("transaction output %d does not exist", index)
 	}
 
 	var incidence *wtxmgr.Block
@@ -338,18 +341,20 @@ func (s *txStore) AddCredit(record *wtxmgr.TxRecord,
 
 	transactionID, err := s.transactionID(record.Hash, incidence)
 	if err != nil {
-		return fmt.Errorf("find credit transaction: %w", err)
+		return false, fmt.Errorf("find credit transaction: %w", err)
 	}
 
 	// Preserve the existing wtxmgr behavior where adding the same credit more
 	// than once succeeds without rewriting it.
-	_, err = s.queries.GetCreditID(s.ctx, transactionID, index)
+	_, err = s.queries.GetCreditID(
+		s.ctx, s.walletID, transactionID, index,
+	)
 	if err == nil {
-		return nil
+		return false, nil
 	}
 
 	if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("check transaction credit: %w", err)
+		return false, fmt.Errorf("check transaction credit: %w", err)
 	}
 
 	output := record.MsgTx.TxOut[index]
@@ -359,17 +364,17 @@ func (s *txStore) AddCredit(record *wtxmgr.TxRecord,
 		output.PkScript, change,
 	)
 	if err != nil {
-		return fmt.Errorf("insert transaction credit: %w", err)
+		return false, fmt.Errorf("insert transaction credit: %w", err)
 	}
 
 	// A credit may appear in multiple transaction incidences. The newly added
 	// incidence becomes the active wallet output.
 	err = s.queries.SetActiveCreditIncidence(s.ctx, s.walletID, creditID)
 	if err != nil {
-		return fmt.Errorf("activate transaction credit: %w", err)
+		return false, fmt.Errorf("activate transaction credit: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // PutTxLabel validates and stores a transaction label.
@@ -450,7 +455,7 @@ func (s *txStore) LockOutput(id wtxmgr.LockID, output wire.OutPoint,
 
 	rows, err := s.queries.AcquireOutputLease(
 		s.ctx, s.walletID, output.Hash[:], output.Index, id[:],
-		expires.Unix(), now.Unix(),
+		expires.UnixNano(), now.UnixNano(),
 	)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("lock output: %w", err)
@@ -487,7 +492,7 @@ func (s *txStore) outputLease(output wire.OutPoint) (wtxmgr.LockID,
 	var id wtxmgr.LockID
 	copy(id[:], row.LockID)
 
-	return id, time.Unix(row.Expiration, 0), true, nil
+	return id, time.Unix(0, row.Expiration), true, nil
 }
 
 // UnlockOutput releases an output lease held by the owner. Missing and expired
@@ -526,7 +531,7 @@ func (s *txStore) UnlockOutput(id wtxmgr.LockID, output wire.OutPoint) error {
 // DeleteExpiredLockedOutputs removes expired output leases.
 func (s *txStore) DeleteExpiredLockedOutputs() error {
 	_, err := s.queries.DeleteExpiredOutputLeases(
-		s.ctx, s.walletID, time.Now().Unix(),
+		s.ctx, s.walletID, time.Now().UnixNano(),
 	)
 
 	return err
@@ -535,7 +540,7 @@ func (s *txStore) DeleteExpiredLockedOutputs() error {
 // ListLockedOutputs returns all currently active output leases.
 func (s *txStore) ListLockedOutputs() ([]*wtxmgr.LockedOutput, error) {
 	rows, err := s.queries.ListActiveOutputLeases(
-		s.ctx, s.walletID, time.Now().Unix(),
+		s.ctx, s.walletID, time.Now().UnixNano(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list output leases: %w", err)
@@ -566,7 +571,7 @@ func (s *txStore) ListLockedOutputs() ([]*wtxmgr.LockedOutput, error) {
 				Index: uint32(row.Index),
 			},
 			LockID:     id,
-			Expiration: time.Unix(row.Expiration, 0),
+			Expiration: time.Unix(0, row.Expiration),
 		})
 	}
 

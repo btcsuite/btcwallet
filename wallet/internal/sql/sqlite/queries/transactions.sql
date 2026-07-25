@@ -26,7 +26,8 @@ WHERE wallet_id = ? AND tx_hash = ? AND block_height IS NULL;
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.tx_hash = ?
@@ -37,7 +38,8 @@ LIMIT 1;
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.tx_hash = ? AND t.block_height IS NULL
@@ -47,7 +49,8 @@ LIMIT 1;
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = sqlc.arg('wallet_id')
@@ -60,7 +63,8 @@ LIMIT 1;
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.id = ?
@@ -90,7 +94,9 @@ WHERE wallet_id = ? AND spending_tx_id = ?;
 -- name: ListUnminedSpendersByPrevHash :many
 SELECT DISTINCT spender.id, spender.tx_hash
 FROM transaction_inputs AS input
-INNER JOIN transactions AS spender ON spender.id = input.spending_tx_id
+INNER JOIN transactions AS spender
+    ON spender.id = input.spending_tx_id
+    AND spender.wallet_id = sqlc.arg('wallet_id')
 WHERE spender.wallet_id = sqlc.arg('wallet_id')
   AND spender.block_height IS NULL
   AND input.prev_tx_hash = sqlc.arg('prev_tx_hash')
@@ -100,7 +106,8 @@ ORDER BY spender.id;
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.tx_hash = sqlc.arg('tx_hash')
   AND t.block_height = sqlc.arg('block_height')
@@ -125,7 +132,8 @@ SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.block_height BETWEEN cast(sqlc.arg('start_height') AS INTEGER)
                          AND cast(sqlc.arg('end_height') AS INTEGER)
@@ -136,7 +144,8 @@ SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.block_height BETWEEN cast(sqlc.arg('end_height') AS INTEGER)
                          AND cast(sqlc.arg('start_height') AS INTEGER)
@@ -151,7 +160,9 @@ RETURNING id;
 -- name: ListUnminedSpenders :many
 SELECT t.id, t.tx_hash, i.input_index
 FROM transaction_inputs AS i
-INNER JOIN transactions AS t ON t.id = i.spending_tx_id
+INNER JOIN transactions AS t
+    ON t.id = i.spending_tx_id
+    AND t.wallet_id = sqlc.arg('wallet_id')
 WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.block_height IS NULL
   AND i.prev_tx_hash = sqlc.arg('prev_tx_hash')
@@ -173,7 +184,8 @@ SELECT label FROM transaction_labels WHERE wallet_id = ? AND tx_hash = ?;
 -- name: GetMinedTransactionID :one
 SELECT t.id
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = sqlc.arg('wallet_id')
   AND t.tx_hash = sqlc.arg('tx_hash')
   AND t.block_height = cast(sqlc.arg('block_height') AS INTEGER)

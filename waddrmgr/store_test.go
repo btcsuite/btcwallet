@@ -120,3 +120,42 @@ func TestManagerStoreKVAdapter(t *testing.T) {
 	})
 	require.NoError(t, err)
 }
+
+// TestManagerStoreKVNoAccount verifies an unallocated scope keeps the legacy
+// account-zero sentinel instead of recording account zero as already used.
+func TestManagerStoreKVNoAccount(t *testing.T) {
+	teardown, database, _ := setupManager(t)
+	t.Cleanup(teardown)
+
+	scope := KeyScope{Purpose: 1_017, Coin: 1}
+	want := KeyScopeState{
+		Scope:       scope,
+		AddrSchema:  ScopeAddrMap[KeyScopeBIP0084],
+		LastAccount: NoAccount,
+	}
+	err := walletdb.Update(database, func(tx walletdb.ReadWriteTx) error {
+		store := BindManagerReadWriteStore(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey),
+		)
+
+		if err := store.PutKeyScope(want); err != nil {
+			return err
+		}
+		if err := store.SetLastAccount(scope, 2); err != nil {
+			return err
+		}
+
+		return store.PutKeyScope(want)
+	})
+	require.NoError(t, err)
+
+	err = walletdb.View(database, func(tx walletdb.ReadTx) error {
+		store := BindManagerReadStore(tx.ReadBucket(waddrmgrNamespaceKey))
+		got, err := store.KeyScope(scope)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+
+		return nil
+	})
+	require.NoError(t, err)
+}

@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -214,14 +216,37 @@ func (w *Wallet) ImportAccount(name string, accountPubKey *hdkeychain.ExtendedKe
 	*waddrmgr.AccountProperties, error) {
 
 	var accountProps *waddrmgr.AccountProperties
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		var err error
-		accountProps, err = w.importAccount(
-			ns, name, accountPubKey, masterKeyFingerprint, addrType,
+	var err error
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			var err error
+			accountProps, err = w.importAccount(
+				ns, name, accountPubKey, masterKeyFingerprint, addrType,
+			)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				accountProps, _, err = w.importAccountFromStore(
+					tx.Addr(), name, accountPubKey,
+					masterKeyFingerprint, addrType,
+				)
+				return err
+			}, func() {
+				accountProps = nil
+			},
 		)
-		return err
-	})
+	}
+	if err != nil {
+		keyScope, _, scopeErr := keyScopeFromPubKey(accountPubKey, addrType)
+		if scopeErr == nil {
+			_, _ = w.attachStoreScopeAfterAmbiguous(err, keyScope)
+		}
+	}
 	return accountProps, err
 }
 
@@ -236,17 +261,101 @@ func (w *Wallet) ImportAccountWithScope(name string,
 	keyScope waddrmgr.KeyScope, addrSchema waddrmgr.ScopeAddrSchema) (
 	*waddrmgr.AccountProperties, error) {
 
+	if accountPubKey.IsPrivate() {
+		return nil, errors.New("private keys cannot be imported")
+	}
+
 	var accountProps *waddrmgr.AccountProperties
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		var err error
-		accountProps, err = w.importAccountScope(
-			ns, name, accountPubKey, masterKeyFingerprint, keyScope,
-			&addrSchema,
+	var err error
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			var err error
+			accountProps, err = w.importAccountScope(
+				ns, name, accountPubKey, masterKeyFingerprint, keyScope,
+				&addrSchema,
+			)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				accountProps, _, err = w.importAccountScopeFromStore(
+					tx.Addr(), name, accountPubKey,
+					masterKeyFingerprint, keyScope, &addrSchema,
+				)
+				return err
+			}, func() {
+				accountProps = nil
+			},
 		)
-		return err
-	})
+	}
+	if err != nil {
+		_, _ = w.attachStoreScopeAfterAmbiguous(err, keyScope)
+	}
 	return accountProps, err
+}
+
+// importAccountFromStore validates and imports an account through a Store.
+func (w *Wallet) importAccountFromStore(tx waddrmgr.ManagerReadWriteTx,
+	name string, accountPubKey *hdkeychain.ExtendedKey,
+	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType) (
+	*waddrmgr.AccountProperties, *waddrmgr.ScopedKeyManager, error) {
+
+	if err := w.validateExtendedPubKey(accountPubKey, true); err != nil {
+		return nil, nil, err
+	}
+
+	keyScope, addrSchema, err := keyScopeFromPubKey(accountPubKey, addrType)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return w.importAccountScopeFromStore(
+		tx, name, accountPubKey, masterKeyFingerprint, keyScope,
+		addrSchema,
+	)
+}
+
+// importAccountScopeFromStore imports an extended-public-key account into a
+// known Store-backed key scope.
+func (w *Wallet) importAccountScopeFromStore(
+	tx waddrmgr.ManagerReadWriteTx, name string,
+	accountPubKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, addrSchema *waddrmgr.ScopeAddrSchema) (
+	*waddrmgr.AccountProperties, *waddrmgr.ScopedKeyManager, error) {
+
+	scopedManager, err := w.Manager.FetchScopedKeyManager(keyScope)
+	if err != nil {
+		schema := addrSchema
+		if schema == nil {
+			defaultSchema, ok := waddrmgr.ScopeAddrMap[keyScope]
+			if !ok {
+				return nil, nil, fmt.Errorf(
+					"address schema for scope %v is required", keyScope,
+				)
+			}
+			schema = &defaultSchema
+		}
+
+		scopedManager, err = w.Manager.NewScopedKeyManagerFromStore(
+			tx, keyScope, *schema,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	_, props, err := scopedManager.NewAccountWatchingOnlyFromStore(
+		tx, name, accountPubKey, masterKeyFingerprint, addrSchema,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return props, scopedManager, nil
 }
 
 // importAccount is the internal implementation of ImportAccount -- one should
@@ -281,6 +390,10 @@ func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 
 	scopedMgr, err := w.Manager.FetchScopedKeyManager(keyScope)
 	if err != nil {
+		if addrSchema == nil {
+			schema := waddrmgr.ScopeAddrMap[keyScope]
+			addrSchema = &schema
+		}
 		scopedMgr, err = w.Manager.NewScopedKeyManager(
 			ns, keyScope, *addrSchema,
 		)
@@ -322,6 +435,55 @@ func (w *Wallet) ImportAccountDryRun(name string,
 		externalAddrs []waddrmgr.ManagedAddress
 		internalAddrs []waddrmgr.ManagedAddress
 	)
+
+	if w.db == nil {
+		err := w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				props, manager, err := w.importAccountFromStore(
+					tx.Addr(), name, accountPubKey,
+					masterKeyFingerprint, addrType,
+				)
+				if err != nil {
+					return err
+				}
+				accountProps = props
+
+				for i := uint32(0); i < numAddrs; i++ {
+					external, props, err :=
+						manager.NextExternalAddressFromStore(
+							tx.Addr(), accountProps.AccountNumber,
+						)
+					if err != nil {
+						return err
+					}
+					externalAddrs = append(externalAddrs, external)
+					accountProps = props
+
+					internal, props, err :=
+						manager.NextInternalAddressFromStore(
+							tx.Addr(), accountProps.AccountNumber,
+						)
+					if err != nil {
+						return err
+					}
+					internalAddrs = append(internalAddrs, internal)
+					accountProps = props
+				}
+
+				return walletdb.ErrDryRunRollBack
+			}, func() {
+				accountProps = nil
+				externalAddrs = nil
+				internalAddrs = nil
+			},
+		)
+		if err != nil && !errors.Is(err, walletdb.ErrDryRunRollBack) {
+			return nil, nil, nil, err
+		}
+
+		return accountProps, externalAddrs, internalAddrs, nil
+	}
 
 	// Start a database transaction that we'll never commit and always
 	// rollback because we'll return a specific error in the end.
@@ -419,11 +581,26 @@ func (w *Wallet) ImportPublicKey(pubKey *btcec.PublicKey,
 
 	// TODO: Perform rescan if requested.
 	var addr waddrmgr.ManagedAddress
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		addr, err = scopedKeyManager.ImportPublicKey(ns, pubKey, nil)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			addr, err = scopedKeyManager.ImportPublicKey(ns, pubKey, nil)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				addr, err = scopedKeyManager.ImportPublicKeyFromStore(
+					tx.Addr(), pubKey, nil,
+				)
+				return err
+			}, func() {
+				addr = nil
+			},
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -470,13 +647,30 @@ func (w *Wallet) ImportTaprootScript(scope waddrmgr.KeyScope,
 
 	// TODO: Perform rescan if requested.
 	var addr waddrmgr.ManagedAddress
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		addr, err = manager.ImportTaprootScript(
-			ns, tapscript, bs, witnessVersion, isSecretScript,
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			addr, err = manager.ImportTaprootScript(
+				ns, tapscript, bs, witnessVersion, isSecretScript,
+			)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				addr, err = manager.ImportTaprootScriptFromStore(
+					tx.Addr(), tapscript, bs, witnessVersion,
+					isSecretScript,
+				)
+				return err
+			}, func() {
+				addr = nil
+			},
 		)
-		return err
-	})
+	}
+	w.refreshStartBlockAfterAmbiguous(err)
 	if err != nil {
 		return nil, err
 	}
@@ -525,42 +719,91 @@ func (w *Wallet) ImportPrivateKey(scope waddrmgr.KeyScope, wif *btcutil.WIF,
 	// Attempt to import private key into wallet.
 	var addr address.Address
 	var props *waddrmgr.AccountProperties
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		maddr, err := manager.ImportPrivateKey(addrmgrNs, wif, bs)
-		if err != nil {
-			return err
-		}
-		addr = maddr.Address()
-		props, err = manager.AccountProperties(
-			addrmgrNs, waddrmgr.ImportedAddrAccount,
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			maddr, err := manager.ImportPrivateKey(addrmgrNs, wif, bs)
+			if err != nil {
+				return err
+			}
+			addr = maddr.Address()
+			props, err = manager.AccountProperties(
+				addrmgrNs, waddrmgr.ImportedAddrAccount,
+			)
+			if err != nil {
+				return err
+			}
+
+			birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+			if err != nil {
+				return err
+			}
+			if bs.Height >= birthdayBlock.Height {
+				return nil
+			}
+
+			err = w.Manager.SetBirthday(addrmgrNs, bs.Timestamp)
+			if err != nil {
+				return err
+			}
+
+			return w.Manager.SetBirthdayBlock(addrmgrNs, *bs, false)
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				maddr, err := manager.ImportPrivateKeyFromStore(
+					tx.Addr(), wif, bs,
+				)
+				if err != nil {
+					return err
+				}
+				addr = maddr.Address()
+
+				state, err := tx.Addr().SyncState()
+				if err != nil {
+					return err
+				}
+				if state.BirthdayBlock == nil ||
+					bs.Height < state.BirthdayBlock.Height {
+
+					err = w.Manager.SetBirthdayFromStore(
+						tx.Addr(), bs.Timestamp,
+					)
+					if err != nil {
+						return err
+					}
+					err = w.Manager.SetBirthdayBlockFromStore(
+						tx.Addr(), *bs, false,
+					)
+					if err != nil {
+						return err
+					}
+				}
+
+				addresses, err := tx.Addr().AccountAddresses(
+					scope, waddrmgr.ImportedAddrAccount,
+				)
+				if err != nil {
+					return err
+				}
+				props = &waddrmgr.AccountProperties{
+					AccountNumber:    waddrmgr.ImportedAddrAccount,
+					AccountName:      waddrmgr.ImportedAddrAccountName,
+					ImportedKeyCount: uint32(len(addresses)),
+					KeyScope:         scope,
+					IsWatchOnly:      w.Manager.WatchOnly(),
+				}
+
+				return nil
+			}, func() {
+				addr = nil
+				props = nil
+			},
 		)
-		if err != nil {
-			return err
-		}
-
-		// We'll only update our birthday with the new one if it is
-		// before our current one. Otherwise, if we do, we can
-		// potentially miss detecting relevant chain events that
-		// occurred between them while rescanning.
-		birthdayBlock, _, err := w.Manager.BirthdayBlock(addrmgrNs)
-		if err != nil {
-			return err
-		}
-		if bs.Height >= birthdayBlock.Height {
-			return nil
-		}
-
-		err = w.Manager.SetBirthday(addrmgrNs, bs.Timestamp)
-		if err != nil {
-			return err
-		}
-
-		// To ensure this birthday block is correct, we'll mark it as
-		// unverified to prompt a sanity check at the next restart to
-		// ensure it is correct as it was provided by the caller.
-		return w.Manager.SetBirthdayBlock(addrmgrNs, *bs, false)
-	})
+	}
+	w.refreshStartBlockAfterAmbiguous(err)
 	if err != nil {
 		return "", err
 	}

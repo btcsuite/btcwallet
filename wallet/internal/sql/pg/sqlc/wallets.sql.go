@@ -166,13 +166,21 @@ func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (Walle
 const GetWalletStartBlock = `-- name: GetWalletStartBlock :one
 SELECT b.block_height, b.header_hash, b.block_timestamp
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = s.wallet_id
+    AND b.block_height = s.start_block_height
 WHERE s.wallet_id = $1
 `
 
-func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error) {
+type GetWalletStartBlockRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetWalletStartBlock(ctx context.Context, walletID int64) (GetWalletStartBlockRow, error) {
 	row := q.queryRow(ctx, q.getWalletStartBlockStmt, GetWalletStartBlock, walletID)
-	var i Block
+	var i GetWalletStartBlockRow
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
 }
@@ -192,12 +200,15 @@ SELECT
     birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS start_block
-    ON s.start_block_height = start_block.block_height
-INNER JOIN blocks AS synced_block
-    ON s.synced_block_height = synced_block.block_height
-LEFT JOIN blocks AS birthday_block
-    ON s.birthday_block_height = birthday_block.block_height
+INNER JOIN wallet_blocks AS start_block
+    ON start_block.wallet_id = s.wallet_id
+    AND start_block.block_height = s.start_block_height
+INNER JOIN wallet_blocks AS synced_block
+    ON synced_block.wallet_id = s.wallet_id
+    AND synced_block.block_height = s.synced_block_height
+LEFT JOIN wallet_blocks AS birthday_block
+    ON birthday_block.wallet_id = s.wallet_id
+    AND birthday_block.block_height = s.birthday_block_height
 WHERE s.wallet_id = $1
 `
 

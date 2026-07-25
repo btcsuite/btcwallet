@@ -238,10 +238,7 @@ func (s *txStore) rangeUnmined(
 func (s *txStore) rangeMined(begin, end int32,
 	visit func([]wtxmgr.TxDetails) (bool, error)) (bool, error) {
 
-	forward := begin < end
-
 	// wtxmgr uses a negative height as the unbounded chain tip. Normalize it
-	// only for the mined query because unmined placement is handled by the
 	// caller.
 	if begin < 0 {
 		begin = int32(^uint32(0) >> 1)
@@ -250,6 +247,7 @@ func (s *txStore) rangeMined(begin, end int32,
 	if end < 0 {
 		end = int32(^uint32(0) >> 1)
 	}
+	forward := begin < end
 
 	// Preserve wtxmgr's caller-selected traversal direction in SQL so each
 	// callback sees heights in the expected order.
@@ -451,7 +449,7 @@ func (s *txStore) OutputsToWatch() ([]wtxmgr.Credit, error) {
 // UnspentOutputs returns all currently spendable credits.
 func (s *txStore) UnspentOutputs() ([]wtxmgr.Credit, error) {
 	rows, err := s.queries.ListUnspentCredits(
-		s.ctx, s.walletID, time.Now().Unix(),
+		s.ctx, s.walletID, time.Now().UnixNano(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list unspent outputs: %w", err)

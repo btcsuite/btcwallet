@@ -28,10 +28,17 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 
 	q := sqlc.New(db)
 	for height := int32(100); height <= 101; height++ {
-		require.NoError(t, q.InsertBlock(ctx, sqlc.InsertBlockParams{
+		block := sqlc.EnsureBlockHeightParams{
 			BlockHeight:    height,
 			HeaderHash:     testHash(byte(height)),
 			BlockTimestamp: 1000 + int64(height),
+		}
+		require.NoError(t, q.EnsureBlockHeight(ctx, block))
+		require.NoError(t, q.InsertBlock(ctx, sqlc.InsertBlockParams{
+			WalletID:       1,
+			BlockHeight:    height,
+			HeaderHash:     block.HeaderHash,
+			BlockTimestamp: block.BlockTimestamp,
 		}))
 	}
 
@@ -120,7 +127,10 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 	require.Len(t, unspent, 1)
 	require.Equal(t, minedCreditIDs[1], unspent[0].ID)
-	require.Error(t, q.DeleteBlock(ctx, 100))
+	require.Error(t, q.DeleteBlock(ctx, sqlc.DeleteBlockParams{
+		WalletID:    1,
+		BlockHeight: 100,
+	}))
 
 	unminedHash := testHash(2)
 	unminedID := insertUnminedTransaction(t, ctx, q, unminedHash)
@@ -182,7 +192,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 		},
 	))
 	credit, err := q.GetCredit(ctx, sqlc.GetCreditParams{
-		TransactionID: fundingID, OutputIndex: 0,
+		WalletID: 1, TransactionID: fundingID, OutputIndex: 0,
 	})
 	require.NoError(t, err)
 	require.Equal(t, pkScript, credit.PkScript)

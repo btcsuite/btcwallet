@@ -200,7 +200,7 @@ SET
     encrypted_priv_key = NULL,
     encrypted_script = CASE
         WHEN address_type = 2 THEN NULL
-        WHEN address_type = 3 AND is_secret_script = TRUE THEN NULL
+        WHEN address_type IN (3, 4) AND is_secret_script = TRUE THEN NULL
         ELSE encrypted_script
     END
 WHERE wallet_id = $1;

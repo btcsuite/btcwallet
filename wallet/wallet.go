@@ -7,6 +7,7 @@ package wallet
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -91,10 +92,24 @@ var (
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
 )
 
+// UnsupportedStoreOperationError reports a transaction-domain operation that
+// has not yet been ported to store-backed wallets.
+type UnsupportedStoreOperationError struct {
+	// Operation identifies the unsupported public wallet method.
+	Operation string
+}
+
+// Error describes the unsupported store-backed wallet operation.
+func (e *UnsupportedStoreOperationError) Error() string {
+	return e.Operation + " is unsupported for store-backed wallets"
+}
+
 // Coin represents a spendable UTXO which is available for coin selection.
 type Coin struct {
+	// TxOut describes the spendable output value and script.
 	wire.TxOut
 
+	// OutPoint identifies the transaction output being spent.
 	wire.OutPoint
 }
 
@@ -127,9 +142,13 @@ type Wallet struct {
 	publicPassphrase []byte
 
 	// Data stores
-	db      walletdb.DB
-	store   walletstore.Store
+	db    walletdb.DB
+	store walletstore.Store
+	// Manager controls the wallet's address and key state.
 	Manager *waddrmgr.Manager
+
+	// TxStore controls the legacy wallet transaction state. It is nil for a
+	// Store-backed wallet.
 	TxStore *wtxmgr.Store
 
 	chainClient        chain.Interface
@@ -165,6 +184,7 @@ type Wallet struct {
 	changePassphrase   chan changePassphraseRequest
 	changePassphrases  chan changePassphrasesRequest
 
+	// NtfnServer publishes wallet state changes to subscribers.
 	NtfnServer *NotificationServer
 
 	chainParams *chaincfg.Params
@@ -350,9 +370,9 @@ func (w *Wallet) ChainSynced() bool {
 // with the latest block notified by the chain server.
 //
 // NOTE: Due to an API limitation with rpcclient, this may return true after
-// the client disconnected (and is attempting a reconnect).  This will be unknown
-// until the reconnect notification is received, at which point the wallet can be
-// marked out of sync again until after the next rescan completes.
+// the client disconnected (and is attempting a reconnect). This will be
+// unknown until the reconnect notification is received, at which point the
+// wallet can be marked out of sync again until after the next rescan completes.
 func (w *Wallet) SetChainSynced(synced bool) {
 	w.chainClientSyncMtx.Lock()
 	w.chainClientSynced = synced
@@ -390,6 +410,176 @@ func (w *Wallet) activeData(
 
 	unspent, err := w.TxStore.OutputsToWatch(txmgrNs)
 	return addrs, unspent, err
+}
+
+type rollbackBlockHash struct {
+	height int32
+	hash   chainhash.Hash
+}
+
+// readStoreRollbackSnapshot detaches the durable starting sync state and its
+// contiguous retained block hashes before any chain request is made.
+func (w *Wallet) readStoreRollbackSnapshot(ctx context.Context) (
+	waddrmgr.SyncState, []rollbackBlockHash, error) {
+
+	var (
+		state  waddrmgr.SyncState
+		blocks []rollbackBlockHash
+	)
+	err := w.store.View(ctx, func(tx walletstore.ReadTx) error {
+		var err error
+		state, err = tx.Addr().SyncState()
+		if err != nil {
+			return err
+		}
+
+		for height := state.SyncedTo.Height; ; height-- {
+			hash, err := tx.Addr().BlockHash(height)
+			if waddrmgr.IsError(err, waddrmgr.ErrBlockNotFound) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			blocks = append(blocks, rollbackBlockHash{
+				height: height,
+				hash:   *hash,
+			})
+			if height == 0 {
+				break
+			}
+		}
+
+		if len(blocks) == 0 || blocks[0].hash != state.SyncedTo.Hash {
+			return errors.New("durable synced tip has no matching block hash")
+		}
+
+		return nil
+	}, func() {
+		state = waddrmgr.SyncState{}
+		blocks = nil
+	})
+
+	return state, blocks, err
+}
+
+// findStoreRollbackTarget finds the newest retained wallet block on the
+// backend's active chain and validates the descending header linkage.
+func findStoreRollbackTarget(chainClient chain.Interface,
+	blocks []rollbackBlockHash) (waddrmgr.BlockStamp, error) {
+
+	var expectedHash *chainhash.Hash
+	for _, block := range blocks {
+		chainHash, err := chainClient.GetBlockHash(int64(block.height))
+		if err != nil {
+			return waddrmgr.BlockStamp{}, err
+		}
+		if expectedHash != nil && *chainHash != *expectedHash {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"chain changed while finding rollback ancestor at height %d",
+				block.height,
+			)
+		}
+
+		header, err := chainClient.GetBlockHeader(chainHash)
+		if err != nil {
+			return waddrmgr.BlockStamp{}, err
+		}
+		if header.BlockHash() != *chainHash {
+			return waddrmgr.BlockStamp{}, fmt.Errorf(
+				"header hash does not match block %v", chainHash,
+			)
+		}
+
+		stamp := waddrmgr.BlockStamp{
+			Hash:      *chainHash,
+			Height:    block.height,
+			Timestamp: header.Timestamp,
+		}
+		if block.hash == *chainHash {
+			return stamp, nil
+		}
+
+		expectedHash = &header.PrevBlock
+	}
+
+	return waddrmgr.BlockStamp{}, errors.New(
+		"no retained wallet block is on the active chain",
+	)
+}
+
+// rollbackStoreToChain prepares a common-ancestor rollback without a Store
+// transaction and atomically applies it against the exact durable starting tip.
+func (w *Wallet) rollbackStoreToChain(chainClient chain.Interface,
+	birthdayStamp *waddrmgr.BlockStamp) (bool, error) {
+
+	ctx := context.Background()
+	state, blocks, err := w.readStoreRollbackSnapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	target, err := findStoreRollbackTarget(chainClient, blocks)
+	if err != nil {
+		return false, err
+	}
+	start := state.SyncedTo
+	if sameBlockPosition(start, target) {
+		return false, nil
+	}
+
+	err = w.applyStorePlan(
+		ctx, "initial rollback", func(tx walletstore.ReadWriteTx) error {
+			current, err := tx.Addr().SyncState()
+			if err != nil {
+				return err
+			}
+			if !sameBlockPosition(current.SyncedTo, start) {
+				return &StorePlanStaleError{
+					Operation: "initial rollback",
+					Reason: fmt.Sprintf("starting tip is %d:%v, want %d:%v",
+						current.SyncedTo.Height, current.SyncedTo.Hash,
+						start.Height, start.Hash),
+				}
+			}
+
+			startHash, err := tx.Addr().BlockHash(start.Height)
+			if err != nil {
+				return err
+			}
+			if *startHash != start.Hash {
+				return &StorePlanStaleError{
+					Operation: "initial rollback",
+					Reason:    "starting block hash changed",
+				}
+			}
+
+			if err := w.Manager.SetSyncedToFromStore(
+				tx.Addr(), &target,
+			); err != nil {
+
+				return err
+			}
+			if target.Height <= birthdayStamp.Height &&
+				target.Hash != birthdayStamp.Hash {
+
+				if err := w.Manager.SetBirthdayBlockFromStore(
+					tx.Addr(), target, true,
+				); err != nil {
+
+					return err
+				}
+			}
+
+			return tx.Tx().Rollback(target.Height + 1)
+		}, func(tx walletstore.ReadTx) (storePlanStatus, error) {
+			return storePlanCommitStatus(tx, start, target)
+		}, nil,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // syncWithChain brings the wallet up to date with the current chain server
@@ -453,18 +643,42 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 			return err
 		}
 
-		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-			err := w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
-				Hash:      *startHash,
-				Height:    startHeight,
-				Timestamp: startHeader.Timestamp,
+		if w.db != nil {
+			err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+				err := w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+					Hash:      *startHash,
+					Height:    startHeight,
+					Timestamp: startHeader.Timestamp,
+				})
+				if err != nil {
+					return err
+				}
+				return w.Manager.SetBirthdayBlock(
+					ns, *birthdayStamp, true,
+				)
 			})
-			if err != nil {
-				return err
-			}
-			return w.Manager.SetBirthdayBlock(ns, *birthdayStamp, true)
-		})
+		} else {
+			err = w.store.UpdateOnce(
+				context.Background(),
+				func(tx walletstore.ReadWriteTx) error {
+					err := w.Manager.SetSyncedToFromStore(
+						tx.Addr(), &waddrmgr.BlockStamp{
+							Hash:      *startHash,
+							Height:    startHeight,
+							Timestamp: startHeader.Timestamp,
+						},
+					)
+					if err != nil {
+						return err
+					}
+
+					return w.Manager.SetBirthdayBlockFromStore(
+						tx.Addr(), *birthdayStamp, true,
+					)
+				}, nil,
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("unable to persist initial sync "+
 				"data: %w", err)
@@ -485,65 +699,61 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 	// before catching up with the rescan.
 	rollback := false
 	rollbackStamp := w.Manager.SyncedTo()
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 
-		for height := rollbackStamp.Height; true; height-- {
-			hash, err := w.Manager.BlockHash(addrmgrNs, height)
+			for height := rollbackStamp.Height; true; height-- {
+				hash, err := w.Manager.BlockHash(addrmgrNs, height)
+				if err != nil {
+					return err
+				}
+				chainHash, err := chainClient.GetBlockHash(int64(height))
+				if err != nil {
+					return err
+				}
+				header, err := chainClient.GetBlockHeader(chainHash)
+				if err != nil {
+					return err
+				}
+
+				rollbackStamp.Hash = *chainHash
+				rollbackStamp.Height = height
+				rollbackStamp.Timestamp = header.Timestamp
+
+				if bytes.Equal(hash[:], chainHash[:]) {
+					break
+				}
+				rollback = true
+			}
+
+			if !rollback {
+				return nil
+			}
+
+			err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
 			if err != nil {
 				return err
 			}
-			chainHash, err := chainClient.GetBlockHash(int64(height))
-			if err != nil {
-				return err
+			if rollbackStamp.Height <= birthdayStamp.Height &&
+				rollbackStamp.Hash != birthdayStamp.Hash {
+
+				err := w.Manager.SetBirthdayBlock(
+					addrmgrNs, rollbackStamp, true,
+				)
+				if err != nil {
+					return err
+				}
 			}
-			header, err := chainClient.GetBlockHeader(chainHash)
-			if err != nil {
-				return err
-			}
 
-			rollbackStamp.Hash = *chainHash
-			rollbackStamp.Height = height
-			rollbackStamp.Timestamp = header.Timestamp
-
-			if bytes.Equal(hash[:], chainHash[:]) {
-				break
-			}
-			rollback = true
-		}
-
-		// If a rollback did not happen, we can proceed safely.
-		if !rollback {
-			return nil
-		}
-
-		// Otherwise, we'll mark this as our new synced height.
-		err := w.Manager.SetSyncedTo(addrmgrNs, &rollbackStamp)
-		if err != nil {
-			return err
-		}
-
-		// If the rollback happened to go beyond our birthday stamp,
-		// we'll need to find a new one by syncing with the chain again
-		// until finding one.
-		if rollbackStamp.Height <= birthdayStamp.Height &&
-			rollbackStamp.Hash != birthdayStamp.Hash {
-
-			err := w.Manager.SetBirthdayBlock(
-				addrmgrNs, rollbackStamp, true,
+			return w.TxStore.Rollback(
+				txmgrNs, rollbackStamp.Height+1,
 			)
-			if err != nil {
-				return err
-			}
-		}
-
-		// Finally, we'll roll back our transaction store to reflect the
-		// stale state. `Rollback` unconfirms transactions at and beyond
-		// the passed height, so add one to the new synced-to height to
-		// prevent unconfirming transactions in the synced-to block.
-		return w.TxStore.Rollback(txmgrNs, rollbackStamp.Height+1)
-	})
+		})
+	} else {
+		rollback, err = w.rollbackStoreToChain(chainClient, birthdayStamp)
+	}
 	if err != nil {
 		return err
 	}
@@ -567,10 +777,37 @@ func (w *Wallet) syncWithChain(birthdayStamp *waddrmgr.BlockStamp) error {
 		addrs   []address.Address
 		unspent []wtxmgr.Credit
 	)
-	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
-		addrs, unspent, err = w.activeData(dbtx)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
+			addrs, unspent, err = w.activeData(dbtx)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				addrs = nil
+				unspent = nil
+				err := w.Manager.ForEachRelevantActiveAddressFromStore(
+					tx.Addr(), func(addr address.Address) error {
+						addrs = append(addrs, addr)
+						return nil
+					},
+				)
+				if err != nil {
+					return err
+				}
+				if err := tx.Tx().DeleteExpiredLockedOutputs(); err != nil {
+					return err
+				}
+				unspent, err = tx.Tx().OutputsToWatch()
+				return err
+			}, func() {
+				addrs = nil
+				unspent = nil
+			},
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -729,15 +966,67 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	for _, scopedMgr := range w.Manager.ActiveScopedKeyManagers() {
 		scopedMgrs[scopedMgr.Scope()] = scopedMgr
 	}
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
-		credits, err := w.TxStore.UnspentOutputs(txMgrNS)
-		if err != nil {
-			return err
+	var err error
+	var recoveryStart waddrmgr.BlockStamp
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			txMgrNS := tx.ReadBucket(wtxmgrNamespaceKey)
+			credits, err := w.TxStore.UnspentOutputs(txMgrNS)
+			if err != nil {
+				return err
+			}
+			addrMgrNS := tx.ReadBucket(waddrmgrNamespaceKey)
+			return recoveryMgr.Resurrect(
+				addrMgrNS, scopedMgrs, credits,
+			)
+		})
+		recoveryStart = w.Manager.SyncedTo()
+	} else {
+		var (
+			credits  []wtxmgr.Credit
+			accounts map[waddrmgr.KeyScope]waddrmgr.AccountState
+		)
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				credits, err = tx.Tx().UnspentOutputs()
+				if err != nil {
+					return err
+				}
+
+				accounts = make(
+					map[waddrmgr.KeyScope]waddrmgr.AccountState,
+					len(scopedMgrs),
+				)
+				for scope := range scopedMgrs {
+					account, err := tx.Addr().Account(
+						scope, waddrmgr.DefaultAccountNum,
+					)
+					if err != nil {
+						return err
+					}
+					accounts[scope] = account
+				}
+
+				state, err := tx.Addr().SyncState()
+				if err != nil {
+					return err
+				}
+				recoveryStart = state.SyncedTo
+
+				return nil
+			}, func() {
+				credits = nil
+				accounts = nil
+				recoveryStart = waddrmgr.BlockStamp{}
+			},
+		)
+		if err == nil {
+			err = recoveryMgr.resurrectFromAccountStates(
+				accounts, scopedMgrs, credits,
+			)
 		}
-		addrMgrNS := tx.ReadBucket(waddrmgrNamespaceKey)
-		return recoveryMgr.Resurrect(addrMgrNS, scopedMgrs, credits)
-	})
+	}
 	if err != nil {
 		return err
 	}
@@ -759,7 +1048,8 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 	// that a wallet rescan will be performed from the wallet's tip, which
 	// will be of bestHeight after completing the recovery process.
 	var blocks []*waddrmgr.BlockStamp
-	startHeight := w.Manager.SyncedTo().Height + 1
+	startHeight := recoveryStart.Height + 1
+	previousHash := recoveryStart.Hash
 	for height := startHeight; height <= bestHeight; height++ {
 		if atomic.LoadUint32(&syncer.quit) == 1 {
 			return errors.New("recovery: forced shutdown")
@@ -772,6 +1062,17 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 		header, err := chainClient.GetBlockHeader(hash)
 		if err != nil {
 			return err
+		}
+		if w.db == nil {
+			if header.BlockHash() != *hash {
+				return fmt.Errorf("recovery header hash does not match %v",
+					hash)
+			}
+			if header.PrevBlock != previousHash {
+				return fmt.Errorf("recovery block %d does not link to %v",
+					height, previousHash)
+			}
+			previousHash = *hash
 		}
 		blocks = append(blocks, &waddrmgr.BlockStamp{
 			Hash:      *hash,
@@ -794,28 +1095,39 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 		// state to disk.
 		recoveryBatch := recoveryMgr.BlockBatch()
 		if len(recoveryBatch) == recoveryBatchSize || height == bestHeight {
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				if err := w.recoverScopedAddresses(
-					chainClient, tx, ns, recoveryBatch,
-					recoveryMgr.State(), scopedMgrs,
-				); err != nil {
-					return err
-				}
+			var err error
+			if w.db != nil {
+				err = walletdb.Update(
+					w.db, func(tx walletdb.ReadWriteTx) error {
+						ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+						if err := w.recoverScopedAddresses(
+							chainClient, tx, ns, recoveryBatch,
+							recoveryMgr.State(), scopedMgrs,
+						); err != nil {
 
-				// TODO: Any error here will roll back this
-				// entire tx. This may cause the in memory sync
-				// point to become desyncronized. Refactor so
-				// that this cannot happen.
-				for _, block := range blocks {
-					err := w.Manager.SetSyncedTo(ns, block)
-					if err != nil {
-						return err
-					}
-				}
+							return err
+						}
 
-				return nil
-			})
+						// TODO: Any error here will roll back this
+						// entire tx. This may cause the in memory sync
+						// point to become desyncronized. Refactor so
+						// that this cannot happen.
+						for _, block := range blocks {
+							err := w.Manager.SetSyncedTo(ns, block)
+							if err != nil {
+								return err
+							}
+						}
+
+						return nil
+					},
+				)
+			} else {
+				err = w.recoverStoreBatch(
+					chainClient, recoveryMgr, recoveryBatch, blocks,
+					scopedMgrs,
+				)
+			}
 			if err != nil {
 				return err
 			}
@@ -833,6 +1145,677 @@ func (w *Wallet) recovery(chainClient chain.Interface,
 		}
 	}
 
+	return nil
+}
+
+type recoveryStoreSnapshot struct {
+	tip      waddrmgr.BlockStamp
+	accounts map[waddrmgr.KeyScope]waddrmgr.AccountState
+}
+
+type recoveryPlannedTx struct {
+	record *wtxmgr.TxRecord
+	block  wtxmgr.BlockMeta
+}
+
+type recoveryAddressOwner struct {
+	manager  *waddrmgr.ScopedKeyManager
+	scope    waddrmgr.KeyScope
+	internal bool
+}
+
+type recoveryAddressOwners map[string]recoveryAddressOwner
+
+type recoveryScopedManagers map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager
+
+type recoveryStorePlan struct {
+	start        recoveryStoreSnapshot
+	target       waddrmgr.BlockStamp
+	finalState   *RecoveryState
+	finalIndexes map[waddrmgr.KeyScope]waddrmgr.AccountState
+	blocks       []waddrmgr.BlockStamp
+	responses    []*chain.FilterBlocksResponse
+	transactions []recoveryPlannedTx
+	owners       recoveryAddressOwners
+	managers     map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager
+	scopes       []waddrmgr.KeyScope
+}
+
+// readRecoveryStoreSnapshot detaches the exact tip and default-account indexes
+// needed to validate one recovery batch.
+func (w *Wallet) readRecoveryStoreSnapshot(ctx context.Context,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) (
+	recoveryStoreSnapshot, error) {
+
+	snapshot := recoveryStoreSnapshot{}
+	err := w.store.View(ctx, func(tx walletstore.ReadTx) error {
+		state, err := tx.Addr().SyncState()
+		if err != nil {
+			return err
+		}
+		snapshot.tip = state.SyncedTo
+		snapshot.accounts = make(
+			map[waddrmgr.KeyScope]waddrmgr.AccountState,
+			len(scopedMgrs),
+		)
+		for scope := range scopedMgrs {
+			account, err := tx.Addr().Account(
+				scope, waddrmgr.DefaultAccountNum,
+			)
+			if err != nil {
+				return err
+			}
+			snapshot.accounts[scope] = account
+		}
+
+		return nil
+	}, func() {
+		snapshot = recoveryStoreSnapshot{}
+	})
+
+	return snapshot, err
+}
+
+// expandScopeHorizonsFromAccountState derives one scope's transient lookahead
+// from detached account state while no Store transaction is active.
+func expandScopeHorizonsFromAccountState(account waddrmgr.AccountState,
+	scopedMgr *waddrmgr.ScopedKeyManager,
+	scopeState *ScopeRecoveryState) error {
+
+	exHorizon, exWindow := scopeState.ExternalBranch.ExtendHorizon()
+	count, childIndex := uint32(0), exHorizon
+	for count < exWindow {
+		addr, err := scopedMgr.DeriveFromKeyPathFromAccountState(
+			account, externalKeyPath(childIndex),
+		)
+		switch {
+		case errors.Is(err, hdkeychain.ErrInvalidChild):
+			scopeState.ExternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+
+		case err != nil:
+			return err
+		}
+
+		scopeState.ExternalBranch.AddAddr(childIndex, addr.Address())
+		childIndex++
+		count++
+	}
+
+	inHorizon, inWindow := scopeState.InternalBranch.ExtendHorizon()
+	count, childIndex = 0, inHorizon
+	for count < inWindow {
+		addr, err := scopedMgr.DeriveFromKeyPathFromAccountState(
+			account, internalKeyPath(childIndex),
+		)
+		switch {
+		case errors.Is(err, hdkeychain.ErrInvalidChild):
+			scopeState.InternalBranch.MarkInvalidChild(childIndex)
+			childIndex++
+			continue
+
+		case err != nil:
+			return err
+		}
+
+		scopeState.InternalBranch.AddAddr(childIndex, addr.Address())
+		childIndex++
+		count++
+	}
+
+	return nil
+}
+
+// cloneFilterBlocksResponse detaches all response maps and transactions from a
+// chain backend before they are retained in a recovery plan.
+func cloneFilterBlocksResponse(
+	response *chain.FilterBlocksResponse) *chain.FilterBlocksResponse {
+
+	clone := &chain.FilterBlocksResponse{
+		BatchIndex: response.BatchIndex,
+		BlockMeta:  response.BlockMeta,
+		FoundExternalAddrs: make(
+			map[waddrmgr.KeyScope]map[uint32]struct{},
+			len(response.FoundExternalAddrs),
+		),
+		FoundInternalAddrs: make(
+			map[waddrmgr.KeyScope]map[uint32]struct{},
+			len(response.FoundInternalAddrs),
+		),
+		FoundOutPoints: make(
+			map[wire.OutPoint]address.Address,
+			len(response.FoundOutPoints),
+		),
+		RelevantTxns: make([]*wire.MsgTx, 0, len(response.RelevantTxns)),
+	}
+	for scope, indexes := range response.FoundExternalAddrs {
+		clone.FoundExternalAddrs[scope] = make(
+			map[uint32]struct{}, len(indexes),
+		)
+		for index := range indexes {
+			clone.FoundExternalAddrs[scope][index] = struct{}{}
+		}
+	}
+	for scope, indexes := range response.FoundInternalAddrs {
+		clone.FoundInternalAddrs[scope] = make(
+			map[uint32]struct{}, len(indexes),
+		)
+		for index := range indexes {
+			clone.FoundInternalAddrs[scope][index] = struct{}{}
+		}
+	}
+	for outPoint, addr := range response.FoundOutPoints {
+		clone.FoundOutPoints[outPoint] = addr
+	}
+	for _, transaction := range response.RelevantTxns {
+		clone.RelevantTxns = append(clone.RelevantTxns, transaction.Copy())
+	}
+
+	return clone
+}
+
+// advanceRecoveryPlanState records one immutable filter response in the cloned
+// state used to prepare subsequent lookahead requests.
+func advanceRecoveryPlanState(response *chain.FilterBlocksResponse,
+	state *RecoveryState) {
+
+	for scope, indexes := range response.FoundExternalAddrs {
+		branch := state.StateForScope(scope).ExternalBranch
+		for index := range indexes {
+			branch.ReportFound(index)
+		}
+	}
+	for scope, indexes := range response.FoundInternalAddrs {
+		branch := state.StateForScope(scope).InternalBranch
+		for index := range indexes {
+			branch.ReportFound(index)
+		}
+	}
+	for outPoint, addr := range response.FoundOutPoints {
+		outPoint := outPoint
+		state.AddWatchedOutPoint(&outPoint, addr)
+	}
+}
+
+// validateRecoveryResponse ensures every found index was part of the request
+// and belongs to a scope included in the recovery plan.
+func validateRecoveryResponse(response *chain.FilterBlocksResponse,
+	state *RecoveryState,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) error {
+
+	for scope, indexes := range response.FoundExternalAddrs {
+		if scopedMgrs[scope] == nil {
+			return fmt.Errorf("filter response contains unknown scope %s",
+				scope)
+		}
+		branch := state.StateForScope(scope).ExternalBranch
+		for index := range indexes {
+			if branch.GetAddr(index) == nil {
+				return fmt.Errorf("filter response external index %s:%d was "+
+					"not requested", scope, index)
+			}
+		}
+	}
+	for scope, indexes := range response.FoundInternalAddrs {
+		if scopedMgrs[scope] == nil {
+			return fmt.Errorf("filter response contains unknown scope %s",
+				scope)
+		}
+		branch := state.StateForScope(scope).InternalBranch
+		for index := range indexes {
+			if branch.GetAddr(index) == nil {
+				return fmt.Errorf("filter response internal index %s:%d was "+
+					"not requested", scope, index)
+			}
+		}
+	}
+
+	return nil
+}
+
+// recoveryPlanOwners indexes every transient derived address used to classify
+// relevant transaction outputs without mutating manager caches during apply.
+func recoveryPlanOwners(state *RecoveryState,
+	scopedMgrs recoveryScopedManagers) recoveryAddressOwners {
+
+	owners := make(recoveryAddressOwners)
+	for scope, manager := range scopedMgrs {
+		scopeState := state.StateForScope(scope)
+		for _, addr := range scopeState.ExternalBranch.Addrs() {
+			owners[string(addr.ScriptAddress())] = recoveryAddressOwner{
+				manager: manager,
+				scope:   scope,
+			}
+		}
+		for _, addr := range scopeState.InternalBranch.Addrs() {
+			owners[string(addr.ScriptAddress())] = recoveryAddressOwner{
+				manager:  manager,
+				scope:    scope,
+				internal: true,
+			}
+		}
+	}
+
+	return owners
+}
+
+// prepareRecoveryStorePlan performs lookahead derivation and all filter RPCs
+// against detached state, retaining immutable responses for atomic apply.
+func (w *Wallet) prepareRecoveryStorePlan(chainClient chain.Interface,
+	recoveryState *RecoveryState, batch []wtxmgr.BlockMeta,
+	blocks []*waddrmgr.BlockStamp,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) (
+	*recoveryStorePlan, error) {
+
+	if len(blocks) == 0 {
+		return nil, errors.New("recovery Store plan has no block stamps")
+	}
+
+	ctx := context.Background()
+	snapshot, err := w.readRecoveryStoreSnapshot(ctx, scopedMgrs)
+	if err != nil {
+		return nil, err
+	}
+	if blocks[0].Height != snapshot.tip.Height+1 {
+		return nil, &StorePlanStaleError{
+			Operation: "recovery",
+			Reason: fmt.Sprintf("first block height is %d, want %d",
+				blocks[0].Height, snapshot.tip.Height+1),
+		}
+	}
+	firstHeader, err := chainClient.GetBlockHeader(&blocks[0].Hash)
+	if err != nil {
+		return nil, err
+	}
+	if firstHeader.BlockHash() != blocks[0].Hash ||
+		firstHeader.PrevBlock != snapshot.tip.Hash {
+
+		return nil, &StorePlanStaleError{
+			Operation: "recovery",
+			Reason:    "first block does not extend the starting tip",
+		}
+	}
+
+	plan := &recoveryStorePlan{
+		start:        snapshot,
+		finalState:   recoveryState.Clone(),
+		finalIndexes: make(map[waddrmgr.KeyScope]waddrmgr.AccountState),
+		blocks:       make([]waddrmgr.BlockStamp, len(blocks)),
+		managers: make(
+			map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+			len(scopedMgrs),
+		),
+	}
+	for scope, manager := range scopedMgrs {
+		plan.managers[scope] = manager
+	}
+	for i, block := range blocks {
+		plan.blocks[i] = *block
+	}
+	plan.target = plan.blocks[len(plan.blocks)-1]
+
+	remaining := append([]wtxmgr.BlockMeta(nil), batch...)
+	if len(remaining) > 0 {
+		log.Infof("Scanning %d blocks for recoverable addresses",
+			len(remaining))
+	}
+	for len(remaining) > 0 {
+		for scope, scopedMgr := range scopedMgrs {
+			account := snapshot.accounts[scope]
+			scopeState := plan.finalState.StateForScope(scope)
+			if err := expandScopeHorizonsFromAccountState(
+				account, scopedMgr, scopeState,
+			); err != nil {
+
+				return nil, err
+			}
+		}
+
+		request := newFilterBlocksRequest(
+			remaining, scopedMgrs, plan.finalState,
+		)
+		response, err := chainClient.FilterBlocks(request)
+		if err != nil {
+			return nil, err
+		}
+		if response == nil {
+			break
+		}
+		if int(response.BatchIndex) >= len(remaining) {
+			return nil, fmt.Errorf("filter response index %d exceeds batch %d",
+				response.BatchIndex, len(remaining))
+		}
+
+		block := remaining[response.BatchIndex]
+		if response.BlockMeta.Height != block.Height ||
+			response.BlockMeta.Hash != block.Hash {
+
+			return nil, fmt.Errorf("filter response block %d:%v does not "+
+				"match request %d:%v", response.BlockMeta.Height,
+				response.BlockMeta.Hash, block.Height, block.Hash)
+		}
+
+		immutable := cloneFilterBlocksResponse(response)
+		if err := validateRecoveryResponse(
+			immutable, plan.finalState, scopedMgrs,
+		); err != nil {
+
+			return nil, err
+		}
+		logFilterBlocksResp(block, immutable)
+		advanceRecoveryPlanState(immutable, plan.finalState)
+		plan.responses = append(plan.responses, immutable)
+		for _, transaction := range immutable.RelevantTxns {
+			record, err := wtxmgr.NewTxRecordFromMsgTx(
+				transaction, immutable.BlockMeta.Time,
+			)
+			if err != nil {
+				return nil, err
+			}
+			plan.transactions = append(plan.transactions, recoveryPlannedTx{
+				record: record,
+				block:  immutable.BlockMeta,
+			})
+		}
+
+		remaining = remaining[immutable.BatchIndex+1:]
+	}
+
+	for scope, account := range snapshot.accounts {
+		scopeState := plan.finalState.StateForScope(scope)
+		account.NextExternalIndex = max(
+			account.NextExternalIndex,
+			scopeState.ExternalBranch.NextUnfound(),
+		)
+		account.NextInternalIndex = max(
+			account.NextInternalIndex,
+			scopeState.InternalBranch.NextUnfound(),
+		)
+		plan.finalIndexes[scope] = account
+		plan.scopes = append(plan.scopes, scope)
+	}
+	plan.owners = recoveryPlanOwners(
+		plan.finalState, recoveryScopedManagers(scopedMgrs),
+	)
+
+	return plan, nil
+}
+
+// recoveryAccountsMatch reports whether all planned default-account indexes
+// match their durable values.
+func recoveryAccountsMatch(store walletstore.AddrReadStore,
+	accounts map[waddrmgr.KeyScope]waddrmgr.AccountState) (bool, error) {
+
+	for scope, expected := range accounts {
+		account, err := store.Account(scope, waddrmgr.DefaultAccountNum)
+		if err != nil {
+			return false, err
+		}
+		if account.NextExternalIndex != expected.NextExternalIndex ||
+			account.NextInternalIndex != expected.NextInternalIndex {
+
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// recoveryPlanDurable verifies all address, used-state, and transaction writes
+// that distinguish a committed recovery plan from an unrelated tip update.
+func recoveryPlanDurable(tx walletstore.ReadTx,
+	plan *recoveryStorePlan) (bool, error) {
+
+	matches, err := recoveryAccountsMatch(tx.Addr(), plan.finalIndexes)
+	if err != nil || !matches {
+		return false, err
+	}
+
+	for _, response := range plan.responses {
+		for scope, indexes := range response.FoundExternalAddrs {
+			branch := plan.finalState.scopes[scope].ExternalBranch
+			for index := range indexes {
+				state, err := tx.Addr().Address(
+					scope, branch.GetAddr(index).ScriptAddress(),
+				)
+				if err != nil || !state.Used {
+					return false, err
+				}
+			}
+		}
+		for scope, indexes := range response.FoundInternalAddrs {
+			branch := plan.finalState.scopes[scope].InternalBranch
+			for index := range indexes {
+				state, err := tx.Addr().Address(
+					scope, branch.GetAddr(index).ScriptAddress(),
+				)
+				if err != nil || !state.Used {
+					return false, err
+				}
+			}
+		}
+	}
+
+	for _, transaction := range plan.transactions {
+		details, err := tx.Tx().UniqueTxDetails(
+			&transaction.record.Hash, &transaction.block.Block,
+		)
+		if err != nil || details == nil {
+			return false, err
+		}
+	}
+
+	return true, nil
+}
+
+// addRecoveryRelevantTxFromStore records a planned recovery transaction using
+// detached address ownership, avoiding manager cache reads before commit.
+func (w *Wallet) addRecoveryRelevantTxFromStore(
+	tx walletstore.ReadWriteTx, planned recoveryPlannedTx,
+	owners recoveryAddressOwners) error {
+
+	exists, err := tx.Tx().InsertTxCheckIfExists(
+		planned.record, &planned.block,
+	)
+	if err != nil || exists {
+		return err
+	}
+
+	for i, output := range planned.record.MsgTx.TxOut {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			output.PkScript, w.chainParams,
+		)
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			owner, ok := owners[string(addr.ScriptAddress())]
+			if !ok || !waddrmgr.IsDefaultScope(owner.scope) {
+				continue
+			}
+
+			isNew, err := tx.Tx().AddCredit(
+				planned.record, &planned.block, uint32(i), owner.internal,
+			)
+			if err != nil {
+				return err
+			}
+			if isNew {
+				hash := planned.record.Hash
+				index := uint32(i)
+				tx.Addr().OnCommit(func() {
+					w.NtfnServer.notifyUnspentOutput(
+						waddrmgr.DefaultAccountNum, &hash, index,
+					)
+				})
+			}
+			if err := owner.manager.MarkUsedFromStore(
+				tx.Addr(), addr,
+			); err != nil {
+
+				return err
+			}
+		}
+	}
+
+	hash := planned.record.Hash
+	block := planned.block
+	tx.Addr().OnCommit(func() {
+		w.NtfnServer.notifyMinedTransactionFromStore(hash, &block)
+	})
+
+	return nil
+}
+
+// applyRecoveryStorePlan atomically persists a prepared recovery plan after
+// revalidating its exact starting tip and all relevant account indexes.
+func (w *Wallet) applyRecoveryStorePlan(plan *recoveryStorePlan) error {
+	return w.applyStorePlan(
+		context.Background(), "recovery",
+		func(tx walletstore.ReadWriteTx) error {
+			state, err := tx.Addr().SyncState()
+			if err != nil {
+				return err
+			}
+			if !sameBlockPosition(state.SyncedTo, plan.start.tip) {
+				return &StorePlanStaleError{
+					Operation: "recovery",
+					Reason: fmt.Sprintf("starting tip is %d:%v, want %d:%v",
+						state.SyncedTo.Height, state.SyncedTo.Hash,
+						plan.start.tip.Height, plan.start.tip.Hash),
+				}
+			}
+
+			matches, err := recoveryAccountsMatch(
+				tx.Addr(), plan.start.accounts,
+			)
+			if err != nil {
+				return err
+			}
+			if !matches {
+				return &StorePlanStaleError{
+					Operation: "recovery",
+					Reason:    "default account indexes changed",
+				}
+			}
+
+			for scope, target := range plan.finalIndexes {
+				manager := plan.managers[scope]
+				if target.NextExternalIndex > 0 {
+					if err := extendScopeAddressesFromStore(
+						tx.Addr(), manager,
+						target.NextExternalIndex-1, false,
+					); err != nil {
+
+						return err
+					}
+				}
+				if target.NextInternalIndex > 0 {
+					if err := extendScopeAddressesFromStore(
+						tx.Addr(), manager,
+						target.NextInternalIndex-1, true,
+					); err != nil {
+
+						return err
+					}
+				}
+			}
+
+			for _, response := range plan.responses {
+				for scope, indexes := range response.FoundExternalAddrs {
+					manager := plan.managers[scope]
+					branch := plan.finalState.scopes[scope].ExternalBranch
+					for index := range indexes {
+						if err := manager.MarkUsedFromStore(
+							tx.Addr(), branch.GetAddr(index),
+						); err != nil {
+
+							return err
+						}
+					}
+				}
+				for scope, indexes := range response.FoundInternalAddrs {
+					manager := plan.managers[scope]
+					branch := plan.finalState.scopes[scope].InternalBranch
+					for index := range indexes {
+						if err := manager.MarkUsedFromStore(
+							tx.Addr(), branch.GetAddr(index),
+						); err != nil {
+
+							return err
+						}
+					}
+				}
+			}
+
+			for _, transaction := range plan.transactions {
+				if err := w.addRecoveryRelevantTxFromStore(
+					tx, transaction, plan.owners,
+				); err != nil {
+
+					return err
+				}
+			}
+
+			for i := range plan.blocks {
+				if err := w.Manager.SetSyncedToFromStore(
+					tx.Addr(), &plan.blocks[i],
+				); err != nil {
+
+					return err
+				}
+			}
+
+			return nil
+		}, func(tx walletstore.ReadTx) (storePlanStatus, error) {
+			state, err := tx.Addr().SyncState()
+			if err != nil {
+				return storePlanConflict, err
+			}
+
+			switch {
+			case sameBlockPosition(state.SyncedTo, plan.target):
+				durable, err := recoveryPlanDurable(tx, plan)
+				if err != nil || !durable {
+					return storePlanConflict, err
+				}
+				return storePlanCommitted, nil
+
+			case sameBlockPosition(state.SyncedTo, plan.start.tip):
+				matches, err := recoveryAccountsMatch(
+					tx.Addr(), plan.start.accounts,
+				)
+				if err != nil || !matches {
+					return storePlanConflict, err
+				}
+				return storePlanAbsent, nil
+
+			default:
+				return storePlanConflict, nil
+			}
+		}, plan.scopes,
+	)
+}
+
+// recoverStoreBatch prepares and commits one recovery batch, adopting its
+// cloned state only after the database transaction is known to be durable.
+func (w *Wallet) recoverStoreBatch(chainClient chain.Interface,
+	recoveryMgr *RecoveryManager, batch []wtxmgr.BlockMeta,
+	blocks []*waddrmgr.BlockStamp,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager) error {
+
+	plan, err := w.prepareRecoveryStorePlan(
+		chainClient, recoveryMgr.State(), batch, blocks, scopedMgrs,
+	)
+	if err != nil {
+		return err
+	}
+	if err := w.applyRecoveryStorePlan(plan); err != nil {
+		return err
+	}
+
+	recoveryMgr.state = plan.finalState
 	return nil
 }
 
@@ -1173,6 +2156,43 @@ func extendFoundAddresses(ns walletdb.ReadWriteBucket,
 	return nil
 }
 
+// extendScopeAddressesFromStore persists sequential addresses through the
+// requested child index using the existing Store-backed derivation methods.
+func extendScopeAddressesFromStore(tx waddrmgr.ManagerReadWriteTx,
+	scopedMgr *waddrmgr.ScopedKeyManager, lastIndex uint32,
+	internal bool) error {
+
+	for {
+		account, err := tx.Account(
+			scopedMgr.Scope(), waddrmgr.DefaultAccountNum,
+		)
+		if err != nil {
+			return err
+		}
+
+		nextIndex := account.NextExternalIndex
+		if internal {
+			nextIndex = account.NextInternalIndex
+		}
+		if nextIndex > lastIndex {
+			return nil
+		}
+
+		if internal {
+			_, _, err = scopedMgr.NextInternalAddressFromStore(
+				tx, waddrmgr.DefaultAccountNum,
+			)
+		} else {
+			_, _, err = scopedMgr.NextExternalAddressFromStore(
+				tx, waddrmgr.DefaultAccountNum,
+			)
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
 // logFilterBlocksResp provides useful logging information when filtering
 // succeeded in finding relevant transactions.
 func logFilterBlocksResp(block wtxmgr.BlockMeta,
@@ -1322,9 +2342,9 @@ func WithUtxoFilter(allowUtxo func(utxo wtxmgr.Credit) bool) TxCreateOption {
 // CreateSimpleTx creates a new signed transaction spending unspent outputs with
 // at least minconf confirmations spending to any number of address/amount
 // pairs. Only unspent outputs belonging to the given key scope and account will
-// be selected, unless a key scope is not specified. In that case, inputs from all
-// accounts may be selected, no matter what key scope they belong to. This is
-// done to handle the default account case, where a user wants to fund a PSBT
+// be selected, unless a key scope is not specified. In that case, inputs from
+// all accounts may be selected, regardless of key scope. This handles the
+// default account case, where a user wants to fund a PSBT
 // with inputs regardless of their type (NP2WKH, P2WKH, etc.). Change and an
 // appropriate transaction fee are automatically included, if necessary. All
 // transaction creation through this function is serialized to prevent the
@@ -1423,10 +2443,17 @@ out:
 	for {
 		select {
 		case req := <-w.unlockRequests:
-			err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-				addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-				return w.Manager.Unlock(addrmgrNs, req.passphrase)
-			})
+			var err error
+			if w.db != nil {
+				err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+					addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+					return w.Manager.Unlock(
+						addrmgrNs, req.passphrase,
+					)
+				})
+			} else {
+				err = w.Manager.UnlockFromStore(req.passphrase)
+			}
 			if err != nil {
 				req.err <- err
 				continue
@@ -1441,32 +2468,99 @@ out:
 			continue
 
 		case req := <-w.changePassphrase:
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				return w.Manager.ChangePassphrase(
-					addrmgrNs, req.old, req.new, req.private,
-					&waddrmgr.DefaultScryptOptions,
+			var err error
+			if w.db != nil {
+				err = walletdb.Update(
+					w.db, func(tx walletdb.ReadWriteTx) error {
+						addrmgrNs := tx.ReadWriteBucket(
+							waddrmgrNamespaceKey,
+						)
+						return w.Manager.ChangePassphrase(
+							addrmgrNs, req.old, req.new, req.private,
+							&waddrmgr.DefaultScryptOptions,
+						)
+					},
 				)
-			})
+			} else {
+				var change *waddrmgr.PassphraseChange
+				err = w.store.UpdateOnce(
+					context.Background(),
+					func(tx walletstore.ReadWriteTx) error {
+						var err error
+						change, err =
+							w.Manager.ChangePassphraseFromStore(
+								tx.Addr(), req.old, req.new,
+								req.private,
+								&waddrmgr.DefaultScryptOptions,
+							)
+						return err
+					}, nil,
+				)
+				if err == nil {
+					change.Apply()
+				} else {
+					change.Close()
+				}
+			}
 			req.err <- err
 			continue
 
 		case req := <-w.changePassphrases:
-			err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-				addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-				err := w.Manager.ChangePassphrase(
-					addrmgrNs, req.publicOld, req.publicNew,
-					false, &waddrmgr.DefaultScryptOptions,
-				)
-				if err != nil {
-					return err
-				}
+			var err error
+			if w.db != nil {
+				err = walletdb.Update(
+					w.db, func(tx walletdb.ReadWriteTx) error {
+						addrmgrNs := tx.ReadWriteBucket(
+							waddrmgrNamespaceKey,
+						)
+						err := w.Manager.ChangePassphrase(
+							addrmgrNs, req.publicOld, req.publicNew,
+							false, &waddrmgr.DefaultScryptOptions,
+						)
+						if err != nil {
+							return err
+						}
 
-				return w.Manager.ChangePassphrase(
-					addrmgrNs, req.privateOld, req.privateNew,
-					true, &waddrmgr.DefaultScryptOptions,
+						return w.Manager.ChangePassphrase(
+							addrmgrNs, req.privateOld,
+							req.privateNew, true,
+							&waddrmgr.DefaultScryptOptions,
+						)
+					},
 				)
-			})
+			} else {
+				var publicChange, privateChange *waddrmgr.PassphraseChange
+				err = w.store.UpdateOnce(
+					context.Background(),
+					func(tx walletstore.ReadWriteTx) error {
+						var err error
+						publicChange, err =
+							w.Manager.ChangePassphraseFromStore(
+								tx.Addr(), req.publicOld,
+								req.publicNew, false,
+								&waddrmgr.DefaultScryptOptions,
+							)
+						if err != nil {
+							return err
+						}
+
+						privateChange, err =
+							w.Manager.ChangePassphraseFromStore(
+								tx.Addr(), req.privateOld,
+								req.privateNew, true,
+								&waddrmgr.DefaultScryptOptions,
+							)
+						return err
+					}, nil,
+				)
+				if err == nil {
+					publicChange.Apply()
+					privateChange.Apply()
+				} else {
+					publicChange.Close()
+					privateChange.Close()
+				}
+			}
 			req.err <- err
 			continue
 
@@ -1542,6 +2636,11 @@ func (w *Wallet) Lock() {
 // Locked returns whether the account manager for a wallet is locked.
 func (w *Wallet) Locked() bool {
 	return <-w.lockState
+}
+
+// WatchOnly returns whether the wallet contains no private key material.
+func (w *Wallet) WatchOnly() bool {
+	return w.Manager.WatchOnly()
 }
 
 // holdUnlock prevents the wallet from being locked.  The heldUnlock object
@@ -1620,16 +2719,34 @@ func (w *Wallet) ChangePassphrases(publicOld, publicNew, privateOld,
 func (w *Wallet) AccountAddresses(account uint32) ([]address.Address, error) {
 	var addrs []address.Address
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
-		return w.Manager.ForEachAccountAddress(
-			addrmgrNs, account, func(maddr waddrmgr.ManagedAddress) error {
-				addrs = append(addrs, maddr.Address())
-				return nil
+			return w.Manager.ForEachAccountAddress(
+				addrmgrNs, account,
+				func(maddr waddrmgr.ManagedAddress) error {
+					addrs = append(addrs, maddr.Address())
+					return nil
+				},
+			)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				return w.Manager.ForEachAccountAddressFromStore(
+					tx.Addr(), account,
+					func(maddr waddrmgr.ManagedAddress) error {
+						addrs = append(addrs, maddr.Address())
+						return nil
+					},
+				)
+			}, func() {
+				addrs = nil
 			},
 		)
-	})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1649,19 +2766,34 @@ func (w *Wallet) AccountManagedAddresses(scope waddrmgr.KeyScope,
 
 	addrs := make([]waddrmgr.ManagedAddress, 0)
 
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
-		return scopedMgr.ForEachAccountAddress(
-			addrmgrNs, accountNum,
-			func(a waddrmgr.ManagedAddress) error {
-				addrs = append(addrs, a)
+			return scopedMgr.ForEachAccountAddress(
+				addrmgrNs, accountNum,
+				func(a waddrmgr.ManagedAddress) error {
+					addrs = append(addrs, a)
 
-				return nil
+					return nil
+				},
+			)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				return scopedMgr.ForEachAccountAddressFromStore(
+					tx.Addr(), accountNum,
+					func(a waddrmgr.ManagedAddress) error {
+						addrs = append(addrs, a)
+						return nil
+					},
+				)
+			}, func() {
+				addrs = nil
 			},
 		)
-	},
-	)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1679,21 +2811,32 @@ func (w *Wallet) AccountManagedAddresses(scope waddrmgr.KeyScope,
 // include a UTXO.
 func (w *Wallet) CalculateBalance(confirms int32) (btcutil.Amount, error) {
 	var balance btcutil.Amount
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-		var err error
-		blk := w.Manager.SyncedTo()
-		balance, err = w.TxStore.Balance(txmgrNs, confirms, blk.Height)
-		return err
-	})
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			var err error
+			block := w.Manager.SyncedTo()
+			balance, err = tx.Tx().Balance(
+				confirms, block.Height,
+			)
+			return err
+		}, func() {
+			balance = 0
+		},
+	)
+
 	return balance, err
 }
 
 // Balances records total, spendable (by policy), and immature coinbase
 // reward balance amounts.
 type Balances struct {
-	Total          btcutil.Amount
-	Spendable      btcutil.Amount
+	// Total is the account's total unspent balance.
+	Total btcutil.Amount
+
+	// Spendable is the account balance available under current policy.
+	Spendable btcutil.Amount
+
+	// ImmatureReward is the account's immature coinbase balance.
 	ImmatureReward btcutil.Amount
 }
 
@@ -1707,47 +2850,50 @@ func (w *Wallet) CalculateAccountBalances(account uint32,
 	confirms int32) (Balances, error) {
 
 	var bals Balances
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			// Get current block.  The block height used for calculating
+			// the number of tx confirmations.
+			syncBlock := w.Manager.SyncedTo()
 
-		// Get current block.  The block height used for calculating
-		// the number of tx confirmations.
-		syncBlock := w.Manager.SyncedTo()
-
-		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
-		if err != nil {
-			return err
-		}
-		for i := range unspent {
-			output := &unspent[i]
-
-			var outputAcct uint32
-			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-				output.PkScript, w.chainParams)
-			if err == nil && len(addrs) > 0 {
-				_, outputAcct, err = w.Manager.AddrAccount(addrmgrNs, addrs[0])
+			unspent, err := tx.Tx().UnspentOutputs()
+			if err != nil {
+				return err
 			}
-			if err != nil || outputAcct != account {
-				continue
+			for i := range unspent {
+				output := &unspent[i]
+
+				var outputAcct uint32
+				_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+					output.PkScript, w.chainParams)
+				if err == nil && len(addrs) > 0 {
+					_, outputAcct, err = w.Manager.AddrAccountFromStore(
+						tx.Addr(), addrs[0],
+					)
+				}
+				if err != nil || outputAcct != account {
+					continue
+				}
+
+				bals.Total += output.Amount
+				if output.FromCoinBase && !hasMinConfs(
+					int32(w.chainParams.CoinbaseMaturity),
+					output.Height, syncBlock.Height,
+				) {
+
+					bals.ImmatureReward += output.Amount
+				} else if hasMinConfs(
+					confirms, output.Height, syncBlock.Height,
+				) {
+
+					bals.Spendable += output.Amount
+				}
 			}
+			return nil
+		}, func() {
+			bals = Balances{}
+		})
 
-			bals.Total += output.Amount
-			if output.FromCoinBase && !hasMinConfs(
-				int32(w.chainParams.CoinbaseMaturity),
-				output.Height, syncBlock.Height,
-			) {
-
-				bals.ImmatureReward += output.Amount
-			} else if hasMinConfs(
-				confirms, output.Height, syncBlock.Height,
-			) {
-
-				bals.Spendable += output.Amount
-			}
-		}
-		return nil
-	})
 	return bals, err
 }
 
@@ -1781,33 +2927,77 @@ func (w *Wallet) CurrentAddress(account uint32,
 		addr  address.Address
 		props *waddrmgr.AccountProperties
 	)
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		maddr, err := manager.LastExternalAddress(addrmgrNs, account)
-		if err != nil {
-			// If no address exists yet, create the first external
-			// address.
-			if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			maddr, err := manager.LastExternalAddress(addrmgrNs, account)
+			if err != nil {
+				// If no address exists yet, create the first external
+				// address.
+				if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+					addr, props, err = w.newAddress(
+						addrmgrNs, account, scope,
+					)
+				}
+				return err
+			}
+
+			// Get next chained address if the last one has already been
+			// used.
+			if maddr.Used(addrmgrNs) {
 				addr, props, err = w.newAddress(
 					addrmgrNs, account, scope,
 				)
+				return err
 			}
-			return err
-		}
 
-		// Get next chained address if the last one has already been
-		// used.
-		if maddr.Used(addrmgrNs) {
-			addr, props, err = w.newAddress(
-				addrmgrNs, account, scope,
-			)
-			return err
-		}
+			addr = maddr.Address()
+			return nil
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				maddr, err := manager.LastExternalAddressFromStore(
+					tx.Addr(), account,
+				)
+				if waddrmgr.IsError(
+					err, waddrmgr.ErrAddressNotFound,
+				) {
 
-		addr = maddr.Address()
-		return nil
-	})
+					maddr, props, err =
+						manager.NextExternalAddressFromStore(
+							tx.Addr(), account,
+						)
+				}
+				if err != nil {
+					return err
+				}
+
+				if maddr.Used(nil) {
+					maddr, props, err =
+						manager.NextExternalAddressFromStore(
+							tx.Addr(), account,
+						)
+					if err != nil {
+						return err
+					}
+				}
+
+				addr = maddr.Address()
+				return nil
+			}, func() {
+				addr = nil
+				props = nil
+			},
+		)
+	}
 	if err != nil {
+		var ambiguous *walletstore.AmbiguousCommitError
+		if w.db == nil && errors.As(err, &ambiguous) {
+			w.Manager.MarkAccountCacheStale(scope, account)
+		}
+
 		return nil, err
 	}
 
@@ -1828,19 +3018,40 @@ func (w *Wallet) CurrentAddress(account uint32,
 // PubKeyForAddress looks up the associated public key for a P2PKH address.
 func (w *Wallet) PubKeyForAddress(a address.Address) (*btcec.PublicKey, error) {
 	var pubKey *btcec.PublicKey
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		managedAddr, err := w.Manager.Address(addrmgrNs, a)
-		if err != nil {
-			return err
-		}
+	readAddress := func(managedAddr waddrmgr.ManagedAddress) error {
 		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
 			return errors.New("address does not have an associated public key")
 		}
 		pubKey = managedPubKeyAddr.PubKey()
 		return nil
-	})
+	}
+
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			managedAddr, err := w.Manager.Address(addrmgrNs, a)
+			if err != nil {
+				return err
+			}
+
+			return readAddress(managedAddr)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				managedAddr, err := w.Manager.AddressFromStore(
+					tx.Addr(), a,
+				)
+				if err != nil {
+					return err
+				}
+
+				return readAddress(managedAddr)
+			}, nil,
+		)
+	}
 	return pubKey, err
 }
 
@@ -1850,50 +3061,26 @@ func (w *Wallet) PubKeyForAddress(a address.Address) (*btcec.PublicKey, error) {
 func (w *Wallet) LabelTransaction(hash chainhash.Hash, label string,
 	overwrite bool) error {
 
-	// Check that the transaction is known to the wallet, and fail if it is
-	// unknown. If the transaction is known, check whether it already has
-	// a label.
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	return w.store.UpdateOnce(
+		context.Background(), func(tx walletstore.ReadWriteTx) error {
+			details, err := tx.Tx().TxDetails(&hash)
+			if err != nil {
+				return err
+			}
+			if details == nil {
+				return ErrUnknownTransaction
+			}
 
-		dbTx, err := w.TxStore.TxDetails(txmgrNs, &hash)
-		if err != nil {
-			return err
-		}
+			existing, err := tx.Tx().TxLabel(hash)
+			if err != nil {
+				return err
+			}
+			if existing != "" && !overwrite {
+				return ErrTxLabelExists
+			}
 
-		// If the transaction looked up is nil, it was not found. We
-		// do not allow labelling of unknown transactions so we fail.
-		if dbTx == nil {
-			return ErrUnknownTransaction
-		}
-
-		_, err = wtxmgr.FetchTxLabel(txmgrNs, hash)
-		return err
-	})
-
-	switch err {
-	// If no labels have been written yet, we can silence the error.
-	// Likewise if there is no label, we do not need to do any overwrite
-	// checks.
-	case wtxmgr.ErrNoLabelBucket:
-	case wtxmgr.ErrTxLabelNotFound:
-
-	// If we successfully looked up a label, fail if the overwrite param
-	// is not set.
-	case nil:
-		if !overwrite {
-			return ErrTxLabelExists
-		}
-
-	// In another unrelated error occurred, return it.
-	default:
-		return err
-	}
-
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.PutTxLabel(txmgrNs, hash, label)
-	})
+			return tx.Tx().PutTxLabel(hash, label)
+		}, nil)
 }
 
 // PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK
@@ -1902,29 +3089,61 @@ func (w *Wallet) PrivKeyForAddress(
 	a address.Address) (*btcec.PrivateKey, error) {
 
 	var privKey *btcec.PrivateKey
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		managedAddr, err := w.Manager.Address(addrmgrNs, a)
-		if err != nil {
-			return err
-		}
+	readAddress := func(managedAddr waddrmgr.ManagedAddress) error {
 		managedPubKeyAddr, ok := managedAddr.(waddrmgr.ManagedPubKeyAddress)
 		if !ok {
 			return errors.New("address does not have an associated private key")
 		}
+		var err error
 		privKey, err = managedPubKeyAddr.PrivKey()
 		return err
-	})
+	}
+
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			managedAddr, err := w.Manager.Address(addrmgrNs, a)
+			if err != nil {
+				return err
+			}
+
+			return readAddress(managedAddr)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				managedAddr, err := w.Manager.AddressFromStore(
+					tx.Addr(), a,
+				)
+				if err != nil {
+					return err
+				}
+
+				return readAddress(managedAddr)
+			}, nil,
+		)
+	}
 	return privKey, err
 }
 
 // HaveAddress returns whether the wallet is the owner of the address a.
 func (w *Wallet) HaveAddress(a address.Address) (bool, error) {
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		_, err := w.Manager.Address(addrmgrNs, a)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			_, err := w.Manager.Address(addrmgrNs, a)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				_, err := w.Manager.AddressFromStore(tx.Addr(), a)
+				return err
+			}, nil,
+		)
+	}
 	if err == nil {
 		return true, nil
 	}
@@ -1937,12 +3156,27 @@ func (w *Wallet) HaveAddress(a address.Address) (bool, error) {
 // AccountOfAddress finds the account that an address is associated with.
 func (w *Wallet) AccountOfAddress(a address.Address) (uint32, error) {
 	var account uint32
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		_, account, err = w.Manager.AddrAccount(addrmgrNs, a)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			_, account, err = w.Manager.AddrAccount(addrmgrNs, a)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				_, account, err = w.Manager.AddrAccountFromStore(
+					tx.Addr(), a,
+				)
+				return err
+			}, func() {
+				account = 0
+			},
+		)
+	}
 	return account, err
 }
 
@@ -1951,12 +3185,27 @@ func (w *Wallet) AddressInfo(
 	a address.Address) (waddrmgr.ManagedAddress, error) {
 
 	var managedAddress waddrmgr.ManagedAddress
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		managedAddress, err = w.Manager.Address(addrmgrNs, a)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			managedAddress, err = w.Manager.Address(addrmgrNs, a)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				managedAddress, err = w.Manager.AddressFromStore(
+					tx.Addr(), a,
+				)
+				return err
+			}, func() {
+				managedAddress = nil
+			},
+		)
+	}
 	return managedAddress, err
 }
 
@@ -1971,12 +3220,26 @@ func (w *Wallet) AccountNumber(scope waddrmgr.KeyScope,
 	}
 
 	var account uint32
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		account, err = manager.LookupAccount(addrmgrNs, accountName)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			account, err = manager.LookupAccount(addrmgrNs, accountName)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				account, err = manager.LookupAccountFromStore(
+					tx.Addr(), accountName,
+				)
+				return err
+			}, func() {
+				account = 0
+			},
+		)
+	}
 	return account, err
 }
 
@@ -1990,12 +3253,28 @@ func (w *Wallet) AccountName(scope waddrmgr.KeyScope,
 	}
 
 	var accountName string
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		accountName, err = manager.AccountName(addrmgrNs, accountNumber)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			accountName, err = manager.AccountName(
+				addrmgrNs, accountNumber,
+			)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				accountName, err = manager.AccountNameFromStore(
+					tx.Addr(), accountNumber,
+				)
+				return err
+			}, func() {
+				accountName = ""
+			},
+		)
+	}
 	return accountName, err
 }
 
@@ -2011,12 +3290,26 @@ func (w *Wallet) AccountProperties(scope waddrmgr.KeyScope,
 	}
 
 	var props *waddrmgr.AccountProperties
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		props, err = manager.AccountProperties(waddrmgrNs, acct)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			props, err = manager.AccountProperties(waddrmgrNs, acct)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				props, err = manager.AccountPropertiesFromStore(
+					tx.Addr(), acct,
+				)
+				return err
+			}, func() {
+				props = nil
+			},
+		)
+	}
 	return props, err
 }
 
@@ -2032,15 +3325,34 @@ func (w *Wallet) AccountPropertiesByName(scope waddrmgr.KeyScope,
 	}
 
 	var props *waddrmgr.AccountProperties
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		acct, err := manager.LookupAccount(waddrmgrNs, name)
-		if err != nil {
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			acct, err := manager.LookupAccount(waddrmgrNs, name)
+			if err != nil {
+				return err
+			}
+			props, err = manager.AccountProperties(waddrmgrNs, acct)
 			return err
-		}
-		props, err = manager.AccountProperties(waddrmgrNs, acct)
-		return err
-	})
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				acct, err := manager.LookupAccountFromStore(
+					tx.Addr(), name,
+				)
+				if err != nil {
+					return err
+				}
+				props, err = manager.AccountPropertiesFromStore(
+					tx.Addr(), acct,
+				)
+				return err
+			}, func() {
+				props = nil
+			},
+		)
+	}
 	return props, err
 }
 
@@ -2051,12 +3363,27 @@ func (w *Wallet) LookupAccount(name string) (waddrmgr.KeyScope, uint32, error) {
 		keyScope waddrmgr.KeyScope
 		account  uint32
 	)
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(waddrmgrNamespaceKey)
-		var err error
-		keyScope, account, err = w.Manager.LookupAccount(ns, name)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			ns := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			keyScope, account, err = w.Manager.LookupAccount(ns, name)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				keyScope, account, err =
+					w.Manager.LookupAccountFromStore(tx.Addr(), name)
+				return err
+			}, func() {
+				keyScope = waddrmgr.KeyScope{}
+				account = 0
+			},
+		)
+	}
 	return keyScope, account, err
 }
 
@@ -2070,15 +3397,36 @@ func (w *Wallet) RenameAccount(scope waddrmgr.KeyScope, account uint32,
 	}
 
 	var props *waddrmgr.AccountProperties
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		err := manager.RenameAccount(addrmgrNs, account, newName)
-		if err != nil {
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			err := manager.RenameAccount(addrmgrNs, account, newName)
+			if err != nil {
+				return err
+			}
+			props, err = manager.AccountProperties(addrmgrNs, account)
 			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				props, err = manager.RenameAccountFromStore(
+					tx.Addr(), account, newName,
+				)
+				return err
+			}, func() {
+				props = nil
+			},
+		)
+	}
+	if w.db == nil {
+		var ambiguous *walletstore.AmbiguousCommitError
+		if errors.As(err, &ambiguous) {
+			w.Manager.MarkAccountCacheStale(scope, account)
 		}
-		props, err = manager.AccountProperties(addrmgrNs, account)
-		return err
-	})
+	}
 	if err == nil {
 		w.NtfnServer.notifyAccountProperties(props)
 	}
@@ -2102,16 +3450,32 @@ func (w *Wallet) NextAccount(scope waddrmgr.KeyScope,
 		account uint32
 		props   *waddrmgr.AccountProperties
 	)
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		var err error
-		account, err = manager.NewAccount(addrmgrNs, name)
-		if err != nil {
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			var err error
+			account, err = manager.NewAccount(addrmgrNs, name)
+			if err != nil {
+				return err
+			}
+			props, err = manager.AccountProperties(addrmgrNs, account)
 			return err
-		}
-		props, err = manager.AccountProperties(addrmgrNs, account)
-		return err
-	})
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				account, props, err = manager.NewAccountFromStore(
+					tx.Addr(), name,
+				)
+				return err
+			}, func() {
+				account = 0
+				props = nil
+			},
+		)
+	}
 	if err != nil {
 		log.Errorf("Cannot fetch new account properties for notification "+
 			"after account creation: %v", err)
@@ -2128,10 +3492,14 @@ func (w *Wallet) NextAccount(scope waddrmgr.KeyScope,
 // TODO: This is a requirement of the RPC server and should be moved.
 type CreditCategory byte
 
-// These constants define the possible credit categories.
 const (
+	// CreditReceive identifies a non-coinbase received output.
 	CreditReceive CreditCategory = iota
+
+	// CreditGenerate identifies a mature coinbase output.
 	CreditGenerate
+
+	// CreditImmature identifies an immature coinbase output.
 	CreditImmature
 )
 
@@ -2314,24 +3682,25 @@ func (w *Wallet) ListSinceBlock(start, end,
 	syncHeight int32) ([]btcjson.ListTransactionsResult, error) {
 
 	txList := []btcjson.ListTransactionsResult{}
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				for _, detail := range details {
+					detail := detail
 
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			for _, detail := range details {
-				detail := detail
-
-				jsonResults := listTransactions(
-					tx, &detail, w.Manager, syncHeight,
-					w.chainParams,
-				)
-				txList = append(txList, jsonResults...)
+					jsonResults := listTransactionsFromStore(
+						tx, w, &detail, syncHeight,
+					)
+					txList = append(txList, jsonResults...)
+				}
+				return false, nil
 			}
-			return false, nil
-		}
 
-		return w.TxStore.RangeTransactions(txmgrNs, start, end, rangeFn)
-	})
+			return tx.Tx().RangeTransactions(start, end, rangeFn)
+		}, func() {
+			txList = txList[:0]
+		})
+
 	return txList, err
 }
 
@@ -2343,50 +3712,53 @@ func (w *Wallet) ListTransactions(from,
 
 	txList := []btcjson.ListTransactionsResult{}
 
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			// Get current block.  The block height used for calculating
+			// the number of tx confirmations.
+			syncBlock := w.Manager.SyncedTo()
 
-		// Get current block.  The block height used for calculating
-		// the number of tx confirmations.
-		syncBlock := w.Manager.SyncedTo()
+			// Need to skip the first from transactions, and after those, only
+			// include the next count transactions.
+			skipped := 0
+			n := 0
 
-		// Need to skip the first from transactions, and after those, only
-		// include the next count transactions.
-		skipped := 0
-		n := 0
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				// Iterate over transactions at this height in reverse order.
+				// This does nothing for unmined transactions, which are
+				// unsorted, but it will process mined transactions in the
+				// reverse order they were marked mined.
+				for i := len(details) - 1; i >= 0; i-- {
+					if from > skipped {
+						skipped++
+						continue
+					}
 
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			// Iterate over transactions at this height in reverse order.
-			// This does nothing for unmined transactions, which are
-			// unsorted, but it will process mined transactions in the
-			// reverse order they were marked mined.
-			for i := len(details) - 1; i >= 0; i-- {
-				if from > skipped {
-					skipped++
-					continue
-				}
-
-				n++
-				if n > count {
-					return true, nil
-				}
-
-				jsonResults := listTransactions(tx, &details[i],
-					w.Manager, syncBlock.Height, w.chainParams)
-				txList = append(txList, jsonResults...)
-
-				if len(jsonResults) > 0 {
 					n++
+					if n > count {
+						return true, nil
+					}
+
+					jsonResults := listTransactionsFromStore(
+						tx, w, &details[i], syncBlock.Height,
+					)
+					txList = append(txList, jsonResults...)
+
+					if len(jsonResults) > 0 {
+						n++
+					}
 				}
+
+				return false, nil
 			}
 
-			return false, nil
-		}
+			// Return newer results first by starting at mempool height and
+			// working down to the genesis block.
+			return tx.Tx().RangeTransactions(-1, 0, rangeFn)
+		}, func() {
+			txList = txList[:0]
+		})
 
-		// Return newer results first by starting at mempool height and working
-		// down to the genesis block.
-		return w.TxStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
-	})
 	return txList, err
 }
 
@@ -2397,45 +3769,48 @@ func (w *Wallet) ListAddressTransactions(
 	pkHashes map[string]struct{}) ([]btcjson.ListTransactionsResult, error) {
 
 	txList := []btcjson.ListTransactionsResult{}
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			// Get current block.  The block height used for calculating
+			// the number of tx confirmations.
+			syncBlock := w.Manager.SyncedTo()
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+			loopDetails:
+				for i := range details {
+					detail := &details[i]
 
-		// Get current block.  The block height used for calculating
-		// the number of tx confirmations.
-		syncBlock := w.Manager.SyncedTo()
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-		loopDetails:
-			for i := range details {
-				detail := &details[i]
+					for _, cred := range detail.Credits {
+						pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
+						_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+							pkScript, w.chainParams)
+						if err != nil || len(addrs) != 1 {
+							continue
+						}
 
-				for _, cred := range detail.Credits {
-					pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
-					_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-						pkScript, w.chainParams)
-					if err != nil || len(addrs) != 1 {
-						continue
+						apkh, ok := addrs[0].(*address.AddressPubKeyHash)
+						if !ok {
+							continue
+						}
+						_, ok = pkHashes[string(apkh.ScriptAddress())]
+						if !ok {
+							continue
+						}
+
+						jsonResults := listTransactionsFromStore(
+							tx, w, detail, syncBlock.Height,
+						)
+						txList = append(txList, jsonResults...)
+						continue loopDetails
 					}
-
-					apkh, ok := addrs[0].(*address.AddressPubKeyHash)
-					if !ok {
-						continue
-					}
-					_, ok = pkHashes[string(apkh.ScriptAddress())]
-					if !ok {
-						continue
-					}
-
-					jsonResults := listTransactions(tx, detail,
-						w.Manager, syncBlock.Height, w.chainParams)
-					txList = append(txList, jsonResults...)
-					continue loopDetails
 				}
+				return false, nil
 			}
-			return false, nil
-		}
 
-		return w.TxStore.RangeTransactions(txmgrNs, 0, -1, rangeFn)
-	})
+			return tx.Tx().RangeTransactions(0, -1, rangeFn)
+		}, func() {
+			txList = txList[:0]
+		})
+
 	return txList, err
 }
 
@@ -2446,30 +3821,33 @@ func (w *Wallet) ListAllTransactions() ([]btcjson.ListTransactionsResult,
 	error) {
 
 	txList := []btcjson.ListTransactionsResult{}
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			// Get current block.  The block height used for calculating
+			// the number of tx confirmations.
+			syncBlock := w.Manager.SyncedTo()
 
-		// Get current block.  The block height used for calculating
-		// the number of tx confirmations.
-		syncBlock := w.Manager.SyncedTo()
-
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			// Iterate over transactions at this height in reverse order.
-			// This does nothing for unmined transactions, which are
-			// unsorted, but it will process mined transactions in the
-			// reverse order they were marked mined.
-			for i := len(details) - 1; i >= 0; i-- {
-				jsonResults := listTransactions(tx, &details[i], w.Manager,
-					syncBlock.Height, w.chainParams)
-				txList = append(txList, jsonResults...)
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				// Iterate over transactions at this height in reverse order.
+				// This does nothing for unmined transactions, which are
+				// unsorted, but it will process mined transactions in the
+				// reverse order they were marked mined.
+				for i := len(details) - 1; i >= 0; i-- {
+					jsonResults := listTransactionsFromStore(
+						tx, w, &details[i], syncBlock.Height,
+					)
+					txList = append(txList, jsonResults...)
+				}
+				return false, nil
 			}
-			return false, nil
-		}
 
-		// Return newer results first by starting at mempool height and
-		// working down to the genesis block.
-		return w.TxStore.RangeTransactions(txmgrNs, -1, 0, rangeFn)
-	})
+			// Return newer results first by starting at mempool height and
+			// working down to the genesis block.
+			return tx.Tx().RangeTransactions(-1, 0, rangeFn)
+		}, func() {
+			txList = txList[:0]
+		})
+
 	return txList, err
 }
 
@@ -2492,7 +3870,10 @@ func NewBlockIdentifierFromHash(hash *chainhash.Hash) *BlockIdentifier {
 // GetTransactionsResult is the result of the wallet's GetTransactions method.
 // See GetTransactions for more details.
 type GetTransactionsResult struct {
-	MinedTransactions   []Block
+	// MinedTransactions groups confirmed transactions by block.
+	MinedTransactions []Block
+
+	// UnminedTransactions contains currently unconfirmed transactions.
 	UnminedTransactions []TransactionSummary
 }
 
@@ -2583,54 +3964,67 @@ func (w *Wallet) GetTransactions(startBlock, endBlock *BlockIdentifier,
 	}
 
 	var res GetTransactionsResult
-	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				// TODO: probably should make RangeTransactions not reuse the
+				// details backing array memory.
+				dets := make([]wtxmgr.TxDetails, len(details))
+				copy(dets, details)
+				details = dets
 
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			// TODO: probably should make RangeTransactions not reuse the
-			// details backing array memory.
-			dets := make([]wtxmgr.TxDetails, len(details))
-			copy(dets, details)
-			details = dets
+				txs := make([]TransactionSummary, 0, len(details))
+				for i := range details {
+					txs = append(
+						txs, makeTxSummaryFromStore(tx, w, &details[i]),
+					)
+				}
 
-			txs := make([]TransactionSummary, 0, len(details))
-			for i := range details {
-				txs = append(txs, makeTxSummary(dbtx, w, &details[i]))
+				if details[0].Block.Height != -1 {
+					blockHash := details[0].Block.Hash
+					res.MinedTransactions = append(res.MinedTransactions, Block{
+						Hash:         &blockHash,
+						Height:       details[0].Block.Height,
+						Timestamp:    details[0].Block.Time.Unix(),
+						Transactions: txs,
+					})
+				} else {
+					res.UnminedTransactions = txs
+				}
+
+				select {
+				case <-cancel:
+					return true, nil
+				default:
+					return false, nil
+				}
 			}
 
-			if details[0].Block.Height != -1 {
-				blockHash := details[0].Block.Hash
-				res.MinedTransactions = append(res.MinedTransactions, Block{
-					Hash:         &blockHash,
-					Height:       details[0].Block.Height,
-					Timestamp:    details[0].Block.Time.Unix(),
-					Transactions: txs,
-				})
-			} else {
-				res.UnminedTransactions = txs
-			}
+			return tx.Tx().RangeTransactions(start, end, rangeFn)
+		}, func() {
+			res = GetTransactionsResult{}
+		})
 
-			select {
-			case <-cancel:
-				return true, nil
-			default:
-				return false, nil
-			}
-		}
-
-		return w.TxStore.RangeTransactions(txmgrNs, start, end, rangeFn)
-	})
 	return &res, err
 }
 
 // GetTransactionResult returns a summary of the transaction along with
 // other block properties.
 type GetTransactionResult struct {
-	Summary       TransactionSummary
-	Height        int32
-	BlockHash     *chainhash.Hash
+	// Summary contains the transaction's wallet-relevant details.
+	Summary TransactionSummary
+
+	// Height is the transaction's block height or -1 when unmined.
+	Height int32
+
+	// BlockHash identifies the transaction's block when mined.
+	BlockHash *chainhash.Hash
+
+	// Confirmations is the transaction's current confirmation count.
 	Confirmations int32
-	Timestamp     int64
+
+	// Timestamp is the transaction's block time when mined.
+	Timestamp int64
 }
 
 // GetTransaction returns detailed data of a transaction given its id. In
@@ -2639,43 +4033,44 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 	error) {
 
 	var res GetTransactionResult
-	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			txDetail, err := tx.Tx().TxDetails(&txHash)
+			if err != nil {
+				return err
+			}
 
-		txDetail, err := w.TxStore.TxDetails(txmgrNs, &txHash)
-		if err != nil {
-			return err
-		}
+			// If the transaction was not found we return an error.
+			if txDetail == nil {
+				return fmt.Errorf("%w: txid %v", ErrNoTx, txHash)
+			}
 
-		// If the transaction was not found we return an error.
-		if txDetail == nil {
-			return fmt.Errorf("%w: txid %v", ErrNoTx, txHash)
-		}
+			res = GetTransactionResult{
+				Summary:       makeTxSummaryFromStore(tx, w, txDetail),
+				BlockHash:     nil,
+				Height:        -1,
+				Confirmations: 0,
+				Timestamp:     0,
+			}
 
-		res = GetTransactionResult{
-			Summary:       makeTxSummary(dbtx, w, txDetail),
-			BlockHash:     nil,
-			Height:        -1,
-			Confirmations: 0,
-			Timestamp:     0,
-		}
+			// If it is a confirmed transaction we set the corresponding
+			// block height, timestamp, hash, and confirmations.
+			if txDetail.Block.Height != -1 {
+				res.Height = txDetail.Block.Height
+				res.Timestamp = txDetail.Block.Time.Unix()
+				res.BlockHash = &txDetail.Block.Hash
 
-		// If it is a confirmed transaction we set the corresponding
-		// block height, timestamp, hash, and confirmations.
-		if txDetail.Block.Height != -1 {
-			res.Height = txDetail.Block.Height
-			res.Timestamp = txDetail.Block.Time.Unix()
-			res.BlockHash = &txDetail.Block.Hash
+				bestBlock := w.SyncedTo()
+				blockHeight := txDetail.Block.Height
+				res.Confirmations = calcConf(
+					blockHeight, bestBlock.Height,
+				)
+			}
 
-			bestBlock := w.SyncedTo()
-			blockHeight := txDetail.Block.Height
-			res.Confirmations = calcConf(
-				blockHeight, bestBlock.Height,
-			)
-		}
-
-		return nil
-	})
+			return nil
+		}, func() {
+			res = GetTransactionResult{}
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -2684,15 +4079,23 @@ func (w *Wallet) GetTransaction(txHash chainhash.Hash) (*GetTransactionResult,
 
 // AccountResult is a single account result for the AccountsResult type.
 type AccountResult struct {
+	// AccountProperties contains the address manager's account metadata.
 	waddrmgr.AccountProperties
+
+	// TotalBalance is the account's total unspent balance.
 	TotalBalance btcutil.Amount
 }
 
 // AccountsResult is the result of the wallet's Accounts method.  See that
 // method for more details.
 type AccountsResult struct {
-	Accounts           []AccountResult
-	CurrentBlockHash   *chainhash.Hash
+	// Accounts contains the properties and balance of each account.
+	Accounts []AccountResult
+
+	// CurrentBlockHash identifies the chain tip used for the balances.
+	CurrentBlockHash *chainhash.Hash
+
+	// CurrentBlockHeight is the chain tip height used for the balances.
 	CurrentBlockHeight int32
 }
 
@@ -2713,6 +4116,77 @@ func (w *Wallet) Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error) {
 		syncBlockHash   *chainhash.Hash
 		syncBlockHeight int32
 	)
+	if w.db == nil {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				syncBlock := w.Manager.SyncedTo()
+				syncBlockHash = &syncBlock.Hash
+				syncBlockHeight = syncBlock.Height
+
+				unspent, err := tx.Tx().UnspentOutputs()
+				if err != nil {
+					return err
+				}
+				err = manager.ForEachAccountFromStore(
+					tx.Addr(), func(account uint32) error {
+						props, err :=
+							manager.AccountPropertiesFromStore(
+								tx.Addr(), account,
+							)
+						if err != nil {
+							return err
+						}
+						accounts = append(accounts, AccountResult{
+							AccountProperties: *props,
+						})
+						return nil
+					},
+				)
+				if err != nil {
+					return err
+				}
+
+				balances := make(map[uint32]*btcutil.Amount)
+				for i := range accounts {
+					account := &accounts[i]
+					balances[account.AccountNumber] =
+						&account.TotalBalance
+				}
+				for i := range unspent {
+					output := unspent[i]
+					_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+						output.PkScript, w.chainParams,
+					)
+					if err != nil || len(addrs) == 0 {
+						continue
+					}
+					outputAccount, err := manager.AddrAccountFromStore(
+						tx.Addr(), addrs[0],
+					)
+					if err != nil {
+						continue
+					}
+					balance := balances[outputAccount]
+					if balance != nil {
+						*balance += output.Amount
+					}
+				}
+
+				return nil
+			}, func() {
+				accounts = nil
+				syncBlockHash = nil
+				syncBlockHeight = 0
+			},
+		)
+
+		return &AccountsResult{
+			Accounts:           accounts,
+			CurrentBlockHash:   syncBlockHash,
+			CurrentBlockHeight: syncBlockHeight,
+		}, err
+	}
+
 	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -2769,10 +4243,16 @@ func (w *Wallet) Accounts(scope waddrmgr.KeyScope) (*AccountsResult, error) {
 	}, err
 }
 
-// AccountBalanceResult is a single result for the Wallet.AccountBalances method.
+// AccountBalanceResult is a single result for the Wallet.AccountBalances
+// method.
 type AccountBalanceResult struct {
-	AccountNumber  uint32
-	AccountName    string
+	// AccountNumber is the account's internal identifier.
+	AccountNumber uint32
+
+	// AccountName is the account's user-facing name.
+	AccountName string
+
+	// AccountBalance is the account's confirmed balance.
 	AccountBalance btcutil.Amount
 }
 
@@ -2788,6 +4268,71 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 	}
 
 	var results []AccountBalanceResult
+	if w.db == nil {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				syncBlock := w.Manager.SyncedTo()
+				accounts, err := tx.Addr().Accounts(scope)
+				if err != nil {
+					return err
+				}
+
+				results = make([]AccountBalanceResult, len(accounts))
+				resultIndex := make(map[uint32]int, len(accounts))
+				for i, account := range accounts {
+					results[i].AccountNumber = account.Account
+					results[i].AccountName = account.Name
+					resultIndex[account.Account] = i
+				}
+
+				outputs, err := tx.Tx().UnspentOutputs()
+				if err != nil {
+					return err
+				}
+				for i := range outputs {
+					output := &outputs[i]
+					if !hasMinConfs(
+						requiredConfs, output.Height, syncBlock.Height,
+					) {
+
+						continue
+					}
+					if output.FromCoinBase && !hasMinConfs(
+						int32(w.ChainParams().CoinbaseMaturity),
+						output.Height, syncBlock.Height,
+					) {
+
+						continue
+					}
+
+					_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+						output.PkScript, w.chainParams,
+					)
+					if err != nil || len(addrs) == 0 {
+						continue
+					}
+					account, err := manager.AddrAccountFromStore(
+						tx.Addr(), addrs[0],
+					)
+					if err != nil {
+						continue
+					}
+
+					index, ok := resultIndex[account]
+					if !ok {
+						return errors.New("address account is not registered")
+					}
+					results[index].AccountBalance += output.Amount
+				}
+
+				return nil
+			}, func() {
+				results = nil
+			},
+		)
+		return results, err
+	}
+
 	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
 		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -2867,10 +4412,12 @@ func (w *Wallet) AccountBalances(scope waddrmgr.KeyScope,
 // output index.
 type creditSlice []wtxmgr.Credit
 
+// Len returns the number of credits in the slice.
 func (s creditSlice) Len() int {
 	return len(s)
 }
 
+// Less reports whether one credit should sort before another.
 func (s creditSlice) Less(i, j int) bool {
 	switch {
 	// If both credits are from the same tx, sort by output index.
@@ -2893,6 +4440,7 @@ func (s creditSlice) Less(i, j int) bool {
 	}
 }
 
+// Swap exchanges two credits in the slice.
 func (s creditSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
@@ -2906,139 +4454,149 @@ func (w *Wallet) ListUnspent(minconf, maxconf int32,
 	accountName string) ([]*btcjson.ListUnspentResult, error) {
 
 	var results []*btcjson.ListUnspentResult
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			syncBlock := w.Manager.SyncedTo()
 
-		syncBlock := w.Manager.SyncedTo()
-
-		filter := accountName != ""
-		unspent, err := w.TxStore.UnspentOutputs(txmgrNs)
-		if err != nil {
-			return err
-		}
-		sort.Sort(sort.Reverse(creditSlice(unspent)))
-
-		defaultAccountName := "default"
-
-		results = make([]*btcjson.ListUnspentResult, 0, len(unspent))
-		for i := range unspent {
-			output := unspent[i]
-
-			// Outputs with fewer confirmations than the minimum or
-			// more confs than the maximum are excluded.
-			confs := calcConf(output.Height, syncBlock.Height)
-			if confs < minconf || confs > maxconf {
-				continue
+			filter := accountName != ""
+			unspent, err := tx.Tx().UnspentOutputs()
+			if err != nil {
+				return err
 			}
+			sort.Sort(sort.Reverse(creditSlice(unspent)))
 
-			// Only mature coinbase outputs are included.
-			if output.FromCoinBase {
-				target := int32(w.ChainParams().CoinbaseMaturity)
-				if !hasMinConfs(
-					target, output.Height, syncBlock.Height,
-				) {
+			defaultAccountName := "default"
 
+			results = make([]*btcjson.ListUnspentResult, 0, len(unspent))
+			for i := range unspent {
+				output := unspent[i]
+
+				// Outputs with fewer confirmations than the minimum or
+				// more confs than the maximum are excluded.
+				confs := calcConf(output.Height, syncBlock.Height)
+				if confs < minconf || confs > maxconf {
 					continue
 				}
-			}
 
-			// Exclude locked outputs from the result set.
-			if w.LockedOutpoint(output.OutPoint) {
-				continue
-			}
+				// Only mature coinbase outputs are included.
+				if output.FromCoinBase {
+					target := int32(w.ChainParams().CoinbaseMaturity)
+					if !hasMinConfs(
+						target, output.Height, syncBlock.Height,
+					) {
 
-			// Lookup the associated account for the output.  Use the
-			// default account name in case there is no associated account
-			// for some reason, although this should never happen.
-			//
-			// This will be unnecessary once transactions and outputs are
-			// grouped under the associated account in the db.
-			outputAcctName := defaultAccountName
-			sc, addrs, _, err := txscript.ExtractPkScriptAddrs(
-				output.PkScript, w.chainParams)
-			if err != nil {
-				continue
-			}
-			if len(addrs) > 0 {
-				smgr, acct, err := w.Manager.AddrAccount(addrmgrNs, addrs[0])
-				if err == nil {
-					s, err := smgr.AccountName(addrmgrNs, acct)
-					if err == nil {
-						outputAcctName = s
-					}
-				}
-			}
-
-			if filter && outputAcctName != accountName {
-				continue
-			}
-
-			// At the moment watch-only addresses are not supported, so all
-			// recorded outputs that are not multisig are "spendable".
-			// Multisig outputs are only "spendable" if all keys are
-			// controlled by this wallet.
-			//
-			// TODO: Each case will need updates when watch-only addrs
-			// is added.  For P2PK, P2PKH, and P2SH, the address must be
-			// looked up and not be watching-only.  For multisig, all
-			// pubkeys must belong to the manager with the associated
-			// private key (currently it only checks whether the pubkey
-			// exists, since the private key is required at the moment).
-			var spendable bool
-		scSwitch:
-			switch sc {
-			case txscript.PubKeyHashTy:
-				spendable = true
-			case txscript.PubKeyTy:
-				spendable = true
-			case txscript.WitnessV0ScriptHashTy:
-				spendable = true
-			case txscript.WitnessV0PubKeyHashTy:
-				spendable = true
-			case txscript.MultiSigTy:
-				for _, a := range addrs {
-					_, err := w.Manager.Address(addrmgrNs, a)
-					if err == nil {
 						continue
 					}
-					if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
-						break scSwitch
-					}
-					return err
 				}
-				spendable = true
-			}
 
-			result := &btcjson.ListUnspentResult{
-				TxID:          output.OutPoint.Hash.String(),
-				Vout:          output.OutPoint.Index,
-				Account:       outputAcctName,
-				ScriptPubKey:  hex.EncodeToString(output.PkScript),
-				Amount:        output.Amount.ToBTC(),
-				Confirmations: int64(confs),
-				Spendable:     spendable,
-			}
+				// Exclude locked outputs from the result set.
+				if w.LockedOutpoint(output.OutPoint) {
+					continue
+				}
 
-			// BUG: this should be a JSON array so that all
-			// addresses can be included, or removed (and the
-			// caller extracts addresses from the pkScript).
-			if len(addrs) > 0 {
-				result.Address = addrs[0].EncodeAddress()
-			}
+				// Lookup the associated account for the output.  Use the
+				// default account name in case there is no associated account
+				// for some reason, although this should never happen.
+				//
+				// This will be unnecessary once transactions and outputs are
+				// grouped under the associated account in the db.
+				outputAcctName := defaultAccountName
+				sc, addrs, _, err := txscript.ExtractPkScriptAddrs(
+					output.PkScript, w.chainParams)
+				if err != nil {
+					continue
+				}
+				if len(addrs) > 0 {
+					smgr, acct, err := w.Manager.AddrAccountFromStore(
+						tx.Addr(), addrs[0],
+					)
+					if err == nil {
+						s, err := smgr.AccountNameFromStore(
+							tx.Addr(), acct,
+						)
+						if err == nil {
+							outputAcctName = s
+						}
+					}
+				}
 
-			results = append(results, result)
-		}
-		return nil
-	})
+				if filter && outputAcctName != accountName {
+					continue
+				}
+
+				// At the moment watch-only addresses are not supported, so all
+				// recorded outputs that are not multisig are "spendable".
+				// Multisig outputs are only "spendable" if all keys are
+				// controlled by this wallet.
+				//
+				// TODO: Each case will need updates when watch-only addrs
+				// is added.  For P2PK, P2PKH, and P2SH, the address must be
+				// looked up and not be watching-only.  For multisig, all
+				// pubkeys must belong to the manager with the associated
+				// private key (currently it only checks whether the pubkey
+				// exists, since the private key is required at the moment).
+				var spendable bool
+			scSwitch:
+				switch sc {
+				case txscript.PubKeyHashTy:
+					spendable = true
+				case txscript.PubKeyTy:
+					spendable = true
+				case txscript.WitnessV0ScriptHashTy:
+					spendable = true
+				case txscript.WitnessV0PubKeyHashTy:
+					spendable = true
+				case txscript.MultiSigTy:
+					for _, a := range addrs {
+						_, err := w.Manager.AddressFromStore(tx.Addr(), a)
+						if err == nil {
+							continue
+						}
+						if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+							break scSwitch
+						}
+						return err
+					}
+					spendable = true
+				}
+
+				result := &btcjson.ListUnspentResult{
+					TxID:          output.OutPoint.Hash.String(),
+					Vout:          output.OutPoint.Index,
+					Account:       outputAcctName,
+					ScriptPubKey:  hex.EncodeToString(output.PkScript),
+					Amount:        output.Amount.ToBTC(),
+					Confirmations: int64(confs),
+					Spendable:     spendable,
+				}
+
+				// BUG: this should be a JSON array so that all
+				// addresses can be included, or removed (and the
+				// caller extracts addresses from the pkScript).
+				if len(addrs) > 0 {
+					result.Address = addrs[0].EncodeAddress()
+				}
+
+				results = append(results, result)
+			}
+			return nil
+		}, func() {
+			results = nil
+		})
+
 	return results, err
 }
 
 // ListLeasedOutputResult is a single result for the Wallet.ListLeasedOutputs
 // method. See that method for more details.
 type ListLeasedOutputResult struct {
+	// LockedOutput identifies the output lease and its owner.
 	*wtxmgr.LockedOutput
-	Value    int64
+
+	// Value is the leased output amount in satoshis.
+	Value int64
+
+	// PkScript is the leased output's public-key script.
 	PkScript []byte
 }
 
@@ -3046,39 +4604,42 @@ type ListLeasedOutputResult struct {
 // utxos.
 func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
 	var results []*ListLeasedOutputResult
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		ns := tx.ReadBucket(wtxmgrNamespaceKey)
-		outputs, err := w.TxStore.ListLockedOutputs(ns)
-		if err != nil {
-			return err
-		}
-
-		for _, output := range outputs {
-			details, err := w.TxStore.TxDetails(ns, &output.Outpoint.Hash)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			outputs, err := tx.Tx().ListLockedOutputs()
 			if err != nil {
 				return err
 			}
 
-			if details == nil {
-				log.Infof("unable to find tx details for "+
-					"%v:%v", output.Outpoint.Hash,
-					output.Outpoint.Index)
-				continue
+			for _, output := range outputs {
+				details, err := tx.Tx().TxDetails(&output.Outpoint.Hash)
+				if err != nil {
+					return err
+				}
+
+				if details == nil {
+					log.Infof("unable to find tx details for "+
+						"%v:%v", output.Outpoint.Hash,
+						output.Outpoint.Index)
+					continue
+				}
+
+				txOut := details.MsgTx.TxOut[output.Outpoint.Index]
+
+				result := &ListLeasedOutputResult{
+					LockedOutput: output,
+					Value:        txOut.Value,
+					PkScript:     txOut.PkScript,
+				}
+
+				results = append(results, result)
 			}
 
-			txOut := details.MsgTx.TxOut[output.Outpoint.Index]
+			return nil
+		}, func() {
+			results = nil
+		})
 
-			result := &ListLeasedOutputResult{
-				LockedOutput: output,
-				Value:        txOut.Value,
-				PkScript:     txOut.PkScript,
-			}
-
-			results = append(results, result)
-		}
-
-		return nil
-	})
 	return results, err
 }
 
@@ -3086,37 +4647,57 @@ func (w *Wallet) ListLeasedOutputs() ([]*ListLeasedOutputResult, error) {
 // private keys in a wallet.
 func (w *Wallet) DumpPrivKeys() ([]string, error) {
 	var privkeys []string
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		// Iterate over each active address, appending the private key to
-		// privkeys.
-		return w.Manager.ForEachActiveAddress(
-			addrmgrNs, func(addr address.Address) error {
-				ma, err := w.Manager.Address(addrmgrNs, addr)
-				if err != nil {
-					return err
-				}
+	appendKey := func(ma waddrmgr.ManagedAddress) error {
+		// Only those addresses with keys needed.
+		pka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
+		if !ok {
+			return nil
+		}
 
-				// Only those addresses with keys needed.
-				pka, ok := ma.(waddrmgr.ManagedPubKeyAddress)
-				if !ok {
-					return nil
-				}
+		wif, err := pka.ExportPrivKey()
+		if err != nil {
+			return err
+		}
+		privkeys = append(privkeys, wif.String())
 
-				wif, err := pka.ExportPrivKey()
-				if err != nil {
-					// It would be nice to zero out the array here. However,
-					// since strings in go are immutable, and we have no
-					// control over the caller I don't think we can. :(
-					return err
-				}
+		return nil
+	}
 
-				privkeys = append(privkeys, wif.String())
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			return w.Manager.ForEachActiveAddress(
+				addrmgrNs, func(addr address.Address) error {
+					ma, err := w.Manager.Address(addrmgrNs, addr)
+					if err != nil {
+						return err
+					}
 
-				return nil
+					return appendKey(ma)
+				},
+			)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				return w.Manager.ForEachActiveAddressFromStore(
+					tx.Addr(), func(addr address.Address) error {
+						ma, err := w.Manager.AddressFromStore(
+							tx.Addr(), addr,
+						)
+						if err != nil {
+							return err
+						}
+
+						return appendKey(ma)
+					},
+				)
+			}, func() {
+				privkeys = nil
 			},
 		)
-	})
+	}
 	return privkeys, err
 }
 
@@ -3124,13 +4705,25 @@ func (w *Wallet) DumpPrivKeys() ([]string, error) {
 // single wallet address.
 func (w *Wallet) DumpWIFPrivateKey(addr address.Address) (string, error) {
 	var maddr waddrmgr.ManagedAddress
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		// Get private key from wallet if it exists.
-		var err error
-		maddr, err = w.Manager.Address(waddrmgrNs, addr)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			waddrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			var err error
+			maddr, err = w.Manager.Address(waddrmgrNs, addr)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				maddr, err = w.Manager.AddressFromStore(tx.Addr(), addr)
+				return err
+			}, func() {
+				maddr = nil
+			},
+		)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -3222,12 +4815,16 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 	duration time.Duration) (time.Time, error) {
 
 	var expiry time.Time
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		var err error
-		expiry, err = w.TxStore.LockOutput(ns, id, op, duration)
-		return err
-	})
+	err := w.store.UpdateOnce(
+		context.Background(), func(tx walletstore.ReadWriteTx) error {
+			var err error
+			expiry, err = tx.Tx().LockOutput(id, op, duration)
+			return err
+		}, func() {
+			expiry = time.Time{}
+		},
+	)
+
 	return expiry, err
 }
 
@@ -3235,10 +4832,11 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 // selection if it remains unspent. The ID should match the one used to
 // originally lock the output.
 func (w *Wallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-		return w.TxStore.UnlockOutput(ns, id, op)
-	})
+	return w.store.UpdateOnce(
+		context.Background(), func(tx walletstore.ReadWriteTx) error {
+			return tx.Tx().UnlockOutput(id, op)
+		}, nil,
+	)
 }
 
 // resendUnminedTxs iterates through all transactions that spend from wallet
@@ -3246,12 +4844,25 @@ func (w *Wallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
 // to send each to the chain server for relay.
 func (w *Wallet) resendUnminedTxs() {
 	var txs []*wire.MsgTx
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
-		var err error
-		txs, err = w.TxStore.UnminedTxs(txmgrNs)
-		return err
-	})
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+			var err error
+			txs, err = w.TxStore.UnminedTxs(txmgrNs)
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				var err error
+				txs, err = tx.Tx().UnminedTxs()
+				return err
+			}, func() {
+				txs = nil
+			},
+		)
+	}
 	if err != nil {
 		log.Errorf("Unable to retrieve unconfirmed transactions to "+
 			"resend: %v", err)
@@ -3275,16 +4886,30 @@ func (w *Wallet) resendUnminedTxs() {
 // addresses in a wallet.
 func (w *Wallet) SortedActivePaymentAddresses() ([]string, error) {
 	var addrStrs []string
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+	appendAddress := func(addr address.Address) error {
+		addrStrs = append(addrStrs, addr.EncodeAddress())
+		return nil
+	}
 
-		return w.Manager.ForEachActiveAddress(
-			addrmgrNs, func(addr address.Address) error {
-				addrStrs = append(addrStrs, addr.EncodeAddress())
-				return nil
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+			return w.Manager.ForEachActiveAddress(
+				addrmgrNs, appendAddress,
+			)
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				return w.Manager.ForEachActiveAddressFromStore(
+					tx.Addr(), appendAddress,
+				)
+			}, func() {
+				addrStrs = nil
 			},
 		)
-	})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3315,13 +4940,47 @@ func (w *Wallet) NewAddress(account uint32,
 		addr  address.Address
 		props *waddrmgr.AccountProperties
 	)
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		var err error
-		addr, props, err = w.newAddress(addrmgrNs, account, scope)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			var err error
+			addr, props, err = w.newAddress(
+				addrmgrNs, account, scope,
+			)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(), func(tx walletstore.ReadWriteTx) error {
+				manager, err := w.Manager.FetchScopedKeyManager(scope)
+				if err != nil {
+					return err
+				}
+
+				managed, accountProps, err :=
+					manager.NextExternalAddressFromStore(
+						tx.Addr(), account,
+					)
+				if err != nil {
+					return err
+				}
+
+				addr = managed.Address()
+				props = accountProps
+
+				return nil
+			}, func() {
+				addr = nil
+				props = nil
+			},
+		)
+	}
 	if err != nil {
+		var ambiguous *walletstore.AmbiguousCommitError
+		if errors.As(err, &ambiguous) {
+			w.Manager.MarkAccountCacheStale(scope, account)
+		}
+
 		return nil, err
 	}
 
@@ -3336,6 +4995,8 @@ func (w *Wallet) NewAddress(account uint32,
 	return addr, nil
 }
 
+// newAddress derives the next KV-backed external address and its updated
+// account properties.
 func (w *Wallet) newAddress(addrmgrNs walletdb.ReadWriteBucket, account uint32,
 	scope waddrmgr.KeyScope) (address.Address, *waddrmgr.AccountProperties,
 	error) {
@@ -3380,13 +5041,42 @@ func (w *Wallet) NewChangeAddress(account uint32,
 	defer w.newAddrMtx.Unlock()
 
 	var addr address.Address
-	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-		var err error
-		addr, err = w.newChangeAddress(addrmgrNs, account, scope)
-		return err
-	})
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			var err error
+			addr, err = w.newChangeAddress(addrmgrNs, account, scope)
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				manager, err := w.Manager.FetchScopedKeyManager(scope)
+				if err != nil {
+					return err
+				}
+
+				managed, _, err := manager.NextInternalAddressFromStore(
+					tx.Addr(), account,
+				)
+				if err != nil {
+					return err
+				}
+				addr = managed.Address()
+
+				return nil
+			}, func() {
+				addr = nil
+			},
+		)
+	}
 	if err != nil {
+		var ambiguous *walletstore.AmbiguousCommitError
+		if errors.As(err, &ambiguous) {
+			w.Manager.MarkAccountCacheStale(scope, account)
+		}
+
 		return nil, err
 	}
 
@@ -3450,9 +5140,16 @@ func calcConf(txHeight, curHeight int32) int32 {
 // AccountTotalReceivedResult is a single result for the
 // Wallet.TotalReceivedForAccounts method.
 type AccountTotalReceivedResult struct {
-	AccountNumber    uint32
-	AccountName      string
-	TotalReceived    btcutil.Amount
+	// AccountNumber is the account's internal identifier.
+	AccountNumber uint32
+
+	// AccountName is the account's user-facing name.
+	AccountName string
+
+	// TotalReceived is the amount received by the account.
+	TotalReceived btcutil.Amount
+
+	// LastConfirmation is the confirmation count of the latest credit.
 	LastConfirmation int32
 }
 
@@ -3467,70 +5164,77 @@ func (w *Wallet) TotalReceivedForAccounts(scope waddrmgr.KeyScope,
 	}
 
 	var results []AccountTotalReceivedResult
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err = w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			syncBlock := w.Manager.SyncedTo()
 
-		syncBlock := w.Manager.SyncedTo()
-
-		err := manager.ForEachAccount(addrmgrNs, func(account uint32) error {
-			accountName, err := manager.AccountName(addrmgrNs, account)
+			err := manager.ForEachAccountFromStore(
+				tx.Addr(), func(account uint32) error {
+					accountName, err := manager.AccountNameFromStore(
+						tx.Addr(), account,
+					)
+					if err != nil {
+						return err
+					}
+					results = append(results, AccountTotalReceivedResult{
+						AccountNumber: account,
+						AccountName:   accountName,
+					})
+					return nil
+				})
 			if err != nil {
 				return err
 			}
-			results = append(results, AccountTotalReceivedResult{
-				AccountNumber: account,
-				AccountName:   accountName,
-			})
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+			resultIndex := make(map[uint32]int, len(results))
+			for i := range results {
+				resultIndex[results[i].AccountNumber] = i
+			}
 
-		var stopHeight int32
+			var stopHeight int32
 
-		if minConf > 0 {
-			stopHeight = syncBlock.Height - minConf + 1
-		} else {
-			stopHeight = -1
-		}
+			if minConf > 0 {
+				stopHeight = syncBlock.Height - minConf + 1
+			} else {
+				stopHeight = -1
+			}
 
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			for i := range details {
-				detail := &details[i]
-				for _, cred := range detail.Credits {
-					pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
-					var outputAcct uint32
-
-					_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-						pkScript, w.chainParams,
-					)
-					if err == nil && len(addrs) > 0 {
-						_, outputAcct, err = w.Manager.AddrAccount(
-							addrmgrNs, addrs[0],
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				for i := range details {
+					detail := &details[i]
+					for _, cred := range detail.Credits {
+						pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
+						_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+							pkScript, w.chainParams,
 						)
-					}
-					if err == nil {
-						acctIndex := int(outputAcct)
-						if outputAcct == waddrmgr.ImportedAddrAccount {
-							acctIndex = len(results) - 1
+						if err != nil || len(addrs) == 0 {
+							continue
 						}
-						res := &results[acctIndex]
-						res.TotalReceived += cred.Amount
 
-						confs := calcConf(
-							detail.Block.Height,
-							syncBlock.Height,
+						outputAccount, err := manager.AddrAccountFromStore(
+							tx.Addr(), addrs[0],
 						)
-						res.LastConfirmation = confs
+						if err != nil {
+							continue
+						}
+						index, ok := resultIndex[outputAccount]
+						if !ok {
+							continue
+						}
+
+						res := &results[index]
+						res.TotalReceived += cred.Amount
+						res.LastConfirmation = calcConf(
+							detail.Block.Height, syncBlock.Height,
+						)
 					}
 				}
+				return false, nil
 			}
-			return false, nil
-		}
-		return w.TxStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
-	})
+			return tx.Tx().RangeTransactions(0, stopHeight, rangeFn)
+		}, func() {
+			results = nil
+		})
+
 	return results, err
 }
 
@@ -3541,45 +5245,49 @@ func (w *Wallet) TotalReceivedForAddr(addr address.Address,
 	minConf int32) (btcutil.Amount, error) {
 
 	var amount btcutil.Amount
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		txmgrNs := tx.ReadBucket(wtxmgrNamespaceKey)
+	err := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			syncBlock := w.Manager.SyncedTo()
 
-		syncBlock := w.Manager.SyncedTo()
+			var (
+				addrStr    = addr.EncodeAddress()
+				stopHeight int32
+			)
 
-		var (
-			addrStr    = addr.EncodeAddress()
-			stopHeight int32
-		)
-
-		if minConf > 0 {
-			stopHeight = syncBlock.Height - minConf + 1
-		} else {
-			stopHeight = -1
-		}
-		rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
-			for i := range details {
-				detail := &details[i]
-				for _, cred := range detail.Credits {
-					pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
-					_, addrs, _, err := txscript.ExtractPkScriptAddrs(pkScript,
-						w.chainParams)
-					// An error creating addresses from the output script only
-					// indicates a non-standard script, so ignore this credit.
-					if err != nil {
-						continue
-					}
-					for _, a := range addrs {
-						if addrStr == a.EncodeAddress() {
-							amount += cred.Amount
-							break
+			if minConf > 0 {
+				stopHeight = syncBlock.Height - minConf + 1
+			} else {
+				stopHeight = -1
+			}
+			rangeFn := func(details []wtxmgr.TxDetails) (bool, error) {
+				for i := range details {
+					detail := &details[i]
+					for _, cred := range detail.Credits {
+						pkScript := detail.MsgTx.TxOut[cred.Index].PkScript
+						_, addrs, _, err :=
+							txscript.ExtractPkScriptAddrs(
+								pkScript, w.chainParams,
+							)
+						// An address error only indicates a non-standard
+						// script, so ignore this credit.
+						if err != nil {
+							continue
+						}
+						for _, a := range addrs {
+							if addrStr == a.EncodeAddress() {
+								amount += cred.Amount
+								break
+							}
 						}
 					}
 				}
+				return false, nil
 			}
-			return false, nil
-		}
-		return w.TxStore.RangeTransactions(txmgrNs, 0, stopHeight, rangeFn)
-	})
+			return tx.Tx().RangeTransactions(0, stopHeight, rangeFn)
+		}, func() {
+			amount = 0
+		})
+
 	return amount, err
 }
 
@@ -3668,8 +5376,11 @@ func (w *Wallet) sendOutputs(outputs []*wire.TxOut, keyScope *waddrmgr.KeyScope,
 // SignatureError records the underlying error when validating a transaction
 // input signature.
 type SignatureError struct {
+	// InputIndex identifies the transaction input with an invalid signature.
 	InputIndex uint32
-	Error      error
+
+	// Error is the underlying signature validation failure.
+	Error error
 }
 
 // SignTransaction uses secrets of the wallet, as well as additional secrets
@@ -3685,6 +5396,13 @@ func (w *Wallet) SignTransaction(tx *wire.MsgTx, hashType txscript.SigHashType,
 	additionalPrevScripts map[wire.OutPoint][]byte,
 	additionalKeysByAddress map[string]*btcutil.WIF,
 	p2shRedeemScriptsByAddress map[string][]byte) ([]SignatureError, error) {
+
+	if w.db == nil {
+		return w.signTransactionFromStore(
+			tx, hashType, additionalPrevScripts,
+			additionalKeysByAddress, p2shRedeemScriptsByAddress,
+		)
+	}
 
 	var signErrors []SignatureError
 	err := walletdb.View(w.db, func(dbtx walletdb.ReadTx) error {
@@ -3922,49 +5640,89 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 	// Along the way, we'll extract our relevant destination addresses from
 	// the transaction.
 	var ourAddrs []address.Address
-	err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
-		addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
-		for _, txOut := range tx.TxOut {
-			_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-				txOut.PkScript, w.chainParams,
-			)
-			if err != nil {
-				// Non-standard outputs can safely be skipped
-				// because they're not supported by the wallet.
-				log.Warnf("Non-standard pkScript=%x in tx=%v",
-					txOut.PkScript, tx.TxHash())
-
-				continue
-			}
-			for _, addr := range addrs {
-				// Skip any addresses which are not relevant to
-				// us.
-				_, err := w.Manager.Address(addrmgrNs, addr)
-				if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+			addrmgrNs := dbTx.ReadWriteBucket(waddrmgrNamespaceKey)
+			for _, txOut := range tx.TxOut {
+				_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+					txOut.PkScript, w.chainParams,
+				)
+				if err != nil {
+					log.Warnf("Non-standard pkScript=%x in tx=%v",
+						txOut.PkScript, tx.TxHash())
 					continue
 				}
+				for _, addr := range addrs {
+					_, err := w.Manager.Address(addrmgrNs, addr)
+					if waddrmgr.IsError(
+						err, waddrmgr.ErrAddressNotFound,
+					) {
+
+						continue
+					}
+					if err != nil {
+						return err
+					}
+					ourAddrs = append(ourAddrs, addr)
+				}
+			}
+
+			if len(label) != 0 {
+				txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+				err = w.TxStore.PutTxLabel(
+					txmgrNs, tx.TxHash(), label,
+				)
 				if err != nil {
 					return err
 				}
-				ourAddrs = append(ourAddrs, addr)
 			}
-		}
 
-		// If there is a label we should write, get the namespace key
-		// and record it in the tx store.
-		if len(label) != 0 {
-			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+			return w.addRelevantTx(dbTx, txRec, nil)
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(), func(dbTx walletstore.ReadWriteTx) error {
+				for _, txOut := range tx.TxOut {
+					_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+						txOut.PkScript, w.chainParams,
+					)
+					if err != nil {
+						log.Warnf("Non-standard pkScript=%x in tx=%v",
+							txOut.PkScript, tx.TxHash())
+						continue
+					}
+					for _, addr := range addrs {
+						_, err := w.Manager.AddressFromStore(
+							dbTx.Addr(), addr,
+						)
+						if waddrmgr.IsError(
+							err, waddrmgr.ErrAddressNotFound,
+						) {
 
-			err = w.TxStore.PutTxLabel(
-				txmgrNs, tx.TxHash(), label,
-			)
-			if err != nil {
-				return err
-			}
-		}
+							continue
+						}
+						if err != nil {
+							return err
+						}
+						ourAddrs = append(ourAddrs, addr)
+					}
+				}
 
-		return w.addRelevantTx(dbTx, txRec, nil)
-	})
+				if len(label) != 0 {
+					if err := dbTx.Tx().PutTxLabel(
+						tx.TxHash(), label,
+					); err != nil {
+
+						return err
+					}
+				}
+
+				return w.addRelevantTxFromStore(dbTx, txRec, nil)
+			}, func() {
+				ourAddrs = nil
+			},
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3977,6 +5735,28 @@ func (w *Wallet) reliablyPublishTransaction(tx *wire.MsgTx,
 	}
 
 	return w.publishTransaction(tx)
+}
+
+// removeUnminedTransaction removes a transaction from the active manager
+// backend after the chain backend reports that it should not be rebroadcast.
+func (w *Wallet) removeUnminedTransaction(tx *wire.MsgTx) error {
+	txRecord, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
+	if err != nil {
+		return err
+	}
+
+	if w.db != nil {
+		return walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
+			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
+			return w.TxStore.RemoveUnminedTx(txmgrNs, txRecord)
+		})
+	}
+
+	return w.store.UpdateOnce(
+		context.Background(), func(dbTx walletstore.ReadWriteTx) error {
+			return dbTx.Tx().RemoveUnminedTx(txRecord)
+		}, nil,
+	)
 }
 
 // publishTransaction attempts to send an unconfirmed transaction to the
@@ -4003,14 +5783,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	case errors.Is(rpcErr, chain.ErrTxAlreadyKnown),
 		errors.Is(rpcErr, chain.ErrTxAlreadyConfirmed):
 
-		dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
-			txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-			txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-			if err != nil {
-				return err
-			}
-			return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
-		})
+		dbErr := w.removeUnminedTransaction(tx)
 		if dbErr != nil {
 			log.Warnf("Unable to remove confirmed transaction %v "+
 				"from unconfirmed store: %v", tx.TxHash(), dbErr)
@@ -4029,14 +5802,7 @@ func (w *Wallet) publishTransaction(tx *wire.MsgTx) (*chainhash.Hash, error) {
 	// we'll remove it from the transaction store, as otherwise, we'll
 	// attempt to continually re-broadcast it, and the UTXO state of the
 	// wallet won't be accurate.
-	dbErr := walletdb.Update(w.db, func(dbTx walletdb.ReadWriteTx) error {
-		txmgrNs := dbTx.ReadWriteBucket(wtxmgrNamespaceKey)
-		txRec, err := wtxmgr.NewTxRecordFromMsgTx(tx, time.Now())
-		if err != nil {
-			return err
-		}
-		return w.TxStore.RemoveUnminedTx(txmgrNs, txRec)
-	})
+	dbErr := w.removeUnminedTransaction(tx)
 	if dbErr != nil {
 		log.Warnf("Unable to remove invalid transaction %v: %v",
 			tx.TxHash(), dbErr)
@@ -4071,7 +5837,7 @@ func (w *Wallet) ChainParams() *chaincfg.Params {
 
 // Database returns the underlying walletdb database. This method is provided
 // in order to allow applications wrapping btcwallet to store app-specific data
-// with the wallet's database.
+// with the wallet's database. It returns nil for a Store-backed wallet.
 func (w *Wallet) Database() walletdb.DB {
 	return w.db
 }
@@ -4086,11 +5852,11 @@ func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
 		return err
 	}
 
-	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		wtxmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
-
-		return w.TxStore.RemoveUnminedTx(wtxmgrNs, txRecord)
-	})
+	return w.store.UpdateOnce(
+		context.Background(), func(tx walletstore.ReadWriteTx) error {
+			return tx.Tx().RemoveUnminedTx(txRecord)
+		}, nil,
+	)
 }
 
 // BirthdayBlock returns the birthday block of the wallet.
@@ -4100,15 +5866,29 @@ func (w *Wallet) RemoveDescendants(tx *wire.MsgTx) error {
 func (w *Wallet) BirthdayBlock() (*waddrmgr.BlockStamp, error) {
 	var birthdayBlock waddrmgr.BlockStamp
 
-	// Query the wallet's birthday block height from db.
-	err := walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+	var err error
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
 
-		bb, _, err := w.Manager.BirthdayBlock(addrmgrNs)
-		birthdayBlock = bb
+			bb, _, err := w.Manager.BirthdayBlock(addrmgrNs)
+			birthdayBlock = bb
 
-		return err
-	})
+			return err
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				bb, _, err := w.Manager.BirthdayBlockFromStore(
+					tx.Addr(),
+				)
+				birthdayBlock = bb
+				return err
+			}, func() {
+				birthdayBlock = waddrmgr.BlockStamp{}
+			},
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -4123,44 +5903,173 @@ func (w *Wallet) AddScopeManager(scope waddrmgr.KeyScope,
 
 	var scopedManager *waddrmgr.ScopedKeyManager
 
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+	var err error
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		manager, err := w.Manager.NewScopedKeyManager(
-			addrmgrNs, scope, addrSchema,
+			manager, err := w.Manager.NewScopedKeyManager(
+				addrmgrNs, scope, addrSchema,
+			)
+			scopedManager = manager
+
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				var err error
+				scopedManager, err =
+					w.Manager.NewScopedKeyManagerFromStore(
+						tx.Addr(), scope, addrSchema,
+					)
+				return err
+			}, func() {
+				scopedManager = nil
+			},
 		)
-		scopedManager = manager
-
-		return err
-	})
+	}
 	if err != nil {
+		manager, attached := w.attachStoreScopeAfterAmbiguous(err, scope)
+		if attached && manager.AddrSchema() == addrSchema {
+			return manager, nil
+		}
+
 		return nil, err
 	}
 
 	return scopedManager, nil
 }
 
-// InitAccounts creates a number of accounts specified by `num`, with account
-// number ranges from 1 to `num`.
-func (w *Wallet) InitAccounts(scope *waddrmgr.ScopedKeyManager,
-	watchOnly bool, num uint32) error {
+// InitializeKeyScope ensures that a key scope and the exact requested accounts
+// exist. Private key material is removed only after all accounts are durable
+// when convertToWatchOnly is true.
+func (w *Wallet) InitializeKeyScope(scope waddrmgr.KeyScope,
+	addrSchema waddrmgr.ScopeAddrSchema, accounts []uint32,
+	convertToWatchOnly bool) error {
+
+	scopedManager, err := w.Manager.FetchScopedKeyManager(scope)
+	if waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound) {
+		scopedManager, err = w.AddScopeManager(scope, addrSchema)
+	}
+	if err != nil {
+		return err
+	}
+
+	return w.initAccounts(
+		scopedManager, convertToWatchOnly, accounts,
+	)
+}
+
+// attachStoreScopeAfterAmbiguous reconstructs a scope that became durable even
+// though its creation transaction returned an ambiguous commit error.
+func (w *Wallet) attachStoreScopeAfterAmbiguous(err error,
+	scope waddrmgr.KeyScope) (*waddrmgr.ScopedKeyManager, bool) {
+
+	if w.db != nil {
+		return nil, false
+	}
+	var ambiguous *walletstore.AmbiguousCommitError
+	if !errors.As(err, &ambiguous) {
+		return nil, false
+	}
+
+	var manager *waddrmgr.ScopedKeyManager
+	attachErr := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			var err error
+			manager, err = w.Manager.AttachScopedKeyManagerFromStore(
+				tx.Addr(), scope,
+			)
+			return err
+		}, func() {
+			manager = nil
+		},
+	)
+	if attachErr != nil {
+		return nil, false
+	}
+
+	return manager, true
+}
+
+// refreshStartBlockAfterAmbiguous reloads the durable import start block when
+// a Store cannot determine whether an import transaction committed.
+func (w *Wallet) refreshStartBlockAfterAmbiguous(err error) {
+	if w.db != nil {
+		return
+	}
+	var ambiguous *walletstore.AmbiguousCommitError
+	if !errors.As(err, &ambiguous) {
+		return
+	}
+
+	refreshErr := w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			return w.Manager.RefreshStartBlockFromStore(tx.Addr())
+		}, nil,
+	)
+	if refreshErr != nil {
+		log.Warnf("Unable to refresh ambiguous import start block: %v",
+			refreshErr)
+	}
+}
+
+// initAccounts ensures that the requested accounts exist in one backend
+// transaction and optionally converts the wallet to watch-only afterward.
+func (w *Wallet) initAccounts(scope *waddrmgr.ScopedKeyManager,
+	watchOnly bool, accounts []uint32) error {
+
+	if w.db == nil {
+		return w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				for _, account := range accounts {
+					_, err := tx.Addr().Account(
+						scope.Scope(), account,
+					)
+					if err == nil {
+						continue
+					}
+					if !waddrmgr.IsError(
+						err, waddrmgr.ErrAccountNotFound,
+					) {
+
+						return err
+					}
+
+					if err := scope.NewRawAccountFromStore(
+						tx.Addr(), account,
+					); err != nil {
+
+						return err
+					}
+				}
+
+				if watchOnly {
+					return w.Manager.ConvertToWatchingOnlyFromStore(
+						tx.Addr(),
+					)
+				}
+
+				return nil
+			}, nil,
+		)
+	}
 
 	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
-		// Generate all accounts that we could ever need. This includes
-		// all key families.
-		for account := uint32(1); account <= num; account++ {
-			// Otherwise, we'll check if the account already exists,
-			// if so, we can once again bail early.
+		for _, account := range accounts {
 			_, err := scope.AccountName(addrmgrNs, account)
 			if err == nil {
 				continue
 			}
+			if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+				return err
+			}
 
-			// If we reach this point, then the account hasn't yet
-			// been created, so we'll need to create it before we
-			// can proceed.
 			err = scope.NewRawAccount(addrmgrNs, account)
 			if err != nil {
 				return err
@@ -4184,6 +6093,185 @@ func (w *Wallet) InitAccounts(scope *waddrmgr.ScopedKeyManager,
 	})
 }
 
+// InitAccounts creates accounts numbered from one through num. This legacy
+// range-based API is retained for callers that do not know their exact account
+// set.
+func (w *Wallet) InitAccounts(scope *waddrmgr.ScopedKeyManager,
+	watchOnly bool, num uint32) error {
+
+	accounts := make([]uint32, 0, num)
+	for account := uint32(1); account <= num && account != 0; account++ {
+		accounts = append(accounts, account)
+	}
+
+	return w.initAccounts(scope, watchOnly, accounts)
+}
+
+// NextExternalKey derives and persists the next external public key for an
+// account, returning the allocated child index. Missing private accounts are
+// created in the same transaction as the allocation.
+func (w *Wallet) NextExternalKey(scope waddrmgr.KeyScope,
+	account uint32) (*btcec.PublicKey, uint32, error) {
+
+	scopedManager, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	w.newAddrMtx.Lock()
+	defer w.newAddrMtx.Unlock()
+
+	var managedAddress waddrmgr.ManagedAddress
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			_, err := scopedManager.AccountName(addrmgrNs, account)
+			if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) &&
+				!w.WatchOnly() {
+
+				err = scopedManager.NewRawAccount(addrmgrNs, account)
+			}
+			if err != nil {
+				return err
+			}
+
+			addresses, err := scopedManager.NextExternalAddresses(
+				addrmgrNs, account, 1,
+			)
+			if err != nil {
+				return err
+			}
+			managedAddress = addresses[0]
+
+			return nil
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				_, err := tx.Addr().Account(scope, account)
+				if waddrmgr.IsError(
+					err, waddrmgr.ErrAccountNotFound,
+				) && !w.WatchOnly() {
+
+					err = scopedManager.NewRawAccountFromStore(
+						tx.Addr(), account,
+					)
+				}
+				if err != nil {
+					return err
+				}
+
+				managedAddress, _, err =
+					scopedManager.NextExternalAddressFromStore(
+						tx.Addr(), account,
+					)
+
+				return err
+			}, func() {
+				managedAddress = nil
+			},
+		)
+	}
+	if err != nil {
+		var ambiguous *walletstore.AmbiguousCommitError
+		if errors.As(err, &ambiguous) {
+			w.Manager.MarkAccountCacheStale(scope, account)
+		}
+
+		return nil, 0, err
+	}
+
+	pubKeyAddress, ok := managedAddress.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, 0, fmt.Errorf("managed address %T has no public key",
+			managedAddress)
+	}
+	_, path, _ := pubKeyAddress.DerivationInfo()
+
+	return pubKeyAddress.PubKey(), path.Index, nil
+}
+
+// DeriveManagedPubKey derives an arbitrary managed public key. A missing
+// account is created for a wallet with private key material, while watch-only
+// callers must initialize or import the account first.
+func (w *Wallet) DeriveManagedPubKey(scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+
+	scopedManager, err := w.Manager.FetchScopedKeyManager(scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var managedAddress waddrmgr.ManagedAddress
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			managedAddress, err = scopedManager.DeriveFromKeyPath(
+				addrmgrNs, path,
+			)
+			if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) ||
+				w.WatchOnly() {
+
+				return err
+			}
+
+			if err := scopedManager.NewRawAccount(
+				addrmgrNs, path.InternalAccount,
+			); err != nil {
+
+				return err
+			}
+
+			managedAddress, err = scopedManager.DeriveFromKeyPath(
+				addrmgrNs, path,
+			)
+
+			return err
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				_, err := tx.Addr().Account(
+					scope, path.InternalAccount,
+				)
+				if waddrmgr.IsError(
+					err, waddrmgr.ErrAccountNotFound,
+				) && !w.WatchOnly() {
+
+					err = scopedManager.NewRawAccountFromStore(
+						tx.Addr(), path.InternalAccount,
+					)
+				}
+				if err != nil {
+					return err
+				}
+
+				managedAddress, err =
+					scopedManager.DeriveFromKeyPathFromStore(
+						tx.Addr(), path,
+					)
+
+				return err
+			}, func() {
+				managedAddress = nil
+			},
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	pubKeyAddress, ok := managedAddress.(waddrmgr.ManagedPubKeyAddress)
+	if !ok {
+		return nil, fmt.Errorf("managed address %T has no public key",
+			managedAddress)
+	}
+
+	return pubKeyAddress.PubKey(), nil
+}
+
 // DeriveFromKeyPath derives a private key using the given derivation path.
 func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 	path waddrmgr.DerivationPath) (*btcec.PrivateKey, error) {
@@ -4201,9 +6289,7 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 	}
 
 	// The key wasn't in the cache, let's fully derive it now.
-	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-
+	derive := func(addrmgrNs walletdb.ReadBucket) error {
 		addr, err := scopedMgr.DeriveFromKeyPath(addrmgrNs, path)
 		if err != nil {
 			return fmt.Errorf("error deriving private key: %w", err)
@@ -4220,7 +6306,37 @@ func (w *Wallet) DeriveFromKeyPath(scope waddrmgr.KeyScope,
 		privKey, err = mpka.PrivKey()
 
 		return err
-	})
+	}
+	if w.db != nil {
+		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+			return derive(tx.ReadBucket(waddrmgrNamespaceKey))
+		})
+	} else {
+		err = w.store.View(
+			context.Background(), func(tx walletstore.ReadTx) error {
+				addr, err := scopedMgr.DeriveFromKeyPathFromStore(
+					tx.Addr(), path,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"error deriving private key: %w", err,
+					)
+				}
+				mpka, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+				if !ok {
+					return fmt.Errorf(
+						"managed address type for %v is `%T` but want "+
+							"waddrmgr.ManagedPubKeyAddress", addr, addr,
+					)
+				}
+				privKey, err = mpka.PrivKey()
+
+				return err
+			}, func() {
+				privKey = nil
+			},
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -4252,7 +6368,9 @@ func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 		if err == nil {
 			key, ok := addr.(waddrmgr.ManagedPubKeyAddress)
 			if !ok {
-				return nil
+				return fmt.Errorf(
+					"managed address %T has no private key", addr,
+				)
 			}
 
 			// Overwrite the returned private key variable.
@@ -4265,6 +6383,51 @@ func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 	}
 
 	// The key wasn't in the cache, let's fully derive it now.
+	if w.db == nil {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				_, err := scopedMgr.AccountPropertiesFromStore(
+					tx.Addr(), path.InternalAccount,
+				)
+				if err != nil && !waddrmgr.IsError(
+					err, waddrmgr.ErrAccountNotFound,
+				) {
+
+					return err
+				}
+				if waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+					if err := scopedMgr.NewRawAccountFromStore(
+						tx.Addr(), path.InternalAccount,
+					); err != nil {
+
+						return err
+					}
+				}
+
+				addr, err := scopedMgr.DeriveFromKeyPathFromStore(
+					tx.Addr(), path,
+				)
+				if err != nil {
+					return fmt.Errorf(
+						"error deriving private key: %w", err,
+					)
+				}
+				key, ok := addr.(waddrmgr.ManagedPubKeyAddress)
+				if !ok {
+					return fmt.Errorf(
+						"managed address %T has no private key", addr,
+					)
+				}
+				privKey, err = key.PrivKey()
+				return err
+			}, func() {
+				privKey = nil
+			},
+		)
+		return privKey, err
+	}
+
 	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
@@ -4282,7 +6445,9 @@ func (w *Wallet) DeriveFromKeyPathAddAccount(scope waddrmgr.KeyScope,
 
 		// If we've reached this point, then the account doesn't yet
 		// exist, so we'll create it now to ensure we can sign.
-		err = scopedMgr.NewRawAccount(addrmgrNs, path.Account)
+		err = scopedMgr.NewRawAccount(
+			addrmgrNs, path.InternalAccount,
+		)
 		if err != nil {
 			return err
 		}
@@ -4364,6 +6529,7 @@ func CreateWatchingOnly(db walletdb.DB, pubPass []byte,
 	)
 }
 
+// create initializes the wallet namespaces in an existing walletdb database.
 func create(db walletdb.DB, pubPass, privPass []byte,
 	rootKey *hdkeychain.ExtendedKey, params *chaincfg.Params,
 	birthday time.Time, isWatchingOnly bool,
@@ -4484,10 +6650,58 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 
 	log.Infof("Opened wallet") // TODO: log balance? last sync height?
 
+	w := newWallet(
+		db, walletkvdb.NewStore(db, addrMgr, txMgr), addrMgr, txMgr,
+		pubPass, params, recoveryWindow, syncRetryInterval,
+	)
+
+	return w, nil
+}
+
+// OpenFromStore loads an existing wallet around the real address manager and a
+// backend-neutral Store without constructing a walletdb database.
+func OpenFromStore(store walletstore.Store, pubPass []byte,
+	params *chaincfg.Params, recoveryWindow uint32,
+	syncRetryInterval time.Duration) (*Wallet, error) {
+
+	var snapshot *waddrmgr.ManagerSnapshot
+	err := store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			var err error
+			snapshot, err = waddrmgr.ReadManagerSnapshot(tx.Addr())
+			return err
+		}, func() {
+			snapshot = nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	addrMgr, err := waddrmgr.OpenFromSnapshot(snapshot, pubPass, params)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Infof("Opened wallet")
+
+	return newWallet(
+		nil, store, addrMgr, nil, pubPass, params, recoveryWindow,
+		syncRetryInterval,
+	), nil
+}
+
+// newWallet initializes the existing Wallet state machine around the supplied
+// manager stores.
+func newWallet(db walletdb.DB, store walletstore.Store,
+	addrMgr *waddrmgr.Manager, txMgr *wtxmgr.Store, pubPass []byte,
+	params *chaincfg.Params, recoveryWindow uint32,
+	syncRetryInterval time.Duration) *Wallet {
+
 	w := &Wallet{
 		publicPassphrase:    pubPass,
 		db:                  db,
-		store:               walletkvdb.NewStore(db, addrMgr, txMgr),
+		store:               store,
 		Manager:             addrMgr,
 		TxStore:             txMgr,
 		lockedOutpoints:     map[wire.OutPoint]struct{}{},
@@ -4510,9 +6724,6 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 	}
 
 	w.NtfnServer = newNotificationServer(w)
-	w.TxStore.NotifyUnspent = func(hash *chainhash.Hash, index uint32) {
-		w.NtfnServer.notifyUnspentOutput(0, hash, index)
-	}
 
-	return w, nil
+	return w
 }

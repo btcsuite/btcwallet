@@ -8,9 +8,13 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -36,6 +40,57 @@ type mockChainConn struct {
 }
 
 var _ chainConn = (*mockChainConn)(nil)
+
+// TestKVNonDefaultAccountNotification verifies that the legacy transaction
+// manager routes a newly committed credit to its controlling account.
+func TestKVNonDefaultAccountNotification(t *testing.T) {
+	t.Parallel()
+
+	wallet, teardown := testWallet(t)
+	defer teardown()
+
+	account, err := wallet.NextAccount(
+		waddrmgr.KeyScopeBIP0044, "notification account",
+	)
+	require.NoError(t, err)
+	require.NotEqual(t, waddrmgr.DefaultAccountNum, account)
+	addr, err := wallet.NewAddress(account, waddrmgr.KeyScopeBIP0044)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	msgTx := wire.NewMsgTx(2)
+	msgTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  chainhash.Hash{1},
+		Index: 1,
+	}})
+	msgTx.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: pkScript})
+	record, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Unix(1, 0))
+	require.NoError(t, err)
+
+	spentness := wallet.NtfnServer.AccountSpentnessNotifications(account)
+	updateErr := make(chan error, 1)
+
+	go func() {
+		updateErr <- walletdb.Update(
+			wallet.Database(), func(tx walletdb.ReadWriteTx) error {
+				return wallet.addRelevantTx(tx, record, nil)
+			},
+		)
+	}()
+
+	select {
+	case notification := <-spentness.C:
+		require.Equal(t, record.Hash, *notification.Hash())
+		require.Equal(t, uint32(0), notification.Index())
+
+	case <-time.After(time.Second):
+		t.Fatal("non-default KV account did not receive notification")
+	}
+
+	require.NoError(t, <-updateErr)
+	spentness.Done()
+}
 
 // createMockChainConn creates a new mock chain connection backed by a chain
 // with N blocks. Each block has a timestamp that is exactly blockInterval after
@@ -101,7 +156,8 @@ func (c *mockChainConn) GetBlockHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 	return &block.Header, nil
 }
 
-// mockBirthdayStore is a mock in-memory implementation of the birthdayStore interface
+// mockBirthdayStore is a mock in-memory implementation of the birthdayStore
+// interface.
 // that will be used for the birthday block sanity check tests.
 type mockBirthdayStore struct {
 	birthday              time.Time

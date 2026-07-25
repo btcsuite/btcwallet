@@ -32,5 +32,8 @@ func TestSQLiteManagerStore(t *testing.T) {
 		newStore: func(walletID int64) db.Store {
 			return dbsqlite.NewStore(conn, walletID)
 		},
+		newLifecycleStore: func(name string) db.LifecycleStore {
+			return dbsqlite.NewNamedStore(conn, name)
+		},
 	})
 }

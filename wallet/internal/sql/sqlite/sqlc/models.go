@@ -138,6 +138,13 @@ type Wallet struct {
 	EncryptedMasterHdPrivKey []byte
 }
 
+type WalletBlock struct {
+	WalletID       int64
+	BlockHeight    int64
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
 type WalletSyncState struct {
 	WalletID              int64
 	StartBlockHeight      int64

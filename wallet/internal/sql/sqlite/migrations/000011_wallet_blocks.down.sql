@@ -1,0 +1,6 @@
+DROP TRIGGER wallet_blocks_delete_restrict;
+DROP TRIGGER transactions_update_block;
+DROP TRIGGER transactions_insert_block;
+DROP TRIGGER wallet_sync_states_update_blocks;
+DROP TRIGGER wallet_sync_states_insert_blocks;
+DROP TABLE wallet_blocks;

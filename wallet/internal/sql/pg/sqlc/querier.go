@@ -16,7 +16,7 @@ type Querier interface {
 	CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error)
 	DeleteAccountPrivateKeys(ctx context.Context, walletID int64) (int64, error)
 	DeleteAddressPrivateKeys(ctx context.Context, walletID int64) (int64, error)
-	DeleteBlock(ctx context.Context, blockHeight int32) error
+	DeleteBlock(ctx context.Context, arg DeleteBlockParams) error
 	DeleteCreditSpend(ctx context.Context, arg DeleteCreditSpendParams) (int64, error)
 	DeleteCreditSpendsBySpendingTx(ctx context.Context, arg DeleteCreditSpendsBySpendingTxParams) (int64, error)
 	DeleteExpiredOutputLeases(ctx context.Context, arg DeleteExpiredOutputLeasesParams) (int64, error)
@@ -26,11 +26,12 @@ type Querier interface {
 	DeleteOutputLeaseAnyOwner(ctx context.Context, arg DeleteOutputLeaseAnyOwnerParams) (int64, error)
 	DeleteTransactionByID(ctx context.Context, arg DeleteTransactionByIDParams) (int64, error)
 	DetachMinedTransaction(ctx context.Context, arg DetachMinedTransactionParams) (int64, error)
+	EnsureBlockHeight(ctx context.Context, arg EnsureBlockHeightParams) error
 	GetAccount(ctx context.Context, arg GetAccountParams) (Account, error)
 	GetActiveCreditID(ctx context.Context, arg GetActiveCreditIDParams) (int64, error)
 	GetAddress(ctx context.Context, arg GetAddressParams) (Address, error)
-	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
-	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	GetBlockByHeight(ctx context.Context, arg GetBlockByHeightParams) (GetBlockByHeightRow, error)
+	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]GetBlocksInRangeRow, error)
 	GetCredit(ctx context.Context, arg GetCreditParams) (Credit, error)
 	GetKeyScope(ctx context.Context, arg GetKeyScopeParams) (KeyScope, error)
 	GetManagerAccount(ctx context.Context, arg GetManagerAccountParams) (Account, error)
@@ -49,7 +50,7 @@ type Querier interface {
 	GetUnminedTransactionByHash(ctx context.Context, arg GetUnminedTransactionByHashParams) (Transaction, error)
 	GetUnminedTransactionDetails(ctx context.Context, arg GetUnminedTransactionDetailsParams) (GetUnminedTransactionDetailsRow, error)
 	GetWalletByName(ctx context.Context, walletName string) (Wallet, error)
-	GetWalletStartBlock(ctx context.Context, walletID int64) (Block, error)
+	GetWalletStartBlock(ctx context.Context, walletID int64) (GetWalletStartBlockRow, error)
 	GetWalletSyncState(ctx context.Context, walletID int64) (GetWalletSyncStateRow, error)
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
 	InsertCredit(ctx context.Context, arg InsertCreditParams) (int64, error)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
@@ -13,10 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// hardenedKey converts a child index to its hardened form.
 func hardenedKey(key uint32) uint32 {
 	return key + hdkeychain.HardenedKeyStart
 }
 
+// deriveAcctPubKey derives an account public key for an import test.
 func deriveAcctPubKey(t *testing.T, root *hdkeychain.ExtendedKey,
 	scope waddrmgr.KeyScope, paths ...uint32) *hdkeychain.ExtendedKey {
 
@@ -154,6 +157,61 @@ func TestImportAccount(t *testing.T) {
 	}
 }
 
+// TestImportAccountWithScopeRejectsPrivateKey verifies explicit-scope imports
+// reject private extended keys before creating any durable scope state.
+func TestImportAccountWithScopeRejectsPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	wallet, cleanup := testWallet(t)
+	defer cleanup()
+
+	root, err := hdkeychain.NewKeyFromString(testCases[0].masterPriv)
+	require.NoError(t, err)
+	defer root.Zero()
+
+	accountKey := root
+	for _, child := range []uint32{
+		hardenedKey(waddrmgr.KeyScopeBIP0084.Purpose),
+		hardenedKey(waddrmgr.KeyScopeBIP0084.Coin), hardenedKey(0),
+	} {
+		accountKey, err = accountKey.Derive(child)
+		require.NoError(t, err)
+	}
+	defer accountKey.Zero()
+
+	scope := waddrmgr.KeyScope{Purpose: 1_018, Coin: 1}
+	_, err = wallet.ImportAccountWithScope(
+		"private", accountKey, 0, scope,
+		waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084],
+	)
+	require.ErrorContains(t, err, "private keys cannot be imported")
+	_, err = wallet.Manager.FetchScopedKeyManager(scope)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+}
+
+// TestImportTaprootScriptRejectsInvalidVersion verifies taproot imports reject
+// non-v1 witness versions without a failed type assertion.
+func TestImportTaprootScriptRejectsInvalidVersion(t *testing.T) {
+	t.Parallel()
+
+	wallet, cleanup := testWallet(t)
+	defer cleanup()
+
+	privateKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	tapscript := &waddrmgr.Tapscript{
+		Type:          waddrmgr.TaprootFullKeyOnly,
+		FullOutputKey: privateKey.PubKey(),
+	}
+	for _, version := range []byte{0, 2} {
+		_, err := wallet.ImportTaprootScript(
+			waddrmgr.KeyScopeBIP0086, tapscript, nil, version, true,
+		)
+		require.ErrorContains(t, err, "invalid witness version")
+	}
+}
+
+// testImportAccount verifies one imported account test case.
 func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	name string) {
 

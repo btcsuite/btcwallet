@@ -24,6 +24,8 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
+// makeInputSource creates an input source that consumes eligible coins in
+// their arranged order.
 func makeInputSource(eligible []Coin) txauthor.InputSource {
 	// Current inputs and their total value. These are closed over by the
 	// returned input source and reused across multiple calls.
@@ -88,10 +90,12 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 // secretSource is an implementation of txauthor.SecretSource for the wallet's
 // address manager.
 type secretSource struct {
+	// Manager supplies address and key operations to the secret source.
 	*waddrmgr.Manager
 	addrmgrNs walletdb.ReadBucket
 }
 
+// GetKey returns the wallet private key controlling an address.
 func (s secretSource) GetKey(
 	addr address.Address) (*btcec.PrivateKey, bool, error) {
 
@@ -113,6 +117,7 @@ func (s secretSource) GetKey(
 	return privKey, ma.Compressed(), nil
 }
 
+// GetScript returns the wallet redeem script controlling an address.
 func (s secretSource) GetScript(addr address.Address) ([]byte, error) {
 	ma, err := s.Address(s.addrmgrNs, addr)
 	if err != nil {
@@ -175,6 +180,13 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	// with a lock.
 	w.newAddrMtx.Lock()
 	defer w.newAddrMtx.Unlock()
+	if w.db == nil {
+		return w.txToOutputsFromStore(
+			outputs, coinSelectKeyScope, changeKeyScope, account,
+			minconf, feeSatPerKb, strategy, dryRun, selectedUtxos,
+			allowUtxo, chainClient, bs,
+		)
+	}
 
 	var tx *txauthor.AuthoredTx
 	err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
@@ -345,6 +357,7 @@ func (w *Wallet) txToOutputs(outputs []*wire.TxOut,
 	return tx, nil
 }
 
+// findEligibleOutputs filters spendable credits through walletdb views.
 func (w *Wallet) findEligibleOutputs(dbtx walletdb.ReadTx,
 	keyScope *waddrmgr.KeyScope, account uint32, minconf int32,
 	bs *waddrmgr.BlockStamp,
@@ -540,10 +553,15 @@ func validateMsgTx(tx *wire.MsgTx, prevScripts [][]byte,
 // sortByAmount is a generic sortable type for sorting coins by their amount.
 type sortByAmount []Coin
 
+// Len returns the number of coins available for sorting.
 func (s sortByAmount) Len() int { return len(s) }
+
+// Less reports whether one coin has a lower value than another.
 func (s sortByAmount) Less(i, j int) bool {
 	return s[i].Value < s[j].Value
 }
+
+// Swap exchanges two coins in the sortable slice.
 func (s sortByAmount) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // LargestFirstCoinSelector is an implementation of the CoinSelectionStrategy

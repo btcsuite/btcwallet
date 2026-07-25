@@ -47,6 +47,9 @@ type Interface interface {
 	// will fail.
 	Locked() bool
 
+	// WatchOnly returns whether the wallet contains no private key material.
+	WatchOnly() bool
+
 	// Unlock unlocks the wallet with a passphrase. The wallet will
 	// automatically re-lock after the timeout has expired. If the timeout
 	// channel is nil, the wallet remains unlocked indefinitely.
@@ -72,7 +75,8 @@ type Interface interface {
 
 	// Database returns the underlying walletdb database. This method is
 	// provided in order to allow applications wrapping btcwallet to store
-	// app-specific data with the wallet's database.
+	// app-specific data with the wallet's database. It returns nil for a
+	// Store-backed wallet.
 	Database() walletdb.DB
 
 	// ChainParams returns the chain parameters for the wallet.
@@ -136,6 +140,13 @@ type Interface interface {
 	InitAccounts(scope *waddrmgr.ScopedKeyManager, convertToWatchOnly bool,
 		account uint32) error
 
+	// InitializeKeyScope ensures that a key scope and the exact requested
+	// accounts exist. Private key material is removed after initialization
+	// when convertToWatchOnly is true.
+	InitializeKeyScope(scope waddrmgr.KeyScope,
+		addrSchema waddrmgr.ScopeAddrSchema, accounts []uint32,
+		convertToWatchOnly bool) error
+
 	// AddScopeManager adds a new scope manager to the wallet.
 	AddScopeManager(scope waddrmgr.KeyScope,
 		addrSchema waddrmgr.ScopeAddrSchema) (
@@ -155,6 +166,16 @@ type Interface interface {
 	// and scope.
 	NewChangeAddress(account uint32, scope waddrmgr.KeyScope) (
 		address.Address, error)
+
+	// NextExternalKey derives and persists the next external public key for
+	// an account, returning its child index.
+	NextExternalKey(scope waddrmgr.KeyScope, account uint32) (
+		*btcec.PublicKey, uint32, error)
+
+	// DeriveManagedPubKey derives an arbitrary managed public key. The
+	// account is created when possible if it does not exist.
+	DeriveManagedPubKey(scope waddrmgr.KeyScope,
+		path waddrmgr.DerivationPath) (*btcec.PublicKey, error)
 
 	// AddressInfo returns detailed information about a managed address,
 	// including its derivation path and whether it's compressed.
@@ -293,6 +314,10 @@ type Interface interface {
 	// RemoveDescendants removes all transactions from the wallet that
 	// spend outputs from the passed transaction.
 	RemoveDescendants(tx *wire.MsgTx) error
+
+	// DropTransactionHistory removes all wallet transaction state while
+	// optionally retaining labels.
+	DropTransactionHistory(keepLabels bool) error
 
 	// PrivKeyForAddress returns the private key for a given address.
 	PrivKeyForAddress(a address.Address) (*btcec.PrivateKey, error)

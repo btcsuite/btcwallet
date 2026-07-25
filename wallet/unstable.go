@@ -6,8 +6,10 @@
 package wallet
 
 import (
+	"context"
+
 	"github.com/btcsuite/btcd/chainhash/v2"
-	"github.com/btcsuite/btcwallet/walletdb"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -20,25 +22,61 @@ type unstableAPI struct {
 // the transition (particularly for the legacy JSON-RPC server) from using
 // exported manager packages to a unified wallet package that exposes all
 // functionality by itself.  New code should not be written using this API.
-func UnstableAPI(w *Wallet) unstableAPI { return unstableAPI{w} } // nolint:golint
+func UnstableAPI(w *Wallet) unstableAPI { // nolint:golint
+	return unstableAPI{w}
+}
 
-// TxDetails calls wtxmgr.Store.TxDetails under a single database view transaction.
-func (u unstableAPI) TxDetails(txHash *chainhash.Hash) (*wtxmgr.TxDetails, error) {
+// TxDetails returns transaction details under a single Store view transaction.
+func (u unstableAPI) TxDetails(
+	txHash *chainhash.Hash) (*wtxmgr.TxDetails, error) {
+
 	var details *wtxmgr.TxDetails
-	err := walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-		var err error
-		details, err = u.w.TxStore.TxDetails(txmgrNs, txHash)
-		return err
-	})
+
+	err := u.w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+
+			var err error
+			details, err = tx.Tx().TxDetails(txHash)
+			return err
+		}, func() {
+			details = nil
+		})
+
 	return details, err
 }
 
-// RangeTransactions calls wtxmgr.Store.RangeTransactions under a single
-// database view tranasction.
-func (u unstableAPI) RangeTransactions(begin, end int32, f func([]wtxmgr.TxDetails) (bool, error)) error {
-	return walletdb.View(u.w.db, func(dbtx walletdb.ReadTx) error {
-		txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
-		return u.w.TxStore.RangeTransactions(txmgrNs, begin, end, f)
-	})
+// RangeTransactions visits transaction details under a single Store view
+// transaction. The caller callback runs only after the read succeeds so SQL
+// transaction retries cannot replay caller side effects.
+func (u unstableAPI) RangeTransactions(begin, end int32,
+	visit func([]wtxmgr.TxDetails) (bool, error)) error {
+
+	var batches [][]wtxmgr.TxDetails
+	err := u.w.store.View(
+		context.Background(), func(tx walletstore.ReadTx) error {
+			return tx.Tx().RangeTransactions(
+				begin, end,
+				func(details []wtxmgr.TxDetails) (bool, error) {
+					batch := append([]wtxmgr.TxDetails(nil), details...)
+					batches = append(batches, batch)
+
+					return false, nil
+				},
+			)
+		}, func() {
+			batches = nil
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, batch := range batches {
+		stop, err := visit(batch)
+		if err != nil || stop {
+			return err
+		}
+	}
+
+	return nil
 }

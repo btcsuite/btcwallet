@@ -25,6 +25,12 @@ var (
 // a full chain rescan of all wallet transaction and UTXO data. User-defined
 // transaction labels can optionally be kept by setting keepLabels to true.
 func DropTransactionHistory(db walletdb.DB, keepLabels bool) error {
+	if db == nil {
+		return &UnsupportedStoreOperationError{
+			Operation: "DropTransactionHistory",
+		}
+	}
+
 	log.Infof("Dropping btcwallet transaction history")
 
 	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
@@ -92,6 +98,19 @@ func DropTransactionHistory(db walletdb.DB, keepLabels bool) error {
 	}
 
 	return nil
+}
+
+// DropTransactionHistory removes this wallet's transaction state while
+// optionally retaining labels. Store-backed wallets return a typed unsupported
+// operation error before any walletdb access.
+func (w *Wallet) DropTransactionHistory(keepLabels bool) error {
+	if w.db == nil {
+		return &UnsupportedStoreOperationError{
+			Operation: "DropTransactionHistory",
+		}
+	}
+
+	return DropTransactionHistory(w.db, keepLabels)
 }
 
 // fetchAllLabels returns a map of hex-encoded txid to label.

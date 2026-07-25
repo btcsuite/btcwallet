@@ -1,42 +1,94 @@
 package waddrmgr
 
 import (
+	"errors"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 )
 
+var (
+	// ErrStoreAddressTypeUnsupported reports an address encoding that the
+	// store-backed manager cannot reconstruct safely.
+	ErrStoreAddressTypeUnsupported = errors.New(
+		"store-backed address type is unsupported",
+	)
+)
+
 // ManagerState contains the durable root address-manager state.
 type ManagerState struct {
-	Version                  uint32
-	CreatedAt                time.Time
-	WatchOnly                bool
-	MasterPubParams          []byte
-	MasterPrivParams         []byte
-	EncryptedCryptoPubKey    []byte
-	EncryptedCryptoPrivKey   []byte
+	// Version is the address-manager schema version.
+	Version uint32
+
+	// CreatedAt is the manager creation time.
+	CreatedAt time.Time
+
+	// WatchOnly records whether the manager has private material.
+	WatchOnly bool
+
+	// MasterPubParams contains the serialized public passphrase parameters.
+	MasterPubParams []byte
+
+	// MasterPrivParams contains the serialized private passphrase parameters.
+	MasterPrivParams []byte
+
+	// EncryptedCryptoPubKey contains the encrypted public crypto key.
+	EncryptedCryptoPubKey []byte
+
+	// EncryptedCryptoPrivKey contains the encrypted private crypto key.
+	EncryptedCryptoPrivKey []byte
+
+	// EncryptedCryptoScriptKey contains the encrypted script crypto key.
 	EncryptedCryptoScriptKey []byte
-	EncryptedMasterHDPubKey  []byte
+
+	// EncryptedMasterHDPubKey contains the encrypted master HD public key.
+	EncryptedMasterHDPubKey []byte
+
+	// EncryptedMasterHDPrivKey contains the encrypted master HD private key.
 	EncryptedMasterHDPrivKey []byte
 }
 
 // SyncState contains the durable address-manager chain position.
 type SyncState struct {
-	StartBlock            BlockStamp
-	SyncedTo              BlockStamp
-	Birthday              time.Time
-	BirthdayBlock         *BlockStamp
+	// StartBlock is the earliest block relevant to the manager.
+	StartBlock BlockStamp
+
+	// SyncedTo is the latest block processed by the manager.
+	SyncedTo BlockStamp
+
+	// Birthday is the earliest possible key creation time.
+	Birthday time.Time
+
+	// BirthdayBlock is the block associated with the manager birthday.
+	BirthdayBlock *BlockStamp
+
+	// BirthdayBlockVerified records whether BirthdayBlock was verified.
 	BirthdayBlockVerified bool
 }
 
 // KeyScopeState contains the durable state for one key scope.
 type KeyScopeState struct {
-	Scope                KeyScope
-	AddrSchema           ScopeAddrSchema
-	EncryptedCoinPubKey  []byte
+	// Scope identifies the key derivation scope.
+	Scope KeyScope
+
+	// AddrSchema defines the scope's external and internal address types.
+	AddrSchema ScopeAddrSchema
+
+	// EncryptedCoinPubKey contains the encrypted coin-type public key.
+	EncryptedCoinPubKey []byte
+
+	// EncryptedCoinPrivKey contains the encrypted coin-type private key.
 	EncryptedCoinPrivKey []byte
-	LastAccount          uint32
+
+	// LastAccount is the last account allocated in the scope.
+	LastAccount uint32
 }
+
+const (
+	// NoAccount is the last-account sentinel for a scope that has not yet
+	// allocated account zero.
+	NoAccount = ^uint32(0)
+)
 
 // AccountType identifies a durable address-manager account encoding.
 type AccountType uint8
@@ -51,16 +103,35 @@ const (
 
 // AccountState contains the durable state for one scoped account.
 type AccountState struct {
-	Scope                KeyScope
-	Account              uint32
-	Type                 AccountType
-	Name                 string
-	EncryptedPubKey      []byte
-	EncryptedPrivKey     []byte
+	// Scope identifies the account's key derivation scope.
+	Scope KeyScope
+
+	// Account is the account number within Scope.
+	Account uint32
+
+	// Type identifies how the account was created.
+	Type AccountType
+
+	// Name is the user-facing account name.
+	Name string
+
+	// EncryptedPubKey contains the encrypted account public key.
+	EncryptedPubKey []byte
+
+	// EncryptedPrivKey contains the encrypted account private key.
+	EncryptedPrivKey []byte
+
+	// MasterKeyFingerprint identifies the account's root key.
 	MasterKeyFingerprint uint32
-	NextExternalIndex    uint32
-	NextInternalIndex    uint32
-	AddrSchema           *ScopeAddrSchema
+
+	// NextExternalIndex is the next external child index to allocate.
+	NextExternalIndex uint32
+
+	// NextInternalIndex is the next internal child index to allocate.
+	NextInternalIndex uint32
+
+	// AddrSchema optionally overrides the scope's address schema.
+	AddrSchema *ScopeAddrSchema
 }
 
 // StoreAddressType identifies a durable address-manager address encoding.
@@ -99,21 +170,50 @@ const (
 
 // AddressState contains the durable state for one managed address.
 type AddressState struct {
-	Scope            KeyScope
-	Hash             []byte
-	Account          uint32
-	Type             StoreAddressType
-	AddedAt          time.Time
-	SyncStatus       AddressSyncStatus
-	Branch           *uint32
-	Index            *uint32
-	EncryptedPubKey  []byte
+	// Scope identifies the address's key derivation scope.
+	Scope KeyScope
+
+	// Hash is the durable digest of the address identifier.
+	Hash []byte
+
+	// Account is the address's account number.
+	Account uint32
+
+	// Type identifies how the address was created.
+	Type StoreAddressType
+
+	// AddedAt is the time the address was added to the manager.
+	AddedAt time.Time
+
+	// SyncStatus is the address's synchronization state.
+	SyncStatus AddressSyncStatus
+
+	// Branch is the optional HD derivation branch.
+	Branch *uint32
+
+	// Index is the optional HD derivation child index.
+	Index *uint32
+
+	// EncryptedPubKey contains encrypted imported public-key material.
+	EncryptedPubKey []byte
+
+	// EncryptedPrivKey contains encrypted imported private-key material.
 	EncryptedPrivKey []byte
-	EncryptedHash    []byte
-	EncryptedScript  []byte
-	WitnessVersion   *uint8
-	IsSecretScript   *bool
-	Used             bool
+
+	// EncryptedHash contains an encrypted imported script identity.
+	EncryptedHash []byte
+
+	// EncryptedScript contains an encrypted imported script.
+	EncryptedScript []byte
+
+	// WitnessVersion identifies an imported witness script version.
+	WitnessVersion *uint8
+
+	// IsSecretScript records whether a script requires private encryption.
+	IsSecretScript *bool
+
+	// Used records whether the address has appeared on chain.
+	Used bool
 }
 
 // ManagerReadStore exposes the complete durable waddrmgr read surface without
@@ -160,6 +260,7 @@ type ManagerReadStore interface {
 //
 //nolint:interfacebloat // The interface mirrors one existing manager domain.
 type ManagerReadWriteStore interface {
+	// ManagerReadStore provides the complete manager read surface.
 	ManagerReadStore
 
 	// PutManagerState replaces the durable root address-manager state.
@@ -208,4 +309,14 @@ type ManagerReadWriteStore interface {
 
 	// DeletePrivateKeys removes all persisted private key material.
 	DeletePrivateKeys() error
+}
+
+// ManagerReadWriteTx extends a writable manager store with a callback that is
+// invoked only after its enclosing transaction commits successfully.
+type ManagerReadWriteTx interface {
+	// ManagerReadWriteStore provides the manager read/write surface.
+	ManagerReadWriteStore
+
+	// OnCommit registers a callback for successful transaction commit.
+	OnCommit(func())
 }

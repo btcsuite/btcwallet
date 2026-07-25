@@ -11,6 +11,7 @@ import (
 
 // Store is the SQLite manager transaction store.
 type Store struct {
+	// Store supplies the backend-neutral SQL transaction implementation.
 	*sqlstore.Store
 }
 
@@ -27,15 +28,43 @@ func NewStore(conn *sql.DB, walletID int64, maturity ...uint16) *Store {
 	}
 }
 
+// NewNamedStore creates a SQLite manager store that resolves or creates one
+// wallet by name.
+func NewNamedStore(conn *sql.DB, walletName string,
+	maturity ...uint16) *Store {
+
+	return &Store{
+		Store: sqlstore.NewNamed(
+			conn, walletName, func(tx *sql.Tx) sqlstore.Queries {
+				return &queryAdapter{
+					queries: sqlitedb.New(tx),
+				}
+			}, maturity...,
+		),
+	}
+}
+
 type queryAdapter struct {
 	queries *sqlitedb.Queries
 }
 
 // PutBlock stores block through the transaction-bound backend.
-func (q *queryAdapter) PutBlock(ctx context.Context,
+func (q *queryAdapter) PutBlock(ctx context.Context, walletID int64,
 	row sqlstore.BlockRow) error {
 
+	err := q.queries.EnsureBlockHeight(
+		ctx, sqlitedb.EnsureBlockHeightParams{
+			BlockHeight:    int64(row.Height),
+			HeaderHash:     row.Hash,
+			BlockTimestamp: row.Timestamp,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
 	return q.queries.PutBlock(ctx, sqlitedb.PutBlockParams{
+		WalletID:       walletID,
 		BlockHeight:    int64(row.Height),
 		HeaderHash:     row.Hash,
 		BlockTimestamp: row.Timestamp,
@@ -43,10 +72,15 @@ func (q *queryAdapter) PutBlock(ctx context.Context,
 }
 
 // GetBlockByHeight reads block by height from the transaction-bound backend.
-func (q *queryAdapter) GetBlockByHeight(ctx context.Context,
+func (q *queryAdapter) GetBlockByHeight(ctx context.Context, walletID int64,
 	height int32) (sqlstore.BlockRow, error) {
 
-	row, err := q.queries.GetBlockByHeight(ctx, int64(height))
+	row, err := q.queries.GetBlockByHeight(
+		ctx, sqlitedb.GetBlockByHeightParams{
+			WalletID:    walletID,
+			BlockHeight: int64(height),
+		},
+	)
 	if err != nil {
 		return sqlstore.BlockRow{}, err
 	}

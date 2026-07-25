@@ -56,5 +56,8 @@ func TestPostgresManagerStore(t *testing.T) {
 		newStore: func(walletID int64) db.Store {
 			return dbpg.NewStore(conn, walletID)
 		},
+		newLifecycleStore: func(name string) db.LifecycleStore {
+			return dbpg.NewNamedStore(conn, name)
+		},
 	})
 }

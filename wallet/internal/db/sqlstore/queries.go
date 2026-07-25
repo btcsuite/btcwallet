@@ -9,95 +9,180 @@ import (
 
 // BlockRow is the backend-neutral representation of a blocks table row.
 type BlockRow struct {
-	Height    int32
-	Hash      []byte
+	// Height is the block height.
+	Height int32
+
+	// Hash is the serialized block hash.
+	Hash []byte
+
+	// Timestamp is the block timestamp as Unix seconds.
 	Timestamp int64
 }
 
 // TransactionDetailsRow contains the generated columns used to reconstruct a
 // wtxmgr transaction detail.
 type TransactionDetailsRow struct {
-	ID             int64
-	RawTx          []byte
-	Received       int64
-	BlockHeight    sql.NullInt64
+	// ID is the transaction row identifier.
+	ID int64
+
+	// RawTx is the serialized transaction.
+	RawTx []byte
+
+	// Received is the transaction receive time as Unix seconds.
+	Received int64
+
+	// BlockHeight is the optional mined block height.
+	BlockHeight sql.NullInt64
+
+	// ConfirmedOrder is the optional transaction order within its block.
 	ConfirmedOrder sql.NullInt64
-	BlockHash      []byte
+
+	// BlockHash is the optional serialized mined block hash.
+	BlockHash []byte
+
+	// BlockTimestamp is the optional mined block time as Unix seconds.
 	BlockTimestamp sql.NullInt64
-	Label          []byte
+
+	// Label is the optional transaction label.
+	Label []byte
 }
 
 // TransactionRow contains one transaction incidence.
 type TransactionRow struct {
-	ID          int64
-	Hash        []byte
-	RawTx       []byte
+	// ID is the transaction row identifier.
+	ID int64
+
+	// Hash is the serialized transaction hash.
+	Hash []byte
+
+	// RawTx is the serialized transaction.
+	RawTx []byte
+
+	// BlockHeight is the optional mined block height.
 	BlockHeight sql.NullInt64
 }
 
 // TransactionIncidenceRow identifies one mined transaction incidence.
 type TransactionIncidenceRow struct {
-	ID     int64
+	// ID is the transaction row identifier.
+	ID int64
+
+	// Height is the mined block height.
 	Height int32
 }
 
 // TransactionCreditRow contains one credit attached to a transaction detail.
 type TransactionCreditRow struct {
+	// OutputIndex is the credited transaction output index.
 	OutputIndex int64
-	Amount      int64
-	IsChange    bool
-	IsSpent     bool
+
+	// Amount is the credited amount in satoshis.
+	Amount int64
+
+	// IsChange records whether the output is wallet change.
+	IsChange bool
+
+	// IsSpent records whether the credit is currently spent.
+	IsSpent bool
 }
 
 // TransactionDebitRow contains one debit attached to a transaction detail.
 type TransactionDebitRow struct {
+	// InputIndex is the debiting transaction input index.
 	InputIndex int64
-	Amount     int64
+
+	// Amount is the debited amount in satoshis.
+	Amount int64
 }
 
 // CreditRow contains the generated columns used by the wtxmgr credit views.
 type CreditRow struct {
-	Hash           []byte
-	OutputIndex    int64
-	Amount         int64
-	PkScript       []byte
-	Received       int64
-	BlockHeight    sql.NullInt64
-	IsCoinbase     bool
-	BlockHash      []byte
+	// Hash is the serialized transaction hash.
+	Hash []byte
+
+	// OutputIndex is the credited transaction output index.
+	OutputIndex int64
+
+	// Amount is the credited amount in satoshis.
+	Amount int64
+
+	// PkScript is the credited output's public-key script.
+	PkScript []byte
+
+	// Received is the transaction receive time as Unix seconds.
+	Received int64
+
+	// BlockHeight is the optional mined block height.
+	BlockHeight sql.NullInt64
+
+	// IsCoinbase records whether the transaction is a coinbase.
+	IsCoinbase bool
+
+	// BlockHash is the optional serialized mined block hash.
+	BlockHash []byte
+
+	// BlockTimestamp is the optional mined block time as Unix seconds.
 	BlockTimestamp sql.NullInt64
 }
 
 // MinedTransactionRow identifies a mined transaction being disconnected.
 type MinedTransactionRow struct {
-	ID         int64
-	Hash       []byte
+	// ID is the transaction row identifier.
+	ID int64
+
+	// Hash is the serialized transaction hash.
+	Hash []byte
+
+	// IsCoinbase records whether the transaction is a coinbase.
 	IsCoinbase bool
 }
 
 // UnminedSpenderRow identifies an unmined transaction that spends a hash.
 type UnminedSpenderRow struct {
-	ID   int64
+	// ID is the transaction row identifier.
+	ID int64
+
+	// Hash is the serialized transaction hash.
 	Hash []byte
 }
 
 // OutputLeaseRow contains one persisted output lease.
 type OutputLeaseRow struct {
-	Hash       []byte
-	Index      int64
-	LockID     []byte
+	// Hash is the serialized transaction hash.
+	Hash []byte
+
+	// Index is the leased transaction output index.
+	Index int64
+
+	// LockID identifies the lease owner.
+	LockID []byte
+
+	// Expiration is the lease expiration time as Unix nanoseconds.
 	Expiration int64
 }
 
 // InsertTransactionParams contains a transaction incidence to persist.
 type InsertTransactionParams struct {
-	WalletID       int64
-	Hash           []byte
-	RawTx          []byte
-	Received       int64
-	BlockHeight    sql.NullInt64
+	// WalletID identifies the wallet owning the transaction.
+	WalletID int64
+
+	// Hash is the serialized transaction hash.
+	Hash []byte
+
+	// RawTx is the serialized transaction.
+	RawTx []byte
+
+	// Received is the transaction receive time as Unix seconds.
+	Received int64
+
+	// BlockHeight is the optional mined block height.
+	BlockHeight sql.NullInt64
+
+	// ConfirmedOrder is the optional transaction order within its block.
 	ConfirmedOrder sql.NullInt64
-	IsCoinbase     bool
+
+	// IsCoinbase records whether the transaction is a coinbase.
+	IsCoinbase bool
 }
 
 // Queries is the sqlc-generated query subset required by the manager store.
@@ -105,11 +190,21 @@ type InsertTransactionParams struct {
 //
 //nolint:interfacebloat // One SQL transaction binds both manager domains.
 type Queries interface {
-	// PutBlock stores block through the transaction-bound backend.
-	PutBlock(ctx context.Context, row BlockRow) error
+	// WalletIDByName resolves a wallet's backend row identifier.
+	WalletIDByName(ctx context.Context, name string) (int64, error)
+	// CreateWallet creates the root manager row and returns its identifier.
+	CreateWallet(ctx context.Context, name string,
+		state waddrmgr.ManagerState) (int64, error)
+	// CreateSyncState creates the initial wallet synchronization row.
+	CreateSyncState(ctx context.Context, walletID int64,
+		state waddrmgr.SyncState) error
+	// PutBlock stores one wallet's block through the transaction-bound
+	// backend.
+	PutBlock(ctx context.Context, walletID int64, row BlockRow) error
 	// GetBlockByHeight reads block by height from the transaction-bound
 	// backend.
-	GetBlockByHeight(ctx context.Context, height int32) (BlockRow, error)
+	GetBlockByHeight(ctx context.Context, walletID int64,
+		height int32) (BlockRow, error)
 	// GetWalletStartBlock reads wallet start block from the transaction-bound
 	// backend.
 	GetWalletStartBlock(ctx context.Context, walletID int64) (BlockRow, error)
@@ -304,7 +399,7 @@ type Queries interface {
 	DeleteOutputLeaseAnyOwner(ctx context.Context, walletID int64,
 		hash []byte, index uint32) (int64, error)
 	// GetCreditID reads credit id from the transaction-bound backend.
-	GetCreditID(ctx context.Context, transactionID int64,
+	GetCreditID(ctx context.Context, walletID, transactionID int64,
 		index uint32) (int64, error)
 	// InsertCredit records credit through the transaction-bound backend.
 	InsertCredit(ctx context.Context, walletID, transactionID int64,

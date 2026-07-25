@@ -31,17 +31,6 @@ func TestLegacySchemaQueries(t *testing.T) {
 	genesisHash := bytesOf(0x01, 32)
 	birthdayHash := bytesOf(0x02, 32)
 
-	require.NoError(t, queries.InsertBlock(ctx, sqlc.InsertBlockParams{
-		BlockHeight:    0,
-		HeaderHash:     genesisHash,
-		BlockTimestamp: 1,
-	}))
-	require.NoError(t, queries.InsertBlock(ctx, sqlc.InsertBlockParams{
-		BlockHeight:    100,
-		HeaderHash:     birthdayHash,
-		BlockTimestamp: 2,
-	}))
-
 	walletID, err := queries.CreateWallet(ctx, sqlc.CreateWalletParams{
 		WalletName:            "watch-only",
 		ManagerVersion:        8,
@@ -51,6 +40,29 @@ func TestLegacySchemaQueries(t *testing.T) {
 		EncryptedCryptoPubKey: []byte("encrypted-crypto-public-key"),
 	})
 	require.NoError(t, err)
+
+	for _, block := range []sqlc.EnsureBlockHeightParams{
+		{
+			BlockHeight:    0,
+			HeaderHash:     genesisHash,
+			BlockTimestamp: 1,
+		},
+		{
+			BlockHeight:    100,
+			HeaderHash:     birthdayHash,
+			BlockTimestamp: 2,
+		},
+	} {
+		require.NoError(t, queries.EnsureBlockHeight(ctx, block))
+		require.NoError(t, queries.InsertBlock(
+			ctx, sqlc.InsertBlockParams{
+				WalletID:       walletID,
+				BlockHeight:    block.BlockHeight,
+				HeaderHash:     block.HeaderHash,
+				BlockTimestamp: block.BlockTimestamp,
+			},
+		))
+	}
 
 	wallet, err := queries.GetWalletByName(ctx, "watch-only")
 	require.NoError(t, err)
@@ -140,6 +152,8 @@ func TestLegacySchemaQueries(t *testing.T) {
 	createLegacyAddressRows(t, ctx, db, queries, walletID, scopeID)
 }
 
+// requireNoPlaintextColumns verifies that secret manager values have no clear
+// text schema representation.
 func requireNoPlaintextColumns(t *testing.T, db *sql.DB) {
 	t.Helper()
 
@@ -164,6 +178,8 @@ func requireNoPlaintextColumns(t *testing.T, db *sql.DB) {
 	}
 }
 
+// createLegacyAddressRows verifies every legacy address variant and sticky used
+// state through generated queries.
 func createLegacyAddressRows(t *testing.T, ctx context.Context, db *sql.DB,
 	queries *sqlc.Queries, walletID, scopeID int64) {
 
@@ -287,6 +303,7 @@ func createLegacyAddressRows(t *testing.T, ctx context.Context, db *sql.DB,
 	require.Error(t, err)
 }
 
+// bytesOf returns a deterministic byte fixture of the requested length.
 func bytesOf(value byte, count int) []byte {
 	b := make([]byte, count)
 	for i := range b {

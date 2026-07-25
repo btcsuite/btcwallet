@@ -3,6 +3,7 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"testing"
@@ -46,7 +47,7 @@ func TestMigrationsRoundTrip(t *testing.T) {
 		require.NoError(t, db.Close())
 	})
 
-	require.NoError(t, ApplyMigrations(db))
+	requireLeaseUpgrade(t, db)
 	require.Zero(t, db.Stats().InUse)
 	require.NoError(t, db.PingContext(ctx))
 	requireSchemaTables(t, db, true)
@@ -61,11 +62,50 @@ func TestMigrationsRoundTrip(t *testing.T) {
 	requireSchemaTables(t, db, true)
 }
 
+// requireLeaseUpgrade verifies that the forward precision migration converts
+// leases written by migration 000009 before nanosecond comparisons begin.
+func requireLeaseUpgrade(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	migration, err := newMigrationInstance(db)
+	require.NoError(t, err)
+	require.NoError(t, migration.Migrate(11))
+
+	_, err = db.ExecContext(t.Context(), `
+		INSERT INTO wallets (
+			id, wallet_name, manager_version, manager_created_at,
+			is_watch_only, master_pub_params, encrypted_crypto_pub_key
+		) VALUES (99, 'lease-upgrade', 1, 1, TRUE, $1, $2)
+	`, []byte{1}, []byte{2})
+	require.NoError(t, err)
+
+	const expiresSeconds = int64(1_700_000_000)
+	_, err = db.ExecContext(t.Context(), `
+		INSERT INTO utxo_leases (
+			wallet_id, tx_hash, output_index, lock_id, expires_unix
+		) VALUES ($1, $2, 0, $3, $4)
+	`, 99, bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32),
+		expiresSeconds)
+	require.NoError(t, err)
+
+	require.NoError(t, ApplyMigrations(db))
+
+	var expiresNanoseconds int64
+	err = db.QueryRowContext(t.Context(), `
+		SELECT expires_unix FROM utxo_leases WHERE wallet_id = 99
+	`).Scan(&expiresNanoseconds)
+	require.NoError(t, err)
+	require.Equal(t, expiresSeconds*int64(1_000_000_000),
+		expiresNanoseconds)
+}
+
+// requireSchemaTables verifies whether every wallet schema table exists.
 func requireSchemaTables(t *testing.T, db *sql.DB, expected bool) {
 	t.Helper()
 
 	tables := []string{
-		"blocks", "wallets", "wallet_sync_states", "address_types",
+		"blocks", "wallet_blocks", "wallets", "wallet_sync_states",
+		"address_types",
 		"key_scopes", "accounts", "addresses",
 		"transactions", "transaction_inputs", "transaction_labels",
 		"credits", "active_credit_incidences", "credit_spends",

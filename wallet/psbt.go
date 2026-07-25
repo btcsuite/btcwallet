@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -122,6 +124,12 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	// If there are inputs, we need to check if they're sufficient and add
 	// a change output if necessary.
 	default:
+		if w.db == nil {
+			return w.fundPsbtExplicitFromStore(
+				packet, keyScope, account, feeSatPerKB, optFuncs...,
+			)
+		}
+
 		// Make sure all inputs provided are actually ours.
 		packet.Inputs = make([]psbt.PInput, len(packet.UnsignedTx.TxIn))
 
@@ -180,27 +188,26 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 
 		// We also need a change source which needs to be able to insert
 		// a new change address into the database.
-		err = walletdb.Update(w.db, func(dbtx walletdb.ReadWriteTx) error {
-			_, changeSource, err := w.addrMgrWithChangeSource(
-				dbtx, opts.changeKeyScope, account,
-			)
-			if err != nil {
-				return err
-			}
+		err = walletdb.Update(
+			w.db, func(dbtx walletdb.ReadWriteTx) error {
+				_, changeSource, err := w.addrMgrWithChangeSource(
+					dbtx, opts.changeKeyScope, account,
+				)
+				if err != nil {
+					return err
+				}
 
-			// Ask the txauthor to create a transaction with our
-			// selected coins. This will perform fee estimation and
-			// add a change output if necessary.
-			tx, err = txauthor.NewUnsignedTransaction(
-				txOut, feeSatPerKB, inputSource, changeSource,
-			)
-			if err != nil {
-				return fmt.Errorf("fee estimation not "+
-					"successful: %w", err)
-			}
+				tx, err = txauthor.NewUnsignedTransaction(
+					txOut, feeSatPerKB, inputSource, changeSource,
+				)
+				if err != nil {
+					return fmt.Errorf("fee estimation not successful: %w",
+						err)
+				}
 
-			return nil
-		})
+				return nil
+			},
+		)
 		w.newAddrMtx.Unlock()
 
 		if err != nil {
@@ -331,7 +338,7 @@ func addInputInfoSegWitV0(in *psbt.PInput, prevTx *wire.MsgTx, utxo *wire.TxOut,
 	}
 }
 
-// addInputInfoSegWitV0 adds the UTXO and BIP32 derivation info for a SegWit v1
+// addInputInfoSegWitV1 adds the UTXO and BIP32 derivation info for a SegWit v1
 // PSBT input (p2tr) from the given wallet information.
 func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 	derivationInfo *psbt.Bip32Derivation) {
@@ -491,26 +498,35 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		// Finally, if the input doesn't belong to a watch-only account,
 		// then we'll sign it as is, and populate the input with the
 		// witness and sigScript (if needed).
+		watchOnlyScope := waddrmgr.KeyScopeBIP0084
+		if keyScope != nil {
+			watchOnlyScope = *keyScope
+		}
+
 		watchOnly := false
-		err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
-			ns := tx.ReadBucket(waddrmgrNamespaceKey)
-			var err error
-			if keyScope == nil {
-				// If a key scope wasn't specified, then coin
-				// selection was performed from the default
-				// wallet accounts (NP2WKH, P2WKH, P2TR), so any
-				// key scope provided doesn't impact the result
-				// of this call.
+		if w.db != nil {
+			err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+				ns := tx.ReadBucket(waddrmgrNamespaceKey)
+				var err error
 				watchOnly, err = w.Manager.IsWatchOnlyAccount(
-					ns, waddrmgr.KeyScopeBIP0084, account,
+					ns, watchOnlyScope, account,
 				)
-			} else {
-				watchOnly, err = w.Manager.IsWatchOnlyAccount(
-					ns, *keyScope, account,
-				)
-			}
-			return err
-		})
+				return err
+			})
+		} else {
+			err = w.store.View(
+				context.Background(), func(tx walletstore.ReadTx) error {
+					var err error
+					watchOnly, err =
+						w.Manager.IsWatchOnlyAccountFromStore(
+							tx.Addr(), watchOnlyScope, account,
+						)
+					return err
+				}, func() {
+					watchOnly = false
+				},
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("unable to determine if account is "+
 				"watch-only: %w", err)

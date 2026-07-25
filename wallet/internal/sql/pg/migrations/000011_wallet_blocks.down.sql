@@ -1,0 +1,13 @@
+ALTER TABLE transactions
+DROP CONSTRAINT transactions_wallet_block_fkey;
+
+ALTER TABLE wallet_sync_states
+DROP CONSTRAINT wallet_sync_states_birthday_wallet_block_fkey;
+
+ALTER TABLE wallet_sync_states
+DROP CONSTRAINT wallet_sync_states_synced_wallet_block_fkey;
+
+ALTER TABLE wallet_sync_states
+DROP CONSTRAINT wallet_sync_states_start_wallet_block_fkey;
+
+DROP TABLE wallet_blocks;

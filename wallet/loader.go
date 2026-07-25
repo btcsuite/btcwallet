@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -40,6 +42,16 @@ var (
 	// ErrExists describes the error condition of attempting to create a new
 	// wallet when one exists already.
 	ErrExists = errors.New("wallet already exists")
+
+	// ErrStoreCreateUnsupported reports that a bound Store does not expose
+	// wallet lifecycle creation.
+	ErrStoreCreateUnsupported = errors.New(
+		"wallet creation is unsupported for a bound Store",
+	)
+
+	// ErrLoaderClosed describes an operation attempted after the loader has
+	// released an owned backend.
+	ErrLoaderClosed = errors.New("wallet loader is closed")
 )
 
 // loaderConfig contains the configuration options for the loader.
@@ -85,6 +97,9 @@ type Loader struct {
 	walletExists   func() (bool, error)
 	walletCreated  func(db walletdb.ReadWriteTx) error
 	db             walletdb.DB
+	store          walletstore.Store
+	storeClose     func() error
+	closed         bool
 	mu             sync.Mutex
 }
 
@@ -139,6 +154,30 @@ func NewLoaderWithDB(chainParams *chaincfg.Params, recoveryWindow uint32,
 		localDB:        false,
 		walletExists:   walletExists,
 		db:             db,
+	}, nil
+}
+
+// NewLoaderWithStore constructs a Loader for a wallet in a backend-neutral
+// Store. LifecycleStore implementations also support wallet creation. The Store
+// and its underlying connection remain caller-owned.
+func NewLoaderWithStore(chainParams *chaincfg.Params, recoveryWindow uint32,
+	store walletstore.Store, opts ...LoaderOption) (*Loader, error) {
+
+	if store == nil {
+		return nil, errors.New("no Store provided")
+	}
+
+	cfg := defaultLoaderConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	return &Loader{
+		cfg:            cfg,
+		chainParams:    chainParams,
+		recoveryWindow: recoveryWindow,
+		localDB:        false,
+		store:          store,
 	}, nil
 }
 
@@ -233,6 +272,7 @@ func (l *Loader) CreateNewWatchingOnlyWallet(pubPassphrase []byte,
 	)
 }
 
+// createNewWallet creates and starts a wallet using the configured backend.
 func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 	rootKey *hdkeychain.ExtendedKey, bday time.Time,
 	isWatchingOnly bool) (*Wallet, error) {
@@ -240,16 +280,78 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
+	if l.closed {
+		return nil, ErrLoaderClosed
+	}
+
 	if l.wallet != nil {
 		return nil, ErrLoaded
 	}
 
-	exists, err := l.WalletExists()
+	exists, err := l.walletExistsLocked()
 	if err != nil {
 		return nil, err
 	}
 	if exists {
 		return nil, ErrExists
+	}
+
+	if l.store != nil {
+		lifecycle, ok := l.store.(walletstore.LifecycleStore)
+		if !ok {
+			return nil, ErrStoreCreateUnsupported
+		}
+		if l.walletCreated != nil {
+			return nil, errors.New(
+				"OnWalletCreated requires a walletdb backend",
+			)
+		}
+
+		if !isWatchingOnly && rootKey == nil {
+			seed, err := hdkeychain.GenerateSeed(
+				hdkeychain.RecommendedSeedLen,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			rootKey, err = hdkeychain.NewMaster(seed, l.chainParams)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"failed to derive master extended key",
+				)
+			}
+		}
+		if !isWatchingOnly && !rootKey.IsPrivate() {
+			return nil, errors.New(
+				"need extended private key for non-watch-only wallet",
+			)
+		}
+
+		err = lifecycle.Create(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				return waddrmgr.CreateFromStore(
+					tx.Addr(), rootKey, pubPassphrase,
+					privPassphrase, l.chainParams, nil, bday,
+				)
+			}, nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		w, err := OpenFromStore(
+			l.store, pubPassphrase, l.chainParams, l.recoveryWindow,
+			l.cfg.walletSyncRetryInterval,
+		)
+		if err != nil {
+			return nil, err
+		}
+		w.Start()
+		l.onLoaded(w)
+
+		return w, nil
 	}
 
 	if l.localDB {
@@ -303,6 +405,7 @@ func (l *Loader) createNewWallet(pubPassphrase, privPassphrase []byte,
 
 var errNoConsole = errors.New("db upgrade requires console access for additional input")
 
+// noConsole rejects an upgrade request that requires interactive input.
 func noConsole() ([]byte, error) {
 	return nil, errNoConsole
 }
@@ -317,12 +420,16 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
 	defer l.mu.Unlock()
 	l.mu.Lock()
 
+	if l.closed {
+		return nil, ErrLoaderClosed
+	}
+
 	if l.wallet != nil {
 		return nil, ErrLoaded
 	}
 
+	var err error
 	if l.localDB {
-		var err error
 		// Ensure that the network directory exists.
 		if err = checkCreateDir(l.dbDirPath); err != nil {
 			return nil, err
@@ -351,10 +458,18 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
 			ObtainPrivatePass: noConsole,
 		}
 	}
-	w, err := OpenWithRetry(
-		l.db, pubPassphrase, cbs, l.chainParams, l.recoveryWindow,
-		l.cfg.walletSyncRetryInterval,
-	)
+	var w *Wallet
+	if l.store != nil {
+		w, err = OpenFromStore(
+			l.store, pubPassphrase, l.chainParams, l.recoveryWindow,
+			l.cfg.walletSyncRetryInterval,
+		)
+	} else {
+		w, err = OpenWithRetry(
+			l.db, pubPassphrase, cbs, l.chainParams,
+			l.recoveryWindow, l.cfg.walletSyncRetryInterval,
+		)
+	}
 	if err != nil {
 		// If opening the wallet fails (e.g. because of wrong
 		// passphrase), we must close the backing database to
@@ -374,15 +489,37 @@ func (l *Loader) OpenExistingWallet(pubPassphrase []byte,
 	return w, nil
 }
 
-// WalletExists returns whether a file exists at the loader's database path.
-// This may return an error for unexpected I/O failures.
-func (l *Loader) WalletExists() (bool, error) {
+// walletExistsLocked reports whether the configured wallet exists. The loader
+// mutex must be held by the caller.
+func (l *Loader) walletExistsLocked() (bool, error) {
+	if l.store != nil {
+		lifecycle, ok := l.store.(walletstore.LifecycleStore)
+		if !ok {
+			return true, nil
+		}
+
+		return lifecycle.WalletExists(context.Background())
+	}
+
 	if l.localDB {
 		dbPath := filepath.Join(l.dbDirPath, WalletDBName)
 		return fileExists(dbPath)
 	}
 
 	return l.walletExists()
+}
+
+// WalletExists returns whether a wallet exists in the configured backend. This
+// may return an error for unexpected I/O failures.
+func (l *Loader) WalletExists() (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closed {
+		return false, ErrLoaderClosed
+	}
+
+	return l.walletExistsLocked()
 }
 
 // LoadedWallet returns the loaded wallet, if any, and a bool for whether the
@@ -395,10 +532,11 @@ func (l *Loader) LoadedWallet() (*Wallet, bool) {
 	return w, w != nil
 }
 
-// UnloadWallet stops the loaded wallet, if any, and closes the wallet database.
+// UnloadWallet stops the loaded wallet, if any, and closes its owned database.
 // This returns ErrNotLoaded if the wallet has not been loaded with
-// CreateNewWallet or LoadExistingWallet.  The Loader may be reused if this
-// function returns without error.
+// CreateNewWallet or LoadExistingWallet. A Loader with a caller-owned backend
+// may be reused. A Loader created by NewSQLiteLoader releases its connection
+// and is closed permanently.
 func (l *Loader) UnloadWallet() error {
 	defer l.mu.Unlock()
 	l.mu.Lock()
@@ -415,12 +553,59 @@ func (l *Loader) UnloadWallet() error {
 			return err
 		}
 	}
+	if l.storeClose != nil {
+		err := l.storeClose()
+		if err != nil {
+			return err
+		}
+
+		l.storeClose = nil
+		l.store = nil
+		l.closed = true
+	}
 
 	l.wallet = nil
 	l.db = nil
 	return nil
 }
 
+// Close stops a loaded wallet and releases any backend owned by the loader. It
+// is safe to call when no wallet was loaded and more than once. The loader must
+// not be reused after Close.
+func (l *Loader) Close() error {
+	defer l.mu.Unlock()
+	l.mu.Lock()
+
+	if l.closed {
+		return nil
+	}
+
+	if l.wallet != nil {
+		l.wallet.Stop()
+		l.wallet.WaitForShutdown()
+	}
+
+	if l.localDB && l.db != nil {
+		if err := l.db.Close(); err != nil {
+			return err
+		}
+	}
+	if l.storeClose != nil {
+		if err := l.storeClose(); err != nil {
+			return err
+		}
+	}
+
+	l.wallet = nil
+	l.db = nil
+	l.store = nil
+	l.storeClose = nil
+	l.closed = true
+
+	return nil
+}
+
+// fileExists reports whether the path names an existing file.
 func fileExists(filePath string) (bool, error) {
 	_, err := os.Stat(filePath)
 	if err != nil {

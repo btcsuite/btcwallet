@@ -10,12 +10,34 @@ import (
 )
 
 const DeleteBlock = `-- name: DeleteBlock :exec
-DELETE FROM blocks
-WHERE block_height = $1
+DELETE FROM wallet_blocks
+WHERE wallet_id = $1 AND block_height = $2
 `
 
-func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
-	_, err := q.exec(ctx, q.deleteBlockStmt, DeleteBlock, blockHeight)
+type DeleteBlockParams struct {
+	WalletID    int64
+	BlockHeight int32
+}
+
+func (q *Queries) DeleteBlock(ctx context.Context, arg DeleteBlockParams) error {
+	_, err := q.exec(ctx, q.deleteBlockStmt, DeleteBlock, arg.WalletID, arg.BlockHeight)
+	return err
+}
+
+const EnsureBlockHeight = `-- name: EnsureBlockHeight :exec
+INSERT INTO blocks (block_height, header_hash, block_timestamp)
+VALUES ($1, $2, $3)
+ON CONFLICT (block_height) DO NOTHING
+`
+
+type EnsureBlockHeightParams struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) EnsureBlockHeight(ctx context.Context, arg EnsureBlockHeightParams) error {
+	_, err := q.exec(ctx, q.ensureBlockHeightStmt, EnsureBlockHeight, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
 	return err
 }
 
@@ -24,13 +46,25 @@ SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
-WHERE block_height = $1
+FROM wallet_blocks
+WHERE wallet_id = $1
+  AND block_height = $2
 `
 
-func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error) {
-	row := q.queryRow(ctx, q.getBlockByHeightStmt, GetBlockByHeight, blockHeight)
-	var i Block
+type GetBlockByHeightParams struct {
+	WalletID    int64
+	BlockHeight int32
+}
+
+type GetBlockByHeightRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetBlockByHeight(ctx context.Context, arg GetBlockByHeightParams) (GetBlockByHeightRow, error) {
+	row := q.queryRow(ctx, q.getBlockByHeightStmt, GetBlockByHeight, arg.WalletID, arg.BlockHeight)
+	var i GetBlockByHeightRow
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
 }
@@ -40,28 +74,36 @@ SELECT
     block_height,
     header_hash,
     block_timestamp
-FROM blocks
+FROM wallet_blocks
 WHERE
-    block_height BETWEEN
-    $1::INTEGER
-    AND $2::INTEGER
+    wallet_id = $1
+    AND block_height BETWEEN
+    $2::INTEGER
+    AND $3::INTEGER
 ORDER BY block_height
 `
 
 type GetBlocksInRangeParams struct {
+	WalletID    int64
 	StartHeight int32
 	EndHeight   int32
 }
 
-func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error) {
-	rows, err := q.query(ctx, q.getBlocksInRangeStmt, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
+type GetBlocksInRangeRow struct {
+	BlockHeight    int32
+	HeaderHash     []byte
+	BlockTimestamp int64
+}
+
+func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]GetBlocksInRangeRow, error) {
+	rows, err := q.query(ctx, q.getBlocksInRangeStmt, GetBlocksInRange, arg.WalletID, arg.StartHeight, arg.EndHeight)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Block
+	var items []GetBlocksInRangeRow
 	for rows.Next() {
-		var i Block
+		var i GetBlocksInRangeRow
 		if err := rows.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp); err != nil {
 			return nil, err
 		}
@@ -77,37 +119,53 @@ func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangePara
 }
 
 const InsertBlock = `-- name: InsertBlock :exec
-INSERT INTO blocks (block_height, header_hash, block_timestamp)
-VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO NOTHING
+INSERT INTO wallet_blocks (
+    wallet_id, block_height, header_hash, block_timestamp
+)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (wallet_id, block_height) DO NOTHING
 `
 
 type InsertBlockParams struct {
+	WalletID       int64
 	BlockHeight    int32
 	HeaderHash     []byte
 	BlockTimestamp int64
 }
 
 func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
-	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock,
+		arg.WalletID,
+		arg.BlockHeight,
+		arg.HeaderHash,
+		arg.BlockTimestamp,
+	)
 	return err
 }
 
 const PutBlock = `-- name: PutBlock :exec
-INSERT INTO blocks (block_height, header_hash, block_timestamp)
-VALUES ($1, $2, $3)
-ON CONFLICT (block_height) DO UPDATE SET
+INSERT INTO wallet_blocks (
+    wallet_id, block_height, header_hash, block_timestamp
+)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (wallet_id, block_height) DO UPDATE SET
     header_hash = excluded.header_hash,
     block_timestamp = excluded.block_timestamp
 `
 
 type PutBlockParams struct {
+	WalletID       int64
 	BlockHeight    int32
 	HeaderHash     []byte
 	BlockTimestamp int64
 }
 
 func (q *Queries) PutBlock(ctx context.Context, arg PutBlockParams) error {
-	_, err := q.exec(ctx, q.putBlockStmt, PutBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+	_, err := q.exec(ctx, q.putBlockStmt, PutBlock,
+		arg.WalletID,
+		arg.BlockHeight,
+		arg.HeaderHash,
+		arg.BlockTimestamp,
+	)
 	return err
 }

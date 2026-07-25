@@ -19,9 +19,10 @@ import (
 )
 
 type managerStoreHarness struct {
-	conn     *sql.DB
-	postgres bool
-	newStore func(int64) db.Store
+	conn              *sql.DB
+	postgres          bool
+	newStore          func(int64) db.Store
+	newLifecycleStore func(string) db.LifecycleStore
 }
 
 // testManagerStore runs the shared manager-store conformance cases against one
@@ -32,6 +33,12 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	t.Run("manager transaction", func(t *testing.T) {
 		testManagerTransaction(t, harness)
 	})
+	t.Run("wallet lifecycle", func(t *testing.T) {
+		testWalletLifecycle(t, harness)
+	})
+	t.Run("account zero sentinel", func(t *testing.T) {
+		testAccountZeroSentinel(t, harness)
+	})
 	t.Run("address manager persistence", func(t *testing.T) {
 		testAddressManagerPersistence(t, harness)
 	})
@@ -40,6 +47,9 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	})
 	t.Run("rollback transaction", func(t *testing.T) {
 		testRollbackTransaction(t, harness)
+	})
+	t.Run("wallet block isolation", func(t *testing.T) {
+		testWalletBlockIsolation(t, harness)
 	})
 	t.Run("duplicate incidence", func(t *testing.T) {
 		testDuplicateIncidence(t, harness)
@@ -52,8 +62,127 @@ func testManagerStore(t *testing.T, harness *managerStoreHarness) {
 	})
 }
 
+// testWalletLifecycle verifies name binding and single-attempt wallet creation
+// against one SQL backend.
+//
+//nolint:noinlineerr // Each setup write retains operation-local context.
+func testWalletLifecycle(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	ctx := t.Context()
+	store := harness.newLifecycleStore("store-lifecycle")
+	exists, err := store.WalletExists(ctx)
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	managerState := waddrmgr.ManagerState{
+		Version:               9,
+		CreatedAt:             time.Unix(7_001, 0),
+		WatchOnly:             true,
+		MasterPubParams:       []byte{1},
+		EncryptedCryptoPubKey: []byte{2},
+	}
+	genesis := testBlock(0)
+	syncState := waddrmgr.SyncState{
+		StartBlock: genesis,
+		SyncedTo:   genesis,
+		Birthday:   time.Unix(7_002, 0),
+	}
+	msgTx := wire.NewMsgTx(2)
+	msgTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  testHash(70),
+		Index: 1,
+	}})
+	msgTx.AddTxOut(&wire.TxOut{Value: 70_000, PkScript: []byte{0x51}})
+	record, err := wtxmgr.NewTxRecordFromMsgTx(msgTx, time.Unix(7_003, 0))
+	require.NoError(t, err)
+
+	var bodyCalls, resetCalls int
+	err = store.Create(ctx, func(tx db.ReadWriteTx) error {
+		bodyCalls++
+		if err := tx.Addr().PutManagerState(managerState); err != nil {
+			return err
+		}
+
+		if err := tx.Addr().PutSyncState(syncState); err != nil {
+			return err
+		}
+
+		return tx.Tx().InsertTx(record, nil)
+	}, func() {
+		resetCalls++
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, bodyCalls)
+	require.Equal(t, 1, resetCalls)
+
+	exists, err = store.WalletExists(ctx)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	resolvedStore := harness.newLifecycleStore("store-lifecycle")
+	exists, err = resolvedStore.WalletExists(ctx)
+	require.NoError(t, err)
+	require.True(t, exists)
+	err = resolvedStore.View(ctx, func(tx db.ReadTx) error {
+		gotManager, err := tx.Addr().ManagerState()
+		require.NoError(t, err)
+		require.Equal(t, managerState, gotManager)
+
+		gotSync, err := tx.Addr().SyncState()
+		require.NoError(t, err)
+		require.Equal(t, syncState, gotSync)
+		details, err := tx.Tx().TxDetails(&record.Hash)
+		require.NoError(t, err)
+		require.Equal(t, record.Hash, details.Hash)
+
+		return nil
+	}, nil)
+	require.NoError(t, err)
+
+	err = harness.newLifecycleStore("store-lifecycle").Create(
+		ctx, func(db.ReadWriteTx) error {
+			return nil
+		}, nil,
+	)
+	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrAlreadyExists))
+}
+
+// testAccountZeroSentinel verifies SQL NULL round trips as the legacy
+// unallocated-account sentinel so the first imported account remains zero.
+func testAccountZeroSentinel(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	walletID := harness.createWallet(
+		t, "account-zero-sentinel", testBlock(10), testBlock(10),
+	)
+	store := harness.newStore(walletID)
+	scope := waddrmgr.KeyScope{Purpose: 1_017, Coin: 1}
+	want := waddrmgr.KeyScopeState{
+		Scope:       scope,
+		AddrSchema:  waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084],
+		LastAccount: waddrmgr.NoAccount,
+	}
+
+	err := store.Update(t.Context(), func(tx db.ReadWriteTx) error {
+		return tx.Addr().PutKeyScope(want)
+	}, nil)
+	require.NoError(t, err)
+
+	err = store.View(t.Context(), func(tx db.ReadTx) error {
+		got, err := tx.Addr().KeyScope(scope)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+
+		return nil
+	}, nil)
+	require.NoError(t, err)
+}
+
 // testWtxmgrCompatibility verifies the complete wtxmgr surface against one SQL
 // backend.
+//
+//nolint:maintidx // One vector covers the full manager surface.
 func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 	t.Helper()
 
@@ -83,10 +212,15 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		require.NoError(t, err)
 		require.True(t, exists)
 
-		err = tx.Tx().AddCredit(funding, nil, 0, false)
+		isNew, err := tx.Tx().AddCredit(funding, nil, 0, false)
 		if err != nil {
 			return err
 		}
+		require.True(t, isNew)
+
+		isNew, err = tx.Tx().AddCredit(funding, nil, 0, false)
+		require.NoError(t, err)
+		require.False(t, isNew)
 
 		return tx.Tx().PutTxLabel(funding.Hash, "funding")
 	}, func() {})
@@ -127,17 +261,32 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 
 	lockID := wtxmgr.LockID{1, 2, 3}
 	output := wire.OutPoint{Hash: funding.Hash, Index: 0}
+	var lockExpiry time.Time
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
-		_, err := tx.Tx().LockOutput(lockID, output, time.Hour)
+		var err error
+		lockExpiry, err = tx.Tx().LockOutput(lockID, output, time.Hour)
 		return err
 	}, func() {})
 	require.NoError(t, err)
+	require.WithinDuration(
+		t, time.Now().Add(time.Hour), lockExpiry, time.Second,
+	)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		_, err := tx.Tx().LockOutput(
+			wtxmgr.LockID{9}, output, time.Hour,
+		)
+
+		return err
+	}, func() {})
+	require.ErrorIs(t, err, wtxmgr.ErrOutputAlreadyLocked)
 
 	err = store.View(ctx, func(tx db.ReadTx) error {
 		locked, err := tx.Tx().ListLockedOutputs()
 		require.NoError(t, err)
 		require.Len(t, locked, 1)
 		require.Equal(t, output, locked[0].Outpoint)
+		require.True(t, lockExpiry.Equal(locked[0].Expiration))
 
 		unspent, err := tx.Tx().UnspentOutputs()
 		require.NoError(t, err)
@@ -150,6 +299,11 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		return nil
 	}, func() {})
 	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().UnlockOutput(wtxmgr.LockID{9}, output)
+	}, func() {})
+	require.ErrorIs(t, err, wtxmgr.ErrOutputUnlockNotAllowed)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
 		return tx.Tx().UnlockOutput(lockID, output)
@@ -187,13 +341,47 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		require.NoError(t, err)
 		require.True(t, details.Credits[0].Spent)
 
+		spenderDetails, err := tx.Tx().TxDetails(&spender.Hash)
+		require.NoError(t, err)
+		require.Equal(t, []wtxmgr.DebitRecord{{
+			Amount: 50_000,
+			Index:  0,
+		}}, spenderDetails.Debits)
+
 		return nil
+	}, func() {})
+	require.NoError(t, err)
+
+	childTx := wire.NewMsgTx(2)
+	childTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  spender.Hash,
+		Index: 0,
+	}})
+	childTx.AddTxOut(&wire.TxOut{Value: 48_000, PkScript: []byte{0x51}})
+	child, err := wtxmgr.NewTxRecordFromMsgTx(
+		childTx, time.Unix(3_002, 0),
+	)
+	require.NoError(t, err)
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().InsertTx(child, nil)
 	}, func() {})
 	require.NoError(t, err)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
 		return tx.Tx().RemoveUnminedTx(spender)
 	}, func() {})
+	require.NoError(t, err)
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		details, err := tx.Tx().TxDetails(&spender.Hash)
+		require.NoError(t, err)
+		require.Nil(t, details)
+
+		details, err = tx.Tx().TxDetails(&child.Hash)
+		require.NoError(t, err)
+		require.Nil(t, details)
+
+		return nil
+	}, nil)
 	require.NoError(t, err)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
@@ -207,6 +395,11 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 	}, func() {})
 	require.NoError(t, err)
 
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().PutTxLabel(funding.Hash, "funding updated")
+	}, nil)
+	require.NoError(t, err)
+
 	err = store.View(ctx, func(tx db.ReadTx) error {
 		details, err := tx.Tx().UniqueTxDetails(
 			&funding.Hash, &wtxmgr.Block{
@@ -216,6 +409,7 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		)
 		require.NoError(t, err)
 		require.Equal(t, synced.Height, details.Block.Height)
+		require.Equal(t, "funding updated", details.Label)
 
 		var visited []wtxmgr.TxDetails
 
@@ -233,12 +427,131 @@ func testWtxmgrCompatibility(t *testing.T, harness *managerStoreHarness) {
 		return nil
 	}, func() {})
 	require.NoError(t, err)
+
+	independentTx := wire.NewMsgTx(2)
+	independentTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash:  testHash(61),
+		Index: 1,
+	}})
+	independentTx.AddTxOut(&wire.TxOut{
+		Value: 1_000, PkScript: []byte{0x51},
+	})
+	independent, err := wtxmgr.NewTxRecordFromMsgTx(
+		independentTx, time.Unix(3_003, 0),
+	)
+	require.NoError(t, err)
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().InsertTx(independent, nil)
+	}, nil)
+	require.NoError(t, err)
+
+	assertRange := func(begin, end int32, wantHeights []int32) {
+		t.Helper()
+
+		var heights []int32
+		err := store.View(ctx, func(tx db.ReadTx) error {
+			return tx.Tx().RangeTransactions(
+				begin, end,
+				func(details []wtxmgr.TxDetails) (bool, error) {
+					heights = append(heights, details[0].Block.Height)
+					return false, nil
+				},
+			)
+		}, func() {
+			heights = nil
+		})
+		require.NoError(t, err)
+		require.Equal(t, wantHeights, heights)
+	}
+	assertRange(0, -1, []int32{synced.Height, -1})
+	assertRange(-1, 0, []int32{-1, synced.Height})
+
+	conflictATx := wire.NewMsgTx(2)
+	conflictATx.AddTxIn(&wire.TxIn{PreviousOutPoint: output})
+	conflictATx.AddTxOut(&wire.TxOut{
+		Value: 49_000, PkScript: []byte{0x51},
+	})
+	conflictA, err := wtxmgr.NewTxRecordFromMsgTx(
+		conflictATx, time.Unix(3_004, 0),
+	)
+	require.NoError(t, err)
+
+	conflictBTx := wire.NewMsgTx(2)
+	conflictBTx.AddTxIn(&wire.TxIn{PreviousOutPoint: output})
+	conflictBTx.AddTxOut(&wire.TxOut{
+		Value: 48_000, PkScript: []byte{0x51},
+	})
+	conflictB, err := wtxmgr.NewTxRecordFromMsgTx(
+		conflictBTx, time.Unix(3_005, 0),
+	)
+	require.NoError(t, err)
+
+	conflictChildTx := wire.NewMsgTx(2)
+	conflictChildTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: conflictB.Hash,
+	}})
+	conflictChildTx.AddTxOut(&wire.TxOut{
+		Value: 47_000, PkScript: []byte{0x51},
+	})
+	conflictChild, err := wtxmgr.NewTxRecordFromMsgTx(
+		conflictChildTx, time.Unix(3_006, 0),
+	)
+	require.NoError(t, err)
+
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		for _, record := range []*wtxmgr.TxRecord{
+			conflictA, conflictB, conflictChild,
+		} {
+			if err := tx.Tx().InsertTx(record, nil); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}, nil)
+	require.NoError(t, err)
+
+	conflictBlock := wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   testHash(62),
+			Height: synced.Height + 1,
+		},
+		Time: time.Unix(3_007, 0),
+	}
+	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
+		return tx.Tx().InsertTx(conflictA, &conflictBlock)
+	}, nil)
+	require.NoError(t, err)
+	err = store.View(ctx, func(tx db.ReadTx) error {
+		details, err := tx.Tx().TxDetails(&conflictA.Hash)
+		require.NoError(t, err)
+		require.Equal(t, conflictBlock.Height, details.Block.Height)
+		require.Equal(t, []wtxmgr.DebitRecord{{
+			Amount: 50_000,
+			Index:  0,
+		}}, details.Debits)
+
+		details, err = tx.Tx().TxDetails(&conflictB.Hash)
+		require.NoError(t, err)
+		require.Nil(t, details)
+		details, err = tx.Tx().TxDetails(&conflictChild.Hash)
+		require.NoError(t, err)
+		require.Nil(t, details)
+
+		fundingDetails, err := tx.Tx().TxDetails(&funding.Hash)
+		require.NoError(t, err)
+		require.True(t, fundingDetails.Credits[0].Spent)
+		require.Equal(t, "funding updated", fundingDetails.Label)
+
+		return nil
+	}, nil)
+	require.NoError(t, err)
 }
 
 // testAddressManagerPersistence verifies the complete waddrmgr persistence
 // surface against one SQL backend.
 //
-//nolint:maintidx // One vector deliberately covers the complete store surface.
+//nolint:maintidx // One vector covers the complete store surface.
 func testAddressManagerPersistence(t *testing.T,
 	harness *managerStoreHarness) {
 
@@ -326,6 +639,19 @@ func testAddressManagerPersistence(t *testing.T,
 		IsSecretScript:  &secret,
 		Used:            true,
 	}
+	taprootVersion := uint8(1)
+	taprootAddressID := []byte("taproot-address")
+	taprootAddress := waddrmgr.AddressState{
+		Scope:           scope,
+		Account:         watchOnlyAccount.Account,
+		Type:            waddrmgr.AddressTaprootScript,
+		AddedAt:         time.Unix(6_005, 0),
+		SyncStatus:      waddrmgr.AddressSyncNone,
+		EncryptedHash:   []byte{16},
+		EncryptedScript: []byte{17},
+		WitnessVersion:  &taprootVersion,
+		IsSecretScript:  &secret,
+	}
 
 	err := store.Update(ctx, func(tx db.ReadWriteTx) error {
 		addr := tx.Addr()
@@ -341,6 +667,9 @@ func testAddressManagerPersistence(t *testing.T,
 			},
 			func() error {
 				return addr.PutAddress(witnessAddressID, witnessAddress)
+			},
+			func() error {
+				return addr.PutAddress(taprootAddressID, taprootAddress)
 			},
 		}
 		for _, operation := range operations {
@@ -401,6 +730,12 @@ func testAddressManagerPersistence(t *testing.T,
 		witnessAddress.Hash = gotWitness.Hash
 		require.Equal(t, witnessAddress, gotWitness)
 
+		gotTaproot, err := addr.Address(scope, taprootAddressID)
+		require.NoError(t, err)
+
+		taprootAddress.Hash = gotTaproot.Hash
+		require.Equal(t, taprootAddress, gotTaproot)
+
 		accountAddresses, err := addr.AccountAddresses(
 			scope, defaultAccount.Account,
 		)
@@ -412,8 +747,9 @@ func testAddressManagerPersistence(t *testing.T,
 		activeAddresses, err := addr.ActiveAddresses(scope)
 		require.NoError(t, err)
 		require.ElementsMatch(
-			t, []waddrmgr.AddressState{chainAddress, witnessAddress},
-			activeAddresses,
+			t, []waddrmgr.AddressState{
+				chainAddress, witnessAddress, taprootAddress,
+			}, activeAddresses,
 		)
 
 		_, err = addr.KeyScope(waddrmgr.KeyScope{Purpose: 999, Coin: 1})
@@ -505,6 +841,10 @@ func testAddressManagerPersistence(t *testing.T,
 		require.NoError(t, err)
 		require.Nil(t, gotWitness.EncryptedScript)
 
+		gotTaproot, err := addr.Address(scope, taprootAddressID)
+		require.NoError(t, err)
+		require.Nil(t, gotTaproot.EncryptedScript)
+
 		return nil
 	}, func() {})
 	require.NoError(t, err)
@@ -553,7 +893,10 @@ func testManagerTransaction(t *testing.T, harness *managerStoreHarness) {
 	require.NoError(t, err)
 
 	require.Equal(t, replacement.Height, harness.syncedHeight(t, walletID))
-	require.Equal(t, replacement.Hash, harness.blockHash(t, replacement.Height))
+	require.Equal(
+		t, replacement.Hash,
+		harness.blockHash(t, walletID, replacement.Height),
+	)
 
 	err = store.Update(ctx, func(tx db.ReadWriteTx) error {
 		return tx.Addr().SetSyncedTo(nil)
@@ -670,6 +1013,108 @@ func testRollbackTransaction(t *testing.T, harness *managerStoreHarness) {
 	require.True(t, harness.transactionMined(t, txID))
 }
 
+// testWalletBlockIsolation verifies that a same-height reorg in one wallet does
+// not replace another wallet's active block identity or transaction incidence.
+func testWalletBlockIsolation(t *testing.T, harness *managerStoreHarness) {
+	t.Helper()
+
+	startA := testBlock(699)
+	blockA := testBlock(700)
+	startB := startA
+	startB.Hash = testHash(71)
+	blockB := blockA
+	blockB.Hash = testHash(72)
+
+	walletA := harness.createWallet(
+		t, "block-isolation-a", startA, blockA,
+	)
+	walletB := harness.createWallet(
+		t, "block-isolation-b", startB, blockB,
+	)
+	storeA := harness.newStore(walletA)
+	storeB := harness.newStore(walletB)
+
+	newRecord := func(marker byte) *wtxmgr.TxRecord {
+		t.Helper()
+
+		msgTx := wire.NewMsgTx(2)
+		msgTx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+			Hash:  testHash(marker),
+			Index: 1,
+		}})
+		msgTx.AddTxOut(&wire.TxOut{
+			Value:    10_000,
+			PkScript: []byte{0x51},
+		})
+		record, err := wtxmgr.NewTxRecordFromMsgTx(
+			msgTx, time.Unix(7_000+int64(marker), 0),
+		)
+		require.NoError(t, err)
+
+		return record
+	}
+	recordA := newRecord(73)
+	recordB := newRecord(74)
+	metaA := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   blockA.Hash,
+			Height: blockA.Height,
+		},
+		Time: blockA.Timestamp,
+	}
+	metaB := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   blockB.Hash,
+			Height: blockB.Height,
+		},
+		Time: blockB.Timestamp,
+	}
+
+	require.NoError(t, storeA.Update(
+		t.Context(), func(tx db.ReadWriteTx) error {
+			return tx.Tx().InsertTx(recordA, metaA)
+		}, nil,
+	))
+	require.NoError(t, storeB.Update(
+		t.Context(), func(tx db.ReadWriteTx) error {
+			return tx.Tx().InsertTx(recordB, metaB)
+		}, nil,
+	))
+
+	require.NoError(t, storeA.Update(
+		t.Context(), func(tx db.ReadWriteTx) error {
+			if err := tx.Addr().SetSyncedTo(&startA); err != nil {
+				return err
+			}
+
+			return tx.Tx().Rollback(blockA.Height)
+		}, nil,
+	))
+
+	require.NoError(t, storeB.View(
+		t.Context(), func(tx db.ReadTx) error {
+			state, err := tx.Addr().SyncState()
+			require.NoError(t, err)
+			require.Equal(t, blockB, state.SyncedTo)
+
+			details, err := tx.Tx().UniqueTxDetails(
+				&recordB.Hash, &metaB.Block,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, details)
+			require.Equal(t, blockB.Hash, details.Block.Hash)
+
+			return nil
+		}, nil,
+	))
+	require.Equal(
+		t, blockA.Hash, harness.blockHash(t, walletA, blockA.Height),
+	)
+	require.Equal(
+		t, blockB.Hash, harness.blockHash(t, walletB, blockB.Height),
+	)
+}
+
 // testDuplicateIncidence verifies rollback behavior when a transaction has
 // mined and unmined incidences.
 func testDuplicateIncidence(t *testing.T, harness *managerStoreHarness) {
@@ -738,8 +1183,6 @@ func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 	start, synced waddrmgr.BlockStamp) int64 {
 
 	t.Helper()
-	h.putBlock(t, start)
-	h.putBlock(t, synced)
 
 	var walletID int64
 
@@ -751,6 +1194,8 @@ func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 		RETURNING id
 	`, name, []byte{1}, []byte{2}).Scan(&walletID)
 	require.NoError(t, err)
+	h.putBlock(t, walletID, start)
+	h.putBlock(t, walletID, synced)
 
 	h.exec(t, `
 		INSERT INTO wallet_sync_states (
@@ -763,17 +1208,23 @@ func (h *managerStoreHarness) createWallet(t *testing.T, name string,
 }
 
 // putBlock stores one block fixture for a conformance case.
-func (h *managerStoreHarness) putBlock(t *testing.T,
+func (h *managerStoreHarness) putBlock(t *testing.T, walletID int64,
 	block waddrmgr.BlockStamp) {
 
 	t.Helper()
 	h.exec(t, `
 		INSERT INTO blocks (block_height, header_hash, block_timestamp)
 		VALUES (?, ?, ?)
-		ON CONFLICT (block_height) DO UPDATE SET
+		ON CONFLICT (block_height) DO NOTHING
+	`, block.Height, block.Hash[:], block.Timestamp.Unix())
+	h.exec(t, `
+		INSERT INTO wallet_blocks (
+			wallet_id, block_height, header_hash, block_timestamp
+		) VALUES (?, ?, ?, ?)
+		ON CONFLICT (wallet_id, block_height) DO UPDATE SET
 			header_hash = excluded.header_hash,
 			block_timestamp = excluded.block_timestamp
-	`, block.Height, block.Hash[:], block.Timestamp.Unix())
+	`, walletID, block.Height, block.Hash[:], block.Timestamp.Unix())
 }
 
 // insertTransaction inserts the transaction row and all of its input
@@ -862,7 +1313,8 @@ func (h *managerStoreHarness) setActiveCredit(t *testing.T, walletID,
 		)
 		SELECT c.wallet_id, tx.tx_hash, c.output_index, c.id
 		FROM credits AS c
-		INNER JOIN transactions AS tx ON tx.id = c.transaction_id
+		INNER JOIN transactions AS tx
+			ON tx.wallet_id = c.wallet_id AND tx.id = c.transaction_id
 		WHERE c.wallet_id = ? AND c.id = ?
 		ON CONFLICT (wallet_id, tx_hash, output_index) DO UPDATE SET
 			credit_id = excluded.credit_id
@@ -899,7 +1351,7 @@ func (h *managerStoreHarness) syncedHeight(t *testing.T,
 }
 
 // blockHash returns the block hash recorded for a height fixture.
-func (h *managerStoreHarness) blockHash(t *testing.T,
+func (h *managerStoreHarness) blockHash(t *testing.T, walletID int64,
 	height int32) chainhash.Hash {
 
 	t.Helper()
@@ -907,8 +1359,9 @@ func (h *managerStoreHarness) blockHash(t *testing.T,
 	var hashBytes []byte
 
 	err := h.queryRow(t, `
-		SELECT header_hash FROM blocks WHERE block_height = ?
-	`, height).Scan(&hashBytes)
+		SELECT header_hash FROM wallet_blocks
+		WHERE wallet_id = ? AND block_height = ?
+	`, walletID, height).Scan(&hashBytes)
 	require.NoError(t, err)
 
 	hash, err := chainhash.NewHash(hashBytes)

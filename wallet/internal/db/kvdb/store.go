@@ -138,7 +138,7 @@ func (s *Store) View(ctx context.Context, body func(walletstore.ReadTx) error,
 			return err
 		}
 
-		reset()
+		nonNilReset(reset)()
 
 		return body(&readTx{
 			addrStore: &addrReadStore{
@@ -165,28 +165,131 @@ func (s *Store) Update(ctx context.Context,
 		return err
 	}
 
-	return walletdb.Update(s.db, func(tx walletdb.ReadWriteTx) error {
+	var (
+		hooks         []func()
+		bodyCompleted bool
+	)
+
+	err = s.db.Update(func(tx walletdb.ReadWriteTx) error {
 		err := ctx.Err()
 		if err != nil {
 			return err
 		}
 
-		reset()
+		hooks = nil
+		bodyCompleted = false
 
-		return body(&readWriteTx{
+		nonNilReset(reset)()
+
+		bodyErr := body(&readWriteTx{
 			addrStore: &addrReadWriteStore{
 				ManagerReadWriteStore: waddrmgr.BindManagerReadWriteStore(
 					tx.ReadWriteBucket(addrmgrNamespaceKey),
 				),
+				tx:    tx,
 				ns:    tx.ReadWriteBucket(addrmgrNamespaceKey),
 				store: s.addrStore,
+				onCommit: func(callback func()) {
+					hooks = append(hooks, callback)
+				},
 			},
 			txStore: &txReadWriteStore{
 				ns:    tx.ReadWriteBucket(txmgrNamespaceKey),
 				store: s.txStore,
 			},
 		})
+		bodyCompleted = bodyErr == nil
+
+		return bodyErr
+	}, func() {})
+	if err != nil {
+		if bodyCompleted {
+			return walletstore.NewAmbiguousCommitError(err, hooks...)
+		}
+
+		return err
+	}
+
+	for _, hook := range hooks {
+		hook()
+	}
+
+	return nil
+}
+
+// UpdateOnce executes body using the primitive walletdb transaction methods so
+// a backend cannot replay it through DB.Update.
+func (s *Store) UpdateOnce(ctx context.Context,
+	body func(walletstore.ReadWriteTx) error, reset func()) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginReadWriteTx()
+	if err != nil {
+		return err
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	nonNilReset(reset)()
+
+	err = ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	var hooks []func()
+
+	err = body(&readWriteTx{
+		addrStore: &addrReadWriteStore{
+			ManagerReadWriteStore: waddrmgr.BindManagerReadWriteStore(
+				tx.ReadWriteBucket(addrmgrNamespaceKey),
+			),
+			tx:    tx,
+			ns:    tx.ReadWriteBucket(addrmgrNamespaceKey),
+			store: s.addrStore,
+			onCommit: func(callback func()) {
+				hooks = append(hooks, callback)
+			},
+		},
+		txStore: &txReadWriteStore{
+			ns:    tx.ReadWriteBucket(txmgrNamespaceKey),
+			store: s.txStore,
+		},
 	})
+	if err != nil {
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return walletstore.NewAmbiguousCommitError(err, hooks...)
+	}
+
+	committed = true
+
+	for _, hook := range hooks {
+		hook()
+	}
+
+	return nil
+}
+
+// nonNilReset normalizes an optional transaction reset callback.
+func nonNilReset(reset func()) func() {
+	if reset != nil {
+		return reset
+	}
+
+	return func() {}
 }
 
 type readTx struct {
@@ -228,6 +331,7 @@ func (t *readWriteTx) Tx() walletstore.TxReadWriteStore {
 }
 
 type addrReadStore struct {
+	// ManagerReadStore provides the legacy address-manager reads.
 	waddrmgr.ManagerReadStore
 
 	ns    walletdb.ReadBucket
@@ -240,10 +344,23 @@ func (s *addrReadStore) BlockHash(height int32) (*chainhash.Hash, error) {
 }
 
 type addrReadWriteStore struct {
+	// ManagerReadWriteStore provides the legacy manager operations.
 	waddrmgr.ManagerReadWriteStore
 
-	ns    walletdb.ReadWriteBucket
-	store legacyAddrStore
+	tx       walletdb.ReadWriteTx
+	ns       walletdb.ReadWriteBucket
+	store    legacyAddrStore
+	onCommit func(func())
+}
+
+// OnCommit registers a callback with the enclosing walletdb transaction.
+func (s *addrReadWriteStore) OnCommit(callback func()) {
+	if s.onCommit != nil {
+		s.onCommit(callback)
+		return
+	}
+
+	s.tx.OnCommit(callback)
 }
 
 // BlockHash returns the block hash at a particular block height.
@@ -396,11 +513,43 @@ func (s *txReadWriteStore) UnspentOutputs() ([]wtxmgr.Credit, error) {
 	return s.store.UnspentOutputs(s.ns)
 }
 
-// AddCredit marks a recorded output as wallet-owned.
+// AddCredit marks a recorded output as wallet-owned and reports whether the
+// credit is new.
 func (s *txReadWriteStore) AddCredit(rec *wtxmgr.TxRecord,
-	block *wtxmgr.BlockMeta, index uint32, change bool) error {
+	block *wtxmgr.BlockMeta, index uint32, change bool) (bool, error) {
 
-	return s.store.AddCredit(s.ns, rec, block, index, change)
+	var (
+		details *wtxmgr.TxDetails
+		err     error
+	)
+	if block == nil {
+		details, err = s.store.TxDetails(s.ns, &rec.Hash)
+	} else {
+		details, err = s.store.UniqueTxDetails(
+			s.ns, &rec.Hash, &block.Block,
+		)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	isNew := details == nil
+	if details != nil && (block != nil || details.Block.Height < 0) {
+		isNew = true
+		for _, credit := range details.Credits {
+			if credit.Index == index {
+				isNew = false
+				break
+			}
+		}
+	}
+
+	err = s.store.AddCredit(s.ns, rec, block, index, change)
+	if err != nil {
+		return false, err
+	}
+
+	return isNew, nil
 }
 
 // DeleteExpiredLockedOutputs removes expired output leases.

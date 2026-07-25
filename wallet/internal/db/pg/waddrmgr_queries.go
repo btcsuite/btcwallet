@@ -50,7 +50,7 @@ func pgKeyScope(row pgdb.KeyScope) (waddrmgr.KeyScopeState, error) {
 		return waddrmgr.KeyScopeState{}, err
 	}
 
-	var lastAccount uint32
+	lastAccount := uint32(waddrmgr.NoAccount)
 	if row.LastAccountNumber.Valid {
 		lastAccount, err = sqlstore.CheckedUint32(
 			row.LastAccountNumber.Int64, "last account number",
@@ -268,6 +268,57 @@ func pgBlockStamp(height int32, hashBytes []byte,
 	}, nil
 }
 
+// WalletIDByName resolves a PostgreSQL wallet row identifier by name.
+func (q *queryAdapter) WalletIDByName(ctx context.Context,
+	name string) (int64, error) {
+
+	row, err := q.queries.GetWalletByName(ctx, name)
+	return row.ID, err
+}
+
+// CreateWallet creates the PostgreSQL root manager row.
+func (q *queryAdapter) CreateWallet(ctx context.Context, name string,
+	state waddrmgr.ManagerState) (int64, error) {
+
+	return q.queries.CreateWallet(ctx, pgdb.CreateWalletParams{
+		WalletName:               name,
+		ManagerVersion:           int64(state.Version),
+		ManagerCreatedAt:         state.CreatedAt.Unix(),
+		IsWatchOnly:              state.WatchOnly,
+		MasterPubParams:          state.MasterPubParams,
+		MasterPrivParams:         state.MasterPrivParams,
+		EncryptedCryptoPubKey:    state.EncryptedCryptoPubKey,
+		EncryptedCryptoPrivKey:   state.EncryptedCryptoPrivKey,
+		EncryptedCryptoScriptKey: state.EncryptedCryptoScriptKey,
+		EncryptedMasterHdPubKey:  state.EncryptedMasterHDPubKey,
+		EncryptedMasterHdPrivKey: state.EncryptedMasterHDPrivKey,
+	})
+}
+
+// CreateSyncState creates the initial PostgreSQL wallet synchronization row.
+func (q *queryAdapter) CreateSyncState(ctx context.Context, walletID int64,
+	state waddrmgr.SyncState) error {
+
+	birthdayHeight := sql.NullInt32{}
+	if state.BirthdayBlock != nil {
+		birthdayHeight = sql.NullInt32{
+			Int32: state.BirthdayBlock.Height,
+			Valid: true,
+		}
+	}
+
+	return q.queries.PutWalletSyncState(
+		ctx, pgdb.PutWalletSyncStateParams{
+			WalletID:              walletID,
+			StartBlockHeight:      state.StartBlock.Height,
+			SyncedBlockHeight:     state.SyncedTo.Height,
+			BirthdayTimestamp:     state.Birthday.Unix(),
+			BirthdayBlockHeight:   birthdayHeight,
+			BirthdayBlockVerified: state.BirthdayBlockVerified,
+		},
+	)
+}
+
 // GetManagerState reads manager state from the transaction-bound backend.
 func (q *queryAdapter) GetManagerState(ctx context.Context,
 	walletID int64) (waddrmgr.ManagerState, error) {
@@ -469,18 +520,23 @@ func (q *queryAdapter) ListKeyScopes(ctx context.Context,
 func (q *queryAdapter) PutKeyScope(ctx context.Context, walletID int64,
 	state waddrmgr.KeyScopeState) error {
 
+	lastAccount := sql.NullInt64{}
+	if state.LastAccount != waddrmgr.NoAccount {
+		lastAccount = sql.NullInt64{
+			Int64: int64(state.LastAccount),
+			Valid: true,
+		}
+	}
+
 	_, err := q.queries.PutKeyScope(ctx, pgdb.PutKeyScopeParams{
 		WalletID:             walletID,
 		Purpose:              int64(state.Scope.Purpose),
 		CoinType:             int64(state.Scope.Coin),
 		EncryptedCoinPubKey:  state.EncryptedCoinPubKey,
 		EncryptedCoinPrivKey: state.EncryptedCoinPrivKey,
-		LastAccountNumber: sql.NullInt64{
-			Int64: int64(state.LastAccount),
-			Valid: true,
-		},
-		ExternalAddrType: int16(state.AddrSchema.ExternalAddrType),
-		InternalAddrType: int16(state.AddrSchema.InternalAddrType),
+		LastAccountNumber:    lastAccount,
+		ExternalAddrType:     int16(state.AddrSchema.ExternalAddrType),
+		InternalAddrType:     int16(state.AddrSchema.InternalAddrType),
 	})
 
 	return err

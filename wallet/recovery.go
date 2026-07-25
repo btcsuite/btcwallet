@@ -1,6 +1,8 @@
 package wallet
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -143,6 +145,77 @@ func (rm *RecoveryManager) Resurrect(ns walletdb.ReadBucket,
 	return nil
 }
 
+// resurrectFromAccountStates restores recovery state from detached account
+// rows and credits while no Store transaction is active.
+func (rm *RecoveryManager) resurrectFromAccountStates(
+	accounts map[waddrmgr.KeyScope]waddrmgr.AccountState,
+	scopedMgrs map[waddrmgr.KeyScope]*waddrmgr.ScopedKeyManager,
+	credits []wtxmgr.Credit) error {
+
+	for keyScope, scopedMgr := range scopedMgrs {
+		account, ok := accounts[keyScope]
+		if !ok {
+			return fmt.Errorf("recovery account for scope %s is missing",
+				keyScope)
+		}
+
+		scopeState := rm.state.StateForScope(keyScope)
+		for i := uint32(0); i < account.NextExternalIndex; i++ {
+			addr, err := scopedMgr.DeriveFromKeyPathFromAccountState(
+				account, externalKeyPath(i),
+			)
+			if errors.Is(err, hdkeychain.ErrInvalidChild) {
+				scopeState.ExternalBranch.MarkInvalidChild(i)
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			scopeState.ExternalBranch.AddAddr(i, addr.Address())
+		}
+
+		for i := uint32(0); i < account.NextInternalIndex; i++ {
+			addr, err := scopedMgr.DeriveFromKeyPathFromAccountState(
+				account, internalKeyPath(i),
+			)
+			if errors.Is(err, hdkeychain.ErrInvalidChild) {
+				scopeState.InternalBranch.MarkInvalidChild(i)
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			scopeState.InternalBranch.AddAddr(i, addr.Address())
+		}
+
+		if account.NextExternalIndex > 0 {
+			scopeState.ExternalBranch.ReportFound(
+				account.NextExternalIndex - 1,
+			)
+		}
+		if account.NextInternalIndex > 0 {
+			scopeState.InternalBranch.ReportFound(
+				account.NextInternalIndex - 1,
+			)
+		}
+	}
+
+	for _, credit := range credits {
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			credit.PkScript, rm.chainParams,
+		)
+		if err != nil {
+			return err
+		}
+		if len(addrs) == 0 {
+			continue
+		}
+		rm.state.AddWatchedOutPoint(&credit.OutPoint, addrs[0])
+	}
+
+	return nil
+}
+
 // AddToBlockBatch appends the block information, consisting of hash and height,
 // to the batch of blocks to be searched.
 func (rm *RecoveryManager) AddToBlockBatch(hash *chainhash.Hash, height int32,
@@ -223,6 +296,20 @@ func NewRecoveryState(recoveryWindow uint32) *RecoveryState {
 	}
 }
 
+// Clone returns a detached deep copy that can be advanced while a recovery
+// batch is planned without mutating the live recovery state.
+func (rs *RecoveryState) Clone() *RecoveryState {
+	clone := NewRecoveryState(rs.recoveryWindow)
+	for scope, state := range rs.scopes {
+		clone.scopes[scope] = state.Clone()
+	}
+	for outPoint, addr := range rs.watchedOutPoints {
+		clone.watchedOutPoints[outPoint] = addr
+	}
+
+	return clone
+}
+
 // StateForScope returns a ScopeRecoveryState for the provided key scope. If one
 // does not already exist, a new one will be generated with the RecoveryState's
 // recoveryWindow.
@@ -277,6 +364,14 @@ func NewScopeRecoveryState(recoveryWindow uint32) *ScopeRecoveryState {
 	}
 }
 
+// Clone returns a detached deep copy of both branch recovery states.
+func (s *ScopeRecoveryState) Clone() *ScopeRecoveryState {
+	return &ScopeRecoveryState{
+		ExternalBranch: s.ExternalBranch.Clone(),
+		InternalBranch: s.InternalBranch.Clone(),
+	}
+}
+
 // BranchRecoveryState maintains the required state in-order to properly
 // recover addresses derived from a particular account's internal or external
 // derivation branch.
@@ -317,6 +412,25 @@ func NewBranchRecoveryState(recoveryWindow uint32) *BranchRecoveryState {
 		addresses:       make(map[uint32]address.Address),
 		invalidChildren: make(map[uint32]struct{}),
 	}
+}
+
+// Clone returns a detached deep copy of the branch horizon and address sets.
+func (brs *BranchRecoveryState) Clone() *BranchRecoveryState {
+	clone := &BranchRecoveryState{
+		recoveryWindow:  brs.recoveryWindow,
+		horizon:         brs.horizon,
+		nextUnfound:     brs.nextUnfound,
+		addresses:       make(map[uint32]address.Address, len(brs.addresses)),
+		invalidChildren: make(map[uint32]struct{}, len(brs.invalidChildren)),
+	}
+	for index, addr := range brs.addresses {
+		clone.addresses[index] = addr
+	}
+	for index := range brs.invalidChildren {
+		clone.invalidChildren[index] = struct{}{}
+	}
+
+	return clone
 }
 
 // ExtendHorizon returns the current horizon and the number of addresses that

@@ -157,8 +157,8 @@ func (q *queryAdapter) ListTransactionDebits(ctx context.Context,
 
 	rows, err := q.queries.ListTransactionDebits(
 		ctx, pgdb.ListTransactionDebitsParams{
-			WalletID:     walletID,
-			SpendingTxID: transactionID,
+			WalletID:      walletID,
+			TransactionID: transactionID,
 		},
 	)
 	if err != nil {
@@ -506,10 +506,11 @@ func (q *queryAdapter) DeleteOutputLeaseAnyOwner(ctx context.Context,
 }
 
 // GetCreditID reads credit id from the transaction-bound backend.
-func (q *queryAdapter) GetCreditID(ctx context.Context, transactionID int64,
-	index uint32) (int64, error) {
+func (q *queryAdapter) GetCreditID(ctx context.Context, walletID,
+	transactionID int64, index uint32) (int64, error) {
 
 	row, err := q.queries.GetCredit(ctx, pgdb.GetCreditParams{
+		WalletID:      walletID,
 		TransactionID: transactionID,
 		OutputIndex:   int64(index),
 	})

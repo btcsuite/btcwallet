@@ -8,6 +8,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -20,13 +22,15 @@ import (
 // AddrReadStore exposes address-manager reads within an existing wallet
 // transaction. Backend transaction handles remain private to the adapter.
 type AddrReadStore interface {
+	// ManagerReadStore provides the address-manager read surface.
 	waddrmgr.ManagerReadStore
 }
 
 // AddrReadWriteStore exposes address-manager reads and writes within an
 // existing wallet transaction.
 type AddrReadWriteStore interface {
-	waddrmgr.ManagerReadWriteStore
+	// ManagerReadWriteTx provides the address-manager write surface.
+	waddrmgr.ManagerReadWriteTx
 }
 
 // TxReadStore exposes the existing transaction-manager read surface within an
@@ -76,11 +80,13 @@ type TxReadStore interface {
 // TxReadWriteStore exposes the existing transaction-manager read/write surface
 // within an existing wallet transaction.
 type TxReadWriteStore interface {
+	// TxReadStore provides the transaction-manager read surface.
 	TxReadStore
 
-	// AddCredit marks an output of a recorded transaction as wallet-owned.
+	// AddCredit marks an output of a recorded transaction as wallet-owned and
+	// reports whether a new credit was added.
 	AddCredit(rec *wtxmgr.TxRecord, block *wtxmgr.BlockMeta, index uint32,
-		change bool) error
+		change bool) (bool, error)
 
 	// DeleteExpiredLockedOutputs removes all expired output leases.
 	DeleteExpiredLockedOutputs() error
@@ -140,4 +146,88 @@ type Store interface {
 	// Update executes body in a read/write transaction.
 	Update(ctx context.Context, body func(ReadWriteTx) error,
 		reset func()) error
+
+	// UpdateOnce executes body in a single read/write transaction attempt.
+	// It is intended for legacy callbacks whose side effects cannot be
+	// replayed safely.
+	UpdateOnce(ctx context.Context, body func(ReadWriteTx) error,
+		reset func()) error
+}
+
+// LifecycleStore extends a manager Store with wallet existence and creation
+// operations. A lifecycle store may begin unbound and become bound to the
+// wallet created or resolved by its backend-specific identity.
+type LifecycleStore interface {
+	// Store provides the backend transaction execution surface.
+	Store
+
+	// WalletExists reports whether the configured wallet exists. A successful
+	// lookup binds an initially unbound store to the durable wallet.
+	WalletExists(ctx context.Context) (bool, error)
+
+	// Create executes body in the single transaction that creates and binds
+	// the configured wallet. The callback is never replayed.
+	Create(ctx context.Context, body func(ReadWriteTx) error,
+		reset func()) error
+}
+
+// AmbiguousCommitError reports a commit failure for which the caller cannot
+// safely assume whether the transaction became durable.
+type AmbiguousCommitError struct {
+	// Err is the backend error returned while committing the transaction.
+	Err error
+
+	hooks     []func()
+	hooksOnce sync.Once
+}
+
+// NewAmbiguousCommitError records a commit failure and the post-commit hooks
+// that can be applied if the caller later proves the transaction became
+// durable.
+func NewAmbiguousCommitError(err error,
+	hooks ...func()) *AmbiguousCommitError {
+
+	return &AmbiguousCommitError{
+		Err:   err,
+		hooks: append([]func(){}, hooks...),
+	}
+}
+
+// Error describes the ambiguous commit failure.
+func (e *AmbiguousCommitError) Error() string {
+	return fmt.Sprintf("transaction commit outcome is ambiguous: %v", e.Err)
+}
+
+// Unwrap returns the commit error reported by the backend.
+func (e *AmbiguousCommitError) Unwrap() error {
+	return e.Err
+}
+
+// ApplyCommitHooks publishes deferred in-memory state after the caller proves
+// an ambiguously acknowledged transaction committed. Hooks are applied at most
+// once.
+func (e *AmbiguousCommitError) ApplyCommitHooks() {
+	e.hooksOnce.Do(func() {
+		for _, hook := range e.hooks {
+			hook()
+		}
+	})
+}
+
+// RetryableTransactionError reports a failure known to have left no durable
+// transaction changes. The caller may safely retry the whole operation.
+type RetryableTransactionError struct {
+	// Err is the backend error that prevented the transaction from committing.
+	Err error
+}
+
+// Error describes the definitely uncommitted transaction failure.
+func (e *RetryableTransactionError) Error() string {
+	return fmt.Sprintf("transaction did not commit and may be retried: %v",
+		e.Err)
+}
+
+// Unwrap returns the retryable backend error.
+func (e *RetryableTransactionError) Unwrap() error {
+	return e.Err
 }

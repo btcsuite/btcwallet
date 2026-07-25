@@ -28,10 +28,17 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 
 	q := sqlc.New(db)
 	for height := int64(100); height <= 101; height++ {
-		require.NoError(t, q.InsertBlock(ctx, sqlc.InsertBlockParams{
+		block := sqlc.EnsureBlockHeightParams{
 			BlockHeight:    height,
 			HeaderHash:     testHash(byte(height)),
 			BlockTimestamp: 1000 + height,
+		}
+		require.NoError(t, q.EnsureBlockHeight(ctx, block))
+		require.NoError(t, q.InsertBlock(ctx, sqlc.InsertBlockParams{
+			WalletID:       1,
+			BlockHeight:    height,
+			HeaderHash:     block.HeaderHash,
+			BlockTimestamp: block.BlockTimestamp,
 		}))
 	}
 
@@ -131,7 +138,10 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 
 	// A block cannot disappear while confirmed transaction incidences still
 	// reference it. Rollback code must first detach or delete each incidence.
-	require.Error(t, q.DeleteBlock(ctx, 100))
+	require.Error(t, q.DeleteBlock(ctx, sqlc.DeleteBlockParams{
+		WalletID:    1,
+		BlockHeight: 100,
+	}))
 
 	unminedHash := testHash(2)
 	unminedID := insertUnminedTransaction(t, ctx, q, unminedHash)
@@ -208,6 +218,7 @@ func testTransactionSchema(t *testing.T, db *sql.DB) {
 		},
 	))
 	credit, err := q.GetCredit(ctx, sqlc.GetCreditParams{
+		WalletID:      1,
 		TransactionID: fundingID,
 		OutputIndex:   0,
 	})

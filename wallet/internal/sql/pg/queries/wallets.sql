@@ -107,12 +107,15 @@ SELECT
     birthday_block.block_timestamp AS birthday_block_timestamp,
     s.birthday_block_verified
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS start_block
-    ON s.start_block_height = start_block.block_height
-INNER JOIN blocks AS synced_block
-    ON s.synced_block_height = synced_block.block_height
-LEFT JOIN blocks AS birthday_block
-    ON s.birthday_block_height = birthday_block.block_height
+INNER JOIN wallet_blocks AS start_block
+    ON start_block.wallet_id = s.wallet_id
+    AND start_block.block_height = s.start_block_height
+INNER JOIN wallet_blocks AS synced_block
+    ON synced_block.wallet_id = s.wallet_id
+    AND synced_block.block_height = s.synced_block_height
+LEFT JOIN wallet_blocks AS birthday_block
+    ON birthday_block.wallet_id = s.wallet_id
+    AND birthday_block.block_height = s.birthday_block_height
 WHERE s.wallet_id = $1;
 
 -- name: SetWalletBirthday :execrows
@@ -133,7 +136,9 @@ WHERE wallet_id = $2;
 -- name: GetWalletStartBlock :one
 SELECT b.block_height, b.header_hash, b.block_timestamp
 FROM wallet_sync_states AS s
-INNER JOIN blocks AS b ON b.block_height = s.start_block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = s.wallet_id
+    AND b.block_height = s.start_block_height
 WHERE s.wallet_id = $1;
 
 -- name: UpdateWalletSyncState :execrows

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -22,14 +23,33 @@ const defaultCoinbaseMaturity = 100
 // Store owns SQL transactions for one wallet's address and transaction
 // managers.
 type Store struct {
+	bindMu           sync.Mutex
 	walletID         int64
+	walletName       string
 	coinbaseMaturity int32
+	conn             *sql.DB
+	newQueries       func(*sql.Tx) Queries
 	executor         *sqldb.TransactionExecutor[Queries]
 }
 
 // New creates a manager store over an existing SQL connection. Connection
 // setup, migrations, and wallet creation remain owned by the backend package.
 func New(conn *sql.DB, walletID int64,
+	newQueries func(*sql.Tx) Queries, maturity ...uint16) *Store {
+
+	return newStore(conn, walletID, "", newQueries, maturity...)
+}
+
+// NewNamed creates an initially name-bound manager store. The store resolves an
+// existing wallet lazily and can create the wallet through its lifecycle API.
+func NewNamed(conn *sql.DB, walletName string,
+	newQueries func(*sql.Tx) Queries, maturity ...uint16) *Store {
+
+	return newStore(conn, 0, walletName, newQueries, maturity...)
+}
+
+// newStore initializes the common SQL manager store state.
+func newStore(conn *sql.DB, walletID int64, walletName string,
 	newQueries func(*sql.Tx) Queries, maturity ...uint16) *Store {
 
 	baseDB := &sqldb.BaseDB{
@@ -44,26 +64,103 @@ func New(conn *sql.DB, walletID int64,
 
 	return &Store{
 		walletID:         walletID,
+		walletName:       walletName,
 		coinbaseMaturity: coinbaseMaturity,
+		conn:             conn,
+		newQueries:       newQueries,
 		executor:         sqldb.NewTransactionExecutor(baseDB, newQueries),
 	}
+}
+
+// WalletExists reports whether the configured SQL wallet exists. A successful
+// name lookup binds the store to the wallet row for subsequent transactions.
+func (s *Store) WalletExists(ctx context.Context) (bool, error) {
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+
+	var resolvedID int64
+	err := s.executor.ExecTx(
+		ctx, sqldb.ReadTxOpt(), func(queries Queries) error {
+			if s.walletID != 0 {
+				_, err := queries.GetManagerState(ctx, s.walletID)
+				return err
+			}
+			if s.walletName == "" {
+				return sql.ErrNoRows
+			}
+
+			var err error
+			resolvedID, err = queries.WalletIDByName(
+				ctx, s.walletName,
+			)
+			return err
+		}, func() {
+			resolvedID = 0
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if s.walletID == 0 {
+		s.walletID = resolvedID
+	}
+
+	return true, nil
+}
+
+// resolveWalletID requires the configured wallet and returns its durable row
+// identifier.
+func (s *Store) resolveWalletID(ctx context.Context) (int64, error) {
+	s.bindMu.Lock()
+	if s.walletID != 0 {
+		walletID := s.walletID
+		s.bindMu.Unlock()
+
+		return walletID, nil
+	}
+	s.bindMu.Unlock()
+
+	exists, err := s.WalletExists(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrNoExist,
+			Description: "address manager does not exist",
+		}
+	}
+
+	s.bindMu.Lock()
+	walletID := s.walletID
+	s.bindMu.Unlock()
+
+	return walletID, nil
 }
 
 // View executes body in a read-only SQL transaction.
 func (s *Store) View(ctx context.Context,
 	body func(walletstore.ReadTx) error, reset func()) error {
+	walletID, err := s.resolveWalletID(ctx)
+	if err != nil {
+		return err
+	}
 
 	return s.executor.ExecTx(
 		ctx, sqldb.ReadTxOpt(), func(queries Queries) error {
 			return body(&readTx{
 				addrStore: &addrStore{
 					ctx:      ctx,
-					walletID: s.walletID,
+					walletID: walletID,
 					queries:  queries,
 				},
 				txStore: &txStore{
 					ctx:              ctx,
-					walletID:         s.walletID,
+					walletID:         walletID,
 					coinbaseMaturity: s.coinbaseMaturity,
 					queries:          queries,
 				},
@@ -75,24 +172,241 @@ func (s *Store) View(ctx context.Context,
 // Update executes body in a read/write SQL transaction.
 func (s *Store) Update(ctx context.Context,
 	body func(walletstore.ReadWriteTx) error, reset func()) error {
+	walletID, err := s.resolveWalletID(ctx)
+	if err != nil {
+		return err
+	}
 
-	return s.executor.ExecTx(
+	var (
+		hooks         []func()
+		bodyCompleted bool
+	)
+	err = s.executor.ExecTx(
 		ctx, sqldb.WriteTxOpt(), func(queries Queries) error {
-			return body(&readWriteTx{
+			bodyErr := body(&readWriteTx{
 				addrStore: &addrStore{
 					ctx:      ctx,
-					walletID: s.walletID,
+					walletID: walletID,
 					queries:  queries,
+					onCommit: func(callback func()) {
+						hooks = append(hooks, callback)
+					},
 				},
 				txStore: &txStore{
 					ctx:              ctx,
-					walletID:         s.walletID,
+					walletID:         walletID,
 					coinbaseMaturity: s.coinbaseMaturity,
 					queries:          queries,
 				},
 			})
-		}, nonNilReset(reset),
+			bodyCompleted = bodyErr == nil
+
+			return bodyErr
+		}, func() {
+			hooks = nil
+			bodyCompleted = false
+			nonNilReset(reset)()
+		},
 	)
+	if err != nil {
+		if bodyCompleted {
+			return mapCommitError(err, hooks...)
+		}
+
+		return mapUncommittedError(err)
+	}
+
+	for _, hook := range hooks {
+		hook()
+	}
+
+	return nil
+}
+
+// UpdateOnce executes body in one SQL transaction attempt and publishes commit
+// hooks only after Commit returns success. It never replays body internally.
+func (s *Store) UpdateOnce(ctx context.Context,
+	body func(walletstore.ReadWriteTx) error, reset func()) error {
+	walletID, err := s.resolveWalletID(ctx)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.conn.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	})
+	if err != nil {
+		return mapUncommittedError(err)
+	}
+
+	rollback := true
+	defer func() {
+		if rollback {
+			_ = tx.Rollback()
+		}
+	}()
+
+	nonNilReset(reset)()
+
+	var hooks []func()
+	addrStore := &addrStore{
+		ctx:      ctx,
+		walletID: walletID,
+		queries:  s.newQueries(tx),
+		onCommit: func(callback func()) {
+			hooks = append(hooks, callback)
+		},
+	}
+	txStore := &txStore{
+		ctx:              ctx,
+		walletID:         walletID,
+		coinbaseMaturity: s.coinbaseMaturity,
+		queries:          addrStore.queries,
+	}
+
+	err = body(&readWriteTx{
+		addrStore: addrStore,
+		txStore:   txStore,
+	})
+	if err != nil {
+		return mapUncommittedError(err)
+	}
+
+	err = tx.Commit()
+	rollback = false
+	if err != nil {
+		return mapCommitError(err, hooks...)
+	}
+
+	for _, hook := range hooks {
+		hook()
+	}
+
+	return nil
+}
+
+// Create executes the wallet creation callback exactly once and binds this
+// named store only after the transaction commits successfully.
+func (s *Store) Create(ctx context.Context,
+	body func(walletstore.ReadWriteTx) error, reset func()) error {
+
+	s.bindMu.Lock()
+	defer s.bindMu.Unlock()
+
+	if s.walletID != 0 {
+		return waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrAlreadyExists,
+			Description: "address manager already exists",
+		}
+	}
+	if s.walletName == "" {
+		return errors.New("wallet name is required for SQL creation")
+	}
+
+	tx, err := s.conn.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	})
+	if err != nil {
+		return mapUncommittedError(err)
+	}
+
+	rollback := true
+	defer func() {
+		if rollback {
+			_ = tx.Rollback()
+		}
+	}()
+
+	nonNilReset(reset)()
+	queries := s.newQueries(tx)
+	_, err = queries.WalletIDByName(ctx, s.walletName)
+	switch {
+	case err == nil:
+		return waddrmgr.ManagerError{
+			ErrorCode:   waddrmgr.ErrAlreadyExists,
+			Description: "address manager already exists",
+		}
+
+	case !errors.Is(err, sql.ErrNoRows):
+		return mapUncommittedError(err)
+	}
+
+	var hooks []func()
+	txStore := &txStore{
+		ctx:              ctx,
+		coinbaseMaturity: s.coinbaseMaturity,
+		queries:          queries,
+	}
+	addrStore := &addrStore{
+		ctx:        ctx,
+		walletName: s.walletName,
+		creating:   true,
+		queries:    queries,
+		onWalletCreated: func(walletID int64) {
+			txStore.walletID = walletID
+		},
+		onCommit: func(callback func()) {
+			hooks = append(hooks, callback)
+		},
+	}
+
+	err = body(&readWriteTx{
+		addrStore: addrStore,
+		txStore:   txStore,
+	})
+	if err != nil {
+		return mapUncommittedError(err)
+	}
+	if addrStore.walletID == 0 {
+		return errors.New("wallet creation did not write manager state")
+	}
+
+	err = tx.Commit()
+	rollback = false
+	if err != nil {
+		return mapCommitError(err, hooks...)
+	}
+
+	s.walletID = addrStore.walletID
+	for _, hook := range hooks {
+		hook()
+	}
+
+	return nil
+}
+
+// mapUncommittedError marks serialization failures that occurred before commit
+// as safe for the caller to retry.
+func mapUncommittedError(err error) error {
+	var retryable *walletstore.RetryableTransactionError
+	if errors.As(err, &retryable) {
+		return err
+	}
+
+	var ambiguous *walletstore.AmbiguousCommitError
+	if errors.As(err, &ambiguous) {
+		return err
+	}
+
+	mappedErr := sqldb.MapSQLError(err)
+	if !sqldb.IsSerializationError(mappedErr) {
+		return mappedErr
+	}
+
+	return &walletstore.RetryableTransactionError{Err: mappedErr}
+}
+
+// mapCommitError distinguishes serialization failures known to abort the SQL
+// transaction from failures whose commit outcome cannot be determined.
+func mapCommitError(err error, hooks ...func()) error {
+	mappedErr := sqldb.MapSQLError(err)
+	if sqldb.IsSerializationError(mappedErr) ||
+		errors.Is(mappedErr, sqldb.ErrRetriesExceeded) {
+
+		return &walletstore.RetryableTransactionError{Err: mappedErr}
+	}
+
+	return walletstore.NewAmbiguousCommitError(mappedErr, hooks...)
 }
 
 // nonNilReset normalizes an optional reset callback for the SQL transaction
@@ -147,9 +461,19 @@ type addrStore struct {
 	// The manager view is scoped to the transaction callback that created it.
 	//
 	//nolint:containedctx // Domain methods intentionally omit backend context.
-	ctx      context.Context
-	walletID int64
-	queries  Queries
+	ctx             context.Context
+	walletID        int64
+	walletName      string
+	creating        bool
+	queries         Queries
+	onWalletCreated func(int64)
+	onCommit        func(func())
+}
+
+// OnCommit registers a callback for publication after the enclosing SQL
+// transaction commits successfully.
+func (s *addrStore) OnCommit(callback func()) {
+	s.onCommit(callback)
 }
 
 // expectWalletRow requires a manager update to affect exactly one wallet row.
@@ -284,6 +608,21 @@ func (s *addrStore) ActiveAddresses(
 
 // PutManagerState replaces the durable root address-manager state.
 func (s *addrStore) PutManagerState(state waddrmgr.ManagerState) error {
+	if s.creating && s.walletID == 0 {
+		walletID, err := s.queries.CreateWallet(
+			s.ctx, s.walletName, state,
+		)
+		if err != nil {
+			return fmt.Errorf("create manager state: %w", err)
+		}
+
+		s.walletID = walletID
+		if s.onWalletCreated != nil {
+			s.onWalletCreated(walletID)
+		}
+		return nil
+	}
+
 	rows, err := s.queries.PutManagerState(s.ctx, s.walletID, state)
 	if err != nil {
 		return fmt.Errorf("put manager state: %w", err)
@@ -300,7 +639,7 @@ func (s *addrStore) PutSyncState(state waddrmgr.SyncState) error {
 	}
 
 	for _, block := range blocks {
-		err := s.queries.PutBlock(s.ctx, BlockRow{
+		err := s.queries.PutBlock(s.ctx, s.walletID, BlockRow{
 			Height:    block.Height,
 			Hash:      block.Hash[:],
 			Timestamp: block.Timestamp.Unix(),
@@ -308,6 +647,15 @@ func (s *addrStore) PutSyncState(state waddrmgr.SyncState) error {
 		if err != nil {
 			return fmt.Errorf("put sync block %d: %w", block.Height, err)
 		}
+	}
+
+	if s.creating {
+		err := s.queries.CreateSyncState(s.ctx, s.walletID, state)
+		if err != nil {
+			return fmt.Errorf("create sync state: %w", err)
+		}
+
+		return nil
 	}
 
 	rows, err := s.queries.PutSyncState(s.ctx, s.walletID, state)
@@ -334,7 +682,7 @@ func (s *addrStore) SetBirthday(birthday time.Time) error {
 func (s *addrStore) SetBirthdayBlock(block *waddrmgr.BlockStamp) error {
 	var height *int32
 	if block != nil {
-		err := s.queries.PutBlock(s.ctx, BlockRow{
+		err := s.queries.PutBlock(s.ctx, s.walletID, BlockRow{
 			Height:    block.Height,
 			Hash:      block.Hash[:],
 			Timestamp: block.Timestamp.Unix(),
@@ -550,7 +898,7 @@ func (s *addrStore) DeletePrivateKeys() error {
 
 // BlockHash returns the block hash at a particular block height.
 func (s *addrStore) BlockHash(height int32) (*chainhash.Hash, error) {
-	row, err := s.queries.GetBlockByHeight(s.ctx, height)
+	row, err := s.queries.GetBlockByHeight(s.ctx, s.walletID, height)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, waddrmgr.ManagerError{
 			ErrorCode: waddrmgr.ErrBlockNotFound,
@@ -593,7 +941,7 @@ func (s *addrStore) SetSyncedTo(block *waddrmgr.BlockStamp) error {
 		}
 	}
 
-	err := s.queries.PutBlock(s.ctx, BlockRow{
+	err := s.queries.PutBlock(s.ctx, s.walletID, BlockRow{
 		Height:    block.Height,
 		Hash:      block.Hash[:],
 		Timestamp: block.Timestamp.Unix(),
@@ -789,6 +1137,7 @@ func (s *txStore) deleteTransaction(transactionID int64) error {
 
 var (
 	_ walletstore.Store              = (*Store)(nil)
+	_ walletstore.LifecycleStore     = (*Store)(nil)
 	_ walletstore.ReadTx             = (*readTx)(nil)
 	_ walletstore.ReadWriteTx        = (*readWriteTx)(nil)
 	_ walletstore.AddrReadStore      = (*addrStore)(nil)

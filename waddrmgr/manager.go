@@ -99,7 +99,14 @@ func isReservedAccountNum(acct uint32) bool {
 // ScryptOptions is used to hold the scrypt parameters needed when deriving new
 // passphrase keys.
 type ScryptOptions struct {
-	N, R, P int
+	// N is the scrypt CPU and memory cost parameter.
+	N int
+
+	// R is the scrypt block size parameter.
+	R int
+
+	// P is the scrypt parallelization parameter.
+	P int
 }
 
 // OpenCallbacks houses caller-provided callbacks that may be called when
@@ -176,6 +183,10 @@ type accountInfo struct {
 	// derivation path m/). This may be required by some hardware wallets
 	// for proper identification and signing.
 	masterKeyFingerprint uint32
+
+	// storeStale records that an ambiguous commit may have advanced the
+	// durable indexes beyond the values cached here.
+	storeStale bool
 }
 
 // AccountProperties contains properties associated with each account, such as
@@ -277,15 +288,25 @@ func newSecretKey(passphrase *[]byte,
 // EncryptorDecryptor provides an abstraction on top of snacl.CryptoKey so that
 // our tests can use dependency injection to force the behaviour they need.
 type EncryptorDecryptor interface {
+	// Encrypt encrypts the input with the underlying key.
 	Encrypt(in []byte) ([]byte, error)
+
+	// Decrypt decrypts the input with the underlying key.
 	Decrypt(in []byte) ([]byte, error)
+
+	// Bytes returns the underlying key bytes.
 	Bytes() []byte
+
+	// CopyBytes replaces the underlying key bytes.
 	CopyBytes([]byte)
+
+	// Zero clears the underlying key material.
 	Zero()
 }
 
 // cryptoKey extends snacl.CryptoKey to implement EncryptorDecryptor.
 type cryptoKey struct {
+	// CryptoKey provides the underlying encryption implementation.
 	snacl.CryptoKey
 }
 
@@ -442,7 +463,14 @@ func (m *Manager) lock() {
 			switch addr := ma.(type) {
 			case *managedAddress:
 				addr.lock()
+
 			case *scriptAddress:
+				addr.lock()
+
+			case *witnessScriptAddress:
+				addr.lock()
+
+			case *taprootScriptAddress:
 				addr.lock()
 			}
 		}
@@ -607,6 +635,8 @@ func (m *Manager) NewScopedKeyManager(ns walletdb.ReadWriteBucket,
 		addrSchema:  addrSchema,
 		rootManager: m,
 		addrs:       make(map[addrKey]ManagedAddress),
+		used:        make(map[addrKey]bool),
+		storeAddrs:  make(map[string]ManagedAddress),
 		acctInfo:    make(map[uint32]*accountInfo),
 		privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 			defaultPrivKeyCacheSize,
@@ -1101,9 +1131,22 @@ func (m *Manager) ConvertToWatchingOnly(ns walletdb.ReadWriteBucket) error {
 			case *managedAddress:
 				zero.Bytes(addr.privKeyEncrypted)
 				addr.privKeyEncrypted = nil
+
 			case *scriptAddress:
 				zero.Bytes(addr.scriptEncrypted)
 				addr.scriptEncrypted = nil
+
+			case *witnessScriptAddress:
+				if addr.isSecretScript {
+					zero.Bytes(addr.scriptEncrypted)
+					addr.scriptEncrypted = nil
+				}
+
+			case *taprootScriptAddress:
+				if addr.isSecretScript {
+					zero.Bytes(addr.scriptEncrypted)
+					addr.scriptEncrypted = nil
+				}
 			}
 		}
 	}
@@ -1166,6 +1209,17 @@ func (m *Manager) Lock() error {
 // This function will return an error if invoked on a watching-only address
 // manager.
 func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
+	return m.unlock(ns, passphrase)
+}
+
+// UnlockFromStore unlocks a manager whose account state was loaded through a
+// ManagerReadStore. It never accesses a walletdb bucket.
+func (m *Manager) UnlockFromStore(passphrase []byte) error {
+	return m.unlock(nil, passphrase)
+}
+
+// unlock derives and caches all private manager and account keys.
+func (m *Manager) unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// A watching-only address manager can't be unlocked.
 	if m.WatchOnly() {
 		return managerError(ErrWatchingOnly, errWatchingOnly, nil)
@@ -1215,6 +1269,10 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	// extended keys.
 	for _, manager := range m.scopedManagers {
 		for account, acctInfo := range manager.acctInfo {
+			if len(acctInfo.acctKeyEncrypted) == 0 {
+				continue
+			}
+
 			decrypted, err := m.cryptoKeyPriv.Decrypt(acctInfo.acctKeyEncrypted)
 			if err != nil {
 				m.lock()
@@ -1236,11 +1294,28 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 
 		// We'll also derive any private keys that are pending due to
 		// them being created while the address manager was locked.
-		for _, info := range manager.deriveOnUnlock {
-			addressKey, _, _, err := manager.deriveKeyFromPath(
-				ns, info.managedAddr.InternalAccount(),
-				info.branch, info.index, true,
-			)
+		for len(manager.deriveOnUnlock) != 0 {
+			info := manager.deriveOnUnlock[0]
+			account := info.managedAddr.InternalAccount()
+			var addressKey *hdkeychain.ExtendedKey
+			if ns != nil {
+				addressKey, _, _, err = manager.deriveKeyFromPath(
+					ns, account, info.branch, info.index, true,
+				)
+			} else {
+				acctInfo := manager.acctInfo[account]
+				if acctInfo == nil || acctInfo.acctKeyPriv == nil {
+					m.lock()
+					str := fmt.Sprintf(
+						"private account %d not found", account,
+					)
+					return managerError(ErrAccountNotFound, str, nil)
+				}
+
+				addressKey, err = manager.deriveKey(
+					acctInfo, info.branch, info.index, true,
+				)
+			}
 			if err != nil {
 				m.lock()
 				return err
@@ -1282,7 +1357,8 @@ func (m *Manager) Unlock(ns walletdb.ReadBucket, passphrase []byte) error {
 	return nil
 }
 
-// ValidateAccountName validates the given account name and returns an error, if any.
+// ValidateAccountName validates the given account name and returns an error,
+// if any.
 func ValidateAccountName(name string) error {
 	if name == "" {
 		str := "accounts may not be named the empty string"
@@ -1504,7 +1580,8 @@ func deriveAccountKey(coinTypeKey *hdkeychain.ExtendedKey,
 // The branch is 0 for external addresses and 1 for internal addresses.
 func checkBranchKeys(acctKey *hdkeychain.ExtendedKey) error {
 	// Derive the external branch as the first child of the account key.
-	if _, err := acctKey.DeriveNonStandard(ExternalBranch); err != nil { // nolint:staticcheck
+	//nolint:staticcheck
+	if _, err := acctKey.DeriveNonStandard(ExternalBranch); err != nil {
 		return err
 	}
 
@@ -1623,6 +1700,8 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 			scope:      scope,
 			addrSchema: *scopeSchema,
 			addrs:      make(map[addrKey]ManagedAddress),
+			used:       make(map[addrKey]bool),
+			storeAddrs: make(map[string]ManagedAddress),
 			acctInfo:   make(map[uint32]*accountInfo),
 			privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
 				defaultPrivKeyCacheSize,
@@ -1650,6 +1729,161 @@ func loadManager(ns walletdb.ReadBucket, pubPassphrase []byte,
 	}
 
 	return mgr, nil
+}
+
+// OpenFromSnapshot reconstructs an address manager from detached durable state.
+// Passphrase KDF, decryption, HD derivation, validation, and cache population
+// are all performed by this call.
+func OpenFromSnapshot(snapshot *ManagerSnapshot, pubPassphrase []byte,
+	chainParams *chaincfg.Params) (*Manager, error) {
+
+	if snapshot == nil {
+		return nil, managerError(
+			ErrDatabase, "address manager snapshot is nil", nil,
+		)
+	}
+	var (
+		masterKeyPriv snacl.SecretKey
+		masterKeyPub  snacl.SecretKey
+		cryptoKeyPub  = &cryptoKey{snacl.CryptoKey{}}
+		mgr           *Manager
+		opened        bool
+		err           error
+	)
+	defer func() {
+		if opened {
+			return
+		}
+
+		if mgr != nil {
+			mgr.Close()
+			return
+		}
+
+		cryptoKeyPub.Zero()
+		masterKeyPub.Zero()
+		masterKeyPriv.Zero()
+	}()
+
+	state := snapshot.state
+
+	if state.Version < latestMgrVersion {
+		return nil, managerError(
+			ErrUpgrade, "database upgrade required", nil,
+		)
+	}
+	if state.Version > latestMgrVersion {
+		str := "database version is greater than latest understood version"
+		return nil, managerError(ErrUpgrade, str, nil)
+	}
+
+	if !state.WatchOnly {
+		err := masterKeyPriv.Unmarshal(state.MasterPrivParams)
+		if err != nil {
+			str := "failed to unmarshal master private key"
+			return nil, managerError(ErrCrypto, str, err)
+		}
+	}
+
+	err = masterKeyPub.Unmarshal(state.MasterPubParams)
+	if err != nil {
+		str := "failed to unmarshal master public key"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
+	err = masterKeyPub.DeriveKey(&pubPassphrase)
+	if err != nil {
+		str := "invalid passphrase for master public key"
+		return nil, managerError(ErrWrongPassphrase, str, nil)
+	}
+
+	cryptoKeyPubCT, err := masterKeyPub.Decrypt(
+		state.EncryptedCryptoPubKey,
+	)
+	if err != nil {
+		str := "failed to decrypt crypto public key"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+	cryptoKeyPub.CopyBytes(cryptoKeyPubCT)
+	zero.Bytes(cryptoKeyPubCT)
+
+	syncState := snapshot.sync
+	syncInfo := newSyncState(&syncState.StartBlock, &syncState.SyncedTo)
+
+	var privPassphraseSalt [saltSize]byte
+	_, err = rand.Read(privPassphraseSalt[:])
+	if err != nil {
+		str := "failed to read random source for passphrase salt"
+		return nil, managerError(ErrCrypto, str, err)
+	}
+
+	scopedManagers := make(
+		map[KeyScope]*ScopedKeyManager, len(snapshot.scopes),
+	)
+	for _, scopeSnapshot := range snapshot.scopes {
+		scopeState := scopeSnapshot.state
+		scopedManagers[scopeState.Scope] = &ScopedKeyManager{
+			scope:      scopeState.Scope,
+			addrSchema: scopeState.AddrSchema,
+			addrs:      make(map[addrKey]ManagedAddress),
+			used:       make(map[addrKey]bool),
+			storeAddrs: make(map[string]ManagedAddress),
+			acctInfo:   make(map[uint32]*accountInfo),
+			privKeyCache: lru.NewCache[DerivationPath, *cachedKey](
+				defaultPrivKeyCacheSize,
+			),
+		}
+	}
+
+	mgr = newManager(
+		chainParams, &masterKeyPub, &masterKeyPriv, cryptoKeyPub,
+		state.EncryptedCryptoPrivKey, state.EncryptedCryptoScriptKey,
+		syncInfo, syncState.Birthday, privPassphraseSalt, scopedManagers,
+		state.WatchOnly,
+	)
+
+	for _, scopeSnapshot := range snapshot.scopes {
+		scopedManager := scopedManagers[scopeSnapshot.state.Scope]
+		scopedManager.rootManager = mgr
+
+		err := scopedManager.loadStoreSnapshot(
+			scopeSnapshot.accounts, scopeSnapshot.addresses,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	opened = true
+	return mgr, nil
+}
+
+// OpenFromStore loads the real address manager from a backend-neutral durable
+// store. It remains a compatibility wrapper for transaction-bound callers;
+// callers that own the transaction should prefer ReadManagerSnapshot followed
+// by OpenFromSnapshot after the transaction closes.
+func OpenFromStore(store ManagerReadStore, pubPassphrase []byte,
+	chainParams *chaincfg.Params) (*Manager, error) {
+
+	snapshot, err := ReadManagerSnapshot(store)
+	if err != nil {
+		return nil, err
+	}
+
+	return OpenFromSnapshot(snapshot, pubPassphrase, chainParams)
+}
+
+// MarkAccountCacheStale marks one store-backed account for a durable index
+// refresh without discarding its cached public or private extended keys.
+func (m *Manager) MarkAccountCacheStale(scope KeyScope, account uint32) {
+	m.mtx.RLock()
+	scopedManager := m.scopedManagers[scope]
+	m.mtx.RUnlock()
+	if scopedManager == nil {
+		return
+	}
+
+	scopedManager.markAccountCacheStale(account)
 }
 
 // Open loads an existing address manager from the given namespace.  The public

@@ -594,6 +594,16 @@ func (s *kvManagerReadWriteStore) PutKeyScope(state KeyScopeState) error {
 	if err != nil {
 		return err
 	}
+	if state.LastAccount == NoAccount {
+		bucket, err := fetchWriteScopeBucket(s.ns, &state.Scope)
+		if err != nil {
+			return err
+		}
+
+		return bucket.NestedReadWriteBucket(metaBucketName).Delete(
+			lastAccountName,
+		)
+	}
 
 	return s.SetLastAccount(state.Scope, state.LastAccount)
 }

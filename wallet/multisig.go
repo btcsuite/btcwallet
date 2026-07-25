@@ -6,12 +6,14 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletstore "github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 )
 
@@ -47,7 +49,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 			pubKeys[i] = addr
 
 		case *address.AddressPubKeyHash:
-			if dbtx == nil {
+			if dbtx == nil && w.db != nil {
 				var err error
 				dbtx, err = w.db.BeginReadTx()
 				if err != nil {
@@ -55,7 +57,13 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 				}
 				addrmgrNs = dbtx.ReadBucket(waddrmgrNamespaceKey)
 			}
-			addrInfo, err := w.Manager.Address(addrmgrNs, addr)
+			var addrInfo waddrmgr.ManagedAddress
+			var err error
+			if w.db != nil {
+				addrInfo, err = w.Manager.Address(addrmgrNs, addr)
+			} else {
+				addrInfo, err = w.AddressInfo(addr)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -79,17 +87,10 @@ func (w *Wallet) ImportP2SHRedeemScript(
 	script []byte) (*address.AddressScriptHash, error) {
 
 	var p2shAddr *address.AddressScriptHash
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+	importScript := func(
+		importer func(*waddrmgr.ScopedKeyManager) (
+			waddrmgr.ManagedScriptAddress, error)) error {
 
-		// TODO(oga) blockstamp current block?
-		bs := &waddrmgr.BlockStamp{
-			Hash:   *w.ChainParams().GenesisHash,
-			Height: 0,
-		}
-
-		// As this is a regular P2SH script, we'll import this into the
-		// BIP0044 scope.
 		bip44Mgr, err := w.Manager.FetchScopedKeyManager(
 			waddrmgr.KeyScopeBIP0084,
 		)
@@ -97,16 +98,12 @@ func (w *Wallet) ImportP2SHRedeemScript(
 			return err
 		}
 
-		addrInfo, err := bip44Mgr.ImportScript(addrmgrNs, script, bs)
+		addrInfo, err := importer(bip44Mgr)
 		if err != nil {
-			// Don't care if it's already there, but still have to
-			// set the p2shAddr since the address manager didn't
-			// return anything useful.
 			if waddrmgr.IsError(err, waddrmgr.ErrDuplicateAddress) {
-				// This function will never error as it always
-				// hashes the script to the correct length.
-				p2shAddr, _ = address.NewAddressScriptHash(script,
-					w.chainParams)
+				p2shAddr, _ = address.NewAddressScriptHash(
+					script, w.chainParams,
+				)
 				return nil
 			}
 			return err
@@ -114,12 +111,56 @@ func (w *Wallet) ImportP2SHRedeemScript(
 
 		castAddr, ok := addrInfo.Address().(*address.AddressScriptHash)
 		if !ok {
-			return fmt.Errorf("unexpected address type: %T", addrInfo.Address())
+			return fmt.Errorf(
+				"unexpected address type: %T", addrInfo.Address(),
+			)
 		}
-
 		p2shAddr = castAddr
 
 		return nil
-	})
+	}
+
+	var err error
+	if w.db != nil {
+		err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+			addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+			// TODO(oga) blockstamp current block?
+			bs := &waddrmgr.BlockStamp{
+				Hash:   *w.ChainParams().GenesisHash,
+				Height: 0,
+			}
+
+			return importScript(func(manager *waddrmgr.ScopedKeyManager) (
+				waddrmgr.ManagedScriptAddress, error) {
+
+				return manager.ImportScript(addrmgrNs, script, bs)
+			})
+		})
+	} else {
+		err = w.store.UpdateOnce(
+			context.Background(),
+			func(tx walletstore.ReadWriteTx) error {
+				bs := &waddrmgr.BlockStamp{
+					Hash:      *w.ChainParams().GenesisHash,
+					Height:    0,
+					Timestamp: w.ChainParams().GenesisBlock.Header.Timestamp,
+				}
+
+				return importScript(
+					func(manager *waddrmgr.ScopedKeyManager) (
+						waddrmgr.ManagedScriptAddress, error) {
+
+						return manager.ImportScriptFromStore(
+							tx.Addr(), script, bs,
+						)
+					},
+				)
+			}, func() {
+				p2shAddr = nil
+			},
+		)
+	}
+	w.refreshStartBlockAfterAmbiguous(err)
 	return p2shAddr, err
 }

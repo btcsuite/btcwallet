@@ -75,6 +75,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.detachMinedTransactionStmt, err = db.PrepareContext(ctx, DetachMinedTransaction); err != nil {
 		return nil, fmt.Errorf("error preparing query DetachMinedTransaction: %w", err)
 	}
+	if q.ensureBlockHeightStmt, err = db.PrepareContext(ctx, EnsureBlockHeight); err != nil {
+		return nil, fmt.Errorf("error preparing query EnsureBlockHeight: %w", err)
+	}
 	if q.getAccountStmt, err = db.PrepareContext(ctx, GetAccount); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAccount: %w", err)
 	}
@@ -376,6 +379,11 @@ func (q *Queries) Close() error {
 	if q.detachMinedTransactionStmt != nil {
 		if cerr := q.detachMinedTransactionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing detachMinedTransactionStmt: %w", cerr)
+		}
+	}
+	if q.ensureBlockHeightStmt != nil {
+		if cerr := q.ensureBlockHeightStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing ensureBlockHeightStmt: %w", cerr)
 		}
 	}
 	if q.getAccountStmt != nil {
@@ -789,6 +797,7 @@ type Queries struct {
 	deleteOutputLeaseAnyOwnerStmt       *sql.Stmt
 	deleteTransactionByIDStmt           *sql.Stmt
 	detachMinedTransactionStmt          *sql.Stmt
+	ensureBlockHeightStmt               *sql.Stmt
 	getAccountStmt                      *sql.Stmt
 	getActiveCreditIDStmt               *sql.Stmt
 	getAddressStmt                      *sql.Stmt
@@ -883,6 +892,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteOutputLeaseAnyOwnerStmt:       q.deleteOutputLeaseAnyOwnerStmt,
 		deleteTransactionByIDStmt:           q.deleteTransactionByIDStmt,
 		detachMinedTransactionStmt:          q.detachMinedTransactionStmt,
+		ensureBlockHeightStmt:               q.ensureBlockHeightStmt,
 		getAccountStmt:                      q.getAccountStmt,
 		getActiveCreditIDStmt:               q.getActiveCreditIDStmt,
 		getAddressStmt:                      q.getAddressStmt,

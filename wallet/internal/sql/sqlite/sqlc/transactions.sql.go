@@ -68,7 +68,8 @@ const GetMinedTransactionByIncidence = `-- name: GetMinedTransactionByIncidence 
 SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = ?1
   AND t.tx_hash = ?2
   AND t.block_height = ?3
@@ -107,7 +108,8 @@ const GetMinedTransactionDetails = `-- name: GetMinedTransactionDetails :one
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ?1
@@ -159,7 +161,8 @@ func (q *Queries) GetMinedTransactionDetails(ctx context.Context, arg GetMinedTr
 const GetMinedTransactionID = `-- name: GetMinedTransactionID :one
 SELECT t.id
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = ?1
   AND t.tx_hash = ?2
   AND t.block_height = cast(?3 AS INTEGER)
@@ -189,7 +192,8 @@ const GetTransactionDetailsByHash = `-- name: GetTransactionDetailsByHash :one
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.tx_hash = ?
@@ -233,7 +237,8 @@ const GetTransactionDetailsByID = `-- name: GetTransactionDetailsByID :one
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.id = ?
@@ -320,7 +325,8 @@ const GetUnminedTransactionDetails = `-- name: GetUnminedTransactionDetails :one
 SELECT t.id, t.raw_tx, t.received_unix, t.block_height,
        t.confirmed_order, b.header_hash, b.block_timestamp, l.label
 FROM transactions AS t
-LEFT JOIN blocks AS b ON b.block_height = t.block_height
+LEFT JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 LEFT JOIN transaction_labels AS l
     ON l.wallet_id = t.wallet_id AND l.tx_hash = t.tx_hash
 WHERE t.wallet_id = ? AND t.tx_hash = ? AND t.block_height IS NULL
@@ -426,7 +432,8 @@ SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = ?1
   AND t.block_height BETWEEN cast(?2 AS INTEGER)
                          AND cast(?3 AS INTEGER)
@@ -533,7 +540,8 @@ SELECT t.id, t.wallet_id, t.tx_hash, t.raw_tx, t.received_unix,
        t.block_height, t.confirmed_order, t.is_coinbase,
        b.header_hash, b.block_timestamp
 FROM transactions AS t
-INNER JOIN blocks AS b ON b.block_height = t.block_height
+INNER JOIN wallet_blocks AS b
+    ON b.wallet_id = t.wallet_id AND b.block_height = t.block_height
 WHERE t.wallet_id = ?1
   AND t.block_height BETWEEN cast(?2 AS INTEGER)
                          AND cast(?3 AS INTEGER)
@@ -641,7 +649,9 @@ func (q *Queries) ListTransactionIncidencesByHash(ctx context.Context, arg ListT
 const ListUnminedSpenders = `-- name: ListUnminedSpenders :many
 SELECT t.id, t.tx_hash, i.input_index
 FROM transaction_inputs AS i
-INNER JOIN transactions AS t ON t.id = i.spending_tx_id
+INNER JOIN transactions AS t
+    ON t.id = i.spending_tx_id
+    AND t.wallet_id = ?1
 WHERE t.wallet_id = ?1
   AND t.block_height IS NULL
   AND i.prev_tx_hash = ?2
@@ -694,7 +704,9 @@ func (q *Queries) ListUnminedSpenders(ctx context.Context, arg ListUnminedSpende
 const ListUnminedSpendersByPrevHash = `-- name: ListUnminedSpendersByPrevHash :many
 SELECT DISTINCT spender.id, spender.tx_hash
 FROM transaction_inputs AS input
-INNER JOIN transactions AS spender ON spender.id = input.spending_tx_id
+INNER JOIN transactions AS spender
+    ON spender.id = input.spending_tx_id
+    AND spender.wallet_id = ?1
 WHERE spender.wallet_id = ?1
   AND spender.block_height IS NULL
   AND input.prev_tx_hash = ?2

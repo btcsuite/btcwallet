@@ -283,6 +283,11 @@ type ScopedKeyManager struct {
 	// addrs is a cached map of all the addresses that we currently
 	// manage.
 	addrs map[addrKey]ManagedAddress
+	used  map[addrKey]bool
+
+	// storeAddrs indexes the same cached addresses by their durable SHA256
+	// identifier for store-backed account iteration.
+	storeAddrs map[string]ManagedAddress
 
 	// acctInfo houses information about accounts including what is needed
 	// to generate deterministic chained keys for each created account.
@@ -563,6 +568,342 @@ func (s *ScopedKeyManager) loadAccountInfo(ns walletdb.ReadBucket,
 	// Add it to the cache and return it when everything is successful.
 	s.acctInfo[account] = acctInfo
 	return acctInfo, nil
+}
+
+// accountInfoFromState decrypts the account material represented by durable
+// store state. Private material is restored when the manager is unlocked.
+func (s *ScopedKeyManager) accountInfoFromState(
+	state AccountState) (*accountInfo, error) {
+
+	if len(state.EncryptedPubKey) == 0 {
+		return nil, managerError(
+			ErrDatabase, fmt.Sprintf("account %d has no public key",
+				state.Account), nil,
+		)
+	}
+
+	serializedKey, err := s.rootManager.cryptoKeyPub.Decrypt(
+		state.EncryptedPubKey,
+	)
+	if err != nil {
+		str := fmt.Sprintf("failed to decrypt public key for account %d",
+			state.Account)
+		return nil, managerError(ErrCrypto, str, err)
+	}
+	defer zero.Bytes(serializedKey)
+
+	accountKey, err := hdkeychain.NewKeyFromString(string(serializedKey))
+	if err != nil {
+		str := fmt.Sprintf("failed to decode public key for account %d",
+			state.Account)
+		return nil, managerError(ErrKeyChain, str, err)
+	}
+
+	var accountType accountType
+	switch state.Type {
+	case AccountDefault:
+		accountType = accountDefault
+
+	case AccountWatchOnly:
+		accountType = accountWatchOnly
+
+	default:
+		return nil, managerError(
+			ErrDatabase, fmt.Sprintf("unsupported account type %d",
+				state.Type), nil,
+		)
+	}
+
+	var schema *ScopeAddrSchema
+	if state.AddrSchema != nil {
+		copySchema := *state.AddrSchema
+		schema = &copySchema
+	}
+
+	info := &accountInfo{
+		acctName:             state.Name,
+		acctType:             accountType,
+		acctKeyEncrypted:     copyBytes(state.EncryptedPrivKey),
+		acctKeyPub:           accountKey,
+		nextExternalIndex:    state.NextExternalIndex,
+		nextInternalIndex:    state.NextInternalIndex,
+		addrSchema:           schema,
+		masterKeyFingerprint: state.MasterKeyFingerprint,
+	}
+
+	watchOnly := s.rootManager.WatchOnly() ||
+		len(state.EncryptedPrivKey) == 0
+	if s.rootManager.IsLocked() || watchOnly {
+		return info, nil
+	}
+
+	serializedKey, err = s.rootManager.cryptoKeyPriv.Decrypt(
+		state.EncryptedPrivKey,
+	)
+	if err != nil {
+		str := fmt.Sprintf("failed to decrypt private key for account %d",
+			state.Account)
+		return nil, managerError(ErrCrypto, str, err)
+	}
+	defer zero.Bytes(serializedKey)
+
+	info.acctKeyPriv, err = hdkeychain.NewKeyFromString(
+		string(serializedKey),
+	)
+	if err != nil {
+		str := fmt.Sprintf("failed to decode private key for account %d",
+			state.Account)
+		return nil, managerError(ErrKeyChain, str, err)
+	}
+
+	return info, nil
+}
+
+// loadStoreState reads and reconstructs account material, indexes, and every
+// supported managed address needed by a store-backed manager.
+func (s *ScopedKeyManager) loadStoreState(store ManagerReadStore) error {
+	accounts, err := store.Accounts(s.scope)
+	if err != nil {
+		return err
+	}
+	addresses, err := store.ActiveAddresses(s.scope)
+	if err != nil {
+		return err
+	}
+
+	return s.loadStoreSnapshot(accounts, addresses)
+}
+
+// loadStoreSnapshot reconstructs complete scoped cache state from detached
+// durable account and address rows.
+func (s *ScopedKeyManager) loadStoreSnapshot(accounts []AccountState,
+	addresses []AddressState) error {
+
+	for _, state := range accounts {
+		// The imported account has no HD public key and is outside this
+		// external-address PoC.
+		if state.Account == ImportedAddrAccount {
+			continue
+		}
+
+		info, err := s.accountInfoFromState(state)
+		if err != nil {
+			return err
+		}
+		s.acctInfo[state.Account] = info
+	}
+
+	for _, state := range addresses {
+		managed, err := s.managedAddressFromStoreState(state)
+		if err != nil {
+			return err
+		}
+
+		s.addrs[addrKey(managed.Address().ScriptAddress())] = managed
+		s.storeAddrs[string(state.Hash)] = managed
+		s.used[addrKey(managed.Address().ScriptAddress())] = state.Used
+
+		if state.Type == AddressChain {
+			info := s.acctInfo[state.Account]
+			switch *state.Branch {
+			case ExternalBranch:
+				if *state.Index+1 == info.nextExternalIndex {
+					info.lastExternalAddr = managed
+				}
+
+			case InternalBranch:
+				if *state.Index+1 == info.nextInternalIndex {
+					info.lastInternalAddr = managed
+				}
+			}
+		}
+	}
+
+	for account, info := range s.acctInfo {
+		if info.nextExternalIndex > 0 && info.lastExternalAddr == nil {
+			str := fmt.Sprintf("account %d last external address is missing",
+				account)
+			return managerError(ErrDatabase, str, nil)
+		}
+		if info.nextInternalIndex > 0 && info.lastInternalAddr == nil {
+			str := fmt.Sprintf("account %d last internal address is missing",
+				account)
+			return managerError(ErrDatabase, str, nil)
+		}
+	}
+
+	return nil
+}
+
+// accountPropertiesFromInfo returns the existing caller-facing account shape
+// from store-backed account cache state.
+func (s *ScopedKeyManager) accountPropertiesFromInfo(account uint32,
+	info *accountInfo) (*AccountProperties, error) {
+
+	props := &AccountProperties{
+		AccountNumber:        account,
+		AccountName:          info.acctName,
+		ExternalKeyCount:     info.nextExternalIndex,
+		InternalKeyCount:     info.nextInternalIndex,
+		AccountPubKey:        info.acctKeyPub,
+		MasterKeyFingerprint: info.masterKeyFingerprint,
+		KeyScope:             s.scope,
+		IsWatchOnly: s.rootManager.WatchOnly() ||
+			len(info.acctKeyEncrypted) == 0,
+		AddrSchema: info.addrSchema,
+	}
+
+	if info.acctType == accountDefault && IsDefaultScope(s.scope) {
+		var err error
+		props.AccountPubKey, err = s.cloneKeyWithVersion(info.acctKeyPub)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve account public key: %w",
+				err)
+		}
+	}
+
+	return props, nil
+}
+
+// refreshStoreLastAddress reconstructs the last address for one durable branch
+// while retaining private derivation whenever the manager is unlocked.
+func (s *ScopedKeyManager) refreshStoreLastAddress(info *accountInfo,
+	account, branch, nextIndex uint32) (ManagedAddress, error) {
+
+	if nextIndex == 0 {
+		return nil, nil
+	}
+
+	watchOnly := s.rootManager.WatchOnly() ||
+		len(info.acctKeyEncrypted) == 0
+	private := !s.rootManager.IsLocked() && !watchOnly
+	key, err := s.deriveKey(info, branch, nextIndex-1, private)
+	if err != nil {
+		return nil, err
+	}
+
+	managed, err := s.keyToManaged(key, DerivationPath{
+		InternalAccount:      account,
+		Account:              info.acctKeyPub.ChildIndex(),
+		Branch:               branch,
+		Index:                nextIndex - 1,
+		MasterKeyFingerprint: info.masterKeyFingerprint,
+	}, info)
+	if err != nil {
+		return nil, err
+	}
+
+	s.addrs[addrKey(managed.Address().ScriptAddress())] = managed
+	hash := sha256.Sum256(managed.Address().ScriptAddress())
+	s.storeAddrs[string(hash[:])] = managed
+	return managed, nil
+}
+
+// applyStoreAccountState refreshes mutable durable account metadata while
+// retaining the cached extended key objects and any decrypted private key.
+func (s *ScopedKeyManager) applyStoreAccountState(info *accountInfo,
+	state AccountState) error {
+
+	if info.nextExternalIndex != state.NextExternalIndex {
+		lastExternal, err := s.refreshStoreLastAddress(
+			info, state.Account, ExternalBranch,
+			state.NextExternalIndex,
+		)
+		if err != nil {
+			return err
+		}
+		info.lastExternalAddr = lastExternal
+	}
+
+	if info.nextInternalIndex != state.NextInternalIndex {
+		lastInternal, err := s.refreshStoreLastAddress(
+			info, state.Account, InternalBranch,
+			state.NextInternalIndex,
+		)
+		if err != nil {
+			return err
+		}
+		info.lastInternalAddr = lastInternal
+	}
+
+	info.nextExternalIndex = state.NextExternalIndex
+	info.nextInternalIndex = state.NextInternalIndex
+	info.acctName = state.Name
+	info.storeStale = false
+
+	return nil
+}
+
+// AccountPropertiesFromStore returns properties from the store-backed account
+// cache, loading durable state first if the cache was evicted.
+func (s *ScopedKeyManager) AccountPropertiesFromStore(
+	store ManagerReadStore, account uint32) (*AccountProperties, error) {
+	if account == ImportedAddrAccount {
+		_, err := store.Account(s.scope, account)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses, err := store.AccountAddresses(s.scope, account)
+		if err != nil {
+			return nil, err
+		}
+
+		return &AccountProperties{
+			AccountNumber:    account,
+			AccountName:      ImportedAddrAccountName,
+			ImportedKeyCount: uint32(len(addresses)),
+			KeyScope:         s.scope,
+			IsWatchOnly:      s.rootManager.WatchOnly(),
+		}, nil
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	info := s.acctInfo[account]
+	if info == nil || info.storeStale {
+		state, err := store.Account(s.scope, account)
+		if err != nil {
+			return nil, err
+		}
+
+		if info == nil {
+			info, err = s.accountInfoFromState(state)
+			if err != nil {
+				return nil, err
+			}
+			s.acctInfo[account] = info
+		} else {
+			err = s.applyStoreAccountState(info, state)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return s.accountPropertiesFromInfo(account, info)
+}
+
+// markAccountCacheStale requires the account's mutable metadata to be refreshed
+// from durable state before it is next reported.
+func (s *ScopedKeyManager) markAccountCacheStale(account uint32) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	if info := s.acctInfo[account]; info != nil {
+		info.storeStale = true
+	}
+}
+
+// NextExternalAddressFromStore derives and persists one external address for
+// an existing account. Only commit-time index and address deltas are published
+// to the account cache.
+func (s *ScopedKeyManager) NextExternalAddressFromStore(
+	tx ManagerReadWriteTx, account uint32) (ManagedAddress,
+	*AccountProperties, error) {
+
+	return s.nextAddressFromStore(tx, account, false)
 }
 
 // AccountProperties returns properties associated with the account, such as
@@ -1066,7 +1407,8 @@ func (s *ScopedKeyManager) nextAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
+			//nolint:staticcheck
+			key, err := branchKey.DeriveNonStandard(nextIndex)
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.
@@ -1296,7 +1638,8 @@ func (s *ScopedKeyManager) extendAddresses(ns walletdb.ReadWriteBucket,
 		var nextKey *hdkeychain.ExtendedKey
 		for {
 			// Derive the next child in the external chain branch.
-			key, err := branchKey.DeriveNonStandard(nextIndex) // nolint:staticcheck
+			//nolint:staticcheck
+			key, err := branchKey.DeriveNonStandard(nextIndex)
 			if err != nil {
 				// When this particular child is invalid, skip to the
 				// next index.
@@ -1757,7 +2100,8 @@ func (s *ScopedKeyManager) NewAccountWatchingOnly(ns walletdb.ReadWriteBucket,
 	return account, nil
 }
 
-// newAccountWatchingOnly is similar to newAccount, but for watching-only wallets.
+// newAccountWatchingOnly is similar to newAccount, but for watching-only
+// wallets.
 //
 // The master key fingerprint denotes the fingerprint of the root key
 // corresponding to the account public key (also known as the key with
@@ -2099,8 +2443,8 @@ func (s *ScopedKeyManager) toImportedPrivateManagedAddress(
 	return managedAddr, nil
 }
 
-// toPublicManagedAddress converts an imported public key to an imported managed
-// address.
+// toImportedPublicManagedAddress converts an imported public key to an imported
+// managed address.
 func (s *ScopedKeyManager) toImportedPublicManagedAddress(
 	pubKey *btcec.PublicKey, compressed bool) (*managedAddress, error) {
 
@@ -2169,6 +2513,13 @@ func (s *ScopedKeyManager) ImportWitnessScript(ns walletdb.ReadWriteBucket,
 func (s *ScopedKeyManager) ImportTaprootScript(ns walletdb.ReadWriteBucket,
 	tapscript *Tapscript, bs *BlockStamp, witnessVersion byte,
 	isSecretScript bool) (ManagedTaprootScriptAddress, error) {
+
+	if witnessVersion != witnessVersionV1 {
+		return nil, fmt.Errorf(
+			"invalid witness version %d for taproot script",
+			witnessVersion,
+		)
+	}
 
 	// Make sure we have everything we need to calculate the script root and
 	// tweak the taproot key.
@@ -2360,6 +2711,12 @@ func (s *ScopedKeyManager) LookupAccount(ns walletdb.ReadBucket, name string) (u
 // fetchUsed returns true if the provided address id was flagged used.
 func (s *ScopedKeyManager) fetchUsed(ns walletdb.ReadBucket,
 	addressID []byte) bool {
+	if ns == nil {
+		s.mtx.RLock()
+		defer s.mtx.RUnlock()
+
+		return s.used[addrKey(addressID)]
+	}
 
 	return fetchAddressUsed(ns, &s.scope, addressID)
 }
