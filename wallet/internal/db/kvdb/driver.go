@@ -3,12 +3,35 @@ package kvdb
 import (
 	"sync"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/walletdb"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Register bdb.
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
+
+// Config is the one configuration source for the kvdb adapter.
+//
+// The database is supplied already open: the Manager owns the physical handle
+// and closes it, so the adapter neither creates the file nor closes it.
+type Config struct {
+	// DB is the already-open walletdb database.
+	DB walletdb.DB
+
+	// ChainParams identifies the wallet chain parameters.
+	ChainParams *chaincfg.Params
+
+	// PubPassphrase is the public passphrase protecting waddrmgr's public
+	// metadata. It is required to open a wallet in the legacy
+	// dual-encryption format.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. This field will be removed with kvdb
+	// support.
+	PubPassphrase []byte
+}
 
 // Store is the kvdb (walletdb) implementation of the db.Store interface.
 //
