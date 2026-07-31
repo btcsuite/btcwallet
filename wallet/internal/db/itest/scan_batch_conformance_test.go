@@ -2,6 +2,7 @@
 
 package itest
 
+//nolint:staticcheck // This test intentionally covers the legacy kvdb backend.
 import (
 	"context"
 	"path/filepath"
