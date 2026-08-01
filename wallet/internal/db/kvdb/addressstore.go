@@ -386,7 +386,13 @@ func resolvedAddressInfo(ns walletdb.ReadBucket,
 		return nil, fmt.Errorf("lookup address: %w", err)
 	}
 
-	manager, account, err := resolver.AddrAccount(ns, addr)
+	// Look the account up by the address waddrmgr actually persisted, not by
+	// the one the caller passed. ScopedKeyManager.Address normalizes a P2PK
+	// address to its P2PKH form before reading the row, but AddrAccount does
+	// not, so handing it the original address would miss every wallet-owned
+	// P2PK address — its serialized-pubkey lookup cannot match a pubkey-hash
+	// row.
+	manager, account, err := resolver.AddrAccount(ns, managedAddr.Address())
 	if err != nil {
 		return nil, fmt.Errorf("lookup address account: %w", err)
 	}
@@ -453,12 +459,171 @@ func (s *Store) IterAddresses(ctx context.Context,
 	)
 }
 
-// GetAddressSecret is not yet implemented for kvdb.
-func (s *Store) GetAddressSecret(ctx context.Context,
-	_ db.GetAddressSecretQuery) (*db.AddressSecret, error) {
-
-	return nil, notImplemented(ctx, "GetAddressSecret")
+// addressSecretReader is the narrow slice of *waddrmgr.ScopedKeyManager that
+// GetAddressSecret needs. ManagedAddressSecret lives on the concrete type
+// rather than the AccountStore interface, so kvdb asserts to this local
+// interface (mirroring accountSecretReader) instead of widening AccountStore.
+type addressSecretReader interface {
+	// ManagedAddressSecret returns the encrypted private key and encrypted
+	// script for an address, both nil when the address exists but carries
+	// no secret material, plus whether the script ciphertext is encrypted
+	// under the script crypto key (CKTScript) rather than the public crypto
+	// key (CKTPublic).
+	ManagedAddressSecret(ns walletdb.ReadBucket,
+		addr address.Address) (encPriv, encScript []byte,
+		scriptSecret bool, err error)
 }
+
+// GetAddressSecret retrieves the encrypted secret material for an address.
+// kvdb is queried by script pubkey: it converts the script to a standard
+// address, resolves the owning scoped key manager across the active scopes,
+// and reads the persisted ciphertext without decrypting it. An address that
+// resolves but has no secret, and one that does not resolve at all, both map
+// to ErrSecretNotFound.
+func (s *Store) GetAddressSecret(ctx context.Context,
+	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
+
+	// A missing selector is a malformed query, not a missing secret, and
+	// must read the same on every backend.
+	err := query.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	// The deprecated kvdb address IDs are synthetic per-account ordinals,
+	// not stable wallet-wide identities. Only its script selector is safe.
+	if query.AddressID != nil {
+		return nil, db.ErrInvalidAddressQuery
+	}
+
+	// Honor cancellation before entering walletdb so a canceled signing
+	// request never reads secret material.
+	err = checkContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	addr := addressFromScript(query.ScriptPubKey, s.addrStore.ChainParams())
+	if addr == nil {
+		return nil, db.ErrSecretNotFound
+	}
+
+	var secret *db.AddressSecret
+
+	err = walletdb.View(s.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+		if ns == nil {
+			return errMissingAddrmgrNamespace
+		}
+
+		var err error
+
+		secret, err = s.buildAddressSecret(ns, addr)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Re-check after the read: the context may have been canceled while the
+	// lookup ran, and a canceled request must not receive secret material.
+	err = checkContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return secret, nil
+}
+
+// buildAddressSecret resolves the owning scoped key manager for addr within
+// the given namespace and returns its encrypted secret material. It is the
+// read body of GetAddressSecret, factored out so the exported method stays
+// thin. An address that resolves but carries no secret maps to
+// ErrSecretNotFound.
+func (s *Store) buildAddressSecret(ns walletdb.ReadBucket,
+	addr address.Address) (*db.AddressSecret, error) {
+
+	// Resolve the managed address first and look the account up by the
+	// address waddrmgr actually persisted. ScopedKeyManager.Address
+	// normalizes a P2PK address to its P2PKH form before reading the row,
+	// but AddrAccount does not, so handing it the caller's original address
+	// would miss every wallet-owned P2PK address — its serialized-pubkey
+	// lookup cannot match a pubkey-hash row. resolvedAddressInfo resolves
+	// the same way for the info path.
+	managedAddr, err := s.addrStore.Address(ns, addr)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, db.ErrSecretNotFound
+		}
+
+		return nil, fmt.Errorf("lookup address: %w", err)
+	}
+
+	resolvedAddr := managedAddr.Address()
+
+	// AddrAccount iterates the active scoped managers and returns the one
+	// that owns the address, so the caller need not know its scope in
+	// advance.
+	scopedMgr, _, err := s.addrStore.AddrAccount(ns, resolvedAddr)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, db.ErrSecretNotFound
+		}
+
+		return nil, fmt.Errorf("lookup address account: %w", err)
+	}
+
+	reader, ok := scopedMgr.(addressSecretReader)
+	if !ok {
+		return nil, errScopedAddressSecretUnsupported
+	}
+
+	// The third result is waddrmgr's per-address secrecy flag, which the
+	// store contract reports so the caller decrypts under the key the row
+	// was actually written with. waddrmgr already applies the right rule
+	// per address type: P2SH scripts are always secret, while witness and
+	// taproot rows carry a persisted flag.
+	encPriv, encScript, scriptIsSecret, err := reader.ManagedAddressSecret(
+		ns, resolvedAddr,
+	)
+	if err != nil {
+		if waddrmgr.IsError(err, waddrmgr.ErrAddressNotFound) {
+			return nil, db.ErrSecretNotFound
+		}
+
+		return nil, fmt.Errorf("read address secret: %w", err)
+	}
+
+	// A resolved address with neither ciphertext has no secret to return,
+	// which the contract represents as ErrSecretNotFound.
+	if encPriv == nil && encScript == nil {
+		return nil, db.ErrSecretNotFound
+	}
+
+	return &db.AddressSecret{
+		// kvdb has no synthetic address row identity.
+		AddressID:        0,
+		EncryptedPrivKey: encPriv,
+		EncryptedScript:  encScript,
+
+		// Report the crypto key waddrmgr encrypted the script under so
+		// the caller decrypts it with the matching key: script imports
+		// with isSecretScript=false persist under the public crypto key
+		// (CKTPublic), while secret imports use the script crypto key.
+		ScriptIsSecret: scriptIsSecret,
+	}, nil
+}
+
+// errScopedAddressSecretUnsupported is returned when a mocked or alternate
+// scoped manager does not expose kvdb's encrypted-address-secret reader.
+var errScopedAddressSecretUnsupported = errors.New(
+	"kvdb: scoped address secret export unsupported",
+)
+
+// compile-time guard: the concrete waddrmgr scoped manager satisfies the
+// narrow reader interface GetAddressSecret asserts to.
+var _ addressSecretReader = (*waddrmgr.ScopedKeyManager)(nil)
 
 // ListAddressTypes returns the static set of address types supported by the
 // store contract.
@@ -646,6 +811,13 @@ func (s *Store) importScriptAddress(ns walletdb.ReadWriteBucket,
 	manager waddrmgr.AccountStore,
 	params db.NewImportedAddressParams) (waddrmgr.ManagedAddress, error) {
 
+	// Decrypt the transport blob under the crypto key the wallet sealed it
+	// with. The wallet always asks its vault for the public crypto key
+	// (CKTPublic) — see encryptTaprootScript — because the scripts it
+	// imports are public spending data, not secret key material, and
+	// CKTPublic is the one class a locked or watch-only manager can still
+	// serve. Watch-only mode does not enter into it: it is a property of
+	// the wallet, not of the blob.
 	script, err := s.addrStore.Decrypt(
 		waddrmgr.CKTPublic, params.EncryptedScript,
 	)
@@ -653,8 +825,17 @@ func (s *Store) importScriptAddress(ns walletdb.ReadWriteBucket,
 		return nil, fmt.Errorf("decrypt imported script: %w", err)
 	}
 
+	// The manager re-encrypts the plaintext under the crypto key implied by
+	// isSecretScript, so it must record the same secrecy the transport class
+	// declared: public in, public out. Persisting these rows secret would
+	// both contradict the CKTPublic blob they were built from and make them
+	// unreadable while the wallet is locked, which is exactly when a
+	// retained script is needed to recognize an incoming spend.
 	blockStamp := s.addrStore.SyncedTo()
 	switch params.AddressType {
+	// A legacy P2SH import is always secret in waddrmgr, so a watch-only
+	// manager rejects it with ErrWatchingOnly. That is the legacy contract:
+	// the manager holds no key it may store a P2SH redeem script under.
 	case db.ScriptHash:
 		return importScriptHashAddress(
 			ns, manager, script, &blockStamp,
@@ -695,7 +876,8 @@ func importScriptHashAddress(ns walletdb.ReadWriteBucket,
 	return managedAddr, nil
 }
 
-// importWitnessScriptAddress imports legacy P2WSH script material.
+// importWitnessScriptAddress imports legacy P2WSH script material as a
+// non-secret script, matching the CKTPublic blob it was built from.
 func importWitnessScriptAddress(ns walletdb.ReadWriteBucket,
 	manager waddrmgr.AccountStore, script []byte,
 	blockStamp *waddrmgr.BlockStamp) (waddrmgr.ManagedAddress, error) {
@@ -710,7 +892,8 @@ func importWitnessScriptAddress(ns walletdb.ReadWriteBucket,
 	return managedAddr, nil
 }
 
-// importTaprootScriptAddress imports legacy taproot script material.
+// importTaprootScriptAddress imports legacy taproot script material as a
+// non-secret script, as in importWitnessScriptAddress.
 func importTaprootScriptAddress(ns walletdb.ReadWriteBucket,
 	manager waddrmgr.AccountStore, script []byte,
 	blockStamp *waddrmgr.BlockStamp) (waddrmgr.ManagedAddress, error) {
