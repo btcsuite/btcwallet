@@ -78,6 +78,9 @@ func fingerprintDeriveFnFixture(t *testing.T,
 // fingerprintDeriveFnFixture stamps on every derived account.
 const testFingerprintValue uint32 = 0xC0DEC0DE
 
+// fpDerivedAccountName is the derived-account name the fingerprint tests share.
+const fpDerivedAccountName = "fp-derived"
+
 // TestCreateDerivedAccountPersistsMasterKeyFingerprint verifies a
 // derived account's master fingerprint round-trips through the
 // kvdb side bucket independently of waddrmgr's default-account row
@@ -97,7 +100,7 @@ func TestCreateDerivedAccountPersistsMasterKeyFingerprint(t *testing.T) {
 	info, err := store.CreateDerivedAccount(t.Context(),
 		db.CreateDerivedAccountParams{
 			Scope: scope,
-			Name:  "fp-derived",
+			Name:  fpDerivedAccountName,
 		},
 		deriveFn,
 	)
@@ -107,7 +110,7 @@ func TestCreateDerivedAccountPersistsMasterKeyFingerprint(t *testing.T) {
 
 	// Round-trip via Store.GetAccount — the value must come back
 	// from the side bucket, not from waddrmgr's row.
-	name := "fp-derived"
+	name := fpDerivedAccountName
 	got, err := store.GetAccount(t.Context(), db.GetAccountQuery{
 		Scope: scope,
 		Name:  &name,
