@@ -585,6 +585,10 @@ func TestAddressStoreImportTaprootScript(t *testing.T) {
 	addrStore := newSpendableAddrMgr(t, dbConn)
 	store := NewStore(dbConn, nil, addrStore)
 
+	// Deriving the taproot key needs an unlocked manager; the transport blob
+	// travels under the public crypto key, as the wallet seals it.
+	unlockAddrStore(t, dbConn, addrStore)
+
 	tapscript, pkScript := testTaprootScript(t, addrStore)
 	encodedScript, err := waddrmgr.EncodeTaprootScript(&tapscript)
 	require.NoError(t, err)
