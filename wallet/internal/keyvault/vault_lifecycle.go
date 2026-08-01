@@ -1,7 +1,6 @@
 package keyvault
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -216,18 +215,35 @@ func decryptCryptoKey(masterPrivateKey *snacl.SecretKey,
 	return cryptoKey, nil
 }
 
-// ChangePassphrase rotates persisted wallet secrets to the new private
-// passphrase and keeps the existing unlocked runtime state unchanged.
+// ChangePassphrase re-wraps the persisted wallet secrets from oldPassphrase to
+// newPassphrase. It preserves the vault's original locked/unlocked state: the
+// runtime keys held while unlocked are never touched, and a locked vault leaves
+// no decrypted state behind because the rotation reads and re-encrypts only the
+// persisted ciphertext.
 func (v *WalletVault) ChangePassphrase(ctx context.Context,
-	newPassphrase []byte) error {
+	params ChangePassphraseParams) error {
 
+	// Validate before touching any secret. A SQL wallet has no public
+	// passphrase, so a request naming one cannot be served in full and must
+	// leave the persisted state untouched rather than rotating the private
+	// half and then reporting failure.
+	if params.PublicOld != nil {
+		return fmt.Errorf("wallet %d vault ChangePassphrase: %w",
+			v.walletID, ErrPublicPassphraseUnsupported)
+	}
+
+	if params.PrivateOld == nil {
+		return nil
+	}
+
+	oldPassphrase, newPassphrase := params.PrivateOld, params.PrivateNew
+
+	// Hold the lock for the whole rotation so it serializes against
+	// Lock/Unlock/Encrypt/Decrypt. The rotation itself never reads or
+	// writes v.unlockedState, so the vault's locked/unlocked state is
+	// preserved regardless of the outcome.
 	v.mtx.Lock()
 	defer v.mtx.Unlock()
-
-	if v.unlockedState == nil {
-		return fmt.Errorf("wallet %d vault ChangePassphrase: %w",
-			v.walletID, ErrVaultLocked)
-	}
 
 	secrets, err := v.store.GetWalletSecrets(ctx, v.walletID)
 	if err != nil {
@@ -235,22 +251,12 @@ func (v *WalletVault) ChangePassphrase(ctx context.Context,
 			"get secrets: %w", v.walletID, err)
 	}
 
-	updateParams, err := v.makeRotatedWalletSecrets(secrets, newPassphrase)
+	updateParams, err := v.makeRotatedWalletSecrets(
+		secrets, oldPassphrase, newPassphrase,
+	)
 	if err != nil {
 		return fmt.Errorf("wallet %d vault ChangePassphrase: "+
 			"rotate secrets: %w", v.walletID, err)
-	}
-
-	// Validate that the rotated secrets derive the same runtime keys before
-	// persisting them. This prevents storing secrets that would leave the vault
-	// unable to reproduce its current key material.
-	//
-	// This should only fail if there is a bug in this rotation path or in the
-	// underlying cryptographic implementation.
-	err = v.validateRotatedWalletSecrets(updateParams, newPassphrase)
-	if err != nil {
-		return fmt.Errorf("wallet %d vault ChangePassphrase: "+
-			"validate rotated secrets: %w", v.walletID, err)
 	}
 
 	err = v.store.UpdateWalletSecrets(ctx, updateParams)
@@ -262,84 +268,53 @@ func (v *WalletVault) ChangePassphrase(ctx context.Context,
 	return nil
 }
 
-// validateRotatedWalletSecrets confirms rotated persisted secrets decrypt with
-// the new passphrase to the same runtime keys already held in memory.
-func (v *WalletVault) validateRotatedWalletSecrets(
-	params db.UpdateWalletSecretsParams, passphrase []byte) error {
-
-	updatedSecrets := db.WalletSecrets{
-		MasterPrivParams:         params.MasterPrivParams,
-		EncryptedCryptoPrivKey:   params.EncryptedCryptoPrivKey,
-		EncryptedCryptoScriptKey: params.EncryptedCryptoScriptKey,
-		EncryptedMasterHdPrivKey: params.EncryptedMasterHdPrivKey,
-	}
-
-	validatedState, err := decryptWalletSecrets(
-		&updatedSecrets, passphrase, v.watchOnly,
-	)
-	if err != nil {
-		return fmt.Errorf("decrypt rotated secrets: %w", err)
-	}
-	defer validatedState.zero()
-
-	if !unlockedStateEqual(v.unlockedState, validatedState) {
-		return fmt.Errorf("rotated secrets changed runtime keys: %w",
-			errUnexpectedState)
-	}
-
-	return nil
-}
-
-// unlockedStateEqual reports whether two unlocked states hold equal runtime
-// keys.
-func unlockedStateEqual(a, b *unlockedState) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-
-	if !bytes.Equal(a.cryptoKeyPrivate[:], b.cryptoKeyPrivate[:]) {
-		return false
-	}
-
-	if !bytes.Equal(a.cryptoKeyScript[:], b.cryptoKeyScript[:]) {
-		return false
-	}
-
-	if a.hdRootKey == nil || b.hdRootKey == nil {
-		return a.hdRootKey == b.hdRootKey
-	}
-
-	return a.hdRootKey.String() == b.hdRootKey.String()
-}
-
-// makeRotatedWalletSecrets creates a persisted wallet secret update encrypted
-// with a new private passphrase from the currently unlocked runtime state.
+// makeRotatedWalletSecrets validates the old private passphrase and re-encrypts
+// the persisted crypto keys under a master key derived from the new
+// passphrase. It mirrors CreateWalletSecrets: it derives the old master key
+// from the stored parameters (which validates oldPassphrase against the stored
+// digest), decrypts the persisted crypto key blobs with it, and re-encrypts
+// them under a freshly salted master key derived from newPassphrase. The master
+// HD private key ciphertext is carried forward unchanged because it is
+// encrypted under the crypto private key, not the passphrase.
 //
-// TODO(gus): wrap this with secret.Do from Go 1.26+ to avoid
-// leaking HD private key string material while waiting for GC.
+// A wrong oldPassphrase is reported as ErrInvalidPassphrase and no persisted
+// state is mutated. This does not read v.unlockedState, so it works whether the
+// vault is locked or unlocked.
+//
+// TODO(gus): wrap this with secret.Do from Go 1.26+ to avoid leaking decrypted
+// key material while waiting for GC.
 func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
-	newPassphrase []byte) (db.UpdateWalletSecretsParams, error) {
+	oldPassphrase, newPassphrase []byte) (db.UpdateWalletSecretsParams,
+	error) {
 
 	if secrets == nil {
 		return db.UpdateWalletSecretsParams{},
 			fmt.Errorf("missing wallet secrets: %w", errUnexpectedState)
 	}
 
-	// First, we need to load the old key parameters to be able to derive the
-	// new key.
-	var currentMasterPrivateKey snacl.SecretKey
+	// Derive the old master private key from the stored parameters.
+	// DeriveKey validates oldPassphrase against the stored digest, so a
+	// wrong passphrase is rejected here before any secret material is
+	// touched.
+	var oldMasterPrivateKey snacl.SecretKey
 
-	err := currentMasterPrivateKey.Unmarshal(secrets.MasterPrivParams)
+	err := oldMasterPrivateKey.Unmarshal(secrets.MasterPrivParams)
 	if err != nil {
 		return db.UpdateWalletSecretsParams{}, fmt.Errorf(
 			"unmarshal master private parameters: %w", err,
 		)
 	}
-	defer currentMasterPrivateKey.Zero()
+	defer oldMasterPrivateKey.Zero()
 
-	keyParams := currentMasterPrivateKey.Parameters
+	err = deriveMasterPrivateKey(&oldMasterPrivateKey, oldPassphrase)
+	if err != nil {
+		return db.UpdateWalletSecretsParams{}, err
+	}
 
-	// Second, generate the new key.
+	keyParams := oldMasterPrivateKey.Parameters
+
+	// Derive a new master private key from the new passphrase. NewSecretKey
+	// generates a fresh salt; the scrypt cost parameters are preserved.
 	newMasterPrivateKey, err := snacl.NewSecretKey(
 		&newPassphrase, keyParams.N, keyParams.R, keyParams.P,
 	)
@@ -349,15 +324,20 @@ func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
 	}
 	defer newMasterPrivateKey.Zero()
 
-	if v.watchOnly {
-		encryptedCryptoKeyScript, scriptErr := newMasterPrivateKey.Encrypt(
-			v.unlockedState.cryptoKeyScript[:],
-		)
-		if scriptErr != nil {
-			return db.UpdateWalletSecretsParams{},
-				fmt.Errorf("encrypt crypto key script: %w", scriptErr)
-		}
+	// Re-encrypt the script crypto key under the new master key. Every
+	// wallet, watch-only included, holds a script crypto key.
+	encryptedCryptoKeyScript, err := reEncryptCryptoKey(
+		&oldMasterPrivateKey, newMasterPrivateKey,
+		secrets.EncryptedCryptoScriptKey,
+	)
+	if err != nil {
+		return db.UpdateWalletSecretsParams{},
+			fmt.Errorf("re-encrypt crypto key script: %w", err)
+	}
 
+	// A watch-only wallet has no private crypto key or HD root material, so
+	// the script key is all it needs.
+	if v.watchOnly {
 		return db.UpdateWalletSecretsParams{
 			WalletID:                 v.walletID,
 			MasterPrivParams:         newMasterPrivateKey.Marshal(),
@@ -365,20 +345,32 @@ func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
 		}, nil
 	}
 
-	encryptedCryptoKeyPrivate, err := newMasterPrivateKey.Encrypt(
-		v.unlockedState.cryptoKeyPrivate[:],
+	// Re-encrypt the private crypto key under the new master key.
+	// Decrypting it with the old master key also confirms oldPassphrase can
+	// reproduce the spendable key material, beyond the digest check
+	// performed above.
+	encryptedCryptoKeyPrivate, err := reEncryptCryptoKey(
+		&oldMasterPrivateKey, newMasterPrivateKey,
+		secrets.EncryptedCryptoPrivKey,
 	)
 	if err != nil {
 		return db.UpdateWalletSecretsParams{},
-			fmt.Errorf("encrypt crypto key private: %w", err)
+			fmt.Errorf("re-encrypt crypto key private: %w", err)
 	}
 
-	encryptedCryptoKeyScript, err := newMasterPrivateKey.Encrypt(
-		v.unlockedState.cryptoKeyScript[:],
+	// The HD-root ciphertext is encrypted under the crypto private key, not
+	// the passphrase, so it is carried forward unchanged. Validate that it
+	// still decrypts and parses under that key before persisting it, so a
+	// corrupt or mismatched root cannot let rotation report success while
+	// stranding the wallet: after rotation, unlock recovers the HD root the
+	// same way and must not be the first place the corruption surfaces.
+	err = validateCarriedHDRoot(
+		&oldMasterPrivateKey, secrets.EncryptedCryptoPrivKey,
+		secrets.EncryptedMasterHdPrivKey,
 	)
 	if err != nil {
 		return db.UpdateWalletSecretsParams{},
-			fmt.Errorf("encrypt crypto key script: %w", err)
+			fmt.Errorf("validate carried HD root: %w", err)
 	}
 
 	return db.UpdateWalletSecretsParams{
@@ -386,6 +378,82 @@ func (v *WalletVault) makeRotatedWalletSecrets(secrets *db.WalletSecrets,
 		MasterPrivParams:         newMasterPrivateKey.Marshal(),
 		EncryptedCryptoPrivKey:   encryptedCryptoKeyPrivate,
 		EncryptedCryptoScriptKey: encryptedCryptoKeyScript,
+
+		// The master HD private key is encrypted under the crypto
+		// private key, not the passphrase, so its ciphertext is carried
+		// forward unchanged.
 		EncryptedMasterHdPrivKey: secrets.EncryptedMasterHdPrivKey,
 	}, nil
+}
+
+// validateCarriedHDRoot confirms the carried HD-root ciphertext is recoverable
+// before a passphrase rotation persists it. It decrypts the crypto private key
+// with the (already validated) old master key, uses it to decrypt the HD-root
+// ciphertext, and parses the result as an extended key. Rotation preserves the
+// crypto private key plaintext, so a root that recovers here also recovers
+// under the newly re-encrypted crypto private key. Any failure is reported as
+// errUnexpectedState.
+func validateCarriedHDRoot(oldMasterKey *snacl.SecretKey,
+	encryptedCryptoKeyPrivate, encryptedHDRoot []byte) error {
+
+	cryptoKeyPrivate, err := decryptCryptoKey(
+		oldMasterKey, encryptedCryptoKeyPrivate,
+	)
+	if err != nil {
+		return fmt.Errorf("crypto key private: %w", err)
+	}
+	defer cryptoKeyPrivate.Zero()
+
+	if len(encryptedHDRoot) == 0 {
+		return fmt.Errorf("missing master HD private key: %w",
+			errUnexpectedState)
+	}
+
+	decryptedHDRoot, err := cryptoKeyPrivate.Decrypt(encryptedHDRoot)
+	if err != nil {
+		return fmt.Errorf("decrypt master HD private key: %w: %w",
+			errUnexpectedState, err)
+	}
+	defer clear(decryptedHDRoot)
+
+	hdRootKey, err := hdkeychain.NewKeyFromString(string(decryptedHDRoot))
+	if err != nil {
+		return fmt.Errorf("parse master HD private key: %w: %w",
+			errUnexpectedState, err)
+	}
+
+	// The parsed key is only used to confirm the ciphertext is recoverable;
+	// zero it immediately since validation keeps no runtime state.
+	hdRootKey.Zero()
+
+	return nil
+}
+
+// reEncryptCryptoKey decrypts a persisted crypto key blob with the old master
+// key and re-encrypts it under the new master key, zeroing the decrypted
+// plaintext before returning. It validates that the decrypted key has the
+// expected size.
+func reEncryptCryptoKey(oldMasterKey, newMasterKey *snacl.SecretKey,
+	ciphertext []byte) ([]byte, error) {
+
+	decrypted, err := oldMasterKey.Decrypt(ciphertext)
+	defer clear(decrypted)
+
+	if err != nil {
+		return nil, fmt.Errorf("decrypt crypto key: %w: %w",
+			errUnexpectedState, err)
+	}
+
+	if len(decrypted) != snacl.KeySize {
+		return nil, fmt.Errorf("decrypt crypto key expected %d bytes, "+
+			"got %d: %w", snacl.KeySize, len(decrypted),
+			errUnexpectedState)
+	}
+
+	reEncrypted, err := newMasterKey.Encrypt(decrypted)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt crypto key: %w", err)
+	}
+
+	return reEncrypted, nil
 }
