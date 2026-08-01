@@ -446,8 +446,22 @@ func (w *Wallet) ID() uint32 {
 	return w.id
 }
 
-// SyncedTo calls the `SyncedTo` method on the wallet's manager.
+// SyncedTo returns the wallet's current synced-to block.
 func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
+	if w.addrStore == nil {
+		info, err := w.store.GetWallet(context.Background(), w.cfg.Name)
+		if err != nil || info.SyncedTo == nil {
+			return waddrmgr.BlockStamp{Height: -1}
+		}
+
+		stamp, err := db.BlockStampFromBlock(info.SyncedTo)
+		if err != nil {
+			return waddrmgr.BlockStamp{Height: -1}
+		}
+
+		return stamp
+	}
+
 	return w.addrStore.SyncedTo()
 }
 

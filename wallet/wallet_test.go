@@ -11,7 +11,10 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,6 +129,38 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWalletSyncedToUsesStore verifies that a wallet without a legacy address
+// manager reads its synced tip from the Store.
+func TestWalletSyncedToUsesStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a Store-backed wallet with no legacy address manager.
+	store := &walletmock.Store{}
+	t.Cleanup(func() { store.AssertExpectations(t) })
+
+	syncedTo := &db.Block{
+		Hash:      chainhash.Hash{0x01},
+		Height:    123,
+		Timestamp: time.Unix(10, 0),
+	}
+	store.On("GetWallet", mock.Anything, "store-wallet").Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
+
+	wallet := &Wallet{
+		cfg:   Config{Name: "store-wallet"},
+		store: store,
+	}
+
+	// Act: Read the current synced tip.
+	got := wallet.SyncedTo()
+
+	// Assert: Verify the Store metadata is returned as a block stamp.
+	want, err := db.BlockStampFromBlock(syncedTo)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 // mockChainConn is a mock in-memory implementation of the chainConn interface

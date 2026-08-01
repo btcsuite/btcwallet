@@ -51,17 +51,45 @@ var (
 	errSignMock = errors.New("sign error")
 )
 
-// TestDerivePubKeySuccess tests the successful derivation of a public key.
+// expectStorePubKey wires the store-routed public-key lookup for a derived
+// address: the account xpub is public metadata, so it comes from the account
+// read rather than the secret read, and the leaf key is derived from it
+// locally.
+// It returns the leaf public key the wallet will derive at the path's branch
+// and
+// index.
+func expectStorePubKey(t *testing.T, mocks *mockWalletDeps,
+	walletID uint32, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) *btcec.PublicKey {
+
+	t.Helper()
+
+	acct := testAccountXPrv(t)
+	acctPub, err := acct.Neuter()
+	require.NoError(t, err)
+
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:      walletID,
+		Scope:         db.KeyScope(scope),
+		AccountNumber: &path.InternalAccount,
+		SkipBalance:   true,
+	}).Return(&db.AccountInfo{
+		PublicKey: []byte(acctPub.String()),
+	}, nil).Once()
+
+	_, pubKey := deriveLeafKeys(t, acct, path.Branch, path.Index)
+
+	return pubKey
+}
+
+// TestDerivePubKeySuccess tests the successful derivation of a public key
+// through the store account extended public key.
 func TestDerivePubKeySuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet with mocks, a test key, and a
-	// derivation path.
+	// Arrange: Set up the wallet with mocks and a derivation path, and wire
+	// the store account-secret lookup that the pubkey resolver reads.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	pubKey := privKey.PubKey()
 
 	path := BIP32Path{
 		KeyScope: waddrmgr.KeyScopeBIP0084,
@@ -72,14 +100,9 @@ func TestDerivePubKeySuccess(t *testing.T) {
 		},
 	}
 
-	// Set up the mock account manager and the mock address that will be
-	// returned by the derivation call.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PubKey").Return(pubKey).Once()
+	pubKey := expectStorePubKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
 
 	// Act: Derive the public key.
 	derivedKey, err := w.DerivePubKey(t.Context(), path)
@@ -89,49 +112,91 @@ func TestDerivePubKeySuccess(t *testing.T) {
 	require.True(t, pubKey.IsEqual(derivedKey))
 }
 
-// TestDerivePubKeyFetchManagerFails tests the failure case where the scoped
-// key manager cannot be fetched.
-func TestDerivePubKeyFetchManagerFails(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Set up the wallet and a test path. Configure the mock
-	// addrStore to return an error when fetching the key manager.
-	w, mocks := createUnlockedWalletWithMocks(t)
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
-
-	// Act: Attempt to derive the public key.
-	_, err := w.DerivePubKey(t.Context(), path)
-
-	// Assert: Check that the error is propagated correctly.
-	require.ErrorIs(t, err, errManagerNotFound)
-	mocks.addrStore.AssertExpectations(t)
-}
-
-// TestDerivePubKeyDeriveFails tests the failure case where the key derivation
-// from the path fails.
+// TestDerivePubKeyDeriveFails verifies that a failure inside public-child
+// derivation itself propagates. The other retained Store tests cover account
+// absence, an unexpected Store error, and missing account public material, but
+// none reaches deriveStoredAccountChildPubKey's branch/index error path: a
+// hardened child cannot be derived from a public key, so the account xpub here
+// is valid and only the requested child is unreachable.
 func TestDerivePubKeyDeriveFails(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a test path. Configure the
-	// mock account manager to return an error on derivation.
+	// Arrange: a valid account xpub in the Store, and a derivation path
+	// whose branch is hardened.
 	w, mocks := createUnlockedWalletWithMocks(t)
+
 	path := BIP32Path{
 		KeyScope: waddrmgr.KeyScopeBIP0084,
 		DerivationPath: waddrmgr.DerivationPath{
 			InternalAccount: 0,
-			Branch:          0,
+			Branch:          hdkeychain.HardenedKeyStart,
 			Index:           0,
 		},
 	}
 
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
-	).Return((*bwmock.ManagedPubKeyAddr)(nil), errDerivationFailed).Once()
+	acct := testAccountXPrv(t)
+	acctPub, err := acct.Neuter()
+	require.NoError(t, err)
+
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: &path.DerivationPath.InternalAccount,
+		SkipBalance:   true,
+	}).Return(&db.AccountInfo{
+		PublicKey: []byte(acctPub.String()),
+	}, nil).Once()
+
+	// Act: Attempt to derive the public key.
+	_, err = w.DerivePubKey(t.Context(), path)
+
+	// Assert: the derivation error is propagated, not masked as a missing
+	// account or a Store failure.
+	require.ErrorIs(t, err, hdkeychain.ErrDeriveHardFromPublic)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestDerivePubKeyAccountNotInStore tests the failure case where the owning
+// account is not present in the store.
+func TestDerivePubKeyAccountNotInStore(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and a test path. Configure the store to
+	// report that the account row is absent.
+	w, mocks := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: &path.DerivationPath.InternalAccount,
+		SkipBalance:   true,
+	}).Return((*db.AccountInfo)(nil), db.ErrAccountNotFound).Once()
+
+	// Act: Attempt to derive the public key.
+	_, err := w.DerivePubKey(t.Context(), path)
+
+	// Assert: Check that the account-miss error is surfaced.
+	require.ErrorIs(t, err, ErrAccountNotInStore)
+	mocks.store.AssertExpectations(t)
+}
+
+// TestDerivePubKeyStoreFails tests that an unexpected store error is
+// propagated rather than masked.
+func TestDerivePubKeyStoreFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Set up the wallet and a test path. Configure the store to
+	// return an unexpected error.
+	w, mocks := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: &path.DerivationPath.InternalAccount,
+		SkipBalance:   true,
+	}).Return((*db.AccountInfo)(nil), errDerivationFailed).Once()
 
 	// Act: Attempt to derive the public key.
 	_, err := w.DerivePubKey(t.Context(), path)
@@ -140,35 +205,28 @@ func TestDerivePubKeyDeriveFails(t *testing.T) {
 	require.ErrorIs(t, err, errDerivationFailed)
 }
 
-// TestDerivePubKeyNotPubKeyAddr tests the failure case where the derived
-// address is not a public key address.
-func TestDerivePubKeyNotPubKeyAddr(t *testing.T) {
+// TestDerivePubKeyMissingAccountPubKey tests the failure case where the store
+// account carries no extended public key.
+func TestDerivePubKeyMissingAccountPubKey(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks. Configure the mock derivation
-	// to return a managed address that is NOT a ManagedPubKeyAddress.
+	// Arrange: Set up the wallet and a test path. Configure the store to
+	// return an account with an empty public key.
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
-	// We need a valid address for the error message.
-	addr, err := address.NewAddressWitnessPubKeyHash(
-		make([]byte, 20), w.cfg.ChainParams,
-	)
-	require.NoError(t, err)
-
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPath",
-		mock.Anything, mock.Anything,
-	).Return(mocks.addr, nil).Once()
-	mocks.addr.On("Address").Return(addr).Once()
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: &path.DerivationPath.InternalAccount,
+		SkipBalance:   true,
+	}).Return(&db.AccountInfo{}, nil).Once()
 
 	// Act: Attempt to derive the public key.
-	_, err = w.DerivePubKey(t.Context(), path)
+	_, err := w.DerivePubKey(t.Context(), path)
 
-	// Assert: Check that the specific ErrNotPubKeyAddress is returned.
-	require.ErrorIs(t, err, ErrNotPubKeyAddress)
-	require.ErrorContains(t, err, "addr "+addr.String())
+	// Assert: Check that the missing-material error is surfaced.
+	require.ErrorIs(t, err, ErrMissingParam)
 }
 
 // TestECDHSuccess tests the successful ECDH key exchange.

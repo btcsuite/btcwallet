@@ -482,7 +482,7 @@ func (w *Wallet) Info(_ context.Context) (*Info, error) {
 		ChainParams:      w.cfg.ChainParams,
 		Locked:           !w.state.isUnlocked(),
 		Synced:           w.state.isSynced(),
-		SyncedTo:         w.SyncedTo(),
+		SyncedTo:         w.SyncedTo(), //nolint:contextcheck // Legacy API.
 		IsRecoveryMode:   w.state.isRecoveryMode(),
 		RecoveryProgress: 0,
 	}
