@@ -12,7 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest/keyvaultmock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -22,8 +22,8 @@ import (
 // crypt — Encrypt and Decrypt both return a fresh copy of the input bytes
 // with no error. This lets tests roundtrip derived account material
 // without bringing in real cryptoKey wiring.
-func newIdentityVault() *walletmock.Vault {
-	vault := &walletmock.Vault{}
+func newIdentityVault() *keyvaultmock.Vault {
+	vault := &keyvaultmock.Vault{}
 	identity := func(_ waddrmgr.CryptoKeyType, b []byte) []byte {
 		out := make([]byte, len(b))
 		copy(out, b)
@@ -45,8 +45,8 @@ var errEncryptForTest = errors.New("encrypt boom")
 // newEncryptErrorVault returns a Vault whose Encrypt call always fails
 // with errEncryptForTest. Decrypt is left unconfigured because the tests
 // that consume this vault never reach a decrypt path.
-func newEncryptErrorVault() *walletmock.Vault {
-	vault := &walletmock.Vault{}
+func newEncryptErrorVault() *keyvaultmock.Vault {
+	vault := &keyvaultmock.Vault{}
 	vault.On("Encrypt", mock.Anything, mock.Anything).Return(
 		nil, errEncryptForTest,
 	)
@@ -111,7 +111,7 @@ func TestNewAccountDeriveFn_MaxAccountNumber(t *testing.T) {
 	masterKey := testMasterKey(t)
 	scope := db.KeyScope{Purpose: 84, Coin: 0}
 
-	derive := newAccountDeriveFn(masterKey, &walletmock.Vault{}, 0)
+	derive := newAccountDeriveFn(masterKey, &keyvaultmock.Vault{}, 0)
 	data, err := derive(t.Context(), scope, db.MaxAccountNumber+1, false)
 
 	require.Nil(t, data)
