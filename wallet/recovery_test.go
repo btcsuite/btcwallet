@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +39,7 @@ type (
 		Apply(step int, harness *Harness)
 	}
 
-	// InitialiDelta is a Step that verifies our first attempt to expand the
+	// InitialDelta is a Step that verifies our first attempt to expand the
 	// branch recovery state's horizons tells us to derive a number of
 	// adddresses equal to the recovery window.
 	InitialDelta struct{}
@@ -68,6 +69,84 @@ type (
 		child uint32
 	}
 )
+
+// TestRecoveryAddrTypeMapsScopeSchema verifies that a recovery branch selects
+// the matching address type from the account's schema, and that an unknown
+// branch is rejected rather than silently defaulting.
+func TestRecoveryAddrTypeMapsScopeSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := waddrmgr.ScopeAddrMap[waddrmgr.KeyScopeBIP0084]
+	want := db.ScopeAddrMap[db.KeyScopeBIP0084]
+
+	external, err := recoveryAddrType(schema, waddrmgr.ExternalBranch)
+	require.NoError(t, err)
+	require.Equal(t, want.ExternalAddrType, external)
+
+	internal, err := recoveryAddrType(schema, waddrmgr.InternalBranch)
+	require.NoError(t, err)
+	require.Equal(t, want.InternalAddrType, internal)
+
+	_, err = recoveryAddrType(schema, waddrmgr.InternalBranch+1)
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+}
+
+// TestInitializeUsesStoreRecoveryDeriver verifies recovery can seed lookahead
+// filters from store account metadata without a walletdb-backed address
+// manager.
+func TestInitializeUsesStoreRecoveryDeriver(t *testing.T) {
+	t.Parallel()
+
+	accountPubKey := storeDerivationAccountPubKey(t)
+	addrSchema := &waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.WitnessPubKey,
+		InternalAddrType: waddrmgr.NestedWitnessPubKey,
+	}
+	// The untargeted full scan keys recovery state on the durable store row
+	// ID (31), which is deliberately unequal to the account's real BIP44
+	// number (7) so the two identities cannot be confused.
+	const (
+		storeID       uint32 = 31
+		accountNumber uint32 = 7
+	)
+
+	props := &waddrmgr.AccountProperties{
+		AccountNumber: storeID,
+		AccountName:   "sql-account",
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+		AccountPubKey: accountPubKey,
+		AddrSchema:    addrSchema,
+	}
+
+	rs := NewRecoveryState(1, &chainParams, nil)
+	id, number := storeID, accountNumber
+	require.NoError(t, rs.setStoreAccount(props, &id, &number))
+	err := rs.Initialize([]*waddrmgr.AccountProperties{props}, nil, nil)
+	require.NoError(t, err)
+
+	// The store-native deriver keeps the real account number apart from the
+	// recovery key it is indexed by.
+	deriver, ok := rs.accountDerivers[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: storeID,
+	}]
+	require.True(t, ok)
+	storeDeriver, ok := deriver.(*storeRecoveryDeriver)
+	require.True(t, ok)
+	require.NotNil(t, storeDeriver.derivedAccountNumber)
+	require.Equal(t, accountNumber, *storeDeriver.derivedAccountNumber)
+
+	wantExternal, _, _ := expectedStoreAddress(
+		t, accountPubKey, db.WitnessPubKey, waddrmgr.ExternalBranch, 0,
+	)
+	wantInternal, _, _ := expectedStoreAddress(
+		t, accountPubKey, db.NestedWitnessPubKey, waddrmgr.InternalBranch, 0,
+	)
+
+	require.Len(t, rs.addrFilters, 2)
+	require.Contains(t, rs.addrFilters, wantExternal.EncodeAddress())
+	require.Contains(t, rs.addrFilters, wantInternal.EncodeAddress())
+}
 
 // Apply extends the current horizon of the branch recovery state, and checks
 // that the returned delta is equal to the test's recovery window. If the
