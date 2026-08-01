@@ -20,7 +20,7 @@ type CreateImportedAddressRow struct {
 //   - validate the request's static shape before any backend step runs
 //   - load the wallet watch-only mode
 //   - reject private-key material imported into a watch-only wallet
-//   - reject an import lacking private-key material into a spendable wallet
+//   - reject an import without its own private key into a spendable wallet
 //   - insert the imported address row
 //   - persist encrypted secret material when the import carries any
 //   - assemble the AddressInfo from the request and inserted row
@@ -119,12 +119,11 @@ func (p NewImportedAddressParams) ValidateBasic() error {
 
 // ValidateWatchOnly checks imported address creation parameters against the
 // parent wallet's watch-only state. A watch-only wallet must not receive
-// private-key-bearing imports. The symmetric direction (a spendable wallet
-// must not receive an imported address without private-key material) is
-// enforced at the SQL-backend entry through requireAddressPrivKeyOnSpendable;
-// kvdb's data model carries different invariants around legacy imported
-// address rows (a grandfathered legacy shape), so the symmetric check is not
-// applied there.
+// private-key-bearing imports. The symmetric direction (a spendable wallet's
+// imported address must carry its own encrypted private key) is enforced at the
+// SQL-backend entry through RequireAddressPrivKeyOnSpendable; kvdb's data
+// model carries different invariants around legacy imported address rows (a
+// grandfathered legacy shape), so the symmetric check is not applied there.
 func (p NewImportedAddressParams) ValidateWatchOnly(
 	walletIsWatchOnly bool) error {
 
@@ -137,12 +136,18 @@ func (p NewImportedAddressParams) ValidateWatchOnly(
 	return nil
 }
 
-// RequireAddressPrivKeyOnSpendable enforces the ADR 0012 symmetric
-// invariant for SQL backends: a spendable wallet must not receive an
-// imported address without encrypted private-key material. Public-only
-// and script-only imports are both rejected (HasPrivateKey covers both
-// — script-only imports have material in EncryptedScript but no priv
-// key).
+// RequireAddressPrivKeyOnSpendable enforces the ADR 0012 symmetric invariant:
+// on a spendable wallet, every imported address must carry its own encrypted
+// private key. ADR 0012 rejects a public-only *or script-only* import with
+// ErrSpendableWalletNeedsAddressPrivKey; a watch-only wallet accepts both.
+//
+// Holding a redeem, witness or tapscript is not spend capability. A script
+// describes a spending *condition*, not the signing material that satisfies it
+// -- a 2-of-3 multisig script is not spendable because the wallet holds its
+// bytes. So script presence cannot substitute for the private key here.
+//
+// Script-only imports remain accepted on a uniformly watch-only wallet, which
+// is where observing a script without being able to spend it is the point.
 func RequireAddressPrivKeyOnSpendable(walletID uint32,
 	walletIsWatchOnly bool, hasPrivKey bool) error {
 
