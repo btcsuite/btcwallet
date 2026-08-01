@@ -45,8 +45,48 @@ type Vault interface {
 	// type.
 	Decrypt(keyType waddrmgr.CryptoKeyType, ciphertext []byte) ([]byte, error)
 
-	// ChangePassphrase rotates persisted wallet secrets to the provided new
-	// private passphrase. The vault must already be unlocked when this method
-	// is called.
-	ChangePassphrase(ctx context.Context, newPassphrase []byte) error
+	// ChangePassphrase re-wraps the persisted wallet secrets according to
+	// params.
+	//
+	// Implementations validate the whole request before reading or
+	// mutating any secret, so a request an implementation cannot serve in
+	// full changes nothing.
+	//
+	// The rotation preserves the vault's original locked/unlocked state: an
+	// unlocked vault stays unlocked with its runtime keys unchanged, and a
+	// locked vault leaves no decrypted state behind. The old passphrase is
+	// required even while locked, because a locked vault holds no decrypted
+	// keys and must re-derive the old master key from the persisted
+	// parameters before re-wrapping under the new one.
+	ChangePassphrase(ctx context.Context,
+		params ChangePassphraseParams) error
+}
+
+// ErrPublicPassphraseUnsupported reports that a backend was asked to rotate a
+// public passphrase it does not have. SQL wallets protect all key material
+// under one passphrase; only the legacy kvdb format keeps a separate public
+// half.
+var ErrPublicPassphraseUnsupported = errors.New(
+	"public passphrase rotation unsupported",
+)
+
+// ChangePassphraseParams contains the passphrase halves to rotate.
+//
+// The two halves are independent because the legacy kvdb format protects
+// public metadata and private key material under separate passphrases and can
+// rotate either or both in one transaction. A non-nil old passphrase selects
+// that half; this preserves a non-nil empty passphrase as a valid request.
+type ChangePassphraseParams struct {
+	// PublicOld and PublicNew contain the old and new public passphrases. A
+	// non-nil PublicOld requests their rotation.
+	//
+	// Deprecated: only the legacy kvdb format has a separate public
+	// passphrase. Remove these fields with kvdb support.
+	PublicOld []byte
+	PublicNew []byte
+
+	// PrivateOld and PrivateNew contain the old and new private passphrases.
+	// A non-nil PrivateOld requests their rotation.
+	PrivateOld []byte
+	PrivateNew []byte
 }
