@@ -2,12 +2,17 @@
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package mock
+// Package keyvaultmock contains a testify-based mock for the wallet key-vault
+// interface. It lives in its own package because it imports keyvault, and the
+// keyvault package's own tests depend on the shared mock package; keeping the
+// vault mock separate avoids an import cycle in the keyvault test build.
+package keyvaultmock
 
 import (
 	"context"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -37,6 +42,7 @@ func (m *Vault) Decrypt(keyType waddrmgr.CryptoKeyType,
 // Unlock forwards to the configured testify expectations.
 func (m *Vault) Unlock(ctx context.Context, passphrase []byte) error {
 	args := m.Called(ctx, passphrase)
+
 	return args.Error(0)
 }
 
@@ -48,22 +54,27 @@ func (m *Vault) Lock() {
 // IsLocked forwards to the configured testify expectations.
 func (m *Vault) IsLocked() bool {
 	args := m.Called()
+
 	return args.Bool(0)
 }
 
 // ChangePassphrase forwards to the configured testify expectations.
 func (m *Vault) ChangePassphrase(ctx context.Context,
-	passphrase []byte) error {
+	params keyvault.ChangePassphraseParams) error {
 
-	args := m.Called(ctx, passphrase)
+	args := m.Called(ctx, params)
+
 	return args.Error(0)
 }
 
-// returnBytes resolves the first programmed Return arg into a byte slice.
+// returnBytes resolves the first programmed Return arg into a byte slice. A
+// programmed func lets a test transform its input, which is how the identity
+// vault echoes plaintext back through the cipher methods.
 func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
 	input []byte) []byte {
 
-	if fn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte); ok {
+	fn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte)
+	if ok {
 		return fn(keyType, input)
 	}
 
@@ -78,3 +89,6 @@ func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
 
 	return b
 }
+
+// A compile-time check that the mock satisfies the interface it stands in for.
+var _ keyvault.Vault = (*Vault)(nil)
