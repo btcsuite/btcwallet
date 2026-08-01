@@ -73,9 +73,15 @@ func (m *Vault) ChangePassphrase(ctx context.Context,
 func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
 	input []byte) []byte {
 
-	fn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte)
+	// Both shapes are accepted: a stub that cares about the key class takes
+	// it, one that only transforms bytes does not.
+	cryptFn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte)
 	if ok {
-		return fn(keyType, input)
+		return cryptFn(keyType, input)
+	}
+
+	if fn, ok := args.Get(0).(func([]byte) []byte); ok {
+		return fn(input)
 	}
 
 	if args.Get(0) == nil {
