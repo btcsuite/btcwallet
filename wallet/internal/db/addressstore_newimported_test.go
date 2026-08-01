@@ -6,11 +6,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestNewImportedAddressParamsValidateWatchOnly verifies the symmetric
-// watch-only invariant rejects mismatched mode imports in both directions
-// for imported addresses. A script-only import (no priv key, has script) is
-// rejected in a spendable wallet because the spend-capability invariant
-// requires private-key material per ADR 0012.
+// TestNewImportedAddressParamsValidateWatchOnly verifies the watch-only
+// direction of the imported-address invariant: a watch-only wallet rejects a
+// private-key-bearing import, while a spendable wallet accepts any shape at
+// this stage. The symmetric spendable-side requirement (a spendable wallet
+// must carry spend material) is enforced separately by
+// RequireAddressPrivKeyOnSpendable.
 func TestNewImportedAddressParamsValidateWatchOnly(t *testing.T) {
 	t.Parallel()
 
@@ -65,18 +66,51 @@ func TestNewImportedAddressParamsValidateWatchOnly(t *testing.T) {
 }
 
 // TestRequireAddressPrivKeyOnSpendable verifies the SQL-only symmetric
-// rejection for imported addresses. Public-only AND script-only imports are
-// rejected in spendable wallets because both lack the encrypted private-key
-// material that ADR 0012 requires.
+// invariant for imported addresses: a spendable wallet requires an address
+// private key and rejects an import without one, while a watch-only wallet
+// accepts a public-only import. ADR 0012 grants script-only imports no waiver
+// on a spendable wallet.
 func TestRequireAddressPrivKeyOnSpendable(t *testing.T) {
 	t.Parallel()
 
-	err := RequireAddressPrivKeyOnSpendable(7, false, false)
-	require.ErrorIs(t, err, ErrSpendableWalletNeedsAddressPrivKey)
+	tests := []struct {
+		name          string
+		watchOnly     bool
+		hasPrivKey    bool
+		wantRejection bool
+	}{
+		{
+			name:          "spendable public-only rejected",
+			wantRejection: true,
+		},
+		{
+			name:       "spendable private-key accepted",
+			hasPrivKey: true,
+		},
+		{
+			name:      "watch-only public-only accepted",
+			watchOnly: true,
+		},
+	}
 
-	err = RequireAddressPrivKeyOnSpendable(7, false, true)
-	require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	err = RequireAddressPrivKeyOnSpendable(7, true, false)
-	require.NoError(t, err)
+			err := RequireAddressPrivKeyOnSpendable(
+				7, tc.watchOnly, tc.hasPrivKey,
+			)
+
+			if tc.wantRejection {
+				require.ErrorIs(
+					t, err,
+					ErrSpendableWalletNeedsAddressPrivKey,
+				)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
 }
