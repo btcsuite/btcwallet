@@ -728,6 +728,21 @@ type baseScriptAddress struct {
 	scriptMutex     sync.Mutex
 }
 
+// encryptedScript returns the stored, still-encrypted script material for the
+// address. It is nil for watch-only script addresses that persist no script.
+func (a *baseScriptAddress) encryptedScript() []byte {
+	return a.scriptEncrypted
+}
+
+// scriptIsSecret reports whether the stored script ciphertext is encrypted
+// under the script crypto key (CKTScript) rather than the public crypto key
+// (CKTPublic). The base type is used only by pay-to-script-hash addresses,
+// whose script is always secret; witnessScriptAddress overrides this with its
+// per-address flag.
+func (a *baseScriptAddress) scriptIsSecret() bool {
+	return true
+}
+
 var _ clearTextScriptSetter = (*baseScriptAddress)(nil)
 
 // unlock decrypts and stores the associated script.  It will fail if the key is
@@ -962,6 +977,15 @@ func (a *witnessScriptAddress) Script() ([]byte, error) {
 	// script stored in memory can be cleared at any time. Otherwise,
 	// the returned script could be invalidated from under the caller.
 	return a.unlock(cryptoKey)
+}
+
+// scriptIsSecret reports whether the stored script ciphertext is encrypted
+// under the script crypto key (CKTScript) rather than the public crypto key
+// (CKTPublic). It mirrors the key selection in Script above and applies to
+// pay-to-witness-script-hash and (via embedding) taproot script-path
+// addresses, whose secrecy is fixed at import time.
+func (a *witnessScriptAddress) scriptIsSecret() bool {
+	return a.isSecretScript
 }
 
 // Enforce witnessScriptAddress satisfies the ManagedScriptAddress interface.
