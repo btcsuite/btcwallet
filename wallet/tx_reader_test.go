@@ -399,7 +399,6 @@ func txDetailInfoFromLegacy(details *wtxmgr.TxDetails) *db.TxDetailInfo {
 		SerializedTx: details.SerializedTx,
 		Received:     details.Received,
 		Block:        block,
-		Status:       db.TxStatusPublished,
 		Label:        details.Label,
 		OwnedInputs:  ownedInputs,
 		OwnedOutputs: ownedOutputs,
