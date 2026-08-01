@@ -457,6 +457,22 @@ type AccountInfo struct {
 	rowID int64
 }
 
+// AccountSecret holds the encrypted account-level key material used by signing
+// operations. The encrypted private key must be decrypted by the caller through
+// the wallet key vault. This type intentionally carries no plaintext key
+// material.
+type AccountSecret struct {
+	// EncryptedPrivateKey is the account-level extended private key
+	// encrypted by the wallet's key vault. A nil value means the account
+	// has no private account material and cannot sign derived child keys.
+	//
+	// This is the only field: the type carries encrypted secret material
+	// and nothing else. Wallet, scope, account identity and the account
+	// xpub are public metadata, already available through GetAccount, and
+	// the query itself carries the selector the caller asked by.
+	EncryptedPrivateKey []byte
+}
+
 // ScopeAddrSchema is the address schema of a particular KeyScope. It is
 // persisted on the key_scopes row and consulted when deriving any keys
 // for a particular scope to know how to encode the public keys as
@@ -577,6 +593,24 @@ type GetAccountQuery struct {
 	// coinbase maturity, locked-output exclusion) use Store.Balance with
 	// BalanceParams instead.
 	SkipBalance bool
+}
+
+// GetAccountSecretQuery contains the parameters for querying account-level
+// signing material. The query must specify either the account name or the
+// account number within the provided wallet and scope.
+type GetAccountSecretQuery struct {
+	// WalletID is the ID of the wallet to query.
+	WalletID uint32
+
+	// Scope is the key scope of the account.
+	Scope KeyScope
+
+	// AccountNumber is the BIP44 account number to query. Derived accounts
+	// are the only kind that hold account-level signing material: imported
+	// accounts are created from an extended public key and have none, and
+	// imported private keys are per-address material reached through
+	// GetAddressSecret instead. One selector therefore suffices.
+	AccountNumber uint32
 }
 
 // ListAccountsQuery holds the set of options for a ListAccounts query.
