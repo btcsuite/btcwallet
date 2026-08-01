@@ -1968,7 +1968,7 @@ func TestManager(t *testing.T) {
 		{
 			name:                "created with seed",
 			createdWatchingOnly: false,
-			rootKey:             rootKey,
+			rootKey:             testRootKey(t),
 			privPassphrase:      privPassphrase,
 		},
 		{
@@ -2348,7 +2348,7 @@ func TestScopedKeyManagerManagement(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2682,7 +2682,7 @@ func TestRootHDKeyNeutering(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2774,7 +2774,7 @@ func TestNewRawAccount(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -2906,7 +2906,7 @@ func TestNewRawAccountHybrid(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -3029,7 +3029,7 @@ func TestDeriveFromKeyPathCache(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
@@ -3275,7 +3275,7 @@ func TestManagedAddressValidation(t *testing.T) {
 			return err
 		}
 		err = Create(
-			ns, rootKey, pubPassphrase, privPassphrase,
+			ns, testRootKey(t), pubPassphrase, privPassphrase,
 			&chaincfg.MainNetParams, fastScrypt, time.Time{},
 		)
 		if err != nil {
