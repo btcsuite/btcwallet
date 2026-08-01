@@ -1,6 +1,7 @@
 package waddrmgr
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -716,6 +717,117 @@ func (s *ScopedKeyManager) AccountProperties(ns walletdb.ReadBucket,
 	}
 
 	return props, nil
+}
+
+// AccountSecret reads the persisted account row and returns the stored
+// encrypted account extended private key exactly as persisted, so an account's
+// secret can be relocated to another store without decrypting or re-deriving
+// it. The ciphertext is cloned, so the returned buffer never aliases
+// manager-held state.
+//
+// Watch-only, imported-xpub, or otherwise private-less accounts return a nil
+// blob (not an error). An absent account returns ErrAccountNotFound.
+func (s *ScopedKeyManager) AccountSecret(ns walletdb.ReadBucket,
+	account uint32) ([]byte, error) {
+
+	// Read the raw account row directly rather than going through
+	// loadAccountInfo, which would decrypt and cache the private key and
+	// require the manager to be unlocked. We only need the persisted
+	// material here.
+	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
+	if err != nil {
+		return nil, maybeConvertDbError(err)
+	}
+
+	switch row := rowInterface.(type) {
+	case *dbDefaultAccountRow:
+		// A default account row that carries no encrypted private key
+		// (e.g. an imported xpub persisted as a default row) reports a
+		// nil ciphertext rather than an empty slice. Clone a present
+		// ciphertext so the returned buffer is caller-owned.
+		if len(row.privKeyEncrypted) == 0 {
+			return nil, nil
+		}
+
+		return bytes.Clone(row.privKeyEncrypted), nil
+
+	case *dbWatchOnlyAccountRow:
+		// Watch-only accounts never hold a private key.
+		return nil, nil
+
+	default:
+		str := fmt.Sprintf("unsupported account type %T", row)
+
+		return nil, managerError(ErrDatabase, str, nil)
+	}
+}
+
+// ManagedAddressSecret resolves the given address and returns its persisted
+// secret material without decrypting it. For a public-key address it returns
+// the stored encrypted private key (nil when the address is watch-only or has
+// no private key); for a script address it returns the stored encrypted script
+// along with scriptSecret, which reports whether that ciphertext is encrypted
+// under the script crypto key (CKTScript) rather than the public crypto key
+// (CKTPublic) so the caller decrypts it with the matching key. An address that
+// exists but carries neither returns (nil, nil, false, nil), while an address
+// that cannot be resolved returns the ErrAddressNotFound error, keeping "found
+// but has no secret" distinguishable from "not found".
+func (s *ScopedKeyManager) ManagedAddressSecret(ns walletdb.ReadBucket,
+	addr address.Address) ([]byte, []byte, bool, error) {
+
+	// Reuse the standard address resolution path so caching and PK->PKH
+	// normalization behave identically to other reads.
+	managedAddr, err := s.Address(ns, addr)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	// The ciphertext lives in the cached address's own buffers, which
+	// ConvertToWatchingOnly zeroes under s.mtx. Read and clone it while
+	// holding the same lock so the returned slice is an independent copy
+	// that neither races that zeroing nor lets a caller mutate cached
+	// state.
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	// Read the encrypted material straight from the concrete address types'
+	// unexported fields; we deliberately avoid the decrypting accessors.
+	switch a := managedAddr.(type) {
+	case *managedAddress:
+		if len(a.privKeyEncrypted) == 0 {
+			return nil, nil, false, nil
+		}
+
+		return bytes.Clone(a.privKeyEncrypted), nil, false, nil
+
+	case encryptedScriptGetter:
+		// All script address types embed baseScriptAddress and thus
+		// expose the stored ciphertext and the crypto key it is
+		// encrypted under through these accessors.
+		script := a.encryptedScript()
+		if len(script) == 0 {
+			return nil, nil, false, nil
+		}
+
+		return nil, bytes.Clone(script), a.scriptIsSecret(), nil
+
+	default:
+		// The address resolved but is of a type that holds no secret
+		// material we can export.
+		return nil, nil, false, nil
+	}
+}
+
+// encryptedScriptGetter is implemented by the script-based managed address
+// types so ManagedAddressSecret can read their stored ciphertext and the
+// crypto key it is encrypted under uniformly.
+type encryptedScriptGetter interface {
+	encryptedScript() []byte
+
+	// scriptIsSecret reports whether encryptedScript is encrypted under the
+	// script crypto key (CKTScript) rather than the public crypto key
+	// (CKTPublic), so a reader can decrypt it with the matching key.
+	scriptIsSecret() bool
 }
 
 // cachedKey is an entry within the LRU map that stores private keys that are
