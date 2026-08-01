@@ -7,6 +7,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/snacl"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,7 +65,7 @@ func TestCreateWalletSecretsRoundtrip(t *testing.T) {
 				hdRootKey = testGenesisRootKey(t)
 			}
 
-			secrets, err := CreateWalletSecrets(
+			secrets, err := createWalletSecretsFast(
 				[]byte(passphrase), hdRootKey, test.watchOnly,
 			)
 			require.NoError(t, err)
@@ -129,7 +131,8 @@ func TestCreateWalletSecretsRoundtrip(t *testing.T) {
 }
 
 // TestCreateWalletSecretsInputGuards verifies that CreateWalletSecrets rejects
-// invalid spendable inputs before deriving secret material.
+// invalid spendable inputs before deriving secret material, while watch-only
+// wallets keep accepting a neutered xpub and an empty passphrase.
 func TestCreateWalletSecretsInputGuards(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +146,13 @@ func TestCreateWalletSecretsInputGuards(t *testing.T) {
 		wantErr    error
 	}{
 		{
+			name:       "spendable private key and passphrase",
+			passphrase: passphrase,
+			rootKey:    testGenesisRootKey,
+			watchOnly:  false,
+			wantErr:    nil,
+		},
+		{
 			name:       "spendable nil root key",
 			passphrase: passphrase,
 			rootKey: func(*testing.T) *hdkeychain.ExtendedKey {
@@ -151,13 +161,48 @@ func TestCreateWalletSecretsInputGuards(t *testing.T) {
 			watchOnly: false,
 			wantErr:   errUnexpectedState,
 		},
+		{
+			name:       "spendable neutered root key",
+			passphrase: passphrase,
+			rootKey: func(t *testing.T) *hdkeychain.ExtendedKey {
+				t.Helper()
+
+				neutered, err := testGenesisRootKey(t).Neuter()
+				require.NoError(t, err)
+
+				return neutered
+			},
+			watchOnly: false,
+			wantErr:   errRootKeyNotPrivate,
+		},
+		{
+			name:       "spendable empty passphrase",
+			passphrase: nil,
+			rootKey:    testGenesisRootKey,
+			watchOnly:  false,
+			wantErr:    errEmptyPassphrase,
+		},
+		{
+			name:       "watch-only neutered key empty passphrase",
+			passphrase: nil,
+			rootKey: func(t *testing.T) *hdkeychain.ExtendedKey {
+				t.Helper()
+
+				neutered, err := testGenesisRootKey(t).Neuter()
+				require.NoError(t, err)
+
+				return neutered
+			},
+			watchOnly: true,
+			wantErr:   nil,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			secrets, err := CreateWalletSecrets(
+			secrets, err := createWalletSecretsFast(
 				tc.passphrase, tc.rootKey(t), tc.watchOnly,
 			)
 
@@ -185,7 +230,7 @@ func TestCreateWalletSecretsCiphertextOnly(t *testing.T) {
 	hdRootKey := testGenesisRootKey(t)
 	plaintextXPriv := []byte(hdRootKey.String())
 
-	secrets, err := CreateWalletSecrets(passphrase, hdRootKey, false)
+	secrets, err := createWalletSecretsFast(passphrase, hdRootKey, false)
 	require.NoError(t, err)
 
 	// None of the returned fields may embed the plaintext xprv bytes.
@@ -200,4 +245,39 @@ func TestCreateWalletSecretsCiphertextOnly(t *testing.T) {
 	require.False(t, bytes.Contains(
 		secrets.EncryptedMasterHdPrivKey, plaintextXPriv,
 	))
+}
+
+// createWalletSecretsFast is CreateWalletSecrets at a key-derivation cost cheap
+// enough for tests. The exported path's production cost is asserted separately
+// by TestCreateWalletSecretsUsesProductionScrypt.
+func createWalletSecretsFast(privatePassphrase []byte,
+	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool) (*db.WalletSecrets,
+	error) {
+
+	return createWalletSecretsWithScrypt(
+		privatePassphrase, hdRootKey, watchOnly,
+		&waddrmgr.FastScryptOptions,
+	)
+}
+
+// TestCreateWalletSecretsUsesProductionScrypt pins the key-derivation cost of
+// new SQL wallets to waddrmgr's production options.
+//
+// snacl's own defaults are 2^14, sixteen times cheaper than the 2^18 every
+// existing wallet uses, and the parameters are persisted with the wallet — so a
+// weaker cost here would permanently lower the offline passphrase-cracking cost
+// for every wallet created, with no way to raise it later.
+func TestCreateWalletSecretsUsesProductionScrypt(t *testing.T) {
+	t.Parallel()
+
+	secrets, err := CreateWalletSecrets([]byte("passphrase"), nil, true)
+	require.NoError(t, err)
+
+	var masterKey snacl.SecretKey
+	require.NoError(t, masterKey.Unmarshal(secrets.MasterPrivParams))
+
+	require.Equal(t, waddrmgr.DefaultScryptOptions.N, masterKey.Parameters.N,
+		"new SQL wallets must use the production scrypt cost")
+	require.Equal(t, waddrmgr.DefaultScryptOptions.R, masterKey.Parameters.R)
+	require.Equal(t, waddrmgr.DefaultScryptOptions.P, masterKey.Parameters.P)
 }
