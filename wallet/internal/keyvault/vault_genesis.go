@@ -5,6 +5,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/snacl"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
@@ -18,24 +19,48 @@ import (
 // decryptWalletSecrets.
 //
 // A watch-only wallet holds no signing material, so only the script crypto key
-// is produced and hdRootKey is ignored (it may be nil). A spendable wallet
-// requires a non-nil hdRootKey.
+// is produced and hdRootKey is ignored (it may be nil or neutered) and the
+// passphrase may be empty. A spendable wallet requires a non-nil, private
+// hdRootKey and a non-empty privatePassphrase; violations are rejected before
+// any secret material is derived.
 //
 // The returned secrets contain only ciphertext. Every plaintext buffer this
 // function controls is zeroed before returning; the one copy it cannot wipe is
 // the immutable string hdRootKey.String() returns, which Go keeps read-only on
 // the heap until it is garbage collected.
+// CreateWalletSecrets derives a new SQL wallet's secrets at the production
+// scrypt cost. Tests that cannot afford it call createWalletSecretsWithScrypt
+// directly with cheaper parameters.
 func CreateWalletSecrets(privatePassphrase []byte,
 	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool) (*db.WalletSecrets,
 	error) {
 
-	// Derive the master private key from the passphrase using the default
+	return createWalletSecretsWithScrypt(
+		privatePassphrase, hdRootKey, watchOnly,
+		&waddrmgr.DefaultScryptOptions,
+	)
+}
+
+// createWalletSecretsWithScrypt is CreateWalletSecrets with the key-derivation
+// cost as a parameter, so tests can use FastScryptOptions.
+func createWalletSecretsWithScrypt(privatePassphrase []byte,
+	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool,
+	scrypt *waddrmgr.ScryptOptions) (*db.WalletSecrets, error) {
+
+	// Validate the spendable inputs up front, before any secret material is
+	// derived or persisted. Watch-only wallets hold no signing material, so
+	// they accept a nil (or neutered) root key and an empty passphrase.
+	err := validateGenesisInputs(privatePassphrase, hdRootKey, watchOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	// Derive the master private key from the passphrase using the supplied
 	// scrypt parameters. NewSecretKey generates a fresh salt and derives
 	// the key; Marshal persists the parameters (salt + N/R/P), not the key
 	// itself, so Unlock can re-derive it from the same passphrase.
 	masterKey, err := snacl.NewSecretKey(
-		&privatePassphrase, snacl.DefaultN, snacl.DefaultR,
-		snacl.DefaultP,
+		&privatePassphrase, scrypt.N, scrypt.R, scrypt.P,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new master private key: %w", err)
@@ -64,11 +89,6 @@ func CreateWalletSecrets(privatePassphrase []byte,
 	// key is all it needs.
 	if watchOnly {
 		return secrets, nil
-	}
-
-	if hdRootKey == nil {
-		return nil, fmt.Errorf("%w: spendable wallet requires an HD root key",
-			errUnexpectedState)
 	}
 
 	// A spendable wallet additionally holds a private crypto key protecting
@@ -101,4 +121,36 @@ func CreateWalletSecrets(privatePassphrase []byte,
 	secrets.EncryptedMasterHdPrivKey = encryptedMasterHDPrivKey
 
 	return secrets, nil
+}
+
+// validateGenesisInputs rejects invalid spendable-wallet genesis inputs before
+// any secret material is derived or persisted. Watch-only wallets hold no
+// signing material, so they accept a nil (or neutered) root key and an empty
+// passphrase and always pass.
+func validateGenesisInputs(privatePassphrase []byte,
+	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool) error {
+
+	if watchOnly {
+		return nil
+	}
+
+	// A spendable wallet needs an HD root key to derive keys from.
+	if hdRootKey == nil {
+		return fmt.Errorf("%w: spendable wallet requires an HD root "+
+			"key", errUnexpectedState)
+	}
+
+	// The root key must be private; a neutered/xpub key cannot serve as a
+	// spendable wallet's master private key.
+	if !hdRootKey.IsPrivate() {
+		return errRootKeyNotPrivate
+	}
+
+	// The private passphrase protects the master key, so it may not be
+	// empty. This mirrors waddrmgr.Create's rejection.
+	if len(privatePassphrase) == 0 {
+		return errEmptyPassphrase
+	}
+
+	return nil
 }
