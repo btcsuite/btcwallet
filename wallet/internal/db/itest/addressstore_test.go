@@ -519,6 +519,100 @@ func TestNewImportedAddressWithEncryptedScript(t *testing.T) {
 	}
 }
 
+// TestNewImportedTaprootScriptRejectedOnSpendable verifies the ADR 0012
+// invariant at the store boundary: a spendable (non-watch-only) wallet cannot
+// import a taproot script that carries only encrypted script material and no
+// address private key.
+//
+// This test previously asserted the opposite. Holding a tapscript is not spend
+// capability -- the script states a spending condition, not the signing
+// material
+// that satisfies it -- so it cannot stand in for the address private key. The
+// same import on a watch-only wallet is accepted, which is covered below.
+func TestNewImportedTaprootScriptRejectedOnSpendable(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWallet(t, store, "wallet-spendable-taproot-script")
+
+	params := db.NewImportedAddressParams{
+		WalletID:        walletID,
+		AddressType:     db.TaprootPubKey,
+		ScriptPubKey:    RandomBytes(32),
+		EncryptedScript: RandomBytes(48),
+	}
+
+	_, err := store.NewImportedAddress(t.Context(), params)
+	require.ErrorIs(t, err, db.ErrSpendableWalletNeedsAddressPrivKey)
+}
+
+// TestNewImportedTaprootScriptWatchOnly verifies the accepted half of the same
+// invariant: a watch-only wallet may import a script-only taproot address and
+// read its encrypted script back. Observing a script that cannot be spent is
+// what a watch-only wallet is for.
+func TestNewImportedTaprootScriptWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+
+	walletID := newWatchOnlyWallet(
+		t, store, "wallet-watchonly-taproot-script",
+	)
+
+	encryptedScript := RandomBytes(48)
+	params := db.NewImportedAddressParams{
+		WalletID:        walletID,
+		AddressType:     db.TaprootPubKey,
+		ScriptPubKey:    RandomBytes(32),
+		EncryptedScript: encryptedScript,
+	}
+
+	info, err := store.NewImportedAddress(t.Context(), params)
+	require.NoError(t, err)
+	require.True(t, info.IsImported)
+	require.True(t, info.HasScript)
+	require.True(t, info.IsWatchOnly)
+	require.Equal(t, db.TaprootPubKey, info.AddrType)
+
+	// Read the imported script back, mirroring how ScriptForOutput resolves
+	// the encrypted script for a taproot script-path spend.
+	secret, err := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     walletID,
+			ScriptPubKey: params.ScriptPubKey,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, encryptedScript, secret.EncryptedScript)
+	require.Empty(t, secret.EncryptedPrivKey)
+
+	// SQL script ciphertext is always written under the script key.
+	require.True(t, secret.ScriptIsSecret)
+}
+
+// TestGetAddressSecretRejectsEmptySelector verifies that the SQL backends
+// reject an address-secret query with no script pubkey instead of issuing the
+// read. A malformed selector must not read as a missing secret, and must fail
+// the same way on every backend.
+func TestGetAddressSecretRejectsEmptySelector(t *testing.T) {
+	t.Parallel()
+
+	store := NewTestStore(t)
+	walletID := newWatchOnlyWallet(t, store, "empty-secret-selector")
+
+	for _, script := range [][]byte{nil, {}} {
+		secret, err := store.GetAddressSecret(
+			t.Context(), db.GetAddressSecretQuery{
+				WalletID:     walletID,
+				ScriptPubKey: script,
+			},
+		)
+		require.ErrorIs(t, err, db.ErrInvalidAddressQuery)
+		require.Nil(t, secret)
+	}
+}
+
 // TestNewImportedAddressNormalizesEmptyPrivateKey verifies that empty private
 // key payloads are treated as absent for validation and persisted as NULL.
 func TestNewImportedAddressNormalizesEmptyPrivateKey(t *testing.T) {
