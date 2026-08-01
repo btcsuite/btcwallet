@@ -741,6 +741,40 @@ func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccou
 	return i, err
 }
 
+const GetAccountSecret = `-- name: GetAccountSecret :one
+SELECT acs.encrypted_private_key
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
+WHERE
+    a.wallet_id = $1
+    AND ks.purpose = $2
+    AND ks.coin_type = $3
+    AND a.account_number = $4
+`
+
+type GetAccountSecretParams struct {
+	WalletID      int64
+	Purpose       int64
+	CoinType      int64
+	AccountNumber sql.NullInt64
+}
+
+// Returns account-level key material for signing. The account row is returned
+// even when no account_secrets row exists so callers can distinguish a
+// watch-only account from an absent account.
+func (q *Queries) GetAccountSecret(ctx context.Context, arg GetAccountSecretParams) ([]byte, error) {
+	row := q.queryRow(ctx, q.getAccountSecretStmt, GetAccountSecret,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.AccountNumber,
+	)
+	var encrypted_private_key []byte
+	err := row.Scan(&encrypted_private_key)
+	return encrypted_private_key, err
+}
+
 const GetAndIncrementNextExternalIndex = `-- name: GetAndIncrementNextExternalIndex :one
 UPDATE accounts
 SET next_external_index = next_external_index + 1

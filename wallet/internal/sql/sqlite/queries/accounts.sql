@@ -52,6 +52,20 @@ INSERT INTO account_secrets (
     ?, ?
 );
 
+-- name: GetAccountSecret :one
+-- Returns account-level key material for signing. The account row is returned
+-- even when no account_secrets row exists so callers can distinguish a
+-- watch-only account from an absent account.
+SELECT acs.encrypted_private_key
+FROM accounts AS a
+INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
+LEFT JOIN account_secrets AS acs ON a.id = acs.account_id
+WHERE
+    a.wallet_id = sqlc.arg('wallet_id')
+    AND ks.purpose = sqlc.arg('purpose')
+    AND ks.coin_type = sqlc.arg('coin_type')
+    AND a.account_number = sqlc.arg('account_number');
+
 -- name: GetAccountByScopeAndName :one
 -- Returns a single account by scope id and account name.
 SELECT
