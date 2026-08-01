@@ -21,6 +21,12 @@ type runtimeCache interface {
 	GetAccount(ctx context.Context,
 		query db.GetAccountQuery) (*db.AccountInfo, error)
 
+	// GetAccountSecret returns encrypted account-level signing material.
+	// The result mirrors the underlying db.AccountStore.GetAccountSecret
+	// contract and never contains plaintext key material.
+	GetAccountSecret(ctx context.Context,
+		query db.GetAccountSecretQuery) (*db.AccountSecret, error)
+
 	// ListAccounts returns accounts matching the given query. The result
 	// mirrors the underlying db.AccountStore.ListAccounts contract.
 	ListAccounts(ctx context.Context,
@@ -72,6 +78,20 @@ func (c *storeRuntimeCache) GetAccount(ctx context.Context,
 	query db.GetAccountQuery) (*db.AccountInfo, error) {
 
 	return c.store.GetAccount(ctx, query)
+}
+
+// GetAccountSecret delegates to the underlying db.Store.
+//
+// NOTE: pass-through today. See storeRuntimeCache's TODO(yy).
+//
+// TODO(yy): drop the wrapcheck exemption once the cache layer wraps
+// store errors with its own typed errors.
+//
+//nolint:wrapcheck
+func (c *storeRuntimeCache) GetAccountSecret(ctx context.Context,
+	query db.GetAccountSecretQuery) (*db.AccountSecret, error) {
+
+	return c.store.GetAccountSecret(ctx, query)
 }
 
 // ListAccounts delegates to the underlying db.Store.
