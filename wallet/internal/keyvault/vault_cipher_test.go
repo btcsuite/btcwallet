@@ -89,11 +89,6 @@ func TestWalletVaultEncryptUnsupportedKeyTypes(t *testing.T) {
 		message string
 	}{
 		{
-			name:    "public key",
-			keyType: waddrmgr.CKTPublic,
-			message: "public crypto key",
-		},
-		{
 			name:    "invalid key type",
 			keyType: waddrmgr.CryptoKeyType(0xff),
 			message: "255",
@@ -193,11 +188,6 @@ func TestWalletVaultDecryptUnsupportedKeyTypes(t *testing.T) {
 		message string
 	}{
 		{
-			name:    "public key",
-			keyType: waddrmgr.CKTPublic,
-			message: "public crypto key",
-		},
-		{
 			name:    "invalid key type",
 			keyType: waddrmgr.CryptoKeyType(0xff),
 			message: "255",
@@ -233,4 +223,33 @@ func TestWalletVaultDecryptMalformedCiphertext(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, snacl.ErrMalformed)
 	require.ErrorContains(t, err, "wallet 1 vault Decrypt: decrypt")
+}
+
+// TestWalletVaultPublicMapsToScriptKey verifies that a CKTPublic request is
+// served by the script key. A SQL wallet has no separate public crypto key,
+// but the retained taproot script import asks for that class, so the mapping
+// is what keeps the import working and round-tripping.
+func TestWalletVaultPublicMapsToScriptKey(t *testing.T) {
+	t.Parallel()
+
+	state := makeUnlockedState(t)
+	vault := NewWalletVault(nil, 1, false)
+	vault.unlockedState = state
+	t.Cleanup(vault.Lock)
+
+	plaintext := []byte("taproot script body")
+
+	ciphertext, err := vault.Encrypt(waddrmgr.CKTPublic, plaintext)
+	require.NoError(t, err)
+	require.NotEqual(t, plaintext, ciphertext)
+
+	// The same blob opens under either name, which is what makes the
+	// mapping safe: the store records ScriptIsSecret for these rows.
+	got, err := vault.Decrypt(waddrmgr.CKTPublic, ciphertext)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
+
+	got, err = vault.Decrypt(waddrmgr.CKTScript, ciphertext)
+	require.NoError(t, err)
+	require.Equal(t, plaintext, got)
 }
