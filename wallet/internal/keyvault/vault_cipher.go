@@ -76,11 +76,15 @@ func (v *WalletVault) selectUnlockedCryptoKey(
 		}
 
 		return &v.unlockedState.cryptoKeyPrivate, nil
-	case waddrmgr.CKTScript:
+	case waddrmgr.CKTScript, waddrmgr.CKTPublic:
+		// A SQL wallet derives one key per class from a single
+		// passphrase and has no separate public crypto key. The legacy
+		// format kept one so that non-secret script rows stayed
+		// readable while locked, and the retained taproot script import
+		// still asks for that class; map it onto the script key so the
+		// import works and its ciphertext is recorded as script-key
+		// material.
 		return &v.unlockedState.cryptoKeyScript, nil
-	case waddrmgr.CKTPublic:
-		return nil, fmt.Errorf("public crypto key: %w",
-			errUnsupportedCryptoKeyType)
 	default:
 		return nil, fmt.Errorf("%d: %w", keyType, errUnsupportedCryptoKeyType)
 	}
