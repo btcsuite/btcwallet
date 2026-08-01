@@ -191,30 +191,9 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
 	expectSyncedTip(store, tip)
 
-	// Mock retrieval of synced block hashes from the store for the last 10
-	// blocks.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-		StartHeight: 91,
-		EndHeight:   100,
-	}).Return(localBlocks, nil).Once()
-
-	// Mock retrieval of matching block hashes from the remote chain.
-	remoteHashes := make([]chainhash.Hash, 10)
-	for i := range 10 {
-		remoteHashes[i] = chainhash.Hash{byte(91 + i)}
-	}
-
-	mockChain.On(
-		"GetBlockHashes", int64(91), int64(100),
-	).Return(remoteHashes, nil).Once()
+	// The local and remote hashes agree across the scanned batch, so the
+	// tip is on the main chain and no rollback is triggered.
+	expectMatchingRollbackBatch(store, mockChain)
 
 	// Act & Assert: Verify that checkRollback completes without error
 	// and no rollback is triggered when hashes match.
@@ -309,18 +288,22 @@ func TestInitChainSync(t *testing.T) {
 	// Mock backend synchronization check.
 	mockChain.On("IsCurrent").Return(true).Once()
 
-	// Mock block notification registration.
+	// Registration enables block notifications.
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
-	// Mock the synced tip read at the start of the rollback check. A height
-	// of 0 means checkRollback reads the tip and returns without scanning
-	// any block ranges.
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 0})
+	// The synced tip read at the start of the rollback check. A height of 0
+	// means checkRollback reads the tip and returns without scanning any
+	// block ranges.
+	store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{}, nil).Once()
 
 	// Act & Assert: Verify that the initial chain synchronization
 	// sequence completes successfully.
 	err := s.initChainSync(t.Context())
 	require.NoError(t, err)
+
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestScanBatchHeadersOnly verifies header-only scan logic.
@@ -390,10 +373,10 @@ func TestSyncerLoadScanState(t *testing.T) {
 			return query.WalletID == walletID && query.SkipBalance
 		},
 	)).Return([]db.AccountInfo{{
+		AccountID:     &accountNumber0,
 		AccountNumber: &accountNumber0,
 		KeyScope:      db.KeyScopeBIP0084,
 	}}, nil).Twice()
-	expectRecoveryAccountIDLookups(store)
 
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
@@ -483,7 +466,8 @@ func TestScanBatchWithCFilters(t *testing.T) {
 	mockPublisher := &mockTxPublisher{}
 
 	s := newSyncer(
-		Config{Chain: mockChain, DB: dbConn}, nil, nil, mockPublisher,
+		Config{Chain: mockChain, DB: dbConn}, nil, nil,
+		mockPublisher,
 		&walletmock.Store{}, 0,
 	)
 
@@ -616,10 +600,13 @@ func TestScanBatch(t *testing.T) {
 		store, uint32(0),
 	)
 
+	scanAccountID := uint32(0)
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
-		[]db.AccountInfo{{KeyScope: db.KeyScopeBIP0084}}, nil,
+		[]db.AccountInfo{{
+			AccountID: &scanAccountID,
+			KeyScope:  db.KeyScopeBIP0084,
+		}}, nil,
 	).Twice()
-	expectRecoveryAccountIDLookups(store)
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
 	).Maybe()
@@ -738,11 +725,11 @@ func TestAdvanceChainSync(t *testing.T) {
 	accountNumber0 := uint32(0)
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
 		[]db.AccountInfo{{
+			AccountID:     &accountNumber0,
 			AccountNumber: &accountNumber0,
 			KeyScope:      db.KeyScopeBIP0084,
 		}}, nil,
 	).Twice()
-	expectRecoveryAccountIDLookups(store)
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
 	).Maybe()
@@ -964,6 +951,40 @@ func matchUnminedTxBatch(walletID uint32, tx *wire.MsgTx,
 	)
 }
 
+// initStoreScanState loads a Store scan-account snapshot into a fresh recovery
+// state exactly as the production newStoreScanState does: identities first,
+// then Initialize.
+func initStoreScanState(t *testing.T, rs *RecoveryState,
+	accounts []storeScanAccount) {
+
+	t.Helper()
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
+	for _, account := range accounts {
+		require.NoError(t, rs.setStoreAccount(
+			account.props, account.accountID,
+			account.derivedAccountNumber,
+		))
+
+		props = append(props, account.props)
+	}
+
+	require.NoError(t, rs.Initialize(props, nil, nil))
+}
+
+// scanAccountProps extracts the horizon snapshots from a Store scan-account
+// slice for assertions that only care about account properties.
+func scanAccountProps(
+	accounts []storeScanAccount) []*waddrmgr.AccountProperties {
+
+	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
+	for _, account := range accounts {
+		props = append(props, account.props)
+	}
+
+	return props
+}
+
 // expectSyncedTip mocks Store.GetWallet so syncedTip returns the given synced
 // tip for any wallet name. A height of -1 is encoded as a nil SyncedTo,
 // matching how an unsynced wallet is represented; any other height is encoded
@@ -980,16 +1001,6 @@ func expectSyncedTip(store *walletmock.Store, tip waddrmgr.BlockStamp) {
 
 	store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&info, nil).Maybe()
-}
-
-// expectRecoveryAccountIDLookups allows scan-state fixtures to satisfy the
-// Store account ID lookup without asserting a specific backend row identity.
-func expectRecoveryAccountIDLookups(store *walletmock.Store) {
-	store.On("GetAccount", mock.Anything, mock.MatchedBy(
-		func(query db.GetAccountQuery) bool {
-			return query.SkipBalance
-		},
-	)).Return(&db.AccountInfo{}, nil).Maybe()
 }
 
 // serializeTx returns the wire encoding of tx, for stubbing TxInfo.SerializedTx
@@ -1822,64 +1833,6 @@ func TestPutTargetedBatchStore(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestStampRecoveryAccountIDsCarriesStableID verifies that the scan state keeps
-// the stable account ID resolved from the loaded account snapshot, so horizon
-// emission does not need a later name lookup that could race an account rename.
-func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
-	t.Parallel()
-
-	const walletID uint32 = 13
-
-	store := &walletmock.Store{}
-	s := newSyncer(
-		Config{}, nil, nil, &mockTxPublisher{}, store, walletID,
-	)
-	scanState := NewRecoveryState(0, &chainParams, nil)
-
-	props := &waddrmgr.AccountProperties{
-		KeyScope:      waddrmgr.KeyScopeBIP0084,
-		AccountNumber: 5,
-		AccountName:   "before-rename",
-	}
-	scanState.accountNames[waddrmgr.AccountScope{
-		Scope:   props.KeyScope,
-		Account: props.AccountNumber,
-	}] = props.AccountName
-
-	accountID := uint32(77)
-	store.On("GetAccount", mock.Anything, mock.MatchedBy(
-		func(query db.GetAccountQuery) bool {
-			return query.WalletID == walletID &&
-				query.Scope == db.KeyScopeBIP0084 &&
-				query.Name != nil &&
-				*query.Name == "before-rename" &&
-				query.AccountNumber == nil &&
-				query.SkipBalance
-		},
-	)).Return(&db.AccountInfo{
-		AccountID: &accountID,
-	}, nil).Once()
-
-	err := s.stampRecoveryAccountIDs(
-		t.Context(), scanState, []*waddrmgr.AccountProperties{props},
-	)
-	require.NoError(t, err)
-
-	props.AccountName = "after-rename"
-	horizons := scanHorizonParams(scanState, map[waddrmgr.BranchScope]uint32{
-		{
-			Scope:   props.KeyScope,
-			Account: props.AccountNumber,
-			Branch:  waddrmgr.ExternalBranch,
-		}: 3,
-	})
-	require.Len(t, horizons, 1)
-	require.NotNil(t, horizons[0].AccountID)
-	require.Equal(t, accountID, *horizons[0].AccountID)
-	require.Equal(t, "before-rename", horizons[0].AccountName)
-	store.AssertExpectations(t)
-}
-
 // TestScanHorizonParamsStampsAccountIdentity verifies that scanHorizonParams
 // stamps every emitted horizon with the stable account ID and account name
 // resolved from the recovery state.
@@ -1934,6 +1887,128 @@ func TestScanHorizonParamsStampsAccountIdentity(t *testing.T) {
 	require.Equal(t, uint32(7), byAccount[9].Index)
 }
 
+// TestFullScanRecoverySeparatesStoreIDAndAccountNumber is the collision
+// regression for the untargeted full scan, which keys recovery state on the
+// durable store row ID. It exercises two accounts in the same scope where one
+// account's store AccountID equals the other's BIP44 account number:
+//
+//   - an imported xpub account with store AccountID 3 and no BIP44 number, and
+//   - a derived account with BIP44 number 3 and a distinct store AccountID 1.
+//
+// Before the fix the recovery state keyed on a bare number that mixed derived
+// BIP44 numbers and synthetic store IDs, so the imported account (keyed by its
+// store ID 3) and the derived account (keyed by its BIP44 number 3) collided
+// under waddrmgr.AccountScope{scope, 3} and one overwrote the other's deriver,
+// name, and horizons. Keying every recovery-state map on the stable store
+// AccountID keeps them separate. Targeted scans are unaffected: they select and
+// key by account number, so this test never resolves a targeted selector.
+func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	const walletID uint32 = 71
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{}, store, walletID,
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	pubKey := storeDerivationAccountPubKey(t)
+
+	// The imported account: store AccountID 3, masked BIP44 number (nil). Its
+	// store AccountID collides numerically with the derived account's BIP44
+	// number below.
+	importedID := uint32(3)
+
+	// The derived account: BIP44 number 3, but a distinct store AccountID 1.
+	derivedBIP44 := uint32(3)
+	derivedID := uint32(1)
+
+	addrSchema := db.ScopeAddrSchema{
+		ExternalAddrType: db.WitnessPubKey,
+		InternalAddrType: db.WitnessPubKey,
+	}
+	accounts := []db.AccountInfo{
+		{
+			AccountID:        &importedID,
+			AccountNumber:    nil,
+			AccountName:      "imported-a",
+			IsImported:       true,
+			ExternalKeyCount: 1,
+			InternalKeyCount: 1,
+			KeyScope:         db.KeyScope(scope),
+			AddrSchema:       addrSchema,
+			PublicKey:        []byte(pubKey.String()),
+		},
+		{
+			AccountID:        &derivedID,
+			AccountNumber:    &derivedBIP44,
+			AccountName:      "derived-b",
+			ExternalKeyCount: 1,
+			InternalKeyCount: 1,
+			KeyScope:         db.KeyScope(scope),
+			AddrSchema:       addrSchema,
+			PublicKey:        []byte(pubKey.String()),
+		},
+	}
+
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return(accounts, nil).Once()
+
+	// Act: build the recovery horizon snapshot and load it into a fresh
+	// recovery state. addrMgr is nil so accounts derive through their
+	// store-native public material.
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
+	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
+	require.Len(t, props, 2)
+
+	rs := NewRecoveryState(MinRecoveryWindow, &chaincfg.SimNetParams, nil)
+	initStoreScanState(t, rs, scanAccounts)
+
+	// Assert: each account keeps its own identity under its distinct store
+	// AccountID key; neither overwrote the other despite the shared number 3.
+	importedName, ok := rs.AccountName(scope, importedID)
+	require.True(t, ok)
+	require.Equal(t, "imported-a", importedName)
+
+	derivedName, ok := rs.AccountName(scope, derivedID)
+	require.True(t, ok)
+	require.Equal(t, "derived-b", derivedName)
+
+	gotImportedID, ok := rs.AccountID(scope, importedID)
+	require.True(t, ok)
+	require.Equal(t, importedID, *gotImportedID)
+
+	gotDerivedID, ok := rs.AccountID(scope, derivedID)
+	require.True(t, ok)
+	require.Equal(t, derivedID, *gotDerivedID)
+
+	// Both accounts have their own external-branch recovery state keyed by
+	// their store AccountID, and each derived a distinct lookahead address.
+	importedBranch, err := rs.GetBranchState(waddrmgr.BranchScope{
+		Scope:   scope,
+		Account: importedID,
+		Branch:  waddrmgr.ExternalBranch,
+	})
+	require.NoError(t, err)
+
+	derivedBranch, err := rs.GetBranchState(waddrmgr.BranchScope{
+		Scope:   scope,
+		Account: derivedID,
+		Branch:  waddrmgr.ExternalBranch,
+	})
+	require.NoError(t, err)
+
+	require.NotSame(t, importedBranch, derivedBranch)
+
+	store.AssertExpectations(t)
+}
+
 // TestStoreScanHorizonsListAccounts verifies full scan horizon reads use the
 // store account list.
 func TestStoreScanHorizonsListAccounts(t *testing.T) {
@@ -1948,8 +2023,10 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 		store, walletID,
 	)
 	accountNumber2 := uint32(2)
+	accountID := uint32(41)
 
 	accounts := []db.AccountInfo{{
+		AccountID:            &accountID,
 		AccountNumber:        &accountNumber2,
 		AccountName:          "default",
 		ExternalKeyCount:     5,
@@ -1967,12 +2044,15 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	)).Return(accounts, nil).Once()
 
 	// Act: Load all scan horizons from the store.
-	props, err := s.storeScanHorizons(t.Context(), nil)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
 
-	// Assert: The store account row was converted for RecoveryState.
+	// Assert: The store account row was converted for RecoveryState, keyed on
+	// the stable store AccountID rather than the BIP44 account number.
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 	require.Len(t, props, 1)
-	require.Equal(t, *accounts[0].AccountNumber, props[0].AccountNumber)
+	require.Equal(t, *accounts[0].AccountID, props[0].AccountNumber)
 	require.Equal(t, accounts[0].ExternalKeyCount, props[0].ExternalKeyCount)
 	require.Equal(t, accounts[0].InternalKeyCount, props[0].InternalKeyCount)
 	require.Equal(t, waddrmgr.KeyScopeBIP0084, props[0].KeyScope)
@@ -2024,12 +2104,14 @@ func TestStoreScanHorizonsGetAccount(t *testing.T) {
 	)).Return(&account, nil).Once()
 
 	// Act: Load targeted scan horizons from the store.
-	props, err := s.storeScanHorizons(
+	scanAccounts, err := s.storeScanHorizons(
 		t.Context(), []scanTarget{target},
 	)
 
 	// Assert: The targeted account row was converted for RecoveryState.
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 	require.Len(t, props, 1)
 	require.Equal(t, target.Account, props[0].AccountNumber)
 	require.Equal(t, account.ExternalKeyCount, props[0].ExternalKeyCount)
@@ -2090,7 +2172,7 @@ func TestStoreScanHorizonsGetAccountKeepsImportedXpub(t *testing.T) {
 		InternalKeyCount: 2,
 		KeyScope:         db.KeyScope(importedXpub.Scope),
 		IsImported:       true,
-		PublicKey:        []byte("account-xpub"),
+		PublicKey:        []byte(storeDerivationAccountPubKey(t).String()),
 	}
 
 	// The imported-address bucket target must be skipped before lookup. The
@@ -2120,7 +2202,7 @@ func TestStoreScanHorizonsGetAccountKeepsImportedXpub(t *testing.T) {
 		Return(&importedXpubInfo, nil).Once()
 
 	// Act: load targeted scan horizons.
-	props, err := s.storeScanHorizons(t.Context(), []scanTarget{
+	scanAccounts, err := s.storeScanHorizons(t.Context(), []scanTarget{
 		{
 			Scope:       derived.Scope,
 			Account:     derived.Account,
@@ -2140,6 +2222,8 @@ func TestStoreScanHorizonsGetAccountKeepsImportedXpub(t *testing.T) {
 	// Assert: the keyless imported-address bucket was skipped, while the
 	// default derived account and true imported xpub both emitted horizons.
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 	require.Len(t, props, 2)
 
 	byName := make(map[string]*waddrmgr.AccountProperties, len(props))
@@ -2176,19 +2260,21 @@ func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
 	// Arrange: a real store-backed syncer with the default derived account at
 	// number 0 and an imported-xpub account whose Store AccountNumber is
 	// masked but whose waddrmgr account number is distinct.
-	s, mgr := newStoreScanSyncer(t)
+	s, mgr, dbConn := newStoreScanSyncer(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
 	importedNumber := createImportedXpubAccount(
-		t, s, mgr, scope, "imported-xpub",
+		t, s, mgr, dbConn, scope, "imported-xpub",
 	)
 
 	// Act: load all scan horizons from the store.
-	props, err := s.storeScanHorizons(t.Context(), nil)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
 
 	// Assert: the imported xpub is preserved with its non-masked derivation
 	// number rather than colliding with the default account at number 0.
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 
 	byName := make(map[string]*waddrmgr.AccountProperties, len(props))
 	for _, prop := range props {
@@ -2210,10 +2296,12 @@ func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
 // newStoreScanSyncer builds a store-backed syncer over a real, freshly created
 // and unlocked waddrmgr-backed wallet. It returns the syncer and the open
 // *waddrmgr.Manager so tests can resolve internal (non-masked) account numbers
-// the same way production identity resolution does. The legacy manager is the
-// identity-aware backend the Store path consults before its own masked
-// lookups, so a real one is required to exercise resolveScanTargets.
-func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
+// the same way production identity resolution does. resolveScanTargets reads
+// one Store account snapshot; on kvdb the row IDs in that snapshot are those
+// internal numbers, so a real manager is required to exercise it.
+func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager,
+	walletdb.DB) {
+
 	t.Helper()
 
 	dbConn, cleanup := setupTestDB(t)
@@ -2283,11 +2371,14 @@ func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
 
 	store := kvdb.NewStore(dbConn, txStore, mgr)
 	s := newSyncer(
-		Config{DB: dbConn, ChainParams: &chaincfg.SimNetParams}, mgr,
+		Config{
+			DB:          dbConn,
+			ChainParams: &chaincfg.SimNetParams,
+		}, mgr,
 		txStore, &mockTxPublisher{}, store, 0,
 	)
 
-	return s, mgr
+	return s, mgr, dbConn
 }
 
 // createImportedXpubAccount imports a watch-only xpub account into the real
@@ -2296,7 +2387,7 @@ func newStoreScanSyncer(t *testing.T) (*syncer, *waddrmgr.Manager) {
 // tests need the internal number to address the imported account distinctly
 // from the default derived account that also owns number 0.
 func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
-	scope waddrmgr.KeyScope, name string) uint32 {
+	dbConn walletdb.DB, scope waddrmgr.KeyScope, name string) uint32 {
 
 	t.Helper()
 
@@ -2321,7 +2412,7 @@ func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
 
 	var internalNumber uint32
 
-	err = walletdb.View(s.cfg.DB, func(tx walletdb.ReadTx) error {
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(waddrmgrNamespaceKey)
 
 		internalNumber, err = scopedMgr.LookupAccount(ns, name)
@@ -2334,17 +2425,17 @@ func createImportedXpubAccount(t *testing.T, s *syncer, mgr *waddrmgr.Manager,
 }
 
 // TestStoreScanHorizonsTargetedImportedBucketSkipped verifies that a targeted
-// rescan for the keyless legacy imported-address bucket never issues a Store
-// number lookup and produces no horizon for the bucket. The real kvdb backend
-// rejects a by-number lookup of waddrmgr.ImportedAddrAccount with
-// ErrAccountNotFound, so a passing run (no error, no horizon) proves the bucket
-// was skipped before any lookup rather than mis-resolved.
+// rescan for the keyless legacy imported-address bucket, addressed by the
+// reserved waddrmgr.ImportedAddrAccount AccountID, produces no horizon for the
+// bucket. The bucket has no account row, so it is carried through unresolved
+// and skipped before any horizon load; a passing run (no error, no horizon)
+// proves it was skipped rather than mis-resolved.
 func TestStoreScanHorizonsTargetedImportedBucketSkipped(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: a store-backed syncer over a real manager and a single target
 	// for the keyless imported-address bucket.
-	s, _ := newStoreScanSyncer(t)
+	s, _, _ := newStoreScanSyncer(t)
 
 	targets := []waddrmgr.AccountScope{{
 		Scope:   waddrmgr.KeyScopeBIP0084,
@@ -2355,12 +2446,12 @@ func TestStoreScanHorizonsTargetedImportedBucketSkipped(t *testing.T) {
 	resolved, err := s.resolveScanTargets(t.Context(), targets)
 	require.NoError(t, err)
 
-	props, err := s.storeScanHorizons(t.Context(), resolved)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), resolved)
 
-	// Assert: the bucket was skipped before any Store lookup -- a number
-	// lookup would have surfaced ErrAccountNotFound -- so no horizon is
-	// emitted and no error is returned.
+	// Assert: the keyless bucket produced no horizon and no error.
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 	require.Empty(t, props)
 }
 
@@ -2375,11 +2466,11 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 
 	// Arrange: a real-backend syncer with the auto-created default derived
 	// account at number 0 and an imported-xpub account masked to number 0.
-	s, mgr := newStoreScanSyncer(t)
+	s, mgr, dbConn := newStoreScanSyncer(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
 	importedNumber := createImportedXpubAccount(
-		t, s, mgr, scope, "imported-xpub",
+		t, s, mgr, dbConn, scope, "imported-xpub",
 	)
 
 	// The imported account's internal number must differ from the default
@@ -2404,8 +2495,10 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 	require.Equal(t, waddrmgr.DefaultAccountName, resolved[0].AccountName)
 	require.Equal(t, "imported-xpub", resolved[1].AccountName)
 
-	props, err := s.storeScanHorizons(t.Context(), resolved)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), resolved)
 	require.NoError(t, err)
+
+	props := scanAccountProps(scanAccounts)
 
 	// Assert: both horizons are emitted under distinct derivation numbers,
 	// proving the imported target was resolved by name and not mis-resolved as
@@ -2442,6 +2535,108 @@ func expectImportedScanAddressPage(store *walletmock.Store,
 				query.Page.Limit() == scanAddressPageLimit
 		},
 	)).Return(result, nil).Once()
+}
+
+// TestResolveScanTargetsDoesNotUseSQLAccountID verifies the backend boundary
+// of targeted name resolution: an imported row's store AccountID is a legacy
+// waddrmgr account number only for kvdb. Without the legacy address manager the
+// backend is SQL, where AccountID is an unrelated relational row ID, so a
+// numeric target matching no derived account must be a genuine not-found rather
+// than silently selecting whichever imported row shares that integer.
+func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a Store-backed syncer with no legacy address manager, holding
+	// one imported account whose row ID equals the caller's target number
+	// while its own account number does not.
+	const (
+		walletID   uint32 = 3
+		targetNum  uint32 = 7
+		otherNum   uint32 = 12
+		importedID uint32 = 7
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{}, nil, nil, &mockTxPublisher{}, store, walletID,
+	)
+	require.Nil(t, s.addrStore)
+
+	id := importedID
+	number := otherNum
+	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+		func(query db.ListAccountsQuery) bool {
+			return query.WalletID == walletID && query.SkipBalance
+		},
+	)).Return([]db.AccountInfo{{
+		AccountID:     &id,
+		AccountNumber: &number,
+		AccountName:   "imported-xpub",
+		KeyScope:      db.KeyScope(scope),
+		IsImported:    true,
+	}}, nil).Once()
+
+	// Act: target the number that collides with the imported row's ID.
+	resolved, err := s.resolveScanTargets(t.Context(),
+		[]waddrmgr.AccountScope{{Scope: scope, Account: targetNum}},
+	)
+
+	// Assert: the row ID was never treated as an account number.
+	require.ErrorIs(t, err, db.ErrAccountNotFound)
+	require.Nil(t, resolved)
+	store.AssertExpectations(t)
+}
+
+// TestStampRecoveryAccountIDsCarriesStableID verifies that the scan state keeps
+// the stable account ID registered from the loaded account snapshot, so horizon
+// emission does not need a later name lookup that could race an account rename.
+// setStoreAccount registers that identity before Initialize; this asserts an
+// emitted horizon still carries it after the account is renamed.
+func TestStampRecoveryAccountIDsCarriesStableID(t *testing.T) {
+	t.Parallel()
+
+	scanState := NewRecoveryState(0, &chainParams, nil)
+
+	// The untargeted full scan keys recovery state on the durable row ID,
+	// deliberately unequal to the account's real BIP44 number.
+	const (
+		storeID       uint32 = 77
+		accountNumber uint32 = 5
+	)
+
+	props := &waddrmgr.AccountProperties{
+		KeyScope:      waddrmgr.KeyScopeBIP0084,
+		AccountNumber: storeID,
+		AccountName:   "before-rename",
+		AccountPubKey: storeDerivationAccountPubKey(t),
+		AddrSchema: &waddrmgr.ScopeAddrSchema{
+			ExternalAddrType: waddrmgr.WitnessPubKey,
+			InternalAddrType: waddrmgr.WitnessPubKey,
+		},
+	}
+	scanState.accountNames[waddrmgr.AccountScope{
+		Scope:   props.KeyScope,
+		Account: props.AccountNumber,
+	}] = props.AccountName
+
+	id, number := storeID, accountNumber
+	require.NoError(t, scanState.setStoreAccount(props, &id, &number))
+
+	// A later rename must not change what an emitted horizon carries.
+	props.AccountName = "after-rename"
+	horizons := scanHorizonParams(scanState, map[waddrmgr.BranchScope]uint32{
+		{
+			Scope:   props.KeyScope,
+			Account: props.AccountNumber,
+			Branch:  waddrmgr.ExternalBranch,
+		}: 3,
+	})
+	require.Len(t, horizons, 1)
+	require.NotNil(t, horizons[0].AccountID)
+	require.Equal(t, storeID, *horizons[0].AccountID)
+	require.Equal(t, "before-rename", horizons[0].AccountName)
 }
 
 // TestStoreScanAddresses verifies scan address reads use paginated store
@@ -2750,7 +2945,9 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 	require.NoError(t, err)
 
 	accountNumber3 := uint32(3)
+	accountID3 := uint32(3)
 	accounts := []db.AccountInfo{{
+		AccountID:        &accountID3,
 		AccountNumber:    &accountNumber3,
 		AccountName:      "default",
 		ExternalKeyCount: 4,
@@ -2792,7 +2989,7 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 	// Assert: All scan initialization groups came from the store.
 	require.NoError(t, err)
 	require.Len(t, horizons, 1)
-	require.Equal(t, uint32(3), horizons[0].AccountNumber)
+	require.Equal(t, uint32(3), horizons[0].props.AccountNumber)
 	require.Len(t, addrs, 1)
 	require.Equal(t, addr.EncodeAddress(), addrs[0].EncodeAddress())
 	require.Len(t, unspent, 1)
@@ -2854,9 +3051,6 @@ func TestHandleScanReq(t *testing.T) {
 
 	// Arrange: Initialize a store-backed syncer and mocks to test handling
 	// of different scan request types.
-	dbConn, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
 	mockAddrStore := &bwmock.AddrStore{}
 	mockChain := &bwmock.Chain{}
 	mockPublisher := &mockTxPublisher{}
@@ -2864,7 +3058,7 @@ func TestHandleScanReq(t *testing.T) {
 	store := &walletmock.Store{}
 
 	s := newSyncer(
-		Config{DB: dbConn, Chain: mockChain}, mockAddrStore,
+		Config{Chain: mockChain}, mockAddrStore,
 		mockTxStore, mockPublisher,
 		store, 0,
 	)
@@ -2909,7 +3103,7 @@ func TestHandleScanReq(t *testing.T) {
 	// syncer is used so resolveScanTargets resolves the target to its
 	// durable name through the manager and the targeted scan reads and
 	// writes through the real Store.
-	sTargeted, _ := newStoreScanSyncer(t)
+	sTargeted, _, _ := newStoreScanSyncer(t)
 
 	mockChain = &bwmock.Chain{}
 	sTargeted.cfg.Chain = mockChain
@@ -3025,21 +3219,10 @@ func TestSyncerFullRun(t *testing.T) {
 	mockChain.On("IsCurrent").Return(true).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	// Mock rollback check dependencies. The store and the remote chain
-	// agree, so no rollback occurs.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{Height: i})
-	}
+	// Mock rollback check dependencies. The store and the remote chain agree
+	// across the scanned batch, so no rollback occurs.
+	expectMatchingRollbackBatch(store, mockChain)
 
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		localBlocks, nil).Maybe()
-
-	// Mock remote hashes for rollback check (batch size 10).
-	remoteHashes := make([]chainhash.Hash, 10)
-	mockChain.On(
-		"GetBlockHashes", mock.Anything, mock.Anything,
-	).Return(remoteHashes, nil).Maybe()
 	mockChain.On("NotifyBlocks").Return(nil).Once()
 
 	// Mock advancement to the current best block.
@@ -3076,6 +3259,37 @@ var (
 	errCFilter    = errors.New("not supported")
 )
 
+// expectMatchingRollbackBatch programs one checkRollback batch whose local and
+// remote hashes agree, so the scan concludes no reorg occurred.
+func expectMatchingRollbackBatch(store *walletmock.Store,
+	mockChain *bwmock.Chain) {
+
+	const (
+		start uint32 = 91
+		end   uint32 = 100
+	)
+
+	localBlocks := make([]db.Block, 0, end-start+1)
+	remoteHashes := make([]chainhash.Hash, 0, end-start+1)
+
+	for i := start; i <= end; i++ {
+		localBlocks = append(localBlocks, db.Block{
+			Hash:   chainhash.Hash{byte(i)},
+			Height: i,
+		})
+		remoteHashes = append(remoteHashes, chainhash.Hash{byte(i)})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: start,
+		EndHeight:   end,
+	}).Return(localBlocks, nil).Once()
+
+	mockChain.On(
+		"GetBlockHashes", int64(start), int64(end),
+	).Return(remoteHashes, nil).Once()
+}
+
 // TestProcessChainUpdate_Disconnect verifies rollback on block disconnect.
 func TestProcessChainUpdate_Disconnect(t *testing.T) {
 	t.Parallel()
@@ -3093,20 +3307,9 @@ func TestProcessChainUpdate_Disconnect(t *testing.T) {
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 
-	// The store and the remote chain agree (all-zero hashes), so the
+	// The store and the remote chain agree across the scanned batch, so the
 	// rollback check finds no reorg.
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{Height: i})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		localBlocks, nil).Once()
-
-	remoteHashes := make([]chainhash.Hash, 10)
-	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
-		remoteHashes, nil,
-	).Once()
+	expectMatchingRollbackBatch(store, mockChain)
 
 	// Act & Assert: Process a BlockDisconnected notification and verify
 	// that it triggers a rollback check.
@@ -3420,7 +3623,10 @@ func TestInitChainSync_Errors(t *testing.T) {
 		)
 
 		mockChain.On("IsCurrent").Return(true).Maybe()
-		expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+		expectSyncedTip(store, waddrmgr.BlockStamp{
+			Hash:   chainhash.Hash{0x01},
+			Height: 100,
+		})
 		store.On(
 			"ListSyncedBlocks", mock.Anything, mock.Anything,
 		).Return(([]db.Block)(nil), errDBMock).Once()
@@ -3452,7 +3658,7 @@ func TestInitChainSync_Errors(t *testing.T) {
 		err := s.initChainSync(t.Context())
 
 		// Assert: Verify error.
-		require.ErrorContains(t, err, "notify fail")
+		require.ErrorContains(t, err, "unable to start block notifications")
 	})
 }
 
@@ -3517,30 +3723,10 @@ func TestHandleChainUpdate_BlockDisconnected(t *testing.T) {
 		store, uint32(0),
 	)
 
-	// 1. BlockDisconnected. The store and the remote chain agree on blocks
-	// 91..100, so the rollback check finds no reorg.
+	// 1. BlockDisconnected. The store and the remote chain agree across the
+	// scanned batch, so the rollback check finds no reorg.
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-
-	localBlocks := make([]db.Block, 0, 10)
-	for i := uint32(91); i <= 100; i++ {
-		localBlocks = append(localBlocks, db.Block{
-			Hash:   chainhash.Hash{byte(i)},
-			Height: i,
-		})
-	}
-
-	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
-		StartHeight: 91,
-		EndHeight:   100,
-	}).Return(localBlocks, nil).Once()
-
-	remoteHashes := make([]chainhash.Hash, 10)
-	for i := range 10 {
-		remoteHashes[i] = chainhash.Hash{byte(91 + i)}
-	}
-
-	mockChain.On("GetBlockHashes", int64(91), int64(100)).Return(
-		remoteHashes, nil).Once()
+	expectMatchingRollbackBatch(store, mockChain)
 
 	// Act: Handle BlockDisconnected.
 	err := s.handleChainUpdate(
@@ -3901,12 +4087,16 @@ func TestCheckRollback_DBError(t *testing.T) {
 
 	// Arrange: Setup a store-backed syncer where the synced-block read
 	// fails during a rollback check.
+	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, nil, store, 0,
+		Config{Chain: mockChain}, nil, nil, nil, store, 0,
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   chainhash.Hash{0x01},
+		Height: 100,
+	})
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errBlockHash).Once()
 
@@ -3932,9 +4122,23 @@ func TestCheckRollback_RemoteError(t *testing.T) {
 	)
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
-		[]db.Block{}, nil).Maybe()
-	mockChain.On("GetBlockHashes", mock.Anything, mock.Anything).Return(
+
+	// The local batch resolves first; the remote lookup for the same range
+	// is what fails.
+	localBlocks := make([]db.Block, 0, 10)
+	for i := uint32(91); i <= 100; i++ {
+		localBlocks = append(localBlocks, db.Block{
+			Hash:   chainhash.Hash{byte(i)},
+			Height: i,
+		})
+	}
+
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   100,
+	}).Return(localBlocks, nil).Once()
+
+	mockChain.On("GetBlockHashes", int64(91), int64(100)).Return(
 		([]chainhash.Hash)(nil), errRemote).Once()
 
 	// Act: Perform a rollback check.
@@ -3973,7 +4177,8 @@ func TestFilterBatch_NilFilter(t *testing.T) {
 func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer where block notification fails.
+	// Arrange: Setup a store-backed syncer whose block-notification request
+	// fails.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
@@ -3989,8 +4194,9 @@ func TestInitChainSync_NotifyBlocksError(t *testing.T) {
 	// Act: Attempt chain sync initialization.
 	err := s.initChainSync(t.Context())
 
-	// Assert: Verify failure.
+	// Assert: Verify failure surfaces the block-notification error.
 	require.ErrorContains(t, err, "unable to start block notifications")
+	mockChain.AssertExpectations(t)
 }
 
 // TestScanBatchHeadersOnly_Errors verifies error paths.
@@ -4056,11 +4262,17 @@ func TestCheckRollback_HeaderError(t *testing.T) {
 		store, 0,
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 101})
-
 	hashA := chainhash.Hash{0x0A}
 	hashB := chainhash.Hash{0x0B}
 	hashC := chainhash.Hash{0x0C}
+
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   hashB,
+		Height: 101,
+	})
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
+		[]chainhash.Hash{hashC}, nil,
+	).Once()
 
 	// The store returns the local synced blocks for the range [92, 101]
 	// ascending: heights 92..99 are unique fillers, height 100 is hashA and
@@ -4142,7 +4354,7 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	// targeted default account to its durable name through the manager, and
 	// storeScanHorizons loads its horizon by that name. The targeted scan
 	// then returns an empty block batch.
-	s, _ := newStoreScanSyncer(t)
+	s, _, _ := newStoreScanSyncer(t)
 
 	mockChain := &bwmock.Chain{}
 	defer mockChain.AssertExpectations(t)
@@ -4167,7 +4379,8 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
 	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
-		[]chainhash.Hash{}, nil).Once()
+		[]chainhash.Hash{}, nil,
+	).Once()
 	mockChain.On("GetCFilters", []chainhash.Hash{},
 		wire.GCSFilterRegular).Return([]*gcs.Filter{}, nil).Once()
 	mockChain.On("GetBlockHeaders", []chainhash.Hash{}).Return(
@@ -4411,7 +4624,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		// Arrange: a real-backend syncer where GetBestBlock fails after
 		// the targeted scan state has loaded through the Store.
-		s, _ := newStoreScanSyncer(t)
+		s, _, _ := newStoreScanSyncer(t)
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4440,7 +4653,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		// Arrange: a real-backend syncer where GetBlockHashes fails after
 		// the targeted scan state has loaded through the Store.
-		s, _ := newStoreScanSyncer(t)
+		s, _, _ := newStoreScanSyncer(t)
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4467,15 +4680,14 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		require.ErrorContains(t, err, "hashes fail")
 	})
 
-	t.Run("FetchScopedKeyManager_Failure", func(t *testing.T) {
+	t.Run("unknown scope not found", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: a real-backend syncer targeting a scope with no
-		// registered scoped key manager. resolveScanTargets resolves
-		// every non-imported target's durable name up front through the
-		// manager, so the unknown scope fails there -- before any Store
-		// horizon lookup.
-		s, _ := newStoreScanSyncer(t)
+		// Arrange: a real-backend syncer targeting an account in a scope
+		// with no registered accounts. resolveScanTargets resolves every
+		// non-imported target through the Store up front, so the missing
+		// account surfaces there -- before any Store horizon lookup.
+		s, _, _ := newStoreScanSyncer(t)
 
 		targets := []waddrmgr.AccountScope{{
 			Scope:   waddrmgr.KeyScope{Purpose: 99, Coin: 0},
@@ -4490,12 +4702,9 @@ func TestScanWithTargets_Errors(t *testing.T) {
 			},
 		)
 
-		// Assert: the failure surfaces from resolving the scan target's
-		// scoped manager, not from a later Store lookup.
-		var mgrErr waddrmgr.ManagerError
-		require.ErrorAs(t, err, &mgrErr)
-		require.Equal(t, waddrmgr.ErrScopeNotFound, mgrErr.ErrorCode)
-		require.ErrorContains(t, err, "fetch scoped manager")
+		// Assert: the failure surfaces as a clear not-found from
+		// resolving the scan target, not from a later Store lookup.
+		require.ErrorIs(t, err, db.ErrAccountNotFound)
 	})
 }
 
@@ -4589,21 +4798,7 @@ func TestProcessChainUpdate(t *testing.T) {
 				expectSyncedTip(
 					store, waddrmgr.BlockStamp{Height: 100},
 				)
-
-				localBlocks := make([]db.Block, 0, 10)
-				for i := uint32(91); i <= 100; i++ {
-					localBlocks = append(localBlocks, db.Block{
-						Height: i,
-					})
-				}
-				store.On(
-					"ListSyncedBlocks", mock.Anything, mock.Anything,
-				).Return(localBlocks, nil).Once()
-
-				remoteHashes := make([]chainhash.Hash, 10)
-				c.On(
-					"GetBlockHashes", mock.Anything, mock.Anything,
-				).Return(remoteHashes, nil).Once()
+				expectMatchingRollbackBatch(store, c)
 			},
 		},
 	}
@@ -5030,6 +5225,9 @@ func TestRunSyncStep_Unfinished(t *testing.T) {
 
 	// Assert: Verify success.
 	require.NoError(t, err)
+
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestDispatchScanStrategy_OtherMethods verifies FullBlocks, CFilters and
@@ -5134,12 +5332,16 @@ func TestHandleChainUpdate_Error(t *testing.T) {
 
 	// Arrange: Setup a store-backed syncer where chain update processing
 	// fails because the synced-block read errors.
+	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 	s := newSyncer(
-		Config{}, nil, nil, nil, store, uint32(0),
+		Config{Chain: mockChain}, nil, nil, nil, store, uint32(0),
 	)
 
-	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+	expectSyncedTip(store, waddrmgr.BlockStamp{
+		Hash:   chainhash.Hash{0x01},
+		Height: 100,
+	})
 	store.On("ListSyncedBlocks", mock.Anything, mock.Anything).Return(
 		([]db.Block)(nil), errDBFail).Once()
 
@@ -5168,6 +5370,7 @@ func TestRunSyncStep_Success(t *testing.T) {
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
+
 	store.On("ListTxns", mock.Anything, mock.Anything).Return(
 		[]db.TxInfo{}, nil).Once()
 
@@ -5186,6 +5389,9 @@ func TestRunSyncStep_Success(t *testing.T) {
 
 	// Assert: Verify success.
 	require.NoError(t, err)
+
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestScanBatchWithCFilters_HorizonExpansion verifies the re-matching logic
@@ -5555,6 +5761,7 @@ func TestRunSyncStep_BroadcastError(t *testing.T) {
 	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(100),
 		nil).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+
 	store.On("ListTxns", mock.Anything, mock.Anything).Return(
 		([]db.TxInfo)(nil), errBroadcast).Once()
 
@@ -5563,6 +5770,9 @@ func TestRunSyncStep_BroadcastError(t *testing.T) {
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errBroadcast)
+
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
 }
 
 // TestFetchAndFilterBlocks_DispatchError verifies error from

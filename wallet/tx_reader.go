@@ -152,6 +152,7 @@ func (w *Wallet) GetTx(ctx context.Context, txHash chainhash.Hash) (
 		return nil, err
 	}
 
+	//nolint:contextcheck // SyncedTo takes no context.
 	currentHeight := w.SyncedTo().Height
 
 	return w.getTxDetail(ctx, txHash, currentHeight)
@@ -168,6 +169,7 @@ func (w *Wallet) ListTxns(ctx context.Context, startHeight, endHeight int32) (
 		return nil, err
 	}
 
+	//nolint:contextcheck // SyncedTo takes no context.
 	currentHeight := w.SyncedTo().Height
 
 	return w.listTxDetails(ctx, startHeight, endHeight, currentHeight)
