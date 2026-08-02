@@ -29,7 +29,6 @@ import (
 	"github.com/btcsuite/btcwallet/internal/prompt"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
-	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -7215,10 +7214,15 @@ func OpenWithRetry(db walletdb.DB, pubPass []byte, cbs *waddrmgr.OpenCallbacks,
 		id:        walletID,
 		addrStore: addrMgr,
 		store:     store,
-		keyVault: keyvault.NewWalletVault(
-			store, walletID, addrMgr.WatchOnly(),
-		),
-		txStore:          txMgr,
+		cache:     newStoreRuntimeCache(store),
+		keyVault:  kvdb.NewLegacyWalletVault(db, addrMgr),
+		txStore:   txMgr,
+
+		// The shared Wallet reads its network from cfg, so the routed
+		// address and signing paths this constructor still serves
+		// panic without it. The deprecated sub-struct's own
+		// chainParams only covers the legacy paths.
+		cfg:              Config{ChainParams: params},
 		walletDeprecated: deprecated,
 	}
 

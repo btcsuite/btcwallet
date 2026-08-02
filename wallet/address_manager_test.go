@@ -105,8 +105,6 @@ func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
 // AddressInfo for tests that exercise the wallet's address-info read
 // path. No call-count constraint — the same address may be looked up
 // multiple times (input decoration + change output info).
-//
-//nolint:unparam // Keep branch metadata in the helper signature.
 func expectSignerAddressInfo(t *testing.T, w *Wallet, deps *mockWalletDeps,
 	addr address.Address, addrType db.AddressType,
 	internal, imported bool, pubKey *btcec.PublicKey) {
@@ -666,6 +664,48 @@ func TestGetDerivationInfoNoDerivationInfo(t *testing.T) {
 	require.ErrorIs(t, err, ErrDerivationPathNotFound)
 }
 
+// TestGetDerivationInfoImportedXpubNoAccountNumber verifies that an
+// imported-xpub HD child (a store address that is HD-shaped and carries a
+// durable AccountID but no wallet-derived BIP44 account number) exposes no
+// public derivation path: GetDerivationInfo must refuse rather than fabricate a
+// public account 0. Such a child is not signable either — the signer refuses it
+// for lack of a wallet-derived account number, before any secret lookup.
+func TestGetDerivationInfoImportedXpubNoAccountNumber(t *testing.T) {
+	t.Parallel()
+
+	w, deps := createStartedWalletWithMocks(t)
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()),
+		w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	// Build a store record for an imported-xpub external child: HD path
+	// present, a durable AccountID, but no wallet-derived account number.
+	info := addressInfoFromAddr(t, addr)
+	accountID := uint32(7)
+	info.AddrType = db.WitnessPubKey
+	info.IsImported = true
+	info.HasDerivationPath = true
+	info.AccountName = watchOnlyAccount
+	info.AccountID = &accountID
+	info.KeyScope = db.KeyScope(waddrmgr.KeyScopeBIP0084)
+	info.Index = 3
+	info.PubKey = pubKey.SerializeCompressed()
+
+	expectStoreAddressInfo(t, w, deps, addr, info)
+
+	// Act & Assert: the public derivation path must be refused because no
+	// real account number exists.
+	_, err = w.GetDerivationInfo(t.Context(), addr)
+	require.ErrorIs(t, err, ErrDerivationPathNotFound)
+}
+
 // TestListAddresses tests the ListAddresses method to ensure it returns the
 // correct addresses and balances for a given account.
 func TestListAddresses(t *testing.T) {
@@ -896,6 +936,31 @@ func TestImportTaprootScript(t *testing.T) {
 	require.Equal(t, addr, info.Addr)
 	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
 	require.True(t, info.Imported)
+}
+
+// newTestTapscript builds a single-leaf taproot script for import tests.
+func newTestTapscript(t *testing.T) waddrmgr.Tapscript {
+	t.Helper()
+
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	pubKey := privKey.PubKey()
+	script, err := txscript.NewScriptBuilder().
+		AddData(pubKey.SerializeCompressed()).
+		AddOp(txscript.OP_CHECKSIG).
+		Script()
+	require.NoError(t, err)
+
+	leaf := txscript.NewTapLeaf(txscript.BaseLeafVersion, script)
+
+	return waddrmgr.Tapscript{
+		Type: waddrmgr.TapscriptTypeFullTree,
+		ControlBlock: &txscript.ControlBlock{
+			InternalKey: pubKey,
+		},
+		Leaves: []txscript.TapLeaf{leaf},
+	}
 }
 
 // TestScriptForOutput tests the ScriptForOutput method to ensure it returns the
