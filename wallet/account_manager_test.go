@@ -246,32 +246,27 @@ func TestListAccountsByScope(t *testing.T) {
 			KeyScope:      dbScope,
 		},
 	}, nil).Once()
-	deps.addrStore.On("FetchScopedKeyManager", scope).Return(
-		deps.accountManager, nil,
-	).Once()
 
 	accounts, err := w.ListAccountsByScope(t.Context(), scope)
 	require.NoError(t, err)
 	require.Len(t, accounts, 1)
 }
 
-// TestListAccountsByScopeUnknownScope verifies the public wallet API preserves
-// the legacy scope-not-found error surface.
+// TestListAccountsByScopeUnknownScope verifies backend errors are propagated.
 func TestListAccountsByScopeUnknownScope(t *testing.T) {
 	t.Parallel()
 
 	w, deps := createStartedWalletWithMocks(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 123, Coin: 456}
-	deps.addrStore.On("FetchScopedKeyManager", scope).Return(
-		nil, waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrScopeNotFound,
-		},
-	).Once()
+	dbScope := db.KeyScope(scope)
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 0,
+		Scope:    &dbScope,
+	}).Return(nil, db.ErrUnknownKeyScope).Once()
 
 	_, err := w.ListAccountsByScope(t.Context(), scope)
-	require.Error(t, err)
-	require.True(t, waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound))
+	require.ErrorIs(t, err, db.ErrUnknownKeyScope)
 }
 
 // TestListAccountsByName verifies the name filter narrows the query.
@@ -694,6 +689,81 @@ func TestImportAccountAddrSchema(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
+}
+
+// TestDBScopeAddrSchemaMapsTypes verifies dbScopeAddrSchema converts a
+// per-account schema override through the explicit wallet->store address-type
+// mapping rather than a raw enum cast. The two enums do not share ordinals
+// (waddrmgr.PubKeyHash=0 vs db.RawPubKey=0, waddrmgr.Script=1 vs
+// db.PubKeyHash=1, waddrmgr.TaprootScript=7 vs db.Anchor=7), so a raw cast
+// silently stores the wrong script type. P2PKH is the headline case: a
+// BIP-0044 imported xpub whose external schema is PubKeyHash must be stored as
+// db.PubKeyHash so NewAddress later derives a P2PKH script, not a raw pubkey.
+func TestDBScopeAddrSchemaMapsTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		external waddrmgr.AddressType
+		internal waddrmgr.AddressType
+		want     db.ScopeAddrSchema
+	}{
+		{
+			name:     "pubkeyhash not raw pubkey",
+			external: waddrmgr.PubKeyHash,
+			internal: waddrmgr.PubKeyHash,
+			want: db.ScopeAddrSchema{
+				ExternalAddrType: db.PubKeyHash,
+				InternalAddrType: db.PubKeyHash,
+			},
+		},
+		{
+			name:     "script not pubkeyhash",
+			external: waddrmgr.Script,
+			internal: waddrmgr.Script,
+			want: db.ScopeAddrSchema{
+				ExternalAddrType: db.ScriptHash,
+				InternalAddrType: db.ScriptHash,
+			},
+		},
+		{
+			name:     "raw pubkey not script hash",
+			external: waddrmgr.RawPubKey,
+			internal: waddrmgr.RawPubKey,
+			want: db.ScopeAddrSchema{
+				ExternalAddrType: db.RawPubKey,
+				InternalAddrType: db.RawPubKey,
+			},
+		},
+		{
+			name:     "taproot script not anchor",
+			external: waddrmgr.TaprootScript,
+			internal: waddrmgr.TaprootScript,
+			want: db.ScopeAddrSchema{
+				ExternalAddrType: db.TaprootPubKey,
+				InternalAddrType: db.TaprootPubKey,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := dbScopeAddrSchema(&waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: tc.external,
+				InternalAddrType: tc.internal,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			require.Equal(t, tc.want, *got)
+		})
+	}
+
+	// A nil override stays nil so the store falls back to the scope default.
+	got, err := dbScopeAddrSchema(nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }
 
 // importAccountTestKey derives an account-level public key for import routing

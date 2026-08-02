@@ -103,6 +103,11 @@ func TestGetAccountByName(t *testing.T) {
 	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
 
+	// kvdb populates the durable AccountID from the internal waddrmgr account
+	// number; for a derived account it coincides with the BIP44 number.
+	require.NotNil(t, info.AccountID)
+	require.Equal(t, accountNumber, *info.AccountID)
+
 	// The plaintext account-level public key must be parseable.
 	require.NotEmpty(t, info.PublicKey)
 	parsed, err := hdkeychain.NewKeyFromString(string(info.PublicKey))
@@ -172,6 +177,11 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, info.AccountName)
 	require.True(t, info.IsImported)
 	require.Nil(t, info.AccountNumber)
+
+	// The masked BIP44 number is nil, but the durable store AccountID is still
+	// populated from the internal waddrmgr account number.
+	require.NotNil(t, info.AccountID)
+	require.Equal(t, uint32(waddrmgr.ImportedAddrAccount), *info.AccountID)
 }
 
 // TestListAccountsByNameIncludesImportedPseudoAccount verifies the
@@ -588,6 +598,13 @@ func TestCreateImportedAccount(t *testing.T) {
 	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
 	require.Equal(t, uint32(0xDEADBEEF), info.MasterKeyFingerprint)
+
+	// The imported xpub has no BIP44 number, but kvdb still populates the
+	// durable store AccountID from its internal waddrmgr account number, which
+	// is distinct from the default derived account at number 0.
+	require.Nil(t, info.AccountNumber)
+	require.NotNil(t, info.AccountID)
+	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), *info.AccountID)
 }
 
 // TestCreateImportedAccountRejectsPrivateKey verifies that the kvdb
