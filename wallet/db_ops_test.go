@@ -142,25 +142,6 @@ func TestDBBirthdayBlock(t *testing.T) {
 	require.Equal(t, block, retBlock)
 }
 
-// TestDBUnlock verifies that the wallet can successfully unlock its address
-// manager using the provided passphrase.
-func TestDBUnlock(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and setup the expected mock call for
-	// unlocking the address manager.
-	w, mocks := createTestWalletWithMocks(t)
-	pass := []byte("password")
-
-	mocks.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
-
-	// Act: Attempt to unlock the wallet with the passphrase.
-	err := w.DBUnlock(t.Context(), pass)
-
-	// Assert: Verify that the unlock operation succeeded.
-	require.NoError(t, err)
-}
-
 // TestDBDeleteExpiredLockedOutputs verifies that the wallet successfully
 // invokes the transaction store to remove any expired output locks.
 func TestDBDeleteExpiredLockedOutputs(t *testing.T) {
@@ -179,70 +160,6 @@ func TestDBDeleteExpiredLockedOutputs(t *testing.T) {
 
 	// Assert: Verify that the cleanup operation finished without error.
 	require.NoError(t, err)
-}
-
-// TestDBPutPassphrase verifies that the wallet can successfully update both
-// its public and private passphrases in the address manager.
-func TestDBPutPassphrase(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and a request to change both
-	// passphrases.
-	w, mocks := createTestWalletWithMocks(t)
-
-	req := ChangePassphraseRequest{
-		ChangePublic:  true,
-		PublicOld:     []byte("old"),
-		PublicNew:     []byte("new"),
-		ChangePrivate: true,
-		PrivateOld:    []byte("old_priv"),
-		PrivateNew:    []byte("new_priv"),
-	}
-
-	// Setup mock calls for both passphrase changes.
-	mocks.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"), []byte("new"),
-		false, mock.Anything,
-	).Return(nil).Once()
-
-	mocks.addrStore.On(
-		"ChangePassphrase", mock.Anything, req.PrivateOld,
-		req.PrivateNew, true,
-		mock.MatchedBy(func(opts *waddrmgr.ScryptOptions) bool {
-			return opts.N == 16 && opts.R == 8 && opts.P == 1
-		}),
-	).Return(nil).Once()
-
-	// Act: Commit the passphrase changes to the database.
-	err := w.DBPutPassphrase(t.Context(), req)
-
-	// Assert: Verify that both passphrases were updated successfully.
-	require.NoError(t, err)
-}
-
-// TestDBPutPassphrase_Error verifies that DBPutPassphrase correctly handles
-// and returns errors encountered during the passphrase update process.
-func TestDBPutPassphrase_Error(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create a test wallet and setup a mock call that simulates
-	// a database error during a private passphrase change.
-	w, mocks := createTestWalletWithMocks(t)
-
-	req := ChangePassphraseRequest{
-		ChangePrivate: true,
-	}
-
-	mocks.addrStore.On(
-		"ChangePassphrase", mock.Anything, mock.Anything,
-		mock.Anything, true, mock.Anything,
-	).Return(errDBMock).Once()
-
-	// Act: Attempt to change the passphrase, expecting a failure.
-	err := w.DBPutPassphrase(t.Context(), req)
-
-	// Assert: Verify that the expected database error is returned.
-	require.ErrorContains(t, err, "db error")
 }
 
 // TestDBPutBlocks_Error verifies that DBPutBlocks correctly handles errors

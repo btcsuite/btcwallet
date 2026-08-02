@@ -198,65 +198,6 @@ func (w *Wallet) DBDeleteExpiredLockedOutputs(_ context.Context) error {
 	return nil
 }
 
-// DBUnlock attempts to unlock the wallet's address manager with the provided
-// passphrase.
-//
-// TODO(yy): Refactor this in the `Store` implementation - the only db
-// operation needed is to load the account info and derive the private keys.
-func (w *Wallet) DBUnlock(_ context.Context, passphrase []byte) error {
-	err := walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
-		return w.addrStore.Unlock(addrmgrNs, passphrase)
-	})
-	if err != nil {
-		return fmt.Errorf("view: %w", err)
-	}
-
-	return nil
-}
-
-// DBPutPassphrase updates the wallet's public or private passphrases.
-//
-// TODO(yy): Refactor this in the `Store` implementation - we can call
-// `UpdateWallet` instead.
-func (w *Wallet) DBPutPassphrase(_ context.Context,
-	req ChangePassphraseRequest) error {
-
-	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
-		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-		if req.ChangePublic {
-			err := w.addrStore.ChangePassphrase(
-				addrmgrNs, req.PublicOld, req.PublicNew,
-				false, &waddrmgr.DefaultScryptOptions,
-			)
-			if err != nil {
-				return fmt.Errorf("change public passphrase: "+
-					"%w", err)
-			}
-		}
-
-		if req.ChangePrivate {
-			err := w.addrStore.ChangePassphrase(
-				addrmgrNs, req.PrivateOld,
-				req.PrivateNew, true,
-				&waddrmgr.DefaultScryptOptions,
-			)
-			if err != nil {
-				return fmt.Errorf("change private passphrase: "+
-					"%w", err)
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("update: %w", err)
-	}
-
-	return nil
-}
-
 // DBGetAllAccounts ensures all account properties are loaded into the address
 // manager's cache.
 //
