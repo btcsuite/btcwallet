@@ -595,9 +595,8 @@ type GetAccountQuery struct {
 	SkipBalance bool
 }
 
-// GetAccountSecretQuery contains the parameters for querying account-level
-// signing material. The query must specify either the account name or the
-// account number within the provided wallet and scope.
+// GetAccountSecretQuery selects account-level signing material by BIP44 account
+// number within the provided wallet and scope.
 type GetAccountSecretQuery struct {
 	// WalletID is the ID of the wallet to query.
 	WalletID uint32
@@ -609,7 +608,7 @@ type GetAccountSecretQuery struct {
 	// are the only kind that hold account-level signing material: imported
 	// accounts are created from an extended public key and have none, and
 	// imported private keys are per-address material reached through
-	// GetAddressSecret instead. One selector therefore suffices.
+	// GetAddressSecret instead.
 	AccountNumber uint32
 }
 
@@ -779,6 +778,20 @@ type AddressSecret struct {
 	// EncryptedScript is the encrypted redeem or witness script for
 	// P2SH/P2WSH addresses. For Taproot, this is the TLV-encoded Tapscript.
 	EncryptedScript []byte
+
+	// ScriptIsSecret reports which key encrypted EncryptedScript. It exists
+	// for kvdb only: waddrmgr records the choice per address, so witness and
+	// taproot script rows carry a persisted flag selecting the script key or
+	// the public key, legacy P2SH rows have no flag and always use the
+	// script key, and one manager can hold both kinds at once. The fact
+	// therefore has to travel with the row rather than be inferred from
+	// wallet state.
+	//
+	// It carries no information on SQL, where script ciphertext is always
+	// written under the script key, so a SQL row is always true.
+	//
+	// TODO(yy): remove this field once kvdb support is dropped.
+	ScriptIsSecret bool
 }
 
 // NewDerivedAddressParams contains the parameters for creating a new derived
@@ -875,8 +888,20 @@ type GetAddressSecretQuery struct {
 	// databases (signed 64-bit integers).
 	WalletID uint32
 
-	// AddressID is the ID of the address whose secret should be fetched.
-	AddressID uint32
+	// AddressID is the durable SQL row ID of the address whose secret should
+	// be fetched. It is nil for the deprecated kvdb backend, which has no
+	// stable wallet-wide address ID.
+	AddressID *uint32
+
+	// ScriptPubKey is the output script identifying the address whose
+	// secret should be fetched. This compatibility selector exists because
+	// the deprecated kvdb backend has no durable wallet-wide address ID. SQL
+	// accepts it too so wallet code can remain backend-neutral during the
+	// transition.
+	//
+	// TODO(yy): remove this selector with kvdb support and use AddressID at
+	// every call site.
+	ScriptPubKey []byte
 }
 
 // ListAddressesQuery contains the parameters for listing addresses.

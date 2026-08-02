@@ -29,6 +29,19 @@ func addressSecretRowToSecret(
 	})
 }
 
+// addressSecretByIDRowToSecret converts a PostgreSQL ID-selected secret row to
+// the shared database type.
+func addressSecretByIDRowToSecret(
+	row sqlc.GetAddressSecretByIDRow) (*db.AddressSecret, error) {
+
+	return db.AddressSecretRowToSecret(db.AddressSecretRow{
+		AddressID:        row.AddressID,
+		EncryptedPrivKey: row.EncryptedPrivKey,
+		EncryptedScript:  row.EncryptedScript,
+		ScriptIsSecret:   true,
+	})
+}
+
 // addressInfoRow is a type constraint that unifies all PostgreSQL address
 // row types that share the same field structure. This enables a single
 // generic conversion function to handle all address query result types.

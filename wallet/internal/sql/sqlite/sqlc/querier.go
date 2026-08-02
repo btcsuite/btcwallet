@@ -171,6 +171,8 @@ type Querier interface {
 	// - Address exists without secret row: returns row with NULL secret fields
 	// - Address does not exist: returns no rows (sql.ErrNoRows)
 	GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error)
+	// Retrieves secret information for an address using its durable SQL row ID.
+	GetAddressSecretByID(ctx context.Context, arg GetAddressSecretByIDParams) (GetAddressSecretByIDRow, error)
 	// Returns a single address type by its ID.
 	GetAddressTypeByID(ctx context.Context, id int64) (AddressType, error)
 	// Atomically gets the next derived account number for a key scope and
