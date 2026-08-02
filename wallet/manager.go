@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 )
 
 var (
+
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
 )
@@ -75,20 +75,23 @@ type CreateWalletParams struct {
 	// or XPub.
 	RootKey *hdkeychain.ExtendedKey
 
-	// InitialAccounts is optional for ModeShell. Reserved for future use and
-	// currently has no effect during wallet creation.
+	// InitialAccounts is optional and names watch-only accounts to import
+	// after the wallet is created. It requires WatchOnly and is only
+	// honored for ModeShell.
 	InitialAccounts []WatchOnlyAccount
 
-	// WatchOnly controls whether the resulting wallet is watch-only.
-	// - If true with Seed/XPrv input: Derives Master XPub, then discards
-	//   the private material.
-	// - If true with XPub/Shell input: No-op (already watch-only).
+	// WatchOnly requests a watch-only wallet. It is honored for an XPub root
+	// (ModeImportExtKey) and a rootless shell (ModeShell).
 	WatchOnly bool
 
 	// Birthday is the wallet's birthday.
 	Birthday time.Time
 
 	// PubPassphrase is the public passphrase for the wallet.
+	//
+	// Deprecated: only the kvdb backend has a public passphrase. A SQL
+	// wallet seals its metadata under a single passphrase, so this field is
+	// ignored there and goes away with kvdb support.
 	PubPassphrase []byte
 
 	// PrivatePassphrase is the private passphrase for the wallet.
@@ -111,8 +114,172 @@ func validateInitialAccountsMode(params CreateWalletParams) error {
 		ErrWalletParams)
 }
 
-// validate ensures that the parameters are consistent with the chosen
-// creation mode.
+// Manager is a high-level manager that handles the lifecycle of multiple
+// wallets. It acts as a factory for creating and loading wallets, and can
+// optionally track the active wallets.
+//
+// The Manager enables a one-to-many relationship, allowing a single application
+// to manage multiple distinct wallets (e.g., for different coins or different
+// accounts) simultaneously.
+type Manager struct {
+	sync.RWMutex
+
+	// wallets holds the active wallets keyed by their unique name, published
+	// as soon as they are assembled. A ModeShell Create imports its initial
+	// accounts after publishing, so a wallet can be observed here before
+	// that import finishes.
+	wallets map[string]*Wallet
+
+	// backend owns the database and resolves the storage dependencies for
+	// every wallet this Manager serves.
+	backend managerBackend
+
+	// chainParams is fixed at construction and shared by every wallet.
+	chainParams *chaincfg.Params
+}
+
+// NewManager opens the one database described by cfg and returns a Manager that
+// owns it.
+//
+// Every wallet the Manager serves shares that database. The legacy kvdb
+// backend remains single-wallet until it is removed; SQL stores distinguish
+// wallets by ID. The caller stops its wallets and then calls Close.
+func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	var backend managerBackend
+
+	switch cfg.Backend {
+	case DBBackendKVDB:
+		backend, err = newKVDBManagerBackend(cfg)
+
+	case DBBackendSQLite:
+		backend, err = newSQLiteManagerBackend(ctx, cfg)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &Manager{
+		wallets:     make(map[string]*Wallet),
+		backend:     backend,
+		chainParams: cfg.ChainParams,
+	}, nil
+}
+
+// Close releases the database this Manager owns.
+//
+// The caller must have stopped every wallet first. There is no close fence and
+// no use-after-close guarantee beyond that contract.
+func (m *Manager) Close() error {
+	return m.backend.close()
+}
+
+// String returns a summary of the active wallets managed by the Manager.
+func (m *Manager) String() string {
+	m.RLock()
+	defer m.RUnlock()
+
+	names := make([]string, 0, len(m.wallets))
+	for name := range m.wallets {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return fmt.Sprintf("active_wallets=%v", names)
+}
+
+// Create creates a new wallet based on the provided configuration and
+// initialization parameters. It initializes the database structure and then
+// loads the wallet.
+func (m *Manager) Create(cfg Config,
+	params CreateWalletParams) (*Wallet, error) {
+
+	// The Manager owns the network for every wallet it serves, so overwrite
+	// the caller's copy before validating. A caller that leaves it unset, or
+	// sets a conflicting one, gets the Manager's.
+	cfg.ChainParams = m.chainParams
+
+	// Validate the configuration and parameters before touching the cache
+	// or any store, so a malformed request fails on its own merits rather
+	// than on a name collision or store error.
+	err := cfg.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	err = params.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	rootKey, err := m.prepareWalletCreation(cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
+	// spendable. Validate the params.InitialAccounts list upfront so a
+	// mismatched-mode create fails before any backend create runs
+	// (otherwise the wallet row exists on disk while importInitialAccounts
+	// later rejects an entry, leaving a half-created wallet).
+	err = validateInitialAccountsMode(params)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := m.backend.create(
+		context.Background(), cfg, params, rootKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	w := newManagedWallet(cfg, data)
+
+	m.Lock()
+	m.wallets[cfg.Name] = w
+	m.Unlock()
+
+	// If we are in shell mode and have initial accounts, we import them now.
+	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
+		err = w.importInitialAccounts(
+			context.Background(), params.InitialAccounts,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return w, nil
+}
+
+// importInitialAccounts imports a list of watch-only accounts into the wallet.
+// This is typically used during wallet initialization in shell mode.
+func (w *Wallet) importInitialAccounts(ctx context.Context,
+	accounts []WatchOnlyAccount) error {
+
+	for _, account := range accounts {
+		_, err := w.importAccountInternal(
+			ctx, account.Name, account.XPub,
+			account.MasterKeyFingerprint, account.AddrType, false,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to import account %s: %w",
+				account.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// validate ensures that the parameters are consistent with the chosen creation
+// mode.
 //
 // We skip cyclop because this method performs exhaustive validation of
 // mutually exclusive fields across all creation modes.
@@ -180,117 +347,24 @@ func (p *CreateWalletParams) validate() error {
 	return nil
 }
 
-// Manager is a high-level manager that handles the lifecycle of multiple
-// wallets. It acts as a factory for creating and loading wallets, and can
-// optionally track the active wallets.
-//
-// The Manager enables a one-to-many relationship, allowing a single application
-// to manage multiple distinct wallets (e.g., for different coins or different
-// accounts) simultaneously.
-type Manager struct {
-	sync.RWMutex
-
-	// wallets holds the active wallets keyed by their unique name.
-	wallets map[string]*Wallet
-}
-
-// NewManager creates a new Wallet Manager.
-func NewManager() *Manager {
-	return &Manager{
-		wallets: make(map[string]*Wallet),
-	}
-}
-
-// String returns a summary of the active wallets managed by the Manager.
-func (m *Manager) String() string {
-	m.RLock()
-	defer m.RUnlock()
-
-	names := make([]string, 0, len(m.wallets))
-	for name := range m.wallets {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	return fmt.Sprintf("active_wallets=%v", names)
-}
-
-// Create creates a new wallet based on the provided configuration and
-// initialization parameters. It initializes the database structure and then
-// loads the wallet.
-func (m *Manager) Create(cfg Config,
-	params CreateWalletParams) (*Wallet, error) {
-
-	rootKey, err := m.prepareWalletCreation(cfg, params)
-	if err != nil {
-		return nil, err
-	}
-
-	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
-	// spendable. Validate the params.InitialAccounts list upfront so a
-	// mismatched-mode create fails before DBCreateWallet runs (otherwise
-	// the wallet row exists on disk while importInitialAccounts later
-	// rejects an entry, leaving a half-created wallet).
-	err = validateInitialAccountsMode(params)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create the underlying database structure.
-	err = DBCreateWallet(cfg, params, rootKey)
-	if err != nil {
-		return nil, err
-	}
-
-	// Load the newly created wallet.
-	w, err := m.Load(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// If we are in shell mode and have initial accounts, we import them now.
-	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return w, nil
-}
-
-// importInitialAccounts imports a list of watch-only accounts into the wallet.
-// This is typically used during wallet initialization in shell mode.
-func (w *Wallet) importInitialAccounts(ctx context.Context,
-	accounts []WatchOnlyAccount) error {
-
-	for _, account := range accounts {
-		_, err := w.importAccountInternal(
-			ctx, account.Name, account.XPub, account.MasterKeyFingerprint,
-			account.AddrType, false,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to import account %s: %w", account.Name,
-				err)
-		}
-	}
-
-	return nil
-}
-
 // Load loads an existing wallet from the provided configuration. It opens the
 // database, initializes the wallet structure, and registers it with the manager
 // for tracking.
+//
+// TODO(yy): concurrent Load calls for the same name are not serialized, so two
+// callers racing on one wallet can both open a store. Call it from one
+// goroutine per wallet until that is fixed.
 func (m *Manager) Load(cfg Config) (*Wallet, error) {
+	// The Manager owns the network for every wallet it serves; see Create.
+	cfg.ChainParams = m.chainParams
+
 	err := cfg.validate()
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if the wallet is already loaded.
+	// A wallet already published under this name is returned as is; callers
+	// serialize Create and Load, so a miss means this call builds it.
 	m.RLock()
 	existingW, ok := m.wallets[cfg.Name]
 	m.RUnlock()
@@ -299,71 +373,13 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return existingW, nil
 	}
 
-	addrMgr, txMgr, err := DBLoadWallet(cfg)
+	data, err := m.backend.load(context.Background(), cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO(yy): Once Wallet.store includes wallet metadata accessors such as
-	// WalletStore.GetWallet, load the runtime wallet ID from that store
-	// instead of using the legacy single-wallet default.
-	walletID := uint32(0)
+	w := newManagedWallet(cfg, data)
 
-	// Apply the safe default for auto-lock duration if not specified.
-	if cfg.AutoLockDuration == 0 {
-		cfg.AutoLockDuration = defaultLockDuration
-	}
-
-	// Initialize the auto-lock timer in a stopped state. We perform a
-	// non-blocking drain on the channel to ensure it's empty and won't fire
-	// immediately.
-	lockTimer := time.NewTimer(0)
-	if !lockTimer.Stop() {
-		<-lockTimer.C
-	}
-
-	store := kvdb.NewStore(cfg.DB, txMgr, addrMgr)
-
-	// Cache the wallet's master HD fingerprint up-front, before any
-	// context/cancel is set up so an error here doesn't leak a
-	// cancellable context. The master public key is public wallet metadata,
-	// so it is read through the Store rather than a direct database
-	// transaction.
-	masterFingerprint, err := resolveMasterFingerprint(
-		context.Background(), store, cfg.Name,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("cache master fingerprint: %w", err)
-	}
-
-	lifetimeCtx, cancel := context.WithCancel(context.Background())
-
-	w := &Wallet{
-		cfg:       cfg,
-		id:        walletID,
-		addrStore: addrMgr,
-		store:     store,
-		cache:     newStoreRuntimeCache(store),
-
-		// TODO(yy): This constructor is the deprecated kvdb path. SQL
-		// Manager backends supply their vault during backend assembly;
-		// remove this assignment with kvdb support.
-		keyVault:          kvdb.NewLegacyWalletVault(cfg.DB, addrMgr),
-		txStore:           txMgr,
-		requestChan:       make(chan any),
-		lifetimeCtx:       lifetimeCtx,
-		cancel:            cancel,
-		lockTimer:         lockTimer,
-		masterFingerprint: masterFingerprint,
-		isWatchOnly:       addrMgr.WatchOnly(),
-	}
-
-	w.sync = newSyncer(
-		cfg, w.addrStore, w.txStore, w, w.store, w.id,
-	)
-	w.state = newWalletState(w.sync)
-
-	// Register the wallet.
 	m.Lock()
 	m.wallets[cfg.Name] = w
 	m.Unlock()
@@ -371,51 +387,10 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	return w, nil
 }
 
-// resolveMasterFingerprint reads the wallet's persisted master HD public key
-// through the Store, parses it, and returns its BIP32 fingerprint. Shell,
-// watch-only, and pre-master-key wallets have no pubkey persisted, so the
-// fingerprint is zero.
-func resolveMasterFingerprint(ctx context.Context, store db.Store,
-	name string) (uint32, error) {
-
-	info, err := store.GetWallet(ctx, name)
-	if err != nil {
-		return 0, fmt.Errorf("get wallet: %w", err)
-	}
-
-	// Shell / watch-only / pre-master-key wallets persist no master HD
-	// public key, so the fingerprint stays zero.
-	if len(info.MasterPubKey) == 0 {
-		return 0, nil
-	}
-
-	extKey, err := hdkeychain.NewKeyFromString(string(info.MasterPubKey))
-	if err != nil {
-		return 0, fmt.Errorf("parse master HD pubkey: %w", err)
-	}
-
-	mfp, err := masterKeyFingerprint(extKey)
-	if err != nil {
-		return 0, fmt.Errorf("master fingerprint: %w", err)
-	}
-
-	return mfp, nil
-}
-
-// prepareWalletCreation validates the configuration and parameters, and derives
-// the root key for wallet creation.
+// prepareWalletCreation derives the root key for wallet creation. The caller
+// has already validated cfg and params.
 func (m *Manager) prepareWalletCreation(cfg Config,
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
-
-	err := cfg.validate()
-	if err != nil {
-		return nil, err
-	}
-
-	err = params.validate()
-	if err != nil {
-		return nil, err
-	}
 
 	rootKey, err := m.deriveRootKey(cfg, params)
 	if err != nil {
@@ -467,10 +442,9 @@ func (m *Manager) deriveRootKey(cfg Config,
 	}
 }
 
-// genRootKey generates a fresh random seed and derives the master extended
-// private key from it.
+// genRootKey generates a fresh random seed and derives its master extended
+// private key.
 func (m *Manager) genRootKey(cfg Config) (*hdkeychain.ExtendedKey, error) {
-	// Generate a fresh random seed using the recommended length.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate seed: %w", err)

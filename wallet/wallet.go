@@ -37,6 +37,9 @@ const (
 	//
 	// NOTE: at time of writing, public encryption only applies to public
 	// data in the waddrmgr namespace.  Transactions are not yet encrypted.
+	//
+	// Deprecated: this passphrase exists only for the legacy kvdb format and
+	// will be removed with kvdb support.
 	InsecurePubPassphrase = "public"
 
 	// recoveryBatchSize is the default number of blocks that will be
@@ -170,6 +173,10 @@ const (
 // WalletController.
 type Config struct {
 	// DB is the underlying database for the wallet.
+	//
+	// Deprecated: the Manager owns its database, configured once through
+	// ManagerConfig.DataSource. This field serves the deprecated
+	// constructors only and is ignored by Manager.Create and Manager.Load.
 	DB walletdb.DB
 
 	// Chain is the interface to the blockchain (e.g. bitcoind,
@@ -202,6 +209,10 @@ type Config struct {
 	Name string
 
 	// PubPassphrase is the public passphrase for the wallet.
+	//
+	// Deprecated: only the kvdb backend has a public passphrase. A SQL
+	// wallet seals its metadata under a single passphrase, so this field is
+	// ignored there and goes away with kvdb support.
 	PubPassphrase []byte
 
 	// MaxCFilterItems is the threshold of watched items (addresses +
@@ -214,10 +225,6 @@ type Config struct {
 
 // validate checks the configuration for consistency and completeness.
 func (c *Config) validate() error {
-	if c.DB == nil {
-		return fmt.Errorf("%w: DB", ErrMissingParam)
-	}
-
 	if c.Chain == nil {
 		return fmt.Errorf("%w: Chain", ErrMissingParam)
 	}
