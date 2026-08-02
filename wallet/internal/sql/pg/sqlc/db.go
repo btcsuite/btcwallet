@@ -120,6 +120,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getAddressSecretStmt, err = db.PrepareContext(ctx, GetAddressSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressSecret: %w", err)
 	}
+	if q.getAddressSecretByIDStmt, err = db.PrepareContext(ctx, GetAddressSecretByID); err != nil {
+		return nil, fmt.Errorf("error preparing query GetAddressSecretByID: %w", err)
+	}
 	if q.getAddressTypeByIDStmt, err = db.PrepareContext(ctx, GetAddressTypeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetAddressTypeByID: %w", err)
 	}
@@ -469,6 +472,11 @@ func (q *Queries) Close() error {
 	if q.getAddressSecretStmt != nil {
 		if cerr := q.getAddressSecretStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getAddressSecretStmt: %w", cerr)
+		}
+	}
+	if q.getAddressSecretByIDStmt != nil {
+		if cerr := q.getAddressSecretByIDStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getAddressSecretByIDStmt: %w", cerr)
 		}
 	}
 	if q.getAddressTypeByIDStmt != nil {
@@ -852,6 +860,7 @@ type Queries struct {
 	getActiveUtxoLeaseLockIDStmt                *sql.Stmt
 	getAddressByScriptPubKeyStmt                *sql.Stmt
 	getAddressSecretStmt                        *sql.Stmt
+	getAddressSecretByIDStmt                    *sql.Stmt
 	getAddressTypeByIDStmt                      *sql.Stmt
 	getAndIncrementNextAccountNumberStmt        *sql.Stmt
 	getAndIncrementNextExternalIndexStmt        *sql.Stmt
@@ -952,6 +961,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getActiveUtxoLeaseLockIDStmt:                q.getActiveUtxoLeaseLockIDStmt,
 		getAddressByScriptPubKeyStmt:                q.getAddressByScriptPubKeyStmt,
 		getAddressSecretStmt:                        q.getAddressSecretStmt,
+		getAddressSecretByIDStmt:                    q.getAddressSecretByIDStmt,
 		getAddressTypeByIDStmt:                      q.getAddressTypeByIDStmt,
 		getAndIncrementNextAccountNumberStmt:        q.getAndIncrementNextAccountNumberStmt,
 		getAndIncrementNextExternalIndexStmt:        q.getAndIncrementNextExternalIndexStmt,
