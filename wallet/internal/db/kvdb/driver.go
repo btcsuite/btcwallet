@@ -37,6 +37,9 @@ type Config struct {
 //
 // NOTE: This is a partial implementation that will be expanded as the wallet
 // UTXO manager migrates to the new db interfaces.
+//
+// Deprecated: remove this compatibility adapter after kvdb wallet migration
+// and support are removed.
 type Store struct {
 	db        walletdb.DB
 	txStore   wtxmgr.TxStore
@@ -66,4 +69,11 @@ func NewStore(dbConn walletdb.DB, txStore wtxmgr.TxStore,
 // StatsSnapshot returns an empty runtime snapshot for the kvdb backend.
 func (s *Store) StatsSnapshot() dbruntime.StatsSnapshot {
 	return dbruntime.StatsSnapshot{}
+}
+
+// TxStore returns the legacy transaction manager this Store was built over.
+// The Manager records it alongside the Store so a Wallet can be constructed
+// without reopening the namespaces.
+func (s *Store) TxStore() wtxmgr.TxStore {
+	return s.txStore
 }

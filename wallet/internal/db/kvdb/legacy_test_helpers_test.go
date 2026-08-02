@@ -12,6 +12,10 @@ import (
 // helpers. It must match the seed/pass setup in newSpendableAddrMgr.
 var testPrivPass = []byte("priv")
 
+// testPubPass is the public passphrase used by legacy waddrmgr test helpers. It
+// must match the seed/pass setup in newSpendableAddrMgr.
+var testPubPass = []byte("pub")
+
 // legacyAccountProps captures the subset of waddrmgr account metadata that
 // the legacy address-store tests rely on after creating an account.
 type legacyAccountProps struct {
