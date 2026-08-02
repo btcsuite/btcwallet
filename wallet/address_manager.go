@@ -400,12 +400,13 @@ func deriveStoreAddress(params db.AddressDerivationParams,
 	return addr, scriptPubKey, pubKeyBytes, nil
 }
 
-// deriveAddressData derives one SQL-store address from account public material.
-func (w *Wallet) deriveAddressData(_ context.Context,
+// deriveAddressData derives one SQL-store address from account public material
+// for the configured network.
+func deriveAddressData(chainParams *chaincfg.Params,
 	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 	_, scriptPubKey, pubKeyBytes, err := deriveStoreAddress(
-		params, w.cfg.ChainParams,
+		params, chainParams,
 	)
 	if err != nil {
 		return nil, err
@@ -415,6 +416,13 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 		ScriptPubKey: scriptPubKey,
 		PubKey:       pubKeyBytes,
 	}, nil
+}
+
+// deriveAddressData derives one SQL-store address from account public material.
+func (w *Wallet) deriveAddressData(_ context.Context,
+	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+	return deriveAddressData(w.cfg.ChainParams, params)
 }
 
 // storeAddressPubKeyCompressed reports whether store pubkey bytes use the
