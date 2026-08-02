@@ -727,7 +727,7 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 		return nil, err
 	}
 
-	privKey, err := w.privKeyForOutput(scriptInfo)
+	privKey, err := w.privKeyForOutput(ctx, scriptInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -748,19 +748,32 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 }
 // privKeyForOutput returns the private key needed to sign for the given
 // wallet-controlled output.
-func (w *Wallet) privKeyForOutput(scriptInfo OutputScriptInfo) (
+//
+// Derived addresses resolve through the account-level secret; imported
+// addresses have no derivation path and resolve through their own encrypted
+// private key material in the store.
+func (w *Wallet) privKeyForOutput(ctx context.Context,
+	scriptInfo OutputScriptInfo) (
 	*btcec.PrivateKey, error) {
 
 	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
-		return w.privKeyForAddressInfo(scriptInfo.AddressInfo)
+		return w.privKeyForAddressInfo(ctx, scriptInfo.AddressInfo)
 	}
 
-	pubKeyAddr, err := w.loadManagedPubKeyAddr(scriptInfo.Addr)
+	return w.resolveImportedAddrPrivKey(ctx, scriptInfo.scriptPubKey())
+}
+// scriptPubKey returns the output pkScript associated with the address
+// metadata. It re-derives the script from the address so callers that only
+// hold OutputScriptInfo need not thread the raw pkScript separately.
+func (info OutputScriptInfo) scriptPubKey() []byte {
+	// The script is only used to key the store lookup. A derivation error
+	// returns nil, so the subsequent query fails address-query validation.
+	script, err := txscript.PayToAddrScript(info.Addr)
 	if err != nil {
-		return nil, err
+		return nil
 	}
 
-	return w.resolvePrivKey(pubKeyAddr)
+	return script
 }
 // canUseAddressInfoDerivation reports whether address metadata contains enough
 // derivation information to derive a private key without a legacy address row.
@@ -772,25 +785,78 @@ func canUseAddressInfoDerivation(addressInfo AddressInfo) bool {
 	return addressInfo.Derivation.KeyScope != (waddrmgr.KeyScope{})
 }
 // privKeyForAddressInfo derives the private key described by store-backed
-// address metadata.
-func (w *Wallet) privKeyForAddressInfo(addressInfo AddressInfo) (
+// address metadata. It resolves the owning account's encrypted extended
+// private key through the store, decrypts it through keyVault, and derives the
+// leaf key at the address's branch and index.
+func (w *Wallet) privKeyForAddressInfo(ctx context.Context,
+	addressInfo AddressInfo) (
 	*btcec.PrivateKey, error) {
 
+	// An address with no derivation is either a raw single import or an
+	// imported-xpub child. Neither has wallet-derived account-level private
+	// material to resolve, so refuse before any secret lookup rather than
+	// reading a missing account number as account 0, which is the wallet's
+	// own default derived account.
 	derivation := addressInfo.Derivation
 	if derivation == nil {
-		return nil, fmt.Errorf("%w: derivation info not found for %v",
-			ErrDerivationPathNotFound, addressInfo.Addr)
+		return nil, ErrNoAssocPrivateKey
 	}
 
+	internalAccount := derivation.Account
+	hardenedAccount := internalAccount + hdkeychain.HardenedKeyStart
+
 	derivationPath := waddrmgr.DerivationPath{
-		InternalAccount:      derivation.Account,
-		Account:              derivation.Account + hdkeychain.HardenedKeyStart,
+		InternalAccount:      internalAccount,
+		Account:              hardenedAccount,
 		Branch:               derivation.Branch,
 		Index:                derivation.Index,
 		MasterKeyFingerprint: derivation.MasterKeyFingerprint,
 	}
 
-	return w.resolveDerivedPathPrivKey(derivation.KeyScope, derivationPath)
+	return w.resolveDerivedPrivKeyFromStore(
+		ctx, derivation.KeyScope, derivationPath,
+	)
+}
+// resolveImportedAddrPrivKey resolves the private key for an imported address
+// from its encrypted private-key material in the store. Imported addresses
+// have no derivation path, so the key is stored per-address rather than
+// derived from an account. An address that exists but holds no private-key
+// material (watch-only import) yields ErrNoAssocPrivateKey.
+func (w *Wallet) resolveImportedAddrPrivKey(ctx context.Context,
+	scriptPubKey []byte) (*btcec.PrivateKey, error) {
+
+	secret, err := w.cache.GetAddressSecret(ctx, db.GetAddressSecretQuery{
+		WalletID:     w.id,
+		ScriptPubKey: scriptPubKey,
+	})
+	switch {
+	// A resolved address that carries no secret, and (for kvdb) an address
+	// that does not resolve at all, both surface as ErrSecretNotFound.
+	// Either way the wallet holds no spendable key for this address.
+	case errors.Is(err, db.ErrSecretNotFound),
+		errors.Is(err, db.ErrAddressNotFound):
+
+		return nil, ErrNoAssocPrivateKey
+
+	case err != nil:
+		return nil, fmt.Errorf("fetch address secret: %w", err)
+	}
+
+	if len(secret.EncryptedPrivKey) == 0 {
+		return nil, ErrNoAssocPrivateKey
+	}
+
+	plaintext, err := w.keyVault.Decrypt(
+		waddrmgr.CKTPrivate, secret.EncryptedPrivKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt imported priv: %w", err)
+	}
+
+	privKey, _ := btcec.PrivKeyFromBytes(plaintext)
+	zero.Bytes(plaintext)
+
+	return privKey, nil
 }
 
 // loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
@@ -1228,34 +1294,16 @@ func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 		return nil, err
 	}
 
-	// Try the store-routed lookup so SQL-derived addresses (persisted
-	// only in the store) can be signed for. Fall back to the legacy
-	// waddrmgr lookup ONLY when the address is genuinely not in the
-	// store, or when the store record lacks usable derivation metadata
-	// (imported / kvdb cases). Unexpected store errors must surface — do
-	// not mask them.
-	info, err := w.GetAddressInfo(ctx, a)
-	switch {
-	case err == nil && canUseAddressInfoDerivation(info):
-		return w.privKeyForAddressInfo(info)
-
-	case err == nil:
-		// Store record exists but no usable derivation info
-		// (imported case).
-		return w.PrivKeyForAddress(a)
-
-	case errors.Is(err, db.ErrAddressNotFound):
-		// Address not in the store — fall through to the legacy
-		// lookup (kvdb path or pre-store legacy address).
-		return w.PrivKeyForAddress(a)
-
-	default:
-		// Unexpected store error: surface, don't mask.
-		return nil, fmt.Errorf("GetPrivKeyForAddress: %w", err)
-	}
+	return w.privKeyForAddress(ctx, a)
 }
-// PrivKeyForAddress looks up the associated private key for a P2PKH or P2PK
-// address.
+// PrivKeyForAddress looks up the associated private key for a wallet address.
+//
+// It is the context-free compatibility wrapper over privKeyForAddress used by
+// callers on the legacy Signer interface. It performs no walletdb transaction
+// of its own; the private key is resolved entirely through the store and
+// keyVault.
+//
+// DANGER: This method exports sensitive key material.
 func (w *Wallet) PrivKeyForAddress(a address.Address) (
 	*btcec.PrivateKey, error) {
 
@@ -1264,31 +1312,39 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 		return nil, err
 	}
 
-	var privKey *btcec.PrivateKey
+	return w.privKeyForAddress(context.Background(), a)
+}
+// privKeyForAddress resolves the private key for a wallet address through the
+// store. Derived addresses resolve through the owning account's encrypted
+// extended private key; imported addresses resolve through their own encrypted
+// private key material. An address that is not owned by the wallet, or that
+// holds no spendable key, yields ErrNoAssocPrivateKey.
+func (w *Wallet) privKeyForAddress(ctx context.Context,
+	a address.Address) (*btcec.PrivateKey, error) {
 
-	err = walletdb.View(w.cfg.DB, func(tx walletdb.ReadTx) error {
-		addrmgrNs := tx.ReadBucket(waddrmgrNamespaceKey)
+	info, err := w.GetAddressInfo(ctx, a)
+	switch {
+	case err == nil && canUseAddressInfoDerivation(info):
+		return w.privKeyForAddressInfo(ctx, info)
 
-		addr, err := w.addrStore.Address(addrmgrNs, a)
+	case err == nil:
+		// The address is owned but has no usable derivation metadata,
+		// so it is an imported address whose private key (if any) lives
+		// in its own encrypted secret.
+		scriptPubKey, err := txscript.PayToAddrScript(a)
 		if err != nil {
-			return fmt.Errorf("failed to get address: %w", err)
+			return nil, fmt.Errorf("pay to addr script: %w", err)
 		}
 
-		managedPubKeyAddr, ok := addr.(waddrmgr.ManagedPubKeyAddress)
-		if !ok {
-			return ErrNoAssocPrivateKey
-		}
+		return w.resolveImportedAddrPrivKey(ctx, scriptPubKey)
 
-		privKey, err = managedPubKeyAddr.PrivKey()
-		if err != nil {
-			return fmt.Errorf("failed to get private key: %w", err)
-		}
+	case errors.Is(err, db.ErrAddressNotFound):
+		// The address is not owned by the wallet, so the wallet holds
+		// no private key for it.
+		return nil, ErrNoAssocPrivateKey
 
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to view database: %w", err)
+	default:
+		// Unexpected store error: surface, don't mask.
+		return nil, fmt.Errorf("priv key for address: %w", err)
 	}
-
-	return privKey, nil
 }
