@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -31,7 +32,6 @@ import (
 
 var (
 	errDb           = errors.New("db error")
-	errKeyNotFound  = errors.New("key not found")
 	errAddrNotFound = errors.New("addr not found")
 )
 
@@ -1562,9 +1562,10 @@ func TestParseBip32Path(t *testing.T) {
 			wantPath: BIP32Path{
 				KeyScope: waddrmgr.KeyScopeBIP0044,
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 0,
-					Branch:  0,
-					Index:   0,
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
 				},
 			},
 		},
@@ -1576,9 +1577,10 @@ func TestParseBip32Path(t *testing.T) {
 			wantPath: BIP32Path{
 				KeyScope: waddrmgr.KeyScopeBIP0084,
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 1,
-					Branch:  0,
-					Index:   5,
+					InternalAccount: 1,
+					Account:         1,
+					Branch:          0,
+					Index:           5,
 				},
 			},
 		},
@@ -1625,9 +1627,10 @@ func TestParseBip32Path(t *testing.T) {
 					Purpose: 999, Coin: 0,
 				},
 				DerivationPath: waddrmgr.DerivationPath{
-					Account: 0,
-					Branch:  0,
-					Index:   0,
+					InternalAccount: 0,
+					Account:         0,
+					Branch:          0,
+					Index:           0,
 				},
 			},
 			expectedErr: nil,
@@ -1790,9 +1793,35 @@ func TestShouldSkipSigningError(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "compute raw sig error should be skipped",
-			err:      fmt.Errorf("wrapped: %w", errComputeRawSig),
+			name: "missing account should be skipped",
+			err: fmt.Errorf(
+				"%w: %w", errComputeRawSig,
+				ErrAccountNotInStore,
+			),
 			expected: true,
+		},
+		{
+			name: "watch only account should be skipped",
+			err: fmt.Errorf(
+				"%w: %w", errComputeRawSig,
+				ErrWatchOnlyAccount,
+			),
+			expected: true,
+		},
+		{
+			name: "store error should not be skipped",
+			err: fmt.Errorf(
+				"%w: %w", errComputeRawSig, errDb,
+			),
+			expected: false,
+		},
+		{
+			name: "cancellation should not be skipped",
+			err: fmt.Errorf(
+				"%w: %w", errComputeRawSig,
+				context.Canceled,
+			),
+			expected: false,
 		},
 		{
 			name: "unknown BIP32 purpose error should be " +
@@ -2620,18 +2649,16 @@ func TestSignTaprootPsbtInput(t *testing.T) {
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 
-	// Arrange: Mock address lookup flow.
-	// 1. FetchScopedKeyManager
-	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(mocks.accountManager, nil)
-
-	// 2. DeriveFromKeyPath (called inside walletdb.View)
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-
-	// 3. Address/PrivKey from ManagedAddress
-	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
+	// Arrange: Program the store-routed signer key lookup for the BIP-86
+	// path (purpose 86, coin type 1 for RegressionNet, account 0, branch 0,
+	// index 0). The key-path signature is not validated against a specific
+	// key here, so the derived leaf keys are discarded.
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+		waddrmgr.DerivationPath{
+			InternalAccount: 0, Branch: 0, Index: 0,
+		},
+	)
 
 	// Act: Call signTaprootPsbtInput to sign the input using the mocked
 	// wallet and keys.
@@ -2702,13 +2729,16 @@ func TestSignBip32PsbtInput(t *testing.T) {
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 
-	// Arrange: Mock address lookup flow.
-	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(mocks.accountManager, nil)
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
+	// Arrange: Program the store-routed signer key lookup for the BIP-84
+	// path (purpose 84, coin type 1 for RegressionNet, account 0, branch 0,
+	// index 0). The resulting PartialSig echoes the derivation entry's
+	// public key, so the derived leaf keys are discarded.
+	_, _ = expectStoreSignerPrivKey(
+		t, mocks, w.id, waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+		waddrmgr.DerivationPath{
+			InternalAccount: 0, Branch: 0, Index: 0,
+		},
+	)
 
 	// Act: Call signBip32PsbtInput to sign the input using the mocked
 	// wallet and keys.
@@ -2748,77 +2778,97 @@ func TestSignPsbtFailNilParams(t *testing.T) {
 func TestSignPsbt(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup keys.
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	pubKey := privKey.PubKey()
-	pubKeyBytes := pubKey.SerializeCompressed()
-
-	// Arrange: Define the BIP32 derivation path for the input key
-	// (RegressionNet, P2WKH).
-	derivationPath := []uint32{
-		hdkeychain.HardenedKeyStart + 84,
-		// CoinType 1 (RegressionNet)
-		hdkeychain.HardenedKeyStart + 1,
-		hdkeychain.HardenedKeyStart + 0,
-		0, 0,
-	}
-	derivation := &psbt.Bip32Derivation{
-		PubKey:    pubKeyBytes,
-		Bip32Path: derivationPath,
+	// The store account-secret lookup keys on InternalAccount, so a path
+	// that leaves it unset would silently resolve account 0 and sign with
+	// the wrong key. Both the default and a non-zero account are exercised.
+	tests := []struct {
+		name    string
+		account uint32
+	}{
+		{name: "default account", account: 0},
+		{name: "non-zero account", account: 2},
 	}
 
-	// Arrange: Create a P2WKH UTXO that corresponds to the derivation path,
-	// representing the input to be signed.
-	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKeyBytes), &chainParams,
-	)
-	require.NoError(t, err)
-	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
-	require.NoError(t, err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	utxo := &wire.TxOut{
-		Value:    1000,
-		PkScript: p2wkhScript,
+			// Arrange: Setup keys.
+			privKey, err := btcec.NewPrivateKey()
+			require.NoError(t, err)
+
+			pubKey := privKey.PubKey()
+			pubKeyBytes := pubKey.SerializeCompressed()
+
+			// Arrange: Define the BIP32 derivation path for the
+			// input key (RegressionNet, P2WKH, coin type 1).
+			derivationPath := []uint32{
+				hdkeychain.HardenedKeyStart + 84,
+				hdkeychain.HardenedKeyStart + 1,
+				hdkeychain.HardenedKeyStart + test.account,
+				0, 0,
+			}
+			derivation := &psbt.Bip32Derivation{
+				PubKey:    pubKeyBytes,
+				Bip32Path: derivationPath,
+			}
+
+			// Arrange: Create a P2WKH UTXO matching that path.
+			p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+				address.Hash160(pubKeyBytes), &chainParams,
+			)
+			require.NoError(t, err)
+			p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+			require.NoError(t, err)
+
+			utxo := &wire.TxOut{
+				Value:    1000,
+				PkScript: p2wkhScript,
+			}
+
+			// Arrange: Create the PSBT packet to be signed.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{})
+			tx.AddTxOut(&wire.TxOut{
+				Value: 1000, PkScript: []byte{},
+			})
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			packet.Inputs[0].WitnessUtxo = utxo
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{derivation}
+			packet.Inputs[0].SighashType = txscript.SigHashAll
+
+			signParams := &SignPsbtParams{Packet: packet}
+			w, mocks := createUnlockedWalletWithMocks(t)
+
+			// Arrange: Program the store-routed signer key lookup
+			// for the resolved account. The derived leaf keys are
+			// discarded because the PartialSig echoes the
+			// derivation entry's public key.
+			_, _ = expectStoreSignerPrivKey(
+				t, mocks, w.id,
+				waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+				waddrmgr.DerivationPath{
+					InternalAccount: test.account,
+					Branch:          0,
+					Index:           0,
+				},
+			)
+
+			// Act: Call SignPsbt on the packet.
+			result, err := w.SignPsbt(t.Context(), signParams)
+
+			// Assert: the input is reported signed and the packet
+			// carries the generated signature.
+			require.NoError(t, err)
+			require.Len(t, result.SignedInputs, 1)
+			require.Equal(t, uint32(0), result.SignedInputs[0])
+			require.Len(t, packet.Inputs[0].PartialSigs, 1)
+			mocks.store.AssertExpectations(t)
+		})
 	}
-
-	// Arrange: Create a PSBT packet containing the transaction to be
-	// signed.
-	tx := wire.NewMsgTx(2)
-	tx.AddTxIn(&wire.TxIn{})
-	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{}})
-	packet, err := psbt.NewFromUnsignedTx(tx)
-	require.NoError(t, err)
-
-	packet.Inputs[0].WitnessUtxo = utxo
-	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{derivation}
-	packet.Inputs[0].SighashType = txscript.SigHashAll
-
-	signParams := &SignPsbtParams{Packet: packet}
-	// Arrange: Wrap the packet in SignPsbtParams.
-	w, mocks := createUnlockedWalletWithMocks(t)
-
-	// Arrange: Configure mock expectations for key derivation and private
-	// key retrieval.
-	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(mocks.accountManager, nil)
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
-	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil)
-
-	// Act: Call SignPsbt to perform the full signing workflow on the
-	// packet.
-	result, err := w.SignPsbt(t.Context(), signParams)
-
-	// Assert: Verify that the operation succeeded, the input is reported as
-	// signed, and the underlying PSBT packet contains the generated
-	// signature.
-	require.NoError(t, err)
-	require.Len(t, result.SignedInputs, 1)
-	require.Equal(t, uint32(0), result.SignedInputs[0])
-	require.Len(t, packet.Inputs[0].PartialSigs, 1)
 }
 
 // TestSignPsbtInputsNotReady tests that SignPsbt fails if inputs are not ready
@@ -2874,56 +2924,106 @@ func TestSignPsbtInvalidDerivationPath(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidBip32Path)
 }
 
-// TestSignPsbtSignErrorSkippable tests that SignPsbt skips an input if
-// signing fails with a skippable error (e.g. key not found).
-func TestSignPsbtSignErrorSkippable(t *testing.T) {
+// TestSignPsbtClassifiesSignError tests that SignPsbt skips explicit ownership
+// failures while returning cancellation and operational Store errors.
+func TestSignPsbtClassifiesSignError(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Packet with valid input.
-	tx := wire.NewMsgTx(2)
-	tx.AddTxIn(&wire.TxIn{})
-	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{}})
-	packet, err := psbt.NewFromUnsignedTx(tx)
-	require.NoError(t, err)
-
-	p2wkhScript, _ := txscript.PayToAddrScript(
-		&address.AddressWitnessPubKeyHash{},
-	) // Dummy script
-	packet.Inputs[0].WitnessUtxo = &wire.TxOut{
-		Value:    1000,
-		PkScript: p2wkhScript,
-	}
-	// Valid path.
-	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
-		Bip32Path: []uint32{
-			hdkeychain.HardenedKeyStart + 84,
-			hdkeychain.HardenedKeyStart + 1,
-			hdkeychain.HardenedKeyStart + 0,
-			0, 0,
+	tests := []struct {
+		name      string
+		storeErr  error
+		wantError error
+		cancel    bool
+	}{
+		{
+			name:     "missing account skips input",
+			storeErr: db.ErrAccountNotFound,
 		},
-		PubKey: make([]byte, 33),
-	}}
-	packet.Inputs[0].SighashType = txscript.SigHashAll
+		{
+			name:      "canceled context returns error",
+			storeErr:  context.Canceled,
+			wantError: context.Canceled,
+			cancel:    true,
+		},
+		{
+			name:      "store failure returns error",
+			storeErr:  errDb,
+			wantError: errDb,
+		},
+	}
 
-	signParams := &SignPsbtParams{Packet: packet}
-	w, mocks := createUnlockedWalletWithMocks(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Arrange: Mocks to simulate signing failure.
-	mocks.addrStore.On("FetchScopedKeyManager", mock.Anything).
-		Return(mocks.accountManager, nil)
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil)
+			// Arrange: Build a packet with one input and a valid BIP-84
+			// derivation path.
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{})
+			tx.AddTxOut(&wire.TxOut{
+				Value: 1000, PkScript: []byte{},
+			})
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
 
-	// PrivKey returns error!
-	mocks.pubKeyAddr.On("PrivKey").Return(nil, errKeyNotFound)
+			p2wkhScript, err := txscript.PayToAddrScript(
+				&address.AddressWitnessPubKeyHash{},
+			)
+			require.NoError(t, err)
 
-	// Act.
-	result, err := w.SignPsbt(t.Context(), signParams)
+			packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+				Value:    1000,
+				PkScript: p2wkhScript,
+			}
+			packet.Inputs[0].Bip32Derivation =
+				[]*psbt.Bip32Derivation{{
+					Bip32Path: []uint32{
+						hdkeychain.HardenedKeyStart + 84,
+						hdkeychain.HardenedKeyStart + 1,
+						hdkeychain.HardenedKeyStart + 0,
+						0, 0,
+					},
+					PubKey: make([]byte, 33),
+				}}
+			packet.Inputs[0].SighashType = txscript.SigHashAll
 
-	// Assert: No error, but nothing signed.
-	require.NoError(t, err)
-	require.Empty(t, result.SignedInputs)
+			w, mocks := createUnlockedWalletWithMocks(t)
+			mocks.store.On(
+				"GetAccountSecret", mock.Anything,
+				db.GetAccountSecretQuery{
+					WalletID: w.id,
+					Scope: db.KeyScope{
+						Purpose: 84, Coin: 1,
+					},
+					AccountNumber: 0,
+				},
+			).Return(
+				(*db.AccountSecret)(nil), tc.storeErr,
+			).Once()
+
+			ctx := t.Context()
+			if tc.cancel {
+				var cancel context.CancelFunc
+
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			// Act.
+			result, err := w.SignPsbt(
+				ctx, &SignPsbtParams{Packet: packet},
+			)
+
+			// Assert: Only explicit ownership failures are skipped.
+			if tc.wantError != nil {
+				require.ErrorIs(t, err, tc.wantError)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Empty(t, result.SignedInputs)
+		})
+	}
 }
 
 // TestSignTaprootPsbtInputErrors tests various error conditions in
@@ -3074,21 +3174,27 @@ func TestAddScriptToPInput(t *testing.T) {
 func TestFinalizeInput(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup keys.
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	pubKey := privKey.PubKey()
-
-	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
-	)
-	require.NoError(t, err)
-	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
-	require.NoError(t, err)
-
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
+
+		w, mocks := createUnlockedWalletWithMocks(t)
+
+		// The signing key is resolved through the store account secret;
+		// take the leaf public key to build the input address.
+		scope := waddrmgr.KeyScopeBIP0084
+		path := waddrmgr.DerivationPath{}
+		_, pubKey := expectStoreSignerPrivKey(
+			t, mocks, w.id, scope, path,
+		)
+
+		p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(pubKey.SerializeCompressed()),
+			&chainParams,
+		)
+		require.NoError(t, err)
+		p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
+		require.NoError(t, err)
+
 		// Arrange: Valid PSBT input.
 		tx := wire.NewMsgTx(2)
 		tx.AddTxIn(&wire.TxIn{})
@@ -3101,17 +3207,11 @@ func TestFinalizeInput(t *testing.T) {
 		}
 		packet.Inputs[0].SighashType = txscript.SigHashAll
 
-		w, mocks := createUnlockedWalletWithMocks(t)
-
-		// Arrange: Mock dependencies.
-		expectSignerAddressInfo(
-			t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false, pubKey,
-		)
-		mocks.addrStore.On("Address", mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-		expectDerivedSignerPrivKey(
-			t, mocks, waddrmgr.KeyScopeBIP0084,
-			waddrmgr.DerivationPath{}, privKey,
+		// Arrange: Mock dependencies with a usable derivation scope so
+		// signing routes through the store account secret.
+		expectSignerAddressInfoWithKeyScope(
+			t, w, mocks, p2wkhAddr, db.WitnessPubKey, false, false,
+			pubKey, scope,
 		)
 
 		sigHashes := txscript.NewTxSigHashes(
@@ -3194,44 +3294,23 @@ func TestFinalizeInput(t *testing.T) {
 func TestFinalizePsbtSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup keys.
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
-
-	pubKey := privKey.PubKey()
-
-	// Arrange: Create addresses/scripts.
-	p2wkhAddr, err := address.NewAddressWitnessPubKeyHash(
-		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
-	)
-	require.NoError(t, err)
-	p2wkhScript, err := txscript.PayToAddrScript(p2wkhAddr)
-	require.NoError(t, err)
-
-	trAddr, err := address.NewAddressTaproot(
-		schnorr.SerializePubKey(pubKey), &chainParams,
-	)
-	require.NoError(t, err)
-	trScript, err := txscript.PayToAddrScript(trAddr)
-	require.NoError(t, err)
-
 	tests := []struct {
 		name     string
-		pkScript []byte
 		addrType waddrmgr.AddressType
-		addr     address.Address
+		dbType   db.AddressType
+		keyScope waddrmgr.KeyScope
 	}{
 		{
 			name:     "p2wkh",
-			pkScript: p2wkhScript,
 			addrType: waddrmgr.WitnessPubKey,
-			addr:     p2wkhAddr,
+			dbType:   db.WitnessPubKey,
+			keyScope: waddrmgr.KeyScopeBIP0084,
 		},
 		{
 			name:     "taproot",
-			pkScript: trScript,
 			addrType: waddrmgr.TaprootPubKey,
-			addr:     trAddr,
+			dbType:   db.TaprootPubKey,
+			keyScope: waddrmgr.KeyScopeBIP0086,
 		},
 	}
 
@@ -3239,10 +3318,37 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			keyScope := waddrmgr.KeyScopeBIP0084
+			w, mocks := createUnlockedWalletWithMocks(t)
+
+			// The signing key is resolved through the store account
+			// secret; take the leaf public key to build the input
+			// address.
+			path := waddrmgr.DerivationPath{}
+			_, pubKey := expectStoreSignerPrivKey(
+				t, mocks, w.id, tc.keyScope, path,
+			)
+
+			var (
+				addr address.Address
+				err  error
+			)
 			if tc.addrType == waddrmgr.TaprootPubKey {
-				keyScope = waddrmgr.KeyScopeBIP0086
+				addr, err = address.NewAddressTaproot(
+					schnorr.SerializePubKey(pubKey),
+					&chainParams,
+				)
+			} else {
+				addr, err = address.NewAddressWitnessPubKeyHash(
+					address.Hash160(
+						pubKey.SerializeCompressed(),
+					), &chainParams,
+				)
 			}
+
+			require.NoError(t, err)
+
+			pkScript, err := txscript.PayToAddrScript(addr)
+			require.NoError(t, err)
 
 			// Arrange: Create PSBT.
 			tx := wire.NewMsgTx(2)
@@ -3253,32 +3359,16 @@ func TestFinalizePsbtSuccess(t *testing.T) {
 
 			packet.Inputs[0].WitnessUtxo = &wire.TxOut{
 				Value:    1000,
-				PkScript: tc.pkScript,
+				PkScript: pkScript,
 			}
 			packet.Inputs[0].SighashType = txscript.SigHashDefault
 
-			w, mocks := createUnlockedWalletWithMocks(t)
-
-			// Arrange: Mock Store.GetAddress for ScriptForOutput.
-			dbAddrType := db.WitnessPubKey
-			if tc.addrType == waddrmgr.TaprootPubKey {
-				dbAddrType = db.TaprootPubKey
-			}
-
-			expectSignerAddressInfo(
-				t, w, mocks, tc.addr, dbAddrType, false, false, pubKey,
-			)
-			mocks.addrStore.On("Address", mock.Anything,
-				mock.MatchedBy(func(a address.Address) bool {
-					return a.String() == tc.addr.String()
-				}),
-			).Return(mocks.pubKeyAddr, nil).Once()
-			// Create a copy of the private key to avoid data races
-			// when parallel tests call Zero() on it.
-			privKeyCopy := *privKey
-			expectDerivedSignerPrivKey(
-				t, mocks, keyScope, waddrmgr.DerivationPath{},
-				&privKeyCopy,
+			// Arrange: Mock Store.GetAddress for ScriptForOutput
+			// with a usable derivation scope so signing routes
+			// through the store account secret.
+			expectSignerAddressInfoWithKeyScope(
+				t, w, mocks, addr, tc.dbType, false, false,
+				pubKey, tc.keyScope,
 			)
 
 			// Act: Call FinalizePsbt.
