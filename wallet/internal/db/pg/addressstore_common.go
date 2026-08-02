@@ -26,6 +26,10 @@ func addressSecretRowToSecret(
 		AddressID:        row.AddressID,
 		EncryptedPrivKey: row.EncryptedPrivKey,
 		EncryptedScript:  row.EncryptedScript,
+
+		// SQL script ciphertext is always encrypted under the script
+		// key; only kvdb records a per-row choice.
+		ScriptIsSecret: true,
 	})
 }
 
