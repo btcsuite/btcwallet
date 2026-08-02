@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 const (
@@ -39,6 +40,18 @@ var (
 	// ErrStateChanged is returned when the wallet state changes
 	// unexpectedly during an operation, such as a rescan setup.
 	ErrStateChanged = errors.New("wallet state changed unexpectedly")
+)
+
+// The passphrase sentinels below are part of the wallet's public API: callers
+// match on them with errors.Is. They alias the values used inside the wallet's
+// key vault rather than copying them, so an error raised deep in the vault
+// matches here with no translation step -- which matters because the vault
+// lives under wallet/internal and external callers cannot import it.
+var (
+
+	// ErrInvalidPassphrase is returned when a supplied passphrase does not
+	// match the one guarding the wallet.
+	ErrInvalidPassphrase = keyvault.ErrInvalidPassphrase
 )
 
 // UnlockRequest contains the parameters for unlocking the wallet.
@@ -85,20 +98,39 @@ type Info struct {
 }
 
 // ChangePassphraseRequest contains the parameters for changing wallet
-// passphrases. It supports changing the public passphrase, the private
-// passphrase, or both simultaneously.
+// passphrases.
+//
+// The two halves are selected independently. A SQL wallet has only the private
+// passphrase; kvdb additionally protects its public metadata with a separate
+// public passphrase, so a caller on that backend may rotate either half or
+// both.
 type ChangePassphraseRequest struct {
 	// ChangePublic indicates whether the public passphrase should be
 	// changed.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. This field will be removed with kvdb
+	// support.
 	ChangePublic bool
-	PublicOld    []byte
-	PublicNew    []byte
+
+	// PublicOld and PublicNew are read only when ChangePublic is set.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. These fields will be removed with kvdb
+	// support.
+	PublicOld []byte
+	PublicNew []byte
 
 	// ChangePrivate indicates whether the private passphrase should be
 	// changed.
 	ChangePrivate bool
-	PrivateOld    []byte
-	PrivateNew    []byte
+
+	// PrivateOld and PrivateNew are read only when ChangePrivate is set.
+	// The old passphrase is required even when the wallet is unlocked,
+	// because the rotation re-derives the old master key to unwrap the
+	// existing key material.
+	PrivateOld []byte
+	PrivateNew []byte
 }
 
 // Controller provides an interface for managing the wallet's lifecycle and
@@ -347,6 +379,13 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
 	}
 
+	// Lock the key vault so no decrypted signing keys outlive the shutdown.
+	// The background goroutines have exited, so no signer is running.
+	// Unconditional rather than gated on the unlocked state bit: Lock is
+	// void and idempotent, so a never-unlocked vault is a no-op, and gating
+	// would only add a way to skip it.
+	w.keyVault.Lock()
+
 	// Mark the wallet as stopped.
 	err = w.state.toStopped()
 	if err != nil {
@@ -424,7 +463,6 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 		return err
 	}
 
-	// Wait for the result.
 	return w.waitForResp(ctx, r.resp)
 }
 
@@ -700,8 +738,10 @@ func (w *Wallet) handleUnlockReq(req unlockReq) {
 		return
 	}
 
-	// Attempt to unlock the underlying address manager.
-	err = w.DBUnlock(w.lifetimeCtx, req.req.Passphrase)
+	// Attempt to unlock the key vault. The vault has no auto-lock of its
+	// own; the controller keeps owning the auto-lock schedule through its
+	// lockTimer below.
+	err = w.keyVault.Unlock(w.lifetimeCtx, req.req.Passphrase)
 	if err != nil {
 		req.resp <- err
 		return
@@ -752,22 +792,12 @@ func (w *Wallet) handleLockReq(req lockReq) {
 		}
 	}
 
-	// Signal the address manager to lock, clearing sensitive data.
-	err = w.addrStore.Lock()
-	if err != nil {
-		log.Errorf("Could not lock wallet: %v", err)
+	// Signal the key vault to lock, clearing sensitive data. Lock is void
+	// and idempotent: the vault swallows an already-locked condition and
+	// logs any other failure internally.
+	w.keyVault.Lock()
 
-		// If the wallet is already locked, we consider this a success
-		// (idempotency) and proceed to ensure our state is consistent.
-		if !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-			req.resp <- err
-
-			return
-		}
-	}
-
-	// Even if an error occurred (e.g. already locked), we ensure the
-	// wallet's high-level state is synchronized to 'locked'.
+	// Synchronize the wallet's high-level state to 'locked'.
 	w.state.toLocked()
 
 	// Report the result back to the caller.
@@ -775,8 +805,9 @@ func (w *Wallet) handleLockReq(req lockReq) {
 }
 
 // handleChangePassphraseReq processes a request to rotate the wallet's
-// passphrases. It can change either the public passphrase, the private
-// passphrase, or both in a single atomic database update.
+// passphrase, re-wrapping the persisted key material under the new one.
+//
+//nolint:staticcheck // Bridges the legacy kvdb public-passphrase fields.
 func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 	// First, validate that the wallet is in a state that allows changing
 	// the passphrase.
@@ -786,8 +817,34 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		return
 	}
 
-	// Delegate the cryptographic rotation to the database layer.
-	err = w.DBPutPassphrase(w.lifetimeCtx, req.req)
+	// The vault owns the encryption boundary, so it performs the rotation.
+	// Both halves travel together: kvdb applies them in one transaction,
+	// and SQL refuses a request naming the public half before touching
+	// anything.
+	params := keyvault.ChangePassphraseParams{}
+	if req.req.ChangePublic {
+		params.PublicOld = req.req.PublicOld
+		if params.PublicOld == nil {
+			params.PublicOld = []byte{}
+		}
+
+		params.PublicNew = req.req.PublicNew
+	}
+
+	if req.req.ChangePrivate {
+		params.PrivateOld = req.req.PrivateOld
+		if params.PrivateOld == nil {
+			params.PrivateOld = []byte{}
+		}
+
+		params.PrivateNew = req.req.PrivateNew
+	}
+
+	err = w.keyVault.ChangePassphrase(w.lifetimeCtx, params)
+	if err != nil {
+		req.resp <- err
+		return
+	}
 
 	// Report the result back to the caller.
 	req.resp <- err
