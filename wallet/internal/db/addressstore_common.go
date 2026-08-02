@@ -171,6 +171,10 @@ type AddressSecretRow struct {
 
 	// EncryptedScript is the encrypted script for script-based addresses.
 	EncryptedScript []byte
+
+	// ScriptIsSecret reports which key encrypted EncryptedScript. See
+	// AddressSecret.ScriptIsSecret.
+	ScriptIsSecret bool
 }
 
 // AddressSecretRowToSecret converts raw secret row fields into an AddressSecret
@@ -193,6 +197,7 @@ func AddressSecretRowToSecret(row AddressSecretRow) (*AddressSecret, error) {
 		AddressID:        addrID,
 		EncryptedPrivKey: row.EncryptedPrivKey,
 		EncryptedScript:  row.EncryptedScript,
+		ScriptIsSecret:   row.ScriptIsSecret,
 	}, nil
 }
 

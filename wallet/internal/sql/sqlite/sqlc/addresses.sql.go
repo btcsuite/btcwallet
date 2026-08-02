@@ -238,12 +238,12 @@ SELECT
     s.encrypted_script
 FROM addresses AS a
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
-WHERE a.wallet_id = ? AND a.id = ?
+WHERE a.wallet_id = ? AND a.script_pub_key = ?
 `
 
 type GetAddressSecretParams struct {
-	WalletID int64
-	ID       int64
+	WalletID     int64
+	ScriptPubKey []byte
 }
 
 type GetAddressSecretRow struct {
@@ -257,8 +257,37 @@ type GetAddressSecretRow struct {
 // - Address exists without secret row: returns row with NULL secret fields
 // - Address does not exist: returns no rows (sql.ErrNoRows)
 func (q *Queries) GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error) {
-	row := q.queryRow(ctx, q.getAddressSecretStmt, GetAddressSecret, arg.WalletID, arg.ID)
+	row := q.queryRow(ctx, q.getAddressSecretStmt, GetAddressSecret, arg.WalletID, arg.ScriptPubKey)
 	var i GetAddressSecretRow
+	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
+	return i, err
+}
+
+const GetAddressSecretByID = `-- name: GetAddressSecretByID :one
+SELECT
+    a.id AS address_id,
+    s.encrypted_priv_key,
+    s.encrypted_script
+FROM addresses AS a
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE a.wallet_id = ? AND a.id = ?
+`
+
+type GetAddressSecretByIDParams struct {
+	WalletID int64
+	ID       int64
+}
+
+type GetAddressSecretByIDRow struct {
+	AddressID        int64
+	EncryptedPrivKey []byte
+	EncryptedScript  []byte
+}
+
+// Retrieves secret information for an address using its durable SQL row ID.
+func (q *Queries) GetAddressSecretByID(ctx context.Context, arg GetAddressSecretByIDParams) (GetAddressSecretByIDRow, error) {
+	row := q.queryRow(ctx, q.getAddressSecretByIDStmt, GetAddressSecretByID, arg.WalletID, arg.ID)
+	var i GetAddressSecretByIDRow
 	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
 	return i, err
 }
