@@ -1052,9 +1052,16 @@ func (w *Wallet) parseBip32Path(path []uint32) (BIP32Path, error) {
 	bip32Path := BIP32Path{
 		KeyScope: scope,
 		DerivationPath: waddrmgr.DerivationPath{
-			Account: account,
-			Branch:  branch,
-			Index:   index,
+			// InternalAccount is the wallet's database account
+			// number that both the legacy DeriveFromKeyPath and
+			// the SQL account-secret lookup key on. Leaving it
+			// unset always resolves account 0, so a PSBT for a
+			// non-zero account would otherwise sign with the wrong
+			// key or fail to find one.
+			InternalAccount: account,
+			Account:         account,
+			Branch:          branch,
+			Index:           index,
 		},
 	}
 
@@ -1124,16 +1131,12 @@ func shouldSkipSigningError(err error, idx int) bool {
 	}
 
 	// In a collaborative PSBT workflow, the transaction may contain inputs
-	// that belong to other parties. Even if a derivation path is present
-	// and valid (e.g. BIP-84), it might correspond to a different signer's
-	// key (same path, different seed).
-	//
-	// If we encounter `errComputeRawSig`, it means we failed to produce a
-	// signature. This usually happens because we don't have the private
-	// key for the derived address (it's someone else's input). In this
-	// case, we skip the input and log a debug message, allowing us to
-	// proceed and sign the inputs that we DO own.
-	if errors.Is(err, errComputeRawSig) {
+	// that belong to other parties. Skip only explicit ownership failures;
+	// operational Store, vault, tweaking and signing errors must reach the
+	// caller.
+	missingSigningKey := errors.Is(err, ErrAccountNotInStore) ||
+		errors.Is(err, ErrWatchOnlyAccount)
+	if errors.Is(err, errComputeRawSig) && missingSigningKey {
 		log.Debugf("Skipping input %d: %v", idx, err)
 		return true
 	}
@@ -2287,9 +2290,10 @@ func addInputInfoSegWitV1(in *psbt.PInput, utxo *wire.TxOut,
 func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
 	addr AddressInfo) (*psbt.POutput, error) {
 
-	// We don't know the derivation path for imported keys. Those shouldn't
-	// be selected as change outputs in the first place, but just to make
-	// sure we don't run into an issue, we return early for imported keys.
+	// We don't know the public derivation path for imported keys. Those
+	// shouldn't be selected as change outputs in the first place, but just
+	// to make sure we don't run into an issue, we return early for imported
+	// keys.
 	if addr.Derivation == nil || addr.PubKey == nil {
 		return nil, fmt.Errorf("error adding output info to PSBT: %w",
 			ErrImportedAddrNoDerivation)
@@ -2302,7 +2306,8 @@ func createOutputInfoFromAddressInfo(txOut *wire.TxOut,
 		Bip32Path: []uint32{
 			addr.Derivation.KeyScope.Purpose + hdkeychain.HardenedKeyStart,
 			addr.Derivation.KeyScope.Coin + hdkeychain.HardenedKeyStart,
-			addr.Derivation.Account + hdkeychain.HardenedKeyStart,
+			addr.Derivation.Account +
+				hdkeychain.HardenedKeyStart,
 			addr.Derivation.Branch,
 			addr.Derivation.Index,
 		},

@@ -7,6 +7,7 @@ package wallet
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/bwtest/keyvaultmock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	sqlitedb "github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -173,11 +175,8 @@ func TestDerivePubKeyNotPubKeyAddr(t *testing.T) {
 func TestECDHSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and test keys.
+	// Arrange: Set up the wallet and mocks.
 	w, mocks := createUnlockedWalletWithMocks(t)
-
-	// Use a hardcoded private key for deterministic test results.
-	privKey, _ := deterministicPrivKey(t)
 
 	remoteKey, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
@@ -193,34 +192,27 @@ func TestECDHSuccess(t *testing.T) {
 		},
 	}
 
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	// The ECDH key is resolved through the store account secret; take the
+	// leaf private key the signer will derive so we can compute the
+	// expected shared secret independently.
+	privKey, _ := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
 
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	// Compute the expected shared secret before ECDH runs, since ECDH
+	// zeroes the private key it derived internally (a separate copy from
+	// this one).
+	expectedSecret := btcec.GenerateSharedSecret(privKey, remotePubKey)
+
+	var expectedSecretArray [32]byte
+	copy(expectedSecretArray[:], expectedSecret)
 
 	// Act: Perform the ECDH operation.
 	sharedSecret, err := w.ECDH(t.Context(), path, remotePubKey)
 
 	// Assert: Check that the correct shared secret is returned.
 	require.NoError(t, err)
-
-	// Calculate the expected secret independently to verify.
-	expectedSecret := btcec.GenerateSharedSecret(privKey, remotePubKey)
-
-	var expectedSecretArray [32]byte
-	copy(expectedSecretArray[:], expectedSecret)
-
 	require.Equal(t, expectedSecretArray, sharedSecret)
-
-	// Finally, assert that the private key is zeroed out.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestECDHFails tests the failure case where the key derivation fails during
@@ -228,8 +220,8 @@ func TestECDHSuccess(t *testing.T) {
 func TestECDHFails(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and configure the mock addrStore to return
-	// an error.
+	// Arrange: Set up the wallet and configure the store account-secret
+	// lookup to fail with an unexpected error.
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
@@ -238,8 +230,13 @@ func TestECDHFails(t *testing.T) {
 
 	remotePubKey := remoteKey.PubKey()
 
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errDerivationFailed).Once()
+	accountNumber := path.DerivationPath.InternalAccount
+	mocks.store.On("GetAccountSecret", mock.Anything,
+		db.GetAccountSecretQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(path.KeyScope),
+			AccountNumber: accountNumber,
+		}).Return((*db.AccountSecret)(nil), errDerivationFailed).Once()
 
 	// Act: Attempt to perform the ECDH operation.
 	_, err = w.ECDH(t.Context(), path, remotePubKey)
@@ -262,20 +259,93 @@ func deterministicPrivKey(t *testing.T) (*btcec.PrivateKey, *btcec.PublicKey) {
 	return privKey, pubKey
 }
 
-// expectDerivedSignerPrivKey wires the signer-private key lookup path for a
-// derived managed pubkey address.
-func expectDerivedSignerPrivKey(t *testing.T, mocks *mockWalletDeps,
-	scope waddrmgr.KeyScope, path waddrmgr.DerivationPath,
-	privKey *btcec.PrivateKey) {
+// testAccountXPrv is a deterministic account-level extended private key used to
+// back the store-routed signer path in mock-based tests. Its child keys are
+// derived locally, and the store + vault mocks are programmed to return this
+// xprv, so the signer resolves the same leaf key the test derives.
+func testAccountXPrv(t *testing.T) *hdkeychain.ExtendedKey {
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0x2E}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	// A non-hardened child stands in for the account key; the exact path is
+	// irrelevant because the signer never re-derives above the account.
+	acct, err := master.Derive(7)
+	require.NoError(t, err)
+
+	return acct
+}
+
+// deriveLeafKeys derives the leaf private and public keys at the given branch
+// and index from an account extended private key, mirroring the local
+// derivation the store-routed signer performs after decrypting the account
+// xprv.
+func deriveLeafKeys(t *testing.T, acct *hdkeychain.ExtendedKey,
+	branch, index uint32) (*btcec.PrivateKey, *btcec.PublicKey) {
 
 	t.Helper()
 
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(scope, path, true).Once()
-	mocks.addrStore.On("FetchScopedKeyManager", scope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPathCache", path).
-		Return(privKey, nil).Once()
+	branchKey, err := acct.Derive(branch)
+	require.NoError(t, err)
+
+	leafKey, err := branchKey.Derive(index)
+	require.NoError(t, err)
+
+	privKey, err := leafKey.ECPrivKey()
+	require.NoError(t, err)
+
+	pubKey, err := leafKey.ECPubKey()
+	require.NoError(t, err)
+
+	return privKey, pubKey
+}
+
+// expectStoreSignerPrivKey wires the store-routed signer private-key lookup for
+// a derived address: the account secret is fetched by account number and its
+// encrypted extended private key is decrypted through the vault. The vault mock
+// runs as an identity cipher, so the plaintext handed to the signer is the
+// account xprv string itself.
+//
+// It returns the leaf private and public keys the signer will derive at the
+// path's branch and index, so callers can build the matching address and assert
+// against the recovered key.
+func expectStoreSignerPrivKey(t *testing.T, mocks *mockWalletDeps,
+	walletID uint32, scope waddrmgr.KeyScope,
+	path waddrmgr.DerivationPath) (*btcec.PrivateKey, *btcec.PublicKey) {
+
+	t.Helper()
+
+	acct := testAccountXPrv(t)
+	encAcctPriv := []byte(acct.String())
+
+	accountNumber := path.InternalAccount
+	mocks.store.On("GetAccountSecret", mock.Anything,
+		db.GetAccountSecretQuery{
+			WalletID:      walletID,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: accountNumber,
+		}).Return(&db.AccountSecret{
+		EncryptedPrivateKey: encAcctPriv,
+	}, nil).Once()
+
+	mocks.vault.On("Decrypt", waddrmgr.CKTPrivate, encAcctPriv).Return(
+		identityDecrypt, nil,
+	).Once()
+
+	privKey, pubKey := deriveLeafKeys(t, acct, path.Branch, path.Index)
+
+	return privKey, pubKey
+}
+
+// identityDecrypt is a vault decrypt stub that returns the ciphertext
+// unchanged, standing in for a real decrypt of never-encrypted test material.
+func identityDecrypt(b []byte) []byte {
+	out := make([]byte, len(b))
+	copy(out, b)
+
+	return out
 }
 
 // TestSignDigest tests the signing of a message digest with different signature
@@ -284,8 +354,9 @@ func TestSignDigest(t *testing.T) {
 	t.Parallel()
 
 	// We'll use a common set of parameters for all signing test cases to
-	// ensure the only variable is the signing intent itself.
-	privKey, pubKey := deterministicPrivKey(t)
+	// ensure the only variable is the signing intent itself. The signing
+	// key is resolved through the store account secret, so the concrete
+	// key pair is produced per case by expectStoreSignerPrivKey.
 	path := BIP32Path{
 		KeyScope: waddrmgr.KeyScopeBIP0084,
 		DerivationPath: waddrmgr.DerivationPath{
@@ -308,9 +379,9 @@ func TestSignDigest(t *testing.T) {
 		intent *SignDigestIntent
 
 		// verify is a function that verifies the signature produced by
-		// the signing intent.
+		// the signing intent against the resolved leaf key pair.
 		verify func(t *testing.T, sig Signature,
-			pubKey *btcec.PublicKey)
+			privKey *btcec.PrivateKey, pubKey *btcec.PublicKey)
 	}{
 		{
 			name: "ECDSA success",
@@ -320,7 +391,7 @@ func TestSignDigest(t *testing.T) {
 				CompactSig: false,
 			},
 			verify: func(t *testing.T, sig Signature,
-				pubKey *btcec.PublicKey) {
+				_ *btcec.PrivateKey, pubKey *btcec.PublicKey) {
 
 				t.Helper()
 
@@ -340,7 +411,7 @@ func TestSignDigest(t *testing.T) {
 				CompactSig: true,
 			},
 			verify: func(t *testing.T, sig Signature,
-				pubKey *btcec.PublicKey) {
+				_ *btcec.PrivateKey, pubKey *btcec.PublicKey) {
 
 				t.Helper()
 
@@ -363,7 +434,7 @@ func TestSignDigest(t *testing.T) {
 				SigType: SigTypeSchnorr,
 			},
 			verify: func(t *testing.T, sig Signature,
-				pubKey *btcec.PublicKey) {
+				_ *btcec.PrivateKey, pubKey *btcec.PublicKey) {
 
 				t.Helper()
 
@@ -386,7 +457,7 @@ func TestSignDigest(t *testing.T) {
 				TaprootTweak: []byte("test tweak"),
 			},
 			verify: func(t *testing.T, sig Signature,
-				pubKey *btcec.PublicKey) {
+				privKey *btcec.PrivateKey, _ *btcec.PublicKey) {
 
 				t.Helper()
 
@@ -412,76 +483,62 @@ func TestSignDigest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Set up a mock wallet that will return our
-			// deterministic private key for the specified
-			// derivation path. This allows us to test the signing
-			// logic in isolation.
+			// Arrange: Set up a mock wallet whose store account
+			// secret resolves to a deterministic account xprv, so
+			// the signer derives a known leaf key for the path.
 			w, mocks := createUnlockedWalletWithMocks(t)
 
-			// Configure the full mock chain to return the test
-			// private key.
-			//
-			// NOTE: We must use a copy since the ECDH method will
-			// zero out the key.
-			privKeyCopy, _ := btcec.PrivKeyFromBytes(
-				privKey.Serialize(),
-			)
-
-			mocks.addrStore.On(
-				"FetchScopedKeyManager", path.KeyScope,
-			).Return(mocks.accountManager, nil).Once()
-			mocks.accountManager.On(
-				"DeriveFromKeyPath", mock.Anything,
+			privKey, pubKey := expectStoreSignerPrivKey(
+				t, mocks, w.id, path.KeyScope,
 				path.DerivationPath,
-			).Return(mocks.pubKeyAddr, nil).Once()
-			mocks.pubKeyAddr.On("PrivKey").Return(
-				privKeyCopy, nil,
-			).Once()
+			)
 
 			// Act: Attempt to sign the message with the wallet.
 			sig, err := w.SignDigest(t.Context(), path, tc.intent)
 
 			// Assert: Verify that the signature was created
-			// successfully and is valid for the given public key.
-			// We also assert that the private key was cleared from
-			// memory after the operation.
+			// successfully and is valid for the resolved leaf key.
 			require.NoError(t, err)
-			tc.verify(t, sig, pubKey)
-			require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
+			tc.verify(t, sig, privKey, pubKey)
 		})
 	}
 }
 
-// TestSignDigestFail tests failure modes of SignDigest.
+// TestSignDigestFail tests failure modes of SignDigest through the store-routed
+// key path.
 func TestSignDigestFail(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
+	accountNumber := path.DerivationPath.InternalAccount
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: accountNumber,
+	}
+
 	digest := make([]byte, 32)
 	intent := &SignDigestIntent{Digest: digest}
 
-	// Test Case 1: Fetching the key manager fails.
-	// We expect an `errManagerNotFound` error to be returned.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
+	// Test Case 1: The signing account is not in the store. We expect
+	// ErrAccountNotInStore to be returned.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		(*db.AccountSecret)(nil), db.ErrAccountNotFound,
+	).Once()
 
 	_, err := w.SignDigest(t.Context(), path, intent)
-	require.ErrorIs(t, err, errManagerNotFound)
+	require.ErrorIs(t, err, ErrAccountNotInStore)
 
-	// Test Case 2: Obtaining the private key for signing fails.
-	// We expect a `privkey error` to be returned.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPath",
-		mock.Anything, mock.Anything).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
-		errPrivKeyMock).Once()
+	// Test Case 2: The account exists but is watch-only (no encrypted
+	// private material). We expect ErrWatchOnlyAccount to be returned.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		&db.AccountSecret{}, nil,
+	).Once()
 
 	_, err = w.SignDigest(t.Context(), path, intent)
-	require.ErrorContains(t, err, "privkey error")
+	require.ErrorIs(t, err, ErrWatchOnlyAccount)
 }
 
 // TestValidateSignDigestIntent tests the validation logic for SignDigestIntent.
@@ -567,13 +624,23 @@ func TestValidateSignDigestIntent(t *testing.T) {
 func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, keys, and a dummy transaction that will
-	// be used to spend the P2PKH output.
+	// Arrange: Set up the wallet and a dummy transaction that will be used
+	// to spend the P2PKH output.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a P2PKH address and the corresponding previous output script.
-	// This is the output we want to create an unlocking script for.
+	// The signer resolves the private key through the store account secret,
+	// so program that path and take the leaf keys it will derive.
+	scope := waddrmgr.KeyScopeBIP0044
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 0,
+		Account:         0,
+		Branch:          0,
+		Index:           0,
+	}
+	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
+
+	// Create a P2PKH address for the derived leaf public key and the
+	// corresponding previous output script.
 	addr, err := address.NewAddressPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()),
 		w.cfg.ChainParams,
@@ -584,29 +651,10 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// The wallet needs to be able to find the private key for the given
-	// address. We mock the address store to return a mock address that,
-	// when queried, will provide the private key for signing. This
-	// simulates a real scenario where the wallet's address manager would
-	// fetch the key from the database.
-	expectSignerAddressInfo(
-		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
-	)
-	mocks.addrStore.On("Address",
-		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Once()
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	expectDerivedSignerPrivKey(
-		t, mocks, waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, privKeyCopy,
+	// The wallet resolves the address metadata through the store; the
+	// derivation scope makes the metadata directly usable for signing.
+	expectSignerAddressInfoWithKeyScope(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey, scope,
 	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
@@ -639,10 +687,6 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "script execution failed")
-
-	// Finally, we ensure that the private key was not mutated during the
-	// signing process.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeUnlockingScriptP2WKH tests that the wallet can generate a valid
@@ -650,12 +694,21 @@ func TestComputeUnlockingScriptP2PKH(t *testing.T) {
 func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, keys, and a dummy transaction that will
-	// be used to spend the P2WKH output.
+	// Arrange: Set up the wallet and a dummy transaction that will be used
+	// to spend the P2WKH output.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a P2WKH address and the corresponding previous output script.
+	scope := waddrmgr.KeyScopeBIP0084
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 0,
+		Account:         0,
+		Branch:          0,
+		Index:           0,
+	}
+	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
+
+	// Create a P2WKH address for the derived leaf public key and the
+	// corresponding previous output script.
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()),
 		w.cfg.ChainParams,
@@ -666,27 +719,11 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// The wallet needs to be able to find the private key for the given
-	// address. We mock the address store to return a mock address that,
-	// when queried, will provide the private key for signing.
-	expectSignerAddressInfo(
+	// The wallet resolves the address metadata through the store; the
+	// derivation scope makes the metadata directly usable for signing.
+	expectSignerAddressInfoWithKeyScope(
 		t, w, mocks, addr, db.WitnessPubKey, false, false, pubKey,
-	)
-	mocks.addrStore.On("Address",
-		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Once()
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	expectDerivedSignerPrivKey(
-		t, mocks, waddrmgr.KeyScopeBIP0084, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, privKeyCopy,
+		scope,
 	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
@@ -718,10 +755,6 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "script execution failed")
-
-	// Finally, we ensure that the private key was not mutated during the
-	// signing process.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeUnlockingScriptNP2WKH tests that the wallet can generate a valid
@@ -729,13 +762,21 @@ func TestComputeUnlockingScriptP2WKH(t *testing.T) {
 func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, keys, and a dummy transaction.
+	// Arrange: Set up the wallet and a dummy transaction.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a NP2WKH address. This is a P2WKH output nested within a
-	// P2SH output. This is done by creating the witness program first,
-	// and then using its hash in a P2SH script.
+	scope := waddrmgr.KeyScopeBIP0049Plus
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 0,
+		Account:         0,
+		Branch:          0,
+		Index:           0,
+	}
+	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
+
+	// Create a NP2WKH address for the derived leaf public key. This is a
+	// P2WKH output nested within a P2SH output. This is done by creating
+	// the witness program first, and then using its hash in a P2SH script.
 	p2sh, err := txscript.NewScriptBuilder().
 		AddOp(txscript.OP_0).
 		AddData(address.Hash160(pubKey.SerializeCompressed())).
@@ -748,29 +789,12 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// The wallet needs to be able to find the private key for the given
-	// address. We mock the address store to return a mock address that,
-	// when queried, will provide the private key for signing. For NP2WKH,
-	// the wallet also needs the public key to reconstruct the witness
-	// program, so we mock that as well.
-	expectSignerAddressInfo(
+	// The wallet resolves the address metadata through the store; the
+	// derivation scope makes the metadata directly usable for signing. The
+	// nested witness program is rebuilt from the address public key.
+	expectSignerAddressInfoWithKeyScope(
 		t, w, mocks, addr, db.NestedWitnessPubKey, false, false, pubKey,
-	)
-	mocks.addrStore.On("Address",
-		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Once()
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	expectDerivedSignerPrivKey(
-		t, mocks, waddrmgr.KeyScopeBIP0049Plus, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, privKeyCopy,
+		scope,
 	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
@@ -804,10 +828,6 @@ func TestComputeUnlockingScriptNP2WKH(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "script execution failed")
-
-	// Finally, we ensure that the private key was not mutated during the
-	// signing process.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeUnlockingScriptP2TR tests that the wallet can generate a valid
@@ -817,10 +837,19 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 
 	// Arrange: Set up the wallet, keys, and a dummy transaction.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a P2TR address for a key-path spend. This involves computing
-	// the taproot output key from the internal public key.
+	scope := waddrmgr.KeyScopeBIP0086
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 0,
+		Account:         0,
+		Branch:          0,
+		Index:           0,
+	}
+	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
+
+	// Create a P2TR address for a key-path spend of the derived leaf public
+	// key. This involves computing the taproot output key from the internal
+	// public key.
 	addr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(
 			txscript.ComputeTaprootOutputKey(pubKey, nil),
@@ -832,27 +861,11 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 
 	prevOut, tx := createDummyTestTx(pkScript)
 
-	// The wallet needs to be able to find the private key for the given
-	// address. We mock the address store to return a mock address that,
-	// when queried, will provide the private key for signing.
-	expectSignerAddressInfo(
+	// The wallet resolves the address metadata through the store; the
+	// derivation scope makes the metadata directly usable for signing.
+	expectSignerAddressInfoWithKeyScope(
 		t, w, mocks, addr, db.TaprootPubKey, false, false, pubKey,
-	)
-	mocks.addrStore.On("Address",
-		mock.Anything, addr,
-	).Return(mocks.pubKeyAddr, nil).Once()
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	expectDerivedSignerPrivKey(
-		t, mocks, waddrmgr.KeyScopeBIP0086, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, privKeyCopy,
+		scope,
 	)
 
 	// Act: With the setup complete, we can now ask the wallet to compute
@@ -888,10 +901,6 @@ func TestComputeUnlockingScriptP2TR(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "script execution failed")
-
-	// Finally, we ensure that the private key was not mutated during the
-	// signing process.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeUnlockingScriptSQLDerivedAddress verifies that an address created
@@ -914,9 +923,6 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 		t.Context(), "default", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
-
-	_, err = w.loadManagedPubKeyAddr(addr)
-	require.Error(t, err)
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -948,13 +954,112 @@ func TestComputeUnlockingScriptSQLDerivedAddress(t *testing.T) {
 	require.NoError(t, vm.Execute(), "script execution failed")
 }
 
+// TestResolveDerivedPrivKeyFromStoreDerivedSuccess exercises the store-backed
+// success path end to end: the account's encrypted extended private key is
+// fetched from the store, decrypted through the key vault under CKTPrivate, the
+// account xprv is parsed, and the leaf key at a specific branch and index is
+// derived. It asserts the recovered leaf key equals one derived independently
+// from the same account xprv, so a wrong crypto-key selection on decrypt or a
+// bad child derivation cannot slip through unnoticed.
+//
+// Unlike the identity-cipher helpers used elsewhere, the stored ciphertext here
+// is deliberately distinct from the plaintext xprv, so the assertion only holds
+// if the vault Decrypt call is actually made and its output is what gets
+// parsed.
+func TestResolveDerivedPrivKeyFromStoreDerivedSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a real account xprv whose leaf key the signer must recover,
+	// and a marked ciphertext that differs from the plaintext so the
+	// decrypt step is load-bearing.
+	w, mocks := createUnlockedWalletWithMocks(t)
+
+	acct := testAccountXPrv(t)
+	plaintextXPrv := []byte(acct.String())
+	encAcctPriv := append([]byte("vault-ciphertext:"), plaintextXPrv...)
+	require.NotEqual(t, plaintextXPrv, encAcctPriv)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 4,
+		Branch:          1,
+		Index:           5,
+	}
+
+	// The store returns the encrypted account material keyed by account
+	// number (path-only caller, so accountID is nil below).
+	accountNumber := path.InternalAccount
+	mocks.store.On("GetAccountSecret", mock.Anything,
+		db.GetAccountSecretQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: accountNumber,
+		}).Return(&db.AccountSecret{
+		EncryptedPrivateKey: encAcctPriv,
+	}, nil).Once()
+
+	// The vault decrypts the ciphertext under the private crypto key back
+	// to the plaintext account xprv. Returning a closure lets the mock
+	// ignore the (distinct) ciphertext input and hand back the known
+	// plaintext.
+	mocks.vault.On("Decrypt", waddrmgr.CKTPrivate, encAcctPriv).Return(
+		func([]byte) []byte {
+			out := make([]byte, len(plaintextXPrv))
+			copy(out, plaintextXPrv)
+
+			return out
+		}, nil,
+	).Once()
+
+	// The expected leaf key, derived independently from the same account
+	// xprv at the same branch and index.
+	wantPriv, _ := deriveLeafKeys(t, acct, path.Branch, path.Index)
+
+	// Act: resolve the derived private key through the store.
+	gotPriv, err := w.resolveDerivedPrivKeyFromStore(
+		t.Context(), scope, path,
+	)
+
+	// Assert: the decrypt -> parse -> derive chain produced the exact leaf
+	// key, proving the crypto-key type and child derivation are correct.
+	require.NoError(t, err)
+	require.Equal(t, wantPriv.Serialize(), gotPriv.Serialize())
+	gotPriv.Zero()
+}
+
 // TestGetPrivKeyForAddressSQLDerivedAddress verifies that GetPrivKeyForAddress
-// recovers the private key for an address whose only persistent record lives
-// in the SQL store.
+// recovers the private key for an address owned by a SQL-only account, driving
+// the store-secret + vault-decrypt fallback rather than any waddrmgr-mirrored
+// material.
+//
+// The "default" account (number 0) is mirrored between the SQL store and the
+// legacy waddrmgr manager (both seeded identically), so signing it does not
+// distinguish the store path from a legacy lookup. This test instead signs from
+// a secondary account that exists ONLY in the SQL store (a non-zero account
+// number), so the recovered key can only come from the store's encrypted
+// account secret decrypted through the vault.
 func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	t.Parallel()
 
-	w, chain, _ := newSQLAddressSigningWallet(t)
+	w, chain, vault := newSQLAddressSigningWallet(t)
+
+	// Create a second derived account that lives only in the SQL store; it
+	// has no counterpart in the legacy waddrmgr manager.
+	secondary, err := w.store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: w.id,
+			Scope:    db.KeyScope(waddrmgr.KeyScopeBIP0084),
+			Name:     "secondary",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, secondary.AccountNumber)
+	require.NotNil(t, secondary.AccountID)
+
+	// The secondary account must not be the wallet's default account 0,
+	// which is the one mirrored through waddrmgr.
+	require.NotZero(t, *secondary.AccountNumber)
+
 	chain.On(
 		"NotifyReceived",
 		mock.MatchedBy(func(addrs []address.Address) bool {
@@ -963,31 +1068,55 @@ func TestGetPrivKeyForAddressSQLDerivedAddress(t *testing.T) {
 	).Return(nil).Once()
 
 	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), "secondary", waddrmgr.WitnessPubKey, false,
 	)
 	require.NoError(t, err)
 
-	// The legacy managed-address lookup should fail for a SQL-only
-	// derived address — this confirms the test exercises the derivation
-	// path rather than the kvdb fallback.
-	_, err = w.loadManagedPubKeyAddr(addr)
-	require.Error(t, err)
+	// Read back the store's view of the address so the expected leaf key is
+	// derived at exactly the branch and index the store assigned.
+	info, err := w.GetAddressInfo(t.Context(), addr)
+	require.NoError(t, err)
+	require.NotNil(t, info.Derivation, "SQL-derived address must carry "+
+		"derivation metadata")
+	require.Equal(
+		t, *secondary.AccountNumber, info.Derivation.Account,
+	)
 
+	// Independently derive the expected leaf key from the same seed the
+	// SQL account derivation used, at the secondary account number and the
+	// store-assigned branch and index.
+	seed := bytes.Repeat([]byte{0x5A}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+	acctKey, err := deriveBIP44AccountKey(
+		master, db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		*secondary.AccountNumber,
+	)
+	require.NoError(t, err)
+	wantPriv, _ := deriveLeafKeys(
+		t, acctKey, info.Derivation.Branch, info.Derivation.Index,
+	)
+
+	// Act: resolve the private key. This drives GetAccountSecret keyed by
+	// the durable account id and decrypts the account xprv through the
+	// vault.
 	priv, err := w.GetPrivKeyForAddress(t.Context(), addr)
 	require.NoError(t, err, "GetPrivKeyForAddress must succeed for "+
-		"SQL-derived addresses")
+		"SQL-only derived addresses")
 	require.NotNil(t, priv)
+
+	// Assert: the recovered key matches the independently derived leaf key,
+	// and the vault's private decrypt path actually ran.
+	require.Equal(t, wantPriv.Serialize(), priv.Serialize())
+	vault.AssertCalled(t, "Decrypt", waddrmgr.CKTPrivate, mock.Anything)
 	priv.Zero()
 }
 
 // TestNewAddressOnSQLOnlyAccount verifies that SQL-owned accounts can derive
 // receive addresses without a mirrored legacy waddrmgr account.
 //
-// The test exercises the public-key path only. Signing with addresses owned
-// by a SQL-only account currently routes through the legacy waddrmgr
-// derivation cache, which does not see SQL-only accounts; that gap is
-// tracked separately and will be closed by the signer-store work on
-// impl-tx-creator-store using keyVault-backed account-secret derivation.
+// The test exercises the public-key path; signer coverage for SQL-only
+// accounts is provided by TestGetPrivKeyForAddressSQLDerivedAddress.
 func TestNewAddressOnSQLOnlyAccount(t *testing.T) {
 	t.Parallel()
 
@@ -1062,8 +1191,8 @@ func TestComputeUnlockingScriptFail_ScriptForOutput(t *testing.T) {
 	require.ErrorContains(t, err, "unable to get address info")
 }
 
-// TestComputeUnlockingScriptFail_PrivKey tests failure when private key
-// retrieval fails.
+// TestComputeUnlockingScriptFail_PrivKey tests failure when the store-routed
+// private key resolution fails.
 func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	t.Parallel()
 
@@ -1083,35 +1212,23 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	)
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-	// Arrange: Set up the wallet and mocks.
+	// Arrange: Set up the wallet and mocks. A usable derivation scope
+	// routes signing through the store account secret, whose lookup we
+	// fail.
 	w, mocks := createUnlockedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0044
 
-	// Mock address store and managed address.
-	expectSignerAddressInfo(
-		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
+	expectSignerAddressInfoWithKeyScope(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey, scope,
 	)
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, true,
-	).Once()
 
-	mocks.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0044).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPathCache",
-		waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		},
-	).Return((*btcec.PrivateKey)(nil), errPrivKeyMock).Once()
+	accountNumber := uint32(0)
+	mocks.store.On("GetAccountSecret", mock.Anything,
+		db.GetAccountSecretQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: accountNumber,
+		}).Return((*db.AccountSecret)(nil), errPrivKeyMock).Once()
 
 	params := &UnlockingScriptParams{
 		Tx:        tx,
@@ -1127,54 +1244,396 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	require.ErrorContains(t, err, "privkey error")
 }
 
-// TestResolvePrivKeyFallsBackAfterCacheMiss tests that derived private key
-// resolution falls back to DB-backed derivation when the account cache is cold.
-func TestResolvePrivKeyFallsBackAfterCacheMiss(t *testing.T) {
+// TestComputeUnlockingScriptImportedAddress verifies that
+// ComputeUnlockingScript signs for an imported address by resolving the private
+// key from its own encrypted secret in the store rather than an account
+// derivation.
+func TestComputeUnlockingScriptImportedAddress(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a started wallet and configure the signer key lookup path
-	// to miss the account cache before falling back to DB-backed derivation.
-	w, mocks := createStartedWalletWithMocks(t)
-	privKey, _ := deterministicPrivKey(t)
-	path := waddrmgr.DerivationPath{
-		InternalAccount: 0,
-		Account:         0,
-		Branch:          0,
-		Index:           1,
-	}
+	w, mocks := createUnlockedWalletWithMocks(t)
 
-	mocks.pubKeyAddr.On("Imported").Return(false).Once()
-	mocks.pubKeyAddr.On("DerivationInfo").Return(
-		waddrmgr.KeyScopeBIP0084, path, true,
-	).Once()
-	mocks.addrStore.On("FetchScopedKeyManager", waddrmgr.KeyScopeBIP0084).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPathCache", path).
-		Return(
-			(*btcec.PrivateKey)(nil),
-			waddrmgr.ManagerError{
-				ErrorCode:   waddrmgr.ErrAccountNotCached,
-				Description: "account not cached",
-			},
-		).Once()
-	mocks.accountManager.On("DeriveFromKeyPath", mock.Anything, path).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKey, nil).Once()
+	// The imported private key is stored per-address; the vault decrypts
+	// the stored ciphertext (identity here) to the raw 32-byte key.
+	privKey, pubKey := deterministicPrivKey(t)
+	encPriv := privKey.Serialize()
 
-	// Act: Resolve the private key for the managed pubkey address.
-	resolvedPrivKey, err := w.resolvePrivKey(mocks.pubKeyAddr)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()),
+		w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	// Assert: The fallback path returns the same private key bytes.
-	require.Equal(t, privKey.Serialize(), resolvedPrivKey.Serialize())
+	prevOut, tx := createDummyTestTx(pkScript)
+
+	// The store reports the address as imported (no derivation path), so
+	// the signer resolves the key through the per-address secret.
+	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     db.WitnessPubKey,
+		IsImported:   true,
+		PubKey:       pubKey.SerializeCompressed(),
+	})
+	mocks.store.On("GetAddressSecret", mock.Anything,
+		db.GetAddressSecretQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		}).Return(
+		&db.AddressSecret{EncryptedPrivKey: encPriv}, nil,
+	).Once()
+	mocks.vault.On("Decrypt", waddrmgr.CKTPrivate, encPriv).Return(
+		identityDecrypt, nil,
+	).Once()
+
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
+	params := &UnlockingScriptParams{
+		Tx:         tx,
+		InputIndex: 0,
+		Output:     prevOut,
+		SigHashes:  sigHashes,
+		HashType:   txscript.SigHashAll,
+	}
+
+	// Act.
+	script, err := w.ComputeUnlockingScript(t.Context(), params)
+	require.NoError(t, err)
+
+	// Assert: The witness spends the imported P2WKH output.
+	require.Nil(t, script.SigScript)
+	require.NotNil(t, script.Witness)
+	tx.TxIn[0].Witness = script.Witness
+
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		sigHashes, prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute(), "script execution failed")
+}
+
+// TestScriptForOutputScriptClasses verifies that ScriptForOutput resolves each
+// stored script class through the same lookup and returns the caller-visible
+// script: the redeem script verbatim for P2SH, the witness script verbatim for
+// P2WSH, and the decoded leaf script for an imported taproot Tapscript.
+func TestScriptForOutputScriptClasses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		addrType db.AddressType
+
+		// build returns the address to resolve, the blob the store
+		// persists as the encrypted script, and the script the wallet
+		// must hand back.
+		build func(*testing.T, *Wallet) (address.Address, []byte,
+			[]byte)
+	}{{
+		name:     "p2sh redeem script",
+		addrType: db.ScriptHash,
+		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
+			[]byte) {
+
+			t.Helper()
+
+			_, pubKey := deterministicPrivKey(t)
+
+			// A representative multisig redeem script; its exact
+			// contents are opaque to the wallet, which stores and
+			// returns it verbatim.
+			redeemScript, err := txscript.NewScriptBuilder().
+				AddOp(txscript.OP_1).
+				AddData(pubKey.SerializeCompressed()).
+				AddOp(txscript.OP_1).
+				AddOp(txscript.OP_CHECKMULTISIG).
+				Script()
+			require.NoError(t, err)
+
+			addr, err := address.NewAddressScriptHash(
+				redeemScript, w.cfg.ChainParams,
+			)
+			require.NoError(t, err)
+
+			return addr, redeemScript, redeemScript
+		},
+	}, {
+		name:     "p2wsh witness script",
+		addrType: db.WitnessScript,
+		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
+			[]byte) {
+
+			t.Helper()
+
+			_, pubKey := deterministicPrivKey(t)
+
+			witnessScript, err := txscript.NewScriptBuilder().
+				AddData(pubKey.SerializeCompressed()).
+				AddOp(txscript.OP_CHECKSIG).
+				Script()
+			require.NoError(t, err)
+
+			scriptHash := sha256.Sum256(witnessScript)
+			addr, err := address.NewAddressWitnessScriptHash(
+				scriptHash[:], w.cfg.ChainParams,
+			)
+			require.NoError(t, err)
+
+			return addr, witnessScript, witnessScript
+		},
+	}, {
+		name:     "taproot leaf script",
+		addrType: db.TaprootPubKey,
+		build: func(t *testing.T, w *Wallet) (address.Address, []byte,
+			[]byte) {
+
+			t.Helper()
+
+			_, internalKey := deterministicPrivKey(t)
+
+			// A single-leaf taproot script tree and the imported
+			// Tapscript committing to it, mirroring
+			// ImportTaprootScript's persisted shape.
+			leafScript, err := txscript.NewScriptBuilder().
+				AddData(schnorr.SerializePubKey(internalKey)).
+				AddOp(txscript.OP_CHECKSIG).
+				Script()
+			require.NoError(t, err)
+
+			leaf := txscript.NewBaseTapLeaf(leafScript)
+			tapscript := &waddrmgr.Tapscript{
+				Type:   waddrmgr.TapscriptTypeFullTree,
+				Leaves: []txscript.TapLeaf{leaf},
+				ControlBlock: &txscript.ControlBlock{
+					InternalKey: internalKey,
+				},
+			}
+
+			taprootKey, err := tapscript.TaprootKey()
+			require.NoError(t, err)
+
+			addr, err := address.NewAddressTaproot(
+				schnorr.SerializePubKey(taprootKey),
+				w.cfg.ChainParams,
+			)
+			require.NoError(t, err)
+
+			// The store persists the TLV-encoded Tapscript as the
+			// encrypted script; the identity vault returns it
+			// unchanged on decrypt, and ScriptForOutput decodes it
+			// back to the leaf script.
+			encoded, err := waddrmgr.EncodeTaprootScript(tapscript)
+			require.NoError(t, err)
+
+			return addr, encoded, leafScript
+		},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createUnlockedWalletWithMocks(t)
+			addr, stored, want := test.build(t, w)
+
+			script := assertScriptForOutput(
+				t, w, mocks, addr, test.addrType, stored,
+			)
+			require.Equal(t, want, script)
+		})
+	}
+}
+
+// TestScriptForOutputWatchOnlyTaprootSQL exercises the full watch-only taproot
+// round trip against a live SQLite store and the production store-backed key
+// vault: ImportTaprootScript seals the Tapscript, the SQLite store persists
+// that ciphertext, and ScriptForOutput reads it back. This is a read path
+// reachable without signing, and it runs through keyvault.NewWalletVault --
+// the vault every SQL wallet actually uses -- rather than the legacy manager
+// shim, which is what made an earlier version of this test pass against a
+// vault configuration production never runs.
+//
+// The round trip alone cannot pin the wallet-to-store pairing, because a
+// store-backed vault resolves both script key types onto its single
+// passphrase-derived script key: the seal and the open agree no matter which
+// secrecy the store reports. So the persisted secrecy is asserted directly,
+// which is what fails if the store's derivation is inverted.
+func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
+	t.Parallel()
+
+	// Imported addresses never derive, so a stub derivation is enough.
+	deriveAddress := func(context.Context,
+		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+		return nil, errDerivationFailed
+	}
+	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
+		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
+		DeriveAddress: deriveAddress,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	// Real watch-only wallet secrets, so the vault derives its script key
+	// from the passphrase exactly as production does.
+	passphrase := []byte("watch-only-passphrase")
+	secrets, err := keyvault.CreateWalletSecrets(passphrase, nil, true)
+	require.NoError(t, err)
+
+	walletInfo, err := store.CreateWallet(
+		t.Context(), db.CreateWalletParams{
+			Name:                "sql-watch-only-taproot",
+			ManagerVersion:      1,
+			MasterKeyPrivParams: secrets.MasterPrivParams,
+			EncryptedCryptoScriptKey: secrets.
+				EncryptedCryptoScriptKey,
+			IsWatchOnly: true,
+		},
+	)
+	require.NoError(t, err)
+
+	vault := keyvault.NewWalletVault(store, walletInfo.ID, true)
+	require.NoError(t, vault.Unlock(t.Context(), passphrase))
+	t.Cleanup(vault.Lock)
+
+	chain := &bwmock.Chain{}
+	w := &Wallet{
+		store:       store,
+		keyVault:    vault,
+		cache:       newStoreRuntimeCache(store),
+		state:       newWalletState(nil),
+		isWatchOnly: true,
+		cfg: Config{
+			Chain:       chain,
+			ChainParams: &chainParams,
+		},
+		id: walletInfo.ID,
+	}
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	tapscript := newTestTapscript(t)
+	leafScript := tapscript.Leaves[0].Script
+
+	// Import notifies the chain of the new watch-only address.
+	taprootKey, err := tapscript.TaprootKey()
+	require.NoError(t, err)
+	addr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(taprootKey), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+	chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
+
+	info, err := w.ImportTaprootScript(t.Context(), tapscript)
+	require.NoError(t, err)
+	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// A watch-only wallet still seals script bodies: its passphrase derives
+	// a script key even with no private key material. This is the assertion
+	// that pins that behaviour, because the round trip below would succeed
+	// just as well if the script were stored in the clear.
+	encodedScript, err := waddrmgr.EncodeTaprootScript(&tapscript)
+	require.NoError(t, err)
+
+	secret, err := store.GetAddressSecret(
+		t.Context(), db.GetAddressSecretQuery{
+			WalletID:     walletInfo.ID,
+			ScriptPubKey: pkScript,
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, secret.EncryptedScript)
+	require.NotEqual(t, encodedScript, secret.EncryptedScript,
+		"a watch-only wallet's script must not persist in plaintext")
+
+	// ScriptForOutput reads the imported script back through the same vault
+	// that sealed it, returning the revealed leaf script.
+	got, err := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: pkScript},
+	)
+	require.NoError(t, err)
+	require.Equal(t, leafScript, got.Script)
+
+	// A locked vault has no key to open the script with: the script key is
+	// zeroed on lock even on a watch-only wallet.
+	w.keyVault.Lock()
+
+	_, err = w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: pkScript},
+	)
+	require.ErrorIs(t, err, keyvault.ErrVaultLocked)
+
+	chain.AssertExpectations(t)
+}
+
+// assertScriptForOutput drives ScriptForOutput for a script-based output whose
+// encrypted script decrypts (via the identity vault) to encScript, and returns
+// the resolved OutputScriptInfo.Script. It programs the store address lookup as
+// a script address and the address-secret lookup as script-only.
+//
+// Every stored script body reads back through the vault's single script
+// operation, so there is no per-address crypto class for the test to select.
+func assertScriptForOutput(t *testing.T, w *Wallet, mocks *mockWalletDeps,
+	addr address.Address, addrType db.AddressType, encScript []byte) []byte {
+
+	t.Helper()
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// The store owns the address as an imported script address.
+	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     addrType,
+		IsImported:   true,
+		HasScript:    true,
+	})
+
+	// The address secret carries only the encrypted script.
+	mocks.store.On("GetAddressSecret", mock.Anything,
+		db.GetAddressSecretQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		}).Return(&db.AddressSecret{
+		EncryptedScript: encScript,
+	}, nil).Once()
+
+	mocks.vault.On("Decrypt", mock.Anything, encScript).Return(
+		identityDecrypt, nil,
+	).Once()
+
+	info, err := w.ScriptForOutput(
+		t.Context(), wire.TxOut{PkScript: pkScript},
+	)
+	require.NoError(t, err)
+
+	return info.Script
 }
 
 // TestComputeUnlockingScriptFail_Tweak tests failure when the tweaker fails.
 func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up keys, address, and transaction.
-	privKey, pubKey := deterministicPrivKey(t)
+	// Arrange: Set up the wallet and mocks. The key is resolved through the
+	// store account secret.
+	w, mocks := createUnlockedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0044
+	path := waddrmgr.DerivationPath{
+		InternalAccount: 0,
+		Account:         0,
+		Branch:          0,
+		Index:           0,
+	}
+	_, pubKey := expectStoreSignerPrivKey(t, mocks, w.id, scope, path)
+
 	addr, err := address.NewAddressPubKeyHash(
 		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
 	)
@@ -1189,24 +1648,8 @@ func TestComputeUnlockingScriptFail_Tweak(t *testing.T) {
 	)
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-	// Arrange: Set up the wallet and mocks.
-	w, mocks := createUnlockedWalletWithMocks(t)
-
-	// Mock address store and managed address.
-	expectSignerAddressInfo(
-		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey,
-	)
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
-
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-	expectDerivedSignerPrivKey(
-		t, mocks, waddrmgr.KeyScopeBIP0044, waddrmgr.DerivationPath{
-			InternalAccount: 0,
-			Account:         0,
-			Branch:          0,
-			Index:           0,
-		}, privKeyCopy,
+	expectSignerAddressInfoWithKeyScope(
+		t, w, mocks, addr, db.PubKeyHash, false, false, pubKey, scope,
 	)
 
 	// Define failing tweaker.
@@ -1386,10 +1829,20 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 	chain := &bwmock.Chain{}
 	vault := &keyvaultmock.Vault{}
 
+	// The signer decrypts account and address secrets through the vault.
+	// The SQL store persists the account xprv (and any imported priv key)
+	// as the stored ciphertext, so an identity decrypt returns exactly that
+	// material. Kept optional so pure address-derivation tests that never
+	// sign do not trip the expectation assertions.
+	vault.On("Decrypt", waddrmgr.CKTPrivate, mock.Anything).Return(
+		identityDecrypt, nil,
+	).Maybe()
+
 	w = &Wallet{
 		addrStore: addrStore,
 		store:     store,
 		keyVault:  vault,
+		cache:     newStoreRuntimeCache(store),
 		state:     newWalletState(nil),
 		cfg: Config{
 			DB:          legacyDB,
@@ -1493,7 +1946,12 @@ func testAccountDerivationFunc() db.AccountDerivationFunc {
 			MasterKeyFingerprint: 1,
 		}
 		if !walletIsWatchOnly {
-			data.EncryptedPrivateKey = []byte{3}
+			// Store the account xprv string as the "encrypted"
+			// private material. The signing wallet's vault mock
+			// decrypts as an identity cipher, so the signer
+			// recovers this exact xprv and derives child keys that
+			// match the account public key above.
+			data.EncryptedPrivateKey = []byte(accountKey.String())
 		}
 
 		return data, nil
@@ -1505,11 +1963,16 @@ func testAccountDerivationFunc() db.AccountDerivationFunc {
 func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	// Arrange: Set up the wallet and mocks. The signing key is resolved
+	// through the store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a P2PKH address from the public key.
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	_, pubKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
+
+	// Create a P2PKH address from the derived leaf public key.
 	pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
 	addr, err := address.NewAddressPubKeyHash(
 		pubKeyHash, w.cfg.ChainParams,
@@ -1521,19 +1984,6 @@ func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	require.NoError(t, err)
 
 	prevOut, tx := createDummyTestTx(pkScript)
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Create the raw signature parameters.
 	fetcher := txscript.NewCannedPrevOutputFetcher(
@@ -1573,20 +2023,19 @@ func TestComputeRawSigLegacyP2PKH(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "signature verification failed")
-
-	// Finally, assert that the private key is zeroed out.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeRawSigLegacyP2SH tests the signing of a legacy P2SH input.
 func TestComputeRawSigLegacyP2SH(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet with mocks and a deterministic private
-	// key for testing.
+	// Arrange: Set up the wallet with mocks. The signing key is resolved
+	// through the store account secret. P2SH addresses use BIP0049 scope.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0049Plus}
+	_, pubKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
 
 	// Create a P2SH redeem script. This involves pushing the public key
 	// and the CHECKSIG opcode.
@@ -1610,16 +2059,6 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 
 	// Create a dummy transaction and a previous output to spend.
 	prevOut, tx := createDummyTestTx(pkScript)
-
-	// Configure the address manager mock to return the correct key manager
-	// and address information. P2SH addresses use BIP0049 derivation scope.
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0049Plus}
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On("DeriveFromKeyPath",
-		mock.Anything, mock.Anything).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Prepare the inputs for the signing operation.
 	fetcher := txscript.NewCannedPrevOutputFetcher(
@@ -1652,11 +2091,16 @@ func TestComputeRawSigLegacyP2SH(t *testing.T) {
 func TestComputeRawSigSegwitV0(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	// Arrange: Set up the wallet and mocks. The signing key is resolved
+	// through the store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
 
-	// Create a P2WKH address from the public key.
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	_, pubKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
+
+	// Create a P2WKH address from the derived leaf public key.
 	pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		pubKeyHash, w.cfg.ChainParams,
@@ -1668,19 +2112,6 @@ func TestComputeRawSigSegwitV0(t *testing.T) {
 	require.NoError(t, err)
 
 	prevOut, tx := createDummyTestTx(pkScript)
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Create the raw signature parameters.
 	fetcher := txscript.NewCannedPrevOutputFetcher(
@@ -1722,9 +2153,6 @@ func TestComputeRawSigSegwitV0(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "signature verification failed")
-
-	// Finally, assert that the private key is zeroed out.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeRawSigTaprootKeySpendPath tests the successful signing of a
@@ -1732,11 +2160,16 @@ func TestComputeRawSigSegwitV0(t *testing.T) {
 func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	// Arrange: Set up the wallet and mocks. The signing key is resolved
+	// through the store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, internalKey := deterministicPrivKey(t)
 
-	// Create a P2TR address from the public key.
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
+	_, internalKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
+
+	// Create a P2TR address from the derived leaf public key.
 	addr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(
 			txscript.ComputeTaprootOutputKey(internalKey, nil),
@@ -1749,19 +2182,6 @@ func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 	require.NoError(t, err)
 
 	prevOut, tx := createDummyTestTx(pkScript)
-
-	// Configure the full mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the ECDH method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Create the raw signature parameters.
 	fetcher := txscript.NewMultiPrevOutFetcher(
@@ -1797,9 +2217,6 @@ func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "signature verification failed")
-
-	// Finally, assert that the private key is zeroed out.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeRawSigTaprootScriptPath tests the successful signing of a Taproot
@@ -1807,11 +2224,16 @@ func TestComputeRawSigTaprootKeySpendPath(t *testing.T) {
 func TestComputeRawSigTaprootScriptPath(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	// Arrange: Set up the wallet and mocks. The signing key is resolved
+	// through the store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, internalKey := deterministicPrivKey(t)
 
-	// Create a script to spend.
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
+	_, internalKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
+
+	// Create a script to spend, committing to the derived leaf key.
 	script, err := txscript.NewScriptBuilder().
 		AddData(schnorr.SerializePubKey(internalKey)).
 		AddOp(txscript.OP_CHECKSIG).
@@ -1834,17 +2256,6 @@ func TestComputeRawSigTaprootScriptPath(t *testing.T) {
 	require.NoError(t, err)
 
 	prevOut, tx := createDummyTestTx(pkScript)
-
-	// Configure the full mock chain to return the test private key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
 
 	// Create the raw signature parameters.
 	fetcher := txscript.NewMultiPrevOutFetcher(
@@ -1890,16 +2301,11 @@ func TestComputeRawSigTaprootScriptPath(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute(), "signature verification failed")
-
-	// Finally, assert that the private key is zeroed out.
-	require.Equal(t, byte(0), privKeyCopy.Serialize()[0])
 }
 
 // TestComputeRawSigFail tests various failure modes of ComputeRawSig.
 func TestComputeRawSigFail(t *testing.T) {
 	t.Parallel()
-
-	privKey, _ := deterministicPrivKey(t)
 
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 	prevOut := &wire.TxOut{PkScript: []byte{0x00}}
@@ -1910,14 +2316,30 @@ func TestComputeRawSigFail(t *testing.T) {
 	)
 	sigHashes := txscript.NewTxSigHashes(tx, fetcher)
 
-	// This subtest ensures that if fetching the key manager fails during
-	// the raw signature computation, the error is correctly propagated.
+	// storeSecretQuery builds the account-secret query the signer issues
+	// for the default account under the given scope.
+	storeSecretQuery := func(w *Wallet,
+		scope waddrmgr.KeyScope) db.GetAccountSecretQuery {
+
+		accountNumber := uint32(0)
+
+		return db.GetAccountSecretQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(scope),
+			AccountNumber: accountNumber,
+		}
+	}
+
+	// This subtest ensures that if the store account-secret lookup fails
+	// during the raw signature computation, the error is correctly
+	// propagated.
 	t.Run("Fetch Address Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return((*bwmock.AccountStore)(nil),
-				errManagerNotFound).Once()
+		mocks.store.On("GetAccountSecret", mock.Anything,
+			storeSecretQuery(w, path.KeyScope)).Return(
+			(*db.AccountSecret)(nil), errManagerNotFound,
+		).Once()
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -1932,21 +2354,15 @@ func TestComputeRawSigFail(t *testing.T) {
 		require.ErrorIs(t, err, errManagerNotFound)
 	})
 
-	// This subtest ensures that if obtaining the private key from the
-	// managed address fails during raw signature computation, the error is
-	// correctly propagated.
+	// This subtest ensures that a watch-only signing account yields the
+	// watch-only error during raw signature computation.
 	t.Run("PrivKey Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		mocks.pubKeyAddr.On("PrivKey").Return((*btcec.PrivateKey)(nil),
-			errPrivKeyMock).Once()
+		mocks.store.On("GetAccountSecret", mock.Anything,
+			storeSecretQuery(w, path.KeyScope)).Return(
+			&db.AccountSecret{}, nil,
+		).Once()
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -1958,7 +2374,7 @@ func TestComputeRawSigFail(t *testing.T) {
 		}
 
 		_, err := w.ComputeRawSig(t.Context(), params)
-		require.ErrorContains(t, err, "privkey error")
+		require.ErrorIs(t, err, ErrWatchOnlyAccount)
 	})
 
 	// This subtest verifies that if the private key tweaking function
@@ -1967,15 +2383,9 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Tweak Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		expectStoreSignerPrivKey(
+			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2001,15 +2411,9 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		leafPriv, _ := expectStoreSignerPrivKey(
+			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2022,9 +2426,12 @@ func TestComputeRawSigFail(t *testing.T) {
 		mockDetails := &mockSpendDetails{}
 		params.Details = mockDetails
 
-		mockDetails.On("Sign", params, privKeyCopy).
-			Return((RawSignature)(nil),
-				errSignMock)
+		// The signer derives its own leaf key; match on the value it
+		// resolves rather than object identity.
+		mockDetails.On("Sign", params, mock.MatchedBy(
+			func(pk *btcec.PrivateKey) bool {
+				return pk.Key.Equals(&leafPriv.Key)
+			})).Return((RawSignature)(nil), errSignMock)
 		_, err := w.ComputeRawSig(t.Context(), params)
 		require.ErrorContains(t, err, "sign error")
 		mockDetails.AssertExpectations(t)
@@ -2037,20 +2444,14 @@ func TestComputeRawSigFail(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
 
-		path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0086}
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		scope := waddrmgr.KeyScopeBIP0086
+		expectStoreSignerPrivKey(
+			t, mocks, w.id, scope, waddrmgr.DerivationPath{},
+		)
 
 		params := &RawSigParams{
 			Tx:   wire.NewMsgTx(2),
-			Path: path,
+			Path: BIP32Path{KeyScope: scope},
 			Details: TaprootSpendDetails{
 				SpendPath: TaprootSpendPath(99), // Invalid path
 			},
@@ -2066,14 +2467,9 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Segwit Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		expectStoreSignerPrivKey(
+			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2096,14 +2492,9 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Taproot KeyPath Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		expectStoreSignerPrivKey(
+			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2124,14 +2515,9 @@ func TestComputeRawSigFail(t *testing.T) {
 	t.Run("Taproot ScriptPath Sign Fail", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createUnlockedWalletWithMocks(t)
-		mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-			Return(mocks.accountManager, nil).Once()
-		mocks.accountManager.On("DeriveFromKeyPath",
-			mock.Anything, mock.Anything).
-			Return(mocks.pubKeyAddr, nil).Once()
-
-		privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-		mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+		expectStoreSignerPrivKey(
+			t, mocks, w.id, path.KeyScope, path.DerivationPath,
+		)
 
 		params := &RawSigParams{
 			Tx:        tx,
@@ -2154,11 +2540,9 @@ func TestComputeRawSigFail(t *testing.T) {
 func TestDerivePrivKeySuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet with mocks, a test key, and a
-	// derivation path.
+	// Arrange: Set up the wallet with mocks and a derivation path. The key
+	// is resolved through the store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, err := btcec.NewPrivateKey()
-	require.NoError(t, err)
 
 	path := BIP32Path{
 		KeyScope: waddrmgr.KeyScopeBIP0084,
@@ -2168,37 +2552,35 @@ func TestDerivePrivKeySuccess(t *testing.T) {
 			Index:           0,
 		},
 	}
-
-	// Set up the mock account manager and the mock address that will be
-	// returned by the derivation call.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, path.DerivationPath,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	leafPriv, _ := expectStoreSignerPrivKey(
+		t, mocks, w.id, path.KeyScope, path.DerivationPath,
+	)
 
 	// Act: Derive the private key.
 	derivedKey, err := w.DerivePrivKey(t.Context(), path)
 
 	// Assert: Check that the correct key is returned without error.
 	require.NoError(t, err)
-	require.Equal(t, privKey.Serialize(), derivedKey.Serialize())
+	require.Equal(t, leafPriv.Serialize(), derivedKey.Serialize())
 }
 
-// TestDerivePrivKeyFails tests the failure case where the key derivation fails.
+// TestDerivePrivKeyFails tests the failure case where the store account-secret
+// lookup fails.
 func TestDerivePrivKeyFails(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and a test path. Configure the mock
-	// addrStore to return an error when fetching the key manager.
+	// Arrange: Set up the wallet and a test path. Configure the store to
+	// fail the account-secret lookup.
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
+	accountNumber := path.DerivationPath.InternalAccount
+	mocks.store.On("GetAccountSecret", mock.Anything,
+		db.GetAccountSecretQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(path.KeyScope),
+			AccountNumber: accountNumber,
+		}).Return((*db.AccountSecret)(nil), errManagerNotFound).Once()
 
 	// Act: Attempt to derive the private key.
 	_, err := w.DerivePrivKey(t.Context(), path)
@@ -2208,53 +2590,43 @@ func TestDerivePrivKeyFails(t *testing.T) {
 }
 
 // TestGetPrivKeyForAddressSuccess tests the successful retrieval of a private
-// key by address via the legacy fallback when the address is not in the
-// store (kvdb-backed wallet path).
+// key for a derived address through the store account secret.
 func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet, mocks, and a deterministic private key.
+	// Arrange: Set up the wallet and mocks. The key is resolved through the
+	// store account secret.
 	w, mocks := createUnlockedWalletWithMocks(t)
-	privKey, pubKey := deterministicPrivKey(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	path := waddrmgr.DerivationPath{}
+	leafPriv, pubKey := expectStoreSignerPrivKey(
+		t, mocks, w.id, scope, path,
+	)
 
-	// Create a P2PKH address from the public key.
-	pubKeyHash := address.Hash160(pubKey.SerializeCompressed())
-	addr, err := address.NewAddressPubKeyHash(
-		pubKeyHash, w.cfg.ChainParams,
+	// Create a P2WKH address from the derived leaf public key.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()),
+		w.cfg.ChainParams,
 	)
 	require.NoError(t, err)
 
-	pkScript, err := txscript.PayToAddrScript(addr)
-	require.NoError(t, err)
-
-	// The store returns ErrAddressNotFound so GetPrivKeyForAddress falls
-	// through to the legacy PrivKeyForAddress path. This matches the
-	// kvdb-backed wallet shape.
-	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
-		WalletID:     w.id,
-		ScriptPubKey: pkScript,
-	}).Return((*db.AddressInfo)(nil), db.ErrAddressNotFound).Once()
-
-	// Configure the mock chain to return the test private key.
-	//
-	// NOTE: We must use a copy since the method will zero out the key.
-	privKeyCopy, _ := btcec.PrivKeyFromBytes(privKey.Serialize())
-
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").Return(privKeyCopy, nil).Once()
+	// The store owns the address with a usable derivation scope, so the
+	// signer resolves the key through the account secret.
+	expectSignerAddressInfoWithKeyScope(
+		t, w, mocks, addr, db.WitnessPubKey, false, false, pubKey,
+		scope,
+	)
 
 	// Act: Get the private key for the address.
 	retrievedKey, err := w.GetPrivKeyForAddress(t.Context(), addr)
 
 	// Assert: Check that the correct key is returned.
 	require.NoError(t, err)
-	require.Equal(t, privKey.Serialize(), retrievedKey.Serialize())
+	require.Equal(t, leafPriv.Serialize(), retrievedKey.Serialize())
 }
 
 // TestGetPrivKeyForAddressFail tests the failure cases for retrieval of a
-// private key by address. Each case exercises the legacy fallback after the
-// store reports ErrAddressNotFound.
+// private key by address through the store.
 func TestGetPrivKeyForAddressFail(t *testing.T) {
 	t.Parallel()
 
@@ -2268,101 +2640,130 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	// The store does not know the address in either case, so
-	// GetPrivKeyForAddress falls through to PrivKeyForAddress.
-	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+	query := db.GetAddressQuery{
 		WalletID:     w.id,
 		ScriptPubKey: pkScript,
-	}).Return((*db.AddressInfo)(nil), db.ErrAddressNotFound).Twice()
+	}
 
-	// Case 1: Address lookup fails.
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return((*bwmock.ManagedAddress)(nil), errManagerNotFound).Once()
+	// Case 1: An unexpected store error surfaces, not masked.
+	mocks.store.On("GetAddress", mock.Anything, query).Return(
+		(*db.AddressInfo)(nil), errManagerNotFound,
+	).Once()
 
 	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
 	require.ErrorIs(t, err, errManagerNotFound)
 
-	// Case 2: Address is not a pubkey address.
-	// We need a separate mock for this to ensure clean separation.
-	//
-	// NOTE: We can reuse the existing mocks but need to reset expectations
-	// or ensure ordering. Since we are in a single test function, we can
-	// just sequence them.
-	mockScriptAddr := &bwmock.ManagedAddress{}
-	mocks.addrStore.On("Address", mock.Anything, addr).
-		Return(mockScriptAddr, nil).Once()
+	// Case 2: The address is not owned by the wallet, so it has no
+	// associated private key.
+	mocks.store.On("GetAddress", mock.Anything, query).Return(
+		(*db.AddressInfo)(nil), db.ErrAddressNotFound,
+	).Once()
 
 	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
 	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
 }
 
-// TestDerivePrivKeyFail tests failure modes of DerivePrivKey.
+// TestGetPrivKeyForAddressImportedNoPrivKey verifies that requesting the
+// private key for a watch-only imported address (no stored private material)
+// returns ErrNoAssocPrivateKey.
+func TestGetPrivKeyForAddressImportedNoPrivKey(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createUnlockedWalletWithMocks(t)
+	_, pubKey := deterministicPrivKey(t)
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()),
+		w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// The address is owned but imported (no derivation path).
+	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
+		ScriptPubKey: pkScript,
+		AddrType:     db.WitnessPubKey,
+		IsImported:   true,
+		PubKey:       pubKey.SerializeCompressed(),
+	})
+
+	// The imported address carries no private-key material.
+	mocks.store.On("GetAddressSecret", mock.Anything,
+		db.GetAddressSecretQuery{
+			WalletID:     w.id,
+			ScriptPubKey: pkScript,
+		}).Return((*db.AddressSecret)(nil), db.ErrSecretNotFound).Once()
+
+	// Act + Assert.
+	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
+	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
+}
+
+// TestDerivePrivKeyFail tests failure modes of DerivePrivKey through the
+// store-routed key path.
 func TestDerivePrivKeyFail(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
 
-	// Test Case 1: Fetching key manager fails.
-	//
-	// We mock the address store to return an error when fetching the key
-	// manager. We expect this error to be propagated.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
+	accountNumber := path.DerivationPath.InternalAccount
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: accountNumber,
+	}
+
+	// Test Case 1: The account-secret lookup fails with an unexpected
+	// error, which is propagated.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		(*db.AccountSecret)(nil), errPrivKeyMock,
+	).Once()
 
 	_, err := w.DerivePrivKey(t.Context(), path)
-	require.ErrorIs(t, err, errManagerNotFound)
+	require.ErrorIs(t, err, errPrivKeyMock)
 
-	// Test Case 2: PrivKey retrieval fails.
-	//
-	// We mock the key manager to return a valid address, but mock the
-	// address to return an error when fetching the private key. We expect
-	// a wrapped error indicating the failure.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").
-		Return((*btcec.PrivateKey)(nil), errPrivKeyMock).Once()
+	// Test Case 2: The signing account is watch-only.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		&db.AccountSecret{}, nil,
+	).Once()
 
 	_, err = w.DerivePrivKey(t.Context(), path)
-	require.ErrorContains(t, err, "cannot get private key")
+	require.ErrorIs(t, err, ErrWatchOnlyAccount)
 }
 
-// TestECDHFail tests failure modes of ECDH.
+// TestECDHFail tests failure modes of ECDH through the store-routed key path.
 func TestECDHFail(t *testing.T) {
 	t.Parallel()
 
 	w, mocks := createUnlockedWalletWithMocks(t)
 	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
-	privKey, _ := btcec.NewPrivateKey()
+	remoteKey, _ := btcec.NewPrivateKey()
 
-	// Test Case 1: Fetching key manager fails.
-	//
-	// We mock the address store to return an error when fetching the key
-	// manager. We expect this error to be propagated.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return((*bwmock.AccountStore)(nil), errManagerNotFound).Once()
+	accountNumber := path.DerivationPath.InternalAccount
+	query := db.GetAccountSecretQuery{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(path.KeyScope),
+		AccountNumber: accountNumber,
+	}
 
-	_, err := w.ECDH(t.Context(), path, privKey.PubKey())
-	require.ErrorIs(t, err, errManagerNotFound)
+	// Test Case 1: The account-secret lookup fails with an unexpected
+	// error, which is propagated.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		(*db.AccountSecret)(nil), errPrivKeyMock,
+	).Once()
 
-	// Test Case 2: PrivKey retrieval fails.
-	//
-	// We mock the key manager to return a valid address, but mock the
-	// address to return an error when fetching the private key. We expect
-	// a wrapped error indicating the failure.
-	mocks.addrStore.On("FetchScopedKeyManager", path.KeyScope).
-		Return(mocks.accountManager, nil).Once()
-	mocks.accountManager.On(
-		"DeriveFromKeyPath", mock.Anything, mock.Anything,
-	).Return(mocks.pubKeyAddr, nil).Once()
-	mocks.pubKeyAddr.On("PrivKey").
-		Return((*btcec.PrivateKey)(nil), errPrivKeyMock).Once()
+	_, err := w.ECDH(t.Context(), path, remoteKey.PubKey())
+	require.ErrorIs(t, err, errPrivKeyMock)
 
-	_, err = w.ECDH(t.Context(), path, privKey.PubKey())
-	require.ErrorContains(t, err, "cannot get private key")
+	// Test Case 2: The signing account is watch-only.
+	mocks.store.On("GetAccountSecret", mock.Anything, query).Return(
+		&db.AccountSecret{}, nil,
+	).Once()
+
+	_, err = w.ECDH(t.Context(), path, remoteKey.PubKey())
+	require.ErrorIs(t, err, ErrWatchOnlyAccount)
 }
 
 // TestSignDigestLocked tests that SignDigest fails when the wallet is locked.

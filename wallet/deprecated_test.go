@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -2324,4 +2326,120 @@ func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	if err != nil {
 		t.Fatalf("error validating tx: %v", err)
 	}
+}
+
+// TestOpenWithRetryRoutedSigning verifies that a wallet opened through the
+// deprecated OpenWithRetry constructor can resolve signing material for an
+// imported WIF through the routed public API.
+//
+// It pins both pieces of constructor wiring routed signing needs:
+//
+//   - the legacy vault. kvdb has no GetWalletSecrets, so wiring the canonical
+//     WalletVault here compiles but leaves every routed signing call broken.
+//   - the runtime cache. GetPrivKeyForAddress resolves the address secret
+//     through w.cache, so dropping the constructor's cache initialization
+//     nil-panics this test rather than passing silently.
+//
+// The imported key is presented as P2PK, which is the shape that regressed:
+// ScopedKeyManager.Address normalizes P2PK to P2PKH before reading the row but
+// AddrAccount does not, so a secret lookup handed the caller's original
+// address missed every wallet-owned P2PK address.
+func TestOpenWithRetryRoutedSigning(t *testing.T) {
+	t.Parallel()
+
+	var (
+		pubPass  = []byte("public")
+		privPass = []byte("private")
+	)
+
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+
+	dbConn, err := walletdb.Create(
+		"bdb", dbPath, true, time.Minute, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbConn.Close() })
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	err = CreateDeprecated(
+		dbConn, pubPass, privPass, rootKey, &chainParams, time.Now(),
+	)
+	require.NoError(t, err)
+
+	// Act: reopen through the deprecated constructor.
+	w, err := OpenWithRetry(
+		dbConn, pubPass, nil, &chainParams, 0,
+		defaultSyncRetryInterval,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, w.keyVault)
+	require.NotNil(t, w.cache)
+
+	// The vault unlocks with the private passphrase, which is what routed
+	// signing needs. A vault backed by GetWalletSecrets fails here instead.
+	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
+	require.False(t, w.keyVault.IsLocked())
+
+	// This constructor cannot Start: it has no chain to verify a birthday
+	// against. Claim the signing-capable state directly so the routed public
+	// call below is reachable.
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+	w.state.toUnlocked()
+
+	// A wallet that has synced has a birthday block; CreateDeprecated leaves
+	// it unset, and the import path reads it to decide whether to move the
+	// birthday back.
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		return w.addrStore.SetBirthdayBlock(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey),
+			waddrmgr.BlockStamp{
+				Hash:   *chainParams.GenesisHash,
+				Height: 0,
+			}, true,
+		)
+	})
+	require.NoError(t, err)
+
+	// The retained import path notifies the chain about the new address.
+	chainClient := &bwmock.Chain{}
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	w.chainClient = chainClient
+
+	// Import a WIF through the retained deprecated path.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wif, err := btcutil.NewWIF(privKey, &chainParams, true)
+	require.NoError(t, err)
+
+	_, err = w.ImportPrivateKey(
+		waddrmgr.KeyScopeBIP0044, wif, nil, false,
+	)
+	require.NoError(t, err)
+
+	// Assert: the imported key resolves through the routed public API when
+	// presented as P2PK, the shape whose account lookup regressed.
+	p2pk, err := address.NewAddressPubKey(
+		privKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	got, err := w.GetPrivKeyForAddress(t.Context(), p2pk)
+	require.NoError(t, err)
+	require.Equal(t, privKey.Serialize(), got.Serialize())
+
+	// The same key resolves through its P2PKH form, proving the two spellings
+	// reach one row rather than the normalization masking a miss.
+	gotHash, err := w.GetPrivKeyForAddress(
+		t.Context(), p2pk.AddressPubKeyHash(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, privKey.Serialize(), gotHash.Serialize())
+
+	chainClient.AssertExpectations(t)
 }
