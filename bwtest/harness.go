@@ -11,7 +11,6 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/chain"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,8 +39,9 @@ type HarnessTest struct {
 	// passed to wallets under test.
 	ChainClient chain.Interface
 
-	// WalletDB is a wallet database instance created for the current subtest.
-	WalletDB walletdb.DB
+	// WalletDBPath is the wallet database path created for the current
+	// subtest.
+	WalletDBPath string
 
 	// dbType is the configured wallet database backend.
 	dbType string
@@ -167,6 +167,34 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 	})
 
 	return st
+}
+
+// NewWalletManager builds a Manager for the backend the harness was started
+// with and registers it for teardown.
+//
+// The Manager is registered before any wallet is created, so a failed Create
+// still releases the database it opened. Cleanup stops every wallet first and
+// then closes every Manager.
+func (h *HarnessTest) NewWalletManager() *wallet.Manager {
+	h.Helper()
+
+	// Fixed kvdb until #1292 introduces backend selection: this PR only
+	// moves database ownership to the Manager.
+	//nolint:staticcheck // This boundary intentionally exercises legacy kvdb.
+	backend := wallet.DBBackendKVDB
+
+	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
+		Backend:     backend,
+		DataSource:  h.WalletDBPath,
+		ChainParams: h.NetParams(),
+	})
+	require.NoError(h, err, "failed to create wallet manager")
+
+	// Temporary: close this Manager directly. #1292 replaces this with the
+	// registry-ordered teardown that stops wallets first.
+	h.Cleanup(func() { _ = manager.Close() })
+
+	return manager
 }
 
 // RegisterWallet registers a wallet with the harness.
@@ -296,17 +324,11 @@ func (h *HarnessTest) setUpChainClient() {
 	h.ChainClient = chainClient
 }
 
-// setUpWalletDB opens a wallet database for the configured test backend.
+// setUpWalletDB prepares a wallet database path for the configured test
+// backend.
 func (h *HarnessTest) setUpWalletDB() {
 	h.Helper()
 
 	dbDir := h.TempDir()
-	db, cleanup, err := OpenWalletDB(h.dbType, dbDir)
-	require.NoError(h, err, "unable to create wallet db")
-
-	h.Cleanup(func() {
-		require.NoError(h, cleanup(), "failed to close database")
-	})
-
-	h.WalletDB = db
+	h.WalletDBPath = filepath.Join(dbDir, wallet.WalletDBName)
 }

@@ -39,8 +39,8 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 	name := "itest-" + strings.ReplaceAll(h.Name(), "/", "_")
 
 	cfg := wallet.Config{
-		// Use the subtest-scoped DB and chain client prepared by the harness.
-		DB:    h.WalletDB,
+		// The chain client is prepared by the harness; the database is
+		// owned by the Manager built below.
 		Chain: h.ChainClient,
 
 		// Keep network and startup behavior deterministic across tests.
@@ -64,21 +64,26 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 		Birthday: time.Now().Add(-1 * time.Hour),
 	}
 
-	manager := wallet.NewManager()
+	manager := h.NewWalletManager()
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
 
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
+	// Register so harness-level assertions (MineBlocks and friends) can see
+	// this wallet.
+	h.RegisterWallet(w)
 
+	// Temporary, until #1292 owns teardown through the registries: stop this
+	// wallet directly. The callback is registered after NewWalletManager's
+	// Close, and testing.Cleanup runs LIFO, so the wallet stops before the
+	// Manager closes the database underneath it.
 	h.Cleanup(func() {
-		// We use a background context here because the test context might be
-		// canceled by the time cleanup runs.
+		// A background context: the test context may already be done by
+		// the time cleanup runs.
 		_ = w.Stop(context.Background())
 	})
 
-	// Register the wallet so harness helpers can assert global invariants.
-	h.RegisterWallet(w)
+	err = w.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet")
 
 	return w
 }
@@ -119,8 +124,8 @@ func (h *HarnessTest) CreateFundedWallet() *wallet.Wallet {
 	return w
 }
 
+// init uses fast scrypt options for tests to avoid CPU exhaustion and timeouts,
+// especially when running with -race.
 func init() {
-	// Use fast scrypt options for tests to avoid CPU exhaustion and
-	// timeouts, especially when running with -race.
 	waddrmgr.DefaultScryptOptions = waddrmgr.FastScryptOptions
 }

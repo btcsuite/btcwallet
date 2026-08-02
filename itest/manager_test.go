@@ -15,9 +15,9 @@ import (
 func testCreateWallet(h *bwtest.HarnessTest) {
 	h.Helper()
 
-	// Create a wallet using the Manager API.
+	// Create a wallet using the Manager API. The Manager owns the database
+	// selected by the -db flag; the wallet config carries no backend.
 	cfg := wallet.Config{
-		DB:                      h.WalletDB,
 		Chain:                   h.ChainClient,
 		ChainParams:             h.NetParams(),
 		RecoveryWindow:          20,
@@ -26,7 +26,7 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 		PubPassphrase:           []byte("public"),
 	}
 
-	manager := wallet.NewManager()
+	manager := h.NewWalletManager()
 	params := wallet.CreateWalletParams{
 		Mode:              wallet.ModeGenSeed,
 		PubPassphrase:     []byte("public"),
@@ -37,18 +37,18 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
 
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
+	// Register so harness-level assertions can see this wallet.
+	h.RegisterWallet(w)
+
+	// Temporary, until #1292 owns teardown through the registries: stop this
+	// wallet directly. Registered after the Manager's Close and run first,
+	// since testing.Cleanup is LIFO.
 	h.Cleanup(func() {
-		// We use a background context here because h.Context() might be
-		// cancelled already.
-		require.NoError(
-			h, w.Stop(context.Background()), "failed to stop wallet",
-		)
+		_ = w.Stop(context.Background())
 	})
 
-	// Register the wallet so harness helpers can assert global invariants.
-	h.RegisterWallet(w)
+	err = w.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet")
 
 	// Mine a few blocks and require the wallet catches up.
 	h.MineBlocks(5)

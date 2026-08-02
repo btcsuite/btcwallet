@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,9 +20,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testWalletName is the wallet name shared by Store-backed wallet tests.
+const testWalletName = "test-wallet"
+
 var (
 	errDBMock         = errors.New("db error")
-	errMock           = errors.New("mock error")
 	errChainMock      = errors.New("chain error")
 	errPutMock        = errors.New("put error")
 	errDBFail         = errors.New("db fail")
@@ -31,20 +34,13 @@ var (
 	errCFilterFail    = errors.New("cfilter fail")
 	errActiveMgrsFail = errors.New("active managers fail")
 
-	errSetFail   = errors.New("set fail")
 	errOther     = errors.New("other error")
 	errBroadcast = errors.New("broadcast fail")
 	errScan      = errors.New("scan fail")
 	errBlocks    = errors.New("blocks fail")
-	errDBInsert  = errors.New("db insert fail")
 	errBestBlock = errors.New("best block fail")
-	errAddr      = errors.New("addr fail")
-	errInsert    = errors.New("insert fail")
-	errManager   = errors.New("manager fail")
-	errUtxo      = errors.New("utxo fail")
 	errGetBlocks = errors.New("get blocks fail")
 	errBlockHash = errors.New("block hash fail")
-	errSetSync   = errors.New("set sync fail")
 	errRemote    = errors.New("remote fail")
 	errNotify    = errors.New("notify fail")
 	errHashes    = errors.New("hashes fail")
@@ -91,6 +87,81 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 	require.NoError(t, err)
 
 	return db, cleanup
+}
+
+// testKVDBPath returns an unused test walletdb path. The file lives under
+// tb.TempDir, which the test framework removes, so no cleanup is returned.
+func testKVDBPath(tb testing.TB) string {
+	tb.Helper()
+
+	return filepath.Join(tb.TempDir(), "wallet.db")
+}
+
+// testKVDBManager opens a Manager over a fresh temp-file kvdb database. It
+// names the kvdb backend explicitly because ManagerConfig.Backend is required
+// and has no default, and because these tests assert kvdb runtime behavior.
+func testKVDBManager(tb testing.TB) *Manager {
+	tb.Helper()
+
+	return testKVDBManagerAt(tb, testKVDBPath(tb))
+}
+
+// testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
+// path, for tests that exercise the SQL path end to end rather than against a
+// mock store.
+func testSQLiteManager(tb testing.TB) *Manager {
+	tb.Helper()
+
+	m, err := NewManager(context.Background(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  filepath.Join(tb.TempDir(), "runtime.sqlite"),
+		ChainParams: &chainParams,
+	})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = m.Close() })
+
+	return m
+}
+
+// testSQLManager builds a Manager whose SQL store is the supplied one, so a
+// test can drive the SQL path against a mock without a package-level injection
+// point. The Manager does not own the store, so Close releases nothing.
+func testSQLManager(tb testing.TB, store db.Store) *Manager {
+	tb.Helper()
+
+	return &Manager{
+		wallets: make(map[string]*Wallet),
+		backend: &sqliteManagerBackend{
+			store: store,
+		},
+		chainParams: &chainParams,
+	}
+}
+
+// startLoadedWalletForTest marks a loaded wallet as started without launching
+// chain sync goroutines.
+func startLoadedWalletForTest(t *testing.T, w *Wallet) {
+	t.Helper()
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+}
+
+// testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
+// simulate a restart by closing one Manager and opening another over the same
+// database.
+func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
+	tb.Helper()
+
+	m, err := NewManager(context.Background(), ManagerConfig{
+		Backend:     DBBackendKVDB,
+		DataSource:  dbPath,
+		ChainParams: &chainParams,
+	})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = m.Close() })
+
+	return m
 }
 
 // mockWalletDeps holds the mocked dependencies for the Wallet.
