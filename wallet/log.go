@@ -4,6 +4,7 @@
 
 package wallet
 
+//nolint:staticcheck // Required by the temporary kvdb compatibility path.
 import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/build"
