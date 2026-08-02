@@ -330,9 +330,14 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 	return info, nil
 }
 
-// deriveAddressData derives one SQL-store address from account public material.
-func (w *Wallet) deriveAddressData(_ context.Context,
-	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+// deriveStoreAddress derives one address, its pkScript, and the leaf compressed
+// public key from account public material, using only in-memory HD math and the
+// account's address schema — no walletdb and no walletdb-backed
+// waddrmgr.Manager. It is the single encoder shared by SQL address generation
+// (deriveAddressData) and SQL recovery lookahead, so both produce identical
+// addresses for a given (account, branch, index).
+func deriveStoreAddress(params db.AddressDerivationParams,
+	chainParams *chaincfg.Params) (address.Address, []byte, []byte, error) {
 
 	if len(params.AccountPubKey) == 0 {
 		account := "none"
@@ -342,7 +347,7 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 			)
 		}
 
-		return nil, fmt.Errorf("%w: scope=%v account=%s",
+		return nil, nil, nil, fmt.Errorf("%w: scope=%v account=%s",
 			errMissingAccountPubKey, params.Scope, account)
 	}
 
@@ -350,43 +355,60 @@ func (w *Wallet) deriveAddressData(_ context.Context,
 		string(params.AccountPubKey),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("parse account pubkey: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse account "+
+			"pubkey: %w", err)
 	}
 
 	branchKey, err := deriveChildKey(accountPubKey, params.Branch)
 	if err != nil {
-		return nil, fmt.Errorf("derive branch: %w", err)
+		return nil, nil, nil, fmt.Errorf("derive branch: %w", err)
 	}
 	defer branchKey.Zero()
 
 	addrKey, err := deriveChildKey(branchKey, params.Index)
 	if err != nil {
-		return nil, fmt.Errorf("derive address index: %w", err)
+		return nil, nil, nil, fmt.Errorf("derive address "+
+			"index: %w", err)
 	}
 	defer addrKey.Zero()
 
 	pubKey, err := addrKey.ECPubKey()
 	if err != nil {
-		return nil, fmt.Errorf("derive address pubkey: %w", err)
+		return nil, nil, nil, fmt.Errorf("derive address "+
+			"pubkey: %w", err)
 	}
 
 	pubKeyBytes := pubKey.SerializeCompressed()
 
 	walletAddrType, err := addresstype.ToWallet(params.AddrType, false)
 	if err != nil {
-		return nil, fmt.Errorf("address type: %w", err)
+		return nil, nil, nil, fmt.Errorf("address type: %w", err)
 	}
 
 	addr, err := walletAddrType.AddrFromPubKeyBytes(
-		pubKeyBytes, w.cfg.ChainParams,
+		pubKeyBytes, chainParams,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("derive address: %w", err)
+		return nil, nil, nil, fmt.Errorf("derive address: %w", err)
 	}
 
 	scriptPubKey, err := txscript.PayToAddrScript(addr)
 	if err != nil {
-		return nil, fmt.Errorf("pay to addr: %w", err)
+		return nil, nil, nil, fmt.Errorf("pay to addr: %w", err)
+	}
+
+	return addr, scriptPubKey, pubKeyBytes, nil
+}
+
+// deriveAddressData derives one SQL-store address from account public material.
+func (w *Wallet) deriveAddressData(_ context.Context,
+	params db.AddressDerivationParams) (*db.DerivedAddressData, error) {
+
+	_, scriptPubKey, pubKeyBytes, err := deriveStoreAddress(
+		params, w.cfg.ChainParams,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &db.DerivedAddressData{

@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"bytes"
 	"iter"
 	"testing"
 
@@ -21,6 +22,196 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// storeDerivationAccountPubKey returns a deterministic account-level public key
+// for store-native address derivation tests.
+func storeDerivationAccountPubKey(t *testing.T) *hdkeychain.ExtendedKey {
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0x42}, hdkeychain.RecommendedSeedLen)
+	masterKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	purposeKey, err := masterKey.Derive(
+		hdkeychain.HardenedKeyStart + waddrmgr.KeyScopeBIP0084.Purpose,
+	)
+	require.NoError(t, err)
+
+	coinKey, err := purposeKey.Derive(
+		hdkeychain.HardenedKeyStart + waddrmgr.KeyScopeBIP0084.Coin,
+	)
+	require.NoError(t, err)
+
+	accountKey, err := coinKey.Derive(hdkeychain.HardenedKeyStart)
+	require.NoError(t, err)
+
+	accountPubKey, err := accountKey.Neuter()
+	require.NoError(t, err)
+
+	return accountPubKey
+}
+
+// expectedStoreAddress derives the expected address fields without calling the
+// store-native derivation helper under test.
+func expectedStoreAddress(t *testing.T,
+	accountPubKey *hdkeychain.ExtendedKey, addrType db.AddressType,
+	branch uint32, index uint32) (address.Address, []byte, []byte) {
+
+	t.Helper()
+
+	branchKey, err := accountPubKey.Derive(branch)
+	require.NoError(t, err)
+
+	defer branchKey.Zero()
+
+	addrKey, err := branchKey.Derive(index)
+	require.NoError(t, err)
+
+	defer addrKey.Zero()
+
+	pubKey, err := addrKey.ECPubKey()
+	require.NoError(t, err)
+
+	pubKeyBytes := pubKey.SerializeCompressed()
+	addr := expectedStoreAddressFromPubKey(t, addrType, pubKey, pubKeyBytes)
+
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	return addr, scriptPubKey, pubKeyBytes
+}
+
+// expectedStoreAddressFromPubKey encodes an expected address for one store
+// address type.
+func expectedStoreAddressFromPubKey(t *testing.T, addrType db.AddressType,
+	pubKey *btcec.PublicKey, pubKeyBytes []byte) address.Address {
+
+	t.Helper()
+
+	switch addrType {
+	case db.PubKeyHash:
+		addr, err := address.NewAddressPubKeyHash(
+			address.Hash160(pubKeyBytes), &chainParams,
+		)
+		require.NoError(t, err)
+
+		return addr
+
+	case db.WitnessPubKey:
+		addr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(pubKeyBytes), &chainParams,
+		)
+		require.NoError(t, err)
+
+		return addr
+
+	case db.NestedWitnessPubKey:
+		witnessAddr, err := address.NewAddressWitnessPubKeyHash(
+			address.Hash160(pubKeyBytes), &chainParams,
+		)
+		require.NoError(t, err)
+
+		witnessProgram, err := txscript.PayToAddrScript(witnessAddr)
+		require.NoError(t, err)
+
+		addr, err := address.NewAddressScriptHash(
+			witnessProgram, &chainParams,
+		)
+		require.NoError(t, err)
+
+		return addr
+
+	case db.TaprootPubKey:
+		outputKey := schnorr.SerializePubKey(
+			txscript.ComputeTaprootKeyNoScript(pubKey),
+		)
+
+		addr, err := address.NewAddressTaproot(outputKey, &chainParams)
+		require.NoError(t, err)
+
+		return addr
+
+	case db.RawPubKey, db.ScriptHash, db.WitnessScript, db.Anchor:
+		require.FailNow(t, "unsupported address type")
+
+		return nil
+
+	default:
+		require.FailNow(t, "unsupported address type")
+
+		return nil
+	}
+}
+
+// TestDeriveStoreAddressEncodesTypes verifies store-native derivation encodes
+// the same child pubkey into the expected script family for each supported
+// single-key address type.
+func TestDeriveStoreAddressEncodesTypes(t *testing.T) {
+	t.Parallel()
+
+	accountPubKey := storeDerivationAccountPubKey(t)
+	accountNumber := uint32(0)
+
+	testCases := []struct {
+		name     string
+		addrType db.AddressType
+		branch   uint32
+		index    uint32
+	}{
+		{
+			name:     "p2pkh",
+			addrType: db.PubKeyHash,
+			branch:   waddrmgr.ExternalBranch,
+			index:    7,
+		},
+		{
+			name:     "p2wkh",
+			addrType: db.WitnessPubKey,
+			branch:   waddrmgr.ExternalBranch,
+			index:    8,
+		},
+		{
+			name:     "np2wkh",
+			addrType: db.NestedWitnessPubKey,
+			branch:   waddrmgr.InternalBranch,
+			index:    9,
+		},
+		{
+			name:     "p2tr",
+			addrType: db.TaprootPubKey,
+			branch:   waddrmgr.InternalBranch,
+			index:    10,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := db.AddressDerivationParams{
+				Scope:                db.KeyScope(waddrmgr.KeyScopeBIP0084),
+				DerivedAccountNumber: &accountNumber,
+				Branch:               tc.branch,
+				Index:                tc.index,
+				AddrType:             tc.addrType,
+				AccountPubKey:        []byte(accountPubKey.String()),
+			}
+
+			addr, scriptPubKey, pubKey, err := deriveStoreAddress(
+				params, &chainParams,
+			)
+			require.NoError(t, err)
+
+			wantAddr, wantScript, wantPubKey := expectedStoreAddress(
+				t, accountPubKey, tc.addrType, tc.branch, tc.index,
+			)
+
+			require.Equal(t, wantAddr.EncodeAddress(), addr.EncodeAddress())
+			require.Equal(t, wantScript, scriptPubKey)
+			require.Equal(t, wantPubKey, pubKey)
+		})
+	}
+}
 
 // addressInfoFromAddr builds a store address record for a test address.
 func addressInfoFromAddr(t *testing.T, addr address.Address) *db.AddressInfo {

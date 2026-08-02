@@ -276,7 +276,18 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		return nil, err
 	}
 
+	// AccountID is the durable per-account store identity, distinct from
+	// the maskable BIP44 AccountNumber. waddrmgr keys every account row by
+	// its internal, scope-unique account number, so that number is kvdb's
+	// stable row identity and is populated for both derived and imported
+	// accounts. It never collides across accounts in a scope, so recovery
+	// state can key its per-account maps on it without conflating an
+	// imported account with a derived account that happens to share a BIP44
+	// number.
+	accountID := accountNumber
+
 	return &db.AccountInfo{
+		AccountID:        &accountID,
 		AccountNumber:    accountNumberForContract,
 		AccountName:      props.AccountName,
 		IsImported:       accountIsImported,
