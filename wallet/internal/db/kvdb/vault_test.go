@@ -31,9 +31,7 @@ func TestLegacyWalletVaultTranslatesManagerSentinels(t *testing.T) {
 		// keyvault.ErrInvalidPassphrase, matching WalletVault.
 		err := vault.Unlock(t.Context(), []byte("wrong-passphrase"))
 		require.ErrorIs(t, err, keyvault.ErrInvalidPassphrase)
-		require.False(
-			t, waddrmgr.IsError(err, waddrmgr.ErrWrongPassphrase),
-		)
+		require.False(t, waddrmgr.IsError(err, waddrmgr.ErrWrongPassphrase))
 	})
 
 	t.Run("encrypt while locked", func(t *testing.T) {
@@ -44,8 +42,7 @@ func TestLegacyWalletVaultTranslatesManagerSentinels(t *testing.T) {
 
 		// A freshly opened manager is locked, so encrypting under the
 		// script crypto key hits waddrmgr.ErrLocked; the adapter must
-		// translate it to keyvault.ErrVaultLocked, matching
-		// WalletVault.
+		// translate it to keyvault.ErrVaultLocked, matching WalletVault.
 		mgr := newSpendableAddrMgr(t, dbConn)
 		vault := NewLegacyWalletVault(dbConn, mgr)
 		require.True(t, vault.IsLocked())
@@ -136,11 +133,15 @@ func TestLegacyWalletVaultLockWatchOnly(t *testing.T) {
 }
 
 // TestLegacyWalletVaultChangePassphrase covers the adapter's rotation
-// behaviour. A private-only rotation must retire the old private passphrase
-// before the new one is accepted.
+// behaviour across the halves kvdb owns. kvdb is the only backend with a public
+// passphrase, so this is where the field pair has to work: a private-only
+// rotation retires the old private passphrase, a public-only rotation leaves
+// the private half alone, a combined request rotates both, and a wrong old
+// public passphrase is rejected without mutating anything.
 func TestLegacyWalletVaultChangePassphrase(t *testing.T) {
 	t.Parallel()
 
+	newPubPass := []byte("brand-new-pub-pass")
 	newPrivPass := []byte("brand-new-priv-pass")
 
 	tests := []struct {
@@ -161,6 +162,30 @@ func TestLegacyWalletVaultChangePassphrase(t *testing.T) {
 			PrivateNew: newPrivPass,
 		},
 		wantUnlock: newPrivPass,
+	}, {
+		name: "public only leaves the private half",
+		params: keyvault.ChangePassphraseParams{
+			PublicOld: testPubPass,
+			PublicNew: newPubPass,
+		},
+		wantUnlock: testPrivPass,
+	}, {
+		name: "combined rotates both",
+		params: keyvault.ChangePassphraseParams{
+			PublicOld:  testPubPass,
+			PublicNew:  newPubPass,
+			PrivateOld: testPrivPass,
+			PrivateNew: newPrivPass,
+		},
+		wantUnlock: newPrivPass,
+	}, {
+		name: "wrong old public mutates nothing",
+		params: keyvault.ChangePassphraseParams{
+			PublicOld: []byte("not-the-public-passphrase"),
+			PublicNew: newPubPass,
+		},
+		wantErr:    keyvault.ErrInvalidPassphrase,
+		wantUnlock: testPrivPass,
 	}}
 
 	for _, test := range tests {

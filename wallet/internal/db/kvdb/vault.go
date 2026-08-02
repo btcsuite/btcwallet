@@ -10,6 +10,8 @@ import (
 )
 
 // LegacyWalletVault adapts the legacy address manager to keyvault.Vault.
+//
+// Deprecated: remove this adapter with kvdb support.
 type LegacyWalletVault struct {
 	db  walletdb.DB
 	mgr *waddrmgr.Manager
@@ -20,6 +22,8 @@ var _ keyvault.Vault = (*LegacyWalletVault)(nil)
 
 // NewLegacyWalletVault creates a Vault backed by a legacy walletdb address
 // manager.
+//
+// Deprecated: remove this constructor with kvdb support.
 func NewLegacyWalletVault(db walletdb.DB,
 	mgr *waddrmgr.Manager) *LegacyWalletVault {
 
