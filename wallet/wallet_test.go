@@ -46,7 +46,7 @@ var (
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
+	_, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 
 	testCases := []struct {
@@ -57,7 +57,6 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -67,7 +66,6 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "invalid RecoveryWindow",
 			config: Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -76,19 +74,8 @@ func TestConfigValidate(t *testing.T) {
 			expectedErr: "RecoveryWindow",
 		},
 		{
-			name: "missing DB",
-			config: Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			},
-			expectedErr: "DB",
-		},
-		{
 			name: "missing Chain",
 			config: Config{
-				DB:             db,
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -98,7 +85,6 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing ChainParams",
 			config: Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				Name:           "test-wallet",
 				RecoveryWindow: MinRecoveryWindow,
@@ -108,7 +94,6 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing Name",
 			config: Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				RecoveryWindow: MinRecoveryWindow,

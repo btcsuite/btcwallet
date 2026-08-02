@@ -1,13 +1,15 @@
 package wallet
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/walletdb"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,15 +105,8 @@ func TestManagerCreateSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Create a fresh test database for this run. We use setupTestDB
-			// which ensures we have a clean slate (empty buckets) to verify
-			// that Create correctly initializes the schema.
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
-
-			m := NewManager()
+			m := testKVDBManager(t)
 			cfg := Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -139,25 +134,20 @@ func TestManagerCreateSuccess(t *testing.T) {
 
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
-				// We can't use w.GetAccount here because the wallet is not
-				// started. We'll verify directly against the address manager.
-				err := walletdb.View(db, func(tx walletdb.ReadTx) error {
-					ns := tx.ReadBucket(waddrmgrNamespaceKey)
-
-					scopeMgr, err := w.addrStore.FetchScopedKeyManager(
-						tc.params.InitialAccounts[0].Scope,
-					)
-					if err != nil {
-						return err
-					}
-
-					_, err = scopeMgr.LookupAccount(
-						ns, tc.params.InitialAccounts[0].Name,
-					)
-
-					return err
-				})
+				info, err := w.cache.GetAccount(
+					t.Context(), db.GetAccountQuery{
+						WalletID: w.id,
+						Scope: db.KeyScope(
+							tc.params.InitialAccounts[0].Scope,
+						),
+						Name: &tc.params.InitialAccounts[0].Name,
+					},
+				)
 				require.NoError(t, err)
+				require.Equal(
+					t, tc.params.InitialAccounts[0].Name,
+					info.AccountName,
+				)
 			}
 		})
 	}
@@ -223,12 +213,8 @@ func TestManagerCreateError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			db, cleanup := setupTestDB(t)
-			t.Cleanup(cleanup)
-
-			m := NewManager()
+			m := testKVDBManager(t)
 			cfg := Config{
-				DB:             db,
 				Chain:          &bwmock.Chain{},
 				ChainParams:    &chainParams,
 				Name:           "test-wallet",
@@ -341,14 +327,14 @@ func TestCreateWalletParams_Validate(t *testing.T) {
 func TestManagerCreate_InvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
+	m := testKVDBManager(t)
 
 	// Call Create with an empty Config struct. This should fail because
-	// required fields like DB and ChainParams are missing.
+	// required fields like Chain and ChainParams are missing.
 	w, err := m.Create(Config{}, CreateWalletParams{})
 
 	require.ErrorIs(t, err, ErrMissingParam)
-	require.ErrorContains(t, err, "DB")
+	require.ErrorContains(t, err, "Chain")
 	require.Nil(t, w)
 }
 
@@ -357,14 +343,10 @@ func TestManagerCreate_InvalidConfig(t *testing.T) {
 func TestManagerLoadSuccess(t *testing.T) {
 	t.Parallel()
 
-	// Initialize a database and create a wallet to serve as our existing
-	// state.
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
+	dbPath := testKVDBPath(t)
 
-	m := NewManager()
+	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		DB:             db,
 		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
@@ -382,9 +364,13 @@ func TestManagerLoadSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, wCreated)
 
-	// Create a new Manager instance to simulate a fresh start (e.g., daemon
-	// restart) and attempt to load the wallet from the existing database.
-	m2 := NewManager()
+	// Release the database so a second Manager can open the same file: one
+	// bbolt handle per file, and the Manager owns it.
+	require.NoError(t, m.Close())
+
+	// Open a second Manager over the same database to simulate a fresh start
+	// (e.g. daemon restart) and load the wallet from it.
+	m2 := testKVDBManagerAt(t, dbPath)
 	w, err := m2.Load(cfg)
 
 	// Verify that the load operation succeeded and returned a valid wallet.
@@ -411,12 +397,10 @@ func TestManagerLoadSuccess(t *testing.T) {
 func TestManagerLoad_ExistingWallet(t *testing.T) {
 	t.Parallel()
 
-	db, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
+	dbPath := testKVDBPath(t)
 
-	m := NewManager()
+	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		DB:             db,
 		Chain:          &bwmock.Chain{},
 		ChainParams:    &chainParams,
 		Name:           "test-wallet",
@@ -451,7 +435,7 @@ func TestManagerLoadError(t *testing.T) {
 	t.Run("Invalid Config", func(t *testing.T) {
 		t.Parallel()
 
-		m := NewManager()
+		m := testKVDBManager(t)
 
 		// Attempt to load with an empty config. This should fail validation.
 		w, err := m.Load(Config{})
@@ -462,12 +446,8 @@ func TestManagerLoadError(t *testing.T) {
 	t.Run("Uninitialized DB", func(t *testing.T) {
 		t.Parallel()
 
-		db, cleanup := setupTestDB(t)
-		t.Cleanup(cleanup)
-
-		m := NewManager()
+		m := testKVDBManager(t)
 		cfg := Config{
-			DB:          db,
 			Chain:       &bwmock.Chain{},
 			ChainParams: &chainParams,
 			Name:        "test",
@@ -514,7 +494,7 @@ func TestManagerString(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			m := NewManager()
+			m := testKVDBManager(t)
 			tc.setup(m)
 			require.Equal(t, tc.expected, m.String())
 		})
@@ -527,7 +507,7 @@ func TestManagerString(t *testing.T) {
 func TestManager_deriveFromSeed(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
+	m := testKVDBManager(t)
 	cfg := Config{ChainParams: &chainParams}
 
 	t.Run("Success", func(t *testing.T) {
@@ -568,9 +548,11 @@ func TestManager_deriveFromSeed(t *testing.T) {
 func TestManager_genRootKey(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
+	m := testKVDBManager(t)
 	cfg := Config{ChainParams: &chainParams}
 
+	// With no configured kvdb path there is no legacy wallet to recover, so
+	// genRootKey takes the fresh-generation branch.
 	key, err := m.genRootKey(cfg)
 
 	// Verify we got a valid private extended key.
@@ -585,7 +567,7 @@ func TestManager_genRootKey(t *testing.T) {
 func TestManager_deriveRootKey(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager()
+	m := testKVDBManager(t)
 	cfg := Config{ChainParams: &chainParams}
 
 	// 1. ModeShell: Should return nil/nil (no root key for shell).
@@ -619,8 +601,8 @@ func TestManager_deriveRootKey(t *testing.T) {
 
 // TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
 // a non-watch-only wallet cannot ship with InitialAccounts. The validator
-// runs before DBCreateWallet so the failure is atomic and no half-created
-// wallet is left on disk.
+// runs before the kvdb wallet create so the failure is atomic and no
+// half-created wallet is left on disk.
 func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 	t.Parallel()
 
@@ -670,4 +652,258 @@ func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestManagerKVDBRejectsSecondName verifies that a kvdb Manager serves one
+// wallet per database.
+//
+// The deprecated kvdb backend owns one live address manager, so it rejects a
+// second wallet name. Restart-stable name identity is a separate question;
+// this covers the in-process limit retained until kvdb support is removed.
+func TestManagerKVDBRejectsSecondName(t *testing.T) {
+	t.Parallel()
+
+	m := testKVDBManager(t)
+	cfg := Config{
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           "first",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	params := CreateWalletParams{
+		Mode:              ModeGenSeed,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	first, err := m.Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// A different name on the same Manager is refused.
+	second := cfg
+	second.Name = "second"
+
+	_, err = m.Create(second, params)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.ErrorContains(t, err, "one wallet per database")
+
+	_, err = m.Load(second)
+	require.ErrorIs(t, err, ErrInvalidParam)
+
+	// The rejected call did not replace the backend's wallet: the original
+	// name still resolves to the same wallet, and that wallet still works.
+	again, err := m.Load(cfg)
+	require.NoError(t, err)
+	require.Same(t, first, again)
+
+	startLoadedWalletForTest(t, again)
+	_, err = again.ListAccounts(t.Context())
+	require.NoError(t, err)
+}
+
+// TestManagerCreateFailureLeavesManagerReusable verifies that a failed Create
+// leaves no durable trace in the Manager: the wallet is not published, the name
+// is still free, and the database the Manager opened is released exactly once
+// by Close. The harness relies on this — it registers the Manager before any
+// Create so that a failing Create still closes the database it opened.
+func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		manager func(testing.TB) *Manager
+		pubPass []byte
+	}{{
+		name:    "kvdb",
+		manager: testKVDBManager,
+		pubPass: []byte("public"),
+	}, {
+		name:    "sqlite",
+		manager: testSQLiteManager,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := tc.manager(t)
+			cfg := Config{
+				Chain:          &bwmock.Chain{},
+				ChainParams:    &chainParams,
+				Name:           testWalletName,
+				PubPassphrase:  tc.pubPass,
+				RecoveryWindow: MinRecoveryWindow,
+			}
+
+			// Arrange + Act: a seed too short for BIP32 fails root
+			// derivation, after the Manager has already opened its
+			// database.
+			seed, err := hdkeychain.GenerateSeed(
+				hdkeychain.RecommendedSeedLen,
+			)
+			require.NoError(t, err)
+
+			w, err := m.Create(cfg, CreateWalletParams{
+				Mode:              ModeImportSeed,
+				Seed:              seed[:hdkeychain.MinSeedBytes-1],
+				PubPassphrase:     tc.pubPass,
+				PrivatePassphrase: []byte("private"),
+				Birthday:          time.Now(),
+			})
+			require.ErrorIs(t, err, hdkeychain.ErrInvalidSeedLen)
+			require.Nil(t, w)
+
+			// Assert: nothing was published, so the name is free and
+			// a corrected create succeeds over the same database.
+			w, err = m.Create(cfg, CreateWalletParams{
+				Mode:              ModeImportSeed,
+				Seed:              seed,
+				PubPassphrase:     tc.pubPass,
+				PrivatePassphrase: []byte("private"),
+				Birthday:          time.Now(),
+			})
+			require.NoError(t, err)
+			require.NotNil(t, w)
+
+			// Close releases the one database the Manager owns. It is
+			// called once, after quiescence.
+			require.NoError(t, m.Close())
+		})
+	}
+}
+
+// TestManagerIgnoresPerWalletDBAndChainParams verifies that the Manager owns
+// the database and the network for every wallet it serves: a per-wallet Config
+// that leaves both unset still yields a working wallet on the Manager's own
+// database and chain parameters, on both backends.
+// Config.DB is deprecated and Config.ChainParams is overwritten, so neither
+// can steer a wallet somewhere the Manager did not open.
+func TestManagerIgnoresPerWalletDBAndChainParams(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		backend DBBackend
+		file    string
+		pubPass []byte
+	}{{
+		name:    "kvdb",
+		backend: DBBackendKVDB,
+		file:    "wallet.db",
+		pubPass: []byte("public"),
+	}, {
+		name:    "sqlite",
+		backend: DBBackendSQLite,
+		file:    "wallet.sqlite",
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dbPath := filepath.Join(t.TempDir(), tc.file)
+			open := func() (*Manager, error) {
+				return NewManager(
+					t.Context(), ManagerConfig{
+						Backend:     tc.backend,
+						DataSource:  dbPath,
+						ChainParams: &chainParams,
+					},
+				)
+			}
+
+			seed, err := hdkeychain.GenerateSeed(
+				hdkeychain.RecommendedSeedLen,
+			)
+			require.NoError(t, err)
+
+			m, err := open()
+			require.NoError(t, err)
+
+			// Arrange: no DB and no network at all — the Manager
+			// must supply both.
+			cfg := Config{
+				Chain:          &bwmock.Chain{},
+				ChainParams:    nil,
+				DB:             nil,
+				Name:           testWalletName,
+				PubPassphrase:  tc.pubPass,
+				RecoveryWindow: MinRecoveryWindow,
+			}
+
+			w, err := m.Create(cfg, CreateWalletParams{
+				Mode:              ModeImportSeed,
+				Seed:              seed,
+				PubPassphrase:     tc.pubPass,
+				PrivatePassphrase: []byte("private"),
+				Birthday:          time.Now(),
+			})
+			require.NoError(t, err)
+
+			// Assert: a *fresh* Manager over the same database performs
+			// a real Load with the same nil-field Config, so the
+			// injection is proven off the cached-hit path too.
+			require.NoError(t, m.Close())
+
+			reopened, err := open()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = reopened.Close() })
+
+			fresh, err := reopened.Load(cfg)
+			require.NoError(t, err)
+			require.NotSame(t, w, fresh)
+		})
+	}
+}
+
+// TestManagerCreateHonoursCreatePubPassphrase verifies that a kvdb wallet is
+// created under CreateWalletParams.PubPassphrase, not Config.PubPassphrase. The
+// two are separate credentials — the request's is the create one, the config's
+// is what a later Load supplies — so a test that sets them to the same bytes
+// cannot tell the two apart and would mask a create path reading the wrong
+// field.
+func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
+	t.Parallel()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	dbPath := testKVDBPath(t)
+
+	createPub := []byte("create-public-passphrase")
+	configPub := []byte("config-public-passphrase")
+
+	// Arrange + Act: create under createPub while the Config names configPub.
+	m := testKVDBManagerAt(t, dbPath)
+	cfg := Config{
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           testWalletName,
+		PubPassphrase:  configPub,
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	w, err := m.Create(cfg, CreateWalletParams{
+		Mode:              ModeImportSeed,
+		Seed:              seed,
+		PubPassphrase:     createPub,
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.NoError(t, m.Close())
+
+	// Assert: a fresh Manager opens the wallet with the passphrase it was
+	// created under.
+	loadCfg := cfg
+	loadCfg.PubPassphrase = createPub
+
+	reopened := testKVDBManagerAt(t, dbPath)
+	loaded, err := reopened.Load(loadCfg)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.NoError(t, reopened.Close())
 }
