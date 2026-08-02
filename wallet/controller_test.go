@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -43,9 +45,8 @@ func TestPerformRuntimeSetupRoutesStoreStartup(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestHandleUnlockReq verifies that the handleUnlockReq method correctly
-// processes an unlock request by invoking the address manager's Unlock method
-// and updating the wallet state.
+// TestHandleUnlockReq verifies that handleUnlockReq unlocks the key vault and
+// updates the wallet state.
 func TestHandleUnlockReq(t *testing.T) {
 	t.Parallel()
 
@@ -60,8 +61,10 @@ func TestHandleUnlockReq(t *testing.T) {
 	pass := []byte("password")
 	req := newUnlockReq(UnlockRequest{Passphrase: pass})
 
-	// Setup the expected call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Setup the expected call to the key vault's Unlock method.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Dispatch the unlock request to the handler.
 	w.handleUnlockReq(req)
@@ -73,9 +76,8 @@ func TestHandleUnlockReq(t *testing.T) {
 	require.True(t, w.state.isUnlocked())
 }
 
-// TestHandleUnlockReq_Errors verifies that handleUnlockReq correctly handles
-// error conditions, such as attempting to unlock a stopped wallet or a failure
-// from the underlying storage.
+// TestHandleUnlockReq_Errors verifies that handleUnlockReq rejects a stopped
+// wallet and propagates key-vault failures.
 func TestHandleUnlockReq_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -97,7 +99,7 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 		require.ErrorIs(t, err, ErrStateForbidden)
 	})
 
-	t.Run("DBUnlock_Failure", func(t *testing.T) {
+	t.Run("key vault failure", func(t *testing.T) {
 		t.Parallel()
 
 		// Arrange: Create a test wallet and transition to 'Started'.
@@ -107,17 +109,128 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 
 		pass := []byte("password")
 		req := newUnlockReq(UnlockRequest{Passphrase: pass})
-		deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+		deps.vault.On(
+			"Unlock", mock.Anything, pass,
+		).Return(
 			errDBMock,
 		).Once()
 
 		// Act: Attempt to unlock the wallet.
 		w.handleUnlockReq(req)
 
-		// Assert: Verify that the database error is propagated.
+		// Assert: Verify that the key-vault error is propagated.
 		err := <-req.resp
 		require.ErrorContains(t, err, "db error")
 	})
+}
+
+// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
+// ChangePassphrase when response wait is interrupted by context cancellation.
+func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block during response wait and cancel context.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(ctx,
+			ChangePassphraseRequest{})
+	}()
+
+	select {
+	case <-w.requestChan:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for request")
+	}
+
+	// Act: Cancel context.
+	cancel()
+
+	// Assert: Verify error.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
+}
+
+// TestControllerChangePassphrase_Interrupted_WaitShutdown verifies
+// ChangePassphrase when response wait is interrupted by wallet shutdown.
+func TestControllerChangePassphrase_Interrupted_WaitShutdown(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block during response wait and trigger shutdown.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(t.Context(),
+			ChangePassphraseRequest{})
+	}()
+
+	select {
+	case <-w.requestChan:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for request")
+	}
+
+	// Act: Stop wallet.
+	w.cancel()
+
+	// Assert: Verify error.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, ErrWalletShuttingDown)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
+}
+
+// TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
+// ChangePassphrase when response wait times out.
+func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block during response wait and allow timeout.
+	w, _ := createTestWalletWithMocks(t)
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	ctx, cancel := context.WithTimeout(t.Context(),
+		10*time.Millisecond)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.ChangePassphrase(ctx,
+			ChangePassphraseRequest{})
+	}()
+
+	select {
+	case <-w.requestChan:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	// Assert: Verify timeout.
+	select {
+	case err := <-errChan:
+		require.ErrorContains(t, err,
+			"context deadline exceeded")
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for response")
+	}
 }
 
 // TestHandleLockReq verifies that the handleLockReq method correctly processes
@@ -135,8 +248,8 @@ func TestHandleLockReq(t *testing.T) {
 
 	req := newLockReq()
 
-	// Setup the expected call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Setup the expected call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Dispatch the lock request to the handler.
 	w.handleLockReq(req)
@@ -215,11 +328,13 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 	}
 	req := newChangePassphraseReq(reqStruct)
 
-	// Setup the expected call to the address manager's ChangePassphrase
-	// method.
-	deps.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"),
-		[]byte("new"), true, mock.Anything,
+	// The handler rotates the passphrase through the key vault.
+	deps.vault.On(
+		"ChangePassphrase", mock.Anything,
+		keyvault.ChangePassphraseParams{
+			PrivateOld: []byte("old"),
+			PrivateNew: []byte("new"),
+		},
 	).Return(nil).Once()
 
 	// Act: Call the handler.
@@ -261,6 +376,9 @@ func TestControllerStart(t *testing.T) {
 	deps.syncer.On(
 		"run", mock.Anything,
 	).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
@@ -542,11 +660,21 @@ func TestControllerStop(t *testing.T) {
 		if !ok {
 			return
 		}
+
 		<-ctx.Done()
 	}).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
 	require.True(t, w.state.isStarted())
+
+	// Put the wallet in the unlocked state, mirroring a wallet that holds
+	// decrypted vault keys at shutdown. Stop must lock the vault exactly
+	// once so no runtime key outlives a serial Stop and a later Unlock does
+	// not fail with ErrVaultUnlocked.
+	w.state.toUnlocked()
+	require.True(t, w.state.isUnlocked())
+
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Stop the wallet.
 	err := w.Stop(t.Context())
@@ -555,6 +683,7 @@ func TestControllerStop(t *testing.T) {
 	// no longer 'Started'.
 	require.NoError(t, err)
 	require.False(t, w.state.isStarted())
+	deps.vault.AssertExpectations(t)
 
 	// Act: Call Stop again to verify idempotency.
 	err = w.Stop(t.Context())
@@ -588,8 +717,8 @@ func TestControllerLock(t *testing.T) {
 	w.state.toUnlocked()
 	require.True(t, w.state.isUnlocked())
 
-	// Expect a call to the address manager's Lock method.
-	deps.addrStore.On("Lock").Return(nil).Once()
+	// Expect a call to the key vault's Lock method.
+	deps.vault.On("Lock").Return().Once()
 
 	// Act: Call the Lock method.
 	err := w.Lock(t.Context())
@@ -597,6 +726,11 @@ func TestControllerLock(t *testing.T) {
 	// Assert: Verify success and that the wallet state is locked.
 	require.NoError(t, err)
 	require.False(t, w.state.isUnlocked())
+
+	// Allow Stop's extra Lock. Registered
+	// after the operation's Lock().Once() above so that expectation is
+	// matched first and this pass-through absorbs only the teardown Lock.
+	expectStopTeardown(deps)
 
 	// Cleanup: Stop the wallet to release resources.
 	err = w.Stop(t.Context())
@@ -627,8 +761,13 @@ func TestControllerUnlock(t *testing.T) {
 
 	pass := []byte("password")
 
-	// Expect a call to the address manager's Unlock method.
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	// Expect a call to the key vault's Unlock method. Unlock dispatches no
+	// Lock; the only Lock here comes from the cleanup Stop below, so it is
+	// permitted rather than expected -- TestControllerStop is the sole
+	// Stop-to-Vault dispatch falsifier.
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Call the Unlock method.
 	err := w.Unlock(t.Context(), UnlockRequest{Passphrase: pass})
@@ -637,7 +776,8 @@ func TestControllerUnlock(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, w.state.isUnlocked())
 
-	// Cleanup: Stop the wallet to release resources.
+	expectStopTeardown(deps)
+
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
@@ -670,11 +810,17 @@ func TestControllerChangePassphrase(t *testing.T) {
 		PrivateNew:    []byte("new"),
 	}
 
-	// Expect a call to ChangePassphrase in the address store.
-	deps.addrStore.On(
-		"ChangePassphrase", mock.Anything, []byte("old"), []byte("new"),
-		true, mock.Anything,
+	// ChangePassphrase rotates the passphrase through the key vault.
+	deps.vault.On(
+		"ChangePassphrase", mock.Anything,
+		keyvault.ChangePassphraseParams{
+			PrivateOld: []byte("old"),
+			PrivateNew: []byte("new"),
+		},
 	).Return(nil).Once()
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	// Act: Call ChangePassphrase.
 	err := w.ChangePassphrase(t.Context(), req)
@@ -797,6 +943,9 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
+
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
 
@@ -827,9 +976,9 @@ func TestMainLoop_AutoLock(t *testing.T) {
 	w.lockTimer = time.NewTimer(time.Millisecond * 10)
 
 	lockCalled := make(chan struct{})
-	deps.addrStore.On("Lock").Run(func(args mock.Arguments) {
+	deps.vault.On("Lock").Run(func(args mock.Arguments) {
 		close(lockCalled)
-	}).Return(nil).Once()
+	}).Return().Once()
 
 	// Act: Start main loop.
 	w.wg.Add(1)
@@ -1023,115 +1172,6 @@ func TestControllerChangePassphrase_Interrupted_SendShutdown(t *testing.T) {
 	require.ErrorIs(t, err, ErrWalletShuttingDown)
 }
 
-// TestControllerChangePassphrase_Interrupted_WaitCancelled verifies
-// ChangePassphrase when response wait is interrupted by context cancellation.
-func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and cancel context.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithCancel(t.Context())
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
-
-	// Act: Cancel context.
-	cancel()
-
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitShutdown verifies
-// ChangePassphrase when response wait is interrupted by wallet shutdown.
-func TestControllerChangePassphrase_Interrupted_WaitShutdown(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and trigger shutdown.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(t.Context(),
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for request")
-	}
-
-	// Act: Stop wallet.
-	w.cancel()
-
-	// Assert: Verify error.
-	select {
-	case err := <-errChan:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
-// TestControllerChangePassphrase_Interrupted_WaitTimeout verifies
-// ChangePassphrase when response wait times out.
-func TestControllerChangePassphrase_Interrupted_WaitTimeout(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Block during response wait and allow timeout.
-	w, _ := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	ctx, cancel := context.WithTimeout(t.Context(),
-		10*time.Millisecond)
-	defer cancel()
-
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- w.ChangePassphrase(ctx,
-			ChangePassphraseRequest{})
-	}()
-
-	select {
-	case <-w.requestChan:
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
-
-	// Assert: Verify timeout.
-	select {
-	case err := <-errChan:
-		require.ErrorContains(t, err,
-			"context deadline exceeded")
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for response")
-	}
-}
-
 // TestHandleChangePassphraseReq_Errors verifies error handling for the
 // internal change passphrase request handler.
 func TestHandleChangePassphraseReq_Errors(t *testing.T) {
@@ -1182,6 +1222,9 @@ func TestControllerInfo(t *testing.T) {
 
 	// Mock syncState to indicate the wallet is fully synced.
 	deps.syncer.On("syncState").Return(syncStateSynced)
+
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
 
 	require.NoError(t, w.Start(t.Context()))
 
@@ -1372,6 +1415,9 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
+	// Allow Stop to clear secret material.
+	expectStopTeardown(deps)
+
 	// Act: Start the wallet.
 	err := w.Start(t.Context())
 
@@ -1403,10 +1449,12 @@ func TestControllerUnlock_DefaultTimeout(t *testing.T) {
 
 	pass := []byte("pass")
 	req := UnlockRequest{Passphrase: pass}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 	// Auto-lock might trigger if the test runs slowly, but it's not
 	// guaranteed.
-	deps.addrStore.On("Lock").Return(nil).Maybe()
+	deps.vault.On("Lock").Return().Maybe()
 
 	// Act: Perform Unlock with default timeout.
 	err := w.Unlock(t.Context(), req)
@@ -1463,7 +1511,9 @@ func TestControllerUnlock_NegativeTimeout(t *testing.T) {
 
 	pass := []byte("pass")
 	req := UnlockRequest{Passphrase: pass, Timeout: -1}
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(nil).Once()
+	deps.vault.On(
+		"Unlock", mock.Anything, pass,
+	).Return(nil).Once()
 
 	// Act: Perform Unlock with negative timeout (no auto-lock).
 	err := w.Unlock(t.Context(), req)
@@ -1476,9 +1526,8 @@ func TestControllerUnlock_NegativeTimeout(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestControllerUnlock_DBUnlockFail verifies Unlock failure when
-// DBUnlock fails.
-func TestControllerUnlock_DBUnlockFail(t *testing.T) {
+// TestControllerUnlockVaultFailure verifies Unlock reports a key-vault error.
+func TestControllerUnlockVaultFailure(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Setup a wallet and mock an unlock failure.
@@ -1492,7 +1541,7 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	go w.mainLoop()
 
 	pass := []byte("pass")
-	deps.addrStore.On("Unlock", mock.Anything, pass).Return(
+	deps.vault.On("Unlock", mock.Anything, pass).Return(
 		errDBMock).Once()
 
 	// Act: Attempt Unlock.
@@ -1504,28 +1553,6 @@ func TestControllerUnlock_DBUnlockFail(t *testing.T) {
 	// Clean up.
 	w.cancel()
 	w.wg.Wait()
-}
-
-// TestHandleLockReq_LockError verifies error handling when Lock fails.
-func TestHandleLockReq_LockError(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Setup mock expectations where internal lock fails.
-	w, deps := createTestWalletWithMocks(t)
-
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
-
-	req := lockReq{resp: make(chan error, 1)}
-
-	deps.addrStore.On("Lock").Return(errLockMock).Once()
-
-	// Act: Handle lock request.
-	w.handleLockReq(req)
-	err := <-req.resp
-
-	// Assert: Verify error.
-	require.ErrorContains(t, err, "lock fail")
 }
 
 // TestSubmitRescanRequest_HeightOverflow verifies large start height rejection.
@@ -1736,4 +1763,17 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 	// Assert: Verify that the operation was aborted.
 	require.False(t, ok)
 	require.Equal(t, time.Duration(0), nextBackoff)
+}
+
+// TestPassphraseSentinelIsReachable pins that the wallet's exported
+// passphrase sentinel is the same value the key vault returns, wrapped as a
+// real return path wraps them. External callers cannot import
+// wallet/internal/keyvault, so if these ever became independent copies instead
+// of aliases, errors.Is would silently stop matching for every caller outside
+// this module.
+func TestPassphraseSentinelIsReachable(t *testing.T) {
+	t.Parallel()
+
+	require.ErrorIs(t, fmt.Errorf("vault: %w",
+		keyvault.ErrInvalidPassphrase), ErrInvalidPassphrase)
 }
