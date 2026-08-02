@@ -24,7 +24,6 @@ var (
 	errMock           = errors.New("mock error")
 	errChainMock      = errors.New("chain error")
 	errPutMock        = errors.New("put error")
-	errLockMock       = errors.New("lock fail")
 	errDBFail         = errors.New("db fail")
 	errDeriveFail     = errors.New("derive fail")
 	errLoadStateFail  = errors.New("load state fail")
@@ -139,7 +138,9 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 		state:       newWalletState(mockSyncer),
 		lifetimeCtx: ctx,
 		cancel:      cancel,
-		requestChan: make(chan any, 1),
+		// Unbuffered, matching production: a buffered channel here would
+		// let a send succeed without the main loop taking the request.
+		requestChan: make(chan any),
 		lockTimer:   time.NewTimer(time.Hour),
 		birthdayBlock: waddrmgr.BlockStamp{
 			Height: 100,
@@ -183,6 +184,16 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	})
 
 	return w, deps
+}
+
+// expectStopTeardown registers the one mock call Stop makes to clear in-memory
+// secret material: it locks the key vault. The expectation is optional so a
+// test that never stops the wallet is unaffected, and registered so a test that
+// does call Stop does not trip the strict mocks. It must be called after any
+// operation-specific Lock().Once() expectation so that expectation is matched
+// first and this pass-through absorbs only the extra stop-time Lock.
+func expectStopTeardown(deps *mockWalletDeps) {
+	deps.vault.On("Lock").Return().Maybe()
 }
 
 // createStartedWalletWithMocks creates a fully started and unlocked Wallet
@@ -232,6 +243,8 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 
 	// Mock the syncer run.
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	expectStopTeardown(deps)
 
 	// Start the wallet.
 	require.NoError(t, w.Start(t.Context()))
