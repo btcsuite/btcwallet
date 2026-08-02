@@ -101,11 +101,14 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
-      - name: fetch and rebase on ${{ github.base_ref }}
+      - name: fetch and rebase on the PR base
+        id: rebase
         uses: ./.github/actions/rebase
 
       - name: check commits
-        run: scripts/check-each-commit.sh upstream/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ steps.rebase.outputs.base-ref }}
+        run: scripts/check-each-commit.sh "upstream/${BASE_REF}"
 
   ########################
   # run unit tests
