@@ -858,7 +858,6 @@ func (w *Wallet) resolveImportedAddrPrivKey(ctx context.Context,
 
 	return privKey, nil
 }
-
 // loadManagedPubKeyAddr loads a managed pubkey address for signer-private key
 // access.
 func (w *Wallet) loadManagedPubKeyAddr(addr address.Address) (
@@ -986,7 +985,100 @@ func (w *Wallet) resolveDerivedPrivKey(accountManager waddrmgr.AccountStore,
 
 	return privKey, nil
 }
+// isScriptSpendAddress reports whether an address is spent through a redeem or
+// witness script rather than a single public key. These are the P2SH, P2WSH
+// and taproot script-path families, whose spending script is stored encrypted
+// per address rather than derived from a public key.
+func isScriptSpendAddress(addressInfo AddressInfo) bool {
+	spendType := addressInfo.AddrType.SpendType()
 
+	return spendType == waddrmgr.SpendTypeScriptHash ||
+		spendType == waddrmgr.SpendTypeWitnessScript ||
+		spendType == waddrmgr.SpendTypeTaprootScriptPath
+}
+// scriptForAddressInfo resolves the plaintext redeem or witness script for a
+// script-based output from its encrypted material in the store. The stored
+// script is decrypted through the key vault under the script crypto key. For
+// taproot script-path addresses the stored blob is a TLV-encoded Tapscript, so
+// it is decoded and the revealed leaf script returned; for P2SH and P2WSH the
+// decrypted bytes are the redeem or witness script directly.
+//
+// An address that exists but carries no encrypted script (a watch-only import)
+// yields ErrNoAssocPrivateKey, matching the private-key surface: the wallet
+// cannot spend it.
+func (w *Wallet) scriptForAddressInfo(ctx context.Context,
+	addressInfo AddressInfo, scriptPubKey []byte) ([]byte, error) {
+
+	secret, err := w.cache.GetAddressSecret(ctx, db.GetAddressSecretQuery{
+		WalletID:     w.id,
+		ScriptPubKey: scriptPubKey,
+	})
+	switch {
+	case errors.Is(err, db.ErrSecretNotFound),
+		errors.Is(err, db.ErrAddressNotFound):
+
+		return nil, ErrNoAssocPrivateKey
+
+	case err != nil:
+		return nil, fmt.Errorf("fetch address secret: %w", err)
+	}
+
+	if len(secret.EncryptedScript) == 0 {
+		return nil, ErrNoAssocPrivateKey
+	}
+
+	// Decrypt the script under the key the store reports it was written
+	// with. waddrmgr records that per address: a non-secret witness or
+	// taproot row is sealed under the public key and stays readable while
+	// locked, everything else under the script key.
+	scriptKey := waddrmgr.CKTPublic
+	if secret.ScriptIsSecret {
+		scriptKey = waddrmgr.CKTScript
+	}
+
+	plaintext, err := w.keyVault.Decrypt(scriptKey, secret.EncryptedScript)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt script: %w", err)
+	}
+
+	// Non-taproot script families store the redeem or witness script
+	// directly, so the decrypted bytes are the script itself.
+	if addressInfo.AddrType.SpendType() !=
+		waddrmgr.SpendTypeTaprootScriptPath {
+
+		return plaintext, nil
+	}
+
+	// Taproot script-path imports store a TLV-encoded Tapscript; decode it
+	// and return the single revealed leaf script.
+	tapscript, err := waddrmgr.DecodeTaprootScript(plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("decode tapscript: %w", err)
+	}
+
+	script, err := revealedTapscriptLeaf(tapscript)
+	if err != nil {
+		return nil, fmt.Errorf("%w: addr %v", err, addressInfo.Addr)
+	}
+
+	return script, nil
+}
+// revealedTapscriptLeaf returns the single leaf script a taproot script-path
+// spend commits to. It supports the partial-reveal form (one revealed script)
+// and the full-tree form when the tree holds exactly one leaf; other shapes do
+// not carry a unique spending script and are rejected.
+func revealedTapscriptLeaf(tapscript *waddrmgr.Tapscript) ([]byte, error) {
+	switch {
+	case len(tapscript.RevealedScript) > 0:
+		return tapscript.RevealedScript, nil
+
+	case len(tapscript.Leaves) == 1:
+		return tapscript.Leaves[0].Script, nil
+
+	default:
+		return nil, ErrDerivationPathNotFound
+	}
+}
 // resolveDerivedPrivKeyFromStore resolves one derived private key from the
 // account-level encrypted secret stored behind the wallet store, addressed by
 // the derivation path's BIP44 account number.
