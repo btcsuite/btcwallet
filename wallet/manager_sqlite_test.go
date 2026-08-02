@@ -1,0 +1,289 @@
+package wallet
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+)
+
+// TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
+// Wallet from the row Store.CreateWallet returned and never reads it back. A
+// post-create GetWallet would be a failure with no recovery: the row is already
+// durable, so surfacing the read error would strand a wallet a retry could no
+// longer create. The store mock is strict, so an unexpected GetWallet fails the
+// test.
+func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	store := &walletmock.Store{}
+	t.Cleanup(func() { store.AssertExpectations(t) })
+
+	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	masterPubKey, err := rootKey.Neuter()
+	require.NoError(t, err)
+
+	store.On("CreateWallet", mock.Anything,
+		mock.AnythingOfType("db.CreateWalletParams")).
+		Return(&db.WalletInfo{
+			ID:           7,
+			Name:         cfg.Name,
+			MasterPubKey: []byte(masterPubKey.String()),
+		}, nil).Once()
+
+	w, err := testSQLManager(t, store).Create(cfg, params)
+	require.NoError(t, err)
+	require.Equal(t, uint32(7), w.ID())
+}
+
+// TestManagerLoadSQLiteRequiresWalletRow verifies that loading a name with no
+// SQLite wallet row surfaces the not-found error through the public Manager
+// API rather than assembling a Wallet over an absent row.
+func TestManagerLoadSQLiteRequiresWalletRow(t *testing.T) {
+	t.Parallel()
+
+	m, err := NewManager(t.Context(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  filepath.Join(t.TempDir(), "runtime.sqlite"),
+		ChainParams: &chainParams,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Close() })
+
+	w, err := m.Load(Config{
+		Chain:          &bwmock.Chain{},
+		Name:           "no-such-wallet",
+		RecoveryWindow: MinRecoveryWindow,
+	})
+	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	require.Nil(t, w)
+}
+
+// sqliteCreateConfig returns a SQLite-backed create config and a spendable
+// seed-import params pair sharing fresh temp paths, for tests that exercise
+// the SQL create path end to end.
+func sqliteCreateConfig(t *testing.T) (Config, CreateWalletParams) {
+	t.Helper()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	cfg := Config{
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           testWalletName,
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	params := CreateWalletParams{
+		Mode:              ModeImportSeed,
+		Seed:              seed,
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	return cfg, params
+}
+
+// TestSQLiteCreateWalletParamsCreatesSpendableSecrets verifies that SQL wallet
+// creation parameters carry real encrypted secret material for spendable
+// wallets.
+func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+
+	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
+	require.NoError(t, err)
+
+	got, err := sqliteCreateWalletParams(
+		cfg, params, rootKey, birthdayWithSafetyMargin(params.Birthday),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, got.Validate())
+	require.NotEmpty(t, got.MasterKeyPrivParams)
+	require.NotEmpty(t, got.EncryptedCryptoPrivKey)
+	require.NotEmpty(t, got.EncryptedCryptoScriptKey)
+	require.NotEmpty(t, got.EncryptedMasterPrivKey)
+}
+
+// TestManagerSQLiteCreateLoadCached verifies that a SQLite wallet created
+// through the Manager is published under its name, so a same-Manager Load
+// returns that very Wallet rather than building a second one.
+func TestManagerSQLiteCreateLoadCached(t *testing.T) {
+	t.Parallel()
+
+	cfg, params := sqliteCreateConfig(t)
+	m := testSQLiteManager(t)
+
+	w, err := m.Create(cfg, params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+
+	// Create publishes the wallet, so Load returns the same pointer over the
+	// Manager-owned store.
+	loaded, err := m.Load(cfg)
+	require.NoError(t, err)
+	require.Same(t, w, loaded)
+}
+
+// TestSQLiteCreateWalletParamsBirthdayVerbatim verifies that the SQLite
+// create params persist the birthday they are handed verbatim. The caller owns
+// the margin decision — Create applies waddrmgr's safety margin — so this
+// helper must not apply it a second time. A zero "no birthday" must pass
+// through so it is persisted as NULL.
+func TestSQLiteCreateWalletParamsBirthdayVerbatim(t *testing.T) {
+	t.Parallel()
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	// Warm the extended key's lazily-cached public key so the parallel
+	// subtests below only read it; hdkeychain populates it on first use, which
+	// would otherwise race across concurrent Neuter calls.
+	_, err = rootKey.Neuter()
+	require.NoError(t, err)
+
+	requested := time.Date(2026, time.June, 16, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		birthday time.Time
+	}{
+		{
+			name:     "resolved birthday is stored verbatim",
+			birthday: requested.Add(-waddrmgr.BirthdaySafetyMargin),
+		},
+		{
+			name:     "zero birthday is left untouched",
+			birthday: time.Time{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a spendable seed-import create. A
+			// non-empty private passphrase is required because
+			// the store-backed key vault rejects an empty
+			// passphrase for a spendable wallet.
+			cfg := Config{Name: testWalletName}
+			params := CreateWalletParams{
+				Mode:              ModeImportSeed,
+				PrivatePassphrase: []byte("private"),
+			}
+
+			// Act: build the SQL runtime create params with the
+			// already-resolved birthday.
+			got, err := sqliteCreateWalletParams(
+				cfg, params, rootKey, tc.birthday,
+			)
+			require.NoError(t, err)
+
+			// Assert: the stored birthday is exactly what was
+			// passed in, with no further margin applied.
+			require.Equal(t, tc.birthday, got.Birthday)
+		})
+	}
+}
+
+// TestBirthdayWithSafetyMargin verifies the helper subtracts exactly the legacy
+// safety margin from a real birthday and passes a zero birthday through.
+func TestBirthdayWithSafetyMargin(t *testing.T) {
+	t.Parallel()
+
+	birthday := time.Date(2026, time.June, 16, 0, 0, 0, 0, time.UTC)
+
+	require.Equal(
+		t, birthday.Add(-waddrmgr.BirthdaySafetyMargin),
+		birthdayWithSafetyMargin(birthday),
+	)
+	require.True(t, birthdayWithSafetyMargin(time.Time{}).IsZero())
+}
+
+// TestManagerSQLiteReopenDerivesAddress verifies the two SQLite requirements a
+// same-Manager Create/Load cannot: that a *fresh* Manager over the same file
+// serves the storage Load path, and that NewManager installed
+// sqlite.Config.DeriveAddress — proven by calling the public
+// AddressManager.NewAddress, which is the only caller that needs the deriver.
+func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "runtime.sqlite")
+
+	newManager := func() *Manager {
+		m, err := NewManager(t.Context(), ManagerConfig{
+			Backend:     DBBackendSQLite,
+			DataSource:  dbPath,
+			ChainParams: &chainParams,
+		})
+		require.NoError(t, err)
+
+		return m
+	}
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+
+	chain := &bwmock.Chain{}
+	cfg := Config{
+		Chain:          chain,
+		ChainParams:    &chainParams,
+		Name:           testWalletName,
+		RecoveryWindow: MinRecoveryWindow,
+	}
+	privPass := []byte("private")
+
+	// Arrange: create, then close the Manager so nothing is cached.
+	creator := newManager()
+	_, err = creator.Create(cfg, CreateWalletParams{
+		Mode:              ModeImportSeed,
+		Seed:              seed,
+		PrivatePassphrase: privPass,
+		Birthday:          time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, creator.Close())
+
+	// Act: a fresh Manager reads the wallet back off disk.
+	m := newManager()
+	t.Cleanup(func() { _ = m.Close() })
+
+	w, err := m.Load(cfg)
+	require.NoError(t, err)
+
+	startLoadedWalletForTest(t, w)
+	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
+	w.state.toUnlocked()
+
+	_, err = w.NewAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084,
+		waddrmgr.DefaultAccountName,
+	)
+	require.NoError(t, err)
+
+	chain.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+
+	// Assert: NewAddress goes through the store's installed address deriver.
+	addr, err := w.NewAddress(
+		t.Context(), waddrmgr.DefaultAccountName,
+		waddrmgr.WitnessPubKey, false,
+	)
+	require.NoError(t, err, "NewAddress requires the installed deriver")
+	require.NotNil(t, addr)
+}
