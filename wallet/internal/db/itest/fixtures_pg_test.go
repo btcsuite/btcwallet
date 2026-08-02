@@ -736,23 +736,6 @@ func GetAccountID(t *testing.T, queries *sqlc.Queries,
 	return row.ID
 }
 
-// getAddressID retrieves an address ID by script and wallet.
-func getAddressID(t *testing.T, queries *sqlc.Queries, scriptPubKey []byte,
-	walletID uint32) int64 {
-
-	t.Helper()
-
-	addr, err := queries.GetAddressByScriptPubKey(
-		t.Context(), sqlc.GetAddressByScriptPubKeyParams{
-			ScriptPubKey: scriptPubKey,
-			WalletID:     int64(walletID),
-		},
-	)
-	require.NoError(t, err)
-
-	return addr.ID
-}
-
 // MustDeleteAddress deletes an address by ID for test scenarios.
 func MustDeleteAddress(t *testing.T, dbConn *sql.DB, addressID uint32) {
 	t.Helper()

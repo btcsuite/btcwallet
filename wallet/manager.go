@@ -12,7 +12,6 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
-	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 var (
@@ -345,9 +344,11 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		addrStore: addrMgr,
 		store:     store,
 		cache:     newStoreRuntimeCache(store),
-		keyVault: keyvault.NewWalletVault(
-			store, walletID, addrMgr.WatchOnly(),
-		),
+
+		// TODO(yy): This constructor is the deprecated kvdb path. SQL
+		// Manager backends supply their vault during backend assembly;
+		// remove this assignment with kvdb support.
+		keyVault:          kvdb.NewLegacyWalletVault(cfg.DB, addrMgr),
 		txStore:           txMgr,
 		requestChan:       make(chan any),
 		lifetimeCtx:       lifetimeCtx,

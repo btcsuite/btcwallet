@@ -15,6 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// watchOnlyAccount is the placeholder account name used across the address
+// metadata tests for records that carry no signable account identity.
+const watchOnlyAccount = "watch-only"
+
 // TestAddressInfoFromManagedAddressPubKey verifies conversion of a managed
 // pubkey address into wallet-owned metadata.
 func TestAddressInfoFromManagedAddressPubKey(t *testing.T) {
@@ -70,9 +74,8 @@ func TestAddressInfoFromManagedAddressPubKey(t *testing.T) {
 
 // TestAddressInfoFromStoreAddress verifies that the store-backed mapper keeps
 // address shape separate from imported key provenance. Imported-xpub children
-// are HD-shaped but do not expose public BIP32 metadata without a
-// wallet-derived
-// account number.
+// are HD-shaped but expose no wallet BIP44 derivation, because the store masks
+// an imported account's number onto the wallet's own default account.
 func TestAddressInfoFromStoreAddress(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +112,8 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 		return info
 	}
 
+	accountID := uint32(42)
+
 	tests := []struct {
 		name         string
 		mutate       func(*db.AddressInfo)
@@ -117,16 +122,17 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 		wantDeriv    bool
 		wantBranch   uint32
 		wantIndex    uint32
+		wantAccount  uint32
 	}{
 		{
-			// An imported-xpub external child carries a real branch/index but
-			// no wallet-derived account number, so public BIP32 derivation is
-			// intentionally absent instead of using fake account 0.
-			name: "imported-xpub HD external",
+			// An imported-xpub child with no account identity at
+			// all cannot key any derivation, so its derivation
+			// shape is absent.
+			name: "imported-xpub HD external no number",
 			mutate: func(info *db.AddressInfo) {
 				info.IsImported = true
 				info.HasDerivationPath = true
-				info.AccountName = "watch-only"
+				info.AccountName = watchOnlyAccount
 				info.Branch = waddrmgr.ExternalBranch
 				info.Index = 5
 			},
@@ -137,22 +143,39 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			wantIndex:    5,
 		},
 		{
-			// An imported-xpub internal child is still classified by branch
-			// even
-			// though its public BIP32 account metadata is unavailable.
+			// An imported-xpub external child has no wallet-derived
+			// account number, so it exposes no derivation at all:
+			// the store masks an imported account's number onto the
+			// wallet's own default account, and signing refuses the
+			// address before any secret lookup.
+			name: "imported-xpub HD external",
+			mutate: func(info *db.AddressInfo) {
+				info.IsImported = true
+				info.HasDerivationPath = true
+				info.AccountName = watchOnlyAccount
+				info.AccountID = &accountID
+				info.Branch = waddrmgr.ExternalBranch
+				info.Index = 5
+			},
+			wantImported: false,
+			wantInternal: false,
+			wantDeriv:    false,
+		},
+		{
+			// An imported-xpub internal child is classified by
+			// branch but still exposes no derivation.
 			name: "imported-xpub HD internal",
 			mutate: func(info *db.AddressInfo) {
 				info.IsImported = true
 				info.HasDerivationPath = true
-				info.AccountName = "watch-only"
+				info.AccountName = watchOnlyAccount
+				info.AccountID = &accountID
 				info.Branch = waddrmgr.InternalBranch
 				info.Index = 8
 			},
 			wantImported: false,
 			wantInternal: true,
 			wantDeriv:    false,
-			wantBranch:   waddrmgr.InternalBranch,
-			wantIndex:    8,
 		},
 		{
 			// A raw single import has no chain position, so it carries no
@@ -167,11 +190,12 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			wantDeriv:    false,
 		},
 		{
-			// A normal derived child has wallet-derived account metadata, so
-			// it exposes a public derivation path and branch classification.
+			// A normal derived child has wallet-derived account
+			// metadata, so it exposes a public derivation path with
+			// a real account number.
 			name: "derived internal",
 			mutate: func(info *db.AddressInfo) {
-				accountNumber := uint32(0)
+				accountNumber := uint32(3)
 
 				info.AccountName = defaultAccountName
 				info.AccountNumber = &accountNumber
@@ -184,6 +208,7 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			wantDeriv:    true,
 			wantBranch:   waddrmgr.InternalBranch,
 			wantIndex:    2,
+			wantAccount:  3,
 		},
 	}
 
@@ -201,8 +226,8 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			require.NoError(t, err)
 
 			// Assert: Classification matches HD vs raw-import
-			// expectations, and derivation info is populated only when a
-			// wallet-derived account number is available.
+			// expectations, and derivation info is populated only
+			// when a wallet-derived account number is available.
 			require.Equal(t, tc.wantImported, info.Imported)
 			require.Equal(t, tc.wantInternal, info.Internal)
 
@@ -215,6 +240,9 @@ func TestAddressInfoFromStoreAddress(t *testing.T) {
 			require.NotNil(t, info.Derivation)
 			require.Equal(t, tc.wantBranch, info.Derivation.Branch)
 			require.Equal(t, tc.wantIndex, info.Derivation.Index)
+			require.Equal(
+				t, tc.wantAccount, info.Derivation.Account,
+			)
 		})
 	}
 }

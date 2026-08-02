@@ -150,6 +150,14 @@ type OutputScriptInfo struct {
 	// For nested P2WPKH-in-P2SH spends, this is a single push of RedeemScript.
 	// Native witness spends leave this nil.
 	SigScript []byte
+
+	// Script is the plaintext redeem or witness script for a script-based
+	// output (P2SH multisig, P2WSH, taproot script-path). It is decrypted
+	// from the address's stored encrypted script and, for taproot
+	// script-path imports, is the single revealed leaf script. It is nil
+	// for single-key (pubkey-spend) outputs, whose subscript is derived
+	// from the public key instead.
+	Script []byte
 }
 
 // AddressManager provides an interface for generating and inspecting wallet
@@ -236,6 +244,9 @@ func addressInfoFromManagedAddress(
 		return info, nil
 	}
 
+	// A managed address that exposes DerivationInfo is wallet-seed derived
+	// and always has a real BIP44 account number, so it is safe to expose
+	// as a public derivation path.
 	info.Derivation = &AddressDerivation{
 		KeyScope:             keyScope,
 		Account:              derivationPath.Account,
@@ -293,9 +304,14 @@ func addressInfoFromStoreAddress(storeAddr *db.AddressInfo,
 
 	info.PubKey = pubKey
 
-	// Imported-xpub children have a real branch/index but no wallet-derived
-	// account number. Do not fabricate account 0; without a BIP44 account
-	// number the public BIP32 derivation shape is intentionally absent.
+	// A derivation describes a wallet BIP44 path, so it needs a
+	// wallet-derived account number. Raw single imports have none, and
+	// neither do imported-xpub children: the store masks an imported
+	// account's number to 0, which is the wallet's own default derived
+	// account, so publishing a derivation for them would hand callers a
+	// path into the wrong account. Both cases expose no derivation at all,
+	// and signing refuses them with ErrNoAssocPrivateKey before any secret
+	// lookup.
 	if storeAddr.AccountNumber == nil {
 		return info, nil
 	}
@@ -861,16 +877,16 @@ func (w *Wallet) ImportTaprootScript(ctx context.Context,
 
 // encryptTaprootScript encodes and encrypts taproot script data before the
 // encrypted blob is handed to the store.
+//
+// The wallet's watch-only mode does not enter into it: every vault seals script
+// bodies with its script operation, and each backend resolves that to whatever
+// key its own format keeps for the purpose.
 func encryptTaprootScript(vault keyvault.Vault,
 	tapscript *waddrmgr.Tapscript) ([]byte, error) {
 
 	encodedScript, err := waddrmgr.EncodeTaprootScript(tapscript)
 	if err != nil {
 		return nil, fmt.Errorf("encode tapscript: %w", err)
-	}
-
-	if vault == nil {
-		return nil, fmt.Errorf("%w: keyVault", ErrMissingParam)
 	}
 
 	encryptedScript, err := vault.Encrypt(waddrmgr.CKTPublic, encodedScript)
@@ -932,6 +948,24 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 	if err != nil {
 		return OutputScriptInfo{}, fmt.Errorf("unable to get address info "+
 			"for %s: %w", addr.String(), err)
+	}
+
+	// Script-based outputs (P2SH multisig, P2WSH, taproot script-path) have
+	// no single spending public key; their subscript is the stored,
+	// encrypted redeem or witness script. Resolve it through the store and
+	// key vault rather than the pubkey-derived script path below.
+	if isScriptSpendAddress(addressInfo) {
+		script, err := w.scriptForAddressInfo(
+			ctx, addressInfo, output.PkScript,
+		)
+		if err != nil {
+			return OutputScriptInfo{}, err
+		}
+
+		return OutputScriptInfo{
+			AddressInfo: addressInfo,
+			Script:      script,
+		}, nil
 	}
 
 	witnessProgram, redeemScript, sigScript, err := buildScriptsForAddressInfo(
@@ -1054,7 +1088,8 @@ func derivationForAddressInfo(addressInfo AddressInfo) (
 		Bip32Path: []uint32{
 			keyScope.Purpose + hdkeychain.HardenedKeyStart,
 			keyScope.Coin + hdkeychain.HardenedKeyStart,
-			addressInfo.Derivation.Account + hdkeychain.HardenedKeyStart,
+			addressInfo.Derivation.Account +
+				hdkeychain.HardenedKeyStart,
 			addressInfo.Derivation.Branch,
 			addressInfo.Derivation.Index,
 		},
