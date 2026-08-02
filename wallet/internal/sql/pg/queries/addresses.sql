@@ -94,6 +94,16 @@ SELECT
     s.encrypted_script
 FROM addresses AS a
 LEFT JOIN address_secrets AS s ON a.id = s.address_id
+WHERE a.wallet_id = $1 AND a.script_pub_key = $2;
+
+-- name: GetAddressSecretByID :one
+-- Retrieves secret information for an address using its durable SQL row ID.
+SELECT
+    a.id AS address_id,
+    s.encrypted_priv_key,
+    s.encrypted_script
+FROM addresses AS a
+LEFT JOIN address_secrets AS s ON a.id = s.address_id
 WHERE a.wallet_id = $1 AND a.id = $2;
 
 -- name: CreateDerivedAddress :one
