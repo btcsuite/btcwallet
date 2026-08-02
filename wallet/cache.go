@@ -37,6 +37,12 @@ type runtimeCache interface {
 	GetAddress(ctx context.Context,
 		query db.GetAddressQuery) (*db.AddressInfo, error)
 
+	// GetAddressSecret returns encrypted address-level secret material.
+	// The result mirrors the underlying db.AddressStore.GetAddressSecret
+	// contract and never contains plaintext key or script material.
+	GetAddressSecret(ctx context.Context,
+		query db.GetAddressSecretQuery) (*db.AddressSecret, error)
+
 	// ListAddresses returns one page of addresses for the given query.
 	// Mirrors the underlying db.AddressStore.ListAddresses contract.
 	ListAddresses(ctx context.Context, query db.ListAddressesQuery) (
@@ -120,6 +126,20 @@ func (c *storeRuntimeCache) GetAddress(ctx context.Context,
 	query db.GetAddressQuery) (*db.AddressInfo, error) {
 
 	return c.store.GetAddress(ctx, query)
+}
+
+// GetAddressSecret delegates to the underlying db.Store.
+//
+// NOTE: pass-through today. See storeRuntimeCache's TODO(yy).
+//
+// TODO(yy): drop the wrapcheck exemption once the cache layer wraps
+// store errors with its own typed errors.
+//
+//nolint:wrapcheck
+func (c *storeRuntimeCache) GetAddressSecret(ctx context.Context,
+	query db.GetAddressSecretQuery) (*db.AddressSecret, error) {
+
+	return c.store.GetAddressSecret(ctx, query)
 }
 
 // ListAddresses delegates to the underlying db.Store.
