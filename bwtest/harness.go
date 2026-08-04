@@ -2,7 +2,10 @@ package bwtest
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sync"
@@ -15,6 +18,20 @@ import (
 )
 
 const (
+	// sqliteHeaderLen is the length of SQLite's fixed file header string.
+	sqliteHeaderLen = 16
+
+	// sqliteHeaderMagic is the header string every SQLite database starts
+	// with.
+	sqliteHeaderMagic = "SQLite format 3\x00"
+
+	// bboltMagicOffset is the offset of bbolt's magic within the first page
+	// header, bboltMagicLen is its width, and bboltMagic is the value
+	// stored there.
+	bboltMagicOffset = 16
+	bboltMagicLen    = 4
+	bboltMagic       = 0xED0CDAED
+
 	// defaultChainReconnectAttempts is the number of times the chain RPC client
 	// will attempt to reconnect before failing.
 	defaultChainReconnectAttempts = 5
@@ -207,7 +224,72 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	// registry-ordered teardown that stops wallets first.
 	h.Cleanup(func() { _ = manager.Close() })
 
+	// Verify the Manager opened the backend requested by the -db flag without
+	// adding a production accessor solely for the test.
+	h.Cleanup(h.assertBackendArtifact)
+
 	return manager
+}
+
+// assertBackendArtifact verifies the Manager created the requested database.
+func (h *HarnessTest) assertBackendArtifact() {
+	h.Helper()
+
+	err := validateBackendArtifact(h.dbType, h.WalletDBPath)
+	require.NoError(h, err)
+}
+
+// validateBackendArtifact verifies that a database file has the requested
+// backend's header.
+func validateBackendArtifact(dbType, dbPath string) error {
+	switch dbType {
+	case dbNameKvdb, dbNameSQLite:
+
+	default:
+		return fmt.Errorf("%w: %s", ErrUnknownDBBackend, dbType)
+	}
+
+	// The path is created and owned by the test harness.
+	f, err := os.Open(dbPath) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("open wallet database artifact: %w", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	// Read enough for both signatures: SQLite's header string, and bbolt's
+	// magic at offset 16 of the first page.
+	header := make([]byte, bboltMagicOffset+bboltMagicLen)
+
+	_, err = io.ReadFull(f, header)
+	if err != nil {
+		return fmt.Errorf("read wallet database header: %w", err)
+	}
+
+	sqlite := string(header[:sqliteHeaderLen]) == sqliteHeaderMagic
+	bbolt := binary.LittleEndian.Uint32(
+		header[bboltMagicOffset:bboltMagicOffset+bboltMagicLen],
+	) == bboltMagic
+
+	var detected string
+	switch {
+	case sqlite:
+		detected = dbNameSQLite
+
+	case bbolt:
+		detected = dbNameKvdb
+
+	default:
+		return fmt.Errorf("unrecognized wallet database artifact: %s",
+			dbPath)
+	}
+
+	if detected != dbType {
+		return fmt.Errorf("db=%s requested but %s is a %s database",
+			dbType, dbPath, detected)
+	}
+
+	return nil
 }
 
 // RegisterWallet registers a wallet with the harness.
