@@ -3,6 +3,7 @@ package bwtest
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -62,6 +63,10 @@ type HarnessTest struct {
 
 	// dbType is the configured wallet database backend.
 	dbType string
+
+	// managers holds the wallet managers created for this subtest. They are
+	// closed after every registered wallet has stopped.
+	managers []*wallet.Manager
 
 	// mu protects harness state that can be accessed across the main test and
 	// subtests. This includes the wallet registry and idempotent shutdown.
@@ -159,7 +164,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 		// If a test fails, we still try to stop wallets to avoid leaking
 		// goroutines into the next test, but we skip assertions.
 		if st.Failed() {
-			err := st.stopActiveWallets(context.Background())
+			err := st.teardownWallets(context.Background())
 			if err != nil {
 				st.Logf("failed to stop wallets during failed-test cleanup: %v",
 					err)
@@ -172,7 +177,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 			return
 		}
 
-		err := st.stopActiveWallets(context.Background())
+		err := st.teardownWallets(context.Background())
 		require.NoError(st, err, "failed to stop wallets")
 
 		mempool, err := st.getRawMempool()
@@ -220,15 +225,26 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	})
 	require.NoError(h, err, "failed to create wallet manager")
 
-	// Temporary: close this Manager directly. #1292 replaces this with the
-	// registry-ordered teardown that stops wallets first.
-	h.Cleanup(func() { _ = manager.Close() })
+	h.managers = append(h.managers, manager)
 
 	// Verify the Manager opened the backend requested by the -db flag without
 	// adding a production accessor solely for the test.
 	h.Cleanup(h.assertBackendArtifact)
 
 	return manager
+}
+
+// teardownWallets stops registered wallets and then closes their Managers.
+func (h *HarnessTest) teardownWallets(ctx context.Context) error {
+	err := h.stopActiveWallets(ctx)
+
+	for _, manager := range h.managers {
+		err = errors.Join(err, manager.Close())
+	}
+
+	h.managers = nil
+
+	return err
 }
 
 // assertBackendArtifact verifies the Manager created the requested database.
@@ -385,7 +401,9 @@ func (h *HarnessTest) Stop() {
 func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 	h.Helper()
 
-	for _, w := range h.ActiveWallets() {
+	var stopErr error
+
+	for i, w := range h.ActiveWallets() {
 		if w == nil {
 			// Keep cleanup robust against partially initialized test state. A
 			// caller could register a wallet reference and fail before the
@@ -400,11 +418,13 @@ func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 		// legacy fields initialized.
 		err := w.Stop(ctx)
 		if err != nil {
-			return fmt.Errorf("stop wallet: %w", err)
+			stopErr = errors.Join(stopErr, fmt.Errorf(
+				"stop wallet %d: %w", i, err,
+			))
 		}
 	}
 
-	return nil
+	return stopErr
 }
 
 // setUpChainClient creates and starts a chain client for the active harness

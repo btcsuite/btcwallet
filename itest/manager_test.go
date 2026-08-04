@@ -3,7 +3,6 @@
 package itest
 
 import (
-	"context"
 	"time"
 
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -37,15 +36,11 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
 
-	// Register so harness-level assertions can see this wallet.
+	// Register before Start so teardown owns the wallet even if Start fails.
+	// The harness stops every registered wallet and then closes every
+	// Manager. Do not add another Stop cleanup here; it would only stop the
+	// wallet early and duplicate the harness-owned teardown.
 	h.RegisterWallet(w)
-
-	// Temporary, until #1292 owns teardown through the registries: stop this
-	// wallet directly. Registered after the Manager's Close and run first,
-	// since testing.Cleanup is LIFO.
-	h.Cleanup(func() {
-		_ = w.Stop(context.Background())
-	})
 
 	err = w.Start(h.Context())
 	require.NoError(h, err, "failed to start wallet")
