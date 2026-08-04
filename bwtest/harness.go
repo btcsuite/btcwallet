@@ -178,10 +178,23 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	h.Helper()
 
-	// Fixed kvdb until #1292 introduces backend selection: this PR only
-	// moves database ownership to the Manager.
-	//nolint:staticcheck // This boundary intentionally exercises legacy kvdb.
-	backend := wallet.DBBackendKVDB
+	// Switch explicitly: mapping every unknown -db value onto kvdb would let
+	// `db=postgres` pass while exercising kvdb, and the PostgreSQL Manager is
+	// not part of this milestone.
+	var backend wallet.DBBackend
+
+	switch h.dbType {
+	case dbNameKvdb:
+		//nolint:staticcheck // This case intentionally exercises legacy kvdb.
+		backend = wallet.DBBackendKVDB
+
+	case dbNameSQLite:
+		backend = wallet.DBBackendSQLite
+
+	default:
+		h.Fatalf("unsupported -db value %q: the wallet Manager serves "+
+			"kvdb and sqlite", h.dbType)
+	}
 
 	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
 		Backend:     backend,
