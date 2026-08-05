@@ -19,4 +19,12 @@ var allTestCases = []*testCase{
 		Name:     "manager create wallet",
 		TestFunc: testCreateWallet,
 	},
+	{
+		Name:     "manager create duplicate",
+		TestFunc: testManagerCreateDuplicate,
+	},
+	{
+		Name:     "manager load missing",
+		TestFunc: testManagerLoadMissing,
+	},
 }
