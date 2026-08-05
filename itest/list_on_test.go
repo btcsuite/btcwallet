@@ -27,4 +27,16 @@ var allTestCases = []*testCase{
 		Name:     "manager load missing",
 		TestFunc: testManagerLoadMissing,
 	},
+	{
+		Name:     "controller start stop",
+		TestFunc: testControllerStartStop,
+	},
+	{
+		Name:     "controller unlock lock",
+		TestFunc: testControllerUnlockLock,
+	},
+	{
+		Name:     "controller info",
+		TestFunc: testControllerInfo,
+	},
 }
