@@ -3,10 +3,7 @@
 package itest
 
 import (
-	"time"
-
 	"github.com/btcsuite/btcwallet/bwtest"
-	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,24 +11,10 @@ import (
 func testCreateWallet(h *bwtest.HarnessTest) {
 	h.Helper()
 
-	// Create a wallet using the Manager API. The Manager owns the database
-	// selected by the -db flag; the wallet config carries no backend.
-	cfg := wallet.Config{
-		Chain:                   h.ChainClient,
-		ChainParams:             h.NetParams(),
-		RecoveryWindow:          20,
-		WalletSyncRetryInterval: 500 * time.Millisecond,
-		Name:                    "testwallet",
-		PubPassphrase:           []byte("public"),
-	}
-
+	// This is a manager-focused test, so drive the Manager API directly
+	// rather than the harness's CreateEmptyWallet convenience helper.
+	cfg, params := h.TestWalletConfig()
 	manager := h.NewWalletManager()
-	params := wallet.CreateWalletParams{
-		Mode:              wallet.ModeGenSeed,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now().Add(-1 * time.Hour),
-	}
 
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
