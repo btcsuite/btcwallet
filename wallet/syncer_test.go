@@ -203,6 +203,106 @@ func TestCheckRollbackNoReorg(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestCheckRollbackMissingHistoricalBlock verifies that a Store-backed wallet
+// accepts its persisted tip when its historical block range is unavailable.
+func TestCheckRollbackMissingHistoricalBlock(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The Store has a valid synced tip but cannot provide the oldest
+	// block requested by the rollback scan.
+	mockChain := &bwmock.Chain{}
+	store := &walletmock.Store{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, store, 0)
+
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	expectSyncedTip(store, tip)
+	store.On("ListSyncedBlocks", mock.Anything, db.ListSyncedBlocksQuery{
+		StartHeight: 91,
+		EndHeight:   100,
+	}).Return(nil, db.ErrBlockNotFound).Once()
+	mockChain.On("GetBlockHash", int64(100)).Return(&tip.Hash, nil).Once()
+
+	// Act & Assert: The persisted tip proves the wallet remains on the main
+	// chain, so no rollback is necessary.
+	err := s.checkRollback(t.Context())
+	require.NoError(t, err)
+	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+}
+
+// TestResolveMissingHistoricalBlockTipMismatch verifies that a mismatched tip
+// returns the original missing historical block error.
+func TestResolveMissingHistoricalBlockTipMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The SQL store cannot provide a historical block and the remote
+	// synced tip differs from the persisted tip.
+	mockChain := &bwmock.Chain{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, nil, 0)
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	remoteHash := chainhash.Hash{0x02}
+	listErr := db.ErrBlockNotFound
+
+	mockChain.On("GetBlockHash", int64(tip.Height)).Return(
+		&remoteHash, nil,
+	).Once()
+
+	// Act: Resolve the missing historical block against the mismatched tip.
+	err := s.resolveMissingHistoricalBlock(listErr, tip)
+
+	// Assert: The list error is returned without replacement.
+	require.Same(t, listErr, err)
+	require.ErrorIs(t, err, db.ErrBlockNotFound)
+	mockChain.AssertExpectations(t)
+}
+
+// TestResolveMissingHistoricalBlockChainLookupError verifies that a chain
+// lookup failure is wrapped while resolving a missing historical block.
+func TestResolveMissingHistoricalBlockChainLookupError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The SQL store cannot provide a historical block and the chain
+	// backend cannot load the persisted synced tip.
+	mockChain := &bwmock.Chain{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, nil, 0)
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	mockChain.On("GetBlockHash", int64(tip.Height)).Return(
+		nil, errDBFail,
+	).Once()
+
+	// Act: Resolve the missing historical block.
+	err := s.resolveMissingHistoricalBlock(db.ErrBlockNotFound, tip)
+
+	// Assert: The chain error has context and remains available to callers.
+	require.ErrorContains(t, err, "get synced block hash")
+	require.ErrorIs(t, err, errDBFail)
+	mockChain.AssertExpectations(t)
+}
+
+// TestResolveMissingHistoricalBlockLegacyManagerError verifies that legacy
+// kvdb manager not-found errors remain compatible with rollback handling.
+func TestResolveMissingHistoricalBlockLegacyManagerError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A legacy kvdb manager reports a missing historical block and the
+	// persisted synced tip matches the chain backend.
+	mockChain := &bwmock.Chain{}
+	s := newSyncer(Config{Chain: mockChain}, nil, nil, nil, nil, 0)
+	tip := waddrmgr.BlockStamp{Height: 100, Hash: chainhash.Hash{0x01}}
+	mockChain.On("GetBlockHash", int64(tip.Height)).Return(
+		&tip.Hash, nil,
+	).Once()
+
+	listErr := waddrmgr.ManagerError{ErrorCode: waddrmgr.ErrBlockNotFound}
+
+	// Act: Resolve the legacy missing historical block error.
+	err := s.resolveMissingHistoricalBlock(listErr, tip)
+
+	// Assert: The matching chain tip permits rollback initialization.
+	require.NoError(t, err)
+	mockChain.AssertExpectations(t)
+}
+
 // TestCheckRollbackDetected verifies checkRollback when reorg is detected.
 func TestCheckRollbackDetected(t *testing.T) {
 	t.Parallel()
@@ -3307,7 +3407,6 @@ func TestProcessChainUpdate_Disconnect(t *testing.T) {
 	)
 
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
-
 	// The store and the remote chain agree across the scanned batch, so the
 	// rollback check finds no reorg.
 	expectMatchingRollbackBatch(store, mockChain)
@@ -5353,6 +5452,7 @@ func TestHandleChainUpdate_Error(t *testing.T) {
 
 	// Assert: Verify failure.
 	require.ErrorContains(t, err, "failed to process chain update")
+	store.AssertExpectations(t)
 }
 
 // TestRunSyncStep_Success verifies the idle path in runSyncStep.

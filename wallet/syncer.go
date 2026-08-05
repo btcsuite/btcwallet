@@ -430,7 +430,7 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 			ctx, startHeight, endHeight,
 		)
 		if err != nil {
-			return err
+			return s.resolveMissingHistoricalBlock(err, syncedTo)
 		}
 
 		// Fetch Remote Batch - Fetch corresponding hashes from the
@@ -489,6 +489,32 @@ func (s *syncer) checkRollback(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// resolveMissingHistoricalBlock accepts a missing historical block when the
+// persisted synced tip matches the chain backend.
+func (s *syncer) resolveMissingHistoricalBlock(listErr error,
+	syncedTo waddrmgr.BlockStamp) error {
+
+	if !errors.Is(listErr, db.ErrBlockNotFound) {
+		var managerErr waddrmgr.ManagerError
+		if !errors.As(listErr, &managerErr) ||
+			managerErr.ErrorCode != waddrmgr.ErrBlockNotFound {
+
+			return listErr
+		}
+	}
+
+	remoteHash, err := s.cfg.Chain.GetBlockHash(int64(syncedTo.Height))
+	if err != nil {
+		return fmt.Errorf("get synced block hash: %w", err)
+	}
+
+	if syncedTo.Hash.IsEqual(remoteHash) {
+		return nil
+	}
+
+	return listErr
 }
 
 // rewindToBlock rewinds wallet sync and transaction state to the given fork

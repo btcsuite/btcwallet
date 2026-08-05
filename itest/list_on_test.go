@@ -24,6 +24,10 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateDuplicate,
 	},
 	{
+		Name:     "manager load reload",
+		TestFunc: testManagerLoadReload,
+	},
+	{
 		Name:     "manager load missing",
 		TestFunc: testManagerLoadMissing,
 	},
