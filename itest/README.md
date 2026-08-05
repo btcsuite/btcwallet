@@ -14,7 +14,8 @@ make itest
 make itest chain=btcd
 make itest chain=bitcoind
 
-# Select a wallet database backend.
+# Select a wallet database backend. Default: sqlite.
+make itest db=sqlite
 make itest db=kvdb
 
 # Filter cases by regex.
