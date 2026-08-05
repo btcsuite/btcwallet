@@ -18,6 +18,9 @@ const (
 	// dbNameKvdb is the identifier used for the kvdb wallet backend.
 	dbNameKvdb = "kvdb"
 
+	// dbNameSQLite is the identifier used for the SQLite wallet backend.
+	dbNameSQLite = "sqlite"
+
 	// kvdbDriver is the walletdb driver name used for kvdb.
 	kvdbDriver = "bdb"
 

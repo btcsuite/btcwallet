@@ -1,7 +1,6 @@
 package bwtest
 
 import (
-	"context"
 	"strings"
 	"time"
 
@@ -68,19 +67,11 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
 
-	// Register so harness-level assertions (MineBlocks and friends) can see
-	// this wallet.
+	// Register before Start, and only register: teardownWallets is the single
+	// cleanup owner. Registering after Start would leave a wallet whose Start
+	// failed unregistered, and a second direct Stop callback here would stop a
+	// successful one twice, out of order with the Manager close.
 	h.RegisterWallet(w)
-
-	// Temporary, until #1292 owns teardown through the registries: stop this
-	// wallet directly. The callback is registered after NewWalletManager's
-	// Close, and testing.Cleanup runs LIFO, so the wallet stops before the
-	// Manager closes the database underneath it.
-	h.Cleanup(func() {
-		// A background context: the test context may already be done by
-		// the time cleanup runs.
-		_ = w.Stop(context.Background())
-	})
 
 	err = w.Start(h.Context())
 	require.NoError(h, err, "failed to start wallet")

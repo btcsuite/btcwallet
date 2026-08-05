@@ -2,7 +2,11 @@ package bwtest
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sync"
@@ -15,6 +19,20 @@ import (
 )
 
 const (
+	// sqliteHeaderLen is the length of SQLite's fixed file header string.
+	sqliteHeaderLen = 16
+
+	// sqliteHeaderMagic is the header string every SQLite database starts
+	// with.
+	sqliteHeaderMagic = "SQLite format 3\x00"
+
+	// bboltMagicOffset is the offset of bbolt's magic within the first page
+	// header, bboltMagicLen is its width, and bboltMagic is the value
+	// stored there.
+	bboltMagicOffset = 16
+	bboltMagicLen    = 4
+	bboltMagic       = 0xED0CDAED
+
 	// defaultChainReconnectAttempts is the number of times the chain RPC client
 	// will attempt to reconnect before failing.
 	defaultChainReconnectAttempts = 5
@@ -45,6 +63,10 @@ type HarnessTest struct {
 
 	// dbType is the configured wallet database backend.
 	dbType string
+
+	// managers holds the wallet managers created for this subtest. They are
+	// closed after every registered wallet has stopped.
+	managers []*wallet.Manager
 
 	// mu protects harness state that can be accessed across the main test and
 	// subtests. This includes the wallet registry and idempotent shutdown.
@@ -142,7 +164,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 		// If a test fails, we still try to stop wallets to avoid leaking
 		// goroutines into the next test, but we skip assertions.
 		if st.Failed() {
-			err := st.stopActiveWallets(context.Background())
+			err := st.teardownWallets(context.Background())
 			if err != nil {
 				st.Logf("failed to stop wallets during failed-test cleanup: %v",
 					err)
@@ -155,7 +177,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 			return
 		}
 
-		err := st.stopActiveWallets(context.Background())
+		err := st.teardownWallets(context.Background())
 		require.NoError(st, err, "failed to stop wallets")
 
 		mempool, err := st.getRawMempool()
@@ -178,10 +200,23 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	h.Helper()
 
-	// Fixed kvdb until #1292 introduces backend selection: this PR only
-	// moves database ownership to the Manager.
-	//nolint:staticcheck // This boundary intentionally exercises legacy kvdb.
-	backend := wallet.DBBackendKVDB
+	// Switch explicitly: mapping every unknown -db value onto kvdb would let
+	// `db=postgres` pass while exercising kvdb, and the PostgreSQL Manager is
+	// not part of this milestone.
+	var backend wallet.DBBackend
+
+	switch h.dbType {
+	case dbNameKvdb:
+		//nolint:staticcheck // This case intentionally exercises legacy kvdb.
+		backend = wallet.DBBackendKVDB
+
+	case dbNameSQLite:
+		backend = wallet.DBBackendSQLite
+
+	default:
+		h.Fatalf("unsupported -db value %q: the wallet Manager serves "+
+			"kvdb and sqlite", h.dbType)
+	}
 
 	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
 		Backend:     backend,
@@ -190,11 +225,87 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	})
 	require.NoError(h, err, "failed to create wallet manager")
 
-	// Temporary: close this Manager directly. #1292 replaces this with the
-	// registry-ordered teardown that stops wallets first.
-	h.Cleanup(func() { _ = manager.Close() })
+	h.managers = append(h.managers, manager)
+
+	// Verify the Manager opened the backend requested by the -db flag without
+	// adding a production accessor solely for the test.
+	h.Cleanup(h.assertBackendArtifact)
 
 	return manager
+}
+
+// teardownWallets stops registered wallets and then closes their Managers.
+func (h *HarnessTest) teardownWallets(ctx context.Context) error {
+	err := h.stopActiveWallets(ctx)
+
+	for _, manager := range h.managers {
+		err = errors.Join(err, manager.Close())
+	}
+
+	h.managers = nil
+
+	return err
+}
+
+// assertBackendArtifact verifies the Manager created the requested database.
+func (h *HarnessTest) assertBackendArtifact() {
+	h.Helper()
+
+	err := validateBackendArtifact(h.dbType, h.WalletDBPath)
+	require.NoError(h, err)
+}
+
+// validateBackendArtifact verifies that a database file has the requested
+// backend's header.
+func validateBackendArtifact(dbType, dbPath string) error {
+	switch dbType {
+	case dbNameKvdb, dbNameSQLite:
+
+	default:
+		return fmt.Errorf("%w: %s", ErrUnknownDBBackend, dbType)
+	}
+
+	// The path is created and owned by the test harness.
+	f, err := os.Open(dbPath) //nolint:gosec
+	if err != nil {
+		return fmt.Errorf("open wallet database artifact: %w", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	// Read enough for both signatures: SQLite's header string, and bbolt's
+	// magic at offset 16 of the first page.
+	header := make([]byte, bboltMagicOffset+bboltMagicLen)
+
+	_, err = io.ReadFull(f, header)
+	if err != nil {
+		return fmt.Errorf("read wallet database header: %w", err)
+	}
+
+	sqlite := string(header[:sqliteHeaderLen]) == sqliteHeaderMagic
+	bbolt := binary.LittleEndian.Uint32(
+		header[bboltMagicOffset:bboltMagicOffset+bboltMagicLen],
+	) == bboltMagic
+
+	var detected string
+	switch {
+	case sqlite:
+		detected = dbNameSQLite
+
+	case bbolt:
+		detected = dbNameKvdb
+
+	default:
+		return fmt.Errorf("unrecognized wallet database artifact: %s",
+			dbPath)
+	}
+
+	if detected != dbType {
+		return fmt.Errorf("db=%s requested but %s is a %s database",
+			dbType, dbPath, detected)
+	}
+
+	return nil
 }
 
 // RegisterWallet registers a wallet with the harness.
@@ -290,7 +401,9 @@ func (h *HarnessTest) Stop() {
 func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 	h.Helper()
 
-	for _, w := range h.ActiveWallets() {
+	var stopErr error
+
+	for i, w := range h.ActiveWallets() {
 		if w == nil {
 			// Keep cleanup robust against partially initialized test state. A
 			// caller could register a wallet reference and fail before the
@@ -305,11 +418,13 @@ func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 		// legacy fields initialized.
 		err := w.Stop(ctx)
 		if err != nil {
-			return fmt.Errorf("stop wallet: %w", err)
+			stopErr = errors.Join(stopErr, fmt.Errorf(
+				"stop wallet %d: %w", i, err,
+			))
 		}
 	}
 
-	return nil
+	return stopErr
 }
 
 // setUpChainClient creates and starts a chain client for the active harness
