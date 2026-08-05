@@ -211,12 +211,15 @@ jobs:
   ########################
   # Run bwtest integration tests against each supported chain backend.
   #
-  # These jobs currently use kvdb only. Database expansion is planned via a
-  # separate matrix in a future change.
+  # Each job runs over both wallet database backends (kvdb and sqlite).
   ########################
   itest-btcd:
-    name: itest btcd
+    name: itest btcd (${{ matrix.db }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [kvdb, sqlite]
     steps:
       - name: git checkout
         uses: actions/checkout@v5
@@ -240,14 +243,14 @@ jobs:
 
       # The btcd backend job runs btcd for both the shared miner and the chain
       # backend under test.
-      - name: run itest (btcd, kvdb)
-        run: make itest chain=btcd db=kvdb
+      - name: run itest (btcd, ${{ matrix.db }})
+        run: make itest chain=btcd db=${{ matrix.db }}
 
       - name: upload itest logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: itest-logs-btcd
+          name: itest-logs-btcd-${{ matrix.db }}
           path: itest/test-logs
           retention-days: 5
 
@@ -257,12 +260,16 @@ jobs:
   # Job flow:
   # - Install btcd `${{ env.BTCD_VERSION_LATEST }}`.
   # - Use btcd as the shared miner for the suite.
-  # - Run `make itest chain=neutrino db=kvdb` so wallets use the in-process
-  #   neutrino backend while blocks/peers come from btcd.
+  # - Run `make itest chain=neutrino db=${{ matrix.db }}` so wallets use the
+  #   in-process neutrino backend while blocks/peers come from btcd.
   ########################
   itest-neutrino:
-    name: itest neutrino
+    name: itest neutrino (${{ matrix.db }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [kvdb, sqlite]
     steps:
       - name: git checkout
         uses: actions/checkout@v5
@@ -286,14 +293,14 @@ jobs:
 
       # Neutrino runs in-process, but it still relies on the shared btcd miner
       # for chain data and peer connectivity.
-      - name: run itest (neutrino, kvdb)
-        run: make itest chain=neutrino db=kvdb
+      - name: run itest (neutrino, ${{ matrix.db }})
+        run: make itest chain=neutrino db=${{ matrix.db }}
 
       - name: upload itest logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: itest-logs-neutrino
+          name: itest-logs-neutrino-${{ matrix.db }}
           path: itest/test-logs
           retention-days: 5
 
@@ -304,15 +311,16 @@ jobs:
   # - Install btcd `${{ env.BTCD_VERSION_LATEST }}` as the shared miner.
   # - Run a matrix over bitcoind versions `30` (latest) and `28` (older).
   # - Extract each matrix binary from the docker image and run
-  #   `make itest chain=bitcoind db=kvdb`.
+  #   `make itest chain=bitcoind db=${{ matrix.db }}`.
   ########################
   itest-bitcoind:
-    name: itest bitcoind (v${{ matrix.bitcoind_version }})
+    name: itest bitcoind (v${{ matrix.bitcoind_version }}, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         bitcoind_version: ['30', '28']
+        db: [kvdb, sqlite]
     steps:
       - name: git checkout
         uses: actions/checkout@v5
@@ -355,14 +363,14 @@ jobs:
           docker rm $CONTAINER_ID
           bitcoind --version
 
-      - name: run itest (bitcoind, kvdb)
-        run: make itest chain=bitcoind db=kvdb
+      - name: run itest (bitcoind, ${{ matrix.db }})
+        run: make itest chain=bitcoind db=${{ matrix.db }}
 
       - name: upload itest logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: itest-logs-bitcoind-${{ matrix.bitcoind_version }}
+          name: itest-logs-bitcoind-${{ matrix.bitcoind_version }}-${{ matrix.db }}
           path: itest/test-logs
           retention-days: 5
 
