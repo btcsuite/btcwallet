@@ -26,12 +26,12 @@ var (
 
 	// dbBackend defines the database backend to be used for the wallet
 	// storage.
-	// Options: "kvdb" (default), "sqlite", "postgres".
+	// Options: "sqlite" (default), "kvdb", "postgres".
 	//
 	// This flag allows verifying that the wallet functions correctly across all
 	// supported database drivers.
 	dbBackend = flag.String(
-		"db", "kvdb",
+		"db", "sqlite",
 		"database backend to use (kvdb, sqlite, postgres)",
 	)
 
