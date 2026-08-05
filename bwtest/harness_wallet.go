@@ -16,8 +16,9 @@ const (
 	// defaultPubPass is the standard public passphrase used by test wallets.
 	defaultPubPass = "public"
 
-	// defaultPrivPass is the standard private passphrase used by test wallets.
-	defaultPrivPass = "private"
+	// TestWalletPrivatePassphrase is the standard private passphrase used by
+	// harness test wallets.
+	TestWalletPrivatePassphrase = "private"
 
 	// defaultWalletRecoveryWindow keeps enough look-ahead addresses for test
 	// cases that derive multiple addresses while scanning historical blocks.
@@ -28,27 +29,25 @@ const (
 	defaultWalletSyncRetryInterval = 500 * time.Millisecond
 )
 
-// CreateEmptyWallet creates, starts, and registers a new wallet instance.
-//
-// This is intended for non-manager integration tests that want a ready-to-use
-// wallet without repeating boilerplate.
-func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
-	h.Helper()
+// TestWalletConfig builds the standard Config and CreateWalletParams for a
+// harness test wallet. Callers retain ownership of the wallet lifecycle.
+func (h *HarnessTest) TestWalletConfig() (wallet.Config,
+	wallet.CreateWalletParams) {
 
-	name := "itest-" + strings.ReplaceAll(h.Name(), "/", "_")
+	h.Helper()
 
 	cfg := wallet.Config{
 		// The chain client is prepared by the harness; the database is
 		// owned by the Manager built below.
-		Chain: h.ChainClient,
+		Chain:       h.ChainClient,
+		ChainParams: h.NetParams(),
 
 		// Keep network and startup behavior deterministic across tests.
-		ChainParams:             h.NetParams(),
 		RecoveryWindow:          defaultWalletRecoveryWindow,
 		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
 
 		// Use a unique wallet name per test to avoid collisions in logs.
-		Name:          name,
+		Name:          "itest-" + strings.ReplaceAll(h.Name(), "/", "_"),
 		PubPassphrase: []byte(defaultPubPass),
 	}
 
@@ -56,12 +55,24 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 		// Generate a fresh seed for each test wallet.
 		Mode:              wallet.ModeGenSeed,
 		PubPassphrase:     []byte(defaultPubPass),
-		PrivatePassphrase: []byte(defaultPrivPass),
+		PrivatePassphrase: []byte(TestWalletPrivatePassphrase),
 
 		// Use an old birthday to ensure the wallet can discover historical
 		// blocks when used in tests that pre-mine chain state.
 		Birthday: time.Now().Add(-1 * time.Hour),
 	}
+
+	return cfg, params
+}
+
+// CreateEmptyWallet creates, starts, and registers a new wallet instance.
+//
+// This is intended for non-manager integration tests that want a ready-to-use
+// wallet without repeating boilerplate.
+func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
+	h.Helper()
+
+	cfg, params := h.TestWalletConfig()
 
 	manager := h.NewWalletManager()
 	w, err := manager.Create(cfg, params)
@@ -88,7 +99,7 @@ func (h *HarnessTest) CreateFundedWallet() *wallet.Wallet {
 	w := h.CreateEmptyWallet()
 
 	err := w.Unlock(h.Context(), wallet.UnlockRequest{
-		Passphrase: []byte(defaultPrivPass),
+		Passphrase: []byte(TestWalletPrivatePassphrase),
 	})
 	require.NoError(h, err, "failed to unlock wallet")
 
