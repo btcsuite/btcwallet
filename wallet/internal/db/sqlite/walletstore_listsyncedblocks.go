@@ -75,7 +75,7 @@ func (s *Store) ListSyncedBlocks(ctx context.Context,
 
 			if block.Height != height {
 				return fmt.Errorf("get block %d: %w", height,
-					sql.ErrNoRows)
+					db.ErrBlockNotFound)
 			}
 
 			blocks = append(blocks, *block)
@@ -86,7 +86,7 @@ func (s *Store) ListSyncedBlocks(ctx context.Context,
 		// the tail of the range.
 		if len(blocks) != int(expected) {
 			return fmt.Errorf("get block %d: %w", height,
-				sql.ErrNoRows)
+				db.ErrBlockNotFound)
 		}
 
 		return nil
