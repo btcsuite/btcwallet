@@ -324,6 +324,57 @@ func (h *HarnessTest) RegisterWallet(w *wallet.Wallet) {
 	h.mu.Unlock()
 }
 
+// DeregisterWallet releases a wallet from harness ownership.
+//
+// It returns false when the wallet is nil or was not registered. The remaining
+// registrations retain their original order.
+func (h *HarnessTest) DeregisterWallet(w *wallet.Wallet) bool {
+	h.Helper()
+
+	if w == nil {
+		return false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for i, registered := range h.wallets {
+		if registered != w {
+			continue
+		}
+
+		h.wallets = append(h.wallets[:i], h.wallets[i+1:]...)
+
+		return true
+	}
+
+	return false
+}
+
+// ReleaseManager releases a Manager from harness teardown ownership.
+//
+// It returns false when the Manager is nil or was not registered. The remaining
+// registrations retain their original order.
+func (h *HarnessTest) ReleaseManager(manager *wallet.Manager) bool {
+	h.Helper()
+
+	if manager == nil {
+		return false
+	}
+
+	for i, registered := range h.managers {
+		if registered != manager {
+			continue
+		}
+
+		h.managers = append(h.managers[:i], h.managers[i+1:]...)
+
+		return true
+	}
+
+	return false
+}
+
 // ActiveWallets returns a snapshot of wallets registered with this harness.
 func (h *HarnessTest) ActiveWallets() []*wallet.Wallet {
 	h.Helper()
