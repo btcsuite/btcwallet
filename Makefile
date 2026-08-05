@@ -175,7 +175,7 @@ itest:
 		$(filter-out -test.run=%,$(TEST_FLAGS)) \
 		-args \
 		-chain="$(if $(backend),$(backend),$(if $(chain),$(chain),btcd))" \
-		-db="$(if $(db),$(db),kvdb)"
+		-db="$(if $(db),$(db),sqlite)"
 
 # =========
 # UTILITIES
