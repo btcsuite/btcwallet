@@ -11,6 +11,91 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDeregisterWalletRemovesRegisteredWallet verifies that deregistration
+// removes exactly the requested wallet, preserves the order of the remaining
+// registrations, and reports absent wallets without failing.
+func TestDeregisterWalletRemovesRegisteredWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a harness with three registered wallet identities.
+	h := &HarnessTest{T: t}
+	first := &wallet.Wallet{}
+	removed := &wallet.Wallet{}
+	last := &wallet.Wallet{}
+
+	h.RegisterWallet(first)
+	h.RegisterWallet(removed)
+	h.RegisterWallet(last)
+
+	// Act: the middle wallet is deregistered.
+	require.True(t, h.DeregisterWallet(removed))
+
+	// Assert: only it is removed, ordering is retained, and absence is safe.
+	active := h.ActiveWallets()
+	require.Len(t, active, 2)
+	require.Same(t, first, active[0])
+	require.Same(t, last, active[1])
+	require.False(t, h.DeregisterWallet(removed))
+	require.False(t, h.DeregisterWallet(nil))
+}
+
+// TestReleaseManagerRemovesRegisteredManager verifies that releasing a Manager
+// preserves the remaining teardown order and reports an absent Manager.
+func TestReleaseManagerRemovesRegisteredManager(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a harness with three Manager registrations.
+	first := &wallet.Manager{}
+	released := &wallet.Manager{}
+	last := &wallet.Manager{}
+	h := &HarnessTest{
+		T:        t,
+		managers: []*wallet.Manager{first, released, last},
+	}
+
+	// Act: the middle Manager is released from teardown ownership.
+	require.True(t, h.ReleaseManager(released))
+
+	// Assert: only it is removed, ordering is retained, and absence is safe.
+	require.Len(t, h.managers, 2)
+	require.Same(t, first, h.managers[0])
+	require.Same(t, last, h.managers[1])
+	require.False(t, h.ReleaseManager(released))
+	require.False(t, h.ReleaseManager(nil))
+}
+
+// TestReleaseManagerTransfersTeardownOwnership verifies that a successfully
+// closed Manager can be removed from teardown without a second close.
+func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a Manager owned by a harness.
+	h := &HarnessTest{
+		T:            t,
+		dbType:       "kvdb",
+		WalletDBPath: filepath.Join(t.TempDir(), "wallet.db"),
+	}
+	manager := h.NewWalletManager()
+
+	// Act: the test closes the Manager before releasing teardown ownership.
+	require.NoError(t, manager.Close())
+	require.True(t, h.ReleaseManager(manager))
+
+	// Assert: teardown succeeds without a second close and the database
+	// reopened.
+	require.NoError(t, h.teardownWallets(t.Context()))
+	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
+		//nolint:staticcheck // This test intentionally reopens legacy kvdb.
+		Backend:     wallet.DBBackendKVDB,
+		DataSource:  h.WalletDBPath,
+		ChainParams: h.NetParams(),
+	})
+	require.NoError(
+		t, err, "released Manager must leave the database available",
+	)
+	require.NoError(t, reopened.Close())
+}
+
 // TestTeardownWalletsClosesManagerAfterFailedCreate verifies that centralized
 // teardown releases a Manager even when wallet creation fails.
 func TestTeardownWalletsClosesManagerAfterFailedCreate(t *testing.T) {
