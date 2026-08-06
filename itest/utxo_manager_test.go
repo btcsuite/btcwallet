@@ -272,3 +272,92 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 	tx := h.AssertTxInMempool(*txid)
 	h.MineBlockWithTx(tx)
 }
+
+// testGetUtxo verifies GetUtxo returns wallet-facing metadata for owned
+// outpoints, rejects unknown and foreign outpoints, and is forbidden before
+// Start.
+func testGetUtxo(h *bwtest.HarnessTest) {
+	w := createWallet(h)
+
+	// GetUtxo is forbidden before Start.
+	_, err := w.GetUtxo(h.Context(), unknownOutpoint())
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"get utxo before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	// The Spendable assertion below required unlocking the wallet.
+	h.UnlockWallet(w)
+
+	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+
+	// Iterate a slice rather than a map so the assertions run in a
+	// deterministic order and a duplicated outpoint can never collapse
+	// coverage.
+	funded := []struct {
+		op     wire.OutPoint
+		amount btcutil.Amount
+	}{
+		{outpoints[0], oneBTC},
+		{outpoints[1], twoBTC},
+	}
+
+	// Every funded outpoint resolves with its funding metadata.
+	for _, f := range funded {
+		utxo, err := w.GetUtxo(h.Context(), f.op)
+		require.NoError(h, err, "failed to get funded utxo")
+		require.Equal(h, f.op, utxo.OutPoint, "outpoint mismatch")
+		require.Equal(h, f.amount, utxo.Amount, "amount mismatch")
+		require.Equal(
+			h, int32(1), utxo.Confirmations, "confirmation mismatch",
+		)
+		require.True(h, utxo.Spendable, "funded output not spendable")
+		require.False(h, utxo.Locked, "funded output locked")
+		require.Equal(
+			h, waddrmgr.DefaultAccountName, utxo.Account,
+			"account mismatch",
+		)
+	}
+
+	// An outpoint that was never mined is unknown to the wallet.
+	_, err = w.GetUtxo(h.Context(), unknownOutpoint())
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"unknown outpoint not rejected",
+	)
+
+	// The funding transaction contains one change output back to the miner
+	// in addition to the wallet outputs, so exactly one index in
+	// [0, len(outpoints)] is not wallet-owned. That output exists on chain
+	// but belongs to the miner, so the wallet must reject it as unknown.
+	owned := make(map[uint32]bool, len(outpoints))
+	for _, op := range outpoints {
+		owned[op.Index] = true
+	}
+
+	changeIndex := -1
+	for i := range len(outpoints) + 1 {
+		if !owned[uint32(i)] {
+			changeIndex = i
+
+			break
+		}
+	}
+
+	require.NotEqual(
+		h, -1, changeIndex, "funding transaction has no change output",
+	)
+
+	foreign := wire.OutPoint{
+		Hash:  outpoints[0].Hash,
+		Index: uint32(changeIndex),
+	}
+
+	_, err = w.GetUtxo(h.Context(), foreign)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"foreign outpoint not rejected",
+	)
+}
