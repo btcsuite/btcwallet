@@ -3,10 +3,13 @@
 package itest
 
 import (
+	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
 
@@ -157,4 +160,154 @@ func testManagerLoadMissing(h *bwtest.HarnessTest) {
 	manager := h.NewWalletManager()
 	_, err := manager.Load(cfg)
 	require.Error(h, err, "load of never-created wallet should fail")
+}
+
+// testManagerCreateWatchOnly verifies that a watch-only wallet is created,
+// starts, syncs like a spendable wallet, and stays watch-only across a reload
+// from the durable store.
+//
+// The wallet is rootless: that is the one watch-only shape every backend can
+// represent, and its keyspace arrives later as account-level xpub imports. An
+// XPub root is a SQL-only variant, covered by the Manager unit tests.
+func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
+	cfg, params := h.TestWalletConfig()
+	params.Mode = wallet.ModeShell
+	params.WatchOnly = true
+
+	manager := h.NewWalletManager()
+	w, err := manager.Create(cfg, params)
+	require.NoError(h, err, "failed to create watch-only wallet")
+	h.RegisterWallet(w)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	h.AssertWalletSynced(w)
+
+	require.True(h, w.IsWatchOnly(), "created wallet is not watch-only")
+
+	// A watch-only wallet tracks the chain like any other wallet.
+	h.MineBlocks(1)
+
+	// Keep both resources registered until shutdown succeeds, then reload from
+	// the durable store with a fresh Manager.
+	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+	require.NoError(h, manager.Close(), "failed to close wallet manager")
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+
+	manager = h.NewWalletManager()
+	reloaded, err := manager.Load(cfg)
+	require.NoError(h, err, "failed to reload watch-only wallet")
+	h.RegisterWallet(reloaded)
+
+	require.NoError(
+		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
+	)
+	require.True(
+		h, reloaded.IsWatchOnly(),
+		"reloaded wallet lost its watch-only state",
+	)
+}
+
+// testManagerRejectInvalidWatchOnlyParams verifies that invalid create
+// parameters are rejected before a wallet can be created.
+func testManagerRejectInvalidWatchOnlyParams(h *bwtest.HarnessTest) {
+	// The entries are never imported: every request below is rejected on its
+	// parameters alone, so a named placeholder account is enough.
+	initialAccounts := []wallet.WatchOnlyAccount{{Name: "watchonly"}}
+
+	neuteredRootKey := rootPubKey(h)
+	privateRootKey := masterKey(h)
+
+	manager := h.NewWalletManager()
+
+	testCases := []struct {
+		name   string
+		update func(*wallet.CreateWalletParams)
+	}{
+		{
+			name: "xpub spendable",
+			update: func(params *wallet.CreateWalletParams) {
+				params.Mode = wallet.ModeImportExtKey
+				params.RootKey = neuteredRootKey
+				params.WatchOnly = false
+			},
+		},
+		{
+			name: "initial accounts spendable",
+			update: func(params *wallet.CreateWalletParams) {
+				params.Mode = wallet.ModeShell
+				params.WatchOnly = false
+				params.InitialAccounts = initialAccounts
+			},
+		},
+		{
+			name: "initial accounts outside shell mode",
+			update: func(params *wallet.CreateWalletParams) {
+				params.WatchOnly = true
+				params.InitialAccounts = initialAccounts
+			},
+		},
+		{
+			name: "rootless spendable",
+			update: func(params *wallet.CreateWalletParams) {
+				params.Mode = wallet.ModeShell
+				params.WatchOnly = false
+			},
+		},
+		{
+			name: "seed watch-only",
+			update: func(params *wallet.CreateWalletParams) {
+				params.WatchOnly = true
+			},
+		},
+		{
+			name: "private root watch-only",
+			update: func(params *wallet.CreateWalletParams) {
+				params.Mode = wallet.ModeImportExtKey
+				params.RootKey = privateRootKey
+				params.WatchOnly = true
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		h.Run(tc.name, func(t *testing.T) {
+			cfg, params := h.TestWalletConfig()
+			tc.update(&params)
+
+			w, err := manager.Create(cfg, params)
+			require.ErrorIs(
+				t, err, wallet.ErrWalletParams,
+				"rejected create returned a different error",
+			)
+			require.Nil(t, w, "rejected create returned a wallet")
+		})
+	}
+}
+
+// rootPubKey returns a neutered master extended key for the harness network.
+func rootPubKey(h *bwtest.HarnessTest) *hdkeychain.ExtendedKey {
+	h.Helper()
+
+	rootPub, err := masterKey(h).Neuter()
+	require.NoError(h, err, "failed to neuter the master key")
+
+	return rootPub
+}
+
+// masterKey derives the master extended private key for the harness network
+// from a fixed seed. Every wallet keyed by it is rejected before creation, so
+// nothing persists it and a failure reproduces with the same key material.
+func masterKey(h *bwtest.HarnessTest) *hdkeychain.ExtendedKey {
+	h.Helper()
+
+	seed := make([]byte, hdkeychain.RecommendedSeedLen)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+
+	root, err := hdkeychain.NewMaster(seed, h.NetParams())
+	require.NoError(h, err, "failed to derive the master key")
+
+	return root
 }
