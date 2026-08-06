@@ -35,12 +35,7 @@ type stubAccountDeriveFn struct {
 func newStubAccountDeriveFn(t *testing.T) stubAccountDeriveFn {
 	t.Helper()
 
-	seed := make([]byte, hdkeychain.RecommendedSeedLen)
-	for i := range seed {
-		seed[i] = byte(i + 1)
-	}
-
-	masterKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	masterKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
 	require.NoError(t, err)
 
 	fingerprint, err := masterKeyFingerprint(masterKey)
