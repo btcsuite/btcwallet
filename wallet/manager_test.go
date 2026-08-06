@@ -654,6 +654,76 @@ func TestValidateInitialAccountsModeUpfront(t *testing.T) {
 	}
 }
 
+// TestValidateWatchOnlyRootKey verifies that the requested watch-only state is
+// checked against the derived root key. params.WatchOnly is what every backend
+// persists, so a contradicting key must be rejected rather than reinterpreted.
+func TestValidateWatchOnlyRootKey(t *testing.T) {
+	t.Parallel()
+
+	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	rootPubKey, err := rootKey.Neuter()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		watchOnly  bool
+		rootKey    *hdkeychain.ExtendedKey
+		wantErrMsg string
+	}{
+		{
+			name:    "spendable wallet with a private root key",
+			rootKey: rootKey,
+		},
+		{
+			name:      "watch-only wallet with a neutered root key",
+			watchOnly: true,
+			rootKey:   rootPubKey,
+		},
+		{
+			name:      "watch-only wallet with no root key",
+			watchOnly: true,
+		},
+		{
+			// Nothing would persist the private half, so the seed
+			// would vanish without a word.
+			name:       "watch-only wallet with a private root key",
+			watchOnly:  true,
+			rootKey:    rootKey,
+			wantErrMsg: "neuter it first",
+		},
+		{
+			name:       "spendable wallet with a neutered root key",
+			rootKey:    rootPubKey,
+			wantErrMsg: "private key required",
+		},
+		{
+			name:       "spendable wallet with no root key",
+			wantErrMsg: "requires WatchOnly",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateWatchOnlyRootKey(
+				CreateWalletParams{WatchOnly: tc.watchOnly},
+				tc.rootKey,
+			)
+			if tc.wantErrMsg != "" {
+				require.ErrorIs(t, err, ErrWalletParams)
+				require.ErrorContains(t, err, tc.wantErrMsg)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestManagerKVDBRejectsSecondName verifies that a kvdb Manager serves one
 // wallet per database.
 //
