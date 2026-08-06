@@ -538,3 +538,106 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 		"second release not a no-op",
 	)
 }
+
+// testListLeasedOutputs verifies ListLeasedOutputs tracks active leases with
+// their lock IDs and expirations, drops released leases, excludes expired
+// leases, and is forbidden before Start.
+func testListLeasedOutputs(h *bwtest.HarnessTest) {
+	w := createWallet(h)
+
+	// ListLeasedOutputs is forbidden before Start.
+	_, err := w.ListLeasedOutputs(h.Context())
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"list leased outputs before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+
+	// A funded wallet starts with no leases.
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Empty(h, leases, "funded wallet reported leases")
+
+	lockID1 := wtxmgr.LockID{1}
+	lockID2 := wtxmgr.LockID{2}
+
+	_, err = w.LeaseOutput(
+		h.Context(), lockID1, outpoints[0], leaseDuration,
+	)
+	require.NoError(h, err, "failed to lease first output")
+
+	_, err = w.LeaseOutput(
+		h.Context(), lockID2, outpoints[1], leaseDuration,
+	)
+	require.NoError(h, err, "failed to lease second output")
+
+	// Both active leases are listed with their lock IDs and expirations.
+	leases, err = w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Len(h, leases, 2, "unexpected lease count")
+
+	active := make(map[wire.OutPoint]*wallet.LeasedOutput, len(leases))
+	for _, lease := range leases {
+		active[lease.OutPoint] = lease
+	}
+
+	require.Contains(h, active, outpoints[0], "first lease missing")
+	require.Equal(
+		h, lockID1, active[outpoints[0]].LockID, "first lock ID mismatch",
+	)
+	require.WithinDuration(
+		h, time.Now().Add(leaseDuration),
+		active[outpoints[0]].Expiration, time.Minute,
+		"first lease expiration mismatch",
+	)
+
+	require.Contains(h, active, outpoints[1], "second lease missing")
+	require.Equal(
+		h, lockID2, active[outpoints[1]].LockID,
+		"second lock ID mismatch",
+	)
+
+	// Releasing the first lease leaves only the second.
+	require.NoError(
+		h, w.ReleaseOutput(h.Context(), lockID1, outpoints[0]),
+		"failed to release first output",
+	)
+
+	leases, err = w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Len(h, leases, 1, "released lease still listed")
+	require.Equal(
+		h, outpoints[1], leases[0].OutPoint, "wrong lease remained",
+	)
+
+	// An expired lease is excluded from the listing. Lease the first output
+	// again with a short duration and poll until it lapses.
+	shortLease := wtxmgr.LockID{3}
+
+	_, err = w.LeaseOutput(
+		h.Context(), shortLease, outpoints[0], time.Second,
+	)
+	require.NoError(h, err, "failed to lease output with short duration")
+
+	err = wait.NoError(func() error {
+		leases, err := w.ListLeasedOutputs(h.Context())
+		if err != nil {
+			return fmt.Errorf("list leased outputs: %w", err)
+		}
+
+		if len(leases) != 1 {
+			return fmt.Errorf("want 1 lease, got %d", len(leases))
+		}
+
+		if leases[0].OutPoint != outpoints[1] {
+			return fmt.Errorf("want lease on %v, got %v",
+				outpoints[1], leases[0].OutPoint)
+		}
+
+		return nil
+	}, pollTimeout)
+	require.NoError(h, err, "expired lease still listed")
+}
