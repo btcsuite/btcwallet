@@ -47,5 +47,8 @@ var allTestCases = []*testCase{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
-
+	{
+		Name:     "utxomanager list unspent unconfirmed",
+		TestFunc: testListUnspentUnconfirmed,
+	},
 }
