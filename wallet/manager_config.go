@@ -26,6 +26,9 @@ const (
 
 	// DBBackendSQLite selects the SQLite store.
 	DBBackendSQLite DBBackend = "sqlite"
+
+	// DBBackendPostgres selects the PostgreSQL store.
+	DBBackendPostgres DBBackend = "postgres"
 )
 
 // errUnsupportedBackend reports a Backend this build does not serve.
@@ -39,19 +42,19 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 //
 // The struct is flat on purpose: there are no per-backend sub-structs to
 // populate at once, so it cannot describe a backend it is not set to. Some
-// fields apply to only one backend, which is documented here rather than
+// fields apply to only certain backends, which is documented here rather than
 // prevented by a second validation layer:
 //
-//	field                      kvdb    sqlite
-//	DataSource, ChainParams    both backends
-//	MaxConnections             sqlite only
+//	field                      kvdb    sqlite    postgres
+//	DataSource, ChainParams    all backends
+//	MaxConnections             SQL backends
 //	NoFreelistSync, Timeout    kvdb only
 type ManagerConfig struct {
 	// Backend selects the database implementation. Required.
 	Backend DBBackend
 
 	// DataSource locates the database: a filesystem path for kvdb and
-	// SQLite, and a DSN once a networked backend is added. Required.
+	// SQLite, and a DSN for PostgreSQL. Required.
 	DataSource string
 
 	// MaxConnections bounds the SQL connection pool. Zero uses the store
@@ -80,7 +83,7 @@ type ManagerConfig struct {
 // so a wallet is never opened somewhere the caller did not name.
 func (c ManagerConfig) validate() error {
 	switch c.Backend {
-	case DBBackendKVDB, DBBackendSQLite:
+	case DBBackendKVDB, DBBackendSQLite, DBBackendPostgres:
 
 	case "":
 		return fmt.Errorf("%w: Backend", ErrMissingParam)
@@ -99,7 +102,7 @@ func (c ManagerConfig) validate() error {
 
 	// MaxConnections is a SQL pool bound; kvdb ignores it, so only the SQL
 	// backends validate it.
-	if c.Backend == DBBackendSQLite && c.MaxConnections < 0 {
+	if c.Backend != DBBackendKVDB && c.MaxConnections < 0 {
 		return fmt.Errorf("%w: MaxConnections must not be negative",
 			ErrInvalidParam)
 	}
