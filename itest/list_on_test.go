@@ -55,4 +55,8 @@ var allTestCases = []*testCase{
 		Name:     "utxomanager get utxo",
 		TestFunc: testGetUtxo,
 	},
+	{
+		Name:     "utxomanager lease output",
+		TestFunc: testLeaseOutput,
+	},
 }
