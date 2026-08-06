@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -22,6 +23,17 @@ import (
 
 // testWalletName is the wallet name shared by Store-backed wallet tests.
 const testWalletName = "test-wallet"
+
+// fixedTestSeed returns a deterministic HD seed, so tests that assert on
+// derived key material can pin exact expected values.
+func fixedTestSeed() []byte {
+	seed := make([]byte, hdkeychain.RecommendedSeedLen)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+
+	return seed
+}
 
 var (
 	errDBMock         = errors.New("db error")
