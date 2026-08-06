@@ -724,6 +724,88 @@ func TestValidateWatchOnlyRootKey(t *testing.T) {
 	}
 }
 
+// TestManagerKVDBWatchOnlyRejectsRootKey verifies that the legacy kvdb backend
+// refuses a watch-only wallet carrying a root key, rather than dropping the key
+// it cannot persist.
+//
+// waddrmgr has nowhere to keep a neutered root and treats every key it is
+// handed as spendable, so it cannot represent this wallet. A SQL wallet does
+// record the key, so accepting the request on kvdb would silently discard
+// caller key material and make one request mean two different things.
+func TestManagerKVDBWatchOnlyRejectsRootKey(t *testing.T) {
+	t.Parallel()
+
+	// Derive the root from a fixed seed so the SQL fingerprint below is an
+	// exact constant. Zero is a legal BIP32 fingerprint, so a "not zero"
+	// assertion would be both theoretically flaky and satisfied by the wrong
+	// key; this pins the one correct value instead.
+	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	rootPubKey, err := rootKey.Neuter()
+	require.NoError(t, err)
+
+	cfg := testWatchOnlyConfig()
+	params := CreateWalletParams{
+		Mode:              ModeImportExtKey,
+		RootKey:           rootPubKey,
+		WatchOnly:         true,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	w, err := testKVDBManager(t).Create(cfg, params)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.ErrorContains(t, err, "cannot persist a watch-only root key")
+	require.Nil(t, w)
+
+	// A SQL wallet accepts the very same request, records the key and parses
+	// the fingerprint of exactly that key. That asymmetry is why kvdb rejects
+	// rather than drops.
+	sqlWallet, err := testSQLiteManager(t).Create(cfg, params)
+	require.NoError(t, err)
+	require.True(t, sqlWallet.IsWatchOnly())
+	require.Equal(t, fixedTestSeedFingerprint, sqlWallet.masterFingerprint)
+}
+
+// TestManagerKVDBCreateWatchOnlyShell verifies that the legacy kvdb backend
+// creates a rootless watch-only wallet, which is the one watch-only shape its
+// format can represent and what the legacy watch-only constructor built.
+func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
+	t.Parallel()
+
+	params := CreateWalletParams{
+		Mode:              ModeShell,
+		WatchOnly:         true,
+		PubPassphrase:     []byte("public"),
+		PrivatePassphrase: []byte("private"),
+		Birthday:          time.Now(),
+	}
+
+	w, err := testKVDBManager(t).Create(testWatchOnlyConfig(), params)
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.True(t, w.IsWatchOnly())
+
+	// No root key was supplied, so no master fingerprint is cached. The value
+	// is unobservable on a watch-only wallet regardless: it is reported only
+	// for derived accounts, which such a wallet cannot have.
+	require.Zero(t, w.masterFingerprint)
+}
+
+// testWatchOnlyConfig returns the wallet Config shared by the watch-only
+// Manager tests.
+func testWatchOnlyConfig() Config {
+	return Config{
+		Chain:          &bwmock.Chain{},
+		ChainParams:    &chainParams,
+		Name:           "watch-only",
+		PubPassphrase:  []byte("public"),
+		RecoveryWindow: MinRecoveryWindow,
+	}
+}
+
 // TestManagerKVDBRejectsSecondName verifies that a kvdb Manager serves one
 // wallet per database.
 //

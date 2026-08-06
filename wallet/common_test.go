@@ -24,8 +24,14 @@ import (
 // testWalletName is the wallet name shared by Store-backed wallet tests.
 const testWalletName = "test-wallet"
 
+// fixedTestSeedFingerprint is the BIP32 master-key fingerprint of the root
+// derived from fixedTestSeed over chainParams. Zero is a legal fingerprint, so
+// tests assert this exact value rather than merely a non-zero one.
+const fixedTestSeedFingerprint uint32 = 0x5bf9f809
+
 // fixedTestSeed returns a deterministic HD seed, so tests that assert on
-// derived key material can pin exact expected values.
+// derived key material can pin exact expected values such as
+// fixedTestSeedFingerprint.
 func fixedTestSeed() []byte {
 	seed := make([]byte, hdkeychain.RecommendedSeedLen)
 	for i := range seed {
