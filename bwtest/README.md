@@ -39,6 +39,7 @@ exercise the wallet manager:
 
 - `(*HarnessTest).CreateEmptyWallet`
 - `(*HarnessTest).CreateFundedWallet`
+- `(*HarnessTest).FundWallet`
 
 Example usage:
 
