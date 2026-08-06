@@ -32,6 +32,14 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerLoadMissing,
 	},
 	{
+		Name:     "manager create watchonly",
+		TestFunc: testManagerCreateWatchOnly,
+	},
+	{
+		Name:     "manager reject invalid watchonly params",
+		TestFunc: testManagerRejectInvalidWatchOnlyParams,
+	},
+	{
 		Name:     "controller start stop",
 		TestFunc: testControllerStartStop,
 	},
