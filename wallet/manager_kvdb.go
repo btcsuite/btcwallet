@@ -84,6 +84,23 @@ func (b *kvdbManagerBackend) create(ctx context.Context, cfg Config,
 		PubPassphrase: params.PubPassphrase,
 	}
 
+	// waddrmgr recognizes exactly one watch-only shape: a manager created
+	// without a root key. It has nowhere to persist a neutered root and treats
+	// every key it is handed as spendable, so it would fail deriving the
+	// hardened cointype key from an xpub anyway.
+	//
+	// Reject a supplied root key rather than dropping it. Discarding it would
+	// lose caller key material without a word, and make one request mean two
+	// different things: a SQL wallet records that key on the wallet row. This
+	// leaves the same watch-only shape the legacy constructor offered -- "No
+	// root key can be provided as this wallet will be watching only" -- whose
+	// keyspace is built from account-level xpub imports, one account at a time.
+	if params.WatchOnly && rootKey != nil {
+		return nil, fmt.Errorf("%w: kvdb cannot persist a watch-only "+
+			"root key; create a rootless wallet (ModeShell) and "+
+			"import account xpubs instead", ErrInvalidParam)
+	}
+
 	err := kvdb.CreateWallet(adapterCfg, kvdb.CreateWalletRequest{
 		RootKey:           rootKey,
 		PrivatePassphrase: params.PrivatePassphrase,
