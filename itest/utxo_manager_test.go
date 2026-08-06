@@ -15,6 +15,7 @@ import (
 	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -360,4 +361,109 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 		h, err, wallet.ErrUnknownOutput,
 		"foreign outpoint not rejected",
 	)
+}
+
+// testLeaseOutput verifies LeaseOutput marks an output as locked, renews a
+// lease under the same lock ID, rejects double leases under a different lock
+// ID, unknown outpoints, and non-positive durations, and is forbidden before
+// Start.
+func testLeaseOutput(h *bwtest.HarnessTest) {
+	w := createWallet(h)
+
+	lockID1 := wtxmgr.LockID{1}
+	lockID2 := wtxmgr.LockID{2}
+
+	// LeaseOutput is forbidden before Start.
+	_, err := w.LeaseOutput(
+		h.Context(), lockID1, unknownOutpoint(), leaseDuration,
+	)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"lease output before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+
+	// Lease the first output; the expiration tracks the requested duration.
+	expiration, err := w.LeaseOutput(
+		h.Context(), lockID1, outpoints[0], leaseDuration,
+	)
+	require.NoError(h, err, "failed to lease output")
+	require.WithinDuration(
+		h, time.Now().Add(leaseDuration), expiration, time.Minute,
+		"lease expiration mismatch",
+	)
+
+	// The leased output reports Locked while the other remains unlocked.
+	utxo, err := w.GetUtxo(h.Context(), outpoints[0])
+	require.NoError(h, err, "failed to get leased utxo")
+	require.True(h, utxo.Locked, "leased output not locked")
+
+	utxo, err = w.GetUtxo(h.Context(), outpoints[1])
+	require.NoError(h, err, "failed to get unleased utxo")
+	require.False(h, utxo.Locked, "unleased output locked")
+
+	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent after lease")
+
+	locked := make(map[wire.OutPoint]bool, len(utxos))
+	for _, u := range utxos {
+		locked[u.OutPoint] = u.Locked
+	}
+
+	require.True(
+		h, locked[outpoints[0]], "list unspent did not report the lease",
+	)
+	require.False(
+		h, locked[outpoints[1]], "list unspent reported a phantom lease",
+	)
+
+	// A second lease under a different lock ID is rejected.
+	_, err = w.LeaseOutput(
+		h.Context(), lockID2, outpoints[0], leaseDuration,
+	)
+	require.ErrorIs(
+		h, err, wallet.ErrOutputAlreadyLocked,
+		"double lease under different lock ID not rejected",
+	)
+
+	// Re-leasing under the same lock ID renews the lease with a later
+	// expiration. The kvdb and SQL backends implement renewal through
+	// separate code paths, so exercise the documented renewal behavior
+	// explicitly.
+	renewed, err := w.LeaseOutput(
+		h.Context(), lockID1, outpoints[0], 2*leaseDuration,
+	)
+	require.NoError(h, err, "failed to renew lease under same lock ID")
+	require.True(
+		h, renewed.After(expiration),
+		"lease renewal did not extend the expiration",
+	)
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs after renewal")
+	require.Len(h, leases, 1, "lease renewal created a second lease")
+	require.Equal(h, lockID1, leases[0].LockID, "renewed lock ID mismatch")
+
+	// Leasing an unknown outpoint is rejected.
+	_, err = w.LeaseOutput(
+		h.Context(), lockID1, unknownOutpoint(), leaseDuration,
+	)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"lease of unknown outpoint not rejected",
+	)
+
+	// A non-positive lease duration is rejected. Both store backends return
+	// the internal db.ErrInvalidParam sentinel, which Wallet.LeaseOutput
+	// passes through unmapped, so an external caller cannot match it with
+	// errors.Is. require.Error is the strongest available assertion until
+	// the wallet exports a public sentinel for invalid lease durations.
+	_, err = w.LeaseOutput(h.Context(), lockID2, outpoints[1], 0)
+	require.Error(h, err, "non-positive lease duration not rejected")
 }
