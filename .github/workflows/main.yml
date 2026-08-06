@@ -37,7 +37,7 @@ jobs:
   # Format, compileation and lint check
   ########################
   lint-check:
-    name: Format, compilation and lint check
+    name: Static checks (format, compile, lint)
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
@@ -85,7 +85,7 @@ jobs:
 
   check-commits:
     if: github.event_name == 'pull_request'
-    name: Check commits
+    name: Commit checks
     runs-on: ubuntu-latest
     steps:
       - name: git checkout
@@ -114,7 +114,7 @@ jobs:
   # run unit tests
   ########################
   unit-test:
-    name: run unit tests
+    name: Unit tests (${{ matrix.unit_type }})
     runs-on: ubuntu-latest
     strategy:
       # Allow other tests in the matrix to continue if one fails.
@@ -171,7 +171,7 @@ jobs:
   # run integration tests (SQLite + Postgres)
   ########################
   itest-db:
-    name: ${{ matrix.db }} itest (${{ matrix.race && 'race' || 'cover' }})
+    name: Database itest (${{ matrix.db }}, ${{ matrix.race && 'race' || 'cover' }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -211,10 +211,12 @@ jobs:
   ########################
   # Run bwtest integration tests against each supported chain backend.
   #
-  # Each job runs over both wallet database backends (kvdb and sqlite).
+  # btcd and neutrino run with kvdb and sqlite. The bitcoind matrix crosses
+  # every supported bitcoind version with kvdb, sqlite, and postgres so it
+  # catches compatibility bugs specific to a node version and wallet database.
   ########################
   itest-btcd:
-    name: itest btcd (${{ matrix.db }})
+    name: Wallet itest (btcd, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -264,7 +266,7 @@ jobs:
   #   in-process neutrino backend while blocks/peers come from btcd.
   ########################
   itest-neutrino:
-    name: itest neutrino (${{ matrix.db }})
+    name: Wallet itest (neutrino, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -309,18 +311,19 @@ jobs:
   #
   # Job flow:
   # - Install btcd `${{ env.BTCD_VERSION_LATEST }}` as the shared miner.
-  # - Run a matrix over bitcoind versions `30` (latest) and `28` (older).
+  # - Cross bitcoind versions `30` (latest) and `28` (older) with every wallet
+  #   database so each version/database combination is tested independently.
   # - Extract each matrix binary from the docker image and run
   #   `make itest chain=bitcoind db=${{ matrix.db }}`.
   ########################
   itest-bitcoind:
-    name: itest bitcoind (v${{ matrix.bitcoind_version }}, ${{ matrix.db }})
+    name: Wallet itest (bitcoind v${{ matrix.bitcoind_version }}, ${{ matrix.db }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         bitcoind_version: ['30', '28']
-        db: [kvdb, sqlite]
+        db: [kvdb, sqlite, postgres]
     steps:
       - name: git checkout
         uses: actions/checkout@v5
@@ -378,7 +381,7 @@ jobs:
   # Complete parallel coverage uploads
   ########################
   finish:
-    name: Finish coverage upload
+    name: Coverage upload
     if: ${{ !cancelled() }}
     needs: [unit-test, itest-db]
     runs-on: ubuntu-latest
