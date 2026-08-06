@@ -49,6 +49,10 @@ const (
 	// contains only a coinbase transaction and a single non-coinbase
 	// transaction.
 	coinbaseAndOneTxn = 2
+
+	// MinerFeeRate is the fee rate, in satoshis per byte, used for
+	// miner-funded test transactions.
+	MinerFeeRate = btcutil.Amount(10)
 )
 
 // GenerateBlocks generates the specified number of blocks.
@@ -489,8 +493,17 @@ func (h *HarnessTest) SendOutput(output *wire.TxOut,
 
 	h.Helper()
 
-	txid, err := h.miner.SendOutputs([]*wire.TxOut{output}, feeRate)
-	require.NoError(h, err, "failed to send output")
+	return h.SendOutputs([]*wire.TxOut{output}, feeRate)
+}
+
+// SendOutputs sends funds from the miner in a single transaction.
+func (h *HarnessTest) SendOutputs(outputs []*wire.TxOut,
+	feeRate btcutil.Amount) *chainhash.Hash {
+
+	h.Helper()
+
+	txid, err := h.miner.SendOutputs(outputs, feeRate)
+	require.NoError(h, err, "failed to send outputs")
 
 	return txid
 }
