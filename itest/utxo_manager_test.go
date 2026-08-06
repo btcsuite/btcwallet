@@ -467,3 +467,74 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 	_, err = w.LeaseOutput(h.Context(), lockID2, outpoints[1], 0)
 	require.Error(h, err, "non-positive lease duration not rejected")
 }
+
+// testReleaseOutput verifies ReleaseOutput unlocks a leased output, rejects
+// mismatched lock IDs and unknown outpoints, treats releasing an unleased
+// output as a no-op, and is forbidden before Start.
+func testReleaseOutput(h *bwtest.HarnessTest) {
+	w := createWallet(h)
+
+	lockID1 := wtxmgr.LockID{1}
+	lockID2 := wtxmgr.LockID{2}
+
+	// ReleaseOutput is forbidden before Start.
+	err := w.ReleaseOutput(h.Context(), lockID1, unknownOutpoint())
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"release output before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	outpoints := h.FundWallet(w, oneBTC)
+
+	// Releasing an output with no active lease is a no-op.
+	require.NoError(
+		h, w.ReleaseOutput(h.Context(), lockID1, outpoints[0]),
+		"release of unleased output not a no-op",
+	)
+
+	_, err = w.LeaseOutput(
+		h.Context(), lockID1, outpoints[0], leaseDuration,
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	// Releasing under a different lock ID is rejected and the lease
+	// survives.
+	err = w.ReleaseOutput(h.Context(), lockID2, outpoints[0])
+	require.ErrorIs(
+		h, err, wallet.ErrOutputUnlockNotAllowed,
+		"release under wrong lock ID not rejected",
+	)
+
+	utxo, err := w.GetUtxo(h.Context(), outpoints[0])
+	require.NoError(h, err, "failed to get utxo after rejected release")
+	require.True(h, utxo.Locked, "rejected release cleared the lease")
+
+	// Releasing an unknown outpoint is rejected.
+	err = w.ReleaseOutput(h.Context(), lockID1, unknownOutpoint())
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"release of unknown outpoint not rejected",
+	)
+
+	// Releasing under the owning lock ID unlocks the output.
+	require.NoError(
+		h, w.ReleaseOutput(h.Context(), lockID1, outpoints[0]),
+		"failed to release output",
+	)
+
+	utxo, err = w.GetUtxo(h.Context(), outpoints[0])
+	require.NoError(h, err, "failed to get released utxo")
+	require.False(h, utxo.Locked, "released output still locked")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Empty(h, leases, "released output still leased")
+
+	// Releasing an already-released output is a no-op.
+	require.NoError(
+		h, w.ReleaseOutput(h.Context(), lockID1, outpoints[0]),
+		"second release not a no-op",
+	)
+}
