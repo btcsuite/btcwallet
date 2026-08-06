@@ -159,8 +159,7 @@ func testManagerLoadMissing(h *bwtest.HarnessTest) {
 // from the durable store.
 //
 // The wallet is rootless: that is the one watch-only shape every backend can
-// represent, and its keyspace arrives later as account-level xpub imports. An
-// XPub root is a SQL-only variant, covered by the Manager unit tests.
+// represent, and its keyspace arrives later as account-level xpub imports.
 func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	cfg, params := h.TestWalletConfig()
 	params.Mode = wallet.ModeShell

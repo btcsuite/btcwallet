@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -192,13 +193,13 @@ func TestManagerCreateError(t *testing.T) {
 			expectedErr: "root key is required",
 		},
 		{
-			name: "Public Key for Non-WatchOnly",
+			name: "XPub root for spendable wallet",
 			params: CreateWalletParams{
 				Mode:      ModeImportExtKey,
 				RootKey:   pubKey,
 				WatchOnly: false,
 			},
-			expectedErr: "private key required",
+			expectedErr: "XPub-root wallet creation is unsupported",
 		},
 		{
 			name: "Unknown Mode",
@@ -232,94 +233,209 @@ func TestManagerCreateError(t *testing.T) {
 	}
 }
 
-// TestCreateWalletParams_Validate verifies that the validate method enforces
-// the correct constraints for each creation mode.
-func TestCreateWalletParams_Validate(t *testing.T) {
+// TestCreateWalletParamsPolicy verifies the complete creation-mode matrix and
+// proves every rejected combination fails before backend creation.
+func TestCreateWalletParamsPolicy(t *testing.T) {
 	t.Parallel()
 
-	// Pre-calculate cryptographic material to construct specific test
-	// scenarios.
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
 	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
 	require.NoError(t, err)
+	rootXPub, err := rootKey.Neuter()
+	require.NoError(t, err)
+
+	initialXPub := []WatchOnlyAccount{{XPub: rootXPub}}
+	initialXPrv := []WatchOnlyAccount{{XPub: rootKey}}
+	initialNil := []WatchOnlyAccount{{}}
 
 	tests := []struct {
-		name        string
-		params      CreateWalletParams
-		expectedErr string
+		name   string
+		params CreateWalletParams
+		valid  bool
 	}{
 		{
-			name: "ModeGenSeed with Seed",
-			params: CreateWalletParams{
-				Mode: ModeGenSeed,
-				Seed: seed,
-			},
-			expectedErr: "seed should not be set for ModeGenSeed",
+			name:   "generated seed spendable",
+			params: CreateWalletParams{Mode: ModeGenSeed},
+			valid:  true,
 		},
 		{
-			name: "ModeGenSeed with RootKey",
-			params: CreateWalletParams{
-				Mode:    ModeGenSeed,
-				RootKey: rootKey,
-			},
-			expectedErr: "root key should not be set for ModeGenSeed",
+			name:   "imported seed spendable",
+			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed},
+			valid:  true,
 		},
 		{
-			name: "ModeImportSeed with RootKey",
-			params: CreateWalletParams{
-				Mode:    ModeImportSeed,
-				Seed:    seed,
-				RootKey: rootKey,
-			},
-			expectedErr: "root key should not be set for ModeImportSeed",
+			name: "private root spendable",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey: rootKey},
+			valid: true,
 		},
 		{
-			name: "ModeImportExtKey with Seed",
-			params: CreateWalletParams{
-				Mode:    ModeImportExtKey,
-				RootKey: rootKey,
-				Seed:    seed,
-			},
-			expectedErr: "seed should not be set for ModeImportExtKey",
+			name: "watch-only shell with XPub",
+			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
+				InitialAccounts: initialXPub},
+			valid: true,
 		},
 		{
-			name: "ModeShell with Seed",
-			params: CreateWalletParams{
-				Mode: ModeShell,
-				Seed: seed,
-			},
-			expectedErr: "seed should not be set for ModeShell",
+			name:   "unknown mode",
+			params: CreateWalletParams{Mode: ModeUnknown},
 		},
 		{
-			name: "Unknown Mode",
-			params: CreateWalletParams{
-				Mode: ModeUnknown,
-			},
-			expectedErr: "unknown mode",
+			name:   "invalid mode",
+			params: CreateWalletParams{Mode: CreateMode(255)},
 		},
 		{
-			name: "InitialAccounts with ModeGenSeed",
-			params: CreateWalletParams{
-				Mode: ModeGenSeed,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "test",
-				}},
+			name:   "generated seed watch-only",
+			params: CreateWalletParams{Mode: ModeGenSeed, WatchOnly: true},
+		},
+		{
+			name:   "generated seed with explicit seed",
+			params: CreateWalletParams{Mode: ModeGenSeed, Seed: seed},
+		},
+		{
+			name:   "generated seed with root key",
+			params: CreateWalletParams{Mode: ModeGenSeed, RootKey: rootKey},
+		},
+		{
+			name: "generated seed with initial account",
+			params: CreateWalletParams{Mode: ModeGenSeed,
+				InitialAccounts: initialXPub,
 			},
-			expectedErr: "initial accounts should only " +
-				"be set for ModeShell",
-		}}
+		},
+		{
+			name: "imported seed watch-only",
+			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
+				WatchOnly: true},
+		},
+		{
+			name:   "imported seed missing seed",
+			params: CreateWalletParams{Mode: ModeImportSeed},
+		},
+		{
+			name: "imported seed with root key",
+			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
+				RootKey: rootKey},
+		},
+		{
+			name: "imported seed with initial account",
+			params: CreateWalletParams{Mode: ModeImportSeed, Seed: seed,
+				InitialAccounts: initialXPub,
+			},
+		},
+		{
+			name: "private root watch-only",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey: rootKey, WatchOnly: true},
+		},
+		{
+			name:   "extended root missing key",
+			params: CreateWalletParams{Mode: ModeImportExtKey},
+		},
+		{
+			name: "XPub root spendable",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey: rootXPub},
+		},
+		{
+			name: "XPub root watch-only",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey: rootXPub, WatchOnly: true},
+		},
+		{
+			name: "extended root with seed",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey: rootKey, Seed: seed},
+		},
+		{
+			name: "extended root with initial account",
+			params: CreateWalletParams{Mode: ModeImportExtKey,
+				RootKey:         rootKey,
+				InitialAccounts: initialXPub,
+			},
+		},
+		{
+			name:   "spendable shell",
+			params: CreateWalletParams{Mode: ModeShell},
+		},
+		{
+			name: "shell with seed",
+			params: CreateWalletParams{Mode: ModeShell, Seed: seed,
+				WatchOnly: true},
+		},
+		{
+			name: "shell with root key",
+			params: CreateWalletParams{Mode: ModeShell, RootKey: rootKey,
+				WatchOnly: true},
+		},
+		{
+			name: "shell with nil account key",
+			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
+				InitialAccounts: initialNil,
+			},
+		},
+		{
+			name: "shell with private account key",
+			params: CreateWalletParams{Mode: ModeShell, WatchOnly: true,
+				InitialAccounts: initialXPrv,
+			},
+		},
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := tc.params.validate()
-			require.Error(t, err)
-			require.ErrorContains(t, err, tc.expectedErr)
+			if tc.valid {
+				require.NoError(t, tc.params.validate())
+
+				return
+			}
+
+			backend := &recordingManagerBackend{}
+			m := &Manager{
+				wallets:     make(map[string]*Wallet),
+				backend:     backend,
+				chainParams: &chainParams,
+			}
+			cfg := Config{
+				Chain: &bwmock.Chain{}, Name: "test-wallet",
+				RecoveryWindow: MinRecoveryWindow,
+			}
+
+			_, err := m.Create(cfg, tc.params)
+			require.ErrorIs(t, err, ErrWalletParams)
+			require.False(t, backend.createCalled)
 		})
 	}
+}
+
+// recordingManagerBackend records whether Manager.Create reached backend
+// mutation during creation-policy tests.
+type recordingManagerBackend struct{ createCalled bool }
+
+// recordingManagerBackend implements managerBackend.
+var _ managerBackend = (*recordingManagerBackend)(nil)
+
+// create records an unexpected backend creation attempt.
+func (b *recordingManagerBackend) create(_ context.Context, _ Config,
+	_ CreateWalletParams, _ *hdkeychain.ExtendedKey) (*walletData, error) {
+
+	b.createCalled = true
+
+	return nil, ErrInvalidParam
+}
+
+// load is not used by creation-policy tests.
+func (*recordingManagerBackend) load(context.Context, Config) (*walletData,
+	error) {
+
+	return nil, ErrInvalidParam
+}
+
+// close is not used by creation-policy tests.
+func (*recordingManagerBackend) close() error {
+	return nil
 }
 
 // TestManagerCreate_InvalidConfig verifies that the Create method performs
@@ -599,61 +715,6 @@ func TestManager_deriveRootKey(t *testing.T) {
 	})
 }
 
-// TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
-// a non-watch-only wallet cannot ship with InitialAccounts. The validator
-// runs before the kvdb wallet create so the failure is atomic and no
-// half-created wallet is left on disk.
-func TestValidateInitialAccountsModeUpfront(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		params  CreateWalletParams
-		wantErr bool
-	}{
-		{
-			name: "watch-only with initial accounts is fine",
-			params: CreateWalletParams{
-				WatchOnly: true,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "imported-xpub",
-				}},
-			},
-		},
-		{
-			name: "spendable with no initial accounts is fine",
-			params: CreateWalletParams{
-				WatchOnly: false,
-			},
-		},
-		{
-			name: "spendable with initial accounts is rejected",
-			params: CreateWalletParams{
-				WatchOnly: false,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "imported-xpub",
-				}},
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := validateInitialAccountsMode(tc.params)
-			if tc.wantErr {
-				require.ErrorIs(t, err, ErrWalletParams)
-
-				return
-			}
-
-			require.NoError(t, err)
-		})
-	}
-}
-
 // TestValidateWatchOnlyRootKey verifies that the requested watch-only state is
 // checked against the derived root key. params.WatchOnly is what every backend
 // persists, so a contradicting key must be rejected rather than reinterpreted.
@@ -662,6 +723,9 @@ func TestValidateWatchOnlyRootKey(t *testing.T) {
 
 	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
 	require.NoError(t, err)
+	fingerprint, err := masterKeyFingerprint(rootKey)
+	require.NoError(t, err)
+	require.Equal(t, fixedTestSeedFingerprint, fingerprint)
 
 	rootPubKey, err := rootKey.Neuter()
 	require.NoError(t, err)
@@ -724,21 +788,11 @@ func TestValidateWatchOnlyRootKey(t *testing.T) {
 	}
 }
 
-// TestManagerKVDBWatchOnlyRejectsRootKey verifies that the legacy kvdb backend
-// refuses a watch-only wallet carrying a root key, rather than dropping the key
-// it cannot persist.
-//
-// waddrmgr has nowhere to keep a neutered root and treats every key it is
-// handed as spendable, so it cannot represent this wallet. A SQL wallet does
-// record the key, so accepting the request on kvdb would silently discard
-// caller key material and make one request mean two different things.
+// TestManagerKVDBWatchOnlyRejectsRootKey verifies that XPub-root creation is
+// rejected before either backend can mutate wallet state.
 func TestManagerKVDBWatchOnlyRejectsRootKey(t *testing.T) {
 	t.Parallel()
 
-	// Derive the root from a fixed seed so the SQL fingerprint below is an
-	// exact constant. Zero is a legal BIP32 fingerprint, so a "not zero"
-	// assertion would be both theoretically flaky and satisfied by the wrong
-	// key; this pins the one correct value instead.
 	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
 	require.NoError(t, err)
 
@@ -756,17 +810,14 @@ func TestManagerKVDBWatchOnlyRejectsRootKey(t *testing.T) {
 	}
 
 	w, err := testKVDBManager(t).Create(cfg, params)
-	require.ErrorIs(t, err, ErrInvalidParam)
-	require.ErrorContains(t, err, "cannot persist a watch-only root key")
+	require.ErrorIs(t, err, ErrWalletParams)
+	require.ErrorContains(t, err, "XPub-root wallet creation is unsupported")
 	require.Nil(t, w)
 
-	// A SQL wallet accepts the very same request, records the key and parses
-	// the fingerprint of exactly that key. That asymmetry is why kvdb rejects
-	// rather than drops.
-	sqlWallet, err := testSQLiteManager(t).Create(cfg, params)
-	require.NoError(t, err)
-	require.True(t, sqlWallet.IsWatchOnly())
-	require.Equal(t, fixedTestSeedFingerprint, sqlWallet.masterFingerprint)
+	w, err = testSQLiteManager(t).Create(cfg, params)
+	require.ErrorIs(t, err, ErrWalletParams)
+	require.ErrorContains(t, err, "XPub-root wallet creation is unsupported")
+	require.Nil(t, w)
 }
 
 // TestManagerKVDBCreateWatchOnlyShell verifies that the legacy kvdb backend
