@@ -171,8 +171,11 @@ func (d *postgresTestDatabase) close(ctx context.Context) error {
 	defer cancel()
 
 	identifier := pgx.Identifier{d.name}.Sanitize()
+
+	// Managers close before this cleanup. WITH (FORCE) also releases the
+	// auxiliary advisory-lock session retained by the migration driver.
 	_, err := d.server.adminDB.ExecContext(
-		ctx, "DROP DATABASE IF EXISTS "+identifier,
+		ctx, "DROP DATABASE IF EXISTS "+identifier+" WITH (FORCE)",
 	)
 	if err != nil {
 		return fmt.Errorf("drop postgres database %q: %w", d.name, err)
@@ -206,6 +209,43 @@ func postgresDatabaseDSN(adminDSN, database string) (string, error) {
 	dsn.RawPath = ""
 
 	return dsn.String(), nil
+}
+
+// validatePostgresSchema verifies that the PostgreSQL data source is reachable
+// and contains the migrated wallet schema.
+func validatePostgresSchema(dsn string) (err error) {
+	dbConn, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("open postgres schema probe: %w", err)
+	}
+
+	defer func() {
+		err = errors.Join(err, dbConn.Close())
+	}()
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(), defaultTestTimeout,
+	)
+	defer cancel()
+
+	var exists bool
+
+	err = dbConn.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.tables
+			WHERE table_schema = 'public' AND table_name = 'wallets'
+		)
+	`).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("query postgres wallet schema: %w", err)
+	}
+
+	if !exists {
+		return errors.New("postgres wallet schema is missing")
+	}
+
+	return nil
 }
 
 // close releases the administrative connection and immediately terminates

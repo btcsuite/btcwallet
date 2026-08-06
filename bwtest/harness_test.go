@@ -71,9 +71,9 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 
 	// Arrange: a Manager owned by a harness.
 	h := &HarnessTest{
-		T:            t,
-		dbType:       "kvdb",
-		WalletDBPath: filepath.Join(t.TempDir(), "wallet.db"),
+		T:              t,
+		dbType:         "kvdb",
+		WalletDBSource: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 	manager := h.NewWalletManager()
 
@@ -87,7 +87,7 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
 		//nolint:staticcheck // This test intentionally reopens legacy kvdb.
 		Backend:     wallet.DBBackendKVDB,
-		DataSource:  h.WalletDBPath,
+		DataSource:  h.WalletDBSource,
 		ChainParams: h.NetParams(),
 	})
 	require.NoError(
@@ -138,9 +138,9 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	t.Helper()
 
 	h := &HarnessTest{
-		T:            t,
-		dbType:       dbType,
-		WalletDBPath: filepath.Join(t.TempDir(), "wallet.db"),
+		T:              t,
+		dbType:         dbType,
+		WalletDBSource: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 
 	manager := h.NewWalletManager()
@@ -178,11 +178,20 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	// A fresh Manager proves the database was released.
 	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
 		Backend:     backend,
-		DataSource:  h.WalletDBPath,
+		DataSource:  h.WalletDBSource,
 		ChainParams: h.NetParams(),
 	})
 	require.NoError(t, err, "teardown must release the database")
 	require.NoError(t, reopened.Close())
+}
+
+// TestBackendArtifactPostgresRejectsInvalidDSN verifies that PostgreSQL
+// validation uses a connection probe instead of treating the DSN as a file.
+func TestBackendArtifactPostgresRejectsInvalidDSN(t *testing.T) {
+	t.Parallel()
+
+	err := validateBackendArtifact(dbNamePostgres, "://invalid")
+	require.ErrorContains(t, err, "postgres")
 }
 
 // teardownWaitLimit bounds teardown so a leaked Manager fails the test.
