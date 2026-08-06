@@ -158,6 +158,9 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 
 	case DBBackendSQLite:
 		backend, err = newSQLiteManagerBackend(ctx, cfg)
+
+	case DBBackendPostgres:
+		backend, err = newPostgresManagerBackend(ctx, cfg)
 	}
 
 	if err != nil {

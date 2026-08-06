@@ -41,6 +41,14 @@ func TestManagerConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "postgres",
+			cfg: ManagerConfig{
+				Backend:     DBBackendPostgres,
+				DataSource:  "postgres://user:pass@localhost/wallet",
+				ChainParams: &chaincfg.SimNetParams,
+			},
+		},
+		{
 			// kvdb reads these; sqlite ignores them. Neither is an
 			// error, which is what makes the flat shape workable.
 			name: "kvdb knobs on sqlite are ignored",
@@ -91,6 +99,17 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:        DBBackendSQLite,
 				DataSource:     testSQLiteDBName,
+				ChainParams:    &chaincfg.SimNetParams,
+				MaxConnections: -1,
+			},
+			wantIs:  ErrInvalidParam,
+			wantMsg: "MaxConnections",
+		},
+		{
+			name: "postgres negative max connections",
+			cfg: ManagerConfig{
+				Backend:        DBBackendPostgres,
+				DataSource:     "postgres://localhost/wallet",
 				ChainParams:    &chaincfg.SimNetParams,
 				MaxConnections: -1,
 			},
