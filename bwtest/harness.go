@@ -57,12 +57,16 @@ type HarnessTest struct {
 	// passed to wallets under test.
 	ChainClient chain.Interface
 
-	// WalletDBPath is the wallet database path created for the current
+	// WalletDBSource is the database path or DSN created for the current
 	// subtest.
-	WalletDBPath string
+	WalletDBSource string
 
 	// dbType is the configured wallet database backend.
 	dbType string
+
+	// postgresServer is the process-scoped PostgreSQL server shared by the
+	// parent harness and its subtests.
+	postgresServer *postgresTestServer
 
 	// managers holds the wallet managers created for this subtest. They are
 	// closed after every registered wallet has stopped.
@@ -117,8 +121,16 @@ func SetupHarness(t *testing.T, chainBackendType, dbType string) *HarnessTest {
 		dbType:  dbType,
 	}
 
-	// Ensure the harness is cleaned up when the test finishes.
+	// Ensure the harness is cleaned up if PostgreSQL startup fails and when
+	// the test finishes normally.
 	t.Cleanup(ht.Stop)
+
+	if dbType == dbNamePostgres {
+		server, err := newPostgresTestServer(t.Context())
+		require.NoError(t, err, "failed to start postgres test server")
+
+		ht.postgresServer = server
+	}
 
 	return ht
 }
@@ -132,11 +144,12 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 	h.Helper()
 
 	st := &HarnessTest{
-		T:       t,
-		logDir:  h.logDir,
-		miner:   h.miner,
-		Backend: h.Backend,
-		dbType:  h.dbType,
+		T:              t,
+		logDir:         h.logDir,
+		miner:          h.miner,
+		Backend:        h.Backend,
+		dbType:         h.dbType,
+		postgresServer: h.postgresServer,
 	}
 
 	// Use the subtest's testing context for miner assertions.
@@ -200,9 +213,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	h.Helper()
 
-	// Switch explicitly: mapping every unknown -db value onto kvdb would let
-	// `db=postgres` pass while exercising kvdb, and the PostgreSQL Manager is
-	// not part of this milestone.
+	// Switch explicitly so every -db value exercises the selected Manager.
 	var backend wallet.DBBackend
 
 	switch h.dbType {
@@ -213,14 +224,17 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	case dbNameSQLite:
 		backend = wallet.DBBackendSQLite
 
+	case dbNamePostgres:
+		backend = wallet.DBBackendPostgres
+
 	default:
 		h.Fatalf("unsupported -db value %q: the wallet Manager serves "+
-			"kvdb and sqlite", h.dbType)
+			"kvdb, sqlite, and postgres", h.dbType)
 	}
 
 	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
 		Backend:     backend,
-		DataSource:  h.WalletDBPath,
+		DataSource:  h.WalletDBSource,
 		ChainParams: h.NetParams(),
 	})
 	require.NoError(h, err, "failed to create wallet manager")
@@ -251,20 +265,28 @@ func (h *HarnessTest) teardownWallets(ctx context.Context) error {
 func (h *HarnessTest) assertBackendArtifact() {
 	h.Helper()
 
-	err := validateBackendArtifact(h.dbType, h.WalletDBPath)
+	err := validateBackendArtifact(h.dbType, h.WalletDBSource)
 	require.NoError(h, err)
 }
 
-// validateBackendArtifact verifies that a database file has the requested
-// backend's header.
-func validateBackendArtifact(dbType, dbPath string) error {
+// validateBackendArtifact verifies that the data source uses the requested
+// backend and has an initialized wallet schema.
+func validateBackendArtifact(dbType, dbSource string) error {
 	switch dbType {
 	case dbNameKvdb, dbNameSQLite:
+		return validateFileBackendArtifact(dbType, dbSource)
+
+	case dbNamePostgres:
+		return validatePostgresSchema(dbSource)
 
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownDBBackend, dbType)
 	}
+}
 
+// validateFileBackendArtifact verifies that a database file has the requested
+// backend's header.
+func validateFileBackendArtifact(dbType, dbPath string) error {
 	// The path is created and owned by the test harness.
 	f, err := os.Open(dbPath) //nolint:gosec
 	if err != nil {
@@ -435,14 +457,33 @@ func (h *HarnessTest) Stop() {
 	h.mu.Unlock()
 
 	// Stop the chain backend first to avoid it attempting to reconnect while
-	// the miner is being torn down.
-	require.NoError(h, h.Backend.Stop(), "failed to stop chain backend")
+	// the miner is being torn down. Collect shutdown errors so every shared
+	// process is still released.
+	var shutdownErr error
 
-	// Finally, stop the miner.
+	err := h.Backend.Stop()
+	if err != nil {
+		shutdownErr = fmt.Errorf("stop chain backend: %w", err)
+	}
+
+	// Stop PostgreSQL before the miner because miner teardown reports failures
+	// with FailNow and could otherwise skip container termination.
+	if h.postgresServer != nil {
+		err := h.postgresServer.close(context.Background())
+		if err != nil {
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf(
+				"stop postgres test server: %w", err,
+			))
+		}
+	}
+
+	// Stop the miner after its chain backend.
 	h.miner.Stop()
 
 	// Flatten logs into the per-run log dir.
 	h.finalizeLogs()
+
+	require.NoError(h, shutdownErr, "failed to stop harness")
 }
 
 // stopActiveWallets stops all wallets registered with the harness.
@@ -490,11 +531,33 @@ func (h *HarnessTest) setUpChainClient() {
 	h.ChainClient = chainClient
 }
 
-// setUpWalletDB prepares a wallet database path for the configured test
-// backend.
+// setUpWalletDB prepares an isolated wallet data source for the configured
+// test backend.
 func (h *HarnessTest) setUpWalletDB() {
 	h.Helper()
 
-	dbDir := h.TempDir()
-	h.WalletDBPath = filepath.Join(dbDir, wallet.WalletDBName)
+	switch h.dbType {
+	case dbNameKvdb, dbNameSQLite:
+		dbDir := h.TempDir()
+		h.WalletDBSource = filepath.Join(dbDir, wallet.WalletDBName)
+
+	case dbNamePostgres:
+		require.NotNil(h, h.postgresServer, "postgres server not started")
+
+		database, err := h.postgresServer.newDatabase(
+			h.Context(), h.Name(),
+		)
+		require.NoError(h, err, "failed to create postgres test database")
+
+		h.WalletDBSource = database.dsn
+		h.Cleanup(func() {
+			require.NoError(
+				h, database.close(context.Background()),
+				"failed to drop postgres test database",
+			)
+		})
+
+	default:
+		h.Fatalf("unsupported -db value %q", h.dbType)
+	}
 }
