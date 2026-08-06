@@ -2,13 +2,16 @@ package bwtest
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"time"
 
 	"github.com/docker/go-connections/nat"
+	"github.com/jackc/pgx/v5"
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the pgx SQL driver.
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -19,9 +22,9 @@ const (
 	// postgresTestImage is the PostgreSQL image used by the harness.
 	postgresTestImage = "postgres:18-alpine"
 
-	// postgresTestDatabase is the administrative database used by the
+	// postgresAdminDatabase is the administrative database used by the
 	// harness.
-	postgresTestDatabase = "postgres"
+	postgresAdminDatabase = "postgres"
 
 	// postgresTestUsername and postgresTestPassword are credentials scoped
 	// to the disposable PostgreSQL container.
@@ -35,6 +38,10 @@ const (
 	// postgresShutdownTimeout bounds container teardown after the test
 	// context has been canceled.
 	postgresShutdownTimeout = time.Minute
+
+	// postgresDatabaseHashBytes keeps database identifiers short while
+	// retaining enough entropy to isolate test names.
+	postgresDatabaseHashBytes = 12
 )
 
 // postgresTestServer owns the process-scoped PostgreSQL test container and
@@ -43,6 +50,14 @@ type postgresTestServer struct {
 	container *postgres.PostgresContainer
 	adminDB   *sql.DB
 	adminDSN  string
+}
+
+// postgresTestDatabase is one per-subtest database in the shared PostgreSQL
+// server.
+type postgresTestDatabase struct {
+	server *postgresTestServer
+	name   string
+	dsn    string
 }
 
 // newPostgresTestServer starts PostgreSQL and opens its administrative
@@ -57,14 +72,14 @@ func newPostgresTestServer(ctx context.Context) (*postgresTestServer, error) {
 			return fmt.Sprintf(
 				"postgres://%s:%s@%s/%s?sslmode=disable",
 				postgresTestUsername, postgresTestPassword, hostPort,
-				postgresTestDatabase,
+				postgresAdminDatabase,
 			)
 		},
 	).WithStartupTimeout(postgresStartupTimeout)
 
 	container, err := postgres.Run(
 		ctx, postgresTestImage,
-		postgres.WithDatabase(postgresTestDatabase),
+		postgres.WithDatabase(postgresAdminDatabase),
 		postgres.WithUsername(postgresTestUsername),
 		postgres.WithPassword(postgresTestPassword),
 		testcontainers.WithWaitStrategyAndDeadline(
@@ -117,6 +132,80 @@ func newPostgresTestServer(ctx context.Context) (*postgresTestServer, error) {
 	}
 
 	return server, nil
+}
+
+// newDatabase creates an isolated database and returns its rewritten DSN.
+func (s *postgresTestServer) newDatabase(ctx context.Context,
+	testName string) (*postgresTestDatabase, error) {
+
+	database := &postgresTestDatabase{
+		server: s,
+		name:   postgresDatabaseName(testName),
+	}
+	identifier := pgx.Identifier{database.name}.Sanitize()
+
+	createCtx, cancel := context.WithTimeout(ctx, defaultTestTimeout)
+	defer cancel()
+
+	_, err := s.adminDB.ExecContext(
+		createCtx, "CREATE DATABASE "+identifier,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create postgres database %q: %w",
+			database.name, err)
+	}
+
+	database.dsn, err = postgresDatabaseDSN(s.adminDSN, database.name)
+	if err != nil {
+		return nil, errors.Join(err, database.close(ctx))
+	}
+
+	return database, nil
+}
+
+// close drops the isolated database after its Managers have closed.
+func (d *postgresTestDatabase) close(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(
+		ctx, defaultTestTimeout,
+	)
+	defer cancel()
+
+	identifier := pgx.Identifier{d.name}.Sanitize()
+	_, err := d.server.adminDB.ExecContext(
+		ctx, "DROP DATABASE IF EXISTS "+identifier,
+	)
+	if err != nil {
+		return fmt.Errorf("drop postgres database %q: %w", d.name, err)
+	}
+
+	return nil
+}
+
+// postgresDatabaseName returns a short, deterministic SQL identifier for a
+// subtest name.
+func postgresDatabaseName(testName string) string {
+	hash := sha256.Sum256([]byte(testName))
+
+	return fmt.Sprintf(
+		"bwtest_%x", hash[:postgresDatabaseHashBytes],
+	)
+}
+
+// postgresDatabaseDSN rewrites an administrative DSN to select database.
+func postgresDatabaseDSN(adminDSN, database string) (string, error) {
+	dsn, err := url.Parse(adminDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse postgres admin DSN: %w", err)
+	}
+
+	if dsn.Scheme == "" || dsn.Host == "" {
+		return "", errors.New("parse postgres admin DSN: missing endpoint")
+	}
+
+	dsn.Path = "/" + database
+	dsn.RawPath = ""
+
+	return dsn.String(), nil
 }
 
 // close releases the administrative connection and immediately terminates
