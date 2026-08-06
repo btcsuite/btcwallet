@@ -21,6 +21,9 @@ const (
 	// dbNameSQLite is the identifier used for the SQLite wallet backend.
 	dbNameSQLite = "sqlite"
 
+	// dbNamePostgres is the identifier used for the PostgreSQL wallet backend.
+	dbNamePostgres = "postgres"
+
 	// kvdbDriver is the walletdb driver name used for kvdb.
 	kvdbDriver = "bdb"
 
