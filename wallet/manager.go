@@ -71,8 +71,10 @@ type CreateWalletParams struct {
 	// Seed is required for ModeImportSeed. Ignored for others.
 	Seed []byte
 
-	// RootKey is required for ModeImportExtKey. Ignored for others. Can be XPrv
-	// or XPub.
+	// RootKey is required for ModeImportExtKey and must be nil for every
+	// other mode, which reject a key they would not use. It must agree with
+	// WatchOnly: an XPrv for a spendable wallet, an XPub for a watch-only
+	// one.
 	RootKey *hdkeychain.ExtendedKey
 
 	// InitialAccounts is optional and names watch-only accounts to import
@@ -80,8 +82,11 @@ type CreateWalletParams struct {
 	// honored for ModeShell.
 	InitialAccounts []WatchOnlyAccount
 
-	// WatchOnly requests a watch-only wallet. It is honored for an XPub root
-	// (ModeImportExtKey) and a rootless shell (ModeShell).
+	// WatchOnly requests a watch-only wallet, and is the sole authority on
+	// whether the created wallet is watch-only. The root key must agree with
+	// it: a watch-only wallet takes an XPub root (ModeImportExtKey) or no
+	// root at all (ModeShell), while a spendable wallet requires a private
+	// root key.
 	WatchOnly bool
 
 	// Birthday is the wallet's birthday.
@@ -221,17 +226,17 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	rootKey, err := m.prepareWalletCreation(cfg, params)
-	if err != nil {
-		return nil, err
-	}
-
 	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
 	// spendable. Validate the params.InitialAccounts list upfront so a
 	// mismatched-mode create fails before any backend create runs
 	// (otherwise the wallet row exists on disk while importInitialAccounts
 	// later rejects an entry, leaving a half-created wallet).
 	err = validateInitialAccountsMode(params)
+	if err != nil {
+		return nil, err
+	}
+
+	rootKey, err := m.prepareWalletCreation(cfg, params)
 	if err != nil {
 		return nil, err
 	}
@@ -297,6 +302,16 @@ func (p *CreateWalletParams) validate() error {
 	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
 		return fmt.Errorf("%w: initial accounts should only be set "+
 			"for ModeShell", ErrWalletParams)
+	}
+
+	// A seed is private material: both seed modes produce a private root
+	// key that a watch-only wallet cannot hold. Reject the contradiction
+	// here, before the key is generated or derived, so no signing material
+	// is ever created only to be thrown away.
+	if p.WatchOnly && (p.Mode == ModeGenSeed || p.Mode == ModeImportSeed) {
+		return fmt.Errorf("%w: a seed derives a private root key, which "+
+			"a watch-only wallet cannot hold; use ModeImportExtKey "+
+			"with an XPub or ModeShell", ErrWalletParams)
 	}
 
 	if p.Mode == ModeGenSeed {
@@ -390,8 +405,9 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	return w, nil
 }
 
-// prepareWalletCreation derives the root key for wallet creation. The caller
-// has already validated cfg and params.
+// prepareWalletCreation derives the root key for wallet creation and checks it
+// against the requested watch-only state. The caller has already validated cfg
+// and params.
 func (m *Manager) prepareWalletCreation(cfg Config,
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
@@ -400,14 +416,50 @@ func (m *Manager) prepareWalletCreation(cfg Config,
 		return nil, err
 	}
 
-	// If the wallet is NOT watch-only, we require a private root key to be able
-	// to sign transactions and derive child private keys.
-	if !params.WatchOnly && rootKey != nil && !rootKey.IsPrivate() {
-		return nil, fmt.Errorf("%w: private key required for "+
-			"non-watch-only wallet", ErrWalletParams)
+	err = validateWatchOnlyRootKey(params, rootKey)
+	if err != nil {
+		return nil, err
 	}
 
 	return rootKey, nil
+}
+
+// validateWatchOnlyRootKey checks the derived root key against the requested
+// watch-only state.
+//
+// params.WatchOnly is the single source of truth: every backend persists that
+// flag verbatim, so a request whose key material contradicts it is rejected
+// here rather than silently reinterpreted.
+func validateWatchOnlyRootKey(params CreateWalletParams,
+	rootKey *hdkeychain.ExtendedKey) error {
+
+	hasPrivateKey := rootKey != nil && rootKey.IsPrivate()
+
+	switch {
+	// A watch-only wallet must not be handed signing material, because
+	// nothing persists it: kvdb drops the root key outright and a SQL
+	// wallet keeps only its neutered form. Accepting an extended private
+	// key here would silently discard the caller's key material, leaving a
+	// wallet that cannot sign and a seed it has no record of.
+	case params.WatchOnly && hasPrivateKey:
+		return fmt.Errorf("%w: watch-only wallet cannot be created "+
+			"from a private root key; neuter it first", ErrWalletParams)
+
+	// A spendable wallet needs a root key at all. A rootless wallet holds
+	// its accounts as imported extended public keys, which is watch-only by
+	// construction.
+	case !params.WatchOnly && rootKey == nil:
+		return fmt.Errorf("%w: a rootless wallet holds no signing "+
+			"material; it requires WatchOnly", ErrWalletParams)
+
+	// That root key must be private, so the wallet can sign transactions
+	// and derive child private keys.
+	case !params.WatchOnly && !hasPrivateKey:
+		return fmt.Errorf("%w: private key required for "+
+			"non-watch-only wallet", ErrWalletParams)
+	}
+
+	return nil
 }
 
 // deriveRootKey resolves the master extended key based on the creation mode.
