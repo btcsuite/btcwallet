@@ -12,8 +12,6 @@ import (
 // stops cleanly, Stop is idempotent, a stopped instance restarts cleanly, and
 // a fresh Load yields a working instance.
 func testControllerStartStop(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	cfg, params := h.TestWalletConfig()
 
 	manager := h.NewWalletManager()
@@ -51,8 +49,6 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 // they are forbidden before Start, a failed unlock leaves the wallet locked,
 // and Lock is idempotent after an explicit lock.
 func testControllerUnlockLock(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	const wrongPassphrase = "wrong-private-passphrase"
 
 	cfg, params := h.TestWalletConfig()
@@ -125,8 +121,6 @@ func testControllerUnlockLock(h *bwtest.HarnessTest) {
 // reports the configured backend and chain params, and tracks synchronization
 // as a block is mined.
 func testControllerInfo(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	cfg, params := h.TestWalletConfig()
 
 	manager := h.NewWalletManager()
