@@ -52,6 +52,10 @@ var allTestCases = []*testCase{
 		TestFunc: testListUnspentUnconfirmed,
 	},
 	{
+		Name:     "utxomanager list unspent immature coinbase",
+		TestFunc: testListUnspentImmatureCoinbase,
+	},
+	{
 		Name:     "utxomanager get utxo",
 		TestFunc: testGetUtxo,
 	},
