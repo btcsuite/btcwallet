@@ -4,9 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/stretchr/testify/require"
@@ -54,6 +58,39 @@ const (
 	// miner-funded test transactions.
 	MinerFeeRate = btcutil.Amount(10)
 )
+
+// MineBlockToAddress mines a single block whose coinbase reward pays to addr,
+// and waits for every registered wallet to sync.
+func (h *HarnessTest) MineBlockToAddress(addr address.Address) *wire.MsgBlock {
+	h.Helper()
+
+	if addr == nil {
+		h.Fatalf("nil address")
+	}
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create coinbase pkscript")
+
+	_, height := h.GetBestBlock()
+	subsidy := blockchain.CalcBlockSubsidy(height+1, h.NetParams())
+
+	block, err := h.miner.GenerateAndSubmitBlockWithCustomCoinbaseOutputs(
+		nil, -1, time.Time{}, []wire.TxOut{{
+			Value:    subsidy,
+			PkScript: pkScript,
+		}},
+	)
+	require.NoError(h, err, "unable to mine block to address")
+	require.NotNil(h, block, "mined block is nil")
+
+	// Ensure all wallets we created in this test have caught up, matching
+	// the behavior of the other mining helpers.
+	for _, w := range h.ActiveWallets() {
+		h.AssertWalletSynced(w)
+	}
+
+	return block.MsgBlock()
+}
 
 // GenerateBlocks generates the specified number of blocks.
 func (h *HarnessTest) GenerateBlocks(num uint32) []*chainhash.Hash {
