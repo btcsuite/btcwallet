@@ -190,6 +190,85 @@ func testListUnspent(h *bwtest.HarnessTest) {
 	require.Len(h, utxos, 3, "conf range excluded confirmed UTXOs")
 }
 
+// testListUnspentImmatureCoinbase verifies that a freshly mined coinbase output
+// paying the wallet is reported as not spendable, because it has not reached
+// coinbase maturity.
+func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
+	w := createWallet(h)
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	// The Spendable assertion below requires unlocking the wallet.
+	h.UnlockWallet(w)
+
+	addr := h.NewWalletAddress(w)
+
+	// Pay a single coinbase to the wallet. It is immature by construction:
+	// one confirmation is far below the coinbase maturity requirement.
+	h.MineBlockToAddress(addr)
+
+	// Fund an ordinary confirmed output as the spendable control.
+	funded := h.FundWallet(w, oneBTC)
+	require.Len(h, funded, 1, "unexpected funded outpoint count")
+
+	// Mining only waits for the wallet's synced height, which does not imply
+	// the coinbase has been committed to the wallet's UTXO store yet.
+	var utxos []*wallet.Utxo
+
+	err := wait.NoError(func() error {
+		listed, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+			MinConfs: 0,
+			MaxConfs: maxConfsLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("list unspent: %w", err)
+		}
+
+		if len(listed) != 2 {
+			return fmt.Errorf("want 2 utxos, got %d", len(listed))
+		}
+
+		utxos = listed
+
+		return nil
+	}, pollTimeout)
+	require.NoError(h, err, "coinbase and funded outputs not listed")
+
+	var coinbase, control *wallet.Utxo
+
+	for _, utxo := range utxos {
+		if utxo.OutPoint == funded[0] {
+			control = utxo
+
+			continue
+		}
+
+		coinbase = utxo
+	}
+
+	require.NotNil(h, coinbase, "coinbase output not listed")
+	require.NotNil(h, control, "control output not listed")
+
+	// The control proves the wallet reports spendable outputs at all, so the
+	// coinbase assertion below cannot pass vacuously.
+	require.True(h, control.Spendable, "funded output not spendable")
+
+	require.Less(
+		h, coinbase.Confirmations,
+		int32(h.NetParams().CoinbaseMaturity),
+		"coinbase already mature",
+	)
+	require.False(
+		h, coinbase.Spendable, "immature coinbase reported spendable",
+	)
+
+	// GetUtxo reports the same spendability for the same output.
+	utxo, err := w.GetUtxo(h.Context(), coinbase.OutPoint)
+	require.NoError(h, err, "failed to get coinbase utxo")
+	require.False(
+		h, utxo.Spendable, "immature coinbase reported spendable",
+	)
+}
+
 // testListUnspentUnconfirmed verifies that an unconfirmed payment to a wallet
 // address is listed with zero confirmations under MinConfs=0 and excluded
 // under MinConfs=1.
