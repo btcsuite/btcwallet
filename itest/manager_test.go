@@ -15,8 +15,6 @@ import (
 
 // testCreateWallet verifies a wallet can be created, started, and synced.
 func testCreateWallet(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	// This is a manager-focused test, so drive the Manager API directly
 	// rather than the harness's CreateEmptyWallet convenience helper.
 	cfg, params := h.TestWalletConfig()
@@ -45,8 +43,6 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 // testManagerCreateDuplicate verifies that both a live wallet cache entry and
 // a completed wallet in the durable store reject a duplicate creation.
 func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	cfg, params := h.TestWalletConfig()
 
 	manager := h.NewWalletManager()
@@ -80,8 +76,6 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 // testManagerLoadReload verifies Manager cache identity, durable reload, and
 // birthday metadata while preserving lifecycle ownership.
 func testManagerLoadReload(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	cfg, params := h.TestWalletConfig()
 
 	// Keep the effective birthday five days ahead of the chain after the
@@ -153,8 +147,6 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 // testManagerLoadMissing verifies that loading a wallet that was never created
 // fails rather than silently returning an empty wallet.
 func testManagerLoadMissing(h *bwtest.HarnessTest) {
-	h.Helper()
-
 	cfg, _ := h.TestWalletConfig()
 
 	manager := h.NewWalletManager()
