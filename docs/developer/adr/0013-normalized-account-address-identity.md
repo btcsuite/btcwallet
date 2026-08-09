@@ -69,6 +69,40 @@ Account identity fields, including `id`, `wallet_id`, `scope_id`,
 `is_derived`, and `account_number`, are immutable after creation. Account-name
 uniqueness stays centralized on `accounts`.
 
+#### Store Adapter Identity
+
+The shared Store projection needs a stable account selector for each backend,
+but that selector is not a public account identity. The internal
+`db.AccountInfo.AccountID` field carries the backend adapter's persisted
+identity: SQL maps it from `accounts.id`, while kvdb maps it from waddrmgr's
+internal account number.
+
+Shared code identifies this adapter value by the `(KeyScope, AccountID)` pair.
+kvdb account numbers restart in every key scope, so an `AccountID` can recur
+within one wallet. SQL row IDs happen to have wider uniqueness, but shared code
+must not depend on that backend-specific property.
+
+kvdb populates the adapter identity for wallet-derived accounts, imported-xpub
+accounts, and its imported-address pseudo-account. An imported account has no
+wallet-derived BIP44 `AccountNumber`, but waddrmgr still persists an unmasked
+internal account number for scoped lookup. Recovery also uses the adapter
+identity to key per-account state and stamp scan horizons. Returning no kvdb
+adapter identity would therefore make imported-account recovery and numeric
+kvdb lookup ambiguous or unusable.
+
+`AccountNumber` remains an optional BIP44 derivation attribute, and
+`AccountName` remains mutable display and lookup metadata. A wallet-derived
+kvdb account's adapter ID may numerically equal its BIP44 account number, but
+that coincidence does not give the two fields the same meaning.
+
+The adapter identity is stable only for an account within its backing Store
+and backend-defined domain. SQL row IDs and kvdb account numbers are not
+comparable, may repeat across key scopes or wallets, and may change during a
+backend conversion. They must remain inside Store, recovery, and adapter lookup
+boundaries. A wallet-owned public account contract must not expose either
+backend's adapter value, an SQL row ID, or the current
+`RecoveryState.AccountID` accessor as a portable account ID.
+
 #### Account Alternatives
 
 The first rejected alternative was to keep mapping imported xpub accounts to
@@ -175,15 +209,19 @@ Cons:
 
 - Modify the existing unmerged account and address migrations in place. Do not
   add new migration numbers for this feature-branch schema rewrite.
-- The normalized schema applies to the PostgreSQL and SQLite backends. kvdb keeps
-  its legacy waddrmgr storage, including the fixed imported account name and
-  scoped imported buckets, and only maps legacy rows into the shared Go types.
-- `db.AccountInfo` exposes SQL `AccountID` and makes `AccountNumber` optional.
-  The kvdb backend leaves `AccountID` nil.
+- The normalized schema applies to the PostgreSQL and SQLite backends. kvdb
+  keeps its legacy waddrmgr storage, including the fixed imported account name
+  and scoped imported buckets, and only maps legacy rows into the shared Go
+  types.
+- `db.AccountInfo` exposes an internal adapter `AccountID` and makes
+  `AccountNumber` optional. SQL maps `AccountID` from `accounts.id`; kvdb maps
+  it from waddrmgr's per-scope internal account number. Shared code pairs it
+  with `KeyScope` and must not expose it as a portable public account ID.
 - `db.AddressInfo` makes `AccountID` and `AccountNumber` optional. SQL raw
   imports have neither, use an empty account name and zero key scope, and are
-  listed with an accountless query. Imported-xpub child addresses have an account
-  ID and scope inherited from their account but no BIP44 account number.
+  listed with an accountless query. Imported-xpub child addresses have an
+  account ID and scope inherited from their account but no BIP44 account
+  number.
 - `AddressDerivationParams` carries an optional derived account number. Imported
   xpub child addresses must not synthesize `0` and accidentally derive wallet
   seed keys.
