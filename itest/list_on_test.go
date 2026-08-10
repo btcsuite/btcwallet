@@ -52,6 +52,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerContractErrors,
 	},
 	{
+		Name:     "account manager import account",
+		TestFunc: testAccountManagerImportAccount,
+	},
+	{
 		Name:     "account manager reserved accounts",
 		TestFunc: testAccountManagerReservedAccounts,
 	},
