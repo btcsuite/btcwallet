@@ -424,35 +424,35 @@ func TestNewAddress(t *testing.T) {
 	}{
 		{
 			name:             "default account p2wkh",
-			accountName:      "default",
+			accountName:      waddrmgr.DefaultAccountName,
 			addrType:         waddrmgr.WitnessPubKey,
 			change:           false,
 			expectedAddrType: &address.AddressWitnessPubKeyHash{},
 		},
 		{
 			name:             "p2wkh change address",
-			accountName:      "default",
+			accountName:      waddrmgr.DefaultAccountName,
 			addrType:         waddrmgr.WitnessPubKey,
 			change:           true,
 			expectedAddrType: &address.AddressWitnessPubKeyHash{},
 		},
 		{
 			name:             "default account np2wkh",
-			accountName:      "default",
+			accountName:      waddrmgr.DefaultAccountName,
 			addrType:         waddrmgr.NestedWitnessPubKey,
 			change:           false,
 			expectedAddrType: &address.AddressScriptHash{},
 		},
 		{
 			name:             "default account p2tr",
-			accountName:      "default",
+			accountName:      waddrmgr.DefaultAccountName,
 			addrType:         waddrmgr.TaprootPubKey,
 			change:           false,
 			expectedAddrType: &address.AddressTaproot{},
 		},
 		{
 			name:        "unknown address type",
-			accountName: "default",
+			accountName: waddrmgr.DefaultAccountName,
 			addrType:    waddrmgr.WitnessScript,
 			expectErr:   true,
 		},
@@ -676,8 +676,8 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	expectStoreAddressInfo(t, w, deps, extAddr, derivedAddressInfoFromAddr(
-		t, extAddr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
-		false, 0, 0, pubKey,
+		t, extAddr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
+		waddrmgr.KeyScopeBIP0084, false, 0, 0, pubKey,
 	))
 
 	extInfo, err := w.GetAddressInfo(t.Context(), extAddr)
@@ -693,8 +693,8 @@ func TestGetAddressInfo(t *testing.T) {
 		make([]byte, 20), w.cfg.ChainParams,
 	)
 	expectStoreAddressInfo(t, w, deps, intAddr, derivedAddressInfoFromAddr(
-		t, intAddr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
-		true, 0, 0, pubKey,
+		t, intAddr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
+		waddrmgr.KeyScopeBIP0084, true, 0, 0, pubKey,
 	))
 
 	intInfo, err := w.GetAddressInfo(t.Context(), intAddr)
@@ -728,8 +728,8 @@ func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {
 		MasterKeyFingerprint: 123,
 	}
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, "default", scope, false, path.Index,
-		path.MasterKeyFingerprint, pubKey,
+		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName, scope, false,
+		path.Index, path.MasterKeyFingerprint, pubKey,
 	))
 
 	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
@@ -772,8 +772,8 @@ func TestGetDerivationInfoInternalAddressSuccess(t *testing.T) {
 		MasterKeyFingerprint: 123,
 	}
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, "default", scope, true, path.Index,
-		path.MasterKeyFingerprint, pubKey,
+		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName, scope, true,
+		path.Index, path.MasterKeyFingerprint, pubKey,
 	))
 
 	derivationInfo, err := w.GetDerivationInfo(t.Context(), addr)
@@ -909,11 +909,13 @@ func TestListAddresses(t *testing.T) {
 	)
 
 	expectStoreNewAddress(
-		t, w, deps, "default", waddrmgr.KeyScopeBIP0084, false, mockAddr,
+		t, w, deps, waddrmgr.DefaultAccountName, waddrmgr.KeyScopeBIP0084,
+		false, mockAddr,
 	)
 
 	addr, err := w.NewAddress(
-		t.Context(), "default", waddrmgr.WitnessPubKey, false,
+		t.Context(), waddrmgr.DefaultAccountName, waddrmgr.WitnessPubKey,
+		false,
 	)
 	require.NoError(t, err)
 
@@ -922,7 +924,7 @@ func TestListAddresses(t *testing.T) {
 	req, err := addressPageRequest()
 	require.NoError(t, err)
 
-	accountName := "default"
+	accountName := waddrmgr.DefaultAccountName
 	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
 
 	deps.store.On(
@@ -944,7 +946,7 @@ func TestListAddresses(t *testing.T) {
 	}}, nil).Once()
 
 	addrs, err := w.ListAddresses(
-		t.Context(), "default", waddrmgr.WitnessPubKey,
+		t.Context(), waddrmgr.DefaultAccountName, waddrmgr.WitnessPubKey,
 	)
 	require.NoError(t, err)
 
@@ -1175,8 +1177,8 @@ func TestScriptForOutput(t *testing.T) {
 
 	_, pubKey := deterministicPrivKey(t)
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.WitnessPubKey, "default", waddrmgr.KeyScopeBIP0084,
-		false, 0, 0, pubKey,
+		t, addr, db.WitnessPubKey, waddrmgr.DefaultAccountName,
+		waddrmgr.KeyScopeBIP0084, false, 0, 0, pubKey,
 	))
 
 	script, err := w.ScriptForOutput(t.Context(), output)
@@ -1212,7 +1214,7 @@ func TestScriptForOutputNestedWitness(t *testing.T) {
 	require.NoError(t, err)
 
 	expectStoreAddressInfo(t, w, deps, addr, derivedAddressInfoFromAddr(
-		t, addr, db.NestedWitnessPubKey, "default",
+		t, addr, db.NestedWitnessPubKey, waddrmgr.DefaultAccountName,
 		waddrmgr.KeyScopeBIP0049Plus, false, 0, 0, pubKey,
 	))
 
