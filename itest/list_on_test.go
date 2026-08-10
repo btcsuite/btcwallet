@@ -44,6 +44,10 @@ var allTestCases = []*testCase{
 		TestFunc: testControllerInfo,
 	},
 	{
+		Name:     "account manager lifecycle",
+		TestFunc: testAccountManagerLifecycle,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
