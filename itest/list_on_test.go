@@ -64,6 +64,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerAccountNumbers,
 	},
 	{
+		Name:     "account manager import routing",
+		TestFunc: testAccountManagerImportRouting,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},

@@ -388,3 +388,176 @@ func harnessHDVersions(h *bwtest.HarnessTest) harnessHDVersionSet {
 
 	return versions
 }
+
+// testAccountManagerImportRouting verifies that the key scope of an imported
+// account is derived from the extended key's version bytes together with the
+// requested address type, and that the resulting scope and address schema
+// survive a reload.
+//
+// The imports run against a watch-only shell because a spendable wallet refuses
+// xpub-only accounts, so this is the only wallet shape in which the whole
+// routing table is reachable.
+func testAccountManagerImportRouting(h *bwtest.HarnessTest) {
+	ctx := h.Context()
+	versions := harnessHDVersions(h)
+
+	// Every routing branch of the version/address-type mapping. Taproot has no
+	// version set of its own, so BIP86 is reached through a BIP44 or BIP84
+	// encoding paired with a taproot address type.
+	cases := []struct {
+		name     string
+		version  [4]byte
+		addrType waddrmgr.AddressType
+		scope    waddrmgr.KeyScope
+		index    uint32
+	}{
+		{
+			name:     "bip44 nested witness",
+			version:  versions.bip44,
+			addrType: waddrmgr.NestedWitnessPubKey,
+			scope:    waddrmgr.KeyScopeBIP0049Plus,
+			index:    10,
+		},
+		{
+			name:     "bip44 witness",
+			version:  versions.bip44,
+			addrType: waddrmgr.WitnessPubKey,
+			scope:    waddrmgr.KeyScopeBIP0084,
+			index:    11,
+		},
+		{
+			name:     "bip44 taproot",
+			version:  versions.bip44,
+			addrType: waddrmgr.TaprootPubKey,
+			scope:    waddrmgr.KeyScopeBIP0086,
+			index:    12,
+		},
+		{
+			name:     "bip49 nested witness",
+			version:  versions.bip49,
+			addrType: waddrmgr.NestedWitnessPubKey,
+			scope:    waddrmgr.KeyScopeBIP0049Plus,
+			index:    13,
+		},
+		{
+			name:     "bip49 witness",
+			version:  versions.bip49,
+			addrType: waddrmgr.WitnessPubKey,
+			scope:    waddrmgr.KeyScopeBIP0049Plus,
+			index:    14,
+		},
+		{
+			name:     "bip84 witness",
+			version:  versions.bip84,
+			addrType: waddrmgr.WitnessPubKey,
+			scope:    waddrmgr.KeyScopeBIP0084,
+			index:    15,
+		},
+		{
+			name:     "bip84 taproot",
+			version:  versions.bip84,
+			addrType: waddrmgr.TaprootPubKey,
+			scope:    waddrmgr.KeyScopeBIP0086,
+			index:    16,
+		},
+	}
+
+	keys := deterministicImportAccountKeys(h)
+
+	cfg, params := h.TestWalletConfig()
+	params.Mode = wallet.ModeShell
+	params.WatchOnly = true
+	params.InitialAccounts = []wallet.WatchOnlyAccount{
+		{
+			Scope:                waddrmgr.KeyScopeBIP0084,
+			XPub:                 keys.initial,
+			MasterKeyFingerprint: keys.fingerprint,
+			Name:                 "account manager routing seed",
+			AddrType:             waddrmgr.WitnessPubKey,
+		},
+	}
+
+	manager := h.NewWalletManager()
+	w, err := manager.Create(cfg, params)
+	require.NoError(h, err, "failed to create watch-only shell wallet")
+	h.RegisterWallet(w)
+	require.NoError(h, w.Start(ctx), "failed to start watch-only shell wallet")
+
+	// schemas records the address schema each import was stored with, so the
+	// reload can be checked against it. The schema type lives in
+	// wallet/internal/db and cannot be named here, so the recorded values come
+	// from the API itself rather than from literals.
+	schemas := make(map[string]any, len(cases))
+
+	for _, tc := range cases {
+		key := importRoutingKey(h, tc.index, tc.version)
+
+		account, err := w.ImportAccount(
+			ctx, tc.name, key, keys.fingerprint, tc.addrType, false,
+		)
+		require.NoErrorf(h, err, "failed to import the %s account", tc.name)
+		require.NotNilf(
+			h, account, "the %s import returned no account", tc.name,
+		)
+		require.Equalf(
+			h, tc.scope, waddrmgr.KeyScope(account.KeyScope),
+			"the %s account was routed to the wrong scope", tc.name,
+		)
+		require.Truef(
+			h, account.IsImported, "the %s account is not reported as imported",
+			tc.name,
+		)
+		require.Equalf(
+			h, []byte(key.String()), account.PublicKey,
+			"the %s account did not round-trip its key", tc.name,
+		)
+
+		schemas[tc.name] = account.AddrSchema
+	}
+
+	reloaded := reloadAccountManagerWallet(h, cfg, manager, w)
+
+	for _, tc := range cases {
+		account, err := reloaded.GetAccount(ctx, tc.scope, tc.name)
+		require.NoErrorf(
+			h, err, "the %s account was lost by the reload", tc.name,
+		)
+		require.Equalf(
+			h, tc.scope, waddrmgr.KeyScope(account.KeyScope),
+			"the %s account changed scope across the reload", tc.name,
+		)
+		require.Equalf(
+			h, schemas[tc.name], account.AddrSchema,
+			"the %s account changed address schema across the reload", tc.name,
+		)
+	}
+}
+
+// importRoutingKey derives a distinct account-level public key and stamps it
+// with the requested HD version.
+//
+// The derivation path purpose does not have to agree with the version bytes:
+// scope routing is driven by the version and the requested address type, and
+// using one path keeps the keys distinct without implying otherwise.
+func importRoutingKey(h *bwtest.HarnessTest, index uint32,
+	version [4]byte) *hdkeychain.ExtendedKey {
+
+	h.Helper()
+
+	root, err := hdkeychain.NewMaster([]byte{
+		0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+		0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,
+	}, h.NetParams())
+	require.NoError(h, err, "failed to derive the routing root key")
+
+	purpose, err := root.Derive(hdkeychain.HardenedKeyStart + 84)
+	require.NoError(h, err, "failed to derive the routing purpose key")
+	coinType, err := purpose.Derive(
+		hdkeychain.HardenedKeyStart + h.NetParams().HDCoinType,
+	)
+	require.NoError(h, err, "failed to derive the routing coin-type key")
+	account, err := coinType.Derive(hdkeychain.HardenedKeyStart + index)
+	require.NoError(h, err, "failed to derive the routing account key")
+
+	return cloneAccountPublicKey(h, account, version)
+}
