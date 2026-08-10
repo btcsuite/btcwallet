@@ -171,7 +171,7 @@ itest:
 	@$(call print, "Running integration tests.")
 	@$(GOTEST) -v ./itest \
 		-tags="itest $(DEV_TAGS) nolog" \
-		$(if $(icase),-test.run="TestBtcWallet$$|$(icase)",) \
+		$(if $(icase),-test.run="^TestBtcWallet/[^/]+/$(icase)",) \
 		$(filter-out -test.run=%,$(TEST_FLAGS)) \
 		-args \
 		-chain="$(if $(backend),$(backend),$(if $(chain),$(chain),btcd))" \
