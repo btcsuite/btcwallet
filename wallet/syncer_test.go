@@ -2129,7 +2129,7 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	accounts := []db.AccountInfo{{
 		AccountID:            &accountID,
 		AccountNumber:        &accountNumber2,
-		AccountName:          "default",
+		AccountName:          waddrmgr.DefaultAccountName,
 		ExternalKeyCount:     5,
 		InternalKeyCount:     3,
 		ImportedKeyCount:     1,
@@ -2257,7 +2257,7 @@ func TestStoreScanHorizonsGetAccountKeepsImportedXpub(t *testing.T) {
 	// the only horizon emitted.
 	derivedInfo := db.AccountInfo{
 		AccountNumber:    &derivedAccount,
-		AccountName:      "default",
+		AccountName:      waddrmgr.DefaultAccountName,
 		ExternalKeyCount: 8,
 		InternalKeyCount: 4,
 		KeyScope:         db.KeyScope(derived.Scope),
@@ -2763,7 +2763,7 @@ func TestStoreScanAddresses(t *testing.T) {
 	require.NoError(t, err)
 
 	accounts := []db.AccountInfo{{
-		AccountName: "default",
+		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
@@ -2776,7 +2776,7 @@ func TestStoreScanAddresses(t *testing.T) {
 		func(query db.ListAddressesQuery) bool {
 			return query.WalletID == walletID &&
 				query.AccountName != nil &&
-				*query.AccountName == "default" &&
+				*query.AccountName == waddrmgr.DefaultAccountName &&
 				query.Scope != nil &&
 				*query.Scope == db.KeyScopeBIP0084 &&
 				query.Page.Limit() == scanAddressPageLimit
@@ -2823,7 +2823,7 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 	require.NoError(t, err)
 
 	accounts := []db.AccountInfo{{
-		AccountName: "default",
+		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
@@ -2836,7 +2836,7 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 		func(query db.ListAddressesQuery) bool {
 			return query.WalletID == walletID &&
 				query.AccountName != nil &&
-				*query.AccountName == "default" &&
+				*query.AccountName == waddrmgr.DefaultAccountName &&
 				query.Scope != nil &&
 				*query.Scope == db.KeyScopeBIP0084
 		},
@@ -3050,7 +3050,7 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 	accounts := []db.AccountInfo{{
 		AccountID:        &accountID3,
 		AccountNumber:    &accountNumber3,
-		AccountName:      "default",
+		AccountName:      waddrmgr.DefaultAccountName,
 		ExternalKeyCount: 4,
 		InternalKeyCount: 5,
 		KeyScope:         db.KeyScopeBIP0084,
@@ -3065,7 +3065,7 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 		func(query db.ListAddressesQuery) bool {
 			return query.WalletID == walletID &&
 				query.AccountName != nil &&
-				*query.AccountName == "default" &&
+				*query.AccountName == waddrmgr.DefaultAccountName &&
 				query.Scope != nil &&
 				*query.Scope == db.KeyScopeBIP0084
 		},
