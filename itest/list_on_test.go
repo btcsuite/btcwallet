@@ -52,6 +52,14 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerContractErrors,
 	},
 	{
+		Name:     "account manager reserved accounts",
+		TestFunc: testAccountManagerReservedAccounts,
+	},
+	{
+		Name:     "account manager account numbers",
+		TestFunc: testAccountManagerAccountNumbers,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},

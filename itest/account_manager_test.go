@@ -844,6 +844,209 @@ func requireAccountManagerNameAbsent(h *bwtest.HarnessTest, w *wallet.Wallet,
 	)
 }
 
+// testAccountManagerReservedAccounts verifies the reserved-account rules the
+// AccountManager contract states: the "imported" account cannot be renamed and
+// cannot be renamed onto, while a "default" account can be renamed.
+//
+// Whether a freshly created wallet has "default" rows at all is backend
+// specific, so the rename half is asserted only for the scopes that expose one.
+// What is asserted unconditionally is that the exposure is uniform: a backend
+// must publish a default account in every default scope or in none of them,
+// never in a subset.
+func testAccountManagerReservedAccounts(h *bwtest.HarnessTest) {
+	const renamedDefault = "account manager renamed default"
+
+	ctx := h.Context()
+	_, _, w := newAccountManagerWallet(h)
+
+	// Renaming onto the reserved name must be rejected regardless of whether a
+	// row with that name exists, so this needs a source account to rename.
+	const sourceName = "account manager reserved source"
+
+	_, err := w.NewAccount(ctx, waddrmgr.KeyScopeBIP0084, sourceName)
+	require.NoError(h, err, "failed to create the rename source account")
+
+	err = w.RenameAccount(
+		ctx, waddrmgr.KeyScopeBIP0084, sourceName,
+		waddrmgr.ImportedAddrAccountName,
+	)
+	require.Error(
+		h, err, "a rename onto the reserved imported name was accepted",
+	)
+
+	source, err := w.GetAccount(ctx, waddrmgr.KeyScopeBIP0084, sourceName)
+	require.NoError(
+		h, err, "the source account was lost by the rejected rename",
+	)
+	require.Equal(h, sourceName, source.AccountName)
+
+	// The reserved imported account may not be renamed away either. Both
+	// backends reject this; only the classification differs, so the assertion
+	// requires rejection alone.
+	err = w.RenameAccount(
+		ctx, waddrmgr.KeyScopeBIP0084, waddrmgr.ImportedAddrAccountName,
+		"account manager from imported",
+	)
+	require.Error(h, err, "the reserved imported account was renamed")
+	requireAccountManagerNameAbsent(
+		h, w, "account manager from imported",
+		"rename of the reserved imported account",
+	)
+
+	// Collect the scopes that publish a default account.
+	scopesWithDefault := make([]waddrmgr.KeyScope, 0, len(defaultKeyScopes))
+	for _, scope := range defaultKeyScopes {
+		_, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+		if err != nil {
+			continue
+		}
+
+		scopesWithDefault = append(scopesWithDefault, scope)
+	}
+
+	if len(scopesWithDefault) == 0 {
+		// Recorded rather than skipped silently, so a run makes it obvious that
+		// the rename half of this case did not execute on this backend.
+		h.Logf("no default account is published in any default scope; " +
+			"skipping the default-account rename assertions")
+
+		return
+	}
+
+	require.Lenf(
+		h, scopesWithDefault, len(defaultKeyScopes),
+		"a default account is published for some scopes but not all of them: "+
+			"%v",
+		scopesWithDefault,
+	)
+
+	// Renaming a default account is allowed, and must leave the identically
+	// named accounts in the other scopes alone.
+	renameScope := waddrmgr.KeyScopeBIP0084
+
+	err = w.RenameAccount(
+		ctx, renameScope, waddrmgr.DefaultAccountName, renamedDefault,
+	)
+	require.NoErrorf(
+		h, err, "the default account in scope %s could not be renamed",
+		renameScope,
+	)
+
+	renamed, err := w.GetAccount(ctx, renameScope, renamedDefault)
+	require.NoError(h, err, "the renamed default account does not resolve")
+	require.Equal(h, renamedDefault, renamed.AccountName)
+	require.False(
+		h, renamed.IsImported,
+		"the renamed default account is reported as imported",
+	)
+
+	_, err = w.GetAccount(ctx, renameScope, waddrmgr.DefaultAccountName)
+	require.Error(
+		h, err, "the old default name still resolves in the renamed scope",
+	)
+
+	for _, scope := range defaultKeyScopes {
+		if scope == renameScope {
+			continue
+		}
+
+		account, err := w.GetAccount(
+			ctx, scope, waddrmgr.DefaultAccountName,
+		)
+		require.NoErrorf(
+			h, err,
+			"the default account in scope %s was lost by renaming scope %s",
+			scope, renameScope,
+		)
+		require.Equal(h, waddrmgr.DefaultAccountName, account.AccountName)
+	}
+}
+
+// testAccountManagerAccountNumbers verifies derived account numbers advance
+// within a scope, are allocated per scope rather than wallet-wide, and survive
+// a reload.
+//
+// The first number a backend hands out is backend specific, so the assertions
+// compare the sequences the scopes produce against each other instead of
+// against fixed values.
+func testAccountManagerAccountNumbers(h *bwtest.HarnessTest) {
+	const accountsPerScope = 3
+
+	ctx := h.Context()
+	cfg, manager, w := newAccountManagerWallet(h)
+
+	// name identifies the account created for a scope at a given position.
+	name := func(scope waddrmgr.KeyScope, index int) string {
+		return fmt.Sprintf("account manager number %d/%d %d", scope.Purpose,
+			scope.Coin, index)
+	}
+
+	sequences := make(map[waddrmgr.KeyScope][]uint32, len(defaultKeyScopes))
+	for _, scope := range defaultKeyScopes {
+		numbers := make([]uint32, 0, accountsPerScope)
+
+		for index := range accountsPerScope {
+			account, err := w.NewAccount(ctx, scope, name(scope, index))
+			require.NoErrorf(
+				h, err, "failed to create account %d in scope %s", index, scope,
+			)
+			require.NotNilf(
+				h, account.AccountNumber,
+				"account %d in scope %s has no account number", index, scope,
+			)
+
+			numbers = append(numbers, *account.AccountNumber)
+		}
+
+		for i := 1; i < len(numbers); i++ {
+			require.Greaterf(
+				h, numbers[i], numbers[i-1],
+				"account numbers in scope %s did not advance: %v", scope,
+				numbers,
+			)
+		}
+
+		sequences[scope] = numbers
+	}
+
+	// Account numbers are indexed under purpose'/coin_type', so every scope
+	// must produce the same sequence. A wallet-wide counter would make the
+	// later scopes continue from the earlier ones instead.
+	first := sequences[defaultKeyScopes[0]]
+	for _, scope := range defaultKeyScopes[1:] {
+		require.Equalf(
+			h, first, sequences[scope],
+			"scope %s allocated %v but scope %s allocated %v, so account "+
+				"numbers are not scoped",
+			defaultKeyScopes[0], first, scope, sequences[scope],
+		)
+	}
+
+	// The numbers are part of durable state, so a reload has to report the very
+	// same ones rather than reallocating.
+	reloaded := reloadAccountManagerWallet(h, cfg, manager, w)
+
+	for _, scope := range defaultKeyScopes {
+		for index, want := range sequences[scope] {
+			account, err := reloaded.GetAccount(ctx, scope, name(scope, index))
+			require.NoErrorf(
+				h, err, "account %d in scope %s was lost by the reload", index,
+				scope,
+			)
+			require.NotNilf(
+				h, account.AccountNumber,
+				"account %d in scope %s lost its number in the reload", index,
+				scope,
+			)
+			require.Equalf(
+				h, want, *account.AccountNumber,
+				"account %d in scope %s changed number across the reload",
+				index, scope,
+			)
+		}
+	}
+}
+
 // requireDerivedAccountKeyEqual compares two serialized derived account keys
 // in full: depth, parent fingerprint, child index, chain code, and key data
 // all have to match. Only the four HD version bytes are normalized away,
