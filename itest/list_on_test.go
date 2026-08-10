@@ -43,4 +43,32 @@ var allTestCases = []*testCase{
 		Name:     "controller info",
 		TestFunc: testControllerInfo,
 	},
+	{
+		Name:     "utxomanager list unspent",
+		TestFunc: testListUnspent,
+	},
+	{
+		Name:     "utxomanager list unspent unconfirmed",
+		TestFunc: testListUnspentUnconfirmed,
+	},
+	{
+		Name:     "utxomanager list unspent immature coinbase",
+		TestFunc: testListUnspentImmatureCoinbase,
+	},
+	{
+		Name:     "utxomanager get utxo",
+		TestFunc: testGetUtxo,
+	},
+	{
+		Name:     "utxomanager lease output",
+		TestFunc: testLeaseOutput,
+	},
+	{
+		Name:     "utxomanager release output",
+		TestFunc: testReleaseOutput,
+	},
+	{
+		Name:     "utxomanager list leased outputs",
+		TestFunc: testListLeasedOutputs,
+	},
 }
