@@ -106,7 +106,7 @@ func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
 	require.NoError(t, err)
 
-	got, err := sqliteCreateWalletParams(
+	got, err := sqlCreateWalletParams(
 		cfg, params, rootKey, birthdayWithSafetyMargin(params.Birthday),
 	)
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestSQLiteCreateWalletParamsBirthdayVerbatim(t *testing.T) {
 
 			// Act: build the SQL runtime create params with the
 			// already-resolved birthday.
-			got, err := sqliteCreateWalletParams(
+			got, err := sqlCreateWalletParams(
 				cfg, params, rootKey, tc.birthday,
 			)
 			require.NoError(t, err)
