@@ -3,8 +3,11 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	vault "github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
@@ -22,8 +25,7 @@ func (b *sqlManagerBackend) create(ctx context.Context, cfg Config,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
-	createParams, err := sqliteCreateWalletParams(
-		cfg, params, rootKey,
+	createParams, err := sqlCreateWalletParams(cfg, params, rootKey,
 		birthdayWithSafetyMargin(params.Birthday),
 	)
 	if err != nil {
@@ -75,4 +77,72 @@ func (b *sqlManagerBackend) close() error {
 	}
 
 	return b.closeFn()
+}
+
+// sqlCreateWalletParams converts wallet creation inputs into SQL rows.
+func sqlCreateWalletParams(cfg Config, params CreateWalletParams,
+	rootKey *hdkeychain.ExtendedKey, birthday time.Time) (
+	db.CreateWalletParams, error) {
+
+	createParams := db.CreateWalletParams{
+		Name: cfg.Name,
+		IsImported: params.Mode == ModeImportSeed ||
+			params.Mode == ModeImportExtKey,
+		// LatestMgrVersion is a small constant that fits int32.
+		//nolint:gosec
+		ManagerVersion: int32(waddrmgr.LatestMgrVersion),
+		IsWatchOnly:    params.WatchOnly,
+		Birthday:       birthday,
+	}
+
+	switch {
+	case rootKey == nil:
+		createParams.IsWatchOnly = true
+
+	case rootKey.IsPrivate():
+		masterPubKey, err := rootKey.Neuter()
+		if err != nil {
+			return db.CreateWalletParams{}, fmt.Errorf("derive pubkey: %w", err)
+		}
+
+		createParams.MasterPubKey = []byte(masterPubKey.String())
+
+	default:
+		createParams.IsWatchOnly = true
+		createParams.MasterPubKey = []byte(rootKey.String())
+	}
+
+	secrets, err := vault.CreateWalletSecrets(
+		params.PrivatePassphrase, rootKey, createParams.IsWatchOnly)
+	if err != nil {
+		return db.CreateWalletParams{}, fmt.Errorf(
+			"create wallet secrets: %w", err)
+	}
+
+	createParams.MasterKeyPrivParams = secrets.MasterPrivParams
+	createParams.EncryptedCryptoPrivKey = secrets.EncryptedCryptoPrivKey
+	createParams.EncryptedCryptoScriptKey = secrets.EncryptedCryptoScriptKey
+	createParams.EncryptedMasterPrivKey = secrets.EncryptedMasterHdPrivKey
+
+	return createParams, nil
+}
+
+// birthdayWithSafetyMargin applies the legacy margin to a non-zero birthday.
+func birthdayWithSafetyMargin(birthday time.Time) time.Time {
+	if birthday.IsZero() {
+		return birthday
+	}
+
+	return birthday.Add(-waddrmgr.BirthdaySafetyMargin)
+}
+
+// newSQLAddressDeriver returns an address derivation callback for a network.
+func newSQLAddressDeriver(
+	chainParams *chaincfg.Params) db.AddressDerivationFunc {
+
+	return func(_ context.Context, params db.AddressDerivationParams) (
+		*db.DerivedAddressData, error) {
+
+		return deriveAddressData(chainParams, params)
+	}
 }
