@@ -131,8 +131,9 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 
 	return &Manager{
 		wallets: make(map[string]*Wallet),
-		backend: &sqliteManagerBackend{
-			store: store,
+		backend: &sqlManagerBackend{
+			store:   store,
+			closeFn: func() error { return nil },
 		},
 		chainParams: &chainParams,
 	}
