@@ -56,6 +56,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerImportAccount,
 	},
 	{
+		Name:     "account manager watch only",
+		TestFunc: testAccountManagerWatchOnly,
+	},
+	{
 		Name:     "account manager reserved accounts",
 		TestFunc: testAccountManagerReservedAccounts,
 	},
@@ -66,6 +70,10 @@ var allTestCases = []*testCase{
 	{
 		Name:     "account manager import routing",
 		TestFunc: testAccountManagerImportRouting,
+	},
+	{
+		Name:     "account manager import spendable",
+		TestFunc: testAccountManagerImportSpendable,
 	},
 	{
 		Name:     "utxomanager list unspent",

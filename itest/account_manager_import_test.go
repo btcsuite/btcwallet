@@ -533,6 +533,64 @@ func testAccountManagerImportRouting(h *bwtest.HarnessTest) {
 	}
 }
 
+// testAccountManagerImportSpendable pins what a spendable wallet does when an
+// xpub-only account is imported into it.
+//
+// ADR 0012 states that a wallet is uniformly watch-only or uniformly spendable,
+// and the two backends disagree on enforcing it for this operation: sqlite
+// rejects the import outright, while kvdb accepts it and publishes the account
+// as imported and watch-only inside an otherwise spendable wallet. Until that
+// is settled, the assertion covers the part both must honor either way, which
+// is that no partial account state is left behind: the import either fails and
+// publishes nothing, or succeeds and is fully queryable.
+func testAccountManagerImportSpendable(h *bwtest.HarnessTest) {
+	const importName = "account manager spendable import"
+
+	ctx := h.Context()
+	keys := deterministicImportAccountKeys(h)
+	_, _, w := newAccountManagerWallet(h)
+
+	require.False(h, w.IsWatchOnly(), "the wallet is not spendable")
+
+	imported, err := w.ImportAccount(
+		ctx, importName, keys.candidate, keys.fingerprint,
+		waddrmgr.WitnessPubKey, false,
+	)
+	if err != nil {
+		requireAccountManagerNameAbsent(
+			h, w, importName, "rejected import into a spendable wallet",
+		)
+
+		return
+	}
+
+	// The import was accepted, so the account has to be complete and reachable
+	// through every read surface.
+	require.NotNil(h, imported, "the accepted import returned no account")
+	require.True(
+		h, imported.IsImported,
+		"the imported account is not reported as imported",
+	)
+	require.True(
+		h, imported.IsWatchOnly,
+		"an xpub-only account in a spendable wallet is not watch-only",
+	)
+	require.Nil(
+		h, imported.AccountNumber,
+		"the imported account was given a derived account number",
+	)
+	require.Equal(
+		h, []byte(keys.candidate.String()), imported.PublicKey,
+		"the imported account did not round-trip its key",
+	)
+
+	requireImportedAccountState(h, w, importAccountExpectation{
+		name:        importName,
+		publicKey:   bytes.Clone([]byte(keys.candidate.String())),
+		fingerprint: keys.fingerprint,
+	})
+}
+
 // importRoutingKey derives a distinct account-level public key and stamps it
 // with the requested HD version.
 //
@@ -560,4 +618,76 @@ func importRoutingKey(h *bwtest.HarnessTest, index uint32,
 	require.NoError(h, err, "failed to derive the routing account key")
 
 	return cloneAccountPublicKey(h, account, version)
+}
+
+// watchOnlyRejectionPattern matches the watch-only rejection of both backends.
+// sqlite reaches the wallet-side derivation callback and fails with "wallet is
+// watch-only", while kvdb refuses earlier, when waddrmgr allocates the account
+// number, with "address manager is watching-only". Matching either shape keeps
+// the assertion tied to the watch-only restriction instead of accepting any
+// error, such as the unrelated missing-scope failure.
+const watchOnlyRejectionPattern = `watch(ing)?-only`
+
+// testAccountManagerWatchOnly verifies that a real watch-only shell rejects
+// derived account creation without persisting a partial account row.
+func testAccountManagerWatchOnly(h *bwtest.HarnessTest) {
+	const (
+		initialName   = "account manager watch only initial"
+		candidateName = "account manager watch only candidate"
+	)
+
+	keys := deterministicImportAccountKeys(h)
+
+	// Override the harness defaults so the shell presents the same
+	// passphrases cfg carries; see testAccountManagerImportAccount.
+	cfg, params := h.TestWalletConfig()
+	params.Mode = wallet.ModeShell
+	params.WatchOnly = true
+
+	// Seed a BIP84 watch-only account so the scope exists before the
+	// rejected creation. A rootless kvdb wallet registers no scoped
+	// managers of its own, so without this account NewAccount would fail
+	// while resolving the scope and never reach the watch-only restriction
+	// under test.
+	params.InitialAccounts = []wallet.WatchOnlyAccount{
+		{
+			Scope:                waddrmgr.KeyScopeBIP0084,
+			XPub:                 keys.initial,
+			MasterKeyFingerprint: keys.fingerprint,
+			Name:                 initialName,
+			AddrType:             waddrmgr.WitnessPubKey,
+		},
+	}
+
+	manager := h.NewWalletManager()
+	w, err := manager.Create(cfg, params)
+	require.NoError(h, err, "failed to create watch-only shell wallet")
+	h.RegisterWallet(w)
+	require.NoError(
+		h, w.Start(h.Context()), "failed to start watch-only shell wallet",
+	)
+	require.True(h, w.IsWatchOnly(), "wallet did not report watch-only")
+
+	_, err = w.NewAccount(
+		h.Context(), waddrmgr.KeyScopeBIP0084, candidateName,
+	)
+	require.Error(h, err, "watch-only wallet created a derived account")
+	require.Regexp(
+		h, watchOnlyRejectionPattern, err.Error(),
+		"derived account was not rejected for being watch-only",
+	)
+
+	accounts, err := w.ListAccountsByName(h.Context(), candidateName)
+	require.NoError(h, err, "failed to check rejected account name")
+	require.Empty(h, accounts, "rejected account left a partial row")
+
+	// The seeded account must stay queryable after the rejected creation.
+	// This covers that one row only; it says nothing about the rest of the
+	// scope's state, such as the account-number counter.
+	initial, err := w.GetAccount(
+		h.Context(), waddrmgr.KeyScopeBIP0084, initialName,
+	)
+	require.NoError(h, err, "seeded watch-only account was lost")
+	require.NotNil(h, initial, "get returned no seeded account row")
+	require.Equal(h, initialName, initial.AccountName)
 }
