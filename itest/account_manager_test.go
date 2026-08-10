@@ -566,6 +566,284 @@ func accountRowKey(name string, purpose, coin uint32, number *uint32,
 		watchOnly, fingerprint, publicKey)
 }
 
+// testAccountManagerContractErrors verifies AccountManager state gates and
+// that rejected account mutations — duplicate names, empty names, unknown
+// scopes, and missing accounts — leave public account state unchanged. Apart
+// from the state gates, which assert wallet.ErrStateForbidden, the cases only
+// require rejection, not a specific error classification.
+func testAccountManagerContractErrors(h *bwtest.HarnessTest) {
+	const (
+		preStartName       = "account manager pre-start"
+		lockedName         = "account manager locked"
+		sourceName         = "account manager source"
+		targetName         = "account manager target"
+		unknownScopeName   = "account manager unknown scope"
+		missingAccountName = "account manager missing"
+		missingRenameName  = "account manager missing rename"
+		missingRenameNew   = "account manager missing rename target"
+	)
+
+	ctx := h.Context()
+	cfg, params := h.TestWalletConfig()
+	manager := h.NewWalletManager()
+	w, err := manager.Create(cfg, params)
+	require.NoError(h, err, "failed to create wallet")
+	h.RegisterWallet(w)
+
+	// Every gated surface, so the table can be replayed against each state that
+	// must reject it. A nil import key is intentional: ImportAccount has to
+	// reject on state before it reaches extended-key validation.
+	gated := []struct {
+		operation string
+		run       func() error
+	}{
+		{
+			operation: "NewAccount",
+			run: func() error {
+				_, err := w.NewAccount(
+					ctx, waddrmgr.KeyScopeBIP0084, preStartName,
+				)
+
+				return err
+			},
+		},
+		{
+			operation: "ListAccounts",
+			run: func() error {
+				_, err := w.ListAccounts(ctx)
+
+				return err
+			},
+		},
+		{
+			operation: "ListAccountsByScope",
+			run: func() error {
+				_, err := w.ListAccountsByScope(
+					ctx, waddrmgr.KeyScopeBIP0084,
+				)
+
+				return err
+			},
+		},
+		{
+			operation: "ListAccountsByName",
+			run: func() error {
+				_, err := w.ListAccountsByName(ctx, preStartName)
+
+				return err
+			},
+		},
+		{
+			operation: "GetAccount",
+			run: func() error {
+				_, err := w.GetAccount(
+					ctx, waddrmgr.KeyScopeBIP0084, preStartName,
+				)
+
+				return err
+			},
+		},
+		{
+			operation: "RenameAccount",
+			run: func() error {
+				return w.RenameAccount(
+					ctx, waddrmgr.KeyScopeBIP0084, preStartName,
+					"account manager renamed",
+				)
+			},
+		},
+		{
+			operation: "ImportAccount",
+			run: func() error {
+				_, err := w.ImportAccount(
+					ctx, preStartName, nil, 0,
+					waddrmgr.WitnessPubKey, false,
+				)
+
+				return err
+			},
+		},
+	}
+
+	// The started-state gate must run before operation-specific validation.
+	for _, tc := range gated {
+		require.ErrorIsf(
+			h, tc.run(), wallet.ErrStateForbidden,
+			"%s ran before the wallet was started", tc.operation,
+		)
+	}
+
+	require.NoError(h, w.Start(ctx), "failed to start wallet")
+
+	_, err = w.NewAccount(ctx, waddrmgr.KeyScopeBIP0084, lockedName)
+	require.Error(h, err, "locked wallet created an account")
+	requireAccountManagerNameAbsent(h, w, lockedName, "locked account creation")
+
+	require.NoError(h, w.Unlock(ctx, wallet.UnlockRequest{
+		Passphrase: []byte(bwtest.TestWalletPrivatePassphrase),
+		Timeout:    -1,
+	}), "failed to unlock wallet")
+
+	scope := waddrmgr.KeyScopeBIP0084
+	source := accountManagerExpectation{name: sourceName, scope: scope}
+	target := accountManagerExpectation{name: targetName, scope: scope}
+
+	sourceAccount, err := w.NewAccount(ctx, source.scope, source.name)
+	require.NoError(h, err, "failed to create source account")
+	require.NotNil(h, sourceAccount)
+	require.NotEmpty(h, sourceAccount.PublicKey)
+	source.publicKey = bytes.Clone(sourceAccount.PublicKey)
+
+	targetAccount, err := w.NewAccount(ctx, target.scope, target.name)
+	require.NoError(h, err, "failed to create target account")
+	require.NotNil(h, targetAccount)
+	require.NotEmpty(h, targetAccount.PublicKey)
+	target.publicKey = bytes.Clone(targetAccount.PublicKey)
+
+	requireAccountManagerState(h, w, source, target)
+
+	unknownScope := waddrmgr.KeyScope{Purpose: 999, Coin: 999}
+
+	newAccountRejections := []struct {
+		operation   string
+		scope       waddrmgr.KeyScope
+		name        string
+		absentNames []string
+	}{
+		{
+			operation:   "duplicate account name",
+			scope:       scope,
+			name:        sourceName,
+			absentNames: []string{},
+		},
+		{
+			operation:   "empty account name",
+			scope:       scope,
+			name:        "",
+			absentNames: []string{""},
+		},
+		{
+			operation:   "unknown account scope",
+			scope:       unknownScope,
+			name:        unknownScopeName,
+			absentNames: []string{unknownScopeName},
+		},
+	}
+	for _, rejection := range newAccountRejections {
+		_, err = w.NewAccount(ctx, rejection.scope, rejection.name)
+		require.Errorf(
+			h, err, "%s was accepted for scope %s and name %q",
+			rejection.operation, rejection.scope, rejection.name,
+		)
+
+		for _, absentName := range rejection.absentNames {
+			requireAccountManagerNameAbsent(
+				h, w, absentName, rejection.operation,
+			)
+		}
+
+		requireAccountManagerState(h, w, source, target)
+	}
+
+	_, err = w.GetAccount(ctx, scope, missingAccountName)
+	require.Error(h, err, "missing account lookup succeeded")
+
+	renameAccountRejections := []struct {
+		operation   string
+		scope       waddrmgr.KeyScope
+		source      string
+		target      string
+		absentNames []string
+	}{
+		{
+			operation:   "missing rename source",
+			scope:       scope,
+			source:      missingRenameName,
+			target:      missingRenameNew,
+			absentNames: []string{missingRenameName, missingRenameNew},
+		},
+		{
+			operation:   "empty rename target",
+			scope:       scope,
+			source:      sourceName,
+			target:      "",
+			absentNames: []string{""},
+		},
+		{
+			operation:   "rename target collision",
+			scope:       scope,
+			source:      sourceName,
+			target:      targetName,
+			absentNames: []string{},
+		},
+	}
+	for _, rejection := range renameAccountRejections {
+		err = w.RenameAccount(
+			ctx, rejection.scope, rejection.source, rejection.target,
+		)
+		require.Errorf(
+			h, err, "%s was accepted for scope %s from %q to %q",
+			rejection.operation, rejection.scope, rejection.source,
+			rejection.target,
+		)
+
+		for _, absentName := range rejection.absentNames {
+			requireAccountManagerNameAbsent(
+				h, w, absentName, rejection.operation,
+			)
+		}
+
+		requireAccountManagerState(h, w, source, target)
+	}
+
+	// An unregistered scope has to be rejected on the read path too, not only
+	// when creating accounts. Both backends agree on the split asserted here:
+	// a scoped list reports no rows rather than failing, while a get for a
+	// named account in that scope fails.
+	unknownScopeAccounts, err := w.ListAccountsByScope(ctx, unknownScope)
+	require.NoError(
+		h, err,
+		"listing an unregistered scope failed instead of reporting no rows",
+	)
+	require.Empty(
+		h, unknownScopeAccounts, "an unregistered scope reported accounts",
+	)
+
+	_, err = w.GetAccount(ctx, unknownScope, sourceName)
+	require.Error(h, err, "a get in an unregistered scope succeeded")
+
+	requireAccountManagerState(h, w, source, target)
+
+	// The state gates apply to a stopped wallet whether or not it ever ran, so
+	// the same table has to reject every surface again after Stop.
+	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+
+	for _, tc := range gated {
+		require.ErrorIsf(
+			h, tc.run(), wallet.ErrStateForbidden,
+			"%s ran after the wallet was stopped", tc.operation,
+		)
+	}
+}
+
+// requireAccountManagerNameAbsent verifies that no public name lookup returns
+// a row for a failed account or rename mutation.
+func requireAccountManagerNameAbsent(h *bwtest.HarnessTest, w *wallet.Wallet,
+	name, operation string) {
+
+	h.Helper()
+
+	accounts, err := w.ListAccountsByName(h.Context(), name)
+	require.NoErrorf(
+		h, err, "failed to check absent account name %q after %s", name,
+		operation,
+	)
+	require.Emptyf(
+		h, accounts, "account name %q resolves to a row after %s", name,
+		operation,
+	)
+}
+
 // requireDerivedAccountKeyEqual compares two serialized derived account keys
 // in full: depth, parent fingerprint, child index, chain code, and key data
 // all have to match. Only the four HD version bytes are normalized away,

@@ -48,6 +48,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerLifecycle,
 	},
 	{
+		Name:     "account manager contract errors",
+		TestFunc: testAccountManagerContractErrors,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
