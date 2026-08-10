@@ -15,18 +15,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
-// sqliteManagerBackend owns the SQLite Store shared by a Manager's wallets.
-type sqliteManagerBackend struct {
-	store   db.Store
-	closeFn func() error
-}
-
-// Compile-time assertion that sqliteManagerBackend implements managerBackend.
-var _ managerBackend = (*sqliteManagerBackend)(nil)
-
 // newSQLiteManagerBackend opens the SQLite Store owned by a Manager.
 func newSQLiteManagerBackend(ctx context.Context,
-	cfg ManagerConfig) (*sqliteManagerBackend, error) {
+	cfg ManagerConfig) (*sqlManagerBackend, error) {
 
 	err := os.MkdirAll(filepath.Dir(cfg.DataSource), defaultWalletDBDirPerm)
 	if err != nil {
@@ -42,78 +33,10 @@ func newSQLiteManagerBackend(ctx context.Context,
 		return nil, fmt.Errorf("open sqlite store: %w", err)
 	}
 
-	return &sqliteManagerBackend{
+	return &sqlManagerBackend{
 		store:   store,
 		closeFn: store.Close,
 	}, nil
-}
-
-// create atomically creates a SQLite wallet and returns its committed data.
-func (b *sqliteManagerBackend) create(ctx context.Context, cfg Config,
-	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
-	*walletData, error) {
-
-	createParams, err := sqliteCreateWalletParams(
-		cfg, params, rootKey,
-		birthdayWithSafetyMargin(params.Birthday),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := b.store.CreateWallet(ctx, createParams)
-	if err != nil {
-		return nil, fmt.Errorf("create runtime wallet: %w", err)
-	}
-
-	fingerprint, err := masterFingerprint(info)
-	if err != nil {
-		return nil, fmt.Errorf("cache master fingerprint: %w", err)
-	}
-
-	return &walletData{
-		id:    info.ID,
-		store: b.store,
-		vault: keyvault.NewWalletVault(
-			b.store, info.ID, info.IsWatchOnly,
-		),
-		masterFingerprint: fingerprint,
-		isWatchOnly:       info.IsWatchOnly,
-	}, nil
-}
-
-// load reads an existing SQLite wallet and resolves its runtime dependencies.
-func (b *sqliteManagerBackend) load(ctx context.Context,
-	cfg Config) (*walletData, error) {
-
-	info, err := b.store.GetWallet(ctx, cfg.Name)
-	if err != nil {
-		return nil, fmt.Errorf("get runtime wallet: %w", err)
-	}
-
-	fingerprint, err := masterFingerprint(info)
-	if err != nil {
-		return nil, fmt.Errorf("cache master fingerprint: %w", err)
-	}
-
-	return &walletData{
-		id:    info.ID,
-		store: b.store,
-		vault: keyvault.NewWalletVault(
-			b.store, info.ID, info.IsWatchOnly,
-		),
-		masterFingerprint: fingerprint,
-		isWatchOnly:       info.IsWatchOnly,
-	}, nil
-}
-
-// close releases the SQLite Store when this backend owns it.
-func (b *sqliteManagerBackend) close() error {
-	if b.closeFn == nil {
-		return nil
-	}
-
-	return b.closeFn()
 }
 
 // sqliteCreateWalletParams converts wallet creation inputs into the SQL
