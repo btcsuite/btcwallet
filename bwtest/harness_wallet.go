@@ -2,7 +2,6 @@ package bwtest
 
 import (
 	"bytes"
-	"fmt"
 	"strings"
 	"time"
 
@@ -10,7 +9,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
@@ -203,53 +201,7 @@ func (h *HarnessTest) FundWallet(w *wallet.Wallet,
 		})
 	}
 
-	h.AssertUtxosVisible(w, outpoints...)
-
 	return outpoints
-}
-
-// AssertUtxosVisible polls until the wallet's GetUtxo query can observe every
-// outpoint.
-func (h *HarnessTest) AssertUtxosVisible(w *wallet.Wallet,
-	outpoints ...wire.OutPoint) {
-
-	h.Helper()
-
-	err := wait.NoError(func() error {
-		for _, op := range outpoints {
-			_, err := w.GetUtxo(h.Context(), op)
-			if err != nil {
-				return fmt.Errorf("utxo %v not visible: %w",
-					op, err)
-			}
-		}
-
-		return nil
-	}, defaultTestTimeout)
-	require.NoError(h, err, "timeout waiting for utxos to be visible")
-}
-
-// AssertUtxoConfirmations polls until the wallet reports the outpoint with the
-// expected number of confirmations.
-func (h *HarnessTest) AssertUtxoConfirmations(w *wallet.Wallet,
-	op wire.OutPoint, confs int32) {
-
-	h.Helper()
-
-	err := wait.NoError(func() error {
-		utxo, err := w.GetUtxo(h.Context(), op)
-		if err != nil {
-			return fmt.Errorf("utxo %v not visible: %w", op, err)
-		}
-
-		if utxo.Confirmations != confs {
-			return fmt.Errorf("utxo %v: want %d confirmations, "+
-				"got %d", op, confs, utxo.Confirmations)
-		}
-
-		return nil
-	}, defaultTestTimeout)
-	require.NoError(h, err, "timeout waiting for utxo confirmations")
 }
 
 // ensureAccount makes sure an account exists for the given key scope, creating
