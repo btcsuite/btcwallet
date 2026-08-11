@@ -794,28 +794,6 @@ func (s *syncer) unminedTxns(ctx context.Context) ([]*wire.MsgTx, error) {
 	return wtxmgr.DependencySort(txSet), nil
 }
 
-// updateSyncTip records the latest synced block through the store.
-func (s *syncer) updateSyncTip(ctx context.Context,
-	block wtxmgr.BlockMeta) error {
-
-	storeBlock, err := storeBlockFromBlockMeta(block)
-	if err != nil {
-		return err
-	}
-
-	err = s.store.UpdateWallet(
-		ctx, db.UpdateWalletParams{
-			WalletID: s.walletID,
-			SyncedTo: storeBlock,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("update sync tip: %w", err)
-	}
-
-	return nil
-}
-
 // putTxNotifications records relevant transaction notifications through the
 // store.
 func (s *syncer) putTxNotifications(ctx context.Context,
@@ -841,6 +819,18 @@ func (s *syncer) putBlockNotifications(ctx context.Context,
 	if blockMeta == nil {
 		return fmt.Errorf("filtered block is missing metadata: %w",
 			db.ErrInvalidParam)
+	}
+
+	current, err := s.syncedTo(ctx)
+	if err != nil {
+		return err
+	}
+
+	// A filtered notification may remain queued after advanceChainSync has
+	// already scanned past it. Only the exact next block may move the tip
+	// forward; the sync loop handles gaps and rollback handles rewinds.
+	if blockMeta.Height != current.Height+1 {
+		return nil
 	}
 
 	block, err := storeBlockFromBlockMeta(*blockMeta)
@@ -1765,7 +1755,7 @@ func (s *syncer) handleChainUpdate(ctx context.Context, n any) error {
 func (s *syncer) processChainUpdate(ctx context.Context, update any) error {
 	switch n := update.(type) {
 	case chain.BlockConnected:
-		return s.updateSyncTip(ctx, wtxmgr.BlockMeta(n))
+		return nil
 
 	// A block was disconnected. We use checkRollback to safely verify our
 	// chain state against the backend and rewind if necessary. This

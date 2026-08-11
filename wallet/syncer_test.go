@@ -923,12 +923,9 @@ func TestHandleChainUpdate(t *testing.T) {
 		store, walletID,
 	)
 
-	// Case 1: Test handling of a BlockConnected notification, which
-	// advances the synced tip through the store.
+	// Case 1: Test handling of a BlockConnected notification. The filtered
+	// block notification owns the later Store update.
 	meta := wtxmgr.BlockMeta{Block: wtxmgr.Block{Height: 100}}
-
-	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
-		nil).Once()
 
 	// Act & Assert: Verify that a BlockConnected notification is
 	// correctly processed.
@@ -1506,6 +1503,7 @@ func TestProcessFilteredBlockBareMultisigCandidate(t *testing.T) {
 		Time: blockTime,
 	}
 
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 101})
 	store.On("ApplyTxBatch", mock.Anything,
 		matchMultisigCandidateBatch(walletID, tx, members, block),
 	).Return(nil).Once()
@@ -1627,6 +1625,8 @@ func TestProcessFilteredBlockPassesCreditCandidates(t *testing.T) {
 		Time: time.Unix(789, 0).UTC(),
 	}
 
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 102})
+
 	wantCandidates := map[uint32]address.Address{
 		0: firstAddr,
 		1: secondAddr,
@@ -1687,6 +1687,7 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 		Time: blockTime,
 	}
 
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ApplyTxBatch", mock.Anything,
 		matchBlockTxBatch(walletID, tx, addr, received, block),
 	).Return(nil).Once()
@@ -1700,6 +1701,44 @@ func TestProcessFilteredBlockUsesStore(t *testing.T) {
 	// Assert: The block transaction and sync tip were written together.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+}
+
+// TestProcessFilteredBlockOrder verifies that stale, duplicate, and
+// skipped-height notifications are left for the normal sync loop to reconcile.
+func TestProcessFilteredBlockOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		current      int32
+		notification int32
+	}{
+		{name: "stale", current: 102, notification: 101},
+		{name: "duplicate", current: 102, notification: 102},
+		{name: "gap", current: 100, notification: 102},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &walletmock.Store{}
+			expectSyncedTip(store, waddrmgr.BlockStamp{
+				Height: test.current,
+			})
+
+			s := newSyncer(Config{}, nil, nil, nil, store, 0)
+			err := s.processChainUpdate(
+				t.Context(), chain.FilteredBlockConnected{
+					Block: &wtxmgr.BlockMeta{Block: wtxmgr.Block{
+						Height: test.notification,
+					}},
+				},
+			)
+			require.NoError(t, err)
+			store.AssertExpectations(t)
+		})
+	}
 }
 
 // storeScanBatchFixture contains expected values for store scan batch tests.
@@ -3272,12 +3311,8 @@ func TestWaitForEvent(t *testing.T) {
 	notificationChan := make(chan any, 1)
 	mockChain.On("Notifications").Return((<-chan any)(notificationChan))
 
-	// Case 1: Test event handling when a chain notification arrives, which
-	// advances the synced tip through the store.
+	// Case 1: Test event handling when a chain notification arrives.
 	notificationChan <- chain.BlockConnected{}
-
-	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
-		nil).Once()
 
 	// Act & Assert: Call waitForEvent and verify it correctly processes
 	// the arriving notification.
@@ -4853,13 +4888,7 @@ func TestProcessChainUpdate(t *testing.T) {
 			update: chain.BlockConnected{
 				Block: wtxmgr.Block{Height: 100},
 			},
-			setup: func(store *walletmock.Store, c *bwmock.Chain) {
-				store.On("UpdateWallet", mock.Anything, mock.MatchedBy(
-					func(params db.UpdateWalletParams) bool {
-						return params.SyncedTo != nil &&
-							params.SyncedTo.Height == 100
-					})).Return(nil).Once()
-			},
+			setup: func(*walletmock.Store, *bwmock.Chain) {},
 		},
 		{
 			name: "RelevantTx",
@@ -4882,6 +4911,9 @@ func TestProcessChainUpdate(t *testing.T) {
 				},
 			},
 			setup: func(store *walletmock.Store, c *bwmock.Chain) {
+				expectSyncedTip(
+					store, waddrmgr.BlockStamp{Height: 101},
+				)
 				store.On("ApplyTxBatch", mock.Anything, mock.MatchedBy(
 					func(params db.TxBatchParams) bool {
 						return params.SyncedTo != nil &&
@@ -4926,40 +4958,9 @@ func TestProcessChainUpdate(t *testing.T) {
 
 			// Assert
 			require.NoError(t, err)
+			store.AssertExpectations(t)
 		})
 	}
-}
-
-// TestProcessChainUpdateRoutesSyncTip verifies connected block notifications
-// update the runtime store sync tip when the store is available.
-func TestProcessChainUpdateRoutesSyncTip(t *testing.T) {
-	t.Parallel()
-
-	store := &walletmock.Store{}
-	s := newSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
-	s.store = store
-	s.walletID = 77
-
-	block := wtxmgr.BlockMeta{
-		Block: wtxmgr.Block{
-			Hash:   chainhash.Hash{77},
-			Height: 144,
-		},
-		Time: time.Unix(1710003800, 0),
-	}
-	store.On("UpdateWallet", mock.Anything, mock.MatchedBy(
-		func(params db.UpdateWalletParams) bool {
-			return params.WalletID == s.walletID &&
-				params.SyncedTo != nil &&
-				params.SyncedTo.Hash == block.Hash &&
-				params.SyncedTo.Height == uint32(block.Height) &&
-				params.SyncedTo.Timestamp.Equal(block.Time)
-		},
-	)).Return(nil).Once()
-
-	err := s.processChainUpdate(t.Context(), chain.BlockConnected(block))
-	require.NoError(t, err)
-	store.AssertExpectations(t)
 }
 
 // TestAdvanceChainSyncUsesStoreSyncedTo verifies Store-backed synchronization
@@ -5479,11 +5480,6 @@ func TestRunSyncStep_Success(t *testing.T) {
 	mockChain.On("Notifications").Return((<-chan any)(notifChan)).Maybe()
 
 	notifChan <- chain.BlockConnected{Block: wtxmgr.Block{Height: 101}}
-
-	// The queued BlockConnected notification advances the synced tip
-	// through the store.
-	store.On("UpdateWallet", mock.Anything, mock.Anything).Return(
-		nil).Once()
 
 	// Act: Execute a sync step.
 	err := s.runSyncStep(t.Context())
