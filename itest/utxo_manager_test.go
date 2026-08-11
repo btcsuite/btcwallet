@@ -97,26 +97,14 @@ func testListUnspent(h *bwtest.HarnessTest) {
 		funded[op] = amounts[i]
 	}
 
-	// The funding transaction is confirmed, so every output reports one
-	// confirmation. FundWallet waits on GetUtxo, but ListUnspent is a
-	// separate query whose confirmation filter tracks the synced height, so
-	// poll until it reports the full set.
-	err = wait.NoError(func() error {
-		utxos, err = w.ListUnspent(h.Context(), wallet.UtxoQuery{
-			MinConfs: 0,
-			MaxConfs: maxConfsLimit,
-		})
-		if err != nil {
-			return fmt.Errorf("list unspent: %w", err)
-		}
-
-		if len(utxos) != 3 {
-			return fmt.Errorf("want 3 utxos, got %d", len(utxos))
-		}
-
-		return nil
-	}, pollTimeout)
-	require.NoError(h, err, "unexpected UTXO count")
+	// FundWallet waits for the block's exact committed wallet tip, so the
+	// confirmed outputs are ready for one direct ListUnspent assertion.
+	utxos, err = w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list funded outputs")
+	require.Len(h, utxos, 3, "unexpected UTXO count")
 
 	// Results are sorted by amount in ascending order.
 	require.Equal(h, btcutil.Amount(oneBTC), utxos[0].Amount)
@@ -161,12 +149,9 @@ func testListUnspent(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to list unspent by unknown account")
 	require.Empty(h, utxos, "unknown account filter returned UTXOs")
 
-	// Advance the chain so every funded output reaches two confirmations
-	// and the confirmation bounds become selective. Mining only waits for
-	// the wallet's synced height, so wait for the confirmation count the
-	// bounds below depend on.
+	// Advance the chain so every funded output reaches two confirmations and
+	// the confirmation bounds become selective.
 	h.MineBlocks(1)
-	h.AssertUtxoConfirmations(w, outpoints[0], 2)
 
 	utxos, err = w.ListUnspent(h.Context(), wallet.UtxoQuery{
 		MinConfs: 3,
@@ -210,28 +195,14 @@ func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
 	funded := h.FundWallet(w, oneBTC)
 	require.Len(h, funded, 1, "unexpected funded outpoint count")
 
-	// Mining only waits for the wallet's synced height, which does not imply
-	// the coinbase has been committed to the wallet's UTXO store yet.
-	var utxos []*wallet.Utxo
-
-	err := wait.NoError(func() error {
-		listed, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
-			MinConfs: 0,
-			MaxConfs: maxConfsLimit,
-		})
-		if err != nil {
-			return fmt.Errorf("list unspent: %w", err)
-		}
-
-		if len(listed) != 2 {
-			return fmt.Errorf("want 2 utxos, got %d", len(listed))
-		}
-
-		utxos = listed
-
-		return nil
-	}, pollTimeout)
-	require.NoError(h, err, "coinbase and funded outputs not listed")
+	// Both mining helpers wait for the exact committed wallet tip, so the
+	// coinbase and ordinary output are ready for one direct read.
+	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list coinbase and funded outputs")
+	require.Len(h, utxos, 2, "coinbase and funded outputs not listed")
 
 	var coinbase, control *wallet.Utxo
 
