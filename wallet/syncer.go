@@ -640,12 +640,7 @@ func (s *syncer) syncedTo(ctx context.Context) (waddrmgr.BlockStamp, error) {
 			err)
 	}
 
-	// A nil SyncedTo means the wallet has not been synced to any block yet.
-	if walletInfo.SyncedTo == nil {
-		return waddrmgr.BlockStamp{Height: -1}, nil
-	}
-
-	syncedTo, err := db.BlockStampFromBlock(walletInfo.SyncedTo)
+	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
 	if err != nil {
 		return waddrmgr.BlockStamp{}, fmt.Errorf("decode wallet sync tip: %w",
 			err)

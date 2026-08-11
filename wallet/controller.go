@@ -470,10 +470,20 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 // and dynamic synchronization state.
 //
 // This is part of the Controller interface.
-func (w *Wallet) Info(_ context.Context) (*Info, error) {
+func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
+	}
+
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
+	if err != nil {
+		return nil, fmt.Errorf("get wallet info: %w", err)
+	}
+
+	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		return nil, fmt.Errorf("decode wallet sync tip: %w", err)
 	}
 
 	info := &Info{
@@ -482,7 +492,7 @@ func (w *Wallet) Info(_ context.Context) (*Info, error) {
 		ChainParams:      w.cfg.ChainParams,
 		Locked:           !w.state.isUnlocked(),
 		Synced:           w.state.isSynced(),
-		SyncedTo:         w.SyncedTo(), //nolint:contextcheck // Legacy API.
+		SyncedTo:         syncedTo,
 		IsRecoveryMode:   w.state.isRecoveryMode(),
 		RecoveryProgress: 0,
 	}
