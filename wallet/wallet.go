@@ -457,11 +457,11 @@ func (w *Wallet) ID() uint32 {
 func (w *Wallet) SyncedTo() waddrmgr.BlockStamp {
 	if w.addrStore == nil {
 		info, err := w.store.GetWallet(context.Background(), w.cfg.Name)
-		if err != nil || info.SyncedTo == nil {
+		if err != nil {
 			return waddrmgr.BlockStamp{Height: -1}
 		}
 
-		stamp, err := db.BlockStampFromBlock(info.SyncedTo)
+		stamp, err := db.OptionalBlockStampFromBlock(info.SyncedTo)
 		if err != nil {
 			return waddrmgr.BlockStamp{Height: -1}
 		}
