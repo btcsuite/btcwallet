@@ -2427,6 +2427,85 @@ func TestApplyTxBatchSkipsStaleSyncedToRestore(t *testing.T) {
 	require.Equal(t, newerTip, mgr.SyncedTo())
 }
 
+// TestGetWalletWaitsForFailedSyncTipRestore verifies that GetWallet cannot
+// expose the in-memory sync tip written by a walletdb transaction that later
+// fails.
+func TestGetWalletWaitsForFailedSyncTipRestore(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	mgr := newSpendableAddrMgr(t, dbConn)
+	t.Cleanup(mgr.Close)
+
+	previousTip := waddrmgr.BlockStamp{
+		Height:    100,
+		Hash:      chainhash.Hash{87},
+		Timestamp: time.Unix(1710004900, 0),
+	}
+	writeSyncedTo(t, dbConn, mgr, previousTip)
+
+	type walletRead struct {
+		info *db.WalletInfo
+		err  error
+	}
+
+	readStarted := make(chan struct{})
+	readResult := make(chan walletRead, 1)
+
+	var store *Store
+
+	addrStore := &succeedThenFailSyncedAddrStore{
+		Manager: mgr,
+		beforeRestore: func() {
+			go func() {
+				close(readStarted)
+
+				info, err := store.GetWallet(
+					t.Context(), "default",
+				)
+				readResult <- walletRead{info: info, err: err}
+			}()
+
+			<-readStarted
+
+			select {
+			case <-readResult:
+				t.Fatal("GetWallet returned before sync tip restore")
+
+			case <-time.After(100 * time.Millisecond):
+			}
+		},
+	}
+	store = NewStore(dbConn, nil, addrStore)
+
+	attemptedTip := &db.Block{
+		Hash:      chainhash.Hash{88},
+		Height:    101,
+		Timestamp: time.Unix(1710005000, 0),
+	}
+	err := store.ApplyTxBatch(t.Context(), db.TxBatchParams{
+		WalletID: 0,
+		SyncedTo: attemptedTip,
+	})
+	require.ErrorIs(t, err, errInducedFailure)
+
+	var result walletRead
+	select {
+	case result = <-readResult:
+
+	case <-time.After(time.Second):
+		t.Fatal("GetWallet remained blocked after sync tip restore")
+	}
+
+	require.NoError(t, result.err)
+	require.NotNil(t, result.info.SyncedTo)
+	require.Equal(t, uint32(previousTip.Height),
+		result.info.SyncedTo.Height)
+	require.Equal(t, previousTip.Hash, result.info.SyncedTo.Hash)
+}
+
 // TestApplyTxBatchEmptyNoAddrStore verifies that a batch with no transactions
 // and no sync-tip update returns nil without an address manager and without
 // opening a write transaction. The store is built with a nil addrStore and the

@@ -72,6 +72,13 @@ func (s *Store) GetWallet(_ context.Context,
 			errMissingAddrStore)
 	}
 
+	// SetSyncedTo updates the legacy manager's in-memory tip before its
+	// walletdb transaction commits. Serialize this read with Store writes so
+	// only a committed tip, or the restored tip after a failed write, is
+	// observable.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	addrStore := s.addrStore
 
 	var (
