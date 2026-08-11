@@ -37,6 +37,16 @@ func TestBlockStampFromBlock(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidParam)
 }
 
+// TestOptionalBlockStampFromBlock verifies that missing Store block metadata
+// maps to the legacy unknown height.
+func TestOptionalBlockStampFromBlock(t *testing.T) {
+	t.Parallel()
+
+	stamp, err := OptionalBlockStampFromBlock(nil)
+	require.NoError(t, err)
+	require.Equal(t, int32(-1), stamp.Height)
+}
+
 // TestBlockFromBlockStamp verifies that legacy block-stamps convert to the
 // store block shape with UTC timestamps.
 func TestBlockFromBlockStamp(t *testing.T) {

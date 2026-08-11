@@ -1202,7 +1202,10 @@ func TestControllerInfo(t *testing.T) {
 	// Arrange: Create and start a test wallet with mocked subsystems.
 	w, deps := createTestWalletWithMocks(t)
 
-	bs := waddrmgr.BlockStamp{Height: 100}
+	syncedTo := &db.Block{
+		Hash:   chainhash.Hash{100},
+		Height: 100,
+	}
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{
 			BirthdayBlock: &db.Block{Height: 100},
@@ -1217,9 +1220,6 @@ func TestControllerInfo(t *testing.T) {
 	// Mock the chain backend to return a specific name.
 	deps.chain.On("BackEnd").Return("mock")
 
-	// Mock SyncedTo to return a known block stamp.
-	deps.addrStore.On("SyncedTo").Return(bs)
-
 	// Mock syncState to indicate the wallet is fully synced.
 	deps.syncer.On("syncState").Return(syncStateSynced)
 
@@ -1227,6 +1227,10 @@ func TestControllerInfo(t *testing.T) {
 	expectStopTeardown(deps)
 
 	require.NoError(t, w.Start(t.Context()))
+
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{SyncedTo: syncedTo}, nil,
+	).Once()
 
 	// Act: Call the Info method.
 	info, err := w.Info(t.Context())
@@ -1237,12 +1241,52 @@ func TestControllerInfo(t *testing.T) {
 	require.Equal(t, "mock", info.Backend)
 	require.Equal(t, int32(100), info.BirthdayBlock.Height)
 	require.True(t, info.Synced)
+	require.Equal(t, int32(syncedTo.Height), info.SyncedTo.Height)
+	require.Equal(t, syncedTo.Hash, info.SyncedTo.Hash)
 	require.True(t, info.Locked)
 
 	// Cleanup: Stop the wallet to release resources.
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
+}
+
+// TestControllerInfoSyncTipErrors verifies Info preserves Store errors and
+// represents a wallet without a committed sync tip using the legacy unknown
+// height.
+func TestControllerInfoSyncTipErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Store error", func(t *testing.T) {
+		t.Parallel()
+
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			nil, errDBMock,
+		).Once()
+
+		_, err := w.Info(t.Context())
+		require.ErrorIs(t, err, errDBMock)
+	})
+
+	t.Run("No synced tip", func(t *testing.T) {
+		t.Parallel()
+
+		w, deps := createTestWalletWithMocks(t)
+		startLoadedWalletForTest(t, w)
+
+		deps.store.On("GetWallet", mock.Anything, "").Return(
+			&db.WalletInfo{}, nil,
+		).Once()
+		deps.syncer.On("syncState").Return(syncStateSynced)
+		deps.chain.On("BackEnd").Return("mock")
+
+		info, err := w.Info(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, int32(-1), info.SyncedTo.Height)
+	})
 }
 
 // TestControllerResync verifies the Resync method.
