@@ -40,6 +40,16 @@ func BlockStampFromBlock(block *Block) (waddrmgr.BlockStamp, error) {
 	}, nil
 }
 
+// OptionalBlockStampFromBlock converts optional database block metadata into
+// the legacy block-stamp shape, returning height -1 for missing metadata.
+func OptionalBlockStampFromBlock(block *Block) (waddrmgr.BlockStamp, error) {
+	if block == nil {
+		return waddrmgr.BlockStamp{Height: -1}, nil
+	}
+
+	return BlockStampFromBlock(block)
+}
+
 // BlockFromBlockStamp converts a legacy block-stamp into the database store
 // block shape. The timestamp is normalized to UTC.
 func BlockFromBlockStamp(block waddrmgr.BlockStamp) (*Block, error) {
