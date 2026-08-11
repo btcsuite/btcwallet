@@ -99,11 +99,10 @@ func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
 		t.Run(test.name, func(t *testing.T) {
 			// Initialize a fresh miner for the test case.
 			miner1 := setupMiner(t)
-			addr := miner1.P2PAddress()
 
 			// Initialize a fresh bitcoind client for EVERY test
 			// case.
-			btcClient := setupBitcoind(t, addr, rpcPolling)
+			btcClient := setupBitcoind(t, miner1, rpcPolling)
 
 			test.testFn(t, miner1, btcClient)
 		})
@@ -155,10 +154,12 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	require.NoError(client.NotifyBlocks())
 	ntfns := client.Notifications()
 
-	// Send an event to the ntfns after the tx event has been received.
-	// Otherwise the orders of the events might get messed up if we send
-	// events shortly.
-	miner.Client.Generate(1)
+	// Mine one block after the subscription is active. Both connected
+	// notifications below must identify this block.
+	blocks, err := miner.Client.Generate(1)
+	require.NoError(err)
+	require.Len(blocks, 1)
+	blockHash := *blocks[0]
 
 	// We expect to get a ClientConnected notification.
 	waitForClientConnected(t, ntfns)
@@ -166,9 +167,10 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	// We expect to get a FilteredBlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
-		_, ok := ntfn.(FilteredBlockConnected)
+		block, ok := ntfn.(FilteredBlockConnected)
 		require.Truef(ok, "Expected type FilteredBlockConnected, "+
 			"got %T", ntfn)
+		require.Equal(blockHash, block.Block.Hash)
 
 	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for FilteredBlockConnected " +
@@ -178,8 +180,9 @@ func testNotifyBlocks(t *testing.T, miner *rpctest.Harness,
 	// We expect to get a BlockConnected notification.
 	select {
 	case ntfn := <-ntfns:
-		_, ok := ntfn.(BlockConnected)
+		block, ok := ntfn.(BlockConnected)
 		require.Truef(ok, "Expected type BlockConnected, got %T", ntfn)
+		require.Equal(blockHash, block.Hash)
 
 	case <-time.After(defaultTestTimeout):
 		require.Fail("timed out for BlockConnected notification")
@@ -487,8 +490,12 @@ func setupReorgMiner(t *testing.T, miner1 *rpctest.Harness) *rpctest.Harness {
 
 // setupBitcoind starts up a bitcoind node with either a zmq connection or
 // rpc polling connection and returns a client wrapper of this connection.
-func setupBitcoind(t *testing.T, minerAddr string,
+func setupBitcoind(t *testing.T, miner *rpctest.Harness,
 	rpcPolling bool) *BitcoindClient {
+	t.Helper()
+
+	minerHash, minerHeight, err := miner.Client.GetBestBlock()
+	require.NoError(t, err)
 
 	// Start a bitcoind instance and connect it to miner1.
 	tempBitcoindDir := t.TempDir()
@@ -505,7 +512,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 		"bitcoind",
 		"-datadir="+tempBitcoindDir,
 		"-regtest",
-		"-connect="+minerAddr,
+		"-connect="+miner.P2PAddress(),
 		"-txindex",
 		"-rpcauth=weks:469e9bb14ab2360f8e226efed5ca6f"+
 			"d$507c670e800a95284294edb5773b05544b"+
@@ -528,6 +535,30 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	time.Sleep(time.Second)
 
 	host := fmt.Sprintf("127.0.0.1:%d", rpcPort)
+	syncClient, err := rpcclient.New(&rpcclient.ConnConfig{
+		Host:         host,
+		User:         "weks",
+		Pass:         "weks",
+		DisableTLS:   true,
+		HTTPPostMode: true,
+	}, nil)
+	require.NoError(t, err)
+
+	defer syncClient.Shutdown()
+
+	// Wait for bitcoind to reach the miner's exact tip before constructing
+	// the event source. This prevents either the RPC poller or ZMQ subscriber
+	// from observing synchronization blocks as post-start events.
+	require.Eventually(t, func() bool {
+		chainInfo, err := syncClient.GetBlockChainInfo()
+		if err != nil {
+			return false
+		}
+
+		return chainInfo.Blocks == minerHeight &&
+			chainInfo.BestBlockHash == minerHash.String()
+	}, defaultTestTimeout, 100*time.Millisecond)
+
 	cfg := &BitcoindConfig{
 		ChainParams: &chaincfg.RegressionNetParams,
 		Host:        host,
@@ -555,6 +586,7 @@ func setupBitcoind(t *testing.T, minerAddr string,
 
 	chainConn, err := NewBitcoindConn(cfg)
 	require.NoError(t, err)
+
 	require.NoError(t, chainConn.Start())
 
 	t.Cleanup(func() {
@@ -569,12 +601,6 @@ func setupBitcoind(t *testing.T, minerAddr string,
 	t.Cleanup(func() {
 		btcClient.Stop()
 	})
-
-	// Wait for bitcoind to sync with the miner.
-	require.Eventually(t, func() bool {
-		_, height, err := btcClient.GetBestBlock()
-		return err == nil && height >= 101
-	}, defaultTestTimeout, 100*time.Millisecond)
 
 	return btcClient
 }
