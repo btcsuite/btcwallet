@@ -15,7 +15,8 @@ var (
 )
 
 // AssertWalletSynced polls until the wallet reports it is synced to the
-// miner's best known height.
+// miner's exact best block. Once this returns, wallet reads for that block may
+// be asserted without another retry.
 func (h *HarnessTest) AssertWalletSynced(w *wallet.Wallet) {
 	h.Helper()
 
@@ -24,16 +25,23 @@ func (h *HarnessTest) AssertWalletSynced(w *wallet.Wallet) {
 	}
 
 	err := wait.NoError(func() error {
-		syncedTo := w.SyncedTo()
+		info, err := w.Info(h.Context())
+		if err != nil {
+			return fmt.Errorf("get wallet info: %w", err)
+		}
 
-		_, bestHeight, err := h.miner.Client.GetBestBlock()
+		bestHash, bestHeight, err := h.miner.Client.GetBestBlock()
 		if err != nil {
 			return fmt.Errorf("get best block: %w", err)
 		}
 
-		if syncedTo.Height != bestHeight {
-			return fmt.Errorf("%w: wallet=%d chain=%d", ErrWalletNotSynced,
-				syncedTo.Height, bestHeight)
+		if !info.Synced || info.SyncedTo.Height != bestHeight ||
+			!info.SyncedTo.Hash.IsEqual(bestHash) {
+
+			return fmt.Errorf("%w: synced=%v wallet=%v:%d "+
+				"chain=%v:%d", ErrWalletNotSynced, info.Synced,
+				info.SyncedTo.Hash, info.SyncedTo.Height, bestHash,
+				bestHeight)
 		}
 
 		return nil
