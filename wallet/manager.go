@@ -34,12 +34,12 @@ const (
 	// (CreateWalletParams.Seed).
 	ModeImportSeed
 
-	// ModeImportExtKey indicates creating a wallet from an extended key
-	// (CreateWalletParams.RootKey).
+	// ModeImportExtKey indicates creating a spendable wallet from an extended
+	// private root key (CreateWalletParams.RootKey).
 	ModeImportExtKey
 
-	// ModeShell indicates creating an empty wallet shell (no root key).
-	// Intended for importing specific Account XPubs.
+	// ModeShell indicates creating a watch-only wallet shell without a root
+	// key. Its optional initial accounts contain account XPubs.
 	ModeShell
 )
 
@@ -71,10 +71,8 @@ type CreateWalletParams struct {
 	// Seed is required for ModeImportSeed. Ignored for others.
 	Seed []byte
 
-	// RootKey is required for ModeImportExtKey and must be nil for every
-	// other mode, which reject a key they would not use. It must agree with
-	// WatchOnly: an XPrv for a spendable wallet, an XPub for a watch-only
-	// one.
+	// RootKey is the required ModeImportExtKey XPrv. XPub-root creation is
+	// unsupported; use a ModeShell wallet and import account XPubs.
 	RootKey *hdkeychain.ExtendedKey
 
 	// InitialAccounts is optional and names watch-only accounts to import
@@ -82,11 +80,7 @@ type CreateWalletParams struct {
 	// honored for ModeShell.
 	InitialAccounts []WatchOnlyAccount
 
-	// WatchOnly requests a watch-only wallet, and is the sole authority on
-	// whether the created wallet is watch-only. The root key must agree with
-	// it: a watch-only wallet takes an XPub root (ModeImportExtKey) or no
-	// root at all (ModeShell), while a spendable wallet requires a private
-	// root key.
+	// WatchOnly requests a watch-only wallet and is valid only for ModeShell.
 	WatchOnly bool
 
 	// Birthday is the wallet's birthday.
@@ -101,22 +95,6 @@ type CreateWalletParams struct {
 
 	// PrivatePassphrase is the private passphrase for the wallet.
 	PrivatePassphrase []byte
-}
-
-// validateInitialAccountsMode enforces the ADR 0012 wallet-level watch-only
-// invariant against the params before any on-disk artifact is created. A
-// non-watch-only wallet cannot ship with watch-only InitialAccounts; the
-// import would later be rejected by requireAccountPrivKeyOnSpendable but
-// only after the wallet row had already been written. The check fires
-// once at create time so the failure is atomic.
-func validateInitialAccountsMode(params CreateWalletParams) error {
-	if params.WatchOnly || len(params.InitialAccounts) == 0 {
-		return nil
-	}
-
-	return fmt.Errorf("%w: cannot create a non-watch-only wallet with "+
-		"InitialAccounts; xpub-only imports require WatchOnly=true",
-		ErrWalletParams)
 }
 
 // Manager is a high-level manager that handles the lifecycle of multiple
@@ -226,17 +204,7 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	// Per ADR 0012 a wallet is uniformly watch-only or uniformly
-	// spendable. Validate the params.InitialAccounts list upfront so a
-	// mismatched-mode create fails before any backend create runs
-	// (otherwise the wallet row exists on disk while importInitialAccounts
-	// later rejects an entry, leaving a half-created wallet).
-	err = validateInitialAccountsMode(params)
-	if err != nil {
-		return nil, err
-	}
-
-	rootKey, err := m.prepareWalletCreation(cfg, params)
+	rootKey, err := m.deriveRootKey(cfg, params)
 	if err != nil {
 		return nil, err
 	}
@@ -294,27 +262,17 @@ func (w *Wallet) importInitialAccounts(ctx context.Context,
 //
 //nolint:cyclop
 func (p *CreateWalletParams) validate() error {
-	if p.Mode == ModeUnknown {
-		return fmt.Errorf("%w: unknown mode", ErrWalletParams)
-	}
-
-	// InitialAccounts should only be set for ModeShell.
 	if p.Mode != ModeShell && len(p.InitialAccounts) > 0 {
 		return fmt.Errorf("%w: initial accounts should only be set "+
 			"for ModeShell", ErrWalletParams)
 	}
 
-	// A seed is private material: both seed modes produce a private root
-	// key that a watch-only wallet cannot hold. Reject the contradiction
-	// here, before the key is generated or derived, so no signing material
-	// is ever created only to be thrown away.
-	if p.WatchOnly && (p.Mode == ModeGenSeed || p.Mode == ModeImportSeed) {
-		return fmt.Errorf("%w: a seed derives a private root key, which "+
-			"a watch-only wallet cannot hold; use ModeImportExtKey "+
-			"with an XPub or ModeShell", ErrWalletParams)
-	}
+	switch p.Mode {
+	case ModeGenSeed:
+		if p.WatchOnly {
+			return fmt.Errorf("%w: ModeGenSeed is spendable", ErrWalletParams)
+		}
 
-	if p.Mode == ModeGenSeed {
 		if len(p.Seed) != 0 {
 			return fmt.Errorf("%w: seed should not be set for "+
 				"ModeGenSeed", ErrWalletParams)
@@ -324,9 +282,13 @@ func (p *CreateWalletParams) validate() error {
 			return fmt.Errorf("%w: root key should not be set for "+
 				"ModeGenSeed", ErrWalletParams)
 		}
-	}
 
-	if p.Mode == ModeImportSeed {
+	case ModeImportSeed:
+		if p.WatchOnly {
+			return fmt.Errorf("%w: ModeImportSeed must be spendable",
+				ErrWalletParams)
+		}
+
 		if len(p.Seed) == 0 {
 			return fmt.Errorf("%w: seed is required for "+
 				"ModeImportSeed", ErrWalletParams)
@@ -336,9 +298,8 @@ func (p *CreateWalletParams) validate() error {
 			return fmt.Errorf("%w: root key should not be set for "+
 				"ModeImportSeed", ErrWalletParams)
 		}
-	}
 
-	if p.Mode == ModeImportExtKey {
+	case ModeImportExtKey:
 		if p.RootKey == nil {
 			return fmt.Errorf("%w: root key is required for "+
 				"ModeImportExtKey", ErrWalletParams)
@@ -348,9 +309,23 @@ func (p *CreateWalletParams) validate() error {
 			return fmt.Errorf("%w: seed should not be set for "+
 				"ModeImportExtKey", ErrWalletParams)
 		}
-	}
 
-	if p.Mode == ModeShell {
+		if !p.RootKey.IsPrivate() {
+			return fmt.Errorf("%w: XPub-root wallet creation is "+
+				"unsupported; use ModeShell", ErrWalletParams)
+		}
+
+		if p.WatchOnly {
+			return fmt.Errorf("%w: ModeImportExtKey must be spendable",
+				ErrWalletParams)
+		}
+
+	case ModeShell:
+		if !p.WatchOnly {
+			return fmt.Errorf("%w: ModeShell must be watch-only",
+				ErrWalletParams)
+		}
+
 		if len(p.Seed) != 0 {
 			return fmt.Errorf("%w: seed should not be set for "+
 				"ModeShell", ErrWalletParams)
@@ -359,6 +334,29 @@ func (p *CreateWalletParams) validate() error {
 		if p.RootKey != nil {
 			return fmt.Errorf("%w: root key should not be set for "+
 				"ModeShell", ErrWalletParams)
+		}
+
+		return validateInitialAccountKeys(p.InitialAccounts)
+
+	case ModeUnknown:
+		fallthrough
+
+	default:
+		return fmt.Errorf("%w: unknown mode %v", ErrWalletParams, p.Mode)
+	}
+
+	return nil
+}
+
+// validateInitialAccountKeys requires public keys for shell account imports.
+func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
+	for i, account := range accounts {
+		switch {
+		case account.XPub == nil:
+			return fmt.Errorf("%w: account %d needs XPub", ErrWalletParams, i)
+		case account.XPub.IsPrivate():
+			return fmt.Errorf("%w: account %d needs XPub, not XPrv",
+				ErrWalletParams, i)
 		}
 	}
 
@@ -405,96 +403,26 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	return w, nil
 }
 
-// prepareWalletCreation derives the root key for wallet creation and checks it
-// against the requested watch-only state. The caller has already validated cfg
-// and params.
-func (m *Manager) prepareWalletCreation(cfg Config,
-	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
-
-	rootKey, err := m.deriveRootKey(cfg, params)
-	if err != nil {
-		return nil, err
-	}
-
-	err = validateWatchOnlyRootKey(params, rootKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return rootKey, nil
-}
-
-// validateWatchOnlyRootKey checks the derived root key against the requested
-// watch-only state.
-//
-// params.WatchOnly is the single source of truth: every backend persists that
-// flag verbatim, so a request whose key material contradicts it is rejected
-// here rather than silently reinterpreted.
-func validateWatchOnlyRootKey(params CreateWalletParams,
-	rootKey *hdkeychain.ExtendedKey) error {
-
-	hasPrivateKey := rootKey != nil && rootKey.IsPrivate()
-
-	switch {
-	// A watch-only wallet must not be handed signing material, because
-	// nothing persists it: kvdb drops the root key outright and a SQL
-	// wallet keeps only its neutered form. Accepting an extended private
-	// key here would silently discard the caller's key material, leaving a
-	// wallet that cannot sign and a seed it has no record of.
-	case params.WatchOnly && hasPrivateKey:
-		return fmt.Errorf("%w: watch-only wallet cannot be created "+
-			"from a private root key; neuter it first", ErrWalletParams)
-
-	// A spendable wallet needs a root key at all. A rootless wallet holds
-	// its accounts as imported extended public keys, which is watch-only by
-	// construction.
-	case !params.WatchOnly && rootKey == nil:
-		return fmt.Errorf("%w: a rootless wallet holds no signing "+
-			"material; it requires WatchOnly", ErrWalletParams)
-
-	// That root key must be private, so the wallet can sign transactions
-	// and derive child private keys.
-	case !params.WatchOnly && !hasPrivateKey:
-		return fmt.Errorf("%w: private key required for "+
-			"non-watch-only wallet", ErrWalletParams)
-	}
-
-	return nil
-}
-
-// deriveRootKey resolves the master extended key based on the creation mode.
+// deriveRootKey resolves the master extended key after creation parameters have
+// passed validation.
 func (m *Manager) deriveRootKey(cfg Config,
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
-	switch params.Mode {
-	case ModeGenSeed:
+	if params.Mode == ModeGenSeed {
 		return m.genRootKey(cfg)
-
-	case ModeImportSeed:
-		return m.deriveFromSeed(cfg, params.Seed)
-
-	case ModeImportExtKey:
-		// Ensure an extended key was provided.
-		if params.RootKey == nil {
-			return nil, fmt.Errorf("%w: root key is required",
-				ErrWalletParams)
-		}
-
-		// Use the provided extended key (can be XPrv or XPub).
-		return params.RootKey, nil
-
-	case ModeShell:
-		// In shell mode, no root key is persisted. Accounts will be
-		// imported individually.
-		return nil, nil //nolint:nilnil
-
-	case ModeUnknown:
-		fallthrough
-
-	default:
-		return nil, fmt.Errorf("%w: unknown mode %v", ErrWalletParams,
-			params.Mode)
 	}
+
+	if params.Mode == ModeImportSeed {
+		return m.deriveFromSeed(cfg, params.Seed)
+	}
+
+	if params.Mode == ModeImportExtKey {
+		return params.RootKey, nil
+	}
+
+	// The only remaining validated mode is ModeShell. It persists no root
+	// key; accounts are imported individually.
+	return nil, nil //nolint:nilnil
 }
 
 // genRootKey generates a fresh random seed and derives its master extended
