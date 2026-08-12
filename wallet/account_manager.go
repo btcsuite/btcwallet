@@ -147,7 +147,10 @@ type AccountManager interface {
 	// Private extended keys are rejected. The key scope is derived from
 	// the version bytes of the extended key. The account name must be
 	// unique within the derived scope. If dryRun is true, the import is
-	// validated but not persisted.
+	// validated but not persisted. SQL wallets accept this XPub-only
+	// material only when the wallet is watch-only under ADR 0012. The
+	// legacy kvdb backend retains its grandfathered mixed-mode import
+	// behavior until migration; neither path imports signing material.
 	ImportAccount(ctx context.Context, name string,
 		accountKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
@@ -407,6 +410,11 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 // extended keys are rejected. The key scope is derived from the version
 // bytes of the extended key. The account name must be unique within the
 // derived scope.
+//
+// SQL wallets accept this XPub-only material only when the wallet is
+// watch-only under ADR 0012. The legacy kvdb backend retains its grandfathered
+// mixed-mode import behavior until migration; neither path imports signing
+// material.
 //
 // dryRun=true validates the import through the store and rolls the transaction
 // back; no account row is persisted.
