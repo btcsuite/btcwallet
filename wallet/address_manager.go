@@ -194,12 +194,18 @@ type AddressManager interface {
 	ListAddresses(ctx context.Context, accountName string,
 		addrType waddrmgr.AddressType) ([]AddressProperty, error)
 
-	// ImportPublicKey imports a single public key as a watch-only address.
+	// ImportPublicKey imports a single public key without private signing
+	// material. SQL wallets accept the import only when the wallet is
+	// watch-only under ADR 0012. The legacy kvdb backend retains its
+	// grandfathered mixed-mode behavior until migration.
 	ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		addrType waddrmgr.AddressType) error
 
-	// ImportTaprootScript imports a taproot script for tracking and
-	// spending.
+	// ImportTaprootScript imports a taproot script for tracking. Script
+	// presence describes a spending condition, not private signing authority.
+	// SQL wallets accept the script-only import only when the wallet is
+	// watch-only under ADR 0012. The legacy kvdb backend retains its
+	// grandfathered mixed-mode behavior until migration.
 	ImportTaprootScript(ctx context.Context,
 		tapscript waddrmgr.Tapscript) (AddressInfo, error)
 
@@ -804,7 +810,10 @@ func listAddressesQuery(walletID uint32, req page.Request[uint32],
 	return query, addresstype.StoreType{}, nil
 }
 
-// ImportPublicKey imports a single public key as a watch-only address.
+// ImportPublicKey imports a single public key without private signing material.
+// SQL wallets accept the import only when the wallet is watch-only under ADR
+// 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
+// until migration.
 func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	addrType waddrmgr.AddressType) error {
 
@@ -847,7 +856,11 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 	return w.cfg.Chain.NotifyReceived([]address.Address{addr})
 }
 
-// ImportTaprootScript imports a taproot script for tracking and spending.
+// ImportTaprootScript imports a taproot script for tracking. Script presence
+// describes a spending condition, not private signing authority. SQL wallets
+// accept the script-only import only when the wallet is watch-only under ADR
+// 0012. The legacy kvdb backend retains its grandfathered mixed-mode behavior
+// until migration.
 func (w *Wallet) ImportTaprootScript(ctx context.Context,
 	tapscript waddrmgr.Tapscript) (AddressInfo, error) {
 
