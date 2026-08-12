@@ -95,24 +95,15 @@ func sqlCreateWalletParams(cfg Config, params CreateWalletParams,
 		Birthday:       birthday,
 	}
 
-	// A rootless wallet persists no master public key. Every other wallet
-	// persists its root neutered: a spendable wallet's private root is
-	// neutered here, and a watch-only wallet's root is already public. The
-	// caller has validated the key against params.WatchOnly, so a private
-	// root key implies a spendable wallet.
-	switch {
-	case rootKey == nil:
-
-	case rootKey.IsPrivate():
+	// A validated rootless shell persists no master public key. Every other
+	// validated mode supplies a private root, which SQL persists neutered.
+	if rootKey != nil {
 		masterPubKey, err := rootKey.Neuter()
 		if err != nil {
 			return db.CreateWalletParams{}, fmt.Errorf("derive pubkey: %w", err)
 		}
 
 		createParams.MasterPubKey = []byte(masterPubKey.String())
-
-	default:
-		createParams.MasterPubKey = []byte(rootKey.String())
 	}
 
 	secrets, err := vault.CreateWalletSecrets(
