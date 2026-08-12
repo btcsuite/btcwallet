@@ -3,7 +3,6 @@ package db
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -75,7 +74,7 @@ func KeyScopeFromIDs(purpose, coinType int64) (KeyScope, error) {
 // columns. It returns hasScope=false when both columns are NULL, which is the
 // expected shape for raw imported addresses.
 func KeyScopeFromNullIDs(purpose,
-	coinType sql.NullInt64) (KeyScope, bool, error) {
+	coinType Nullable[int64]) (KeyScope, bool, error) {
 
 	switch {
 	case !purpose.Valid && !coinType.Valid:
@@ -86,7 +85,7 @@ func KeyScopeFromNullIDs(purpose,
 			errAddressShapeCorruption)
 	}
 
-	scope, err := KeyScopeFromIDs(purpose.Int64, coinType.Int64)
+	scope, err := KeyScopeFromIDs(purpose.Value, coinType.Value)
 	if err != nil {
 		return KeyScope{}, false, err
 	}
@@ -103,19 +102,19 @@ type UtxoAddressShape struct {
 
 	// DerivedAddressID is set when the credited address has a derived_addresses
 	// child row.
-	DerivedAddressID sql.NullInt64
+	DerivedAddressID Nullable[int64]
 
 	// AccountID is set when the credited address has derived account ownership
 	// metadata.
-	AccountID sql.NullInt64
+	AccountID Nullable[int64]
 
 	// AccountIsDerived reports the owning account's structural shape when
 	// account
 	// metadata is present.
-	AccountIsDerived sql.NullBool
+	AccountIsDerived Nullable[bool]
 
 	// AccountNumber is set when the owning account is wallet-derived.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 }
 
 // validateImportedUtxoShape verifies that a raw imported address carries no
@@ -153,7 +152,7 @@ func ValidateUtxoAddressShape(shape UtxoAddressShape) error {
 			errAddressShapeCorruption)
 	}
 
-	if !shape.AccountIsDerived.Bool {
+	if !shape.AccountIsDerived.Value {
 		if shape.AccountNumber.Valid {
 			return fmt.Errorf("%w: non-derived account has derived "+
 				"account number", errAccountShapeCorruption)

@@ -62,7 +62,7 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 	}
 
 	keyScope, hasScope, err := db.KeyScopeFromNullIDs(
-		row.Purpose, row.CoinType,
+		nullableInt64(row.Purpose), nullableInt64(row.CoinType),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("key scope: %w", err)
@@ -70,10 +70,10 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 
 	err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
 		IsDerived:        row.AddressIsDerived,
-		DerivedAddressID: row.DerivedAddressID,
-		AccountID:        row.AccountID,
-		AccountIsDerived: row.AccountIsDerived,
-		AccountNumber:    row.AccountNumber,
+		DerivedAddressID: nullableInt64(row.DerivedAddressID),
+		AccountID:        nullableInt64(row.AccountID),
+		AccountIsDerived: nullableBool(row.AccountIsDerived),
+		AccountNumber:    nullableInt64(row.AccountNumber),
 	})
 	if err != nil {
 		return nil, err
