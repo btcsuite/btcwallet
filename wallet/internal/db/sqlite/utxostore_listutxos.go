@@ -26,17 +26,17 @@ func (s *Store) ListUTXOs(ctx context.Context,
 	var utxos []db.UtxoInfo
 
 	err = s.execRead(ctx, func(q *sqlc.Queries) error {
-		purpose, coinType := db.ScopeFilter(query.Scope)
+		purpose, coinType := scopeFilter(query.Scope)
 
 		rows, err := q.ListUtxos(ctx, sqlc.ListUtxosParams{
 			NowUtc:        time.Now().UTC(),
 			WalletID:      int64(query.WalletID),
 			Purpose:       purpose,
 			CoinType:      coinType,
-			AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
-			AccountName:   db.NullableStringToSQLNullString(query.AccountName),
-			MinConfirms:   db.NullableInt32ToSQLInt64(query.MinConfs),
-			MaxConfirms:   db.NullableInt32ToSQLInt64(query.MaxConfs),
+			AccountNumber: nullableInt64FromUint32(query.Account),
+			AccountName:   nullableStringFromPtr(query.AccountName),
+			MinConfirms:   nullableInt64FromInt32(query.MinConfs),
+			MaxConfirms:   nullableInt64FromInt32(query.MaxConfs),
 		})
 		if err != nil {
 			return fmt.Errorf("list utxos: %w", err)

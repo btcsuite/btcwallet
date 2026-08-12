@@ -19,7 +19,7 @@ func (s *Store) GetAccountSecret(ctx context.Context,
 			WalletID: int64(query.WalletID),
 			Purpose:  int64(query.Scope.Purpose),
 			CoinType: int64(query.Scope.Coin),
-			AccountNumber: db.NullableUint32ToSQLInt64(
+			AccountNumber: nullableInt64FromUint32(
 				&query.AccountNumber,
 			),
 		})

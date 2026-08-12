@@ -24,18 +24,18 @@ func (s *Store) Balance(ctx context.Context,
 	var result db.BalanceResult
 
 	err = s.execRead(ctx, func(q *sqlc.Queries) error {
-		purpose, coinType := db.ScopeFilter(params.Scope)
+		purpose, coinType := scopeFilter(params.Scope)
 
 		balance, err := q.Balance(ctx, sqlc.BalanceParams{
 			NowUtc:        nowUTC,
 			WalletID:      int64(params.WalletID),
 			Purpose:       purpose,
 			CoinType:      coinType,
-			AccountNumber: db.NullableUint32ToSQLInt64(params.Account),
-			AccountName:   db.NullableStringToSQLNullString(params.Name),
-			MinConfirms:   db.NullableInt32ToSQLInt64(params.MinConfs),
-			MaxConfirms:   db.NullableInt32ToSQLInt64(params.MaxConfs),
-			CoinbaseMaturity: db.NullableInt32ToSQLInt64(
+			AccountNumber: nullableInt64FromUint32(params.Account),
+			AccountName:   nullableStringFromPtr(params.Name),
+			MinConfirms:   nullableInt64FromInt32(params.MinConfs),
+			MaxConfirms:   nullableInt64FromInt32(params.MaxConfs),
+			CoinbaseMaturity: nullableInt64FromInt32(
 				params.CoinbaseMaturity,
 			),
 		})

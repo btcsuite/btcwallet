@@ -75,17 +75,17 @@ func (s *Store) ListUTXOs(ctx context.Context,
 // check the query performs in SQL, in line with the existing Balance /
 // lease-query convention this repo follows.
 func buildListUtxosParams(query db.ListUtxosQuery) sqlc.ListUtxosParams {
-	purpose, coinType := db.ScopeFilter(query.Scope)
+	purpose, coinType := scopeFilter(query.Scope)
 
 	return sqlc.ListUtxosParams{
 		NowUtc:        time.Now().UTC(),
 		WalletID:      int64(query.WalletID),
 		Purpose:       purpose,
 		CoinType:      coinType,
-		AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
-		AccountName:   db.NullableStringToSQLNullString(query.AccountName),
-		MinConfirms:   db.NullableInt32ToSQLInt32(query.MinConfs),
-		MaxConfirms:   db.NullableInt32ToSQLInt32(query.MaxConfs),
+		AccountNumber: nullableInt64FromUint32(query.Account),
+		AccountName:   nullableStringFromPtr(query.AccountName),
+		MinConfirms:   nullableInt32FromPtr(query.MinConfs),
+		MaxConfirms:   nullableInt32FromPtr(query.MaxConfs),
 	}
 }
 

@@ -16,7 +16,11 @@ import (
 func buildBlock(height sql.NullInt32, hash []byte,
 	timestamp sql.NullInt64) (*db.Block, error) {
 
-	height32, err := db.NullInt32ToUint32(height)
+	if !height.Valid {
+		return nil, db.ErrInvalidNullInt
+	}
+
+	height32, err := db.Int32ToUint32(height.Int32)
 	if err != nil {
 		return nil, fmt.Errorf("block height: %w", err)
 	}

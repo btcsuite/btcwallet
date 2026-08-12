@@ -125,7 +125,7 @@ func utxoInfoFromRow(hash []byte, outputIndex int32, amount int64,
 
 	var height *uint32
 	if blockHeight.Valid {
-		heightValue, err := db.NullInt32ToUint32(blockHeight)
+		heightValue, err := nullableInt32ToUint32(blockHeight)
 		if err != nil {
 			return nil, fmt.Errorf("utxo block height: %w", err)
 		}
