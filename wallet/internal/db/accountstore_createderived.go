@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -53,7 +52,7 @@ func (params *CreateDerivedAccountParams) Validate() error {
 // CreateDerivedAccount workflow needs from the final insert row.
 type CreateDerivedAccountRow struct {
 	AccountID     int64
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 	CreatedAt     time.Time
 }
 
@@ -176,13 +175,13 @@ func allocateAndPreviewAccountNumber(ctx context.Context,
 
 // derivedAccountNumber converts a wallet-derived account's persisted account
 // number, which must always be present, into its uint32 form.
-func derivedAccountNumber(accountNumber sql.NullInt64) (uint32, error) {
+func derivedAccountNumber(accountNumber Nullable[int64]) (uint32, error) {
 	if !accountNumber.Valid {
 		// This should never happen unless the query is modified incorrectly.
 		return 0, ErrNilDBAccountNumber
 	}
 
-	number, err := Int64ToUint32(accountNumber.Int64)
+	number, err := Int64ToUint32(accountNumber.Value)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %w", ErrMaxAccountNumberReached, err)
 	}

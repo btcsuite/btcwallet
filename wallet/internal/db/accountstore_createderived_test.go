@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -50,7 +49,7 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	}
 	createdAt := time.Unix(123, 0)
 	expectedRow := CreateDerivedAccountRow{
-		AccountNumber: sql.NullInt64{Int64: 12, Valid: true},
+		AccountNumber: NewNullable(int64(12)),
 		CreatedAt:     createdAt,
 	}
 
@@ -344,7 +343,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 		derived,
 	).Return(
 		CreateDerivedAccountRow{
-			AccountNumber: sql.NullInt64{Int64: 9, Valid: true},
+			AccountNumber: NewNullable(int64(9)),
 			CreatedAt:     time.Unix(101, 0),
 		}, nil,
 	).Once()

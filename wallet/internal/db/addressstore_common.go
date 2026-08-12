@@ -218,9 +218,15 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (*uint32,
 	uint32, KeyScope, error) {
 
-	account, err := optionalAccountNumber(accountNumber)
-	if err != nil {
-		return nil, 0, KeyScope{}, err
+	var account *uint32
+	if accountNumber.Valid {
+		converted, err := validateAccountNumber(accountNumber.Int64)
+		if err != nil {
+			return nil, 0, KeyScope{},
+				fmt.Errorf("account number: %w", err)
+		}
+
+		account = &converted
 	}
 
 	var fingerprint uint32

@@ -2,7 +2,6 @@ package kvdb
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -183,11 +182,8 @@ func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
 	}
 
 	return db.CreateDerivedAccountRow{
-		AccountNumber: sql.NullInt64{
-			Int64: accountNumber,
-			Valid: true,
-		},
-		CreatedAt: now,
+		AccountNumber: db.NewNullable(accountNumber),
+		CreatedAt:     now,
 	}, nil
 }
 
