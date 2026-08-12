@@ -19,3 +19,6 @@ ADRs serve as a historical log of important design choices, providing context fo
 - [ADR 0011: No `used` Column on the Addresses Table](./0011-no-addresses-used-column.md) - Records the decision that the SQL backend derives address used-ness from the utxos table (monotonic by ADR 0006's soft-delete schema) rather than persisting a separate column. The kvdb backend continues to use waddrmgr's legacy sticky-bit because wtxmgr deletes credit records on reorg.
 - [ADR 0012: Wallet-Level Watch-Only as a Uniform Invariant](./0012-wallet-level-watch-only-uniformity.md) - Records that SQL wallets are uniformly watch-only or uniformly spendable, with wallet-level mode enforced at the store boundary.
 - [ADR 0013: Normalized Account and Address Identity](./0013-normalized-account-address-identity.md) - Normalizes SQL account/address identity around nullable account numbers, derived-address path rows, and accountless raw imports.
+- [ADR 0014: Durable SQL Database Identity](./0014-sql-database-identity.md) -
+  Defines the durable role-wallet identity and identity-first initialization
+  order for SQLite and PostgreSQL.
