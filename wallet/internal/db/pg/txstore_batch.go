@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/address/v2"
-	"github.com/btcsuite/btcd/txscript/v2"
+	address "github.com/btcsuite/btcd/address/v2"
+	txscript "github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
