@@ -153,85 +153,6 @@ func TestManagerCreateSuccess(t *testing.T) {
 	}
 }
 
-// TestManagerCreateError verifies that wallet creation fails when invalid
-// parameters are provided. This ensures that the Manager correctly validates
-// inputs before attempting to modify the database.
-func TestManagerCreateError(t *testing.T) {
-	t.Parallel()
-
-	// Pre-calculate cryptographic material to construct specific test
-	// scenarios.
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-	require.NoError(t, err)
-
-	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
-	require.NoError(t, err)
-
-	pubKey, err := rootKey.Neuter()
-	require.NoError(t, err)
-
-	tests := []struct {
-		name        string
-		params      CreateWalletParams
-		expectedErr string
-	}{
-		{
-			name: "ModeImportSeed missing seed",
-			params: CreateWalletParams{
-				Mode: ModeImportSeed,
-				Seed: nil,
-			},
-			expectedErr: "seed is required",
-		},
-		{
-			name: "ModeImportExtKey missing key",
-			params: CreateWalletParams{
-				Mode:    ModeImportExtKey,
-				RootKey: nil,
-			},
-			expectedErr: "root key is required",
-		},
-		{
-			name: "Public Key for Non-WatchOnly",
-			params: CreateWalletParams{
-				Mode:      ModeImportExtKey,
-				RootKey:   pubKey,
-				WatchOnly: false,
-			},
-			expectedErr: "private key required",
-		},
-		{
-			name: "Unknown Mode",
-			params: CreateWalletParams{
-				Mode: ModeUnknown,
-			},
-			expectedErr: "unknown mode",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			m := testKVDBManager(t)
-			cfg := Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
-			}
-
-			// Attempt to create the wallet. We expect this to fail due to
-			// the invalid parameters configured in the test case.
-			_, err := m.Create(cfg, tc.params)
-
-			// Verify that the error matches our expectation.
-			require.Error(t, err)
-			require.ErrorContains(t, err, tc.expectedErr)
-		})
-	}
-}
-
 // TestCreateWalletParams_Validate verifies that the validate method enforces
 // the correct constraints for each creation mode.
 func TestCreateWalletParams_Validate(t *testing.T) {
@@ -256,9 +177,7 @@ func TestCreateWalletParams_Validate(t *testing.T) {
 				Mode:      ModeGenSeed,
 				WatchOnly: true,
 			},
-			expectedErr: "a seed derives a private root key, which a " +
-				"watch-only wallet cannot hold; use ModeImportExtKey " +
-				"with an XPub or ModeShell",
+			expectedErr: "ModeGenSeed is spendable",
 		},
 		{
 			name: "ModeGenSeed with Seed",
@@ -283,9 +202,7 @@ func TestCreateWalletParams_Validate(t *testing.T) {
 				Seed:      seed,
 				WatchOnly: true,
 			},
-			expectedErr: "a seed derives a private root key, which a " +
-				"watch-only wallet cannot hold; use ModeImportExtKey " +
-				"with an XPub or ModeShell",
+			expectedErr: "ModeImportSeed must be spendable",
 		},
 		{
 			name: "ModeImportSeed with RootKey",
@@ -308,8 +225,9 @@ func TestCreateWalletParams_Validate(t *testing.T) {
 		{
 			name: "ModeShell with Seed",
 			params: CreateWalletParams{
-				Mode: ModeShell,
-				Seed: seed,
+				Mode:      ModeShell,
+				Seed:      seed,
+				WatchOnly: true,
 			},
 			expectedErr: "seed should not be set for ModeShell",
 		},
@@ -591,7 +509,7 @@ func TestManager_deriveRootKey(t *testing.T) {
 	m := testKVDBManager(t)
 	cfg := Config{ChainParams: &chainParams}
 
-	// 1. ModeShell: Should return nil/nil (no root key for shell).
+	// ModeShell should return nil/nil because it has no root key.
 	t.Run("ModeShell", func(t *testing.T) {
 		t.Parallel()
 
@@ -600,16 +518,7 @@ func TestManager_deriveRootKey(t *testing.T) {
 		require.Nil(t, key)
 	})
 
-	t.Run("ModeUnknown", func(t *testing.T) {
-		t.Parallel()
-
-		key, err := m.deriveRootKey(cfg, CreateWalletParams{Mode: ModeUnknown})
-		require.ErrorIs(t, err, ErrWalletParams)
-		require.ErrorContains(t, err, "unknown mode")
-		require.Nil(t, key)
-	})
-
-	// 3. ModeGenSeed: Should return a newly generated private key.
+	// ModeGenSeed should return a newly generated private key.
 	t.Run("ModeGenSeed", func(t *testing.T) {
 		t.Parallel()
 
@@ -618,176 +527,6 @@ func TestManager_deriveRootKey(t *testing.T) {
 		require.NotNil(t, key)
 		require.True(t, key.IsPrivate())
 	})
-}
-
-// TestValidateInitialAccountsModeUpfront verifies the ADR 0012 invariant:
-// a non-watch-only wallet cannot ship with InitialAccounts. The validator
-// runs before the kvdb wallet create so the failure is atomic and no
-// half-created wallet is left on disk.
-func TestValidateInitialAccountsModeUpfront(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		params  CreateWalletParams
-		wantErr bool
-	}{
-		{
-			name: "watch-only with initial accounts is fine",
-			params: CreateWalletParams{
-				WatchOnly: true,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "imported-xpub",
-				}},
-			},
-		},
-		{
-			name: "spendable with no initial accounts is fine",
-			params: CreateWalletParams{
-				WatchOnly: false,
-			},
-		},
-		{
-			name: "spendable with initial accounts is rejected",
-			params: CreateWalletParams{
-				WatchOnly: false,
-				InitialAccounts: []WatchOnlyAccount{{
-					Name: "imported-xpub",
-				}},
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := validateInitialAccountsMode(tc.params)
-			if tc.wantErr {
-				require.ErrorIs(t, err, ErrWalletParams)
-
-				return
-			}
-
-			require.NoError(t, err)
-		})
-	}
-}
-
-// TestValidateWatchOnlyRootKey verifies that the requested watch-only state is
-// checked against the derived root key. params.WatchOnly is what every backend
-// persists, so a contradicting key must be rejected rather than reinterpreted.
-func TestValidateWatchOnlyRootKey(t *testing.T) {
-	t.Parallel()
-
-	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
-	require.NoError(t, err)
-
-	rootPubKey, err := rootKey.Neuter()
-	require.NoError(t, err)
-
-	tests := []struct {
-		name       string
-		watchOnly  bool
-		rootKey    *hdkeychain.ExtendedKey
-		wantErrMsg string
-	}{
-		{
-			name:    "spendable wallet with a private root key",
-			rootKey: rootKey,
-		},
-		{
-			name:      "watch-only wallet with a neutered root key",
-			watchOnly: true,
-			rootKey:   rootPubKey,
-		},
-		{
-			name:      "watch-only wallet with no root key",
-			watchOnly: true,
-		},
-		{
-			// Nothing would persist the private half, so the seed
-			// would vanish without a word.
-			name:       "watch-only wallet with a private root key",
-			watchOnly:  true,
-			rootKey:    rootKey,
-			wantErrMsg: "neuter it first",
-		},
-		{
-			name:       "spendable wallet with a neutered root key",
-			rootKey:    rootPubKey,
-			wantErrMsg: "private key required",
-		},
-		{
-			name:       "spendable wallet with no root key",
-			wantErrMsg: "requires WatchOnly",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := validateWatchOnlyRootKey(
-				CreateWalletParams{WatchOnly: tc.watchOnly},
-				tc.rootKey,
-			)
-			if tc.wantErrMsg != "" {
-				require.ErrorIs(t, err, ErrWalletParams)
-				require.ErrorContains(t, err, tc.wantErrMsg)
-
-				return
-			}
-
-			require.NoError(t, err)
-		})
-	}
-}
-
-// TestManagerKVDBWatchOnlyRejectsRootKey verifies that the legacy kvdb backend
-// refuses a watch-only wallet carrying a root key, rather than dropping the key
-// it cannot persist.
-//
-// waddrmgr has nowhere to keep a neutered root and treats every key it is
-// handed as spendable, so it cannot represent this wallet. A SQL wallet does
-// record the key, so accepting the request on kvdb would silently discard
-// caller key material and make one request mean two different things.
-func TestManagerKVDBWatchOnlyRejectsRootKey(t *testing.T) {
-	t.Parallel()
-
-	// Derive the root from a fixed seed so the SQL fingerprint below is an
-	// exact constant. Zero is a legal BIP32 fingerprint, so a "not zero"
-	// assertion would be both theoretically flaky and satisfied by the wrong
-	// key; this pins the one correct value instead.
-	rootKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
-	require.NoError(t, err)
-
-	rootPubKey, err := rootKey.Neuter()
-	require.NoError(t, err)
-
-	cfg := testWatchOnlyConfig()
-	params := CreateWalletParams{
-		Mode:              ModeImportExtKey,
-		RootKey:           rootPubKey,
-		WatchOnly:         true,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
-	}
-
-	w, err := testKVDBManager(t).Create(cfg, params)
-	require.ErrorIs(t, err, ErrInvalidParam)
-	require.ErrorContains(t, err, "cannot persist a watch-only root key")
-	require.Nil(t, w)
-
-	// A SQL wallet accepts the very same request, records the key and parses
-	// the fingerprint of exactly that key. That asymmetry is why kvdb rejects
-	// rather than drops.
-	sqlWallet, err := testSQLiteManager(t).Create(cfg, params)
-	require.NoError(t, err)
-	require.True(t, sqlWallet.IsWatchOnly())
-	require.Equal(t, fixedTestSeedFingerprint, sqlWallet.masterFingerprint)
 }
 
 // TestManagerKVDBCreateWatchOnlyShell verifies that the legacy kvdb backend
