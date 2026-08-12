@@ -70,9 +70,9 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 
 	return db.DerivedAddressAccount{
 		AccountID:         row.ID,
-		AccountNumber:     row.AccountNumber,
+		AccountNumber:     nullableInt64(row.AccountNumber),
 		AccountName:       row.AccountName,
-		MasterFingerprint: row.MasterFingerprint,
+		MasterFingerprint: nullableInt64(row.MasterFingerprint),
 		Purpose:           row.Purpose,
 		CoinType:          row.CoinType,
 		IsDerived:         row.IsDerived,

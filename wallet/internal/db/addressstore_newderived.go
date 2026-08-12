@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -31,13 +30,13 @@ type DerivedAddressAccount struct {
 
 	// AccountNumber is the BIP44 account number; NULL for non-derived
 	// (imported) accounts.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 
 	// AccountName is the human-readable account name.
 	AccountName string
 
 	// MasterFingerprint is the root fingerprint stored on the account.
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint Nullable[int64]
 
 	// Purpose is the BIP43 purpose component of the owning scope.
 	Purpose int64
@@ -288,7 +287,7 @@ func derivedAddressInput(ctx context.Context,
 // resolveAccountNumber maps the account-number lookup result to the optional
 // BIP44 account number, enforcing the wallet-derived/imported shape invariant.
 func resolveAccountNumber(accountIsDerived bool,
-	accountNumber sql.NullInt64) (*uint32, error) {
+	accountNumber Nullable[int64]) (*uint32, error) {
 
 	var resolved *uint32
 
@@ -306,7 +305,7 @@ func resolveAccountNumber(accountIsDerived bool,
 			"account number", errAccountShapeCorruption)
 	}
 
-	accountNumValue, err := validateAccountNumber(accountNumber.Int64)
+	accountNumValue, err := validateAccountNumber(accountNumber.Value)
 	if err != nil {
 		return nil, fmt.Errorf("account number: %w", err)
 	}

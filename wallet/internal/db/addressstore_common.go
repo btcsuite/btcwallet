@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -22,8 +21,8 @@ var (
 // ValidateAddressShape checks that the persisted address shape and
 // derived_addresses child row agree with the nullable branch/index path columns
 // selected from that row.
-func ValidateAddressShape(isDerived bool, derivedAddressID sql.NullInt64,
-	branch, index sql.NullInt64) error {
+func ValidateAddressShape(isDerived bool, derivedAddressID Nullable[int64],
+	branch, index Nullable[int64]) error {
 
 	hasChild := derivedAddressID.Valid
 
@@ -44,7 +43,7 @@ func ValidateAddressShape(isDerived bool, derivedAddressID sql.NullInt64,
 // validateAddressPathColumns checks the branch/index path columns are
 // consistent with whether the address has a derived_addresses child row.
 func validateAddressPathColumns(hasChild bool, branch,
-	index sql.NullInt64) error {
+	index Nullable[int64]) error {
 
 	hasPath := branch.Valid || index.Valid
 
@@ -89,22 +88,22 @@ type AddressInfoRow[TypeID any] struct {
 
 	// DerivedAddressID is the derived_addresses row ID when the address is an
 	// HD child. Raw imported addresses leave this NULL.
-	DerivedAddressID sql.NullInt64
+	DerivedAddressID Nullable[int64]
 
 	// AccountID is the database unique identifier for the account when the
 	// address is an HD child. Raw imported addresses leave this NULL.
-	AccountID sql.NullInt64
+	AccountID Nullable[int64]
 
 	// AccountNumber is the BIP44 account index of the owning account when the
 	// account is derived. Imported accounts leave this NULL.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 
 	// AccountName is the human-readable name of the owning account.
 	// Raw imported addresses leave this NULL.
-	AccountName sql.NullString
+	AccountName Nullable[string]
 
 	// MasterFingerprint is the root fingerprint stored on the owning account.
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint Nullable[int64]
 
 	// AccountProps contains account metadata fetched separately when the
 	// address query does not join all account fields.
@@ -112,11 +111,11 @@ type AddressInfoRow[TypeID any] struct {
 
 	// Purpose is the BIP43 purpose component of the owning scope.
 	// Raw imported addresses leave this NULL.
-	Purpose sql.NullInt64
+	Purpose Nullable[int64]
 
 	// CoinType is the BIP44 coin type component of the owning scope.
 	// Raw imported addresses leave this NULL.
-	CoinType sql.NullInt64
+	CoinType Nullable[int64]
 
 	// TypeID is the database identifier for the address type.
 	TypeID TypeID
@@ -127,7 +126,7 @@ type AddressInfoRow[TypeID any] struct {
 
 	// AccountIsDerived reports the owning account's structural shape when the
 	// address is derived. Raw imported addresses leave this NULL.
-	AccountIsDerived sql.NullBool
+	AccountIsDerived Nullable[bool]
 
 	// WalletIsWatchOnly indicates whether the wallet is watch-only.
 	WalletIsWatchOnly bool
@@ -140,11 +139,11 @@ type AddressInfoRow[TypeID any] struct {
 
 	// AddressBranch is the BIP44 branch number (0=external, 1=internal/change),
 	// or NULL for imported addresses.
-	AddressBranch sql.NullInt64
+	AddressBranch Nullable[int64]
 
 	// AddressIndex is the BIP44 index within the branch, or NULL for imported
 	// addresses.
-	AddressIndex sql.NullInt64
+	AddressIndex Nullable[int64]
 
 	// ScriptPubKey is the script pubkey stored for the address.
 	ScriptPubKey []byte
@@ -214,13 +213,13 @@ func convertAddressID(id int64) (uint32, error) {
 
 // convertAccountMetadata converts account-level row data into wallet-facing
 // fields on AddressInfo.
-func convertAccountMetadata(accountNumber sql.NullInt64,
-	masterFingerprint sql.NullInt64, purpose int64, coinType int64) (*uint32,
+func convertAccountMetadata(accountNumber Nullable[int64],
+	masterFingerprint Nullable[int64], purpose int64, coinType int64) (*uint32,
 	uint32, KeyScope, error) {
 
 	var account *uint32
 	if accountNumber.Valid {
-		converted, err := validateAccountNumber(accountNumber.Int64)
+		converted, err := validateAccountNumber(accountNumber.Value)
 		if err != nil {
 			return nil, 0, KeyScope{},
 				fmt.Errorf("account number: %w", err)
@@ -231,7 +230,7 @@ func convertAccountMetadata(accountNumber sql.NullInt64,
 
 	var fingerprint uint32
 	if masterFingerprint.Valid {
-		converted, err := Int64ToUint32(masterFingerprint.Int64)
+		converted, err := Int64ToUint32(masterFingerprint.Value)
 		if err != nil {
 			return nil, 0, KeyScope{},
 				fmt.Errorf("master fingerprint: %w", err)
@@ -280,14 +279,14 @@ func convertAddressAccountMetadata[TypeID any](
 
 	accountNumber, masterFingerprint, keyScope, err :=
 		convertAccountMetadata(
-			row.AccountNumber, row.MasterFingerprint, row.Purpose.Int64,
-			row.CoinType.Int64,
+			row.AccountNumber, row.MasterFingerprint, row.Purpose.Value,
+			row.CoinType.Value,
 		)
 	if err != nil {
 		return nil, "", 0, KeyScope{}, err
 	}
 
-	return accountNumber, row.AccountName.String, masterFingerprint, keyScope,
+	return accountNumber, row.AccountName.Value, masterFingerprint, keyScope,
 		nil
 }
 
@@ -306,7 +305,7 @@ func validateAddressAccountShape[TypeID any](
 	}
 
 	return validateAddressAccountNumberShape(
-		row.AccountIsDerived.Bool, row.AccountNumber,
+		row.AccountIsDerived.Value, row.AccountNumber,
 	)
 }
 
@@ -330,7 +329,7 @@ func validateRawAddressAccountShape[TypeID any](
 // validateAddressAccountNumberShape verifies address account metadata uses
 // account numbers only for wallet-derived accounts.
 func validateAddressAccountNumberShape(accountIsDerived bool,
-	accountNumber sql.NullInt64) error {
+	accountNumber Nullable[int64]) error {
 
 	if !accountIsDerived {
 		if accountNumber.Valid {
@@ -352,8 +351,8 @@ func validateAddressAccountNumberShape(accountIsDerived bool,
 // ApplyAddressAccountMetadata converts and copies raw account metadata onto an
 // address info returned by a create path.
 func ApplyAddressAccountMetadata(info *AddressInfo,
-	accountNumber sql.NullInt64, accountName string,
-	masterFingerprint sql.NullInt64, purpose, coinType int64,
+	accountNumber Nullable[int64], accountName string,
+	masterFingerprint Nullable[int64], purpose, coinType int64,
 	isImported bool) error {
 
 	accountNum, fingerprint, keyScope, err := convertAccountMetadata(
@@ -388,7 +387,7 @@ func convertAddressMetadata[TypeID any](
 // Imported addresses must have both branch/index unset and return zero values.
 // Derived addresses must have both fields set and convertible to uint32.
 func convertAddressPath(hasDerivedPath bool, branch,
-	index sql.NullInt64) (uint32, uint32, error) {
+	index Nullable[int64]) (uint32, uint32, error) {
 
 	if !hasDerivedPath {
 		if branch.Valid || index.Valid {
@@ -402,12 +401,12 @@ func convertAddressPath(hasDerivedPath bool, branch,
 		return 0, 0, errInvalidDerivationPath
 	}
 
-	addrBranch, err := Int64ToUint32(branch.Int64)
+	addrBranch, err := Int64ToUint32(branch.Value)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address branch: %w", err)
 	}
 
-	addrIndex, err := Int64ToUint32(index.Int64)
+	addrIndex, err := Int64ToUint32(index.Value)
 	if err != nil {
 		return 0, 0, fmt.Errorf("address index: %w", err)
 	}
@@ -443,7 +442,7 @@ func AddressRowToInfo[TypeID any](
 
 	var accountID *uint32
 	if row.AccountID.Valid {
-		accountID, err = optionalAccountID(row.AccountID.Int64)
+		accountID, err = optionalAccountID(row.AccountID.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -469,7 +468,7 @@ func AddressRowToInfo[TypeID any](
 
 	isImported := !row.IsDerived
 	if row.IsDerived {
-		isImported = !row.AccountIsDerived.Bool
+		isImported = !row.AccountIsDerived.Value
 	}
 
 	return &AddressInfo{

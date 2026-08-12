@@ -65,7 +65,7 @@ func TestNewDerivedAddressWithOpsBuildsInfo(t *testing.T) {
 
 	account := DerivedAddressAccount{
 		AccountID:     42,
-		AccountNumber: sqlNullInt64(3),
+		AccountNumber: NewNullable(int64(3)),
 		AccountName:   params.AccountName,
 		Purpose:       int64(params.Scope.Purpose),
 		CoinType:      int64(params.Scope.Coin),
