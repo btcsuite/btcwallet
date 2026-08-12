@@ -53,9 +53,24 @@ func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
 	_, err := dbruntime.Write(
-		ctx, s,
-		func(tx *sql.Tx) *sqlc.Queries {
-			return s.queries.WithTx(tx)
+		ctx, s, dbruntime.WriteTxOps[*sql.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (*sql.Tx, error) {
+				return s.db.BeginTx(ctx, nil)
+			},
+			Bind: func(tx *sql.Tx) *sqlc.Queries {
+				return s.queries.WithTx(tx)
+			},
+			Commit: func(tx *sql.Tx) dbruntime.CommitResult {
+				err := tx.Commit()
+
+				return dbruntime.CommitResult{
+					Err:       err,
+					Ambiguous: isCommitAmbiguous(err),
+				}
+			},
+			Rollback: func(tx *sql.Tx) error {
+				return tx.Rollback()
+			},
 		},
 		func(qtx *sqlc.Queries) (struct{}, error) {
 			return struct{}{}, fn(qtx)
@@ -87,6 +102,11 @@ func (s *Store) ClassifyError(err error) error {
 	return dberr.Normalize(dberr.BackendPostgres, mapErr, err)
 }
 
+// IsNoRows reports whether err is the PostgreSQL query no-row sentinel.
+func (s *Store) IsNoRows(err error) bool {
+	return isNoRows(err)
+}
+
 // RecordError records one classified PostgreSQL backend error and marks the
 // store unhealthy after fatal failures.
 func (s *Store) RecordError(err error) {
@@ -112,11 +132,6 @@ func (s *Store) RecordRetryExhausted() {
 // outcome.
 func (s *Store) RecordAmbiguousTxCommit() {
 	s.runtimeStats.RecordAmbiguousTxCommit()
-}
-
-// RawDB returns the PostgreSQL database handle used by shared runtime writes.
-func (s *Store) RawDB() *sql.DB {
-	return s.db
 }
 
 // StatsSnapshot returns the current PostgreSQL runtime counters.

@@ -2,12 +2,9 @@ package runtime
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,13 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const runtimeAppliedResult = "applied"
+
 // Test errors used by the runtime helper tests.
 var (
 	errRuntimeBusy     = errors.New("busy")
 	errRuntimeRetry    = errors.New("retry")
 	errRuntimeCallback = errors.New("callback failed")
 	errRuntimeOther    = errors.New("other")
-	errRuntimeUnused   = errors.New("unused")
+	errRuntimeNoRows   = errors.New("no rows")
 )
 
 // fakeStore implements the runtime hook interfaces for tests.
@@ -33,7 +32,7 @@ type fakeStore struct {
 	retrySuccesses   int
 	retryExhausted   int
 	ambiguousCommits int
-	db               *sql.DB
+	noRows           error
 }
 
 // CheckHealthy returns the configured health-check result for fakeStore.
@@ -75,9 +74,9 @@ func (s *fakeStore) RecordAmbiguousTxCommit() {
 	s.ambiguousCommits++
 }
 
-// RawDB returns the fake database handle used by transaction tests.
-func (s *fakeStore) RawDB() *sql.DB {
-	return s.db
+// IsNoRows reports whether err matches the configured no-row sentinel.
+func (s *fakeStore) IsNoRows(err error) bool {
+	return errors.Is(err, s.noRows)
 }
 
 // TestReadHealthyCheck verifies that unhealthy stores fail fast.
@@ -128,16 +127,16 @@ func TestReadReturnsValue(t *testing.T) {
 func TestReadNoRowsPassthrough(t *testing.T) {
 	t.Parallel()
 
-	hooks := &fakeStore{}
+	hooks := &fakeStore{noRows: errRuntimeNoRows}
 	result, err := Read(context.Background(), hooks, struct{}{}, ReadConfig{
 		MaxAttempts: 1,
 		BaseDelay:   time.Millisecond,
 		MaxDelay:    time.Millisecond,
 	},
 		func(context.Context, struct{}) (string, error) {
-			return "", sql.ErrNoRows
+			return "", errRuntimeNoRows
 		})
-	require.ErrorIs(t, err, sql.ErrNoRows)
+	require.ErrorIs(t, err, errRuntimeNoRows)
 	require.Empty(t, result)
 	require.Zero(t, hooks.errorCount)
 }
@@ -278,7 +277,7 @@ func TestReadUtilities(t *testing.T) {
 
 	wrappedCanceled := fmt.Errorf("read: %w", context.Canceled)
 	require.Same(t, wrappedCanceled, unwrapContextError(wrappedCanceled))
-	require.NoError(t, unwrapContextError(sql.ErrNoRows))
+	require.NoError(t, unwrapContextError(errRuntimeNoRows))
 }
 
 // TestWriteHealthyCheck verifies that unhealthy stores fail fast before
@@ -287,9 +286,10 @@ func TestWriteHealthyCheck(t *testing.T) {
 	t.Parallel()
 
 	hooks := &fakeStore{healthyErr: ErrStoreUnhealthy}
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(nil),
+		func(struct{}) (string, error) { return "", nil },
+	)
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrStoreUnhealthy)
 }
@@ -299,16 +299,16 @@ func TestWriteHealthyCheck(t *testing.T) {
 func TestWriteReturnsValue(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn}
-
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "ok", nil
-	})
+	hooks := &fakeStore{}
+	tx := &fakeTx{}
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(tx),
+		func(struct{}) (string, error) { return "ok", nil },
+	)
 	require.NoError(t, err)
 	require.Equal(t, "ok", result)
+	require.True(t, tx.committed)
+	require.True(t, tx.rolledBack)
 }
 
 // TestWriteBeginFailure verifies that begin failures are classified and
@@ -316,16 +316,16 @@ func TestWriteReturnsValue(t *testing.T) {
 func TestWriteBeginFailure(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{err: driver.ErrBadConn})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+	hooks := &fakeStore{classifyFn: func(err error) error {
 		return dberr.NewSQLError(
 			dberr.BackendPostgres, dberr.ReasonUnavailable, "", err,
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(*sql.Tx) struct{} {
-		return struct{}{}
-	}, func(struct{}) (string, error) { return "", nil })
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(nil),
+		func(struct{}) (string, error) { return "", nil },
+	)
 
 	var sqlErr *dberr.SQLError
 
@@ -340,15 +340,13 @@ func TestWriteBeginFailure(t *testing.T) {
 func TestWriteCallbackErrorPassthrough(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn}
+	hooks := &fakeStore{}
 	callbackErr := errRuntimeCallback
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", callbackErr
-	})
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(&fakeTx{}),
+		func(struct{}) (string, error) { return "", callbackErr },
+	)
 	require.Empty(t, result)
 	require.ErrorIs(t, err, callbackErr)
 	require.Zero(t, hooks.errorCount)
@@ -359,18 +357,16 @@ func TestWriteCallbackErrorPassthrough(t *testing.T) {
 func TestWriteCallbackErrorClassified(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+	hooks := &fakeStore{classifyFn: func(err error) error {
 		return dberr.NewSQLError(
 			dberr.BackendPostgres, dberr.ReasonConstraint, "23505", err,
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "", errRuntimeCallback
-	})
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(&fakeTx{}),
+		func(struct{}) (string, error) { return "", errRuntimeCallback },
+	)
 
 	var sqlErr *dberr.SQLError
 
@@ -380,24 +376,46 @@ func TestWriteCallbackErrorClassified(t *testing.T) {
 	require.Equal(t, 1, hooks.errorCount)
 }
 
+// TestWriteCanceledBeforeCommit verifies that caller cancellation after the
+// callback prevents commit and still invokes transaction cleanup.
+func TestWriteCanceledBeforeCommit(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	tx := &fakeTx{}
+	result, err := Write(
+		ctx, &fakeStore{}, fakeTxOps(tx),
+		func(struct{}) (string, error) {
+			cancel()
+
+			return runtimeAppliedResult, nil
+		},
+	)
+	require.Empty(t, result)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, tx.committed)
+	require.True(t, tx.rolledBack)
+}
+
 // TestWriteCommitAmbiguous verifies that transport failures during commit are
 // wrapped as ambiguous commit errors, recorded, and return a zero value.
 func TestWriteCommitAmbiguous(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{commitErr: io.EOF})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+	hooks := &fakeStore{classifyFn: func(err error) error {
 		return dberr.NewSQLError(
 			dberr.BackendPostgres, dberr.ReasonUnavailable,
 			"08006", err,
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	tx := &fakeTx{commitErr: io.EOF, commitAmbiguous: true}
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(tx),
+		func(struct{}) (string, error) { return runtimeAppliedResult, nil },
+	)
 	require.Empty(t, result)
 	require.ErrorIs(t, err, ErrAmbiguousTxCommit)
 
@@ -413,19 +431,18 @@ func TestWriteCommitAmbiguous(t *testing.T) {
 func TestWriteCommitUnavailable(t *testing.T) {
 	t.Parallel()
 
-	dbConn := newTestDB(t, beginErrDriver{commitErr: errRuntimeOther})
-	hooks := &fakeStore{db: dbConn, classifyFn: func(err error) error {
+	hooks := &fakeStore{classifyFn: func(err error) error {
 		return dberr.NewSQLError(
 			dberr.BackendPostgres, dberr.ReasonUnavailable,
 			"08006", err,
 		)
 	}}
 
-	result, err := Write(context.Background(), hooks, func(tx *sql.Tx) *sql.Tx {
-		return tx
-	}, func(*sql.Tx) (string, error) {
-		return "applied", nil
-	})
+	tx := &fakeTx{commitErr: errRuntimeOther}
+	result, err := Write(
+		context.Background(), hooks, fakeTxOps(tx),
+		func(struct{}) (string, error) { return runtimeAppliedResult, nil },
+	)
 	require.Empty(t, result)
 	require.NotErrorIs(t, err, ErrAmbiguousTxCommit)
 
@@ -441,81 +458,40 @@ func immediateTimer(time.Duration) *time.Timer {
 	return time.NewTimer(0)
 }
 
-// beginErrDriver is a test SQL driver that injects begin and commit failures.
-type beginErrDriver struct {
-	err       error
-	commitErr error
+// fakeTx is a driver-neutral transaction test double.
+type fakeTx struct {
+	commitErr       error
+	commitAmbiguous bool
+	committed       bool
+	rolledBack      bool
 }
 
-// Open returns a connection that injects the configured failures.
-func (d beginErrDriver) Open(string) (driver.Conn, error) {
-	return beginErrConn(d), nil
-}
+// fakeTxOps returns transaction operations for tx or an injected begin
+// failure when tx is nil.
+func fakeTxOps(tx *fakeTx) WriteTxOps[*fakeTx, struct{}] {
+	return WriteTxOps[*fakeTx, struct{}]{
+		Begin: func(context.Context) (*fakeTx, error) {
+			if tx == nil {
+				return nil, errRuntimeOther
+			}
 
-// beginErrConn is a test connection that injects begin and commit failures.
-type beginErrConn struct {
-	err       error
-	commitErr error
-}
+			return tx, nil
+		},
+		Bind: func(*fakeTx) struct{} {
+			return struct{}{}
+		},
+		Commit: func(tx *fakeTx) CommitResult {
+			tx.committed = true
 
-// Prepare returns an unused statement error for the test driver.
-func (c beginErrConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errRuntimeUnused
-}
+			return CommitResult{
+				Err:       tx.commitErr,
+				Ambiguous: tx.commitAmbiguous,
+			}
+		},
+		Rollback: func(tx *fakeTx) error {
+			tx.rolledBack = true
 
-// Close reports success for the test connection close path.
-func (c beginErrConn) Close() error {
-	return nil
-}
-
-// Begin returns the legacy unused error because tests use BeginTx instead.
-func (c beginErrConn) Begin() (driver.Tx, error) {
-	return nil, errRuntimeUnused
-}
-
-// BeginTx returns the configured begin error or a transaction test double.
-func (c beginErrConn) BeginTx(ctx context.Context,
-	_ driver.TxOptions) (driver.Tx, error) {
-
-	_ = ctx
-
-	if c.err != nil {
-		return nil, c.err
+			return nil
+		},
 	}
-
-	return beginErrTx{commitErr: c.commitErr}, nil
-}
-
-// beginErrTx is a test transaction that injects a commit failure.
-type beginErrTx struct {
-	commitErr error
-}
-
-// Commit returns the configured commit error.
-func (tx beginErrTx) Commit() error {
-	return tx.commitErr
-}
-
-// Rollback reports success for the test rollback path.
-func (tx beginErrTx) Rollback() error {
-	return nil
-}
-
-// testDriverSeq keeps each registered test driver name unique.
-var testDriverSeq atomic.Uint64
-
-// newTestDB registers one test driver instance and opens a matching database.
-func newTestDB(t *testing.T, drv beginErrDriver) *sql.DB {
-	t.Helper()
-
-	name := fmt.Sprintf("runtime-test-%d", testDriverSeq.Add(1))
-	sql.Register(name, drv)
-
-	dbConn, err := sql.Open(name, "")
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, dbConn.Close())
-	})
-
-	return dbConn
 }
