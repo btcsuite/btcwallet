@@ -1,5 +1,13 @@
 # ADR 0004: Targeted Rescan vs. Global Rewind
 
+> **Superseded in part:** ADR 0005 supersedes Section 2.2's automatic import
+> trigger. Imports may register a live watch after persistence, but they do not
+> start historical recovery; callers invoke `Rescan(...)` explicitly. Section
+> 2.2's account-exclusive target description is also superseded: requested
+> accounts limit derivation horizons, while recovery-relevant addresses and
+> UTXOs are loaded wallet-wide. A targeted rescan still does not rewind the
+> global `SyncedTo` watermark.
+
 ## 1. Context
 
 In `btcwallet`, discovering missing transactions has historically required a "Rescan." The legacy implementation treated all rescans as a "Rewind":
