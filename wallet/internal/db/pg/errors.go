@@ -2,11 +2,17 @@
 package pg
 
 import (
+	"database/sql"
 	"errors"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// isNoRows reports whether err is the PostgreSQL query no-row sentinel.
+func isNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
+}
 
 // SQLSTATE helper constants support PostgreSQL error classification.
 const (

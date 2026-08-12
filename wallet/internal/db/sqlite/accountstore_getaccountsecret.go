@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
@@ -24,7 +25,13 @@ func (s *Store) GetAccountSecret(ctx context.Context,
 			),
 		})
 		if err != nil {
-			return db.MapGetAccountSecretErr(err, query)
+			if !isNoRows(err) {
+				return fmt.Errorf("get account secret: %w", err)
+			}
+
+			return fmt.Errorf("account %d in scope %d/%d: %w",
+				query.AccountNumber, query.Scope.Purpose,
+				query.Scope.Coin, db.ErrAccountNotFound)
 		}
 
 		secret = &db.AccountSecret{EncryptedPrivateKey: row}

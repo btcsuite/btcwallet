@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"strconv"
 
@@ -8,6 +10,11 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// isNoRows reports whether err is the SQLite query no-row sentinel.
+func isNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
+}
 
 // SQLite result-code helper constants support error classification.
 const (
@@ -38,6 +45,12 @@ var reasonByCode = map[int]dberr.Reason{
 
 // mapErr maps SQLite result codes into SQLError.
 func mapErr(err error) *dberr.SQLError {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
+		return dberr.NewSQLError(
+			dberr.BackendSQLite, dberr.ReasonUnavailable, "", err,
+		)
+	}
+
 	// Start by extracting the SQLite driver error so the backend package can
 	// inspect its numeric result code.
 	var sqliteErr *sqlite.Error

@@ -4,8 +4,6 @@ package dberr
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -396,12 +394,9 @@ func classifyConnErr(backend Backend, err error) *SQLError {
 		return nil
 	}
 
-	badConn := errors.Is(err, driver.ErrBadConn)
-	connDone := errors.Is(err, sql.ErrConnDone)
-
-	// Broken-connection sentinels and EOF all mean the caller lost the SQL
-	// transport path before receiving a normal backend result.
-	if badConn || connDone || errors.Is(err, io.EOF) {
+	// EOF means the caller lost the transport path before receiving a normal
+	// backend result. Driver-owned sentinels are classified by their backend.
+	if errors.Is(err, io.EOF) {
 		return NewSQLError(backend, ReasonUnavailable, "", err)
 	}
 

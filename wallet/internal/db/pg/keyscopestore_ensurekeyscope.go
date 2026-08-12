@@ -60,6 +60,11 @@ type pgEnsureKeyScopeOps struct {
 // Verify pgEnsureKeyScopeOps implements db.EnsureKeyScopeOps.
 var _ db.EnsureKeyScopeOps = pgEnsureKeyScopeOps{}
 
+// IsMissingRow implements db.EnsureKeyScopeOps.
+func (pgEnsureKeyScopeOps) IsMissingRow(err error) bool {
+	return isNoRows(err)
+}
+
 // GetKeyScope implements db.EnsureKeyScopeOps.
 func (o pgEnsureKeyScopeOps) GetKeyScope(ctx context.Context, walletID uint32,
 	scope db.KeyScope) (int64, error) {
