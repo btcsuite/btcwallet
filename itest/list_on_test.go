@@ -87,4 +87,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator manual inputs",
 		TestFunc: testCreateTransactionManualInputs,
 	},
+	{
+		Name:     "txcreator default account",
+		TestFunc: testCreateTransactionDefaultAccount,
+	},
 }
