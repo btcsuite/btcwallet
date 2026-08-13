@@ -1,5 +1,18 @@
 # ADR 0006: Wallet Transaction Manager SQL Schema
 
+## Status
+
+- **Status:** Accepted
+- **Date:** 2026-01-28
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL block
+  identity and canonical-frontier semantics.
+- **Superseded by:** None.
+
 ## 1. Context
 
 As part of the migration from a Key-Value store to a relational SQL backend, the Wallet Transaction Manager (`wtxmgr`) requires a new schema design. The `wtxmgr` is responsible for tracking:
@@ -249,7 +262,3 @@ This ADR defines the target schema and invariants. Production operations still r
 
 Monitoring note:
 *   Track table growth, count of active leases, and lease cleanup latency. These are important for long-running nodes and multi-process deployments.
-
-## 5. Status
-
-Accepted.

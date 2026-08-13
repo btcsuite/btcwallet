@@ -1,12 +1,27 @@
 # ADR 0004: Targeted Rescan vs. Global Rewind
 
-> **Superseded in part:** ADR 0005 supersedes Section 2.2's automatic import
+## Status
+
+- **Status:** Accepted
+- **Date:** 2025-12-25
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** [ADR 0005](0005-no-auto-rescan-on-import.md) for explicit
+  import recovery and wallet-wide targets;
+  [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL targeted-rescan
+  ownership.
+- **Superseded by:** None.
+
+> **Amended by ADR 0005:** ADR 0005 changes Section 2.2's automatic import
 > trigger. Imports may register a live watch after persistence, but they do not
-> start historical recovery; callers invoke `Rescan(...)` explicitly. Section
-> 2.2's account-exclusive target description is also superseded: requested
-> accounts limit derivation horizons, while recovery-relevant addresses and
-> UTXOs are loaded wallet-wide. A targeted rescan still does not rewind the
-> global `SyncedTo` watermark.
+> start historical recovery; callers invoke `Rescan(...)` explicitly. It also
+> amends Section 2.2's account-exclusive target description: requested accounts
+> limit derivation horizons, while recovery-relevant addresses and UTXOs are
+> loaded wallet-wide. A targeted rescan still does not rewind the global
+> `SyncedTo` watermark.
 
 ## 1. Context
 
@@ -60,7 +75,3 @@ To prevent race conditions during these operations, we enforce strict access con
 ### Cons
 *   **Complexity:** The `Syncer` logic must handle two different "modes" of operation (Global Loop vs. Ad-hoc Job).
 *   **Database Complexity:** We must ensure that inserting transactions during a targeted rescan doesn't conflict with the global sync loop if they happen to overlap (though the design serializes them in the `chainLoop`).
-
-## 5. Status
-
-Accepted and Implemented.
