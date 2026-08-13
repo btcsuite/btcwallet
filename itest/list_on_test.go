@@ -40,6 +40,26 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateWatchOnly,
 	},
 	{
+		Name:     "account manager create account",
+		TestFunc: testAccountManagerCreateAccount,
+	},
+	{
+		Name:     "account manager create account sequence",
+		TestFunc: testAccountManagerCreateAccountSequence,
+	},
+	{
+		Name:     "account manager reject account creation",
+		TestFunc: testAccountManagerRejectAccountCreation,
+	},
+	{
+		Name:     "account manager enforce account creation lifecycle",
+		TestFunc: testAccountManagerEnforceAccountCreationLifecycle,
+	},
+	{
+		Name:     "account manager reject watchonly account creation",
+		TestFunc: testAccountManagerRejectWatchOnlyAccountCreation,
+	},
+	{
 		Name:     "controller start stop",
 		TestFunc: testControllerStartStop,
 	},
