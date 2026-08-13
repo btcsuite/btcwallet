@@ -56,7 +56,7 @@ Wallet clients can use one of two RPC servers:
 
 ## Requirements
 
-[Go](http://golang.org) 1.12 or newer.
+[Go](http://golang.org) 1.25.11 or newer.
 
 ## Installation and updating
 
