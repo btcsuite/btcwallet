@@ -158,3 +158,71 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 	require.Empty(h, leases, "creating a transaction reserved a coin")
 }
 
+// testCreateTransactionMultipleOutputs verifies that every requested output
+// reaches the authored transaction intact when an intent asks for more than
+// one, alongside the change output.
+func testCreateTransactionMultipleOutputs(h *bwtest.HarnessTest) {
+	// quarterBTC is the second payment amount. It differs from the first so
+	// the two payments are distinguishable by value as well as by script.
+	const quarterBTC = btcutil.SatoshiPerBitcoin / 4
+
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	// Each payment is derived separately, so an authored transaction that
+	// collapsed its outputs onto one recipient fails the assertions below.
+	first := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+	second := deriveWalletPayment(h, w, txCreatorFundingType, quarterBTC)
+	require.NotEqual(
+		h, first.PkScript, second.PkScript, "payments share a script",
+	)
+
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{first, second},
+		Inputs: &wallet.InputsPolicy{
+			Strategy: wallet.CoinSelectionLargest,
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	// Both payments and one change output are present. The change position
+	// is randomized, so the payments are located by content.
+	require.Len(h, authored.Tx.TxOut, 3, "unexpected output count")
+	require.GreaterOrEqual(h, authored.ChangeIndex, 0, "no change output")
+
+	paid := make(map[string]int64, len(authored.Tx.TxOut))
+	for i, output := range authored.Tx.TxOut {
+		if i == authored.ChangeIndex {
+			continue
+		}
+
+		paid[string(output.PkScript)] = output.Value
+	}
+
+	require.Equal(
+		h, first.Value, paid[string(first.PkScript)],
+		"first payment missing or altered",
+	)
+	require.Equal(
+		h, second.Value, paid[string(second.PkScript)],
+		"second payment missing or altered",
+	)
+}
+
