@@ -291,6 +291,42 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	return outpoints
 }
 
+// ForeignOutpoint returns an outpoint of the funding transaction that the
+// funded wallet does not own.
+//
+// Funding pays one output per requested amount plus a single change output
+// back to the miner, so exactly one index in the transaction's first
+// len(funded)+1 outputs is not wallet-owned. That output exists on chain and is
+// spendable by the miner, which makes it the fixture's foreign coin.
+func (h *HarnessTest) ForeignOutpoint(funded []wire.OutPoint) wire.OutPoint {
+	h.Helper()
+
+	require.NotEmpty(h, funded, "no funded outpoints")
+
+	owned := make(map[uint32]struct{}, len(funded))
+	for _, outpoint := range funded {
+		owned[outpoint.Index] = struct{}{}
+	}
+
+	for index := range len(funded) + 1 {
+		//nolint:gosec // A funding transaction's output count is small.
+		outputIndex := uint32(index)
+
+		if _, ok := owned[outputIndex]; ok {
+			continue
+		}
+
+		return wire.OutPoint{
+			Hash:  funded[0].Hash,
+			Index: outputIndex,
+		}
+	}
+
+	h.Fatalf("funding transaction has no foreign output")
+
+	return wire.OutPoint{}
+}
+
 // ensureAccount makes sure an account exists for the given key scope, creating
 // it when the backend did not seed it at wallet creation.
 func (h *HarnessTest) ensureAccount(w *wallet.Wallet,
