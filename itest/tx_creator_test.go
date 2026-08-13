@@ -40,8 +40,9 @@ var relayFeeRate = btcunit.NewSatPerKVByte(txrules.DefaultRelayFeePerKb)
 // external branch is what tells the payment apart from an internal change
 // output, which the cases rely on when they identify the change.
 //
-// Deriving the address changes the wallet, so a case must cross
-// AssertWalletSynced after its last call to this, not merely after funding.
+// Deriving the address changes the wallet but not its synchronization state,
+// which the harness has already asserted for every registered wallet while
+// mining the funding block.
 func deriveWalletPayment(h *bwtest.HarnessTest, w *wallet.Wallet,
 	addrType waddrmgr.AddressType, amount btcutil.Amount) wire.TxOut {
 
@@ -72,10 +73,6 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 	})
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
-
-	// Funding and the derivation above are both wallet side effects, so
-	// the synchronization boundary belongs here, after the last of them.
-	h.AssertWalletSynced(w)
 
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
@@ -186,8 +183,6 @@ func testCreateTransactionMultipleOutputs(h *bwtest.HarnessTest) {
 		h, first.PkScript, second.PkScript, "payments share a script",
 	)
 
-	h.AssertWalletSynced(w)
-
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    scope,
@@ -244,8 +239,6 @@ func testCreateTransactionManualInputs(h *bwtest.HarnessTest) {
 	// The first payment needs two coins, the second needs one.
 	large := deriveWalletPayment(h, w, txCreatorFundingType, threeBTC+halfBTC)
 	small := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
-
-	h.AssertWalletSynced(w)
 
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
@@ -340,8 +333,6 @@ func testCreateTransactionDefaultAccount(h *bwtest.HarnessTest) {
 
 	payment := deriveWalletPayment(h, w, waddrmgr.TaprootPubKey, halfBTC)
 
-	h.AssertWalletSynced(w)
-
 	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
 		Outputs: []wire.TxOut{payment},
 		FeeRate: relayFeeRate,
@@ -396,8 +387,6 @@ func testCreateTransactionCoinSource(h *bwtest.HarnessTest) {
 	})
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
-
-	h.AssertWalletSynced(w)
 
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
@@ -472,8 +461,6 @@ func testCreateTransactionOmitChange(h *bwtest.HarnessTest) {
 		h, w, txCreatorFundingType, smallCoin-changeLeftover,
 	)
 
-	h.AssertWalletSynced(w)
-
 	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
 		Outputs: []wire.TxOut{payment},
 		Inputs: &wallet.InputsManual{
@@ -515,8 +502,6 @@ func testCreateTransactionRejectIntent(h *bwtest.HarnessTest) {
 	})
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
-
-	h.AssertWalletSynced(w)
 
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
@@ -727,8 +712,6 @@ func testCreateTransactionOutputBoundaries(h *bwtest.HarnessTest) {
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
-	h.AssertWalletSynced(w)
-
 	account := &wallet.ScopedAccount{
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    scope,
@@ -846,8 +829,6 @@ func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
 	beyondBalance := deriveWalletPayment(
 		h, w, txCreatorFundingType, oneBTC+twoBTC+halfBTC,
 	)
-
-	h.AssertWalletSynced(w)
 
 	lockID := wtxmgr.LockID{1}
 	_, err = w.LeaseOutput(
@@ -1013,8 +994,6 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	outpoints := h.FundWalletOfType(w, txCreatorFundingType, oneBTC)
-
-	h.AssertWalletSynced(w)
 
 	// Funding derives an address, which the harness unlocks for when the
 	// account is missing, but it restores the locked state afterwards.
