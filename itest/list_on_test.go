@@ -87,4 +87,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator multiple outputs",
 		TestFunc: testCreateTransactionMultipleOutputs,
 	},
+	{
+		Name:     "txcreator manual inputs",
+		TestFunc: testCreateTransactionManualInputs,
+	},
 }
