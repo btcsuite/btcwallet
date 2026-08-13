@@ -91,4 +91,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator default account",
 		TestFunc: testCreateTransactionDefaultAccount,
 	},
+	{
+		Name:     "txcreator coin source",
+		TestFunc: testCreateTransactionCoinSource,
+	},
 }
