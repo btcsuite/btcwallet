@@ -75,4 +75,8 @@ var allTestCases = []*testCase{
 		Name:     "utxomanager list leased outputs",
 		TestFunc: testListLeasedOutputs,
 	},
+	{
+		Name:     "txcreator select coins",
+		TestFunc: testCreateTransactionSelectCoins,
+	},
 }

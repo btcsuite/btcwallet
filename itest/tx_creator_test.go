@@ -1,0 +1,160 @@
+//go:build itest
+
+package itest
+
+import (
+	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	// halfBTC is the payment amount the TxCreator cases use. It is small
+	// enough that any single funded coin covers it.
+	halfBTC = btcutil.SatoshiPerBitcoin / 2
+
+	// txCreatorFundingType is the address type the TxCreator cases fund and
+	// select from. Each case derives its key scope from this value, so the
+	// funded scope is never stated twice.
+	txCreatorFundingType = waddrmgr.WitnessPubKey
+)
+
+// relayFeeRate is the fee rate the TxCreator cases author at. It is the
+// default relay fee, one satoshi per virtual byte, which keeps the fee
+// negligible against the funded amounts.
+var relayFeeRate = btcunit.NewSatPerKVByte(txrules.DefaultRelayFeePerKb)
+
+// deriveWalletPayment derives a fresh external address of the requested type
+// from the wallet and returns a payment of amount to it.
+//
+// Paying the wallet itself keeps the destination wallet-visible, and the
+// external branch is what tells the payment apart from an internal change
+// output, which the cases rely on when they identify the change.
+//
+// Deriving the address changes the wallet, so a case must cross
+// AssertWalletSynced after its last call to this, not merely after funding.
+func deriveWalletPayment(h *bwtest.HarnessTest, w *wallet.Wallet,
+	addrType waddrmgr.AddressType, amount btcutil.Amount) wire.TxOut {
+
+	h.Helper()
+
+	addr := h.NewWalletAddressOfType(w, addrType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	return wire.TxOut{
+		Value:    int64(amount),
+		PkScript: pkScript,
+	}
+}
+
+// testCreateTransactionSelectCoins verifies that policy-based selection funds
+// a payment from the named account, returns the remainder to an internal
+// change address, and reserves nothing.
+func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	// Funding and the derivation above are both wallet side effects, so
+	// the synchronization boundary belongs here, after the last of them.
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs: &wallet.InputsPolicy{
+			Strategy: wallet.CoinSelectionLargest,
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	// Largest-first selection covers the payment with the two BTC coin on
+	// its own, and reports that coin as the spent input.
+	require.Len(h, authored.Tx.TxIn, 1, "unexpected input count")
+	require.Equal(
+		h, outpoints[1], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected selected input",
+	)
+	require.Equal(
+		h, btcutil.Amount(twoBTC), authored.TotalInput,
+		"unexpected total input",
+	)
+	require.Equal(
+		h, []btcutil.Amount{twoBTC}, authored.PrevInputValues,
+		"unexpected input values",
+	)
+
+	// The transaction pays the requested output and one change output.
+	require.Len(h, authored.Tx.TxOut, 2, "unexpected output count")
+	require.GreaterOrEqual(h, authored.ChangeIndex, 0, "no change output")
+
+	paid := authored.Tx.TxOut[1-authored.ChangeIndex]
+	require.Equal(h, payment.Value, paid.Value, "payment value changed")
+	require.Equal(h, payment.PkScript, paid.PkScript, "payment script changed")
+
+	// The remainder returns to the wallet on an internal address of the
+	// funded account.
+	change := authored.Tx.TxOut[authored.ChangeIndex]
+	_, changeAddrs, _, err := txscript.ExtractPkScriptAddrs(
+		change.PkScript, h.NetParams(),
+	)
+	require.NoError(h, err, "failed to extract change address")
+	require.Len(h, changeAddrs, 1, "unexpected change address count")
+
+	changeInfo, err := w.GetAddressInfo(h.Context(), changeAddrs[0])
+	require.NoError(h, err, "change address is unknown to the wallet")
+	require.True(h, changeInfo.Internal, "change address is not internal")
+	require.Equal(
+		h, txCreatorFundingType, changeInfo.AddrType,
+		"unexpected change address type",
+	)
+
+	// The inputs cover both outputs, leaving a fee behind.
+	require.Greater(
+		h, int64(authored.TotalInput), paid.Value+change.Value,
+		"authored transaction pays no fee",
+	)
+
+	// Creating a transaction neither spends nor reserves the coin it
+	// selected.
+	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent")
+
+	unspent := make([]wire.OutPoint, 0, len(utxos))
+	for _, utxo := range utxos {
+		unspent = append(unspent, utxo.OutPoint)
+	}
+
+	require.ElementsMatch(h, outpoints, unspent, "wallet utxo set changed")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Empty(h, leases, "creating a transaction reserved a coin")
+}
+
