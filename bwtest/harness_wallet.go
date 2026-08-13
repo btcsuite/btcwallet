@@ -131,35 +131,63 @@ func (h *HarnessTest) UnlockWallet(w *wallet.Wallet) {
 	require.NoError(h, err, "failed to unlock wallet")
 }
 
-// NewWalletAddress derives a fresh receive address from the wallet's default
-// account, ensuring the account exists first.
+// NewWalletAddress derives a fresh receive address of the default funding
+// type from the wallet's default account, ensuring the account exists first.
 func (h *HarnessTest) NewWalletAddress(w *wallet.Wallet) address.Address {
 	h.Helper()
 
-	scope, err := fundingAddrType.KeyScope()
-	require.NoError(h, err, "failed to resolve funding address scope")
+	return h.NewWalletAddressOfType(w, fundingAddrType)
+}
+
+// NewWalletAddressOfType derives a fresh receive address of the requested type
+// from the wallet's default account in that type's key scope, ensuring the
+// account exists first.
+//
+// Callers that need funds under a particular key scope must use this instead
+// of NewWalletAddress, because the wallet resolves accounts per scope: coins
+// held under one scope's default account are invisible to selection from
+// another.
+func (h *HarnessTest) NewWalletAddressOfType(w *wallet.Wallet,
+	addrType waddrmgr.AddressType) address.Address {
+
+	h.Helper()
+
+	scope, err := addrType.KeyScope()
+	require.NoError(h, err, "failed to resolve address scope")
 
 	h.ensureAccount(w, scope, waddrmgr.DefaultAccountName)
 
 	addr, err := w.NewAddress(
-		h.Context(), waddrmgr.DefaultAccountName, fundingAddrType, false,
+		h.Context(), waddrmgr.DefaultAccountName, addrType, false,
 	)
 	require.NoError(h, err, "failed to create address")
 
 	return addr
 }
 
-// FundWallet pays one output per amount to fresh wallet addresses in a single
-// miner transaction, confirms it, and returns the wallet outpoints in the
-// order of the amounts argument.
+// FundWallet pays one output per amount to fresh wallet addresses of the
+// default funding type in a single miner transaction, confirms it, and returns
+// the wallet outpoints in the order of the amounts argument.
 func (h *HarnessTest) FundWallet(w *wallet.Wallet,
+	amounts ...btcutil.Amount) []wire.OutPoint {
+
+	h.Helper()
+
+	return h.FundWalletOfType(w, fundingAddrType, amounts...)
+}
+
+// FundWalletOfType pays one output per amount to fresh wallet addresses of the
+// requested address type in a single miner transaction, confirms it, and
+// returns the wallet outpoints in the order of the amounts argument.
+func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
+	addrType waddrmgr.AddressType,
 	amounts ...btcutil.Amount) []wire.OutPoint {
 
 	h.Helper()
 
 	outputs := make([]*wire.TxOut, 0, len(amounts))
 	for _, amount := range amounts {
-		addr := h.NewWalletAddress(w)
+		addr := h.NewWalletAddressOfType(w, addrType)
 
 		pkScript, err := txscript.PayToAddrScript(addr)
 		require.NoError(h, err, "failed to create pkscript")
