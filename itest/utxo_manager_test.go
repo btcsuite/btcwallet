@@ -4,11 +4,9 @@ package itest
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
-	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -20,22 +18,9 @@ import (
 )
 
 const (
-	// maxConfsLimit is used as the MaxConfs bound when a test does not want
-	// to constrain the upper confirmation range.
-	maxConfsLimit = math.MaxInt32
-
-	// leaseDuration is the standard lease length for tests. It is long
-	// enough that the lease never expires mid-test.
-	leaseDuration = 10 * time.Minute
-
 	// pollTimeout bounds waits for asynchronous wallet state changes, such
 	// as unconfirmed transaction notifications and lease expiry.
 	pollTimeout = 30 * time.Second
-
-	// The funding amounts shared by the UtxoManager cases.
-	oneBTC   = 1 * btcutil.SatoshiPerBitcoin
-	twoBTC   = 2 * btcutil.SatoshiPerBitcoin
-	threeBTC = 3 * btcutil.SatoshiPerBitcoin
 )
 
 // createWallet creates and registers a wallet without starting it so tests can
@@ -53,12 +38,6 @@ func createWallet(h *bwtest.HarnessTest) *wallet.Wallet {
 	h.RegisterWallet(w)
 
 	return w
-}
-
-// unknownOutpoint returns an outpoint that was never mined and is therefore
-// unknown to any wallet.
-func unknownOutpoint() wire.OutPoint {
-	return wire.OutPoint{Hash: chainhash.Hash{0xaa}, Index: 0}
 }
 
 // testListUnspent verifies ListUnspent field enrichment, amount ordering,
