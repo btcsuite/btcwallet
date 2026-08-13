@@ -3,12 +3,18 @@
 package itest
 
 import (
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
+
+// accountManagerFundingType is the address type whose key scope the
+// default-account case operates in. Funding it materializes that scope on
+// every backend.
+const accountManagerFundingType = waddrmgr.WitnessPubKey
 
 // importedAccountKeys holds deterministic public and private account material
 // used to exercise imported-account contracts without sharing wallet state.
@@ -355,4 +361,302 @@ func testAccountManagerRejectWatchOnlyAccountCreation(h *bwtest.HarnessTest) {
 	require.Error(h, err, "watch-only wallet created an account")
 	_, err = w.GetAccount(ctx, waddrmgr.KeyScopeBIP0084, accountName)
 	require.Error(h, err, "rejected watch-only account name resolves")
+}
+
+// testAccountManagerRenameDerivedAccount verifies that renaming a derived
+// account changes only its name and survives a wallet reload.
+func testAccountManagerRenameDerivedAccount(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager derived source"
+		renamedName = "account manager derived renamed"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	_, err := w.NewAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to create derived rename source")
+
+	source, err := w.GetAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to read derived rename source")
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = canonicalAccountKey(h, wantRenamed.PublicKey)
+
+	err = w.RenameAccount(ctx, scope, sourceName, renamedName)
+
+	require.NoError(h, err, "failed to rename derived account")
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old derived account name still resolves")
+	renamed, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed derived account")
+
+	renamedInfo := *renamed
+	renamedInfo.PublicKey = canonicalAccountKey(h, renamedInfo.PublicKey)
+	require.Equal(h, wantRenamed, renamedInfo)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old derived account name resolves after reload")
+	durable, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed account after reload")
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantRenamed, durableInfo)
+}
+
+// testAccountManagerRenameDefaultAccount verifies the default account keeps a
+// present-zero account number across a rename and a wallet reload, rather than
+// collapsing the zero value to an absent identity.
+//
+// The scope is derived from the funding address type because that is the only
+// scope every backend is guaranteed to hold a default account in: kvdb seeds
+// one per scope at genesis, while SQL creates it lazily on first use.
+func testAccountManagerRenameDefaultAccount(h *bwtest.HarnessTest) {
+	const renamedName = "account manager renamed default"
+
+	scope, err := accountManagerFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			AddrType: accountManagerFundingType,
+			Amounts:  []btcutil.Amount{oneBTC},
+			Unlocked: true,
+		},
+	)
+
+	source, err := w.GetAccount(ctx, scope, waddrmgr.DefaultAccountName)
+	require.NoError(h, err, "failed to read default account")
+	require.NotNil(h, source.AccountNumber, "default account has no number")
+	require.Zero(
+		h, *source.AccountNumber, "default account number is not zero",
+	)
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = canonicalAccountKey(h, wantRenamed.PublicKey)
+
+	err = w.RenameAccount(
+		ctx, scope, waddrmgr.DefaultAccountName, renamedName,
+	)
+
+	require.NoError(h, err, "failed to rename default account")
+	renamed, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(h, err, "failed to read renamed default account")
+	require.NotNil(
+		h, renamed.AccountNumber, "renamed default account has no number",
+	)
+	require.Zero(
+		h, *renamed.AccountNumber,
+		"renamed default account number is not zero",
+	)
+
+	renamedInfo := *renamed
+	renamedInfo.PublicKey = canonicalAccountKey(h, renamedInfo.PublicKey)
+	require.Equal(h, wantRenamed, renamedInfo)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, scope, renamedName)
+	require.NoError(
+		h, err, "failed to read renamed default account after reload",
+	)
+	require.NotNil(
+		h, durable.AccountNumber,
+		"default account number is absent after reload",
+	)
+	require.Zero(
+		h, *durable.AccountNumber,
+		"default account number is not zero after reload",
+	)
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantRenamed, durableInfo)
+}
+
+// testAccountManagerRenameImportedAccount verifies an InitialAccounts XPub
+// keeps its caller-supplied serialization when renamed and reloaded.
+func testAccountManagerRenameImportedAccount(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager imported source"
+		renamedName = "account manager imported renamed"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 sourceName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+	source, err := w.GetAccount(ctx, keys.scope, sourceName)
+	require.NoError(h, err, "failed to read imported account")
+
+	wantRenamed := *source
+	wantRenamed.AccountName = renamedName
+	wantRenamed.PublicKey = []byte(keys.accountKey.String())
+
+	err = w.RenameAccount(ctx, keys.scope, sourceName, renamedName)
+
+	require.NoError(h, err, "failed to rename imported account")
+	_, err = w.GetAccount(ctx, keys.scope, sourceName)
+	require.Error(h, err, "old imported account name still resolves")
+	renamed, err := w.GetAccount(ctx, keys.scope, renamedName)
+	require.NoError(h, err, "failed to read renamed imported account")
+	require.Equal(h, wantRenamed, *renamed)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, keys.scope, sourceName)
+	require.Error(h, err, "old imported account name resolves after reload")
+	durable, err := w.GetAccount(ctx, keys.scope, renamedName)
+	require.NoError(h, err, "failed to read renamed import after reload")
+	require.Equal(h, wantRenamed, *durable)
+}
+
+// testAccountManagerRejectAccountRename verifies rejected rename requests leave
+// the established source and duplicate target unchanged.
+func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
+	const (
+		sourceName      = "account manager rename source"
+		duplicateTarget = "account manager occupied target"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+
+	_, err := w.NewAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to create rename source")
+	_, err = w.NewAccount(ctx, scope, duplicateTarget)
+	require.NoError(h, err, "failed to create duplicate rename target")
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	// These rejections have no stable public error identity yet, so the
+	// rows assert rejection and unchanged state only.
+	testCases := []struct {
+		name    string
+		oldName string
+		newName string
+	}{
+		{
+			name:    "duplicate target",
+			oldName: sourceName,
+			newName: duplicateTarget,
+		},
+		{
+			name:    "empty target",
+			oldName: sourceName,
+			newName: "",
+		},
+		{
+			name:    "reserved target",
+			oldName: sourceName,
+			newName: waddrmgr.ImportedAddrAccountName,
+		},
+		{
+			name:    "unknown source",
+			oldName: "account manager unknown source",
+			newName: "account manager unknown target",
+		},
+		{
+			name:    "reserved source",
+			oldName: waddrmgr.ImportedAddrAccountName,
+			newName: "account manager reserved source target",
+		},
+	}
+
+	for _, tc := range testCases {
+		err := w.RenameAccount(
+			ctx, scope, tc.oldName, tc.newName,
+		)
+
+		require.Error(h, err, "%s was accepted", tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerEnforceAccountRenameLifecycle verifies metadata rename is
+// admitted while locked but rejected after the wallet stops.
+func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
+	const (
+		sourceName  = "account manager lifecycle source"
+		lockedName  = "account manager locked rename"
+		stoppedName = "account manager stopped rename"
+	)
+
+	scope := waddrmgr.KeyScopeBIP0084
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	_, err := w.NewAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to create lifecycle source")
+
+	// Reload to reach the started but locked state this rename must be
+	// admitted in, not to re-check that the source persisted.
+	w = h.ReloadWallet(w)
+	source, err := w.GetAccount(ctx, scope, sourceName)
+	require.NoError(h, err, "failed to read lifecycle source")
+
+	wantLockedRename := *source
+	wantLockedRename.AccountName = lockedName
+	wantLockedRename.PublicKey = canonicalAccountKey(
+		h, wantLockedRename.PublicKey,
+	)
+
+	err = w.RenameAccount(ctx, scope, sourceName, lockedName)
+
+	require.NoError(h, err, "locked wallet rejected metadata rename")
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old locked rename name still resolves")
+	locked, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read locked rename")
+
+	lockedInfo := *locked
+	lockedInfo.PublicKey = canonicalAccountKey(h, lockedInfo.PublicKey)
+	require.Equal(h, wantLockedRename, lockedInfo)
+
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, scope, sourceName)
+	require.Error(h, err, "old locked rename name resolves after reload")
+	durable, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read locked rename after reload")
+
+	durableInfo := *durable
+	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
+	require.Equal(h, wantLockedRename, durableInfo)
+	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+
+	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
+
+	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+
+	// The rejected rename must not move the account, so the source keeps
+	// its complete result and the target stays absent across a reopen.
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, scope, stoppedName)
+	require.Error(h, err, "stopped rename created a target account")
+	unchanged, err := w.GetAccount(ctx, scope, lockedName)
+	require.NoError(h, err, "failed to read source after stopped rename")
+
+	unchangedInfo := *unchanged
+	unchangedInfo.PublicKey = canonicalAccountKey(
+		h, unchangedInfo.PublicKey,
+	)
+	require.Equal(h, wantLockedRename, unchangedInfo)
 }
