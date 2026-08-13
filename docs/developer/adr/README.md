@@ -35,11 +35,20 @@ relationship metadata, but do not rewrite its historical decision body.
 ## Existing ADRs
 
 - [ADR 0001: Multi-Wallet Architecture](./0001-multi-wallet-architecture.md) - Decides on the architecture for managing multiple distinct wallets and networks within a single daemon instance.
-- [ADR 0002: Controller-Syncer-State Architecture](./0002-controller-syncer-architecture.md) - Decouples lifecycle management, synchronization logic, and state tracking from the monolithic `Wallet` struct.
+- [ADR 0002: Controller-Syncer-State
+  Architecture](./0002-controller-syncer-architecture.md)
+  is the historical Controller/Syncer/State decision superseded by ADR 0015.
 - [ADR 0003: Optimistic CFilter Batch Scanning](./0003-optimistic-cfilter-batching.md) - Optimizes BIP 157/158 Compact Filter synchronization using optimistic batch scanning.
-- [ADR 0004: Targeted Rescan vs. Global Rewind](./0004-targeted-rescan-vs-rewind.md) - Introduces "Targeted Rescans" to replace global "Rewinds" for more efficient transaction discovery.
-- [ADR 0005: Explicit Rescan on Import](./0005-no-auto-rescan-on-import.md) - Disables automatic blockchain scanning during import operations, requiring explicit user initiation.
-- [ADR 0006: Wallet Transaction Manager SQL Schema](./0006-wtxmgr-sql-schema.md) - Defines the relational SQL schema for the Wallet Transaction Manager (`wtxmgr`) migration.
+- [ADR 0004: Targeted Rescan vs. Global
+  Rewind](./0004-targeted-rescan-vs-rewind.md) introduces targeted rescans in
+  place of global rewinds; amended by ADR 0005 for explicit import recovery
+  and by ADR 0015 for SQL targeted-rescan ownership.
+- [ADR 0005: Explicit Rescan on Import](./0005-no-auto-rescan-on-import.md)
+  requires callers to initiate historical recovery after imports and amends
+  ADR 0004's import trigger and target scope.
+- [ADR 0006: Wallet Transaction Manager SQL
+  Schema](./0006-wtxmgr-sql-schema.md) defines the relational `wtxmgr` schema;
+  amended by ADR 0015 for SQL block identity and canonical-frontier semantics.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
@@ -50,3 +59,7 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0014: Durable SQL Database Identity](./0014-sql-database-identity.md) -
   Defines the durable role-wallet identity and identity-first initialization
   order for SQLite and PostgreSQL.
+- [ADR 0015: Manager Lifecycle and SQL Shared-Chain
+  Ownership](./0015-sql-shared-chain-ownership.md) supersedes ADR 0002, applies
+  aggregate lifecycle and admission to every maintained Manager, and assigns
+  SQL shared-chain ownership.
