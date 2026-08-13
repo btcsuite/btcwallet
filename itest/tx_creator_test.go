@@ -325,3 +325,52 @@ func testCreateTransactionManualInputs(h *bwtest.HarnessTest) {
 	)
 }
 
+// testCreateTransactionDefaultAccount verifies that an intent naming neither
+// an input source nor a change source funds itself from the default account,
+// which the wallet resolves under the Taproot key scope.
+func testCreateTransactionDefaultAccount(h *bwtest.HarnessTest) {
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: waddrmgr.TaprootPubKey,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, waddrmgr.TaprootPubKey, halfBTC)
+
+	h.AssertWalletSynced(w)
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		FeeRate: relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	// The implicit source is the default account of the Taproot scope, the
+	// only account holding coins here.
+	require.Len(h, authored.Tx.TxIn, 1, "unexpected input count")
+	require.Equal(
+		h, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected selected input",
+	)
+
+	// The implicit change source is that same account, so the change output
+	// is an internal Taproot address of the wallet.
+	require.Len(h, authored.Tx.TxOut, 2, "unexpected output count")
+	require.GreaterOrEqual(h, authored.ChangeIndex, 0, "no change output")
+
+	change := authored.Tx.TxOut[authored.ChangeIndex]
+	_, changeAddrs, _, err := txscript.ExtractPkScriptAddrs(
+		change.PkScript, h.NetParams(),
+	)
+	require.NoError(h, err, "failed to extract change address")
+	require.Len(h, changeAddrs, 1, "unexpected change address count")
+
+	changeInfo, err := w.GetAddressInfo(h.Context(), changeAddrs[0])
+	require.NoError(h, err, "change address is unknown to the wallet")
+	require.True(h, changeInfo.Internal, "change address is not internal")
+	require.Equal(
+		h, waddrmgr.TaprootPubKey, changeInfo.AddrType,
+		"unexpected change address type",
+	)
+}
+
