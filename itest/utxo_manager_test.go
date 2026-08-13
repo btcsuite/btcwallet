@@ -358,34 +358,10 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 		"unknown outpoint not rejected",
 	)
 
-	// The funding transaction contains one change output back to the miner
-	// in addition to the wallet outputs, so exactly one index in
-	// [0, len(outpoints)] is not wallet-owned. That output exists on chain
-	// but belongs to the miner, so the wallet must reject it as unknown.
-	owned := make(map[uint32]bool, len(outpoints))
-	for _, op := range outpoints {
-		owned[op.Index] = true
-	}
-
-	changeIndex := -1
-	for i := range len(outpoints) + 1 {
-		if !owned[uint32(i)] {
-			changeIndex = i
-
-			break
-		}
-	}
-
-	require.NotEqual(
-		h, -1, changeIndex, "funding transaction has no change output",
-	)
-
-	foreign := wire.OutPoint{
-		Hash:  outpoints[0].Hash,
-		Index: uint32(changeIndex),
-	}
-
-	_, err = w.GetUtxo(h.Context(), foreign)
+	// The funding transaction also pays one change output back to the
+	// miner. That output exists on chain but belongs to the miner, so the
+	// wallet must reject it as unknown.
+	_, err = w.GetUtxo(h.Context(), h.ForeignOutpoint(outpoints))
 	require.ErrorIs(
 		h, err, wallet.ErrUnknownOutput,
 		"foreign outpoint not rejected",
