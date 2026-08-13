@@ -23,27 +23,10 @@ const (
 	pollTimeout = 30 * time.Second
 )
 
-// createWallet creates and registers a wallet without starting it so tests can
-// exercise the pre-start state gates before bringing the wallet up.
-func createWallet(h *bwtest.HarnessTest) *wallet.Wallet {
-	h.Helper()
-
-	cfg, params := h.TestWalletConfig()
-
-	manager := h.NewWalletManager()
-	w, err := manager.Create(cfg, params)
-	require.NoError(h, err, "failed to create wallet")
-
-	// Register before Start so teardown owns the wallet even if Start fails.
-	h.RegisterWallet(w)
-
-	return w
-}
-
 // testListUnspent verifies ListUnspent field enrichment, amount ordering,
 // account and confirmation filters, and the pre-start state gate.
 func testListUnspent(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 
 	// ListUnspent is forbidden before Start.
 	_, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{})
@@ -158,7 +141,7 @@ func testListUnspent(h *bwtest.HarnessTest) {
 // paying the wallet is reported as not spendable, because it has not reached
 // coinbase maturity.
 func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	// The Spendable assertion below requires unlocking the wallet.
@@ -231,7 +214,7 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 		h.Skip("neutrino cannot deliver unconfirmed transactions")
 	}
 
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	h.FundWallet(w, oneBTC)
@@ -307,7 +290,7 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 // outpoints, rejects unknown and foreign outpoints, and is forbidden before
 // Start.
 func testGetUtxo(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 
 	// GetUtxo is forbidden before Start.
 	_, err := w.GetUtxo(h.Context(), unknownOutpoint())
@@ -373,7 +356,7 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 // ID, unknown outpoints, and non-positive durations, and is forbidden before
 // Start.
 func testLeaseOutput(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 
 	lockID1 := wtxmgr.LockID{1}
 	lockID2 := wtxmgr.LockID{2}
@@ -477,7 +460,7 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 // mismatched lock IDs and unknown outpoints, treats releasing an unleased
 // output as a no-op, and is forbidden before Start.
 func testReleaseOutput(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 
 	lockID1 := wtxmgr.LockID{1}
 	lockID2 := wtxmgr.LockID{2}
@@ -548,7 +531,7 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 // their lock IDs and expirations, drops released leases, excludes expired
 // leases, and is forbidden before Start.
 func testListLeasedOutputs(h *bwtest.HarnessTest) {
-	w := createWallet(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
 
 	// ListLeasedOutputs is forbidden before Start.
 	_, err := w.ListLeasedOutputs(h.Context())
