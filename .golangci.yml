@@ -10,6 +10,9 @@ run:
 linters:
   default: all
   disable:
+    # TODO(yy): Re-enable this linter once the refactoring series is done.
+    - ireturn
+
     # Global variables are used in many places throughout the code base.
     - gochecknoglobals
 
@@ -91,6 +94,19 @@ linters:
       multi-func: true
       multi-if: true
 
+    wrapcheck:
+      ignore-sig-regexps:
+        # Allow returning .Err() from context.Context without wrapping it.
+        - context\.Context.*\.Err\(\)
+
+    gomoddirectives:
+      replace-local: true
+      replace-allow-list:
+        # This package will be downgrade to internal so we will import it
+        # directly here.
+        - github.com/btcsuite/btcwallet/wtxmgr
+
+
   # Defines a set of rules to ignore issues.
   # It does not skip the analysis, and so does not ignore "typecheck" errors.
   exclusions:
@@ -112,6 +128,7 @@ linters:
     paths:
       - rpc/legacyrpc/
       - wallet/deprecated.go
+      - wallet/deprecated_test.go
 
     rules:
       # Exclude gosec from running for tests so that tests with weak randomness

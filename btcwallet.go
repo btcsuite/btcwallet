@@ -237,10 +237,16 @@ func rpcClientConnectLoop(legacyRPCServer *legacyrpc.Server, loader *wallet.Load
 			loadedWallet.SetChainSynced(false)
 
 			// TODO: Rework the wallet so changing the RPC client
-			// does not require stopping and restarting everything.
-			loadedWallet.Stop()
+			//nolint:staticcheck // This should be fixed once
+			// the interface refactor is finished, and new wallet
+			// RPC is built.
+			loadedWallet.StopDeprecated()
 			loadedWallet.WaitForShutdown()
-			loadedWallet.Start()
+
+			//nolint:staticcheck // This should be fixed once
+			// the interface refactor is finished, and new wallet
+			// RPC is built.
+			loadedWallet.StartDeprecated()
 		}
 	}
 }

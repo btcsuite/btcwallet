@@ -64,3 +64,7 @@ require (
 // If you change this please run `make lint` to see where else it needs to be
 // updated as well.
 go 1.25.11
+
+replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+
+replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes

@@ -2383,7 +2383,7 @@ func TestTxLabel(t *testing.T) {
 
 		err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
 			var err error
-			label, err = FetchTxLabel(getBucket(tx), labelTx)
+			label, err = store.FetchTxLabel(getBucket(tx), labelTx)
 			return err
 		})
 

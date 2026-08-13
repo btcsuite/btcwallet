@@ -7,6 +7,7 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -44,6 +45,8 @@ type Interface interface {
 	GetBlockHash(int64) (*chainhash.Hash, error)
 	GetBlockHeader(*chainhash.Hash) (*wire.BlockHeader, error)
 	IsCurrent() bool
+	GetCFilter(hash *chainhash.Hash,
+		filterType wire.FilterType) (*gcs.Filter, error)
 	FilterBlocks(*FilterBlocksRequest) (*FilterBlocksResponse, error)
 	BlockStamp() (*waddrmgr.BlockStamp, error)
 	SendRawTransaction(*wire.MsgTx, bool) (*chainhash.Hash, error)
@@ -57,6 +60,32 @@ type Interface interface {
 	SubmitPackage(txns []*wire.MsgTx,
 		maxFeeRate *float64) (*btcjson.SubmitPackageResult, error)
 	MapRPCErr(err error) error
+
+	// Batching methods for optimized scanning.
+	//
+	// GetBlockHashes returns a slice of block hashes for the given height
+	// range (inclusive).
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlockHashes(startHeight, endHeight int64) ([]chainhash.Hash, error)
+
+	// GetCFilters returns a slice of compact filters for the given block
+	// hashes and filter type.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetCFilters(hashes []chainhash.Hash,
+		filterType wire.FilterType) ([]*gcs.Filter, error)
+
+	// GetBlocks returns a slice of full blocks for the given block hashes.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlocks(hashes []chainhash.Hash) ([]*wire.MsgBlock, error)
+
+	// GetBlockHeaders returns a slice of block headers for the given block
+	// hashes.
+	//
+	// NOTE: This is a batching method, designed for optimized scanning.
+	GetBlockHeaders(hashes []chainhash.Hash) ([]*wire.BlockHeader, error)
 }
 
 // Notification types.  These are defined here and processed from from reading

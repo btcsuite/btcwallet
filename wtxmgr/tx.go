@@ -134,6 +134,13 @@ type LockedOutput struct {
 	Expiration time.Time
 }
 
+// CreditEntry specifies a transaction output that should be recorded as a
+// credit (spendable output) for the wallet.
+type CreditEntry struct {
+	Index  uint32
+	Change bool
+}
+
 // NewTxRecord creates a new transaction record that may be inserted into the
 // store.  It uses memoization to save the transaction hash and the serialized
 // transaction.
@@ -180,6 +187,9 @@ type Credit struct {
 	PkScript     []byte
 	Received     time.Time
 	FromCoinBase bool
+
+	// Locked indicates whether the output is locked by the wallet.
+	Locked bool
 }
 
 // LockID represents a unique context-specific ID assigned to an output lock.
@@ -197,6 +207,10 @@ type Store struct {
 	// caller.
 	NotifyUnspent func(hash *chainhash.Hash, index uint32)
 }
+
+// A compile-time assertion to ensure that Store implements the TxStore
+// interface.
+var _ TxStore = (*Store)(nil)
 
 // Open opens the wallet transaction store from a walletdb namespace.  If the
 // store does not exist, ErrNoExist is returned. `lockDuration` represents how
@@ -383,6 +397,50 @@ func (s *Store) InsertTxCheckIfExists(ns walletdb.ReadWriteBucket,
 		return true, nil
 	}
 	return false, err
+}
+
+// InsertConfirmedTx records a mined transaction and its associated credits in
+// a single operation. This is more efficient than calling InsertTx followed by
+// AddCredit for each output.
+func (s *Store) InsertConfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	block *BlockMeta, credits []CreditEntry) error {
+
+	if err := s.insertMinedTx(ns, rec, block); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, block, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
+}
+
+// InsertUnconfirmedTx records an unmined transaction and its associated credits
+// in a single operation. This is more efficient than calling InsertTx followed
+// by AddCredit for each output.
+func (s *Store) InsertUnconfirmedTx(ns walletdb.ReadWriteBucket, rec *TxRecord,
+	credits []CreditEntry) error {
+
+	if err := s.insertMemPoolTx(ns, rec); err != nil && err != ErrDuplicateTx {
+		return err
+	}
+
+	for _, c := range credits {
+		isNew, err := s.addCredit(ns, rec, nil, c.Index, c.Change)
+		if err != nil {
+			return err
+		}
+		if isNew && s.NotifyUnspent != nil {
+			s.NotifyUnspent(&rec.Hash, c.Index)
+		}
+	}
+	return nil
 }
 
 // RemoveUnminedTx attempts to remove an unmined transaction from the
@@ -805,6 +863,34 @@ func (s *Store) rollback(ns walletdb.ReadWriteBucket, height int32) error {
 	return putMinedBalance(ns, minedBalance)
 }
 
+// TODO(yy): The fetchCredits method suffers from several architectural and
+// performance issues that should be addressed in a future refactoring:
+//
+//  1. **N+1 Query Problem:** The function iterates through all unspent outputs
+//     and performs a separate database lookup (`fetchTxRecord`) for each one to
+//     retrieve its full details. For a wallet with a large number of UTXOs,
+//     this results in an excessive number of database reads, leading to poor
+//     performance.
+//
+//  2. **Inefficient Data Storage:** The root cause of the N+1 problem is that
+//     the `unspent` bucket only stores a reference to the transaction, not the
+//     critical data (Amount, PkScript) itself. The schema should be
+//     denormalized to include this data directly in the `unspent` value, which
+//     would turn the N+1 query into a single, efficient bucket scan.
+//
+//  3. **Code Duplication:** The logic for iterating over mined and unmined
+//     credits is nearly identical, leading to significant code duplication. This
+//     should be consolidated into a more generic helper function.
+//
+//  4. **Leaky Abstraction:** The use of multiple boolean flags
+//     (`includeLocked`, `populateFullDetails`) to control behavior is a sign of
+//     a leaky abstraction. A better API would provide more specific query
+//     functions rather than a single, complex function with many toggles.
+//
+//  5. **Lack of Pagination:** The function loads all results into a single
+//     in-memory slice, which can be memory-intensive for wallets with a large
+//     UTXO set. A more scalable approach would use an iterator pattern.
+//
 // fetchCredits retrieves credits from the store based on the provided filters.
 // It iterates over both mined (unspent) and unmined credits.
 //
@@ -832,12 +918,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -869,6 +956,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
@@ -918,12 +1006,13 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 				return err
 			}
 
+			// We check if this output is actually locked and set
+			// the Locked field.
+			_, _, isLocked := isLockedOutput(ns, op, now)
+
 			// Check if locked, skip if necessary.
-			if !includeLocked {
-				_, _, isLocked := isLockedOutput(ns, op, now)
-				if isLocked {
-					return nil
-				}
+			if isLocked && !includeLocked {
+				return nil
 			}
 
 			// Check if spent by unmined, skip if necessary.
@@ -961,6 +1050,7 @@ func (s *Store) fetchCredits(ns walletdb.ReadBucket, includeLocked bool,
 			cred := Credit{
 				OutPoint: op,
 				PkScript: txOut.PkScript,
+				Locked:   isLocked,
 			}
 
 			// Populate full details if requested.
@@ -1232,7 +1322,7 @@ func PutTxLabel(labelBucket walletdb.ReadWriteBucket, txid chainhash.Hash,
 
 // FetchTxLabel reads a transaction label from the tx labels bucket. If a label
 // with 0 length was written, we return an error, since this is unexpected.
-func FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
+func (s *Store) FetchTxLabel(ns walletdb.ReadBucket, txid chainhash.Hash) (string, error) {
 	labelBucket := ns.NestedReadBucket(bucketTxLabels)
 	if labelBucket == nil {
 		return "", ErrNoLabelBucket

@@ -49,13 +49,15 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 		case *address.AddressPubKeyHash:
 			if dbtx == nil {
 				var err error
-				dbtx, err = w.db.BeginReadTx()
+
+				dbtx, err = w.cfg.DB.BeginReadTx()
 				if err != nil {
 					return nil, err
 				}
 				addrmgrNs = dbtx.ReadBucket(waddrmgrNamespaceKey)
 			}
-			addrInfo, err := w.Manager.Address(addrmgrNs, addr)
+
+			addrInfo, err := w.addrStore.Address(addrmgrNs, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -63,7 +65,7 @@ func (w *Wallet) MakeMultiSigScript(addrs []address.Address,
 				PubKey().SerializeCompressed()
 
 			pubKeyAddr, err := address.NewAddressPubKey(
-				serializedPubKey, w.chainParams)
+				serializedPubKey, w.cfg.ChainParams)
 			if err != nil {
 				return nil, err
 			}
@@ -79,7 +81,8 @@ func (w *Wallet) ImportP2SHRedeemScript(
 	script []byte) (*address.AddressScriptHash, error) {
 
 	var p2shAddr *address.AddressScriptHash
-	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+
+	err := walletdb.Update(w.cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
 
 		// TODO(oga) blockstamp current block?
@@ -90,7 +93,7 @@ func (w *Wallet) ImportP2SHRedeemScript(
 
 		// As this is a regular P2SH script, we'll import this into the
 		// BIP0044 scope.
-		bip44Mgr, err := w.Manager.FetchScopedKeyManager(
+		bip44Mgr, err := w.addrStore.FetchScopedKeyManager(
 			waddrmgr.KeyScopeBIP0084,
 		)
 		if err != nil {
@@ -106,7 +109,7 @@ func (w *Wallet) ImportP2SHRedeemScript(
 				// This function will never error as it always
 				// hashes the script to the correct length.
 				p2shAddr, _ = address.NewAddressScriptHash(script,
-					w.chainParams)
+					w.cfg.ChainParams)
 				return nil
 			}
 			return err
