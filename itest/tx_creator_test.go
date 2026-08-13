@@ -499,3 +499,214 @@ func testCreateTransactionOmitChange(h *bwtest.HarnessTest) {
 	)
 }
 
+// testCreateTransactionRejectIntent verifies the stable errors a malformed or
+// unresolvable intent produces, that the fee rate bound admits its own limit,
+// and that a rejection leaves the wallet's coins and leases untouched.
+func testCreateTransactionRejectIntent(h *bwtest.HarnessTest) {
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+	unknownAccount := &wallet.ScopedAccount{
+		AccountName: "no-such-account",
+		KeyScope:    scope,
+	}
+
+	testCases := []struct {
+		name        string
+		intent      *wallet.TxIntent
+		expectedErr error
+	}{{
+		name:        "nil intent",
+		intent:      nil,
+		expectedErr: wallet.ErrNilTxIntent,
+	}, {
+		name: "no outputs",
+		intent: &wallet.TxIntent{
+			Inputs:  &wallet.InputsPolicy{Source: account},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: wallet.ErrNoTxOutputs,
+	}, {
+		name: "negative output",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{{
+				Value:    -1,
+				PkScript: payment.PkScript,
+			}},
+			Inputs:  &wallet.InputsPolicy{Source: account},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: txrules.ErrAmountNegative,
+	}, {
+		name: "unnamed change account",
+		intent: &wallet.TxIntent{
+			Outputs:      []wire.TxOut{payment},
+			Inputs:       &wallet.InputsPolicy{Source: account},
+			ChangeSource: &wallet.ScopedAccount{KeyScope: scope},
+			FeeRate:      relayFeeRate,
+		},
+		expectedErr: wallet.ErrMissingAccountName,
+	}, {
+		name: "empty manual inputs",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs:  &wallet.InputsManual{},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: wallet.ErrManualInputsEmpty,
+	}, {
+		name: "duplicate manual inputs",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs: &wallet.InputsManual{
+				UTXOs: []wire.OutPoint{
+					outpoints[0], outpoints[0],
+				},
+			},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: wallet.ErrDuplicatedUtxo,
+	}, {
+		name: "empty coin source",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs: &wallet.InputsPolicy{
+				Source: &wallet.CoinSourceUTXOs{},
+			},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: wallet.ErrManualInputsEmpty,
+	}, {
+		name: "unnamed source account",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs: &wallet.InputsPolicy{
+				Source: &wallet.ScopedAccount{KeyScope: scope},
+			},
+			FeeRate: relayFeeRate,
+		},
+		expectedErr: wallet.ErrMissingAccountName,
+	}, {
+		name: "zero fee rate",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs:  &wallet.InputsPolicy{Source: account},
+			FeeRate: btcunit.NewSatPerKVByte(0),
+		},
+		expectedErr: wallet.ErrMissingFeeRate,
+	}, {
+		name: "excessive fee rate",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs:  &wallet.InputsPolicy{Source: account},
+			FeeRate: btcunit.NewSatPerKVByte(
+				wallet.DefaultMaxFeeRate.Val() + 1,
+			),
+		},
+		expectedErr: wallet.ErrFeeRateTooLarge,
+	}, {
+		name: "unknown source account",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs: &wallet.InputsPolicy{
+				MinConfs: 1,
+				Source:   unknownAccount,
+			},
+			ChangeSource: account,
+			FeeRate:      relayFeeRate,
+		},
+		expectedErr: wallet.ErrAccountNotFound,
+	}, {
+		name: "unknown change account",
+		intent: &wallet.TxIntent{
+			Outputs: []wire.TxOut{payment},
+			Inputs: &wallet.InputsPolicy{
+				MinConfs: 1,
+				Source:   account,
+			},
+			ChangeSource: unknownAccount,
+			FeeRate:      relayFeeRate,
+		},
+		expectedErr: wallet.ErrAccountNotFound,
+	}}
+
+	// A refused intent must leave the wallet's coins and leases as they
+	// were. Snapshot before the loop and compare straight after it, before
+	// anything succeeds.
+	utxosBefore, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent")
+
+	leasesBefore, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+
+	for _, tc := range testCases {
+		_, err := w.CreateTransaction(h.Context(), tc.intent)
+		require.ErrorIs(
+			h, err, tc.expectedErr, "%s not rejected", tc.name,
+		)
+	}
+
+	utxosAfter, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent")
+	require.Equal(
+		h, utxosBefore, utxosAfter, "a rejection changed the wallet's coins",
+	)
+
+	leasesAfter, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Equal(
+		h, leasesBefore, leasesAfter, "a rejection changed the wallet's leases",
+	)
+
+	// The maximum sane fee rate is itself allowed.
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      wallet.DefaultMaxFeeRate,
+	})
+	require.NoError(h, err, "maximum fee rate rejected")
+	require.NotEmpty(h, authored.Tx.TxIn, "authored transaction has no inputs")
+
+	// No rejection consumed a coin or reserved one.
+	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent")
+
+	unspent := make([]wire.OutPoint, 0, len(utxos))
+	for _, utxo := range utxos {
+		unspent = append(unspent, utxo.OutPoint)
+	}
+
+	require.ElementsMatch(h, outpoints, unspent, "wallet utxo set changed")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Empty(h, leases, "a rejection reserved a coin")
+}
+
