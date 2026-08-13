@@ -693,8 +693,9 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 // privKeyForOutput returns the private key needed to sign for the given
 // wallet-controlled output.
 //
-// Derived addresses resolve through the account-level secret; imported
-// addresses have no derivation path and resolve through their own encrypted
+// Derived addresses resolve through the account-level secret. A derived child
+// without wallet-seed derivation metadata, such as an imported-XPub child,
+// cannot sign. Only raw imported addresses resolve through their own encrypted
 // private key material in the store.
 func (w *Wallet) privKeyForOutput(ctx context.Context,
 	scriptInfo OutputScriptInfo) (
@@ -702,6 +703,10 @@ func (w *Wallet) privKeyForOutput(ctx context.Context,
 
 	if canUseAddressInfoDerivation(scriptInfo.AddressInfo) {
 		return w.privKeyForAddressInfo(ctx, scriptInfo.AddressInfo)
+	}
+
+	if !scriptInfo.Imported {
+		return nil, ErrNoAssocPrivateKey
 	}
 
 	return w.resolveImportedAddrPrivKey(ctx, scriptInfo.scriptPubKey())
