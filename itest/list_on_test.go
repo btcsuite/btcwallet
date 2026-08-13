@@ -80,6 +80,30 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerEnforceAccountRenameLifecycle,
 	},
 	{
+		Name:     "account manager import account",
+		TestFunc: testAccountManagerImportAccount,
+	},
+	{
+		Name:     "account manager import account zero fingerprint",
+		TestFunc: testAccountManagerImportAccountZeroFingerprint,
+	},
+	{
+		Name:     "account manager preview account import",
+		TestFunc: testAccountManagerPreviewAccountImport,
+	},
+	{
+		Name:     "account manager reject account import",
+		TestFunc: testAccountManagerRejectAccountImport,
+	},
+	{
+		Name:     "account manager reject invalid import key",
+		TestFunc: testAccountManagerRejectInvalidImportKey,
+	},
+	{
+		Name:     "account manager enforce account import lifecycle",
+		TestFunc: testAccountManagerEnforceAccountImportLifecycle,
+	},
+	{
 		Name:     "controller start stop",
 		TestFunc: testControllerStartStop,
 	},
