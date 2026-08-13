@@ -1996,6 +1996,104 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 	return w, chain, vault
 }
 
+// TestSQLImportedXPubDerivation verifies locked public derivation selects a
+// numberless imported account by name even when its SQL row projection equals
+// another account's BIP44 number.
+func TestSQLImportedXPubDerivation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a numberless imported-XPub account whose immutable SQL
+	// row projection collides with another account's BIP44 number. Distinct
+	// expected children make any selector mix-up observable, and locking the
+	// wallet proves public derivation does not require private-key access.
+	w, _, _ := newSQLAddressSigningWallet(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	dbScope := db.KeyScope(scope)
+	importedKey := testAccountXPrv(t)
+	importedPub, err := importedKey.Neuter()
+	require.NoError(t, err)
+
+	imported, err := w.store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			WalletID:            w.id,
+			Name:                "imported-xpub",
+			Scope:               dbScope,
+			PublicKey:           []byte(importedPub.String()),
+			EncryptedPrivateKey: []byte(importedKey.String()),
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = w.store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: w.id, Scope: dbScope, Name: "account-one",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+
+	collision, err := w.store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID: w.id, Scope: dbScope, Name: "collision",
+		}, testAccountDerivationFunc(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, imported.AccountID)
+	require.NotNil(t, collision.AccountNumber)
+	require.Equal(t, *imported.AccountID, *collision.AccountNumber)
+
+	path := waddrmgr.DerivationPath{Branch: 0, Index: 7}
+	wantImported, err := deriveStoredAccountChildPubKey(
+		imported.PublicKey, path,
+	)
+	require.NoError(t, err)
+	wantDerived, err := deriveStoredAccountChildPubKey(
+		collision.PublicKey, path,
+	)
+	require.NoError(t, err)
+	require.False(t, wantImported.IsEqual(wantDerived))
+
+	w.state.toLocked()
+
+	// Act: Derive the child by the imported account's semantic name.
+	byName, err := w.DerivePubKey(
+		t.Context(), DerivePubKeyParams{
+			Account: NewAccountSelectorByName(scope, imported.AccountName),
+			Branch:  path.Branch,
+			Index:   path.Index,
+		},
+	)
+
+	// Assert: Name selection returned the imported XPub's child.
+	require.NoError(t, err)
+	require.True(t, wantImported.IsEqual(byName))
+
+	accountNumber := AccountNumber(*collision.AccountNumber)
+
+	// Act: Derive the same path by the colliding BIP44 account number.
+	byNumber, err := w.DerivePubKey(
+		t.Context(), DerivePubKeyParams{
+			Account: NewAccountSelectorByNumber(scope, accountNumber),
+			Branch:  path.Branch,
+			Index:   path.Index,
+		},
+	)
+
+	// Assert: Numeric selection returned the derived account's child instead
+	// of leaking the imported account's backend identity.
+	require.NoError(t, err)
+	require.True(t, wantDerived.IsEqual(byNumber))
+
+	// Act: Attempt to derive from a name absent from the live SQL store.
+	_, err = w.DerivePubKey(
+		t.Context(), DerivePubKeyParams{
+			Account: NewAccountSelectorByName(scope, "missing"),
+		},
+	)
+
+	// Assert: The missing semantic identity maps to the wallet-level error.
+	require.ErrorIs(t, err, ErrAccountNotInStore)
+}
+
 // newSpendableAddressManager creates and unlocks a deterministic legacy
 // waddrmgr manager for signer integration tests.
 func newSpendableAddressManager(t *testing.T,
