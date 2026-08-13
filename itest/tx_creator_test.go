@@ -712,6 +712,115 @@ func testCreateTransactionRejectIntent(h *bwtest.HarnessTest) {
 	require.Empty(h, leases, "a rejection reserved a coin")
 }
 
+// testCreateTransactionOutputBoundaries verifies the output amount policy at
+// its edges: the largest dust amount and the smallest payable one, and the
+// largest amount a transaction output may carry.
+func testCreateTransactionOutputBoundaries(h *bwtest.HarnessTest) {
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	// The dust limit depends on the output's script, so the edge is derived
+	// from the relay policy itself rather than written down as a number
+	// that would silently drift from it.
+	candidate := wire.TxOut{PkScript: payment.PkScript}
+	for candidate.Value = 1; ; candidate.Value++ {
+		if !txrules.IsDustOutput(&candidate, txrules.DefaultRelayFeePerKb) {
+			break
+		}
+	}
+
+	smallestPayment := candidate.Value
+
+	// One satoshi below that edge is dust, and the edge itself is payable.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{{
+			Value:    smallestPayment - 1,
+			PkScript: payment.PkScript,
+		}},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.ErrorIs(
+		h, err, txrules.ErrOutputIsDust, "dust output not rejected",
+	)
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{{
+			Value:    smallestPayment,
+			PkScript: payment.PkScript,
+		}},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "smallest payable output rejected")
+	require.Equal(
+		h, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected selected input",
+	)
+
+	// One satoshi above the maximum an output may carry is rejected on its
+	// value.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{{
+			Value:    btcutil.MaxSatoshi + 1,
+			PkScript: payment.PkScript,
+		}},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.ErrorIs(
+		h, err, txrules.ErrAmountExceedsMax,
+		"output above the maximum not rejected",
+	)
+
+	// The maximum itself passes the amount policy: this wallet simply
+	// cannot fund it, so it fails for want of coins instead.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{{
+			Value:    btcutil.MaxSatoshi,
+			PkScript: payment.PkScript,
+		}},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+
+	var sourceErr txauthor.InputSourceError
+	require.ErrorAs(
+		h, err, &sourceErr, "maximum amount rejected on its value",
+	)
+}
+
 // testCreateTransactionRejectInputs verifies that inputs the wallet cannot
 // spend are refused, that selection skips a leased coin rather than spending
 // it, and that a refusal leaves the wallet's coins and leases untouched.

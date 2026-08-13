@@ -104,6 +104,10 @@ var allTestCases = []*testCase{
 		TestFunc: testCreateTransactionRejectIntent,
 	},
 	{
+		Name:     "txcreator output boundaries",
+		TestFunc: testCreateTransactionOutputBoundaries,
+	},
+	{
 		Name:     "txcreator reject inputs",
 		TestFunc: testCreateTransactionRejectInputs,
 	},
