@@ -45,12 +45,26 @@ var (
 	ErrAccountNotInStore = errors.New("account not in store")
 )
 
+// DerivePubKeyParams identifies an account and the unhardened child key to
+// derive from its extended public key.
+type DerivePubKeyParams struct {
+	// Account identifies the account by portable wallet semantics.
+	Account AccountSelector
+
+	// Branch is the account child branch to derive.
+	Branch uint32
+
+	// Index is the child index within Branch to derive.
+	Index uint32
+}
+
 // Signer provides an interface for common, safe cryptographic operations,
 // including signing and key derivation.
 type Signer interface {
-	// DerivePubKey derives a public key from a full BIP-32 derivation
-	// path.
-	DerivePubKey(ctx context.Context, path BIP32Path) (
+	// DerivePubKey derives a public child key from the selected account's
+	// extended public key. The account may be selected by name when it has
+	// no BIP44 account number, such as an imported XPub account.
+	DerivePubKey(ctx context.Context, params DerivePubKeyParams) (
 		*btcec.PublicKey, error)
 
 	// ECDH performs a scalar multiplication (ECDH-like operation) between
@@ -115,8 +129,7 @@ type UnsafeSigner interface {
 		*btcec.PrivateKey, error)
 }
 
-// A compile-time check to ensure that Wallet implements the Signer and
-// UnsafeSigner interfaces.
+// Compile-time checks ensure that Wallet implements the signer interfaces.
 var _ Signer = (*Wallet)(nil)
 var _ UnsafeSigner = (*Wallet)(nil)
 
@@ -468,17 +481,12 @@ var _ SpendDetails = (*LegacySpendDetails)(nil)
 var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
 var _ SpendDetails = (*TaprootSpendDetails)(nil)
 
-// DerivePubKey derives a public key from a full BIP-32 derivation path.
-//
-// The public key is resolved entirely through the durable store: the
-// account-level extended public key is fetched by the path's BIP44 account
-// number and the branch and index derived locally. This single path covers
-// both SQL-backed and kvdb-backed wallets because the kvdb store adapter
-// exports the legacy address manager's account material through the same
-// account-secret contract. It is the public-key counterpart of
-// derivePathPrivKey and, since the account xpub is stored in plaintext, it
-// also serves watch-only accounts that hold no encrypted private material.
-func (w *Wallet) DerivePubKey(ctx context.Context, path BIP32Path) (
+// DerivePubKey derives a public child key from a semantically selected
+// account. The account XPub is read from the durable store, then the branch and
+// child index are derived in memory. Public derivation requires a started
+// wallet but remains available while the wallet is locked.
+func (w *Wallet) DerivePubKey(ctx context.Context,
+	params DerivePubKeyParams) (
 	*btcec.PublicKey, error) {
 
 	err := w.state.validateStarted()
@@ -486,9 +494,12 @@ func (w *Wallet) DerivePubKey(ctx context.Context, path BIP32Path) (
 		return nil, err
 	}
 
-	return w.resolveDerivedPubKeyFromStore(
-		ctx, path.KeyScope, path.DerivationPath,
-	)
+	err = params.Account.validate()
+	if err != nil {
+		return nil, err
+	}
+
+	return w.resolveDerivedPubKeyFromStore(ctx, params)
 }
 
 // derivePathPrivKey resolves the signing private key for a full BIP-32 path.
@@ -989,19 +1000,26 @@ func deriveStoredAccountChildKey(vault keyvault.Vault,
 // account xpub is stored in plaintext, it also serves watch-only accounts that
 // hold no encrypted private material.
 func (w *Wallet) resolveDerivedPubKeyFromStore(ctx context.Context,
-	keyScope waddrmgr.KeyScope,
-	path waddrmgr.DerivationPath) (*btcec.PublicKey, error) {
+	params DerivePubKeyParams) (*btcec.PublicKey, error) {
+
+	query := db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(params.Account.keyScope),
+		SkipBalance: true,
+	}
+
+	if params.Account.accountName != nil {
+		query.Name = params.Account.accountName
+	} else {
+		accountNumber := uint32(*params.Account.accountNumber)
+		query.AccountNumber = &accountNumber
+	}
 
 	// The account xpub is public metadata, so it comes from the account read
 	// rather than the secret read: AccountSecret carries encrypted private
 	// material only. SkipBalance keeps this to one backend query, and the
 	// public path works while the wallet is locked.
-	account, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
-		WalletID:      w.id,
-		Scope:         db.KeyScope(keyScope),
-		AccountNumber: &path.InternalAccount,
-		SkipBalance:   true,
-	})
+	account, err := w.cache.GetAccount(ctx, query)
 	switch {
 	case errors.Is(err, db.ErrAccountNotFound):
 		return nil, ErrAccountNotInStore
@@ -1016,7 +1034,11 @@ func (w *Wallet) resolveDerivedPubKeyFromStore(ctx context.Context,
 		)
 	}
 
-	return deriveStoredAccountChildPubKey(account.PublicKey, path)
+	return deriveStoredAccountChildPubKey(account.PublicKey,
+		waddrmgr.DerivationPath{
+			Branch: params.Branch,
+			Index:  params.Index,
+		})
 }
 
 // deriveStoredAccountChildPubKey parses an account-level extended public key
