@@ -660,3 +660,348 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	)
 	require.Equal(h, wantLockedRename, unchangedInfo)
 }
+
+// testAccountManagerImportAccount verifies that one XPub import's returned
+// view matches an immediate read and survives a wallet reload.
+func testAccountManagerImportAccount(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager import existing"
+		accountName  = "account manager imported"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	imported, err := w.ImportAccount(
+		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, false,
+	)
+
+	require.NoError(h, err, "failed to import account")
+	require.Nil(h, imported.AccountNumber, "imported account has a number")
+	require.Equal(h, accountName, imported.AccountName)
+	require.True(h, imported.IsImported, "account is not imported")
+	require.True(
+		h, imported.IsWatchOnly, "imported account is not watch-only",
+	)
+	require.Zero(h, imported.ExternalKeyCount)
+	require.Zero(h, imported.InternalKeyCount)
+	require.Zero(h, imported.ImportedKeyCount)
+	require.Zero(h, imported.ConfirmedBalance)
+	require.Zero(h, imported.UnconfirmedBalance)
+	require.NotZero(
+		h, imported.CreatedAt, "imported account has no creation time",
+	)
+	require.Equal(h, keys.scope, imported.KeyScope)
+	require.Equal(h, keys.addrType, imported.AddrSchema.ExternalAddrType)
+	require.Equal(h, keys.addrType, imported.AddrSchema.InternalAddrType)
+	require.Equal(h, []byte(keys.accountKey.String()), imported.PublicKey)
+	require.NotNil(
+		h, imported.MasterKeyFingerprint,
+		"imported account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*imported.MasterKeyFingerprint,
+	)
+	want := *imported
+	got, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read imported account")
+	require.Equal(h, want, *got)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read imported account after reload")
+	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerImportAccountZeroFingerprint verifies an import declaring
+// a zero master key fingerprint keeps a present-zero identity across the
+// mutation result, its lookup, and a wallet reload, rather than collapsing the
+// zero value to an absent identity.
+func testAccountManagerImportAccountZeroFingerprint(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager zero fingerprint existing"
+		accountName  = "account manager zero fingerprint"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	imported, err := w.ImportAccount(
+		ctx, accountName, keys.accountKey, 0, keys.addrType, false,
+	)
+
+	require.NoError(h, err, "failed to import zero fingerprint account")
+	require.NotNil(
+		h, imported.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent on import",
+	)
+	require.Zero(
+		h, *imported.MasterKeyFingerprint,
+		"imported fingerprint is not zero",
+	)
+
+	want := *imported
+	got, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read zero fingerprint account")
+	require.NotNil(
+		h, got.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent on lookup",
+	)
+	require.Zero(
+		h, *got.MasterKeyFingerprint, "read fingerprint is not zero",
+	)
+	require.Equal(h, want, *got)
+
+	// The seeded account keeps its non-zero fingerprint, so a present-zero
+	// identity is distinguishable from a present-nonzero one in the same
+	// wallet rather than from a backend-wide default.
+	existing, err := w.GetAccount(ctx, keys.scope, existingName)
+	require.NoError(h, err, "failed to read seeded imported account")
+	require.NotNil(
+		h, existing.MasterKeyFingerprint,
+		"seeded account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*existing.MasterKeyFingerprint,
+	)
+
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(
+		h, err, "failed to read zero fingerprint account after reload",
+	)
+	require.NotNil(
+		h, durable.MasterKeyFingerprint,
+		"zero fingerprint collapsed to absent after reload",
+	)
+	require.Zero(
+		h, *durable.MasterKeyFingerprint,
+		"fingerprint is not zero after reload",
+	)
+	require.Equal(h, want, *durable)
+}
+
+// testAccountManagerPreviewAccountImport verifies a dry run returns portable
+// identity fields without materializing an account.
+func testAccountManagerPreviewAccountImport(h *bwtest.HarnessTest) {
+	const (
+		existingName = "account manager preview existing"
+		accountName  = "account manager import preview"
+	)
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.otherAccountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	preview, err := w.ImportAccount(
+		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, true,
+	)
+
+	require.NoError(h, err, "failed to preview account import")
+	require.Equal(h, accountName, preview.AccountName)
+	require.True(h, preview.IsImported, "preview is not imported")
+	require.True(h, preview.IsWatchOnly, "preview is not watch-only")
+	require.Nil(h, preview.AccountNumber, "preview has an account number")
+	require.Equal(h, keys.scope, preview.KeyScope)
+	require.Equal(h, []byte(keys.accountKey.String()), preview.PublicKey)
+	require.NotNil(
+		h, preview.MasterKeyFingerprint,
+		"preview account has no master key fingerprint",
+	)
+	require.Equal(
+		h, wallet.MasterFingerprint(keys.masterKeyFingerprint),
+		*preview.MasterKeyFingerprint,
+	)
+	_, err = w.GetAccount(ctx, keys.scope, accountName)
+	require.Error(h, err, "preview materialized an account")
+}
+
+// testAccountManagerRejectAccountImport verifies rejected imports preserve the
+// existing imported account and its scope's account count.
+func testAccountManagerRejectAccountImport(h *bwtest.HarnessTest) {
+	const existingName = "account manager existing import"
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	testCases := []struct {
+		name        string
+		accountName string
+		accountKey  *hdkeychain.ExtendedKey
+	}{
+		// Both rows collide on name only. Rejecting a colliding XPub
+		// under a fresh name is a separate contract the wallet does
+		// not implement yet.
+		{
+			name:        "duplicate name, same key",
+			accountName: existingName,
+			accountKey:  keys.accountKey,
+		},
+		{
+			name:        "duplicate name, other key",
+			accountName: existingName,
+			accountKey:  keys.otherAccountKey,
+		},
+		{
+			name:        "empty name",
+			accountName: "",
+			accountKey:  keys.otherAccountKey,
+		},
+	}
+
+	for _, tc := range testCases {
+		_, err := w.ImportAccount(
+			ctx, tc.accountName, tc.accountKey, keys.masterKeyFingerprint,
+			keys.addrType, false,
+		)
+
+		require.Error(h, err, "%s was accepted", tc.name)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(h, err, "failed to list accounts after rejection")
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerRejectInvalidImportKey verifies invalid import keys are
+// rejected without changing the account set.
+func testAccountManagerRejectInvalidImportKey(h *bwtest.HarnessTest) {
+	const existingName = "account manager existing import"
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(
+		bwtest.WalletFixture{
+			InitialAccounts: []wallet.WatchOnlyAccount{{
+				Scope:                keys.scope,
+				XPub:                 keys.accountKey,
+				MasterKeyFingerprint: keys.masterKeyFingerprint,
+				Name:                 existingName,
+				AddrType:             keys.addrType,
+			}},
+		},
+	)
+
+	wantAccounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	testCases := []struct {
+		name        string
+		accountName string
+		accountKey  *hdkeychain.ExtendedKey
+	}{
+		{
+			name:        "nil key",
+			accountName: "account manager nil key",
+			accountKey:  nil,
+		},
+		{
+			name:        "private key",
+			accountName: "account manager private key",
+			accountKey:  keys.accountPrivateKey,
+		},
+	}
+
+	for _, tc := range testCases {
+		_, err := w.ImportAccount(
+			ctx, tc.accountName, tc.accountKey, keys.masterKeyFingerprint,
+			keys.addrType, false,
+		)
+
+		require.ErrorIs(h, err, wallet.ErrInvalidAccountKey)
+
+		gotAccounts, err := w.ListAccounts(ctx)
+		require.NoError(
+			h, err, "failed to list accounts after rejection",
+		)
+		require.ElementsMatch(
+			h, wantAccounts, gotAccounts, "%s changed the account set", tc.name,
+		)
+	}
+}
+
+// testAccountManagerEnforceAccountImportLifecycle verifies that a stopped
+// watch-only wallet rejects an otherwise valid account import.
+func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
+	const accountName = "account manager stopped import"
+
+	keys := deterministicImportedAccountKeys(h)
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
+
+	accounts, err := w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts before rejection")
+
+	wantCount := len(accounts)
+
+	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+
+	_, err = w.ImportAccount(
+		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
+		keys.addrType, false,
+	)
+
+	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+
+	// A rejected import must leave no partial account, so the target stays
+	// absent across a reopen and the account set is unchanged.
+	w = h.ReloadWallet(w)
+	_, err = w.GetAccount(ctx, keys.scope, accountName)
+	require.Error(h, err, "stopped import created an account")
+
+	accounts, err = w.ListAccounts(ctx)
+	require.NoError(h, err, "failed to list accounts after rejection")
+	require.Len(h, accounts, wantCount, "rejection changed account count")
+}
