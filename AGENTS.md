@@ -22,7 +22,7 @@ Welcome to the `btcwallet` knowledge base. This file defines the global project
 | `wallet/internal/sql/` | **SQL Assets**            | SQL schema, query, migration, and sqlc codegen.            | `wallet/internal/sql/AGENTS.md` |
 | `rpc/`                 | **RPC**                   | gRPC and legacy JSON-RPC APIs and server implementations.  | None                            |
 | `chain/`               | **Blockchain**            | Sync clients for Neutrino, `btcd` RPC, and `bitcoind` RPC. | None                            |
-| `itest/`               | **Integration Scenarios** | Actual daemon-level test cases and E2E flows.              | None                            |
+| `itest/`               | **Integration Scenarios** | Actual daemon-level test cases and E2E flows.              | `itest/AGENTS.md`               |
 | `bwtest/`              | **Harness Layer**         | Test harness definitions and backend wrappers.             | None                            |
 
 ## REPO & WORKTREE WORKFLOW
