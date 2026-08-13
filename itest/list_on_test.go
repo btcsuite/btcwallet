@@ -103,4 +103,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator omit change",
 		TestFunc: testCreateTransactionOmitChange,
 	},
+	{
+		Name:     "txcreator reject intent",
+		TestFunc: testCreateTransactionRejectIntent,
+	},
 }
