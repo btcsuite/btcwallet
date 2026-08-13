@@ -226,3 +226,102 @@ func testCreateTransactionMultipleOutputs(h *bwtest.HarnessTest) {
 	)
 }
 
+// testCreateTransactionManualInputs verifies that caller-selected inputs are
+// used exactly as given, bypassing coin selection.
+func testCreateTransactionManualInputs(h *bwtest.HarnessTest) {
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC, threeBTC},
+		Unlocked: true,
+	})
+
+	// The first payment needs two coins, the second needs one.
+	large := deriveWalletPayment(h, w, txCreatorFundingType, threeBTC+halfBTC)
+	small := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	// A payment no single coin covers is funded by exactly the two coins
+	// the caller named, and not by the pair selection would have reached
+	// for: largest first would have taken the three and two BTC coins.
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{large},
+		Inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{outpoints[0], outpoints[2]},
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	spent := make([]wire.OutPoint, 0, len(authored.Tx.TxIn))
+	for _, txIn := range authored.Tx.TxIn {
+		spent = append(spent, txIn.PreviousOutPoint)
+	}
+
+	require.ElementsMatch(
+		h, []wire.OutPoint{outpoints[0], outpoints[2]}, spent,
+		"unexpected manual inputs",
+	)
+	require.Equal(
+		h, btcutil.Amount(oneBTC+threeBTC), authored.TotalInput,
+		"unexpected total input",
+	)
+
+	// A signer reads the input metadata positionally, so entry i must
+	// describe the coin spent by input i, whatever order selection put
+	// them in.
+	require.Len(
+		h, authored.PrevScripts, len(authored.Tx.TxIn),
+		"unexpected prev script count",
+	)
+	require.Len(
+		h, authored.PrevInputValues, len(authored.Tx.TxIn),
+		"unexpected prev input value count",
+	)
+
+	for i, txIn := range authored.Tx.TxIn {
+		utxo, err := w.GetUtxo(h.Context(), txIn.PreviousOutPoint)
+		require.NoError(h, err, "input %d is not a wallet coin", i)
+
+		require.Equal(
+			h, utxo.Amount, authored.PrevInputValues[i],
+			"input %d value mismatch", i,
+		)
+		require.Equal(
+			h, utxo.PkScript, authored.PrevScripts[i],
+			"input %d script mismatch", i,
+		)
+	}
+
+	// A payment one named coin covers spends that coin alone, even though
+	// the wallet holds larger coins selection would have preferred.
+	authored, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{small},
+		Inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{outpoints[0]},
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	require.Len(h, authored.Tx.TxIn, 1, "unexpected input count")
+	require.Equal(
+		h, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected manual input",
+	)
+	require.Equal(
+		h, btcutil.Amount(oneBTC), authored.TotalInput,
+		"unexpected total input",
+	)
+}
+
