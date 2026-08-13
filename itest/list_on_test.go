@@ -111,4 +111,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator reject inputs",
 		TestFunc: testCreateTransactionRejectInputs,
 	},
+	{
+		Name:     "txcreator wallet state",
+		TestFunc: testCreateTransactionWalletState,
+	},
 }
