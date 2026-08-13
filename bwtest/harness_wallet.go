@@ -95,10 +95,10 @@ type WalletFixture struct {
 // returning it alongside the outpoints funding produced, in the order of the
 // requested amounts.
 //
-// The returned wallet is not a synchronization boundary. Funding and address
-// derivation are both wallet side effects, so a case that reads wallet state
-// must cross AssertWalletSynced after its own last funding or derivation, not
-// merely after this call.
+// A funded fixture returns after the funding block's synchronization check,
+// which mining performs for every registered wallet, so its coins are readable
+// without a further check; deriving an address afterwards does not need one
+// either. An unfunded fixture mines nothing and so provides no such boundary.
 func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	[]wire.OutPoint) {
 
