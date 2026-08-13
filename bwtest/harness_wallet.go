@@ -67,11 +67,41 @@ func (h *HarnessTest) TestWalletConfig() (wallet.Config,
 	return cfg, params
 }
 
-// CreateEmptyWallet creates, starts, and registers a new wallet instance.
+// WalletFixture describes the wallet a test case needs. It is the harness's
+// parameterized wallet preparation request, so a component test states what it
+// needs instead of growing its own creation, funding and lock policy.
+type WalletFixture struct {
+	// AddrType is the address type funding is paid to. A test that selects
+	// those coins derives its key scope from this same value with
+	// KeyScope(), so the funded scope has a single authority.
+	//
+	// This field is always honored, including its zero value, PubKeyHash.
+	AddrType waddrmgr.AddressType
+
+	// Amounts funds the wallet with one confirmed output per amount, in
+	// the order given. Funding needs a running wallet, so it cannot be
+	// combined with Unstarted.
+	Amounts []btcutil.Amount
+
+	// Unlocked unlocks the wallet once it has started.
+	Unlocked bool
+
+	// Unstarted returns the wallet before Start, for cases asserting
+	// behavior that is only observable while the wallet is not running.
+	Unstarted bool
+}
+
+// NewWallet creates, registers and prepares a wallet as the fixture describes,
+// returning it alongside the outpoints funding produced, in the order of the
+// requested amounts.
 //
-// This is intended for non-manager integration tests that want a ready-to-use
-// wallet without repeating boilerplate.
-func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
+// The returned wallet is not a synchronization boundary. Funding and address
+// derivation are both wallet side effects, so a case that reads wallet state
+// must cross AssertWalletSynced after its own last funding or derivation, not
+// merely after this call.
+func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
+	[]wire.OutPoint) {
+
 	h.Helper()
 
 	cfg, params := h.TestWalletConfig()
@@ -86,8 +116,36 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 	// successful one twice, out of order with the Manager close.
 	h.RegisterWallet(w)
 
+	if fixture.Unstarted {
+		require.Empty(
+			h, fixture.Amounts, "funding needs a started wallet",
+		)
+
+		return w, nil
+	}
+
 	err = w.Start(h.Context())
 	require.NoError(h, err, "failed to start wallet")
+
+	if fixture.Unlocked {
+		h.UnlockWallet(w)
+	}
+
+	if len(fixture.Amounts) == 0 {
+		return w, nil
+	}
+
+	return w, h.FundWalletOfType(w, fixture.AddrType, fixture.Amounts...)
+}
+
+// CreateEmptyWallet creates, starts, and registers a new wallet instance.
+//
+// This is intended for non-manager integration tests that want a ready-to-use
+// wallet without repeating boilerplate.
+func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
+	h.Helper()
+
+	w, _ := h.NewWallet(WalletFixture{AddrType: fundingAddrType})
 
 	return w
 }
@@ -96,11 +154,12 @@ func (h *HarnessTest) CreateEmptyWallet() *wallet.Wallet {
 func (h *HarnessTest) CreateFundedWallet() *wallet.Wallet {
 	h.Helper()
 
-	w := h.CreateEmptyWallet()
-
 	const tenBTC = 10 * btcutil.SatoshiPerBitcoin
 
-	h.FundWallet(w, tenBTC)
+	w, _ := h.NewWallet(WalletFixture{
+		AddrType: fundingAddrType,
+		Amounts:  []btcutil.Amount{tenBTC},
+	})
 
 	return w
 }
