@@ -60,6 +60,26 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerRejectWatchOnlyAccountCreation,
 	},
 	{
+		Name:     "account manager rename derived account",
+		TestFunc: testAccountManagerRenameDerivedAccount,
+	},
+	{
+		Name:     "account manager rename default account",
+		TestFunc: testAccountManagerRenameDefaultAccount,
+	},
+	{
+		Name:     "account manager rename imported account",
+		TestFunc: testAccountManagerRenameImportedAccount,
+	},
+	{
+		Name:     "account manager reject account rename",
+		TestFunc: testAccountManagerRejectAccountRename,
+	},
+	{
+		Name:     "account manager enforce account rename lifecycle",
+		TestFunc: testAccountManagerEnforceAccountRenameLifecycle,
+	},
+	{
 		Name:     "controller start stop",
 		TestFunc: testControllerStartStop,
 	},
