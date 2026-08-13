@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -849,3 +850,87 @@ func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
 	require.Equal(h, outpoints[0], leases[0].OutPoint, "unexpected lease")
 }
 
+// testCreateTransactionWalletState verifies the lifecycle gate on transaction
+// creation: it is forbidden before Start and after Stop, and a locked wallet
+// still authors, since an unsigned transaction needs no private key.
+func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
+	// witnessProgramSize is the length of a witness pubkey hash program.
+	const witnessProgramSize = 20
+
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType:  txCreatorFundingType,
+		Unstarted: true,
+	})
+
+	// A wallet that has not started cannot derive an address, so this
+	// payment goes to an arbitrary witness program. The intent is otherwise
+	// well formed, which keeps the assertion below about the state gate
+	// alone rather than about the order in which the gate and intent
+	// validation run.
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, witnessProgramSize), h.NetParams(),
+	)
+	require.NoError(h, err, "failed to create witness address")
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+	intent := &wallet.TxIntent{
+		Outputs: []wire.TxOut{{
+			Value:    halfBTC,
+			PkScript: pkScript,
+		}},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	}
+
+	_, err = w.CreateTransaction(h.Context(), intent)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"create transaction before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	outpoints := h.FundWalletOfType(w, txCreatorFundingType, oneBTC)
+
+	h.AssertWalletSynced(w)
+
+	// Funding derives an address, which the harness unlocks for when the
+	// account is missing, but it restores the locked state afterwards.
+	info, err := w.Info(h.Context())
+	require.NoError(h, err, "failed to query wallet info")
+	require.True(h, info.Locked, "wallet is not locked")
+
+	// Authoring an unsigned transaction does not require the private key.
+	authored, err := w.CreateTransaction(h.Context(), intent)
+	require.NoError(h, err, "locked wallet failed to create transaction")
+
+	require.Len(h, authored.Tx.TxIn, 1, "unexpected input count")
+	require.Equal(
+		h, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected selected input",
+	)
+
+	// Stop the wallet, then deregister it so the harness does not drive a
+	// stopped wallet during teardown.
+	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+
+	_, err = w.CreateTransaction(h.Context(), intent)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"create transaction after stop not rejected",
+	)
+}
