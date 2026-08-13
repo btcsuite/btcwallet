@@ -95,4 +95,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator coin source",
 		TestFunc: testCreateTransactionCoinSource,
 	},
+	{
+		Name:     "txcreator omit change",
+		TestFunc: testCreateTransactionOmitChange,
+	},
 }

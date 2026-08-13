@@ -443,3 +443,59 @@ func testCreateTransactionCoinSource(h *bwtest.HarnessTest) {
 	)
 }
 
+// testCreateTransactionOmitChange verifies that a transaction whose remainder
+// would be dust is authored without a change output.
+func testCreateTransactionOmitChange(h *bwtest.HarnessTest) {
+	// smallCoin is the only coin the wallet holds, so the payment below is
+	// funded by it alone.
+	const smallCoin = 100_000
+
+	// changeLeftover is what remains of the coin after the payment. The fee
+	// for this single input, single output shape at the default relay rate
+	// takes most of it, and what is left is below the dust limit for a
+	// witness pubkey change output, so the wallet must drop the change.
+	// Only that omission is asserted here; the fee itself is not.
+	const changeLeftover = 300
+
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{smallCoin},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(
+		h, w, txCreatorFundingType, smallCoin-changeLeftover,
+	)
+
+	h.AssertWalletSynced(w)
+
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{outpoints[0]},
+		},
+		ChangeSource: &wallet.ScopedAccount{
+			AccountName: waddrmgr.DefaultAccountName,
+			KeyScope:    scope,
+		},
+		FeeRate: relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	require.Equal(
+		h, -1, authored.ChangeIndex, "dust change output not omitted",
+	)
+	require.Len(h, authored.Tx.TxOut, 1, "unexpected output count")
+	require.Equal(
+		h, payment.PkScript, authored.Tx.TxOut[0].PkScript,
+		"payment script changed",
+	)
+	require.Equal(
+		h, payment.Value, authored.Tx.TxOut[0].Value,
+		"payment value changed",
+	)
+}
+
