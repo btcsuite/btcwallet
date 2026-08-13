@@ -1,5 +1,18 @@
 # ADR 0005: Explicit Rescan on Import
 
+## Status
+
+- **Status:** Accepted
+- **Date:** 2025-12-25
+
+## Relationships
+
+- **Amends:** [ADR 0004](0004-targeted-rescan-vs-rewind.md) for explicit
+  import recovery and wallet-wide targets.
+- **Supersedes:** None.
+- **Amended by:** None.
+- **Superseded by:** None.
+
 ## 1. Context
 
 When importing new keys, addresses, or accounts into a wallet, the wallet needs
@@ -50,7 +63,3 @@ The user (or calling software) retains control over system resources. They may c
 ### Cons
 *   **Usability Pitfall:** A naive user might import a key and be confused why their balance shows `0`. Documentation and RPC output must clearly indicate that a rescan is required to see funds.
 *   **Client Burden:** Clients must implement the "Import -> Rescan" logic themselves.
-
-## 5. Status
-
-Accepted and Implemented.
