@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/stretchr/testify/require"
 )
@@ -371,6 +372,74 @@ func testCreateTransactionDefaultAccount(h *bwtest.HarnessTest) {
 	require.Equal(
 		h, waddrmgr.TaprootPubKey, changeInfo.AddrType,
 		"unexpected change address type",
+	)
+}
+
+// testCreateTransactionCoinSource verifies that a policy restricted to a
+// candidate list selects only from that list and honors its confirmation
+// bound.
+func testCreateTransactionCoinSource(h *bwtest.HarnessTest) {
+	// unreachableConfs is a confirmation floor no candidate in this case
+	// can meet: the funding block is the chain tip, so every coin the
+	// wallet holds has exactly one confirmation.
+	const unreachableConfs = 2
+
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC, threeBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	h.AssertWalletSynced(w)
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+
+	// Only the candidate coin is spendable here, even though the wallet
+	// holds larger coins outside the list.
+	authored, err := w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source: &wallet.CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{outpoints[0]},
+			},
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.NoError(h, err, "failed to create transaction")
+
+	require.Len(h, authored.Tx.TxIn, 1, "unexpected input count")
+	require.Equal(
+		h, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint,
+		"unexpected candidate selected",
+	)
+
+	// A confirmation bound the candidate cannot meet leaves the policy with
+	// nothing to select.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: unreachableConfs,
+			Source: &wallet.CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{outpoints[0]},
+			},
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+
+	var sourceErr txauthor.InputSourceError
+	require.ErrorAs(
+		h, err, &sourceErr, "under-confirmed candidate not skipped",
 	)
 }
 
