@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -708,5 +709,143 @@ func testCreateTransactionRejectIntent(h *bwtest.HarnessTest) {
 	leases, err := w.ListLeasedOutputs(h.Context())
 	require.NoError(h, err, "failed to list leased outputs")
 	require.Empty(h, leases, "a rejection reserved a coin")
+}
+
+// testCreateTransactionRejectInputs verifies that inputs the wallet cannot
+// spend are refused, that selection skips a leased coin rather than spending
+// it, and that a refusal leaves the wallet's coins and leases untouched.
+func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
+	scope, err := txCreatorFundingType.KeyScope()
+	require.NoError(h, err, "failed to resolve funding scope")
+
+	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txCreatorFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
+
+	// The wallet holds three BTC in two coins. This payment needs both of
+	// them, so it is only fundable while neither is leased.
+	needsBothCoins := deriveWalletPayment(
+		h, w, txCreatorFundingType, twoBTC+halfBTC,
+	)
+
+	// This one exceeds everything the wallet holds.
+	beyondBalance := deriveWalletPayment(
+		h, w, txCreatorFundingType, oneBTC+twoBTC+halfBTC,
+	)
+
+	h.AssertWalletSynced(w)
+
+	lockID := wtxmgr.LockID{1}
+	_, err = w.LeaseOutput(
+		h.Context(), lockID, outpoints[0], leaseDuration,
+	)
+	require.NoError(h, err, "failed to lease output")
+
+	account := &wallet.ScopedAccount{
+		AccountName: waddrmgr.DefaultAccountName,
+		KeyScope:    scope,
+	}
+	foreign := h.ForeignOutpoint(outpoints)
+
+	ineligible := []struct {
+		name   string
+		inputs wallet.Inputs
+	}{{
+		name: "leased manual input",
+		inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{outpoints[0]},
+		},
+	}, {
+		name: "unknown manual input",
+		inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{unknownOutpoint()},
+		},
+	}, {
+		name: "foreign manual input",
+		inputs: &wallet.InputsManual{
+			UTXOs: []wire.OutPoint{foreign},
+		},
+	}, {
+		name: "leased candidate",
+		inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source: &wallet.CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{outpoints[0]},
+			},
+		},
+	}, {
+		name: "foreign candidate",
+		inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source: &wallet.CoinSourceUTXOs{
+				UTXOs: []wire.OutPoint{foreign},
+			},
+		},
+	}}
+
+	for _, tc := range ineligible {
+		_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+			Outputs:      []wire.TxOut{payment},
+			Inputs:       tc.inputs,
+			ChangeSource: account,
+			FeeRate:      relayFeeRate,
+		})
+		require.ErrorIs(
+			h, err, wallet.ErrUtxoNotEligible,
+			"%s not rejected", tc.name,
+		)
+	}
+
+	// Account selection skips the leased coin instead of spending it, so a
+	// payment that needs both coins can no longer be funded.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{needsBothCoins},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+
+	var sourceErr txauthor.InputSourceError
+	require.ErrorAs(h, err, &sourceErr, "leased coin was selected")
+
+	// A payment beyond everything the wallet holds cannot be funded either.
+	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
+		Outputs: []wire.TxOut{beyondBalance},
+		Inputs: &wallet.InputsPolicy{
+			MinConfs: 1,
+			Source:   account,
+		},
+		ChangeSource: account,
+		FeeRate:      relayFeeRate,
+	})
+	require.ErrorAs(
+		h, err, &sourceErr, "payment beyond the balance was funded",
+	)
+
+	// Every refusal left the coins in place and the lease as it was.
+	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
+		MinConfs: 0,
+		MaxConfs: maxConfsLimit,
+	})
+	require.NoError(h, err, "failed to list unspent")
+
+	unspent := make([]wire.OutPoint, 0, len(utxos))
+	for _, utxo := range utxos {
+		unspent = append(unspent, utxo.OutPoint)
+	}
+
+	require.ElementsMatch(h, outpoints, unspent, "wallet utxo set changed")
+
+	leases, err := w.ListLeasedOutputs(h.Context())
+	require.NoError(h, err, "failed to list leased outputs")
+	require.Len(h, leases, 1, "wallet lease set changed")
+	require.Equal(h, outpoints[0], leases[0].OutPoint, "unexpected lease")
 }
 
