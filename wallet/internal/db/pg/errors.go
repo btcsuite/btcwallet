@@ -4,6 +4,8 @@ package pg
 import (
 	"database/sql"
 	"errors"
+	"io"
+	"net"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -12,6 +14,18 @@ import (
 // isNoRows reports whether err is the PostgreSQL query no-row sentinel.
 func isNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
+}
+
+// isCommitAmbiguous reports whether a PostgreSQL commit failed on the
+// transport path after its final outcome may have been decided.
+func isCommitAmbiguous(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr)
 }
 
 // SQLSTATE helper constants support PostgreSQL error classification.

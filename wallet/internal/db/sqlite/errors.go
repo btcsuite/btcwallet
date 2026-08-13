@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"io"
+	"net"
 	"strconv"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
@@ -14,6 +16,20 @@ import (
 // isNoRows reports whether err is the SQLite query no-row sentinel.
 func isNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
+}
+
+// isCommitAmbiguous reports whether a SQLite commit failed on the transport
+// path after its final outcome may have been decided.
+func isCommitAmbiguous(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
+		errors.Is(err, io.EOF) {
+
+		return true
+	}
+
+	var netErr net.Error
+
+	return errors.As(err, &netErr)
 }
 
 // SQLite result-code helper constants support error classification.
