@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // GetEncryptedHDSeed retrieves the encrypted Hierarchical
@@ -33,7 +33,7 @@ func (s *Store) GetEncryptedHDSeed(ctx context.Context,
 			return nil
 		}
 
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return resolveWalletSecretsLookupErr(ctx, q, walletID)
 		}
 

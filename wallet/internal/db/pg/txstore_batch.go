@@ -2,7 +2,6 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
@@ -10,6 +9,7 @@ import (
 	txscript "github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // ApplyTxBatch atomically records transactions and an optional sync-tip update.
@@ -204,7 +204,7 @@ func creditScriptOwned(ctx context.Context, qtx *sqlc.Queries, walletID uint32,
 			WalletID:     int64(walletID),
 		},
 	)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 
@@ -274,7 +274,7 @@ func promotableBatchDuplicate(ctx context.Context, qtx *sqlc.Queries,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false, nil
 		}
 

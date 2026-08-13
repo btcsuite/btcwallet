@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // listSyncedBlocksParams validates one synced-block query and returns the
@@ -75,9 +75,9 @@ func (s *Store) ListSyncedBlocks(ctx context.Context,
 			row := rows[i]
 
 			block, err := buildBlock(
-				sql.NullInt32{Int32: row.BlockHeight, Valid: true},
+				pgtype.Int4{Int32: row.BlockHeight, Valid: true},
 				row.HeaderHash,
-				sql.NullInt64{
+				pgtype.Int8{
 					Int64: row.BlockTimestamp,
 					Valid: true,
 				},

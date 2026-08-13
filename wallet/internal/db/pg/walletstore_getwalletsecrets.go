@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // resolveWalletSecretsLookupErr maps a missing wallet_secrets row to the
@@ -23,7 +23,7 @@ func resolveWalletSecretsLookupErr(ctx context.Context, q *sqlc.Queries,
 			db.ErrSecretNotFound)
 	}
 
-	if errors.Is(walletErr, sql.ErrNoRows) {
+	if errors.Is(walletErr, pgx.ErrNoRows) {
 		return fmt.Errorf("wallet %d: %w", walletID, db.ErrWalletNotFound)
 	}
 
@@ -50,7 +50,7 @@ func (s *Store) GetWalletSecrets(ctx context.Context,
 			return nil
 		}
 
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return resolveWalletSecretsLookupErr(ctx, q, walletID)
 		}
 

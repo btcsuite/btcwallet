@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ListTxns lists wallet-scoped transactions using either the confirmed-range
@@ -57,7 +57,7 @@ func (s *Store) listTxnsWithoutBlock(ctx context.Context,
 	infos := make([]db.TxInfo, len(rows))
 	for i, row := range rows {
 		info, err := txInfoFromRow(
-			row.TxHash, row.RawTx, row.ReceivedTime, row.BlockHeight,
+			row.TxHash, row.RawTx, row.ReceivedTime.Time, row.BlockHeight,
 			row.BlockHash, row.BlockTimestamp, int64(row.TxStatus), row.TxLabel,
 		)
 		if err != nil {
@@ -101,14 +101,14 @@ func (s *Store) listConfirmedTxns(ctx context.Context,
 		block, err := buildBlock(
 			row.BlockHeight,
 			row.BlockHash,
-			sql.NullInt64{Int64: row.BlockTimestamp, Valid: true},
+			pgtype.Int8{Int64: row.BlockTimestamp, Valid: true},
 		)
 		if err != nil {
 			return nil, err
 		}
 
 		info, err := db.BuildTxInfo(
-			row.TxHash, row.RawTx, row.ReceivedTime, block,
+			row.TxHash, row.RawTx, row.ReceivedTime.Time, block,
 			int64(row.TxStatus), row.TxLabel,
 		)
 		if err != nil {

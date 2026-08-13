@@ -7,7 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const InsertTxReplacementEdge = `-- name: InsertTxReplacementEdge :execrows
@@ -39,11 +40,11 @@ type InsertTxReplacementEdgeParams struct {
 // Performance:
 // - Single-row insert with cheap duplicate suppression via `ON CONFLICT`.
 func (q *Queries) InsertTxReplacementEdge(ctx context.Context, arg InsertTxReplacementEdgeParams) (int64, error) {
-	result, err := q.exec(ctx, q.insertTxReplacementEdgeStmt, InsertTxReplacementEdge, arg.WalletID, arg.ReplacedTxID, arg.ReplacementTxID)
+	result, err := q.db.Exec(ctx, InsertTxReplacementEdge, arg.WalletID, arg.ReplacedTxID, arg.ReplacementTxID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const InsertTxReplacementEdgeByHash = `-- name: InsertTxReplacementEdgeByHash :execrows
@@ -86,11 +87,11 @@ type InsertTxReplacementEdgeByHashParams struct {
 //   - Trades two indexed scalar subqueries for one network round trip, which is
 //     preferable when callers start from tx hashes.
 func (q *Queries) InsertTxReplacementEdgeByHash(ctx context.Context, arg InsertTxReplacementEdgeByHashParams) (int64, error) {
-	result, err := q.exec(ctx, q.insertTxReplacementEdgeByHashStmt, InsertTxReplacementEdgeByHash, arg.WalletID, arg.TxHash, arg.TxHash_2)
+	result, err := q.db.Exec(ctx, InsertTxReplacementEdgeByHash, arg.WalletID, arg.TxHash, arg.TxHash_2)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const ListReplacedTxHashesByReplacementTxHash = `-- name: ListReplacedTxHashesByReplacementTxHash :many
@@ -115,7 +116,7 @@ type ListReplacedTxHashesByReplacementTxHashParams struct {
 
 type ListReplacedTxHashesByReplacementTxHashRow struct {
 	ReplacedTxHash []byte
-	CreatedAt      time.Time
+	CreatedAt      pgtype.Timestamp
 }
 
 // Lists victim txids for a given replacement txid.
@@ -129,7 +130,7 @@ type ListReplacedTxHashesByReplacementTxHashRow struct {
 //   - Mirrors the victim lookup path while keeping the graph traversal bounded by
 //     wallet scope and indexed edge keys.
 func (q *Queries) ListReplacedTxHashesByReplacementTxHash(ctx context.Context, arg ListReplacedTxHashesByReplacementTxHashParams) ([]ListReplacedTxHashesByReplacementTxHashRow, error) {
-	rows, err := q.query(ctx, q.listReplacedTxHashesByReplacementTxHashStmt, ListReplacedTxHashesByReplacementTxHash, arg.WalletID, arg.TxHash)
+	rows, err := q.db.Query(ctx, ListReplacedTxHashesByReplacementTxHash, arg.WalletID, arg.TxHash)
 	if err != nil {
 		return nil, err
 	}
@@ -141,9 +142,6 @@ func (q *Queries) ListReplacedTxHashesByReplacementTxHash(ctx context.Context, a
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -167,7 +165,7 @@ type ListReplacedTxIDsByReplacementTxIDParams struct {
 
 type ListReplacedTxIDsByReplacementTxIDRow struct {
 	ReplacedTxID int64
-	CreatedAt    time.Time
+	CreatedAt    pgtype.Timestamp
 }
 
 // Lists victim transaction IDs for a given replacement transaction ID.
@@ -181,7 +179,7 @@ type ListReplacedTxIDsByReplacementTxIDRow struct {
 // Performance:
 // - Uses the inverse replacement lookup index without joining transactions.
 func (q *Queries) ListReplacedTxIDsByReplacementTxID(ctx context.Context, arg ListReplacedTxIDsByReplacementTxIDParams) ([]ListReplacedTxIDsByReplacementTxIDRow, error) {
-	rows, err := q.query(ctx, q.listReplacedTxIDsByReplacementTxIDStmt, ListReplacedTxIDsByReplacementTxID, arg.WalletID, arg.ReplacementTxID)
+	rows, err := q.db.Query(ctx, ListReplacedTxIDsByReplacementTxID, arg.WalletID, arg.ReplacementTxID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,9 +191,6 @@ func (q *Queries) ListReplacedTxIDsByReplacementTxID(ctx context.Context, arg Li
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -225,7 +220,7 @@ type ListReplacementTxHashesByReplacedTxHashParams struct {
 
 type ListReplacementTxHashesByReplacedTxHashRow struct {
 	ReplacementTxHash []byte
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 }
 
 // Lists replacement txids for a given victim txid.
@@ -239,7 +234,7 @@ type ListReplacementTxHashesByReplacedTxHashRow struct {
 //   - The victim hash lookup narrows the graph walk before the second transaction
 //     join materializes replacement hashes.
 func (q *Queries) ListReplacementTxHashesByReplacedTxHash(ctx context.Context, arg ListReplacementTxHashesByReplacedTxHashParams) ([]ListReplacementTxHashesByReplacedTxHashRow, error) {
-	rows, err := q.query(ctx, q.listReplacementTxHashesByReplacedTxHashStmt, ListReplacementTxHashesByReplacedTxHash, arg.WalletID, arg.TxHash)
+	rows, err := q.db.Query(ctx, ListReplacementTxHashesByReplacedTxHash, arg.WalletID, arg.TxHash)
 	if err != nil {
 		return nil, err
 	}
@@ -251,9 +246,6 @@ func (q *Queries) ListReplacementTxHashesByReplacedTxHash(ctx context.Context, a
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -277,7 +269,7 @@ type ListReplacementTxIDsByReplacedTxIDParams struct {
 
 type ListReplacementTxIDsByReplacedTxIDRow struct {
 	ReplacementTxID int64
-	CreatedAt       time.Time
+	CreatedAt       pgtype.Timestamp
 }
 
 // Lists replacement transaction IDs for a given victim transaction ID.
@@ -291,7 +283,7 @@ type ListReplacementTxIDsByReplacedTxIDRow struct {
 // Performance:
 // - Uses the replacement-edge index without joining transactions.
 func (q *Queries) ListReplacementTxIDsByReplacedTxID(ctx context.Context, arg ListReplacementTxIDsByReplacedTxIDParams) ([]ListReplacementTxIDsByReplacedTxIDRow, error) {
-	rows, err := q.query(ctx, q.listReplacementTxIDsByReplacedTxIDStmt, ListReplacementTxIDsByReplacedTxID, arg.WalletID, arg.ReplacedTxID)
+	rows, err := q.db.Query(ctx, ListReplacementTxIDsByReplacedTxID, arg.WalletID, arg.ReplacedTxID)
 	if err != nil {
 		return nil, err
 	}
@@ -303,9 +295,6 @@ func (q *Queries) ListReplacementTxIDsByReplacedTxID(ctx context.Context, arg Li
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -7,10 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const AccountBalance = `-- name: AccountBalance :one
@@ -71,7 +69,7 @@ type AccountBalanceRow struct {
 // AccountBalance returns the confirmed/unconfirmed balance for one account,
 // summed from the wallet's well-formed derived-address UTXO set at read time.
 func (q *Queries) AccountBalance(ctx context.Context, arg AccountBalanceParams) (AccountBalanceRow, error) {
-	row := q.queryRow(ctx, q.accountBalanceStmt, AccountBalance, arg.WalletID, arg.AccountID)
+	row := q.db.QueryRow(ctx, AccountBalance, arg.WalletID, arg.AccountID)
 	var i AccountBalanceRow
 	err := row.Scan(&i.ConfirmedBalance, &i.UnconfirmedBalance)
 	return i, err
@@ -139,7 +137,7 @@ type AccountBalancesByIDsRow struct {
 // account in account_ids that has well-formed funded UTXOs, grouped by
 // account_id.
 func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesByIDsParams) ([]AccountBalancesByIDsRow, error) {
-	rows, err := q.query(ctx, q.accountBalancesByIDsStmt, AccountBalancesByIDs, arg.WalletID, pq.Array(arg.AccountIds))
+	rows, err := q.db.Query(ctx, AccountBalancesByIDs, arg.WalletID, arg.AccountIds)
 	if err != nil {
 		return nil, err
 	}
@@ -151,9 +149,6 @@ func (q *Queries) AccountBalancesByIDs(ctx context.Context, arg AccountBalancesB
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -180,7 +175,7 @@ type AdvanceNextExternalIndexParams struct {
 // so a slower concurrent writer cannot regress it below an already-recorded
 // index.
 func (q *Queries) AdvanceNextExternalIndex(ctx context.Context, arg AdvanceNextExternalIndexParams) error {
-	_, err := q.exec(ctx, q.advanceNextExternalIndexStmt, AdvanceNextExternalIndex, arg.NextIndex, arg.ID)
+	_, err := q.db.Exec(ctx, AdvanceNextExternalIndex, arg.NextIndex, arg.ID)
 	return err
 }
 
@@ -203,7 +198,7 @@ type AdvanceNextInternalIndexParams struct {
 // monotonic so a slower concurrent writer cannot regress it below an
 // already-recorded index.
 func (q *Queries) AdvanceNextInternalIndex(ctx context.Context, arg AdvanceNextInternalIndexParams) error {
-	_, err := q.exec(ctx, q.advanceNextInternalIndexStmt, AdvanceNextInternalIndex, arg.NextIndex, arg.ID)
+	_, err := q.db.Exec(ctx, AdvanceNextInternalIndex, arg.NextIndex, arg.ID)
 	return err
 }
 
@@ -223,7 +218,7 @@ type CreateAccountSecretParams struct {
 
 // Inserts the encrypted private key material for an account.
 func (q *Queries) CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error {
-	_, err := q.exec(ctx, q.createAccountSecretStmt, CreateAccountSecret, arg.AccountID, arg.EncryptedPrivateKey)
+	_, err := q.db.Exec(ctx, CreateAccountSecret, arg.AccountID, arg.EncryptedPrivateKey)
 	return err
 }
 
@@ -252,21 +247,21 @@ RETURNING id, account_number, created_at
 
 type CreateDerivedAccountParams struct {
 	AccountName       string
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	ScopeID           int64
 }
 
 type CreateDerivedAccountRow struct {
 	ID            int64
-	AccountNumber sql.NullInt64
-	CreatedAt     time.Time
+	AccountNumber pgtype.Int8
+	CreatedAt     pgtype.Timestamp
 }
 
 // Creates the parent row for a wallet-derived account under the given scope.
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
-	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
+	row := q.db.QueryRow(ctx, CreateDerivedAccount,
 		arg.AccountName,
 		arg.AccountNumber,
 		arg.PublicKey,
@@ -302,19 +297,19 @@ RETURNING id, created_at
 type CreateImportedAccountParams struct {
 	AccountName       string
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	ScopeID           int64
 }
 
 type CreateImportedAccountRow struct {
 	ID        int64
-	CreatedAt time.Time
+	CreatedAt pgtype.Timestamp
 }
 
 // Creates a new imported xpub account under the given scope. Imported xpub
 // accounts are HD account-like rows but do not have BIP44 account numbers.
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
-	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
+	row := q.db.QueryRow(ctx, CreateImportedAccount,
 		arg.AccountName,
 		arg.PublicKey,
 		arg.MasterFingerprint,
@@ -354,10 +349,10 @@ type GetAccountByScopeAndNameParams struct {
 
 type GetAccountByScopeAndNameRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -365,13 +360,13 @@ type GetAccountByScopeAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Returns a single account by scope id and account name.
 func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountByScopeAndNameParams) (GetAccountByScopeAndNameRow, error) {
-	row := q.queryRow(ctx, q.getAccountByScopeAndNameStmt, GetAccountByScopeAndName, arg.ScopeID, arg.AccountName)
+	row := q.db.QueryRow(ctx, GetAccountByScopeAndName, arg.ScopeID, arg.AccountName)
 	var i GetAccountByScopeAndNameRow
 	err := row.Scan(
 		&i.ID,
@@ -416,15 +411,15 @@ WHERE a.scope_id = $1 AND a.account_number = $2 AND a.is_derived
 
 type GetAccountByScopeAndNumberParams struct {
 	ScopeID       int64
-	AccountNumber sql.NullInt64
+	AccountNumber pgtype.Int8
 }
 
 type GetAccountByScopeAndNumberRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -432,13 +427,13 @@ type GetAccountByScopeAndNumberRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Returns a single derived account by scope id and account number.
 func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccountByScopeAndNumberParams) (GetAccountByScopeAndNumberRow, error) {
-	row := q.queryRow(ctx, q.getAccountByScopeAndNumberStmt, GetAccountByScopeAndNumber, arg.ScopeID, arg.AccountNumber)
+	row := q.db.QueryRow(ctx, GetAccountByScopeAndNumber, arg.ScopeID, arg.AccountNumber)
 	var i GetAccountByScopeAndNumberRow
 	err := row.Scan(
 		&i.ID,
@@ -494,10 +489,10 @@ type GetAccountByWalletScopeAndNameParams struct {
 
 type GetAccountByWalletScopeAndNameRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -505,13 +500,13 @@ type GetAccountByWalletScopeAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Returns a single account by wallet id, scope tuple, and account name.
 func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAccountByWalletScopeAndNameParams) (GetAccountByWalletScopeAndNameRow, error) {
-	row := q.queryRow(ctx, q.getAccountByWalletScopeAndNameStmt, GetAccountByWalletScopeAndName,
+	row := q.db.QueryRow(ctx, GetAccountByWalletScopeAndName,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -568,15 +563,15 @@ type GetAccountByWalletScopeAndNumberParams struct {
 	WalletID      int64
 	Purpose       int64
 	CoinType      int64
-	AccountNumber sql.NullInt64
+	AccountNumber pgtype.Int8
 }
 
 type GetAccountByWalletScopeAndNumberRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -584,13 +579,13 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Returns a single derived account by wallet id, scope tuple, and account number.
 func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetAccountByWalletScopeAndNumberParams) (GetAccountByWalletScopeAndNumberRow, error) {
-	row := q.queryRow(ctx, q.getAccountByWalletScopeAndNumberStmt, GetAccountByWalletScopeAndNumber,
+	row := q.db.QueryRow(ctx, GetAccountByWalletScopeAndNumber,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -639,12 +634,12 @@ FOR UPDATE OF a
 `
 
 type GetAccountPropsByIdRow struct {
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	CreatedAt         time.Time
+	MasterFingerprint pgtype.Int8
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -656,7 +651,7 @@ type GetAccountPropsByIdRow struct {
 
 // Returns full account properties by account id.
 func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccountPropsByIdRow, error) {
-	row := q.queryRow(ctx, q.getAccountPropsByIdStmt, GetAccountPropsById, id)
+	row := q.db.QueryRow(ctx, GetAccountPropsById, id)
 	var i GetAccountPropsByIdRow
 	err := row.Scan(
 		&i.AccountNumber,
@@ -704,12 +699,12 @@ type GetAccountPropsByWalletAndIdParams struct {
 }
 
 type GetAccountPropsByWalletAndIdRow struct {
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
-	CreatedAt         time.Time
+	MasterFingerprint pgtype.Int8
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -721,7 +716,7 @@ type GetAccountPropsByWalletAndIdRow struct {
 
 // Returns full account properties by wallet id and account id.
 func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccountPropsByWalletAndIdParams) (GetAccountPropsByWalletAndIdRow, error) {
-	row := q.queryRow(ctx, q.getAccountPropsByWalletAndIdStmt, GetAccountPropsByWalletAndId, arg.WalletID, arg.ID)
+	row := q.db.QueryRow(ctx, GetAccountPropsByWalletAndId, arg.WalletID, arg.ID)
 	var i GetAccountPropsByWalletAndIdRow
 	err := row.Scan(
 		&i.AccountNumber,
@@ -757,14 +752,14 @@ type GetAccountSecretParams struct {
 	WalletID      int64
 	Purpose       int64
 	CoinType      int64
-	AccountNumber sql.NullInt64
+	AccountNumber pgtype.Int8
 }
 
 // Returns account-level key material for signing. The account row is returned
 // even when no account_secrets row exists so callers can distinguish a
 // watch-only account from an absent account.
 func (q *Queries) GetAccountSecret(ctx context.Context, arg GetAccountSecretParams) ([]byte, error) {
-	row := q.queryRow(ctx, q.getAccountSecretStmt, GetAccountSecret,
+	row := q.db.QueryRow(ctx, GetAccountSecret,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -785,7 +780,7 @@ RETURNING (next_external_index - 1)::BIGINT AS address_index
 // Atomically gets the next external address index and increments the counter.
 // Returns the current index value (before incrementing) for the address derivation.
 func (q *Queries) GetAndIncrementNextExternalIndex(ctx context.Context, id int64) (int64, error) {
-	row := q.queryRow(ctx, q.getAndIncrementNextExternalIndexStmt, GetAndIncrementNextExternalIndex, id)
+	row := q.db.QueryRow(ctx, GetAndIncrementNextExternalIndex, id)
 	var address_index int64
 	err := row.Scan(&address_index)
 	return address_index, err
@@ -801,7 +796,7 @@ RETURNING (next_internal_index - 1)::BIGINT AS address_index
 // Atomically gets the next internal/change address index and increments the counter.
 // Returns the current index value (before incrementing) for the address derivation.
 func (q *Queries) GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error) {
-	row := q.queryRow(ctx, q.getAndIncrementNextInternalIndexStmt, GetAndIncrementNextInternalIndex, id)
+	row := q.db.QueryRow(ctx, GetAndIncrementNextInternalIndex, id)
 	var address_index int64
 	err := row.Scan(&address_index)
 	return address_index, err
@@ -832,10 +827,10 @@ ORDER BY a.account_number NULLS LAST, a.account_name
 
 type ListAccountsByScopeRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -843,13 +838,13 @@ type ListAccountsByScopeRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByScopeStmt, ListAccountsByScope, scopeID)
+	rows, err := q.db.Query(ctx, ListAccountsByScope, scopeID)
 	if err != nil {
 		return nil, err
 	}
@@ -876,9 +871,6 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -911,10 +903,10 @@ ORDER BY a.account_number NULLS LAST, a.account_name
 
 type ListAccountsByWalletRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -922,13 +914,13 @@ type ListAccountsByWalletRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Lists all accounts for a wallet.
 func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletStmt, ListAccountsByWallet, walletID)
+	rows, err := q.db.Query(ctx, ListAccountsByWallet, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -955,9 +947,6 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -995,10 +984,10 @@ type ListAccountsByWalletAndNameParams struct {
 
 type ListAccountsByWalletAndNameRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -1006,13 +995,13 @@ type ListAccountsByWalletAndNameRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Lists all accounts for a wallet filtered by account name.
 func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletAndNameStmt, ListAccountsByWalletAndName, arg.WalletID, arg.AccountName)
+	rows, err := q.db.Query(ctx, ListAccountsByWalletAndName, arg.WalletID, arg.AccountName)
 	if err != nil {
 		return nil, err
 	}
@@ -1039,9 +1028,6 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1083,10 +1069,10 @@ type ListAccountsByWalletScopeParams struct {
 
 type ListAccountsByWalletScopeRow struct {
 	ID                int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	IsDerived         bool
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	Purpose           int64
 	CoinType          int64
 	InternalTypeID    int16
@@ -1094,13 +1080,13 @@ type ListAccountsByWalletScopeRow struct {
 	ExternalKeyCount  int64
 	InternalKeyCount  int64
 	PublicKey         []byte
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 }
 
 // Lists all accounts for a wallet and scope tuple.
 func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletScopeStmt, ListAccountsByWalletScope, arg.WalletID, arg.Purpose, arg.CoinType)
+	rows, err := q.db.Query(ctx, ListAccountsByWalletScope, arg.WalletID, arg.Purpose, arg.CoinType)
 	if err != nil {
 		return nil, err
 	}
@@ -1127,9 +1113,6 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1162,7 +1145,7 @@ type UpdateAccountNameByWalletScopeAndNameParams struct {
 
 // Renames an account identified by wallet id, scope tuple, and current name.
 func (q *Queries) UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNameParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateAccountNameByWalletScopeAndNameStmt, UpdateAccountNameByWalletScopeAndName,
+	result, err := q.db.Exec(ctx, UpdateAccountNameByWalletScopeAndName,
 		arg.NewName,
 		arg.WalletID,
 		arg.Purpose,
@@ -1172,7 +1155,7 @@ func (q *Queries) UpdateAccountNameByWalletScopeAndName(ctx context.Context, arg
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const UpdateAccountNameByWalletScopeAndNumber = `-- name: UpdateAccountNameByWalletScopeAndNumber :execrows
@@ -1196,12 +1179,12 @@ type UpdateAccountNameByWalletScopeAndNumberParams struct {
 	WalletID      int64
 	Purpose       int64
 	CoinType      int64
-	AccountNumber sql.NullInt64
+	AccountNumber pgtype.Int8
 }
 
 // Renames a derived account identified by wallet id, scope tuple, and number.
 func (q *Queries) UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, arg UpdateAccountNameByWalletScopeAndNumberParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateAccountNameByWalletScopeAndNumberStmt, UpdateAccountNameByWalletScopeAndNumber,
+	result, err := q.db.Exec(ctx, UpdateAccountNameByWalletScopeAndNumber,
 		arg.NewName,
 		arg.WalletID,
 		arg.Purpose,
@@ -1211,5 +1194,5 @@ func (q *Queries) UpdateAccountNameByWalletScopeAndNumber(ctx context.Context, a
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

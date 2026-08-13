@@ -7,10 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const DeleteBlocksAtOrAboveHeight = `-- name: DeleteBlocksAtOrAboveHeight :execrows
@@ -28,11 +26,11 @@ WHERE block_height >= $1
 // Performance:
 // - Executes as a range delete over the block-height primary key.
 func (q *Queries) DeleteBlocksAtOrAboveHeight(ctx context.Context, blockHeight int32) (int64, error) {
-	result, err := q.exec(ctx, q.deleteBlocksAtOrAboveHeightStmt, DeleteBlocksAtOrAboveHeight, blockHeight)
+	result, err := q.db.Exec(ctx, DeleteBlocksAtOrAboveHeight, blockHeight)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const DeleteUnminedTransactionByHash = `-- name: DeleteUnminedTransactionByHash :execrows
@@ -61,11 +59,11 @@ type DeleteUnminedTransactionByHashParams struct {
 // Performance:
 // - Targets at most one row by `(wallet_id, tx_hash)`.
 func (q *Queries) DeleteUnminedTransactionByHash(ctx context.Context, arg DeleteUnminedTransactionByHashParams) (int64, error) {
-	result, err := q.exec(ctx, q.deleteUnminedTransactionByHashStmt, DeleteUnminedTransactionByHash, arg.WalletID, arg.TxHash)
+	result, err := q.db.Exec(ctx, DeleteUnminedTransactionByHash, arg.WalletID, arg.TxHash)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const GetTransactionByHash = `-- name: GetTransactionByHash :one
@@ -94,10 +92,10 @@ type GetTransactionByHashRow struct {
 	ID             int64
 	TxHash         []byte
 	RawTx          []byte
-	ReceivedTime   time.Time
-	BlockHeight    sql.NullInt32
+	ReceivedTime   pgtype.Timestamp
+	BlockHeight    pgtype.Int4
 	BlockHash      []byte
-	BlockTimestamp sql.NullInt64
+	BlockTimestamp pgtype.Int8
 	IsCoinbase     bool
 	TxStatus       int16
 	TxLabel        string
@@ -114,7 +112,7 @@ type GetTransactionByHashRow struct {
 //   - The unique transaction lookup limits the join fanout to at most one block
 //     row.
 func (q *Queries) GetTransactionByHash(ctx context.Context, arg GetTransactionByHashParams) (GetTransactionByHashRow, error) {
-	row := q.queryRow(ctx, q.getTransactionByHashStmt, GetTransactionByHash, arg.WalletID, arg.TxHash)
+	row := q.db.QueryRow(ctx, GetTransactionByHash, arg.WalletID, arg.TxHash)
 	var i GetTransactionByHashRow
 	err := row.Scan(
 		&i.ID,
@@ -149,7 +147,7 @@ type GetTransactionMetaByHashParams struct {
 
 type GetTransactionMetaByHashRow struct {
 	ID          int64
-	BlockHeight sql.NullInt32
+	BlockHeight pgtype.Int4
 	IsCoinbase  bool
 	TxStatus    int16
 	TxLabel     string
@@ -164,7 +162,7 @@ type GetTransactionMetaByHashRow struct {
 // Performance:
 // - Uses the wallet-scoped unique `(wallet_id, tx_hash)` lookup path.
 func (q *Queries) GetTransactionMetaByHash(ctx context.Context, arg GetTransactionMetaByHashParams) (GetTransactionMetaByHashRow, error) {
-	row := q.queryRow(ctx, q.getTransactionMetaByHashStmt, GetTransactionMetaByHash, arg.WalletID, arg.TxHash)
+	row := q.db.QueryRow(ctx, GetTransactionMetaByHash, arg.WalletID, arg.TxHash)
 	var i GetTransactionMetaByHashRow
 	err := row.Scan(
 		&i.ID,
@@ -208,9 +206,9 @@ type InsertTransactionParams struct {
 	WalletID     int64
 	TxHash       []byte
 	RawTx        []byte
-	BlockHeight  sql.NullInt32
+	BlockHeight  pgtype.Int4
 	TxStatus     int16
-	ReceivedTime time.Time
+	ReceivedTime pgtype.Timestamp
 	IsCoinbase   bool
 	TxLabel      string
 }
@@ -228,7 +226,7 @@ type InsertTransactionParams struct {
 //   - Single-row insert. The cost is dominated by the wallet/hash uniqueness
 //     checks and any optional block foreign-key validation.
 func (q *Queries) InsertTransaction(ctx context.Context, arg InsertTransactionParams) (int64, error) {
-	row := q.queryRow(ctx, q.insertTransactionStmt, InsertTransaction,
+	row := q.db.QueryRow(ctx, InsertTransaction,
 		arg.WalletID,
 		arg.TxHash,
 		arg.RawTx,
@@ -259,7 +257,7 @@ ORDER BY t.id
 type ListActiveTransactionRawsRow struct {
 	ID          int64
 	TxHash      []byte
-	BlockHeight sql.NullInt32
+	BlockHeight pgtype.Int4
 	RawTx       []byte
 }
 
@@ -275,7 +273,7 @@ type ListActiveTransactionRawsRow struct {
 // Performance:
 // - Matches the wallet/status index used by active wallet history paths.
 func (q *Queries) ListActiveTransactionRaws(ctx context.Context, walletID int64) ([]ListActiveTransactionRawsRow, error) {
-	rows, err := q.query(ctx, q.listActiveTransactionRawsStmt, ListActiveTransactionRaws, walletID)
+	rows, err := q.db.Query(ctx, ListActiveTransactionRaws, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -292,9 +290,6 @@ func (q *Queries) ListActiveTransactionRaws(ctx context.Context, walletID int64)
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -342,7 +337,7 @@ type ListOwnedInputPrevOutputsByTxHashesRow struct {
 //   - Uses one batched transaction-hash lookup, then the UTXO tx-id index for the
 //     previous transactions' wallet-owned outputs.
 func (q *Queries) ListOwnedInputPrevOutputsByTxHashes(ctx context.Context, arg ListOwnedInputPrevOutputsByTxHashesParams) ([]ListOwnedInputPrevOutputsByTxHashesRow, error) {
-	rows, err := q.query(ctx, q.listOwnedInputPrevOutputsByTxHashesStmt, ListOwnedInputPrevOutputsByTxHashes, arg.WalletID, pq.Array(arg.TxHashes))
+	rows, err := q.db.Query(ctx, ListOwnedInputPrevOutputsByTxHashes, arg.WalletID, arg.TxHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -354,9 +349,6 @@ func (q *Queries) ListOwnedInputPrevOutputsByTxHashes(ctx context.Context, arg L
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -402,7 +394,7 @@ type ListOwnedOutputsByTxIDsRow struct {
 // Performance:
 // - Uses the provided tx-id array to bound the scan to the selected rows.
 func (q *Queries) ListOwnedOutputsByTxIDs(ctx context.Context, arg ListOwnedOutputsByTxIDsParams) ([]ListOwnedOutputsByTxIDsRow, error) {
-	rows, err := q.query(ctx, q.listOwnedOutputsByTxIDsStmt, ListOwnedOutputsByTxIDs, arg.WalletID, pq.Array(arg.TxIds))
+	rows, err := q.db.Query(ctx, ListOwnedOutputsByTxIDs, arg.WalletID, arg.TxIds)
 	if err != nil {
 		return nil, err
 	}
@@ -414,9 +406,6 @@ func (q *Queries) ListOwnedOutputsByTxIDs(ctx context.Context, arg ListOwnedOutp
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -454,7 +443,7 @@ type ListRollbackCoinbaseRootsRow struct {
 // Performance:
 // - Uses the block-height index to bound the scan to the rollback range.
 func (q *Queries) ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight int32) ([]ListRollbackCoinbaseRootsRow, error) {
-	rows, err := q.query(ctx, q.listRollbackCoinbaseRootsStmt, ListRollbackCoinbaseRoots, rollbackHeight)
+	rows, err := q.db.Query(ctx, ListRollbackCoinbaseRoots, rollbackHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -466,9 +455,6 @@ func (q *Queries) ListRollbackCoinbaseRoots(ctx context.Context, rollbackHeight 
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -508,8 +494,8 @@ type ListTransactionsByHeightRangeRow struct {
 	ID             int64
 	TxHash         []byte
 	RawTx          []byte
-	ReceivedTime   time.Time
-	BlockHeight    sql.NullInt32
+	ReceivedTime   pgtype.Timestamp
+	BlockHeight    pgtype.Int4
 	BlockHash      []byte
 	BlockTimestamp int64
 	IsCoinbase     bool
@@ -529,7 +515,7 @@ type ListTransactionsByHeightRangeRow struct {
 //     preserves wallet-observed order within each block before the single-row
 //     block join.
 func (q *Queries) ListTransactionsByHeightRange(ctx context.Context, arg ListTransactionsByHeightRangeParams) ([]ListTransactionsByHeightRangeRow, error) {
-	rows, err := q.query(ctx, q.listTransactionsByHeightRangeStmt, ListTransactionsByHeightRange, arg.WalletID, arg.StartHeight, arg.EndHeight)
+	rows, err := q.db.Query(ctx, ListTransactionsByHeightRange, arg.WalletID, arg.StartHeight, arg.EndHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -552,9 +538,6 @@ func (q *Queries) ListTransactionsByHeightRange(ctx context.Context, arg ListTra
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -585,10 +568,10 @@ type ListTransactionsWithoutBlockRow struct {
 	ID             int64
 	TxHash         []byte
 	RawTx          []byte
-	ReceivedTime   time.Time
-	BlockHeight    sql.NullInt32
+	ReceivedTime   pgtype.Timestamp
+	BlockHeight    pgtype.Int4
 	BlockHash      []byte
-	BlockTimestamp sql.NullInt64
+	BlockTimestamp pgtype.Int8
 	IsCoinbase     bool
 	TxStatus       int16
 	TxLabel        string
@@ -608,7 +591,7 @@ type ListTransactionsWithoutBlockRow struct {
 // Performance:
 // - Matches the dedicated no-confirming-block history index.
 func (q *Queries) ListTransactionsWithoutBlock(ctx context.Context, walletID int64) ([]ListTransactionsWithoutBlockRow, error) {
-	rows, err := q.query(ctx, q.listTransactionsWithoutBlockStmt, ListTransactionsWithoutBlock, walletID)
+	rows, err := q.db.Query(ctx, ListTransactionsWithoutBlock, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -631,9 +614,6 @@ func (q *Queries) ListTransactionsWithoutBlock(ctx context.Context, walletID int
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -665,10 +645,10 @@ type ListUnminedTransactionsRow struct {
 	ID             int64
 	TxHash         []byte
 	RawTx          []byte
-	ReceivedTime   time.Time
-	BlockHeight    sql.NullInt32
+	ReceivedTime   pgtype.Timestamp
+	BlockHeight    pgtype.Int4
 	BlockHash      []byte
-	BlockTimestamp sql.NullInt64
+	BlockTimestamp pgtype.Int8
 	IsCoinbase     bool
 	TxStatus       int16
 	TxLabel        string
@@ -689,7 +669,7 @@ type ListUnminedTransactionsRow struct {
 //   - Matches the dedicated unmined-history index while the more selective
 //     live-only partial index stays available for conflict paths.
 func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) ([]ListUnminedTransactionsRow, error) {
-	rows, err := q.query(ctx, q.listUnminedTransactionsStmt, ListUnminedTransactions, walletID)
+	rows, err := q.db.Query(ctx, ListUnminedTransactions, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -712,9 +692,6 @@ func (q *Queries) ListUnminedTransactions(ctx context.Context, walletID int64) (
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -775,11 +752,11 @@ WHERE
 //   - Touches only wallet_sync_states rows whose heights are at or above the
 //     rollback boundary.
 func (q *Queries) RewindWalletSyncStateHeightsForRollback(ctx context.Context, rollbackHeight int32) (int64, error) {
-	result, err := q.exec(ctx, q.rewindWalletSyncStateHeightsForRollbackStmt, RewindWalletSyncStateHeightsForRollback, rollbackHeight)
+	result, err := q.db.Exec(ctx, RewindWalletSyncStateHeightsForRollback, rollbackHeight)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const UpdateTransactionLabelByHash = `-- name: UpdateTransactionLabelByHash :execrows
@@ -806,11 +783,11 @@ type UpdateTransactionLabelByHashParams struct {
 // Performance:
 // - Updates at most one row through the wallet-scoped unique tx-hash lookup.
 func (q *Queries) UpdateTransactionLabelByHash(ctx context.Context, arg UpdateTransactionLabelByHashParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateTransactionLabelByHashStmt, UpdateTransactionLabelByHash, arg.Label, arg.WalletID, arg.TxHash)
+	result, err := q.db.Exec(ctx, UpdateTransactionLabelByHash, arg.Label, arg.WalletID, arg.TxHash)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const UpdateTransactionStateByHash = `-- name: UpdateTransactionStateByHash :execrows
@@ -832,7 +809,7 @@ WHERE
 `
 
 type UpdateTransactionStateByHashParams struct {
-	BlockHeight sql.NullInt32
+	BlockHeight pgtype.Int4
 	Status      int16
 	WalletID    int64
 	TxHash      []byte
@@ -852,7 +829,7 @@ type UpdateTransactionStateByHashParams struct {
 // Performance:
 // - Updates at most one row through the wallet-scoped unique tx-hash lookup.
 func (q *Queries) UpdateTransactionStateByHash(ctx context.Context, arg UpdateTransactionStateByHashParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateTransactionStateByHashStmt, UpdateTransactionStateByHash,
+	result, err := q.db.Exec(ctx, UpdateTransactionStateByHash,
 		arg.BlockHeight,
 		arg.Status,
 		arg.WalletID,
@@ -861,7 +838,7 @@ func (q *Queries) UpdateTransactionStateByHash(ctx context.Context, arg UpdateTr
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const UpdateTransactionStatusByIDs = `-- name: UpdateTransactionStatusByIDs :execrows
@@ -889,9 +866,9 @@ type UpdateTransactionStatusByIDsParams struct {
 // Performance:
 // - Restricts by wallet scope first, then matches only the provided ID set.
 func (q *Queries) UpdateTransactionStatusByIDs(ctx context.Context, arg UpdateTransactionStatusByIDsParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateTransactionStatusByIDsStmt, UpdateTransactionStatusByIDs, arg.Status, arg.WalletID, pq.Array(arg.TxIds))
+	result, err := q.db.Exec(ctx, UpdateTransactionStatusByIDs, arg.Status, arg.WalletID, arg.TxIds)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

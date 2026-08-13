@@ -27,7 +27,7 @@ func (s *Store) Balance(ctx context.Context,
 		purpose, coinType := scopeFilter(params.Scope)
 
 		balance, err := q.Balance(ctx, sqlc.BalanceParams{
-			NowUtc:        nowUTC,
+			NowUtc:        timestamp(nowUTC),
 			WalletID:      int64(params.WalletID),
 			Purpose:       purpose,
 			CoinType:      coinType,

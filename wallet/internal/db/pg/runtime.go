@@ -2,12 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"time"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -53,23 +54,23 @@ func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
 	_, err := dbruntime.Write(
-		ctx, s, dbruntime.WriteTxOps[*sql.Tx, *sqlc.Queries]{
-			Begin: func(ctx context.Context) (*sql.Tx, error) {
-				return s.db.BeginTx(ctx, nil)
+		ctx, s, dbruntime.WriteTxOps[pgx.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (pgx.Tx, error) {
+				return s.pool.Begin(ctx)
 			},
-			Bind: func(tx *sql.Tx) *sqlc.Queries {
+			Bind: func(tx pgx.Tx) *sqlc.Queries {
 				return s.queries.WithTx(tx)
 			},
-			Commit: func(tx *sql.Tx) dbruntime.CommitResult {
-				err := tx.Commit()
+			Commit: func(tx pgx.Tx) dbruntime.CommitResult {
+				err := tx.Commit(ctx)
 
 				return dbruntime.CommitResult{
 					Err:       err,
 					Ambiguous: isCommitAmbiguous(err),
 				}
 			},
-			Rollback: func(tx *sql.Tx) error {
-				return tx.Rollback()
+			Rollback: func(tx pgx.Tx) error {
+				return rollbackTx(tx.Rollback)
 			},
 		},
 		func(qtx *sqlc.Queries) (struct{}, error) {
@@ -78,6 +79,17 @@ func (s *Store) execWrite(ctx context.Context,
 	)
 
 	return err
+}
+
+// rollbackTx rolls back a PostgreSQL transaction with a fresh bounded context
+// so caller cancellation cannot prevent cleanup.
+func rollbackTx(rollback func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), db.DefaultConnectionTimeout,
+	)
+	defer cancel()
+
+	return rollback(ctx)
 }
 
 // defaultReadConfig returns the PostgreSQL read retry policy.

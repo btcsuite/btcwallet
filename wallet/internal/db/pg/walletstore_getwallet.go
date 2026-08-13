@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // GetWallet retrieves information about a wallet given its name. It
@@ -25,7 +25,7 @@ func (s *Store) GetWallet(ctx context.Context, name string) (*db.WalletInfo,
 			return err
 		}
 
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("wallet %q: %w", name, db.ErrWalletNotFound)
 		}
 

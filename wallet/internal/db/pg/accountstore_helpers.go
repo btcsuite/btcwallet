@@ -46,7 +46,7 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 			PublicKey:         base.PublicKey,
 			MasterFingerprint: nullableInt64(base.MasterFingerprint),
 			IsWatchOnly:       base.WalletIsWatchOnly,
-			CreatedAt:         base.CreatedAt,
+			CreatedAt:         base.CreatedAt.Time,
 			Purpose:           base.Purpose,
 			CoinType:          base.CoinType,
 			InternalTypeID:    base.InternalTypeID,

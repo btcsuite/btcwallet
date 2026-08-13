@@ -7,10 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const CreateDerivedAddress = `-- name: CreateDerivedAddress :one
@@ -45,13 +43,13 @@ type CreateDerivedAddressParams struct {
 type CreateDerivedAddressRow struct {
 	ID        int64
 	WalletID  int64
-	CreatedAt time.Time
+	CreatedAt pgtype.Timestamp
 }
 
 // Creates the parent address row for an HD-derived address. The caller inserts
 // the path and account ownership into derived_addresses in the same transaction.
 func (q *Queries) CreateDerivedAddress(ctx context.Context, arg CreateDerivedAddressParams) (CreateDerivedAddressRow, error) {
-	row := q.queryRow(ctx, q.createDerivedAddressStmt, CreateDerivedAddress,
+	row := q.db.QueryRow(ctx, CreateDerivedAddress,
 		arg.ScriptPubKey,
 		arg.ScriptTypeID,
 		arg.PubKey,
@@ -90,7 +88,7 @@ type CreateDerivedAddressPathParams struct {
 
 // Stores account ownership and BIP44 path data for an HD-derived address.
 func (q *Queries) CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error {
-	_, err := q.exec(ctx, q.createDerivedAddressPathStmt, CreateDerivedAddressPath,
+	_, err := q.db.Exec(ctx, CreateDerivedAddressPath,
 		arg.AccountID,
 		arg.AddressBranch,
 		arg.AddressIndex,
@@ -125,12 +123,12 @@ type CreateImportedAddressParams struct {
 
 type CreateImportedAddressRow struct {
 	ID        int64
-	CreatedAt time.Time
+	CreatedAt pgtype.Timestamp
 }
 
 // Creates a raw imported address with no account or derivation path.
 func (q *Queries) CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error) {
-	row := q.queryRow(ctx, q.createImportedAddressStmt, CreateImportedAddress,
+	row := q.db.QueryRow(ctx, CreateImportedAddress,
 		arg.WalletID,
 		arg.ScriptPubKey,
 		arg.ScriptTypeID,
@@ -182,29 +180,29 @@ type GetAddressByScriptPubKeyParams struct {
 
 type GetAddressByScriptPubKeyRow struct {
 	ID                int64
-	DerivedAddressID  sql.NullInt64
-	AccountID         sql.NullInt64
-	AccountNumber     sql.NullInt64
-	Purpose           sql.NullInt64
-	CoinType          sql.NullInt64
+	DerivedAddressID  pgtype.Int8
+	AccountID         pgtype.Int8
+	AccountNumber     pgtype.Int8
+	Purpose           pgtype.Int8
+	CoinType          pgtype.Int8
 	ScriptTypeID      int16
-	AddressBranch     sql.NullInt16
-	AddressIndex      sql.NullInt64
+	AddressBranch     pgtype.Int2
+	AddressIndex      pgtype.Int8
 	IsDerived         bool
-	AccountIsDerived  sql.NullBool
+	AccountIsDerived  pgtype.Bool
 	ScriptPubKey      []byte
 	PubKey            []byte
-	CreatedAt         time.Time
-	MasterFingerprint sql.NullInt64
+	CreatedAt         pgtype.Timestamp
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
-	AccountName       sql.NullString
+	AccountName       pgtype.Text
 	HasScript         bool
 	IsUsed            bool
 }
 
 // Retrieves an address by its script pubkey and wallet.
 func (q *Queries) GetAddressByScriptPubKey(ctx context.Context, arg GetAddressByScriptPubKeyParams) (GetAddressByScriptPubKeyRow, error) {
-	row := q.queryRow(ctx, q.getAddressByScriptPubKeyStmt, GetAddressByScriptPubKey, arg.ScriptPubKey, arg.WalletID)
+	row := q.db.QueryRow(ctx, GetAddressByScriptPubKey, arg.ScriptPubKey, arg.WalletID)
 	var i GetAddressByScriptPubKeyRow
 	err := row.Scan(
 		&i.ID,
@@ -256,7 +254,7 @@ type GetAddressSecretRow struct {
 // - Address exists without secret row: returns row with NULL secret fields
 // - Address does not exist: returns no rows (sql.ErrNoRows)
 func (q *Queries) GetAddressSecret(ctx context.Context, arg GetAddressSecretParams) (GetAddressSecretRow, error) {
-	row := q.queryRow(ctx, q.getAddressSecretStmt, GetAddressSecret, arg.WalletID, arg.ScriptPubKey)
+	row := q.db.QueryRow(ctx, GetAddressSecret, arg.WalletID, arg.ScriptPubKey)
 	var i GetAddressSecretRow
 	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
 	return i, err
@@ -285,7 +283,7 @@ type GetAddressSecretByIDRow struct {
 
 // Retrieves secret information for an address using its durable SQL row ID.
 func (q *Queries) GetAddressSecretByID(ctx context.Context, arg GetAddressSecretByIDParams) (GetAddressSecretByIDRow, error) {
-	row := q.queryRow(ctx, q.getAddressSecretByIDStmt, GetAddressSecretByID, arg.WalletID, arg.ID)
+	row := q.db.QueryRow(ctx, GetAddressSecretByID, arg.WalletID, arg.ID)
 	var i GetAddressSecretByIDRow
 	err := row.Scan(&i.AddressID, &i.EncryptedPrivKey, &i.EncryptedScript)
 	return i, err
@@ -311,7 +309,7 @@ type InsertAddressSecretParams struct {
 // addresses.
 // Not used for derived addresses (their keys are derived from account key).
 func (q *Queries) InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error {
-	_, err := q.exec(ctx, q.insertAddressSecretStmt, InsertAddressSecret, arg.AddressID, arg.EncryptedPrivKey, arg.EncryptedScript)
+	_, err := q.db.Exec(ctx, InsertAddressSecret, arg.AddressID, arg.EncryptedPrivKey, arg.EncryptedScript)
 	return err
 }
 
@@ -368,7 +366,7 @@ type ListAddressesByAccountParams struct {
 	Purpose     int64
 	CoinType    int64
 	AccountName string
-	CursorID    sql.NullInt64
+	CursorID    pgtype.Int8
 	PageLimit   int64
 }
 
@@ -376,7 +374,7 @@ type ListAddressesByAccountRow struct {
 	ID                int64
 	DerivedAddressID  int64
 	AccountID         int64
-	AccountNumber     sql.NullInt64
+	AccountNumber     pgtype.Int8
 	AccountName       string
 	Purpose           int64
 	CoinType          int64
@@ -387,8 +385,8 @@ type ListAddressesByAccountRow struct {
 	AccountIsDerived  bool
 	ScriptPubKey      []byte
 	PubKey            []byte
-	CreatedAt         time.Time
-	MasterFingerprint sql.NullInt64
+	CreatedAt         pgtype.Timestamp
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
 	HasScript         bool
 	IsUsed            bool
@@ -397,7 +395,7 @@ type ListAddressesByAccountRow struct {
 // Lists HD-derived addresses for an account identified by wallet_id, key scope
 // (purpose/coin_type), and account name, ordered by address ID.
 func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesByAccountParams) ([]ListAddressesByAccountRow, error) {
-	rows, err := q.query(ctx, q.listAddressesByAccountStmt, ListAddressesByAccount,
+	rows, err := q.db.Query(ctx, ListAddressesByAccount,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -436,9 +434,6 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -489,22 +484,22 @@ type ListAddressesByScriptPubKeysParams struct {
 
 type ListAddressesByScriptPubKeysRow struct {
 	ID                int64
-	DerivedAddressID  sql.NullInt64
-	AccountID         sql.NullInt64
-	AccountNumber     sql.NullInt64
-	Purpose           sql.NullInt64
-	CoinType          sql.NullInt64
+	DerivedAddressID  pgtype.Int8
+	AccountID         pgtype.Int8
+	AccountNumber     pgtype.Int8
+	Purpose           pgtype.Int8
+	CoinType          pgtype.Int8
 	ScriptTypeID      int16
-	AddressBranch     sql.NullInt16
-	AddressIndex      sql.NullInt64
+	AddressBranch     pgtype.Int2
+	AddressIndex      pgtype.Int8
 	IsDerived         bool
-	AccountIsDerived  sql.NullBool
+	AccountIsDerived  pgtype.Bool
 	ScriptPubKey      []byte
 	PubKey            []byte
-	CreatedAt         time.Time
-	MasterFingerprint sql.NullInt64
+	CreatedAt         pgtype.Timestamp
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
-	AccountName       sql.NullString
+	AccountName       pgtype.Text
 	HasScript         bool
 	IsUsed            bool
 }
@@ -514,7 +509,7 @@ type ListAddressesByScriptPubKeysRow struct {
 // address are simply absent from the result. The Go caller is responsible for
 // short-circuiting an empty script set before issuing this query.
 func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddressesByScriptPubKeysParams) ([]ListAddressesByScriptPubKeysRow, error) {
-	rows, err := q.query(ctx, q.listAddressesByScriptPubKeysStmt, ListAddressesByScriptPubKeys, arg.WalletID, pq.Array(arg.ScriptPubKeys))
+	rows, err := q.db.Query(ctx, ListAddressesByScriptPubKeys, arg.WalletID, arg.ScriptPubKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -546,9 +541,6 @@ func (q *Queries) ListAddressesByScriptPubKeys(ctx context.Context, arg ListAddr
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -597,35 +589,35 @@ LIMIT $3::BIGINT
 
 type ListRawImportedAddressesParams struct {
 	WalletID  int64
-	CursorID  sql.NullInt64
+	CursorID  pgtype.Int8
 	PageLimit int64
 }
 
 type ListRawImportedAddressesRow struct {
 	ID                int64
-	DerivedAddressID  sql.NullInt64
-	AccountID         sql.NullInt64
-	AccountNumber     sql.NullInt64
-	Purpose           sql.NullInt64
-	CoinType          sql.NullInt64
+	DerivedAddressID  pgtype.Int8
+	AccountID         pgtype.Int8
+	AccountNumber     pgtype.Int8
+	Purpose           pgtype.Int8
+	CoinType          pgtype.Int8
 	ScriptTypeID      int16
-	AddressBranch     sql.NullInt16
-	AddressIndex      sql.NullInt64
+	AddressBranch     pgtype.Int2
+	AddressIndex      pgtype.Int8
 	IsDerived         bool
-	AccountIsDerived  sql.NullBool
+	AccountIsDerived  pgtype.Bool
 	ScriptPubKey      []byte
 	PubKey            []byte
-	CreatedAt         time.Time
-	MasterFingerprint sql.NullInt64
+	CreatedAt         pgtype.Timestamp
+	MasterFingerprint pgtype.Int8
 	WalletIsWatchOnly bool
-	AccountName       sql.NullString
+	AccountName       pgtype.Text
 	HasScript         bool
 	IsUsed            bool
 }
 
 // Lists raw imported addresses in a wallet, ordered by address ID.
 func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImportedAddressesParams) ([]ListRawImportedAddressesRow, error) {
-	rows, err := q.query(ctx, q.listRawImportedAddressesStmt, ListRawImportedAddresses, arg.WalletID, arg.CursorID, arg.PageLimit)
+	rows, err := q.db.Query(ctx, ListRawImportedAddresses, arg.WalletID, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -657,9 +649,6 @@ func (q *Queries) ListRawImportedAddresses(ctx context.Context, arg ListRawImpor
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

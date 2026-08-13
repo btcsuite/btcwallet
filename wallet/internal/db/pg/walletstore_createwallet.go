@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Ensure Store satisfies the WalletStore interface.
@@ -84,9 +84,9 @@ func (o createWalletOps) InsertWalletSecrets(ctx context.Context,
 func (o createWalletOps) InsertWalletSyncState(ctx context.Context,
 	walletID int64, birthday time.Time) error {
 
-	birthdayTimestamp := sql.NullTime{}
+	birthdayTimestamp := pgtype.Timestamp{}
 	if !birthday.IsZero() {
-		birthdayTimestamp = sql.NullTime{
+		birthdayTimestamp = pgtype.Timestamp{
 			Time:  birthday,
 			Valid: true,
 		}
@@ -94,8 +94,8 @@ func (o createWalletOps) InsertWalletSyncState(ctx context.Context,
 
 	return o.q.InsertWalletSyncState(ctx, sqlc.InsertWalletSyncStateParams{
 		WalletID:          walletID,
-		SyncedHeight:      sql.NullInt32{},
-		BirthdayHeight:    sql.NullInt32{},
+		SyncedHeight:      pgtype.Int4{},
+		BirthdayHeight:    pgtype.Int4{},
 		BirthdayTimestamp: birthdayTimestamp,
 	})
 }

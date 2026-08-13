@@ -2,13 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // LeaseOutput atomically acquires or renews a lease for one current UTXO.
@@ -63,17 +63,17 @@ func (o *leaseOutputOps) Acquire(ctx context.Context,
 		ctx, sqlc.AcquireUtxoLeaseParams{
 			WalletID:    int64(params.WalletID),
 			LockID:      params.ID[:],
-			ExpiresAt:   expiresAt,
+			ExpiresAt:   timestamp(expiresAt),
 			TxHash:      params.OutPoint.Hash[:],
 			OutputIndex: outputIndex,
-			NowUtc:      nowUTC,
+			NowUtc:      timestamp(nowUTC),
 		},
 	)
 	if err == nil {
-		return expiration, nil
+		return expiration.Time, nil
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, db.ErrLeaseOutputNoRow
 	}
 
@@ -101,7 +101,7 @@ func (o *leaseOutputOps) HasUtxo(ctx context.Context,
 		return true, nil
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 

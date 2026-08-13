@@ -2,21 +2,21 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
-	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Store is the PostgreSQL implementation of the
 // WalletStore interface.
 type Store struct {
-	// db is the shared PostgreSQL connection pool.
-	db *sql.DB
+	// pool is the native PostgreSQL connection pool used by Store queries.
+	pool *pgxpool.Pool
 
 	// queries executes PostgreSQL statements on db.
 	queries *sqlc.Queries
@@ -39,18 +39,9 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	dbConn, err := sql.Open("pgx", cfg.Dsn)
+	poolConfig, err := pgxpool.ParseConfig(cfg.Dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
-	defer cancel()
-
-	err = dbConn.PingContext(connCtx)
-	if err != nil {
-		_ = dbConn.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
+		return nil, fmt.Errorf("parse pool config: %w", err)
 	}
 
 	maxConns := db.DefaultMaxConnections
@@ -58,31 +49,51 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		maxConns = cfg.MaxConnections
 	}
 
-	dbConn.SetMaxOpenConns(maxConns)
-	dbConn.SetMaxIdleConns(maxConns)
-	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
+	// Config.Validate bounds MaxConnections to int32.
+	poolConfig.MaxConns = int32(maxConns) //nolint:gosec
+	// TODO(yy): make the idle connection lifetime configurable.
+	poolConfig.MaxConnIdleTime = db.DefaultConnIdleLifetime
 
-	queries := sqlc.New(dbConn)
-
-	err = pg.ApplyMigrations(dbConn)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
-		_ = dbConn.Close()
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
+	defer cancel()
+
+	err = pool.Ping(connCtx)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	migrationDB := stdlib.OpenDBFromPool(pool)
+
+	err = pg.ApplyMigrations(ctx, migrationDB)
+	if err != nil {
+		_ = migrationDB.Close()
+		pool.Close()
+
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 
+	err = migrationDB.Close()
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("close migration database: %w", err)
+	}
+
 	return &Store{
-		db:            dbConn,
-		queries:       queries,
+		pool:          pool,
+		queries:       sqlc.New(pool),
 		deriveAddress: cfg.DeriveAddress,
 	}, nil
 }
 
 // Close closes the database connection.
 func (s *Store) Close() error {
-	err := s.db.Close()
-	if err != nil {
-		return fmt.Errorf("close database: %w", err)
-	}
+	s.pool.Close()
 
 	return nil
 }

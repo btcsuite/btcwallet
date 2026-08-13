@@ -46,7 +46,7 @@ func (s *Store) ListUTXOs(ctx context.Context,
 
 			utxo, err := utxoInfoFromRow(
 				row.TxHash, row.OutputIndex, row.Amount,
-				row.ScriptPubKey, row.ReceivedTime, row.IsCoinbase,
+				row.ScriptPubKey, row.ReceivedTime.Time, row.IsCoinbase,
 				row.BlockHeight,
 			)
 			if err != nil {
@@ -78,7 +78,7 @@ func buildListUtxosParams(query db.ListUtxosQuery) sqlc.ListUtxosParams {
 	purpose, coinType := scopeFilter(query.Scope)
 
 	return sqlc.ListUtxosParams{
-		NowUtc:        time.Now().UTC(),
+		NowUtc:        timestamp(time.Now().UTC()),
 		WalletID:      int64(query.WalletID),
 		Purpose:       purpose,
 		CoinType:      coinType,

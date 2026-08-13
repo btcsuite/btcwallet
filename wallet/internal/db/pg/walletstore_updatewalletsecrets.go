@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // UpdateWalletSecrets updates the secrets for the wallet.
@@ -39,7 +39,7 @@ func (o updateWalletSecretsOps) WalletWatchOnly(ctx context.Context,
 		return walletRow.IsWatchOnly, nil
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("wallet %d: %w", walletID,
 			db.ErrWalletNotFound)
 	}

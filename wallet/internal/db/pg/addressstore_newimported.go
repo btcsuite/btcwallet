@@ -58,7 +58,7 @@ func (o newImportedAddressOps) CreateImportedAddress(ctx context.Context,
 
 	return db.CreateImportedAddressRow{
 		ID:        row.ID,
-		CreatedAt: row.CreatedAt,
+		CreatedAt: row.CreatedAt.Time,
 	}, nil
 }
 

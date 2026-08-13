@@ -1,13 +1,36 @@
 package pg
 
 import (
+	"context"
 	"io"
 	"testing"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
+
+// safeRetryError is a test error that pgconn guarantees happened before any
+// bytes reached PostgreSQL.
+type safeRetryError struct {
+	err error
+}
+
+// Error returns the wrapped error text.
+func (e *safeRetryError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap exposes the wrapped error.
+func (e *safeRetryError) Unwrap() error {
+	return e.err
+}
+
+// SafeToRetry reports that no request bytes reached PostgreSQL.
+func (*safeRetryError) SafeToRetry() bool {
+	return true
+}
 
 // codeClassificationTestCase defines one SQLSTATE mapping expectation.
 type codeClassificationTestCase struct {
@@ -115,4 +138,58 @@ func TestMapErr(t *testing.T) {
 	require.Equal(t, dberr.BackendPostgres, err.Backend)
 	require.Equal(t, dberr.ReasonReadOnly, err.Reason)
 	require.Equal(t, dberr.ClassFatal, err.Class())
+}
+
+// TestIsCommitAmbiguous verifies that commit cancellation is ambiguous only
+// after pgconn can no longer prove the request was unsent.
+func TestIsCommitAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		ambiguous bool
+	}{
+		{
+			name:      "canceled after send",
+			err:       context.Canceled,
+			ambiguous: true,
+		},
+		{
+			name:      "deadline after send",
+			err:       context.DeadlineExceeded,
+			ambiguous: true,
+		},
+		{
+			name: "canceled before send",
+			err: &safeRetryError{
+				err: context.Canceled,
+			},
+		},
+		{
+			name: "deadline before send",
+			err: &safeRetryError{
+				err: context.DeadlineExceeded,
+			},
+		},
+		{
+			name: "commit rollback",
+			err:  pgx.ErrTxCommitRollback,
+		},
+		{
+			name:      "end of file",
+			err:       io.EOF,
+			ambiguous: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(
+				t, test.ambiguous, isCommitAmbiguous(test.err),
+			)
+		})
+	}
 }

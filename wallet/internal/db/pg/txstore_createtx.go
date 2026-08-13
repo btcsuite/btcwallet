@@ -3,7 +3,6 @@ package pg
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -14,6 +13,8 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // CreateTx atomically records a wallet-scoped transaction row, its
@@ -46,7 +47,7 @@ func (s *Store) CreateTx(ctx context.Context,
 type createTxOps struct {
 	invalidateUnminedTxOps
 
-	blockHeight sql.NullInt32
+	blockHeight pgtype.Int4
 }
 
 var _ db.CreateTxOps = (*createTxOps)(nil)
@@ -63,7 +64,7 @@ func (o *createTxOps) LoadExisting(ctx context.Context,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, db.ErrCreateTxExistingNotFound
 		}
 
@@ -117,7 +118,7 @@ func (o *createTxOps) ConfirmExisting(ctx context.Context,
 
 	rows, err := o.qtx.UpdateTransactionStateByHash(
 		ctx, sqlc.UpdateTransactionStateByHashParams{
-			BlockHeight: sql.NullInt32{Int32: blockHeight, Valid: true},
+			BlockHeight: pgtype.Int4{Int32: blockHeight, Valid: true},
 			Status:      int16(db.TxStatusPublished),
 			WalletID:    int64(req.Params.WalletID),
 			TxHash:      req.TxHash[:],
@@ -139,7 +140,7 @@ func (o *createTxOps) ConfirmExisting(ctx context.Context,
 func (o *createTxOps) PrepareBlock(ctx context.Context,
 	req db.CreateTxRequest) error {
 
-	o.blockHeight = sql.NullInt32{}
+	o.blockHeight = pgtype.Int4{}
 
 	if req.Params.Block == nil {
 		return nil
@@ -150,7 +151,7 @@ func (o *createTxOps) PrepareBlock(ctx context.Context,
 		return err
 	}
 
-	o.blockHeight = sql.NullInt32{Int32: height, Valid: true}
+	o.blockHeight = pgtype.Int4{Int32: height, Valid: true}
 
 	return nil
 }
@@ -202,7 +203,7 @@ func collectConflictRootIDs(ctx context.Context, qtx *sqlc.Queries,
 			},
 		)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				continue
 			}
 
@@ -256,7 +257,7 @@ func (o *createTxOps) Insert(ctx context.Context,
 		RawTx:        req.RawTx,
 		BlockHeight:  o.blockHeight,
 		TxStatus:     int16(req.Params.Status),
-		ReceivedTime: req.Received,
+		ReceivedTime: timestamp(req.Received),
 		IsCoinbase:   req.IsCoinbase,
 		TxLabel:      req.Params.Label,
 	})
@@ -443,7 +444,7 @@ func insertCredit(ctx context.Context, qtx *sqlc.Queries,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("credit output %d: %w", index,
 				db.ErrAddressNotFound)
 		}
@@ -811,11 +812,11 @@ func markChildInputSpent(ctx context.Context, qtx *sqlc.Queries,
 			WalletID:    int64(params.WalletID),
 			TxHash:      spend.prevOut.Hash[:],
 			OutputIndex: outputIndex,
-			SpentByTxID: sql.NullInt64{
+			SpentByTxID: pgtype.Int8{
 				Int64: spend.id,
 				Valid: true,
 			},
-			SpentInputIndex: sql.NullInt32{
+			SpentInputIndex: pgtype.Int4{
 				Int32: spentInputIndex,
 				Valid: true,
 			},
@@ -863,7 +864,7 @@ func creditExists(ctx context.Context, qtx *sqlc.Queries,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil, nil
 		}
 
@@ -905,8 +906,8 @@ func markInputsSpent(ctx context.Context, qtx *sqlc.Queries,
 			WalletID:        int64(params.WalletID),
 			TxHash:          txIn.PreviousOutPoint.Hash[:],
 			OutputIndex:     outputIndex,
-			SpentByTxID:     sql.NullInt64{Int64: txID, Valid: true},
-			SpentInputIndex: sql.NullInt32{Int32: spentInputIndex, Valid: true},
+			SpentByTxID:     pgtype.Int8{Int64: txID, Valid: true},
+			SpentInputIndex: pgtype.Int4{Int32: spentInputIndex, Valid: true},
 		})
 		if err != nil {
 			return fmt.Errorf("mark spent input %d: %w", inputIndex, err)
@@ -942,7 +943,7 @@ func ensureSpendConflict(ctx context.Context, qtx *sqlc.Queries,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ensureWalletParentValid(
 				ctx, qtx, walletID, txHash, outputIndex,
 			)

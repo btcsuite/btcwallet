@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // UpdateWallet updates various properties of a wallet, such as its
@@ -80,7 +80,7 @@ func buildUpdateSyncParams(params db.UpdateWalletParams) (
 	}
 
 	if params.Birthday != nil {
-		syncParams.BirthdayTimestamp = sql.NullTime{
+		syncParams.BirthdayTimestamp = pgtype.Timestamp{
 			Time:  *params.Birthday,
 			Valid: true,
 		}

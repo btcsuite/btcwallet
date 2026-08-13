@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // GetAddress retrieves information about a specific address, identified by
@@ -29,7 +29,7 @@ func (s *Store) GetAddress(ctx context.Context,
 				WalletID:     int64(query.WalletID),
 			},
 		)
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return db.ErrAddressNotFound
 		}
 

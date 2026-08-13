@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ApplyScanBatch atomically records recovery scan writes for one wallet.
@@ -130,7 +131,7 @@ var _ db.ScanHorizonOps = (*scanHorizonOps)(nil)
 // single HorizonAccount builder.
 type horizonAccountRow struct {
 	id               int64
-	accountNumber    sql.NullInt64
+	accountNumber    pgtype.Int8
 	publicKey        []byte
 	internalTypeID   int16
 	externalTypeID   int16
@@ -279,7 +280,7 @@ func (o scanHorizonOps) horizonAccountByID(ctx context.Context,
 			ID:       int64(accountID),
 		},
 	)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, db.ErrAccountNotFound
 	}
 

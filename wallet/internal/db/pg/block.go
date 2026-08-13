@@ -3,18 +3,19 @@ package pg
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // buildBlock constructs a Block from the given PostgreSQL block
 // fields.
-func buildBlock(height sql.NullInt32, hash []byte,
-	timestamp sql.NullInt64) (*db.Block, error) {
+func buildBlock(height pgtype.Int4, hash []byte,
+	timestamp pgtype.Int8) (*db.Block, error) {
 
 	if !height.Valid {
 		return nil, db.ErrInvalidNullInt
@@ -68,7 +69,7 @@ func requireBlockMatches(ctx context.Context, qtx *sqlc.Queries,
 
 	storedBlock, err := qtx.GetBlockByHeight(ctx, height)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, fmt.Errorf("block %d: %w", block.Height,
 				db.ErrBlockNotFound)
 		}
