@@ -1376,6 +1376,62 @@ func TestComputeUnlockingScriptFail_PrivKey(t *testing.T) {
 	require.ErrorContains(t, err, "privkey error")
 }
 
+// TestComputeUnlockingScriptImportedXPub verifies a numberless imported-XPub
+// child fails before either account or raw-address secrets are queried.
+func TestComputeUnlockingScriptImportedXPub(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Resolve the output as a derived imported-XPub child with
+	// branch/index facts but no wallet-seed account number. Retaining every
+	// secret mock lets the test prove signing stops before either private-key
+	// lookup path or vault decryption.
+	_, pubKey := deterministicPrivKey(t)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(pubKey.SerializeCompressed()), &chainParams,
+	)
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	prevOut, tx := createDummyTestTx(pkScript)
+	w, mocks := createUnlockedWalletWithMocks(t)
+	accountID := uint32(7)
+
+	expectStoreAddressInfo(t, w, mocks, addr, &db.AddressInfo{
+		AccountID:         &accountID,
+		AccountName:       "imported-xpub",
+		KeyScope:          db.KeyScope(waddrmgr.KeyScopeBIP0084),
+		AddrType:          db.WitnessPubKey,
+		IsImported:        true,
+		HasDerivationPath: true,
+		Branch:            0,
+		Index:             3,
+		ScriptPubKey:      pkScript,
+		PubKey:            pubKey.SerializeCompressed(),
+	})
+
+	fetcher := txscript.NewCannedPrevOutputFetcher(pkScript, prevOut.Value)
+
+	// Act: Attempt to build an unlocking script for the public-only child.
+	_, err = w.ComputeUnlockingScript(t.Context(), &UnlockingScriptParams{
+		Tx:        tx,
+		Output:    prevOut,
+		SigHashes: txscript.NewTxSigHashes(tx, fetcher),
+		HashType:  txscript.SigHashAll,
+	})
+
+	// Assert: Signing reports no associated private key without consulting
+	// account secrets, raw-address secrets, or the decryption vault.
+	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
+	mocks.store.AssertNotCalled(
+		t, "GetAccountSecret", mock.Anything, mock.Anything,
+	)
+	mocks.store.AssertNotCalled(
+		t, "GetAddressSecret", mock.Anything, mock.Anything,
+	)
+	mocks.vault.AssertNotCalled(t, "Decrypt", mock.Anything, mock.Anything)
+}
+
 // TestComputeUnlockingScriptImportedAddress verifies that
 // ComputeUnlockingScript signs for an imported address by resolving the private
 // key from its own encrypted secret in the store rather than an account
