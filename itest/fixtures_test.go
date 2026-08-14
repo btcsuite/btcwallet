@@ -9,6 +9,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/pkg/btcunit"
+	"github.com/btcsuite/btcwallet/wallet/txrules"
 )
 
 // Fixture values shared by more than one component's integration tests. They
@@ -23,11 +25,17 @@ const (
 	// enough that the lease never expires mid-test.
 	leaseDuration = 10 * time.Minute
 
-	// The funding amounts shared by the component test cases.
+	// The funding and payment amounts shared by the component test cases.
+	halfBTC  = btcutil.SatoshiPerBitcoin / 2
 	oneBTC   = 1 * btcutil.SatoshiPerBitcoin
 	twoBTC   = 2 * btcutil.SatoshiPerBitcoin
 	threeBTC = 3 * btcutil.SatoshiPerBitcoin
 )
+
+// relayFeeRate is the default relay fee, one satoshi per virtual byte. Any
+// case that authors a transaction pays it, and it keeps the fee negligible
+// against the funding amounts above.
+var relayFeeRate = btcunit.NewSatPerKVByte(txrules.DefaultRelayFeePerKb)
 
 // unknownOutpoint returns an outpoint that was never mined and is therefore
 // unknown to any wallet.
