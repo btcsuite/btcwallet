@@ -17,21 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	// halfBTC is the payment amount the TxCreator cases use. It is small
-	// enough that any single funded coin covers it.
-	halfBTC = btcutil.SatoshiPerBitcoin / 2
-
-	// txCreatorFundingType is the address type the TxCreator cases fund and
-	// select from. Each case derives its key scope from this value, so the
-	// funded scope is never stated twice.
-	txCreatorFundingType = waddrmgr.WitnessPubKey
-)
-
-// relayFeeRate is the fee rate the TxCreator cases author at. It is the
-// default relay fee, one satoshi per virtual byte, which keeps the fee
-// negligible against the funded amounts.
-var relayFeeRate = btcunit.NewSatPerKVByte(txrules.DefaultRelayFeePerKb)
+// txCreatorFundingType is the address type the TxCreator cases fund and select
+// from. Each case derives its key scope from this value, so the funded scope is
+// never stated twice.
+const txCreatorFundingType = waddrmgr.WitnessPubKey
 
 // deriveWalletPayment derives a fresh external address of the requested type
 // from the wallet and returns a payment of amount to it.
