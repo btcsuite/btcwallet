@@ -92,15 +92,14 @@ type WalletFixture struct {
 }
 
 // NewWallet creates, registers and prepares a wallet as the fixture describes,
-// returning it alongside the outpoints funding produced, in the order of the
-// requested amounts.
+// returning it alongside what its funding transaction created.
 //
 // A funded fixture returns after the funding block's synchronization check,
 // which mining performs for every registered wallet, so its coins are readable
 // without a further check; deriving an address afterwards does not need one
 // either. An unfunded fixture mines nothing and so provides no such boundary.
 func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
-	[]wire.OutPoint) {
+	WalletFunding) {
 
 	h.Helper()
 
@@ -121,7 +120,7 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 			h, fixture.Amounts, "funding needs a started wallet",
 		)
 
-		return w, nil
+		return w, WalletFunding{}
 	}
 
 	err = w.Start(h.Context())
@@ -132,7 +131,7 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	}
 
 	if len(fixture.Amounts) == 0 {
-		return w, nil
+		return w, WalletFunding{}
 	}
 
 	return w, h.FundWalletOfType(w, fixture.AddrType, fixture.Amounts...)
@@ -224,11 +223,23 @@ func (h *HarnessTest) NewWalletAddressOfType(w *wallet.Wallet,
 	return addr
 }
 
+// WalletFunding describes the outputs a funding transaction created.
+type WalletFunding struct {
+	// WalletOutpoints are the outputs the funded wallet owns, in the order
+	// of the amounts that were requested.
+	WalletOutpoints []wire.OutPoint
+
+	// ForeignOutpoints are the transaction's remaining outputs, which
+	// exist on chain but belong to the miner rather than to the funded
+	// wallet. Funding pays its own change here, so there is normally one.
+	ForeignOutpoints []wire.OutPoint
+}
+
 // FundWallet pays one output per amount to fresh wallet addresses of the
 // default funding type in a single miner transaction, confirms it, and returns
-// the wallet outpoints in the order of the amounts argument.
+// what the funding transaction created.
 func (h *HarnessTest) FundWallet(w *wallet.Wallet,
-	amounts ...btcutil.Amount) []wire.OutPoint {
+	amounts ...btcutil.Amount) WalletFunding {
 
 	h.Helper()
 
@@ -237,10 +248,13 @@ func (h *HarnessTest) FundWallet(w *wallet.Wallet,
 
 // FundWalletOfType pays one output per amount to fresh wallet addresses of the
 // requested address type in a single miner transaction, confirms it, and
-// returns the wallet outpoints in the order of the amounts argument.
+// returns what the funding transaction created.
+//
+// The transaction's outputs are classified here, where the transaction itself
+// is known, so no caller has to infer which of them the wallet owns.
 func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	addrType waddrmgr.AddressType,
-	amounts ...btcutil.Amount) []wire.OutPoint {
+	amounts ...btcutil.Amount) WalletFunding {
 
 	h.Helper()
 
@@ -267,7 +281,11 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	// Locate each wallet output's index within the funding transaction so
 	// callers receive ready-to-use outpoints in the order of the amounts
 	// argument.
-	outpoints := make([]wire.OutPoint, 0, len(outputs))
+	owned := make(map[uint32]struct{}, len(outputs))
+	funding := WalletFunding{
+		WalletOutpoints: make([]wire.OutPoint, 0, len(outputs)),
+	}
+
 	for _, output := range outputs {
 		index := -1
 
@@ -282,49 +300,34 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 		require.NotEqual(h, -1, index,
 			"funding output missing from transaction")
 
-		outpoints = append(outpoints, wire.OutPoint{
-			Hash:  *txid,
-			Index: uint32(index), //nolint:gosec
-		})
+		outputIndex := uint32(index) //nolint:gosec
+		owned[outputIndex] = struct{}{}
+
+		funding.WalletOutpoints = append(
+			funding.WalletOutpoints, wire.OutPoint{
+				Hash:  *txid,
+				Index: outputIndex,
+			},
+		)
 	}
 
-	return outpoints
-}
-
-// ForeignOutpoint returns an outpoint of the funding transaction that the
-// funded wallet does not own.
-//
-// Funding pays one output per requested amount plus a single change output
-// back to the miner, so exactly one index in the transaction's first
-// len(funded)+1 outputs is not wallet-owned. That output exists on chain and is
-// spendable by the miner, which makes it the fixture's foreign coin.
-func (h *HarnessTest) ForeignOutpoint(funded []wire.OutPoint) wire.OutPoint {
-	h.Helper()
-
-	require.NotEmpty(h, funded, "no funded outpoints")
-
-	owned := make(map[uint32]struct{}, len(funded))
-	for _, outpoint := range funded {
-		owned[outpoint.Index] = struct{}{}
-	}
-
-	for index := range len(funded) + 1 {
-		//nolint:gosec // A funding transaction's output count is small.
-		outputIndex := uint32(index)
-
+	// Whatever the transaction pays elsewhere belongs to the miner, and is
+	// reported as it stands rather than assumed to exist.
+	for i := range tx.TxOut {
+		outputIndex := uint32(i) //nolint:gosec
 		if _, ok := owned[outputIndex]; ok {
 			continue
 		}
 
-		return wire.OutPoint{
-			Hash:  funded[0].Hash,
-			Index: outputIndex,
-		}
+		funding.ForeignOutpoints = append(
+			funding.ForeignOutpoints, wire.OutPoint{
+				Hash:  *txid,
+				Index: outputIndex,
+			},
+		)
 	}
 
-	h.Fatalf("funding transaction has no foreign output")
-
-	return wire.OutPoint{}
+	return funding
 }
 
 // ensureAccount makes sure an account exists for the given key scope, creating
