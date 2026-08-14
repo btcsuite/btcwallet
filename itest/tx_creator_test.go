@@ -55,11 +55,13 @@ func testCreateTransactionSelectCoins(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
@@ -219,11 +221,13 @@ func testCreateTransactionManualInputs(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC, threeBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	// The first payment needs two coins, the second needs one.
 	large := deriveWalletPayment(h, w, txCreatorFundingType, threeBTC+halfBTC)
@@ -314,11 +318,13 @@ func testCreateTransactionManualInputs(h *bwtest.HarnessTest) {
 // an input source nor a change source funds itself from the default account,
 // which the wallet resolves under the Taproot key scope.
 func testCreateTransactionDefaultAccount(h *bwtest.HarnessTest) {
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: waddrmgr.TaprootPubKey,
 		Amounts:  []btcutil.Amount{oneBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, waddrmgr.TaprootPubKey, halfBTC)
 
@@ -369,11 +375,13 @@ func testCreateTransactionCoinSource(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC, threeBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
@@ -440,11 +448,13 @@ func testCreateTransactionOmitChange(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{smallCoin},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(
 		h, w, txCreatorFundingType, smallCoin-changeLeftover,
@@ -484,11 +494,13 @@ func testCreateTransactionRejectIntent(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
@@ -693,11 +705,13 @@ func testCreateTransactionOutputBoundaries(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
@@ -800,11 +814,13 @@ func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, outpoints := h.NewWallet(bwtest.WalletFixture{
+	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txCreatorFundingType,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
 		Unlocked: true,
 	})
+
+	outpoints := funding.WalletOutpoints
 
 	payment := deriveWalletPayment(h, w, txCreatorFundingType, halfBTC)
 
@@ -829,7 +845,12 @@ func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    scope,
 	}
-	foreign := h.ForeignOutpoint(outpoints)
+
+	require.Len(
+		h, funding.ForeignOutpoints, 1, "unexpected foreign output count",
+	)
+
+	foreign := funding.ForeignOutpoints[0]
 
 	ineligible := []struct {
 		name   string
@@ -982,7 +1003,8 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
-	outpoints := h.FundWalletOfType(w, txCreatorFundingType, oneBTC)
+	funding := h.FundWalletOfType(w, txCreatorFundingType, oneBTC)
+	outpoints := funding.WalletOutpoints
 
 	// Funding derives an address, which the harness unlocks for when the
 	// account is missing, but it restores the locked state afterwards.

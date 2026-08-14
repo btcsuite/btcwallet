@@ -51,7 +51,7 @@ func testListUnspent(h *bwtest.HarnessTest) {
 	// Fund out of order so the ascending amount sort is observable.
 	amounts := []btcutil.Amount{threeBTC, oneBTC, twoBTC}
 
-	outpoints := h.FundWallet(w, amounts...)
+	outpoints := h.FundWallet(w, amounts...).WalletOutpoints
 	require.Len(h, outpoints, 3, "unexpected funded outpoint count")
 
 	funded := make(map[wire.OutPoint]btcutil.Amount, len(outpoints))
@@ -154,7 +154,7 @@ func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
 	h.MineBlockToAddress(addr)
 
 	// Fund an ordinary confirmed output as the spendable control.
-	funded := h.FundWallet(w, oneBTC)
+	funded := h.FundWallet(w, oneBTC).WalletOutpoints
 	require.Len(h, funded, 1, "unexpected funded outpoint count")
 
 	// Both mining helpers wait for the exact committed wallet tip, so the
@@ -304,7 +304,8 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 	// The Spendable assertion below required unlocking the wallet.
 	h.UnlockWallet(w)
 
-	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+	funding := h.FundWallet(w, oneBTC, twoBTC)
+	outpoints := funding.WalletOutpoints
 
 	// Iterate a slice rather than a map so the assertions run in a
 	// deterministic order and a duplicated outpoint can never collapse
@@ -344,7 +345,11 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 	// The funding transaction also pays one change output back to the
 	// miner. That output exists on chain but belongs to the miner, so the
 	// wallet must reject it as unknown.
-	_, err = w.GetUtxo(h.Context(), h.ForeignOutpoint(outpoints))
+	require.Len(
+		h, funding.ForeignOutpoints, 1, "unexpected foreign output count",
+	)
+
+	_, err = w.GetUtxo(h.Context(), funding.ForeignOutpoints[0])
 	require.ErrorIs(
 		h, err, wallet.ErrUnknownOutput,
 		"foreign outpoint not rejected",
@@ -372,7 +377,7 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
-	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 
 	// Lease the first output; the expiration tracks the requested duration.
 	expiration, err := w.LeaseOutput(
@@ -474,7 +479,7 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
-	outpoints := h.FundWallet(w, oneBTC)
+	outpoints := h.FundWallet(w, oneBTC).WalletOutpoints
 
 	// Releasing an output with no active lease is a no-op.
 	require.NoError(
@@ -542,7 +547,7 @@ func testListLeasedOutputs(h *bwtest.HarnessTest) {
 
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
-	outpoints := h.FundWallet(w, oneBTC, twoBTC)
+	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 
 	// A funded wallet starts with no leases.
 	leases, err := w.ListLeasedOutputs(h.Context())
