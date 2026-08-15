@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
@@ -20,6 +21,214 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestAccountInfoFromStore verifies SQL and modern kvdb snapshots map every
+// public semantic field without exposing Store identity. The fixtures cover
+// absent, present-zero, and present-nonzero optional values, including a stale
+// derived fingerprint that must be replaced by the Wallet-cached value.
+func TestAccountInfoFromStore(t *testing.T) {
+	t.Parallel()
+
+	var (
+		storeAccountID        = uint32(91)
+		storeAccountZero      = uint32(0)
+		storeAccountSeven     = uint32(7)
+		storeFingerprintZero  = uint32(0)
+		storeFingerprintStale = uint32(0xfedcba98)
+		publicAccountZero     = AccountNumber(0)
+		publicAccountSeven    = AccountNumber(7)
+		publicFingerprintZero = MasterFingerprint(0)
+		publicFingerprintSet  = MasterFingerprint(0x01020304)
+	)
+
+	createdAt := time.Date(
+		2026, time.August, 15, 9, 30, 0, 0, time.UTC,
+	)
+	tests := []struct {
+		name              string
+		walletFingerprint uint32
+		store             db.AccountInfo
+		want              AccountInfo
+	}{
+		{
+			name: "sql present zero optionals",
+			store: db.AccountInfo{
+				AccountID:          &storeAccountID,
+				AccountNumber:      &storeAccountZero,
+				AccountName:        "sql derived",
+				ExternalKeyCount:   2,
+				InternalKeyCount:   3,
+				ImportedKeyCount:   4,
+				ConfirmedBalance:   btcutil.Amount(5),
+				UnconfirmedBalance: btcutil.Amount(6),
+				IsWatchOnly:        true,
+				CreatedAt:          createdAt,
+				KeyScope:           db.KeyScope{Purpose: 49, Coin: 0},
+				AddrSchema: db.ScopeAddrSchema{
+					ExternalAddrType: db.NestedWitnessPubKey,
+					InternalAddrType: db.WitnessPubKey,
+				},
+				PublicKey:            []byte{7, 8, 9},
+				MasterKeyFingerprint: &storeFingerprintZero,
+			},
+			want: AccountInfo{
+				AccountNumber:      &publicAccountZero,
+				AccountName:        "sql derived",
+				ExternalKeyCount:   2,
+				InternalKeyCount:   3,
+				ImportedKeyCount:   4,
+				ConfirmedBalance:   btcutil.Amount(5),
+				UnconfirmedBalance: btcutil.Amount(6),
+				IsWatchOnly:        true,
+				CreatedAt:          createdAt,
+				KeyScope:           waddrmgr.KeyScope{Purpose: 49, Coin: 0},
+				AddrSchema: waddrmgr.ScopeAddrSchema{
+					ExternalAddrType: waddrmgr.NestedWitnessPubKey,
+					InternalAddrType: waddrmgr.WitnessPubKey,
+				},
+				PublicKey:            []byte{7, 8, 9},
+				MasterKeyFingerprint: &publicFingerprintZero,
+			},
+		},
+		{
+			name: "modern kvdb absent optionals",
+			store: db.AccountInfo{
+				AccountID:          &storeAccountID,
+				AccountName:        "imported",
+				IsImported:         true,
+				ExternalKeyCount:   10,
+				InternalKeyCount:   11,
+				ImportedKeyCount:   12,
+				ConfirmedBalance:   btcutil.Amount(13),
+				UnconfirmedBalance: btcutil.Amount(14),
+				CreatedAt:          createdAt.Add(time.Hour),
+				KeyScope:           db.KeyScope{Purpose: 84, Coin: 1},
+				AddrSchema: db.ScopeAddrSchema{
+					ExternalAddrType: db.WitnessPubKey,
+					InternalAddrType: db.WitnessPubKey,
+				},
+			},
+			want: AccountInfo{
+				AccountName:        "imported",
+				IsImported:         true,
+				ExternalKeyCount:   10,
+				InternalKeyCount:   11,
+				ImportedKeyCount:   12,
+				ConfirmedBalance:   btcutil.Amount(13),
+				UnconfirmedBalance: btcutil.Amount(14),
+				CreatedAt:          createdAt.Add(time.Hour),
+				KeyScope:           waddrmgr.KeyScope{Purpose: 84, Coin: 1},
+				AddrSchema: waddrmgr.ScopeAddrSchema{
+					ExternalAddrType: waddrmgr.WitnessPubKey,
+					InternalAddrType: waddrmgr.WitnessPubKey,
+				},
+			},
+		},
+		{
+			name:              "modern kvdb ignores stale fingerprint",
+			walletFingerprint: uint32(publicFingerprintSet),
+			store: db.AccountInfo{
+				AccountID:          &storeAccountID,
+				AccountNumber:      &storeAccountSeven,
+				AccountName:        "kvdb derived",
+				ExternalKeyCount:   15,
+				InternalKeyCount:   16,
+				ImportedKeyCount:   17,
+				ConfirmedBalance:   btcutil.Amount(18),
+				UnconfirmedBalance: btcutil.Amount(19),
+				IsWatchOnly:        true,
+				CreatedAt:          createdAt.Add(2 * time.Hour),
+				KeyScope:           db.KeyScope{Purpose: 86, Coin: 1},
+				AddrSchema: db.ScopeAddrSchema{
+					ExternalAddrType: db.TaprootPubKey,
+					InternalAddrType: db.TaprootPubKey,
+				},
+				PublicKey:            []byte{20, 21, 22},
+				MasterKeyFingerprint: &storeFingerprintStale,
+			},
+			want: AccountInfo{
+				AccountNumber:      &publicAccountSeven,
+				AccountName:        "kvdb derived",
+				ExternalKeyCount:   15,
+				InternalKeyCount:   16,
+				ImportedKeyCount:   17,
+				ConfirmedBalance:   btcutil.Amount(18),
+				UnconfirmedBalance: btcutil.Amount(19),
+				IsWatchOnly:        true,
+				CreatedAt:          createdAt.Add(2 * time.Hour),
+				KeyScope:           waddrmgr.KeyScope{Purpose: 86, Coin: 1},
+				AddrSchema: waddrmgr.ScopeAddrSchema{
+					ExternalAddrType: waddrmgr.TaprootPubKey,
+					InternalAddrType: waddrmgr.TaprootPubKey,
+				},
+				PublicKey:            []byte{20, 21, 22},
+				MasterKeyFingerprint: &publicFingerprintSet,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := &Wallet{masterFingerprint: test.walletFingerprint}
+			got, err := w.accountInfoFromStore(&test.store)
+			require.NoError(t, err)
+			require.Equal(t, test.want, *got)
+		})
+	}
+}
+
+// TestAccountInfoFromStoreCopiesMutableFields verifies independently converted
+// results do not alias Store-owned optionals or public-key bytes.
+func TestAccountInfoFromStoreCopiesMutableFields(t *testing.T) {
+	t.Parallel()
+
+	accountNumber := uint32(2)
+	fingerprint := uint32(3)
+	store := db.AccountInfo{
+		AccountNumber: &accountNumber,
+		IsImported:    true,
+		AddrSchema: db.ScopeAddrSchema{
+			ExternalAddrType: db.WitnessPubKey,
+			InternalAddrType: db.WitnessPubKey,
+		},
+		PublicKey:            []byte{4, 5, 6},
+		MasterKeyFingerprint: &fingerprint,
+	}
+	w := &Wallet{}
+
+	first, err := w.accountInfoFromStore(&store)
+	require.NoError(t, err)
+	second, err := w.accountInfoFromStore(&store)
+	require.NoError(t, err)
+
+	*first.AccountNumber = AccountNumber(20)
+	*first.MasterKeyFingerprint = MasterFingerprint(30)
+	first.PublicKey[0] = 40
+
+	require.Equal(t, uint32(2), *store.AccountNumber)
+	require.Equal(t, uint32(3), *store.MasterKeyFingerprint)
+	require.Equal(t, []byte{4, 5, 6}, store.PublicKey)
+	require.Equal(t, AccountNumber(2), *second.AccountNumber)
+	require.Equal(t, MasterFingerprint(3), *second.MasterKeyFingerprint)
+	require.Equal(t, []byte{4, 5, 6}, second.PublicKey)
+}
+
+// TestAccountInfoFromStoreRejectsInvalidSchema verifies a malformed Store
+// schema fails conversion instead of producing a partial public result.
+func TestAccountInfoFromStoreRejectsInvalidSchema(t *testing.T) {
+	t.Parallel()
+
+	store := db.AccountInfo{AddrSchema: db.ScopeAddrSchema{
+		ExternalAddrType: db.Anchor,
+		InternalAddrType: db.WitnessPubKey,
+	}}
+
+	got, err := (&Wallet{}).accountInfoFromStore(&store)
+	require.ErrorContains(t, err, "external account address schema")
+	require.Nil(t, got)
+}
 
 // stubAccountDeriveFn holds the master-key material the test wallet's
 // buildAccountDeriveFn path consumes.
