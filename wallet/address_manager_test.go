@@ -707,6 +707,92 @@ func TestGetAddressInfo(t *testing.T) {
 	require.Equal(t, waddrmgr.WitnessPubKey, intInfo.AddrType)
 }
 
+// TestGetAddressInfoMapsNotFound verifies that a Store address miss exposes
+// only the wallet-owned public sentinel with address context.
+func TestGetAddressInfoMapsNotFound(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: configure the existing Store mock to return its normalized
+	// not-found sentinel for a valid address lookup.
+	w, deps := createStartedWalletWithMocks(t)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: scriptPubKey,
+	}).Return((*db.AddressInfo)(nil), db.ErrAddressNotFound).Once()
+
+	// Act: look up the unknown address through the wallet-owned API
+	// boundary.
+	_, err = w.GetAddressInfo(t.Context(), addr)
+
+	// Assert: callers see the wallet sentinel and address context without
+	// inheriting the Store sentinel.
+	require.ErrorIs(t, err, ErrAddressNotFound)
+	require.ErrorContains(t, err, addr.String())
+	require.NotErrorIs(t, err, db.ErrAddressNotFound)
+}
+
+// TestGetAddressInfoPreservesStoreError verifies that an unexpected Store
+// failure retains its identity and is not promoted to the public not-found
+// contract.
+func TestGetAddressInfoPreservesStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: configure the existing Store mock to return an unexpected
+	// error for an otherwise valid address query.
+	w, deps := createStartedWalletWithMocks(t)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+
+	scriptPubKey, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	deps.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID:     w.id,
+		ScriptPubKey: scriptPubKey,
+	}).Return((*db.AddressInfo)(nil), errDBMock).Once()
+
+	// Act: pass the Store failure through the address lookup boundary.
+	_, err = w.GetAddressInfo(t.Context(), addr)
+
+	// Assert: the original error remains discoverable and is not
+	// reclassified as an address miss.
+	require.ErrorIs(t, err, errDBMock)
+	require.NotErrorIs(t, err, ErrAddressNotFound)
+}
+
+// TestGetAddressInfoRejectsInvalidAddress verifies that address-to-script
+// failures remain distinct from a wallet ownership miss and never reach the
+// Store.
+func TestGetAddressInfoRejectsInvalidAddress(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a typed nil address that cannot be converted to a
+	// script, together with the existing Store mock.
+	w, deps := createStartedWalletWithMocks(t)
+
+	var addr *address.AddressPubKeyHash
+
+	// Act: attempt the lookup before any Store query can be built.
+	_, err := w.GetAddressInfo(t.Context(), addr)
+
+	// Assert: the script-conversion error remains distinct from a wallet
+	// miss, and the Store was never queried.
+	require.Error(t, err)
+	require.ErrorContains(t, err, "pay to addr script")
+	require.NotErrorIs(t, err, ErrAddressNotFound)
+	deps.store.AssertNotCalled(t, "GetAddress", mock.Anything, mock.Anything)
+}
+
 // TestGetDerivationInfoExternalAddressSuccess tests that we can successfully
 // get the derivation info for an external address.
 func TestGetDerivationInfoExternalAddressSuccess(t *testing.T) {

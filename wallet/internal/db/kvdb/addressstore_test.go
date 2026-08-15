@@ -335,6 +335,48 @@ func TestGetAddressBareMultisigReturnsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, db.ErrAddressNotFound)
 }
 
+// TestGetAddressUnknownStandardAddressReturnsNotFound verifies that a valid
+// standard script for an unowned address reaches the legacy manager lookup and
+// returns only the Store-owned address-miss sentinel.
+func TestGetAddressUnknownStandardAddressReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: build a real legacy-backed Store, then encode a standard
+	// witness address from a fresh key that was never imported into it. This
+	// keeps script extraction successful so the lookup reaches waddrmgr.
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	addrStore := newSpendableAddrMgr(t, dbConn)
+	store := NewStore(dbConn, nil, addrStore)
+
+	foreignKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	foreignAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(foreignKey.PubKey().SerializeCompressed()),
+		addrStore.ChainParams(),
+	)
+	require.NoError(t, err)
+
+	foreignScript, err := txscript.PayToAddrScript(foreignAddr)
+	require.NoError(t, err)
+
+	// Act: resolve the valid but unowned script through the modern kvdb Store
+	// boundary, which must normalize the legacy manager miss.
+	_, err = store.GetAddress(t.Context(), db.GetAddressQuery{
+		WalletID:     0,
+		ScriptPubKey: foreignScript,
+	})
+
+	// Assert: callers can classify the Store sentinel without inheriting the
+	// backend-specific waddrmgr.ManagerError in the error chain.
+	require.ErrorIs(t, err, db.ErrAddressNotFound)
+
+	var managerErr waddrmgr.ManagerError
+	require.NotErrorAs(t, err, &managerErr)
+}
+
 // TestAddressStoreResolveOwnedAddresses verifies that the batched resolver
 // returns only the wallet-owned subset of a mixed script set in a single
 // transaction, omits scripts that are not owned, and treats an empty input as
