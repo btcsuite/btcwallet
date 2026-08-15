@@ -47,25 +47,27 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	require.Equal(t, uint32(7), w.ID())
 }
 
-// TestManagerLoadSQLiteRequiresWalletRow verifies that loading a name with no
-// SQLite wallet row surfaces the not-found error through the public Manager
-// API rather than assembling a Wallet over an absent row.
-func TestManagerLoadSQLiteRequiresWalletRow(t *testing.T) {
+// TestManagerLoadPreservesBackendFailure verifies that a non-not-found SQL
+// backend failure is not reclassified as a missing wallet.
+func TestManagerLoadPreservesBackendFailure(t *testing.T) {
 	t.Parallel()
 
-	m, err := NewManager(t.Context(), ManagerConfig{
-		Backend:     DBBackendSQLite,
-		DataSource:  filepath.Join(t.TempDir(), "runtime.sqlite"),
-		ChainParams: &chainParams,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = m.Close() })
+	// Arrange a SQL manager whose wallet lookup returns an unrelated
+	// backend sentinel instead of the database not-found classification.
+	cfg, _ := sqliteCreateConfig(t)
+	store := &walletmock.Store{}
+	t.Cleanup(func() { store.AssertExpectations(t) })
 
-	w, err := m.Load(Config{
-		Chain: &bwmock.Chain{},
-		Name:  "no-such-wallet",
-	})
-	require.ErrorIs(t, err, db.ErrWalletNotFound)
+	store.On("GetWallet", mock.Anything, cfg.Name).
+		Return(nil, errDBMock).Once()
+
+	// Act by loading the wallet through the public Manager boundary.
+	w, err := testSQLManager(t, store).Load(cfg)
+
+	// Assert that the original backend failure remains discoverable and is
+	// not replaced with the public missing-wallet sentinel.
+	require.ErrorIs(t, err, errDBMock)
+	require.NotErrorIs(t, err, ErrWalletNotFound)
 	require.Nil(t, w)
 }
 

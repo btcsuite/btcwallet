@@ -214,11 +214,19 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 // testManagerLoadMissing verifies that loading a wallet that was never created
 // fails rather than silently returning an empty wallet.
 func testManagerLoadMissing(h *bwtest.HarnessTest) {
+	// Arrange a manager whose durable store has never contained the named
+	// wallet from the standard test configuration.
 	cfg, _ := h.TestWalletConfig()
-
 	manager := h.NewWalletManager()
-	_, err := manager.Load(cfg)
-	require.Error(h, err, "load of never-created wallet should fail")
+
+	// Act by asking the manager to load the never-created wallet.
+	w, err := manager.Load(cfg)
+
+	// Assert that the public missing-wallet contract is returned without a
+	// partially assembled wallet.
+	require.ErrorIs(h, err, wallet.ErrWalletNotFound,
+		"load of never-created wallet should report wallet not found")
+	require.Nil(h, w, "load of never-created wallet should return no wallet")
 }
 
 // testManagerCreateWatchOnly verifies that a watch-only wallet is created,

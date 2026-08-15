@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -79,11 +80,16 @@ func OpenStore(cfg Config) (*Store, *waddrmgr.Manager, error) {
 
 	err := walletdb.Update(cfg.DB, func(tx walletdb.ReadWriteTx) error {
 		addrMgrBucket := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		if addrMgrBucket == nil && txMgrBucket == nil {
+			return db.ErrWalletNotFound
+		}
+
 		if addrMgrBucket == nil {
 			return errMissingAddrmgrNamespace
 		}
 
-		txMgrBucket := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		if txMgrBucket == nil {
 			return errMissingTxmgrNamespace
 		}
