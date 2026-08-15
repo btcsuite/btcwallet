@@ -216,7 +216,8 @@ func TestListAccounts(t *testing.T) {
 	require.Len(t, accounts, 1)
 	require.Equal(t, "default", accounts[0].AccountName)
 	require.NotNil(t, accounts[0].MasterKeyFingerprint)
-	require.Equal(t, masterFP, *accounts[0].MasterKeyFingerprint)
+	require.Equal(t, MasterFingerprint(masterFP),
+		*accounts[0].MasterKeyFingerprint)
 }
 
 // TestListAccountsByScope verifies the scope filter narrows the query.
@@ -389,12 +390,13 @@ func TestGetAccount(t *testing.T) {
 	info, err := w.GetAccount(t.Context(), scope, name)
 	require.NoError(t, err)
 	require.NotNil(t, info.AccountNumber)
-	require.Equal(t, uint32(1), *info.AccountNumber)
+	require.Equal(t, AccountNumber(1), *info.AccountNumber)
 	require.Equal(t, name, info.AccountName)
 	require.Equal(t, btcutil.Amount(100), info.ConfirmedBalance)
 	require.Equal(t, btcutil.Amount(23), info.UnconfirmedBalance)
 	require.NotNil(t, info.MasterKeyFingerprint)
-	require.Equal(t, masterFP, *info.MasterKeyFingerprint)
+	require.Equal(t, MasterFingerprint(masterFP),
+		*info.MasterKeyFingerprint)
 }
 
 // TestGetAccountIncludesImportedPseudoAccount verifies that the AccountInfo
@@ -467,9 +469,9 @@ func TestNewAccount(t *testing.T) {
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
-	require.Equal(t, uint32(1), *account.AccountNumber)
+	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 	require.NotNil(t, account.MasterKeyFingerprint)
-	require.Equal(t, stub.masterKeyFingerprint,
+	require.Equal(t, MasterFingerprint(stub.masterKeyFingerprint),
 		*account.MasterKeyFingerprint)
 
 	// Duplicate-name path.
@@ -525,7 +527,7 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
-	require.Equal(t, uint32(1), *account.AccountNumber)
+	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 }
 
 // TestRenameAccount verifies RenameAccount routes through
