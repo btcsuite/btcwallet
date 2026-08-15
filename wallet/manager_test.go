@@ -528,9 +528,12 @@ func TestManagerLoadError(t *testing.T) {
 		require.Nil(t, w)
 	})
 
-	t.Run("Uninitialized DB", func(t *testing.T) {
+	t.Run("Missing Wallet", func(t *testing.T) {
 		t.Parallel()
 
+		// Arrange a fresh kvdb-backed Manager whose database has never
+		// contained wallet state. This distinguishes absence from a
+		// partially initialized or corrupt wallet.
 		m := testKVDBManager(t)
 		cfg := Config{
 			Chain:       &bwmock.Chain{},
@@ -538,16 +541,42 @@ func TestManagerLoadError(t *testing.T) {
 			Name:        "test",
 		}
 
-		// Attempt to load from a database that has valid buckets but no
-		// wallet data (waddrmgr is not initialized). This should fail
-		// at the database loading step.
+		// Act by loading the never-created wallet through the public
+		// Manager boundary.
 		w, err := m.Load(cfg)
 
-		// We expect an error from waddrmgr.Open indicating the address
-		// manager namespace is missing or invalid.
-		require.Error(t, err)
+		// Assert that the Manager replaces the internal database sentinel
+		// with its public missing-wallet contract and returns no partial
+		// Wallet.
+		require.ErrorIs(t, err, ErrWalletNotFound)
+		require.NotErrorIs(t, err, db.ErrWalletNotFound)
 		require.Nil(t, w)
 	})
+}
+
+// TestManagerLoadMissingSQLite verifies that a real SQLite wallet miss obeys
+// the public Manager contract without exposing its internal database sentinel.
+func TestManagerLoadMissingSQLite(t *testing.T) {
+	t.Parallel()
+
+	// Arrange a Manager over a fresh real SQLite database with a wallet name
+	// that has never been created.
+	m := testSQLiteManager(t)
+
+	const walletName = "no-such-wallet"
+
+	// Act by loading the absent wallet through the public Manager method.
+	w, err := m.Load(Config{
+		Chain: &bwmock.Chain{},
+		Name:  walletName,
+	})
+
+	// Assert that callers receive only the wallet-owned sentinel, retain the
+	// requested name for context, and never receive a partial Wallet.
+	require.ErrorIs(t, err, ErrWalletNotFound)
+	require.NotErrorIs(t, err, db.ErrWalletNotFound)
+	require.ErrorContains(t, err, walletName)
+	require.Nil(t, w)
 }
 
 // TestManagerString verifies that the String representation of the Manager

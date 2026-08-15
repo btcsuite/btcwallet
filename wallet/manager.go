@@ -11,9 +11,12 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
 
 var (
+	// ErrWalletNotFound is returned when a wallet is not found by Manager.Load.
+	ErrWalletNotFound = errors.New("wallet not found")
 
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
@@ -368,7 +371,8 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 
 // Load loads an existing wallet from the provided configuration. It opens the
 // database, initializes the wallet structure, and registers it with the manager
-// for tracking.
+// for tracking. If the named wallet does not exist, Load returns
+// ErrWalletNotFound.
 func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	// The Manager owns the network for every wallet it serves; see Create.
 	cfg.ChainParams = m.chainParams
@@ -390,6 +394,14 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 
 	data, err := m.backend.load(context.Background(), cfg)
 	if err != nil {
+		// Hide the database sentinel at the public Manager boundary while
+		// retaining the requested wallet name for caller diagnostics.
+		if errors.Is(err, db.ErrWalletNotFound) {
+			return nil, fmt.Errorf(
+				"wallet %q: %w", cfg.Name, ErrWalletNotFound,
+			)
+		}
+
 		return nil, err
 	}
 
