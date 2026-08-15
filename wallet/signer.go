@@ -1273,7 +1273,7 @@ func (w *Wallet) privKeyForAddress(ctx context.Context,
 
 		return w.resolveImportedAddrPrivKey(ctx, scriptPubKey)
 
-	case errors.Is(err, db.ErrAddressNotFound):
+	case errors.Is(err, ErrAddressNotFound):
 		// The address is not owned by the wallet, so the wallet holds
 		// no private key for it.
 		return nil, ErrNoAssocPrivateKey
