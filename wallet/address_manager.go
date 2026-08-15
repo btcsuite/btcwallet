@@ -46,6 +46,10 @@ var (
 	// script.
 	ErrDerivationPathNotFound = errors.New("derivation path not found")
 
+	// ErrAddressNotFound is returned when an address is not known to the
+	// wallet.
+	ErrAddressNotFound = errors.New("address not found")
+
 	// ErrUnknownAddrType is an error returned when a wallet function is
 	// called with an unknown address type.
 	ErrUnknownAddrType = errors.New("unknown address type")
@@ -186,7 +190,8 @@ type AddressManager interface {
 		address.Address, error)
 
 	// GetAddressInfo returns detailed information about a managed address. If
-	// the address is not known to the wallet, an error is returned.
+	// the address is not known to the wallet, the returned error wraps
+	// ErrAddressNotFound for errors.Is matching.
 	GetAddressInfo(ctx context.Context, a address.Address) (AddressInfo, error)
 
 	// ListAddresses lists all addresses for a given account, including
@@ -680,7 +685,9 @@ func nextUnusedStoreAddress(storeAddr db.AddressInfo,
 	return addr, true, nil
 }
 
-// GetAddressInfo returns detailed information regarding a wallet address.
+// GetAddressInfo returns detailed information regarding a wallet address. If
+// the address is not known to the wallet, the returned error wraps
+// ErrAddressNotFound for errors.Is matching.
 func (w *Wallet) GetAddressInfo(ctx context.Context, a address.Address) (
 	AddressInfo, error) {
 
@@ -701,6 +708,14 @@ func (w *Wallet) GetAddressInfo(ctx context.Context, a address.Address) (
 		},
 	)
 	if err != nil {
+		// Store implementations normalize backend-specific misses before
+		// this boundary. Translate only that normalized form so raw legacy
+		// manager errors remain unexpected errors.
+		if errors.Is(err, db.ErrAddressNotFound) {
+			return AddressInfo{}, fmt.Errorf("%w: addr=%v",
+				ErrAddressNotFound, a)
+		}
+
 		return AddressInfo{}, err
 	}
 

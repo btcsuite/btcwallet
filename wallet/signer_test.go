@@ -2688,7 +2688,8 @@ func TestGetPrivKeyForAddressSuccess(t *testing.T) {
 func TestGetPrivKeyForAddressFail(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Set up the wallet and mocks.
+	// Arrange: create an unlocked wallet and one deterministic address query
+	// so each Store response exercises the same signer lookup path.
 	w, mocks := createUnlockedWalletWithMocks(t)
 	addr, err := address.NewAddressPubKeyHash(
 		make([]byte, 20), w.cfg.ChainParams,
@@ -2703,7 +2704,8 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 		ScriptPubKey: pkScript,
 	}
 
-	// Case 1: An unexpected store error surfaces, not masked.
+	// Act and assert case 1: an unexpected Store error surfaces without
+	// being masked by a signing-specific sentinel.
 	mocks.store.On("GetAddress", mock.Anything, query).Return(
 		(*db.AddressInfo)(nil), errManagerNotFound,
 	).Once()
@@ -2711,14 +2713,38 @@ func TestGetPrivKeyForAddressFail(t *testing.T) {
 	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
 	require.ErrorIs(t, err, errManagerNotFound)
 
-	// Case 2: The address is not owned by the wallet, so it has no
-	// associated private key.
+	// Act and assert case 2: a normalized Store miss reports that the wallet
+	// has no associated private key and hides the public lookup sentinel.
 	mocks.store.On("GetAddress", mock.Anything, query).Return(
 		(*db.AddressInfo)(nil), db.ErrAddressNotFound,
 	).Once()
 
 	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
 	require.ErrorIs(t, err, ErrNoAssocPrivateKey)
+	require.NotErrorIs(t, err, ErrAddressNotFound)
+
+	// Arrange case 3: return a raw legacy manager miss. The kvdb Store
+	// translates real legacy misses before this boundary, so this synthetic
+	// response must remain an unexpected Store failure.
+	legacyErr := waddrmgr.ManagerError{
+		ErrorCode:   waddrmgr.ErrAddressNotFound,
+		Description: "address not found",
+	}
+	mocks.store.On("GetAddress", mock.Anything, query).Return(
+		(*db.AddressInfo)(nil), legacyErr,
+	).Once()
+
+	// Act: resolve the private key while the Store returns the raw manager
+	// error.
+	_, err = w.GetPrivKeyForAddress(t.Context(), addr)
+
+	// Assert: the typed legacy cause remains available and neither wallet
+	// sentinel replaces it.
+	var managerErr waddrmgr.ManagerError
+	require.ErrorAs(t, err, &managerErr)
+	require.Equal(t, waddrmgr.ErrAddressNotFound, managerErr.ErrorCode)
+	require.NotErrorIs(t, err, ErrNoAssocPrivateKey)
+	require.NotErrorIs(t, err, ErrAddressNotFound)
 }
 
 // TestGetPrivKeyForAddressImportedNoPrivKey verifies that requesting the
