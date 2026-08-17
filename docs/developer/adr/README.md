@@ -4,6 +4,34 @@ This directory contains [Architecture Decision Records (ADRs)](https://github.co
 
 ADRs serve as a historical log of important design choices, providing context for future development and helping new contributors understand the rationale behind the system's architecture.
 
+## Authoring ADRs
+
+Copy [the ADR template](./template.md) to a file named
+`NNNN-short-title.md`, using the next available four-digit number and a concise
+kebab-case title. Replace every instructional comment, complete every section,
+wrap Markdown near 80 columns, and add the ADR to the index below.
+
+Each ADR has exactly one decision status:
+
+- `Proposed`: under discussion and not authoritative.
+- `Accepted`: approved and authoritative for the current architecture.
+- `Rejected`: considered but not approved.
+- `Deprecated`: no longer authoritative and not replaced by one specific ADR.
+- `Superseded`: fully replaced by the ADR named in `Superseded by`.
+
+Implementation progress is not a decision status. Record it in the
+implementation overview or references instead. ADRs written before this
+template that omit a status are treated as `Accepted` unless a relationship
+link says otherwise. The legacy `Accepted and Implemented` wording is also
+equivalent to `Accepted`.
+
+Use `Amends` for a compatible, partial change. The earlier ADR remains
+`Accepted` and links back with `Amended by`. Use `Supersedes` when a new ADR
+fully replaces an earlier decision. The earlier ADR then becomes `Superseded`
+and links back with `Superseded by`. Add both sides of either relationship in
+the same change. When relating a legacy ADR, add its normalized status and
+relationship metadata, but do not rewrite its historical decision body.
+
 ## Existing ADRs
 
 - [ADR 0001: Multi-Wallet Architecture](./0001-multi-wallet-architecture.md) - Decides on the architecture for managing multiple distinct wallets and networks within a single daemon instance.
