@@ -105,3 +105,121 @@ func TestScopeAddrSchemaFromWaddrmgr(t *testing.T) {
 		InternalAddrType: PubKeyHash,
 	}, schema)
 }
+
+// TestAddrTypeToWaddrmgr verifies every database address type with a
+// legacy waddrmgr representation maps explicitly rather than by ordinal.
+func TestAddrTypeToWaddrmgr(t *testing.T) {
+	t.Parallel()
+
+	// The three legacy values below have different ordinals in the database
+	// and waddrmgr enums, which is why this conversion cannot use a cast.
+	require.NotEqual(t, uint8(RawPubKey), uint8(waddrmgr.RawPubKey))
+	require.NotEqual(t, uint8(PubKeyHash), uint8(waddrmgr.PubKeyHash))
+	require.NotEqual(t, uint8(ScriptHash), uint8(waddrmgr.Script))
+
+	testCases := []struct {
+		name  string
+		input AddressType
+		want  waddrmgr.AddressType
+	}{
+		{
+			name:  "raw pubkey",
+			input: RawPubKey,
+			want:  waddrmgr.RawPubKey,
+		},
+		{
+			name:  "pubkey hash",
+			input: PubKeyHash,
+			want:  waddrmgr.PubKeyHash,
+		},
+		{
+			name:  "script hash",
+			input: ScriptHash,
+			want:  waddrmgr.Script,
+		},
+		{
+			name:  "nested witness pubkey",
+			input: NestedWitnessPubKey,
+			want:  waddrmgr.NestedWitnessPubKey,
+		},
+		{
+			name:  "witness pubkey",
+			input: WitnessPubKey,
+			want:  waddrmgr.WitnessPubKey,
+		},
+		{
+			name:  "witness script",
+			input: WitnessScript,
+			want:  waddrmgr.WitnessScript,
+		},
+		{
+			name:  "taproot pubkey",
+			input: TaprootPubKey,
+			want:  waddrmgr.TaprootPubKey,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := addrTypeToWaddrmgr(testCase.input)
+
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, got)
+		})
+	}
+}
+
+// TestAddrTypeToWaddrmgrRejectsUnrepresentable verifies address types that
+// have no legacy waddrmgr representation return ErrInvalidParam.
+func TestAddrTypeToWaddrmgrRejectsUnrepresentable(t *testing.T) {
+	t.Parallel()
+
+	testCases := []AddressType{
+		Anchor,
+		AddressType(255),
+	}
+	for _, testCase := range testCases {
+		_, err := addrTypeToWaddrmgr(testCase)
+
+		require.ErrorIs(t, err, ErrInvalidParam)
+	}
+}
+
+// TestScopeAddrSchemaToWaddrmgr verifies database schemas are converted into
+// the legacy address-manager shape with branch-specific conversion errors.
+func TestScopeAddrSchemaToWaddrmgr(t *testing.T) {
+	t.Parallel()
+
+	schema, err := ScopeAddrSchemaToWaddrmgr(
+		ScopeAddrSchema{
+			ExternalAddrType: PubKeyHash,
+			InternalAddrType: PubKeyHash,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, waddrmgr.ScopeAddrSchema{
+			ExternalAddrType: waddrmgr.PubKeyHash,
+			InternalAddrType: waddrmgr.PubKeyHash,
+		}, schema,
+	)
+
+	_, err = ScopeAddrSchemaToWaddrmgr(
+		ScopeAddrSchema{
+			ExternalAddrType: Anchor,
+			InternalAddrType: WitnessPubKey,
+		},
+	)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.ErrorContains(t, err, "external:")
+
+	_, err = ScopeAddrSchemaToWaddrmgr(
+		ScopeAddrSchema{
+			ExternalAddrType: WitnessPubKey,
+			InternalAddrType: Anchor,
+		},
+	)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.ErrorContains(t, err, "internal:")
+}

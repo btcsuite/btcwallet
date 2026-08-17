@@ -829,6 +829,74 @@ func TestCreateImportedAccountUsesAddrSchema(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+
+	// BIP44 uses db.PubKeyHash=1 while waddrmgr.PubKeyHash=0. This case
+	// guards against the old raw cast by asserting the persisted legacy
+	// schema for both the external and internal branches.
+	bip44Scope := db.KeyScope{
+		Purpose: waddrmgr.KeyScopeBIP0044.Purpose,
+		Coin:    waddrmgr.KeyScopeBIP0044.Coin,
+	}
+	bip44Schema := db.ScopeAddrSchema{
+		ExternalAddrType: db.PubKeyHash,
+		InternalAddrType: db.PubKeyHash,
+	}
+	bip44Name := "imported-bip44-schema"
+
+	info, err = store.CreateImportedAccount(
+		t.Context(), db.CreateImportedAccountParams{
+			Scope:             bip44Scope,
+			Name:              bip44Name,
+			MasterFingerprint: 0xDEADBEEF,
+			PublicKey:         []byte(masterPub.String()),
+			AddrSchema:        &bip44Schema,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, bip44Schema, info.AddrSchema)
+
+	info, err = store.GetAccount(
+		t.Context(), db.GetAccountQuery{
+			Scope: bip44Scope,
+			Name:  &bip44Name,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, bip44Schema, info.AddrSchema)
+
+	bip44ScopedMgr, err := store.addrStore.FetchScopedKeyManager(
+		waddrmgr.KeyScope(bip44Scope),
+	)
+	require.NoError(t, err)
+
+	err = walletdb.View(store.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgr.NamespaceKey)
+
+		accountNumber, err := bip44ScopedMgr.LookupAccount(
+			ns, bip44Name,
+		)
+		if err != nil {
+			return err
+		}
+
+		props, err := bip44ScopedMgr.AccountProperties(
+			ns, accountNumber,
+		)
+		if err != nil {
+			return err
+		}
+
+		require.NotNil(t, props.AddrSchema)
+		require.Equal(
+			t, waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.PubKeyHash,
+				InternalAddrType: waddrmgr.PubKeyHash,
+			}, *props.AddrSchema,
+		)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // newCreditedFixture builds an account store backed by a spendable wallet

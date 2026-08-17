@@ -289,6 +289,42 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 	}, nil
 }
 
+// addrTypeToWaddrmgr maps a database AddressType to its legacy waddrmgr
+// representation. The two enums share names but not ordinal values, so a
+// direct cast would corrupt the schema.
+func addrTypeToWaddrmgr(t AddressType) (waddrmgr.AddressType, error) {
+	switch t {
+	case RawPubKey:
+		return waddrmgr.RawPubKey, nil
+
+	case PubKeyHash:
+		return waddrmgr.PubKeyHash, nil
+
+	case ScriptHash:
+		return waddrmgr.Script, nil
+
+	case NestedWitnessPubKey:
+		return waddrmgr.NestedWitnessPubKey, nil
+
+	case WitnessPubKey:
+		return waddrmgr.WitnessPubKey, nil
+
+	case WitnessScript:
+		return waddrmgr.WitnessScript, nil
+
+	case TaprootPubKey:
+		return waddrmgr.TaprootPubKey, nil
+
+	case Anchor:
+		return 0, fmt.Errorf("%w: database address type %d",
+			ErrInvalidParam, t)
+
+	default:
+		return 0, fmt.Errorf("%w: database address type %d",
+			ErrInvalidParam, t)
+	}
+}
+
 // addrTypeFromWaddrmgr maps a legacy waddrmgr.AddressType to the database
 // AddressType. The two enums share names but not ordinal values, so a direct
 // cast would corrupt the schema (e.g. waddrmgr.PubKeyHash=0 collides with
@@ -346,6 +382,30 @@ func ScopeAddrSchemaFromWaddrmgr(
 	}
 
 	return ScopeAddrSchema{
+		ExternalAddrType: external,
+		InternalAddrType: internal,
+	}, nil
+}
+
+// ScopeAddrSchemaToWaddrmgr converts a database account schema into the
+// legacy address-manager schema shape. An unrepresentable address type is
+// surfaced as ErrInvalidParam rather than coerced to a different enum value.
+func ScopeAddrSchemaToWaddrmgr(
+	schema ScopeAddrSchema) (waddrmgr.ScopeAddrSchema, error) {
+
+	external, err := addrTypeToWaddrmgr(schema.ExternalAddrType)
+	if err != nil {
+		return waddrmgr.ScopeAddrSchema{},
+			fmt.Errorf("external: %w", err)
+	}
+
+	internal, err := addrTypeToWaddrmgr(schema.InternalAddrType)
+	if err != nil {
+		return waddrmgr.ScopeAddrSchema{},
+			fmt.Errorf("internal: %w", err)
+	}
+
+	return waddrmgr.ScopeAddrSchema{
 		ExternalAddrType: external,
 		InternalAddrType: internal,
 	}, nil
