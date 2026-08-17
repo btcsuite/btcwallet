@@ -580,11 +580,15 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 //
 // It executes the funding logic by:
 //  1. Validation: Checking the `FundIntent` for consistency.
-//  2. Creation: Converting the intent into a `TxIntent` and delegating to the
-//     `CreateTransaction` method (which handles the underlying coin selection
-//     and change calculation algorithms).
+//  2. Creation: Converting the intent into a `TxIntent`, preparing its input
+//     and change sources, and invoking the shared transaction authoring method.
 //  3. Population: Calling `populatePsbtPacket` to apply the selected inputs and
 //     change output to the PSBT structure and sort it according to BIP 69.
+//
+// FundPsbt deliberately invokes the neutral authoring boundary instead of the
+// public CreateTransaction wrapper. Their construction flow is identical
+// today, but keeping the wrappers independent prevents direct-transaction watch
+// delivery from leaking into PSBT-specific lease, cleanup, and publication.
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	*psbt.Packet, int32, error) {
 
@@ -602,8 +606,20 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	// Create a TxIntent from the FundIntent.
 	txIntent := w.createTxIntent(intent)
 
-	// Create the transaction.
-	authoredTx, err := w.CreateTransaction(ctx, txIntent)
+	err = normalizeAndValidateTxIntent(txIntent)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	inputSource, changeSource, err := w.prepareTxAuthSources(ctx, txIntent)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Create the transaction through the shared authoring boundary.
+	authoredTx, err := w.authorTransaction(
+		txIntent.Outputs, txIntent.FeeRate, inputSource, changeSource,
+	)
 	if err != nil {
 		return nil, 0, err
 	}
