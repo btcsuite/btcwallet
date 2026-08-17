@@ -869,6 +869,101 @@ func TestDecorateInputsErrDecorationFailed(t *testing.T) {
 	require.ErrorIs(t, err, errDb)
 }
 
+// TestFundPsbtExplicitPolicy verifies the public PSBT wrapper prepares sources,
+// authors the transaction, and publishes the funded packet itself.
+func TestFundPsbtExplicitPolicy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet whose default BIP0086 account has
+	// one mature 100,000-sat UTXO, then build a packet requesting the
+	// fixture's 99,700-sat payment. Register the store metadata needed to
+	// decorate that selected P2WPKH input in the funded PSBT.
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	fixture := expectDefaultAuthoringSources(t, w, mocks)
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(&fixture.payment)
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id, OutPoint: fixture.utxo.OutPoint,
+	}).Return(&fixture.utxo, nil).Once()
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id, Txid: fixture.utxo.OutPoint.Hash,
+	}).Return(testStoreTxDetail(
+		fixture.utxo.OutPoint.Hash, wire.NewTxOut(
+			int64(fixture.utxo.Amount), fixture.utxo.PkScript,
+		),
+	), nil).Once()
+
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, fixture.inputAddr, db.WitnessPubKey,
+		fixture.inputKey.PubKey(),
+	)
+
+	// Act: Fund the packet through FundPsbt with an explicit automatic
+	// selection policy and the fixture's fee rate.
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		Policy:  &InputsPolicy{},
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: FundPsbt must mutate and return the caller's packet, select
+	// exactly the fixture UTXO, preserve the 99,700-sat payment, decorate
+	// the input with that UTXO, and report -1 because no change survived.
+	require.NoError(t, err)
+	require.Same(t, packet, funded)
+	require.Equal(t, int32(-1), changeIndex)
+	require.Len(t, funded.UnsignedTx.TxIn, 1)
+	require.Equal(t, fixture.utxo.OutPoint,
+		funded.UnsignedTx.TxIn[0].PreviousOutPoint)
+	require.Len(t, funded.UnsignedTx.TxOut, 1)
+	require.Equal(t, fixture.payment, *funded.UnsignedTx.TxOut[0])
+	require.NotNil(t, funded.Inputs[0].WitnessUtxo)
+	require.Equal(t, int64(fixture.utxo.Amount),
+		funded.Inputs[0].WitnessUtxo.Value)
+	require.Equal(t, fixture.utxo.PkScript,
+		funded.Inputs[0].WitnessUtxo.PkScript)
+}
+
+// TestFundPsbtInvalidTxIntent verifies wrapper rewiring preserves transaction
+// validation errors without mutating the caller's packet.
+func TestFundPsbtInvalidTxIntent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a packet with one 10,000-sat output and retain its
+	// unsigned transaction pointer. A zero fee rate must fail TxIntent
+	// validation before source preparation or packet population can run.
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(&wire.TxOut{Value: 10_000, PkScript: script})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	originalTx := packet.UnsignedTx
+
+	// Act: Attempt to fund the packet with the invalid zero fee rate.
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet: packet, Policy: &InputsPolicy{},
+		FeeRate: btcunit.ZeroSatPerKVByte,
+	})
+
+	// Assert: FundPsbt must return ErrMissingFeeRate, no funded packet, and
+	// the error-path change index. The original transaction object and its
+	// sole 10,000-sat output must remain untouched.
+	require.ErrorIs(t, err, ErrMissingFeeRate)
+	require.Nil(t, funded)
+	require.Zero(t, changeIndex)
+	require.Same(t, originalTx, packet.UnsignedTx)
+	require.Equal(t, int64(10_000), packet.UnsignedTx.TxOut[0].Value)
+}
+
 // TestValidateFundIntentSuccess tests that validateFundIntent returns no error
 // for valid funding intents.
 func TestValidateFundIntentSuccess(t *testing.T) {
