@@ -60,11 +60,11 @@ const (
 	// locking.
 	defaultLockDuration = 10 * time.Minute
 
-	// MinRecoveryWindow is the minimum allowed value for the RecoveryWindow
-	// configuration parameter. This value ensures that a sufficient number
-	// of addresses are scanned during wallet recovery to avoid missing
-	// funds due to gaps in the address chain.
-	MinRecoveryWindow = 20
+	// MaxRecoveryWindow is the largest accepted value for the
+	// RecoveryWindow configuration parameter. The bound is public so a
+	// caller can reject an expensive request on its own, before the wallet
+	// reaches its Store or the chain backend to serve it.
+	MaxRecoveryWindow = 100_000
 )
 
 var (
@@ -187,7 +187,19 @@ type Config struct {
 	// ChainParams defines the network parameters (e.g. mainnet, testnet).
 	ChainParams *chaincfg.Params
 
-	// RecoveryWindow specifies the address lookahead for recovery.
+	// RecoveryWindow specifies the address lookahead used when this wallet
+	// scans for its own history. Any value from zero through
+	// MaxRecoveryWindow is accepted.
+	//
+	// The value is used exactly as supplied: the wallet applies no default
+	// and rounds nothing up, so an unset field means a window of zero
+	// rather than an unspecified one. A caller that wants a default — for
+	// example the twenty this field once required — passes it here.
+	//
+	// A zero window derives no lookahead addresses at all. The scan itself
+	// still runs: the addresses and unspent outputs already persisted for
+	// this wallet are watched and synchronized as they always are, so only
+	// the discovery of unused gaps is given up.
 	RecoveryWindow uint32
 
 	// WalletSyncRetryInterval is the interval at which the wallet should
@@ -237,9 +249,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%w: Name", ErrMissingParam)
 	}
 
-	if c.RecoveryWindow < MinRecoveryWindow {
-		return fmt.Errorf("%w: RecoveryWindow must be at least %d",
-			ErrInvalidParam, MinRecoveryWindow)
+	if c.RecoveryWindow > MaxRecoveryWindow {
+		return fmt.Errorf("%w: RecoveryWindow must not exceed %d",
+			ErrInvalidParam, MaxRecoveryWindow)
 	}
 
 	return nil

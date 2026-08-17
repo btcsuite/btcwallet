@@ -109,11 +109,10 @@ func TestManagerCreateSuccess(t *testing.T) {
 
 			m := testKVDBManager(t)
 			cfg := Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				PubPassphrase:  []byte("public"),
-				RecoveryWindow: MinRecoveryWindow,
+				Chain:         &bwmock.Chain{},
+				ChainParams:   &chainParams,
+				Name:          "test-wallet",
+				PubPassphrase: []byte("public"),
 			}
 
 			// Attempt to create the wallet with the specified parameters.
@@ -324,7 +323,6 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 			}
 			cfg := Config{
 				Chain: &bwmock.Chain{}, Name: "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
 			}
 
 			wallet, err := m.Create(cfg, tc.params)
@@ -396,6 +394,37 @@ func TestManagerCreate_InvalidConfig(t *testing.T) {
 	require.Nil(t, w)
 }
 
+// TestManagerCreateExcessRecoveryWindow verifies that a recovery window above
+// the public maximum is rejected on the configuration's own merits, before
+// Create reaches the store or the chain backend that would serve it.
+func TestManagerCreateExcessRecoveryWindow(t *testing.T) {
+	t.Parallel()
+
+	// A chain mock with no registered calls fails the test if the request
+	// reaches the chain backend.
+	chainMock := &bwmock.Chain{}
+	defer chainMock.AssertExpectations(t)
+
+	backend := &recordingManagerBackend{}
+	m := &Manager{
+		wallets:     make(map[string]*Wallet),
+		backend:     backend,
+		chainParams: &chainParams,
+	}
+	cfg := Config{
+		Chain:          chainMock,
+		Name:           "test-wallet",
+		RecoveryWindow: MaxRecoveryWindow + 1,
+	}
+
+	w, err := m.Create(cfg, CreateWalletParams{Mode: ModeGenSeed})
+
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.ErrorContains(t, err, "RecoveryWindow")
+	require.False(t, backend.createCalled)
+}
+
 // TestManagerLoadSuccess verifies that an existing wallet can be successfully
 // loaded from the database. This tests the persistence and restoration flow.
 func TestManagerLoadSuccess(t *testing.T) {
@@ -405,11 +434,10 @@ func TestManagerLoadSuccess(t *testing.T) {
 
 	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           "test-wallet",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:         &bwmock.Chain{},
+		ChainParams:   &chainParams,
+		Name:          "test-wallet",
+		PubPassphrase: []byte("public"),
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
@@ -459,11 +487,10 @@ func TestManagerLoad_ExistingWallet(t *testing.T) {
 
 	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           "test-wallet",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:         &bwmock.Chain{},
+		ChainParams:   &chainParams,
+		Name:          "test-wallet",
+		PubPassphrase: []byte("public"),
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
@@ -677,11 +704,10 @@ func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 // Manager tests.
 func testWatchOnlyConfig() Config {
 	return Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           "watch-only",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:         &bwmock.Chain{},
+		ChainParams:   &chainParams,
+		Name:          "watch-only",
+		PubPassphrase: []byte("public"),
 	}
 }
 
@@ -696,11 +722,10 @@ func TestManagerKVDBRejectsSecondName(t *testing.T) {
 
 	m := testKVDBManager(t)
 	cfg := Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           "first",
-		PubPassphrase:  []byte("public"),
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:         &bwmock.Chain{},
+		ChainParams:   &chainParams,
+		Name:          "first",
+		PubPassphrase: []byte("public"),
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
@@ -762,11 +787,10 @@ func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 
 			m := tc.manager(t)
 			cfg := Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           testWalletName,
-				PubPassphrase:  tc.pubPass,
-				RecoveryWindow: MinRecoveryWindow,
+				Chain:         &bwmock.Chain{},
+				ChainParams:   &chainParams,
+				Name:          testWalletName,
+				PubPassphrase: tc.pubPass,
 			}
 
 			// Arrange + Act: a seed too short for BIP32 fails root
@@ -857,12 +881,11 @@ func TestManagerIgnoresPerWalletDBAndChainParams(t *testing.T) {
 			// Arrange: no DB and no network at all — the Manager
 			// must supply both.
 			cfg := Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    nil,
-				DB:             nil,
-				Name:           testWalletName,
-				PubPassphrase:  tc.pubPass,
-				RecoveryWindow: MinRecoveryWindow,
+				Chain:         &bwmock.Chain{},
+				ChainParams:   nil,
+				DB:            nil,
+				Name:          testWalletName,
+				PubPassphrase: tc.pubPass,
 			}
 
 			w, err := m.Create(cfg, CreateWalletParams{
@@ -910,11 +933,10 @@ func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
 	// Arrange + Act: create under createPub while the Config names configPub.
 	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           testWalletName,
-		PubPassphrase:  configPub,
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:         &bwmock.Chain{},
+		ChainParams:   &chainParams,
+		Name:          testWalletName,
+		PubPassphrase: configPub,
 	}
 	w, err := m.Create(cfg, CreateWalletParams{
 		Mode:              ModeImportSeed,
