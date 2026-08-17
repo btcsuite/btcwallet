@@ -62,9 +62,8 @@ func TestManagerLoadSQLiteRequiresWalletRow(t *testing.T) {
 	t.Cleanup(func() { _ = m.Close() })
 
 	w, err := m.Load(Config{
-		Chain:          &bwmock.Chain{},
-		Name:           "no-such-wallet",
-		RecoveryWindow: MinRecoveryWindow,
+		Chain: &bwmock.Chain{},
+		Name:  "no-such-wallet",
 	})
 	require.ErrorIs(t, err, db.ErrWalletNotFound)
 	require.Nil(t, w)
@@ -80,10 +79,9 @@ func sqliteCreateConfig(t *testing.T) (Config, CreateWalletParams) {
 	require.NoError(t, err)
 
 	cfg := Config{
-		Chain:          &bwmock.Chain{},
-		ChainParams:    &chainParams,
-		Name:           testWalletName,
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:       &bwmock.Chain{},
+		ChainParams: &chainParams,
+		Name:        testWalletName,
 	}
 	params := CreateWalletParams{
 		Mode:              ModeImportSeed,
@@ -242,10 +240,9 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 
 	chain := &bwmock.Chain{}
 	cfg := Config{
-		Chain:          chain,
-		ChainParams:    &chainParams,
-		Name:           testWalletName,
-		RecoveryWindow: MinRecoveryWindow,
+		Chain:       chain,
+		ChainParams: &chainParams,
+		Name:        testWalletName,
 	}
 	privPass := []byte("private")
 

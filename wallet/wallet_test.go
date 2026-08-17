@@ -57,46 +57,32 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid config",
 			config: Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
+				Chain:       &bwmock.Chain{},
+				ChainParams: &chainParams,
+				Name:        "test-wallet",
 			},
-		},
-		{
-			name: "invalid RecoveryWindow",
-			config: Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow - 1,
-			},
-			expectedErr: "RecoveryWindow",
 		},
 		{
 			name: "missing Chain",
 			config: Config{
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
+				ChainParams: &chainParams,
+				Name:        "test-wallet",
 			},
 			expectedErr: "Chain",
 		},
 		{
 			name: "missing ChainParams",
 			config: Config{
-				Chain:          &bwmock.Chain{},
-				Name:           "test-wallet",
-				RecoveryWindow: MinRecoveryWindow,
+				Chain: &bwmock.Chain{},
+				Name:  "test-wallet",
 			},
 			expectedErr: "ChainParams",
 		},
 		{
 			name: "missing Name",
 			config: Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				RecoveryWindow: MinRecoveryWindow,
+				Chain:       &bwmock.Chain{},
+				ChainParams: &chainParams,
 			},
 			expectedErr: "Name",
 		},
@@ -114,6 +100,48 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfigValidateRecoveryWindow ensures the configuration accepts every
+// recovery window from zero through the public maximum and rejects the first
+// value above it.
+func TestConfigValidateRecoveryWindow(t *testing.T) {
+	t.Parallel()
+
+	// A zero window asks for no look-ahead at all, and recovery already
+	// runs with windows far below the twenty this configuration used to
+	// demand, so every one of these is a request the wallet serves as
+	// written.
+	accepted := []uint32{0, 1, 2, 19, 20, MaxRecoveryWindow}
+	for _, window := range accepted {
+		t.Run(fmt.Sprintf("accepts %d", window), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := Config{
+				Chain:          &bwmock.Chain{},
+				ChainParams:    &chainParams,
+				Name:           "test-wallet",
+				RecoveryWindow: window,
+			}
+
+			require.NoError(t, cfg.validate())
+		})
+	}
+
+	t.Run("rejects the first excess window", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{
+			Chain:          &bwmock.Chain{},
+			ChainParams:    &chainParams,
+			Name:           "test-wallet",
+			RecoveryWindow: MaxRecoveryWindow + 1,
+		}
+
+		err := cfg.validate()
+		require.ErrorIs(t, err, ErrInvalidParam)
+		require.ErrorContains(t, err, "RecoveryWindow")
+	})
 }
 
 // TestWalletSyncedToUsesStore verifies that a wallet without a legacy address
