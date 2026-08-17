@@ -50,9 +50,10 @@ Welcome to the `btcwallet` knowledge base. This file defines the global project
 - **Test Locations:** Unit tests live alongside code. DB integration tests live
   in `wallet/internal/db/itest`. E2E integration tests are orchestrated from
   `itest/`.
-- **ADR** Before changing architecture-sensitive areas, review
-  `docs/developer/adr/README.md` for recorded design decisions, context,
-  tradeoffs, and consequences.
+- **ADR:** Before changing architecture-sensitive areas, review
+  `docs/developer/adr/README.md` for recorded decisions, context, tradeoffs,
+  and consequences. For design tasks, read that guide and follow
+  `docs/developer/adr/template.md`.
 
 ## VERIFICATION STRATEGY
 - Start by running the narrowest relevant test.
