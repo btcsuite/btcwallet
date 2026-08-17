@@ -31,6 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testScanRecoveryWindow is a small non-zero look-ahead used by the scan tests
+// that need a recovery horizon beyond the addresses already on record.
+const testScanRecoveryWindow = 20
+
 // TestSyncerInitialization verifies that a new syncer is created with the
 // correct default state.
 func TestSyncerInitialization(t *testing.T) {
@@ -2107,7 +2111,7 @@ func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
 	props := scanAccountProps(scanAccounts)
 	require.Len(t, props, 2)
 
-	rs := NewRecoveryState(MinRecoveryWindow, &chaincfg.SimNetParams, nil)
+	rs := NewRecoveryState(testScanRecoveryWindow, &chaincfg.SimNetParams, nil)
 	initStoreScanState(t, rs, scanAccounts)
 
 	// Assert: each account keeps its own identity under its distinct store
@@ -3247,7 +3251,7 @@ func TestHandleScanReq(t *testing.T) {
 
 	mockChain = &bwmock.Chain{}
 	sTargeted.cfg.Chain = mockChain
-	sTargeted.cfg.RecoveryWindow = MinRecoveryWindow
+	sTargeted.cfg.RecoveryWindow = testScanRecoveryWindow
 
 	// Target the auto-created default derived account at number 0.
 	req = &scanReq{
@@ -4497,7 +4501,7 @@ func TestScanWithTargets_Empty(t *testing.T) {
 	s.cfg.Chain = mockChain
 	s.cfg.SyncMethod = SyncMethodAuto
 	s.cfg.MaxCFilterItems = 100
-	s.cfg.RecoveryWindow = MinRecoveryWindow
+	s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 	// Target the auto-created default derived account at number 0. It
 	// resolves to its durable name and seeds the recovery state with a
@@ -4763,7 +4767,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
-		s.cfg.RecoveryWindow = MinRecoveryWindow
+		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
 			startBlock: waddrmgr.BlockStamp{Height: 100},
@@ -4792,7 +4796,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
-		s.cfg.RecoveryWindow = MinRecoveryWindow
+		s.cfg.RecoveryWindow = testScanRecoveryWindow
 
 		req := &scanReq{
 			startBlock: waddrmgr.BlockStamp{Height: 100},
