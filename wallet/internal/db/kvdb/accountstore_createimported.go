@@ -105,7 +105,17 @@ func (s *Store) putImportedAccount(ns walletdb.ReadWriteBucket,
 	pubKey *hdkeychain.ExtendedKey,
 	walletIsWatchOnly bool) (*db.AccountInfo, error) {
 
-	addrSchema := waddrmgrScopeAddrSchema(params.AddrSchema)
+	var addrSchema *waddrmgr.ScopeAddrSchema
+	if params.AddrSchema != nil {
+		converted, err := db.ScopeAddrSchemaToWaddrmgr(
+			*params.AddrSchema,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("address schema: %w", err)
+		}
+
+		addrSchema = &converted
+	}
 
 	scopedMgr, err := s.scopedManagerOrCreate(
 		ns, scope, addrSchema, params.DryRun,
@@ -204,19 +214,4 @@ func dryRunImportedAccount(ns walletdb.ReadWriteBucket,
 	return loadAccountInfo(
 		ns, scopedMgr, accountNumber, walletIsWatchOnly,
 	)
-}
-
-// waddrmgrScopeAddrSchema converts the account-store schema type into the
-// waddrmgr per-account address schema type.
-func waddrmgrScopeAddrSchema(
-	schema *db.ScopeAddrSchema) *waddrmgr.ScopeAddrSchema {
-
-	if schema == nil {
-		return nil
-	}
-
-	return &waddrmgr.ScopeAddrSchema{
-		ExternalAddrType: waddrmgr.AddressType(schema.ExternalAddrType),
-		InternalAddrType: waddrmgr.AddressType(schema.InternalAddrType),
-	}
 }
