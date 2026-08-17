@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -11,7 +12,9 @@ import (
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
+	"github.com/btcsuite/btcwallet/wallet/txsizes"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +37,89 @@ var (
 
 	defaultFeeRate = btcunit.NewSatPerKVByte(1000)
 )
+
+// defaultAuthoringFixture describes the input, payment, and signing metadata
+// returned by expectDefaultAuthoringSources. The fixture spends one mature
+// 100,000-sat default-account UTXO on a 99,700-sat payment, leaving no change
+// output after fees.
+type defaultAuthoringFixture struct {
+	// payment is the single 99,700-sat recipient output requested by the
+	// transaction intent.
+	payment wire.TxOut
+
+	// utxo is the mature 100,000-sat default-account input selected to fund
+	// payment.
+	utxo db.UtxoInfo
+
+	// inputKey is the private key backing utxo and supplies its public key
+	// during PSBT input decoration.
+	inputKey *btcec.PrivateKey
+
+	// inputAddr is the P2WPKH address backing utxo and identifies its wallet
+	// derivation metadata during PSBT input decoration.
+	inputAddr address.Address
+}
+
+// expectDefaultAuthoringSources configures automatic selection from the default
+// BIP0086 account. It registers the account-by-name and account-by-number
+// lookups, a chain tip at height 100, one 100,000-sat P2WPKH UTXO mined at
+// height 1, and one P2TR-sized derived change script. The requested payment is
+// 99,700 sat, so the remainder after fees is below the change threshold: the
+// authoring result must contain one input, the payment output, and no change.
+func expectDefaultAuthoringSources(t *testing.T, w *Wallet,
+	mocks *mockWalletDeps) defaultAuthoringFixture {
+
+	t.Helper()
+
+	inputKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	inputAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(inputKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	inputScript, err := txscript.PayToAddrScript(inputAddr)
+	require.NoError(t, err)
+
+	payment := wire.TxOut{Value: 99_700, PkScript: inputScript}
+	inputAmount := btcutil.Amount(100_000)
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	accountInfo := &db.AccountInfo{
+		AccountNumber: &defaultAccountNum,
+		AccountName:   waddrmgr.DefaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[scope],
+	}
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+	}).Return(accountInfo, nil).Once()
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
+	}).Return(accountInfo, nil).Once()
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	utxo := db.UtxoInfo{
+		OutPoint: validUTXO, Amount: inputAmount, PkScript: inputScript,
+		Height: 1,
+	}
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
+	}).Return([]db.UtxoInfo{utxo}, nil).Once()
+	mocks.store.On("NewDerivedAddress", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID: w.id, AccountName: defaultAccountName,
+			Scope: scope, Change: true,
+		},
+	).Return(&db.AddressInfo{
+		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
+	}, nil).Once()
+
+	return defaultAuthoringFixture{
+		payment: payment, utxo: utxo, inputKey: inputKey,
+		inputAddr: inputAddr,
+	}
+}
 
 // txIntentTestCases enumerates the TxIntent validation scenarios exercised by
 // TestValidateTxIntent.
@@ -501,6 +587,178 @@ func TestDetermineChangeSource(t *testing.T) {
 			require.Equal(t, tc.expectedSource, source)
 		})
 	}
+}
+
+// TestAuthorTransaction verifies the shared authoring boundary preserves
+// transaction results, callback timing, and source errors without wrapper
+// effects.
+func TestAuthorTransaction(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use a 50,000-sat payment and distinct input and change
+	// scripts. Each table row controls the surplus returned by the input
+	// source or injects the exact callback error authoring must propagate.
+	inputScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	changeScript := append([]byte(nil), inputScript...)
+	changeScript[len(changeScript)-1] = 1
+	output := wire.TxOut{Value: 50_000, PkScript: inputScript}
+
+	testCases := []struct {
+		name         string
+		changeAmount btcutil.Amount
+		inputErr     error
+		changeErr    error
+	}{
+		{
+			name: "direct no change",
+		},
+		{
+			name:         "psbt viable change",
+			changeAmount: 10_000,
+		},
+		{
+			name:     "input source failure",
+			inputErr: errDBMock,
+		},
+		{
+			name:      "change source failure",
+			changeErr: errChainMock,
+		},
+		{
+			name:     "cancellation",
+			inputErr: context.Canceled,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Build counting callbacks so the test records the
+			// input target requested by txauthor and whether change-script
+			// allocation is attempted. A successful input callback returns
+			// exactly the requested target plus the case's change amount.
+			w, _ := createTestWalletWithMocks(t)
+
+			var (
+				inputCalls, changeCalls int
+				inputTarget             btcutil.Amount
+			)
+
+			inputSource := func(target btcutil.Amount) (btcutil.Amount,
+				[]*wire.TxIn, []btcutil.Amount, [][]byte, error) {
+
+				inputCalls++
+				inputTarget = target
+
+				if tc.inputErr != nil {
+					return 0, nil, nil, nil, tc.inputErr
+				}
+
+				total := target + tc.changeAmount
+
+				return total, []*wire.TxIn{{}},
+					[]btcutil.Amount{total}, [][]byte{inputScript}, nil
+			}
+			changeSource := &txauthor.ChangeSource{
+				ScriptSize: len(changeScript),
+				NewScript: func() ([]byte, error) {
+					changeCalls++
+					return changeScript, tc.changeErr
+				},
+			}
+
+			wantErr := tc.inputErr
+			if wantErr == nil {
+				wantErr = tc.changeErr
+			}
+
+			// Act: Invoke the neutral authoring boundary directly, without
+			// either public wallet wrapper.
+			authored, err := w.authorTransaction(
+				[]wire.TxOut{output}, defaultFeeRate, inputSource,
+				changeSource,
+			)
+
+			// Assert: The input source is queried exactly once and an
+			// injected callback error is returned unchanged without
+			// publishing a partially authored transaction.
+			require.ErrorIs(t, err, wantErr)
+			require.Equal(t, 1, inputCalls)
+
+			if wantErr != nil {
+				require.Nil(t, authored)
+
+				if tc.inputErr != nil {
+					require.Zero(t, changeCalls)
+				} else {
+					require.Equal(t, 1, changeCalls)
+				}
+
+				return
+			}
+
+			// A successful result must allocate the change script once,
+			// spend one input, preserve its previous script and total
+			// amount, and charge the target amount above the payment as
+			// its fee.
+			require.Equal(t, 1, changeCalls)
+			require.Len(t, authored.Tx.TxIn, 1)
+			require.Equal(t, inputScript, authored.PrevScripts[0])
+			require.Equal(t, inputTarget+tc.changeAmount,
+				authored.TotalInput)
+			fee := authored.TotalInput - txauthor.SumOutputValues(
+				authored.Tx.TxOut,
+			)
+			require.Equal(t, inputTarget-btcutil.Amount(output.Value), fee)
+
+			if tc.changeAmount == 0 {
+				// With no surplus, the result contains only the exact
+				// 50,000-sat payment and reports no change index.
+				require.Equal(t, -1, authored.ChangeIndex)
+				require.Len(t, authored.Tx.TxOut, 1)
+				require.Equal(t, output, *authored.Tx.TxOut[0])
+			} else {
+				// With a 10,000-sat surplus, the randomized change
+				// position must identify an output with that exact value
+				// and the change callback's script.
+				require.GreaterOrEqual(t, authored.ChangeIndex, 0)
+				require.Len(t, authored.Tx.TxOut, 2)
+				change := authored.Tx.TxOut[authored.ChangeIndex]
+				require.Equal(t, int64(tc.changeAmount), change.Value)
+				require.Equal(t, changeScript, change.PkScript)
+			}
+		})
+	}
+}
+
+// TestCreateTransactionDefaultPolicy verifies nil inputs still select from the
+// default account through the direct wrapper.
+func TestCreateTransactionDefaultPolicy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet whose default BIP0086 account has
+	// one mature 100,000-sat UTXO. The 99,700-sat payment leaves only a
+	// sub-dust remainder after fees, so no change output should be created.
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+	fixture := expectDefaultAuthoringSources(t, w, mocks)
+
+	// Act: Omit Inputs so CreateTransaction must install the default
+	// automatic-selection policy before preparing its sources.
+	authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+		Outputs: []wire.TxOut{fixture.payment}, FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The wrapper must select the fixture's sole UTXO, publish the
+	// exact 99,700-sat payment, and report -1 because no change survived.
+	require.NoError(t, err)
+	require.Equal(t, -1, authored.ChangeIndex)
+	require.Len(t, authored.Tx.TxIn, 1)
+	require.Equal(t, fixture.utxo.OutPoint,
+		authored.Tx.TxIn[0].PreviousOutPoint)
+	require.Len(t, authored.Tx.TxOut, 1)
+	require.Equal(t, fixture.payment, *authored.Tx.TxOut[0])
 }
 
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
