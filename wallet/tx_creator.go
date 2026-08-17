@@ -600,21 +600,11 @@ func (w *Wallet) createChangeSource(ctx context.Context,
 	}, nil
 }
 
-// CreateTransaction creates a new unsigned transaction spending unspent outputs
-// to the given outputs. It is the main implementation of the TxCreator
-// interface. The method will produce a valid, unsigned transaction, which can
-// then be passed to the Signer interface to be signed.
-func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
-	*txauthor.AuthoredTx, error) {
-
-	err := w.state.validateSynced()
-	if err != nil {
-		return nil, err
-	}
-
-	// Check that the intent is not nil.
+// normalizeAndValidateTxIntent applies the default input policy and validates
+// a transaction intent before source preparation.
+func normalizeAndValidateTxIntent(intent *TxIntent) error {
 	if intent == nil {
-		return nil, ErrNilTxIntent
+		return ErrNilTxIntent
 	}
 
 	// If no input source is specified, an auto coin selection with the
@@ -626,7 +616,24 @@ func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
 		intent.Inputs = &InputsPolicy{}
 	}
 
-	err = validateTxIntent(intent)
+	return validateTxIntent(intent)
+}
+
+// CreateTransaction creates a new unsigned transaction spending unspent outputs
+// to the given outputs. It is the direct-transaction wrapper around the neutral
+// authoring boundary and the main implementation of the TxCreator interface.
+// Direct-transaction watch delivery belongs to this wrapper; PSBT funding calls
+// the neutral boundary independently so its lease, cleanup, and publication
+// obligations remain in FundPsbt.
+func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
+	*txauthor.AuthoredTx, error) {
+
+	err := w.state.validateSynced()
+	if err != nil {
+		return nil, err
+	}
+
+	err = normalizeAndValidateTxIntent(intent)
 	if err != nil {
 		return nil, err
 	}
@@ -636,24 +643,38 @@ func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
 		return nil, err
 	}
 
+	return w.authorTransaction(
+		intent.Outputs, intent.FeeRate, inputSource, changeSource,
+	)
+}
+
+// authorTransaction creates an unsigned transaction from the outputs, fee rate,
+// and precomputed input and change sources shared by both public wrappers. Its
+// narrow request keeps wrapper-owned input policies, change accounts, labels,
+// and lifecycle effects outside the neutral boundary.
+func (w *Wallet) authorTransaction(outputs []wire.TxOut,
+	feeRate btcunit.SatPerKVByte,
+	inputSource txauthor.InputSource,
+	changeSource *txauthor.ChangeSource) (*txauthor.AuthoredTx, error) {
+
 	// The txauthor.NewUnsignedTransaction function expects a slice of
 	// *wire.TxOut, but our intent has a slice of wire.TxOut. We perform
 	// the conversion here.
 	//
 	// TODO(yy): change the signature of `NewUnsignedTransaction` to take a
 	// list of `wire.TxOut`.
-	outputs := make([]*wire.TxOut, 0, len(intent.Outputs))
-	for _, output := range intent.Outputs {
-		outputs = append(outputs, &output)
+	txOutputs := make([]*wire.TxOut, 0, len(outputs))
+	for _, output := range outputs {
+		txOutputs = append(txOutputs, &output)
 	}
 
 	// With the input source and change source prepared, we can now call the
 	// txauthor package to perform the actual coin selection and create the
 	// unsigned transaction.
-	feeSatPerKb := intent.FeeRate.Val()
+	feeSatPerKb := feeRate.Val()
 
 	tx, err := txauthor.NewUnsignedTransaction(
-		outputs, feeSatPerKb, inputSource, changeSource,
+		txOutputs, feeSatPerKb, inputSource, changeSource,
 	)
 	if err != nil {
 		return nil, err
