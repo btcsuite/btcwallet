@@ -35,9 +35,9 @@ The `bitcoind` backend uses ZMQ for block/tx notifications.
 ## Wallet Helpers
 
 `bwtest` owns wallet creation, funding and lock policy so component tests do
-not each define their own. `(*HarnessTest).NewWallet` is the single
-parameterized entry point; it takes a `WalletFixture` describing what the case
-needs and returns the wallet with the outpoints funding produced:
+not each define their own. `(*HarnessTest).NewWallet` takes a `WalletFixture`
+describing what the case needs and returns the wallet with the outpoints funding
+produced:
 
 ```go
 func testFoo(t *bwtest.HarnessTest) {
@@ -51,10 +51,20 @@ func testFoo(t *bwtest.HarnessTest) {
 }
 ```
 
-`WalletFixture` carries the funding address type, the funding amounts, whether
-to unlock, and whether to leave the wallet unstarted. A case that selects the
-funded coins derives its key scope from the same `AddrType` with `KeyScope()`,
-so the funded scope has one authority.
+`WalletFixture` carries the funding address type, funding amounts, whether to
+unlock, and whether to leave the wallet unstarted. Its zero value returns a
+started, locked wallet. `WatchOnly` creates a rootless `ModeShell` watch-only
+wallet.
+`InitialAccounts` seeds a watch-only shell wallet; a non-empty slice implies
+watch-only even when `WatchOnly` is false, and nil and empty slices are
+equivalent. A case that selects funded coins derives its key scope from the
+same `AddrType` with `KeyScope()`, so the funded scope has one authority.
+
+`NewWallet` privately records the configuration needed to reload its wallet.
+Pass that wallet to `(*HarnessTest).ReloadWallet(w)` when a component test needs
+to reopen it. A successful reload consumes the old generation and returns a
+fresh, registered, started, but locked replacement pointer from the same
+persistent store. Use the returned pointer for a later reload.
 
 Two convenience wrappers remain for cases that need nothing else:
 
@@ -65,8 +75,13 @@ Funding is also available on its own through `(*HarnessTest).FundWallet` and
 `(*HarnessTest).FundWalletOfType`, and addresses through
 `(*HarnessTest).NewWalletAddress` and `(*HarnessTest).NewWalletAddressOfType`.
 
-Manager-focused tests should continue to create wallets through the manager API
-directly.
+Manager-focused tests should continue to create wallets through the Manager API
+directly and register each one with `(*HarnessTest).RegisterWallet(manager, w)`
+before starting it. They may register multiple wallets under one manager. At
+teardown, the harness stops all registered wallets before closing each manager
+once. Raw `RegisterWallet` entries are not reloadable. `ReloadWallet` is limited
+to a wallet created by `NewWallet` that is the only registered wallet on its
+manager, because reloading closes and replaces that manager.
 
 ## Signed Transactions
 
