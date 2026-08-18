@@ -160,6 +160,23 @@ type AccountManager interface {
 // A compile time check to ensure that Wallet implements the interface.
 var _ AccountManager = (*Wallet)(nil)
 
+// canonicalStoreAccountInfo returns an internal Store snapshot whose derived
+// account fingerprint comes from the Wallet cache. Legacy Store snapshots can
+// contain an absent, zero, or stale fingerprint, while w.masterFingerprint is
+// loaded from the wallet's master HD public key and is canonical.
+func (w *Wallet) canonicalStoreAccountInfo(
+	storeInfo db.AccountInfo) db.AccountInfo {
+
+	if storeInfo.IsImported {
+		return storeInfo
+	}
+
+	fingerprint := w.masterFingerprint
+	storeInfo.MasterKeyFingerprint = &fingerprint
+
+	return storeInfo
+}
+
 // NewAccount creates the next account and returns its account info. The name
 // must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -197,11 +214,9 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	if !info.IsImported {
-		info.MasterKeyFingerprint = w.masterFingerprint
-	}
+	canonicalInfo := w.canonicalStoreAccountInfo(*info)
 
-	return info, nil
+	return &canonicalInfo, nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total
@@ -234,7 +249,17 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 
 	if isImported {
 		isWatchOnly = walletWatchOnly || props.IsWatchOnly
+
+		// Imported accounts are not derived from the wallet seed, so their
+		// waddrmgr fingerprint takes precedence over the cached seed value.
 		fingerprint = props.MasterKeyFingerprint
+	}
+
+	var fingerprintResult *uint32
+	// AccountPubKey distinguishes an imported XPub, whose fingerprint is
+	// present, from the keyless imported-address pseudo-account.
+	if !isImported || props.AccountPubKey != nil {
+		fingerprintResult = &fingerprint
 	}
 
 	scope := db.KeyScope(props.KeyScope)
@@ -262,7 +287,7 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		KeyScope:             scope,
 		AddrSchema:           addrSchema,
 		PublicKey:            pubKey,
-		MasterKeyFingerprint: fingerprint,
+		MasterKeyFingerprint: fingerprintResult,
 		ConfirmedBalance:     total,
 	}
 }
@@ -290,9 +315,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	}
 
 	for i := range infos {
-		if !infos[i].IsImported {
-			infos[i].MasterKeyFingerprint = w.masterFingerprint
-		}
+		infos[i] = w.canonicalStoreAccountInfo(infos[i])
 	}
 
 	return infos, nil
@@ -358,16 +381,9 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	// The kvdb store's default-account row carries fingerprint=0 for
-	// derived accounts because waddrmgr persists no per-account
-	// fingerprint there. Inject the wallet-cached value (parsed from
-	// the master HD pubkey at Manager.Load time) so external consumers
-	// see the canonical BIP32 root fingerprint.
-	if !info.IsImported {
-		info.MasterKeyFingerprint = w.masterFingerprint
-	}
+	canonicalInfo := w.canonicalStoreAccountInfo(*info)
 
-	return info, nil
+	return &canonicalInfo, nil
 }
 
 // RenameAccount renames an existing account. The new name must be unique within

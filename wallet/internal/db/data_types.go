@@ -457,9 +457,10 @@ type AccountInfo struct {
 	PublicKey []byte
 
 	// MasterKeyFingerprint is the fingerprint of the root master key
-	// (BIP32 m/) corresponding to this account's public key. Used by
-	// some hardware wallets for proper identification and signing.
-	MasterKeyFingerprint uint32
+	// (BIP32 m/) corresponding to this account's public key. A nil pointer
+	// means the fingerprint is absent, while a non-nil zero is a
+	// present-zero fingerprint.
+	MasterKeyFingerprint *uint32
 
 	// rowID is the SQL backend's per-account row ID. Populated by
 	// ProcessAccountRows so AttachBalances can pair AccountBalancesByIDs
