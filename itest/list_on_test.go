@@ -28,6 +28,10 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerLoadReload,
 	},
 	{
+		Name:     "manager load concurrent",
+		TestFunc: testManagerLoadConcurrent,
+	},
+	{
 		Name:     "manager load missing",
 		TestFunc: testManagerLoadMissing,
 	},
