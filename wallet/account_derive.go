@@ -6,11 +6,9 @@ package wallet
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -192,7 +190,5 @@ func masterKeyFingerprint(masterKey *hdkeychain.ExtendedKey) (uint32, error) {
 		return 0, fmt.Errorf("master pubkey: %w", err)
 	}
 
-	hash := address.Hash160(pubKey.SerializeCompressed())
-
-	return binary.BigEndian.Uint32(hash[:4]), nil
+	return db.MasterKeyFingerprint(pubKey), nil
 }
