@@ -124,6 +124,24 @@ func optionalAccountNumber(accountNumber sql.NullInt64) (*uint32, error) {
 	return result, nil
 }
 
+// optionalMasterFingerprint converts a nullable SQL master fingerprint to a
+// pointer without collapsing an absent value into a present zero.
+func optionalMasterFingerprint(
+	masterFingerprint sql.NullInt64) (*uint32, error) {
+
+	var result *uint32
+	if masterFingerprint.Valid {
+		converted, err := Int64ToUint32(masterFingerprint.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("master fingerprint: %w", err)
+		}
+
+		result = &converted
+	}
+
+	return result, nil
+}
+
 // getKeyCounts converts external, internal, and imported key counts from
 // int64 to uint32 and handles errors.
 func getKeyCounts(external, internal, imported int64) (uint32, uint32,
@@ -230,12 +248,9 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 		return nil, fmt.Errorf("coin type: %w", err)
 	}
 
-	var fingerprint uint32
-	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("master fingerprint: %w", err)
-		}
+	fingerprint, err := optionalMasterFingerprint(row.MasterFingerprint)
+	if err != nil {
+		return nil, err
 	}
 
 	// Normalized SQL account rows track HD branch counters only. Individually
@@ -346,7 +361,7 @@ func BuildAccountInfo(accountID *uint32, accountNum *uint32,
 	isImported bool, externalKeyCount, internalKeyCount,
 	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
 	scope KeyScope, addrSchema ScopeAddrSchema, publicKey []byte,
-	masterKeyFingerprint uint32,
+	masterKeyFingerprint *uint32,
 	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
 
 	return &AccountInfo{
@@ -459,12 +474,9 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		return nil, err
 	}
 
-	var fingerprint uint32
-	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
-		if err != nil {
-			return nil, fmt.Errorf("master fingerprint: %w", err)
-		}
+	fingerprint, err := optionalMasterFingerprint(row.MasterFingerprint)
+	if err != nil {
+		return nil, err
 	}
 
 	addrSchema, err := DerivedAddressAccountSchema(

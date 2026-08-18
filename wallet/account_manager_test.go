@@ -147,7 +147,8 @@ func TestPropertiesToAccountInfoLockedDerivedNotMisclassified(t *testing.T) {
 	require.Equal(t, uint32(7), *info.AccountNumber)
 	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
-	require.Equal(t, masterFingerprint, info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, masterFingerprint, *info.MasterKeyFingerprint)
 }
 
 // TestValidateExtendedPubKeyNil verifies that a nil account key is rejected
@@ -176,7 +177,7 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	require.Nil(t, info.AccountNumber)
 	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
-	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
+	require.Nil(t, info.MasterKeyFingerprint)
 }
 
 // TestListAccounts verifies ListAccounts returns account snapshots with the
@@ -203,10 +204,9 @@ func TestListAccounts(t *testing.T) {
 		WalletID: 0,
 	}).Return([]db.AccountInfo{
 		{
-			AccountNumber:        &accountNumber,
-			AccountName:          "default",
-			KeyScope:             bip84,
-			MasterKeyFingerprint: 0,
+			AccountNumber: &accountNumber,
+			AccountName:   "default",
+			KeyScope:      bip84,
 		},
 	}, nil).Once()
 
@@ -215,7 +215,8 @@ func TestListAccounts(t *testing.T) {
 
 	require.Len(t, accounts, 1)
 	require.Equal(t, "default", accounts[0].AccountName)
-	require.Equal(t, masterFP, accounts[0].MasterKeyFingerprint)
+	require.NotNil(t, accounts[0].MasterKeyFingerprint)
+	require.Equal(t, masterFP, *accounts[0].MasterKeyFingerprint)
 }
 
 // TestListAccountsByScope verifies the scope filter narrows the query.
@@ -358,10 +359,9 @@ func TestGetAccount(t *testing.T) {
 
 	// Seed a non-zero cached master fingerprint so the
 	// derived-account override path produces an observable value.
-	// The mocked store deliberately returns MasterKeyFingerprint: 0
-	// (matching what waddrmgr's default-account row carries for
-	// legacy derived rows) so the wallet-level override is what
-	// surfaces the value to the caller.
+	// The mocked store deliberately returns an absent fingerprint,
+	// matching a legacy derived row with no kvdb side-bucket entry,
+	// so the wallet-level fallback surfaces the value to the caller.
 	const masterFP uint32 = 0xDEADBEEF
 
 	w.masterFingerprint = masterFP
@@ -379,12 +379,11 @@ func TestGetAccount(t *testing.T) {
 		Scope:    dbScope,
 		Name:     &name,
 	}).Return(&db.AccountInfo{
-		AccountNumber:        &accountNumber,
-		AccountName:          name,
-		KeyScope:             dbScope,
-		ConfirmedBalance:     100,
-		UnconfirmedBalance:   23,
-		MasterKeyFingerprint: 0,
+		AccountNumber:      &accountNumber,
+		AccountName:        name,
+		KeyScope:           dbScope,
+		ConfirmedBalance:   100,
+		UnconfirmedBalance: 23,
 	}, nil).Once()
 
 	info, err := w.GetAccount(t.Context(), scope, name)
@@ -394,7 +393,8 @@ func TestGetAccount(t *testing.T) {
 	require.Equal(t, name, info.AccountName)
 	require.Equal(t, btcutil.Amount(100), info.ConfirmedBalance)
 	require.Equal(t, btcutil.Amount(23), info.UnconfirmedBalance)
-	require.Equal(t, masterFP, info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, masterFP, *info.MasterKeyFingerprint)
 }
 
 // TestGetAccountIncludesImportedPseudoAccount verifies that the AccountInfo
@@ -468,7 +468,9 @@ func TestNewAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
 	require.Equal(t, uint32(1), *account.AccountNumber)
-	require.Equal(t, stub.masterKeyFingerprint, account.MasterKeyFingerprint)
+	require.NotNil(t, account.MasterKeyFingerprint)
+	require.Equal(t, stub.masterKeyFingerprint,
+		*account.MasterKeyFingerprint)
 
 	// Duplicate-name path.
 	expectAccountDeriveSetup(t, deps, stub)

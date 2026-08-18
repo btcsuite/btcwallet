@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
@@ -236,8 +237,29 @@ func (o *createDerivedAccountOps) deriveAccountFromScopedKey(
 		return nil, fmt.Errorf("derive scoped account: %w", err)
 	}
 
+	masterPubKey, err := readMasterPubKey(o.mgr, o.ns)
+	if err != nil {
+		return nil, err
+	}
+
+	var fingerprint uint32
+	if len(masterPubKey) > 0 {
+		rootKey, err := hdkeychain.NewKeyFromString(string(masterPubKey))
+		if err != nil {
+			return nil, fmt.Errorf("parse master HD pubkey: %w", err)
+		}
+
+		rootPubKey, err := rootKey.ECPubKey()
+		if err != nil {
+			return nil, fmt.Errorf("master pubkey: %w", err)
+		}
+
+		fingerprint = db.MasterKeyFingerprint(rootPubKey)
+	}
+
 	return &db.DerivedAccountData{
-		PublicKey:           pubKey,
-		EncryptedPrivateKey: encPrivKey,
+		PublicKey:            pubKey,
+		EncryptedPrivateKey:  encPrivKey,
+		MasterKeyFingerprint: fingerprint,
 	}, nil
 }
