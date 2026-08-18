@@ -107,10 +107,11 @@ type CreateWalletParams struct {
 type Manager struct {
 	sync.RWMutex
 
-	// wallets holds the active wallets keyed by their unique name, published
-	// as soon as they are assembled. A ModeShell Create imports its initial
-	// accounts after publishing, so a wallet can be observed here before
-	// that import finishes.
+	// wallets holds the active wallets keyed by their unique name. The
+	// Manager lock serializes Create and Load through assembly and cache
+	// installation. A ModeShell Create imports its initial accounts after
+	// installation, so a wallet can be observed here before that import
+	// finishes.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -209,16 +210,18 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
+	m.Lock()
+
 	data, err := m.backend.create(
 		context.Background(), cfg, params, rootKey,
 	)
 	if err != nil {
+		m.Unlock()
+
 		return nil, err
 	}
 
 	w := newManagedWallet(cfg, data)
-
-	m.Lock()
 	m.wallets[cfg.Name] = w
 	m.Unlock()
 
@@ -366,10 +369,6 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 // Load loads an existing wallet from the provided configuration. It opens the
 // database, initializes the wallet structure, and registers it with the manager
 // for tracking.
-//
-// TODO(yy): concurrent Load calls for the same name are not serialized, so two
-// callers racing on one wallet can both open a store. Call it from one
-// goroutine per wallet until that is fixed.
 func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	// The Manager owns the network for every wallet it serves; see Create.
 	cfg.ChainParams = m.chainParams
@@ -379,12 +378,12 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
-	// A wallet already published under this name is returned as is; callers
-	// serialize Create and Load, so a miss means this call builds it.
-	m.RLock()
-	existingW, ok := m.wallets[cfg.Name]
-	m.RUnlock()
+	m.Lock()
+	defer m.Unlock()
 
+	// A wallet already installed under this name is returned as is. The
+	// Manager lock makes a miss the sole assembly owner until installation.
+	existingW, ok := m.wallets[cfg.Name]
 	if ok {
 		return existingW, nil
 	}
@@ -395,10 +394,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	}
 
 	w := newManagedWallet(cfg, data)
-
-	m.Lock()
 	m.wallets[cfg.Name] = w
-	m.Unlock()
 
 	return w, nil
 }
