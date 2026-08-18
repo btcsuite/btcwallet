@@ -2109,6 +2109,11 @@ func (s *syncer) storeScanAccount(info db.AccountInfo,
 		return storeScanAccount{}, err
 	}
 
+	var masterFingerprint uint32
+	if info.MasterKeyFingerprint != nil {
+		masterFingerprint = *info.MasterKeyFingerprint
+	}
+
 	return storeScanAccount{
 		props: &waddrmgr.AccountProperties{
 			AccountNumber:        recoveryKey,
@@ -2116,7 +2121,7 @@ func (s *syncer) storeScanAccount(info db.AccountInfo,
 			ExternalKeyCount:     info.ExternalKeyCount,
 			InternalKeyCount:     info.InternalKeyCount,
 			ImportedKeyCount:     info.ImportedKeyCount,
-			MasterKeyFingerprint: info.MasterKeyFingerprint,
+			MasterKeyFingerprint: masterFingerprint,
 			KeyScope:             waddrmgr.KeyScope(info.KeyScope),
 			IsWatchOnly:          info.IsWatchOnly,
 			AccountPubKey:        accountPubKey,

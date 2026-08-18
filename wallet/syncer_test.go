@@ -2168,6 +2168,7 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	)
 	accountNumber2 := uint32(2)
 	accountID := uint32(41)
+	masterFingerprint := uint32(9)
 
 	accounts := []db.AccountInfo{{
 		AccountID:            &accountID,
@@ -2176,7 +2177,7 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 		ExternalKeyCount:     5,
 		InternalKeyCount:     3,
 		ImportedKeyCount:     1,
-		MasterKeyFingerprint: 9,
+		MasterKeyFingerprint: &masterFingerprint,
 		KeyScope:             db.KeyScopeBIP0084,
 		IsWatchOnly:          true,
 	}}

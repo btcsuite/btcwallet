@@ -258,8 +258,13 @@ func convertAddressAccountMetadata[TypeID any](
 	KeyScope, error) {
 
 	if row.AccountProps != nil {
+		var masterFingerprint uint32
+		if row.AccountProps.MasterKeyFingerprint != nil {
+			masterFingerprint = *row.AccountProps.MasterKeyFingerprint
+		}
+
 		return row.AccountProps.AccountNumber, row.AccountProps.AccountName,
-			row.AccountProps.MasterKeyFingerprint,
+			masterFingerprint,
 			row.AccountProps.KeyScope, nil
 	}
 

@@ -106,7 +106,8 @@ func TestCreateDerivedAccountPersistsMasterKeyFingerprint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, info.AccountNumber)
-	require.Equal(t, testFingerprintValue, info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, testFingerprintValue, *info.MasterKeyFingerprint)
 
 	// Round-trip via Store.GetAccount — the value must come back
 	// from the side bucket, not from waddrmgr's row.
@@ -116,15 +117,14 @@ func TestCreateDerivedAccountPersistsMasterKeyFingerprint(t *testing.T) {
 		Name:  &name,
 	})
 	require.NoError(t, err)
-	require.Equal(t, testFingerprintValue, got.MasterKeyFingerprint)
+	require.NotNil(t, got.MasterKeyFingerprint)
+	require.Equal(t, testFingerprintValue, *got.MasterKeyFingerprint)
 }
 
 // TestLoadAccountInfoFallsBackOnMissingFingerprintRow verifies the
-// legacy-compatibility path: a derived account whose side-bucket entry
-// is missing reads back props.MasterKeyFingerprint (which is 0 for
-// waddrmgr default-account rows). The wallet-layer override is the
-// canonical compatibility fallback at the public boundary; this test
-// pins the store-layer behavior (returns 0 honestly).
+// legacy-compatibility path: a derived account whose side-bucket entry is
+// missing reports an absent fingerprint. The wallet-layer override is the
+// canonical compatibility fallback at the public boundary.
 func TestLoadAccountInfoFallsBackOnMissingFingerprintRow(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +149,8 @@ func TestLoadAccountInfoFallsBackOnMissingFingerprintRow(t *testing.T) {
 		deriveFn,
 	)
 	require.NoError(t, err)
-	require.Equal(t, testFingerprintValue, info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, testFingerprintValue, *info.MasterKeyFingerprint)
 
 	// Manually delete the side-bucket entry to simulate a legacy
 	// derived account that pre-dates the side bucket.
@@ -168,17 +169,14 @@ func TestLoadAccountInfoFallsBackOnMissingFingerprintRow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Read back — store now returns 0 (waddrmgr's default-account
-	// row has no fingerprint). The wallet-layer override outside
-	// of kvdb backfills the cached master fingerprint at the
-	// public boundary.
+	// Read back. The Store preserves the missing side-bucket entry as an
+	// absent value so the Wallet boundary can apply its cached fallback
+	// without confusing absence with a present-zero fingerprint.
 	name := "fp-derived-fallback"
 	got, err := store.GetAccount(t.Context(), db.GetAccountQuery{
 		Scope: scope,
 		Name:  &name,
 	})
 	require.NoError(t, err)
-	require.Equal(t, uint32(0), got.MasterKeyFingerprint,
-		"missing side-bucket entry must fall back to waddrmgr's 0",
-	)
+	require.Nil(t, got.MasterKeyFingerprint)
 }

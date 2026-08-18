@@ -1980,8 +1980,9 @@ func TestNewDerivedAddress(t *testing.T) {
 			require.Equal(t, account.AccountNumber, info.AccountNumber)
 			require.Equal(t, account.AccountName, info.AccountName)
 			require.Equal(t, account.KeyScope, info.KeyScope)
+			require.NotNil(t, account.MasterKeyFingerprint)
 			require.Equal(
-				t, account.MasterKeyFingerprint,
+				t, *account.MasterKeyFingerprint,
 				info.MasterKeyFingerprint,
 			)
 		})

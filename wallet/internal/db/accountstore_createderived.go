@@ -257,10 +257,12 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, err
 	}
 
+	masterFingerprint := derived.MasterKeyFingerprint
+
 	return BuildAccountInfo(
 		accountID, &accNumber, params.Name, false, 0, 0, 0,
 		walletIsWatchOnly, row.CreatedAt, params.Scope, addrSchema,
-		derived.PublicKey, derived.MasterKeyFingerprint,
+		derived.PublicKey, &masterFingerprint,
 		0, 0,
 	), nil
 }
