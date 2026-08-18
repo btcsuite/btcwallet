@@ -38,6 +38,46 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	require.Equal(t, int64(42), info.rowID)
 }
 
+// TestOptionalMasterFingerprintPreservesPresence verifies SQL NULL and valid
+// values remain distinguishable, including a valid zero fingerprint.
+func TestOptionalMasterFingerprintPreservesPresence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value sql.NullInt64
+		want  *uint32
+	}{
+		{
+			name: "absent",
+		},
+		{
+			name:  "present zero",
+			value: sql.NullInt64{Valid: true},
+			want:  ptrUint32(0),
+		},
+		{
+			name: "present nonzero",
+			value: sql.NullInt64{
+				Int64: 42,
+				Valid: true,
+			},
+			want: ptrUint32(42),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := optionalMasterFingerprint(test.value)
+
+			require.NoError(t, err)
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
 // TestScopeAddrSchemaFromWaddrmgr verifies legacy address-manager schemas are
 // converted into the database account schema shape.
 func TestScopeAddrSchemaFromWaddrmgr(t *testing.T) {
