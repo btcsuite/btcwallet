@@ -3,6 +3,7 @@
 package itest
 
 import (
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -10,6 +11,74 @@ import (
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
+
+// testManagerLoadConcurrent verifies that every supported Manager backend gives
+// concurrent cold Loads one exact runtime Wallet pointer.
+func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
+	// Arrange. The setup Manager creates durable state, then closes so the
+	// test Manager opens the same backend with an empty runtime cache. Using
+	// two Managers is required to exercise a true cold Load on kvdb as well
+	// as SQL.
+	cfg, params := h.TestWalletConfig()
+	setupManager := h.NewWalletManager()
+
+	created, err := setupManager.Create(cfg, params)
+	require.NoError(h, err, "failed to create wallet")
+	require.NoError(h, created.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(h, setupManager.Close(), "failed to close setup manager")
+	require.True(
+		h, h.ReleaseManager(setupManager),
+		"failed to release setup manager",
+	)
+
+	manager := h.NewWalletManager()
+
+	// Multiple callers contend for cold assembly. The exact number is not
+	// significant as long as it is greater than one.
+	const numCallers = 8
+
+	type result struct {
+		// wallet is the exact runtime returned to one caller.
+		wallet *wallet.Wallet
+
+		// err is the Load result returned with wallet.
+		err error
+	}
+
+	results := make(chan result, numCallers)
+	start := make(chan struct{})
+
+	var ready sync.WaitGroup
+
+	ready.Add(numCallers)
+
+	for range numCallers {
+		go func() {
+			ready.Done()
+			<-start
+
+			w, err := manager.Load(cfg)
+			results <- result{wallet: w, err: err}
+		}()
+	}
+
+	// Act. Release every caller into the empty Manager cache together.
+	ready.Wait()
+	close(start)
+
+	// Assert. One caller assembles the runtime and every other caller returns
+	// that exact installed pointer.
+	first := <-results
+	require.NoError(h, first.err, "failed to load wallet")
+	installed := first.wallet
+	h.RegisterWallet(installed)
+
+	for range numCallers - 1 {
+		result := <-results
+		require.NoError(h, result.err, "failed to load wallet")
+		require.Same(h, installed, result.wallet, "load rebuilt wallet")
+	}
+}
 
 // testCreateWallet verifies a wallet can be created, started, and synced.
 func testCreateWallet(h *bwtest.HarnessTest) {
