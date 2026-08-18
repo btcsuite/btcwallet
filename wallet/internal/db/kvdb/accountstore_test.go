@@ -433,7 +433,10 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.Equal(t, savingsAccountName, info.AccountName)
 	require.False(t, info.IsImported)
 	require.NotEmpty(t, info.PublicKey)
-	require.Equal(t, uint32(0xC0DEC0DE), info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.NotZero(t, *info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, uint32(0xC0DEC0DE), *info.MasterKeyFingerprint)
 
 	// A subsequent GetAccount must observe the new row.
 	name := savingsAccountName
@@ -561,6 +564,7 @@ func TestCreateDerivedAccountFallsBackToScopedKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, info.AccountNumber, read.AccountNumber)
+	require.Equal(t, info.MasterKeyFingerprint, read.MasterKeyFingerprint)
 }
 
 var errTestBoom = errors.New("kvdb test boom")
@@ -597,7 +601,8 @@ func TestCreateImportedAccount(t *testing.T) {
 	require.Equal(t, "imported-xpub", info.AccountName)
 	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
-	require.Equal(t, uint32(0xDEADBEEF), info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, uint32(0xDEADBEEF), *info.MasterKeyFingerprint)
 
 	// The imported xpub has no BIP44 number, but kvdb still populates the
 	// durable store AccountID from its internal waddrmgr account number, which
@@ -1330,5 +1335,6 @@ func TestCreateImportedAccountAllowsMultipleInScope(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, "bob-import", got.AccountName)
-	require.Equal(t, uint32(0xFEEDFACE), got.MasterKeyFingerprint)
+	require.NotNil(t, got.MasterKeyFingerprint)
+	require.Equal(t, uint32(0xFEEDFACE), *got.MasterKeyFingerprint)
 }

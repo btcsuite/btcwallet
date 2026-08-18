@@ -118,7 +118,8 @@ func TestGetAccountReturnsPublicKeyAndFingerprint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotEmpty(t, derived.PublicKey)
-	require.NotZero(t, derived.MasterKeyFingerprint)
+	require.NotNil(t, derived.MasterKeyFingerprint)
+	require.NotZero(t, *derived.MasterKeyFingerprint)
 
 	derivedRead, err := store.GetAccount(
 		t.Context(), getAccountQueryByName(walletID, scope, "derived"),

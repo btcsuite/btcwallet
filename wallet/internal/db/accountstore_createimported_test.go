@@ -58,7 +58,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		KeyScope:             params.Scope,
 		AddrSchema:           ScopeAddrMap[params.Scope],
 		PublicKey:            params.PublicKey,
-		MasterKeyFingerprint: params.MasterFingerprint,
+		MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
 	}
 
 	ops := &mockCreateImportedAccountOps{}
@@ -101,7 +101,9 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
 	require.Equal(t, params.PublicKey, info.PublicKey)
-	require.Equal(t, params.MasterFingerprint, info.MasterKeyFingerprint)
+	require.NotNil(t, info.MasterKeyFingerprint)
+	require.Equal(t, params.MasterFingerprint,
+		*info.MasterKeyFingerprint)
 }
 
 // TestCreateImportedAccountWithOpsRejectsInvalidParams verifies the shared
@@ -175,7 +177,7 @@ func TestCreateImportedAccountWithOpsSkipsSecretInsertion(t *testing.T) {
 		KeyScope:             params.Scope,
 		AddrSchema:           ScopeAddrMap[params.Scope],
 		PublicKey:            params.PublicKey,
-		MasterKeyFingerprint: params.MasterFingerprint,
+		MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
 	}
 
 	ops := &mockCreateImportedAccountOps{}
