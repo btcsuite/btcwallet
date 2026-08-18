@@ -17,7 +17,7 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	manager := h.NewWalletManager()
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(w)
+	h.RegisterWallet(manager, w)
 
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
@@ -39,7 +39,7 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	manager = h.NewWalletManager()
 	reloaded, err := manager.Load(cfg)
 	require.NoError(h, err, "failed to reload wallet")
-	h.RegisterWallet(reloaded)
+	h.RegisterWallet(manager, reloaded)
 	require.NoError(
 		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
 	)
@@ -56,7 +56,7 @@ func testControllerUnlockLock(h *bwtest.HarnessTest) {
 	manager := h.NewWalletManager()
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(w)
+	h.RegisterWallet(manager, w)
 
 	// Before Start, unlock and lock are forbidden.
 	err = w.Unlock(h.Context(), wallet.UnlockRequest{
@@ -126,7 +126,7 @@ func testControllerInfo(h *bwtest.HarnessTest) {
 	manager := h.NewWalletManager()
 	w, err := manager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(w)
+	h.RegisterWallet(manager, w)
 
 	// Info is forbidden before Start.
 	_, err = w.Info(h.Context())

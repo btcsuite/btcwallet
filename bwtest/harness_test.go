@@ -12,54 +12,117 @@ import (
 )
 
 // TestDeregisterWalletRemovesRegisteredWallet verifies that deregistration
-// removes exactly the requested wallet, preserves the order of the remaining
-// registrations, and reports absent wallets without failing.
+// removes only the requested wallet and leaves its sibling registered.
 func TestDeregisterWalletRemovesRegisteredWallet(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a harness with three registered wallet identities.
-	h := &HarnessTest{T: t}
-	first := &wallet.Wallet{}
+	// Arrange: two wallets registered under one Manager.
+	manager := &wallet.Manager{}
 	removed := &wallet.Wallet{}
-	last := &wallet.Wallet{}
+	sibling := &wallet.Wallet{}
+	h := &HarnessTest{
+		T: t,
+		wallets: map[*wallet.Manager]walletRegistration{
+			manager: {
+				removed: nil,
+				sibling: nil,
+			},
+		}}
 
-	h.RegisterWallet(first)
-	h.RegisterWallet(removed)
-	h.RegisterWallet(last)
+	// Act: the wallet is deregistered, then queried again as absent and
+	// nil.
+	removedWallet := h.DeregisterWallet(removed)
+	removedAgain := h.DeregisterWallet(removed)
+	removedNil := h.DeregisterWallet(nil)
 
-	// Act: the middle wallet is deregistered.
-	require.True(t, h.DeregisterWallet(removed))
-
-	// Assert: only it is removed, ordering is retained, and absence is safe.
-	active := h.ActiveWallets()
-	require.Len(t, active, 2)
-	require.Same(t, first, active[0])
-	require.Same(t, last, active[1])
-	require.False(t, h.DeregisterWallet(removed))
-	require.False(t, h.DeregisterWallet(nil))
+	// Assert: the sibling remains and absent wallets are reported safely.
+	require.True(t, removedWallet)
+	require.False(t, removedAgain)
+	require.False(t, removedNil)
+	require.ElementsMatch(t, []*wallet.Wallet{sibling}, h.ActiveWallets())
 }
 
-// TestReleaseManagerRemovesRegisteredManager verifies that releasing a Manager
-// preserves the remaining teardown order and reports an absent Manager.
+// TestRegisterWalletSupportsMultipleWalletsPerManager verifies that one
+// Manager can own multiple registered wallets.
+func TestRegisterWalletSupportsMultipleWalletsPerManager(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: one manager with two wallet pointers.
+	manager := &wallet.Manager{}
+	first := &wallet.Wallet{}
+	second := &wallet.Wallet{}
+	h := &HarnessTest{
+		T: t,
+		wallets: map[*wallet.Manager]walletRegistration{
+			manager: {},
+		},
+	}
+
+	// Act: register both wallets under the same manager.
+	h.RegisterWallet(manager, first)
+	h.RegisterWallet(manager, second)
+
+	// Assert: both wallets are active regardless of map order.
+	active := h.ActiveWallets()
+	require.ElementsMatch(t, []*wallet.Wallet{first, second}, active)
+	require.Len(t, h.wallets[manager], 2)
+	require.Nil(t, h.wallets[manager][first])
+	require.Nil(t, h.wallets[manager][second])
+}
+
+// TestReleaseManagerRejectsRegisteredWallet verifies that Manager ownership
+// cannot be released while any wallet remains registered.
+func TestReleaseManagerRejectsRegisteredWallet(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a Manager with one registered wallet.
+	manager := &wallet.Manager{}
+	w := &wallet.Wallet{}
+	h := &HarnessTest{
+		T: t,
+		wallets: map[*wallet.Manager]walletRegistration{
+			manager: {
+				w: nil,
+			},
+		},
+	}
+
+	// Act: release is attempted while the registration is non-empty.
+	released := h.ReleaseManager(manager)
+
+	// Assert: release is rejected and the Manager remains owned.
+	require.False(t, released)
+	require.Contains(t, h.wallets, manager)
+}
+
+// TestReleaseManagerRemovesRegisteredManager verifies that releasing an empty
+// Manager retains unrelated registrations and reports an absent Manager.
 func TestReleaseManagerRemovesRegisteredManager(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a harness with three Manager registrations.
+	// Arrange: a harness with three empty Manager registrations.
 	first := &wallet.Manager{}
 	released := &wallet.Manager{}
 	last := &wallet.Manager{}
 	h := &HarnessTest{
-		T:        t,
-		managers: []*wallet.Manager{first, released, last},
+		T: t,
+		wallets: map[*wallet.Manager]walletRegistration{
+			first:    {},
+			released: {},
+			last:     {},
+		},
 	}
 
 	// Act: the middle Manager is released from teardown ownership.
 	require.True(t, h.ReleaseManager(released))
 
-	// Assert: only it is removed, ordering is retained, and absence is safe.
-	require.Len(t, h.managers, 2)
-	require.Same(t, first, h.managers[0])
-	require.Same(t, last, h.managers[1])
+	// Assert: only it is removed and absence is safe.
+	require.Len(t, h.wallets, 2)
+	_, firstRegistered := h.wallets[first]
+	_, lastRegistered := h.wallets[last]
+
+	require.True(t, firstRegistered)
+	require.True(t, lastRegistered)
 	require.False(t, h.ReleaseManager(released))
 	require.False(t, h.ReleaseManager(nil))
 }
@@ -76,6 +139,7 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 		WalletDBSource: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 	manager := h.NewWalletManager()
+	require.NotNil(t, h.wallets[manager])
 
 	// Act: the test closes the Manager before releasing teardown ownership.
 	require.NoError(t, manager.Close())

@@ -38,6 +38,11 @@ const (
 	defaultChainReconnectAttempts = 5
 )
 
+// walletRegistration tracks every wallet owned by one Manager. Each map value
+// is a copied reload configuration, or nil for wallets registered through
+// RegisterWallet.
+type walletRegistration map[*wallet.Wallet]*wallet.Config
+
 // HarnessTest is the integration test harness.
 type HarnessTest struct {
 	*testing.T
@@ -68,16 +73,12 @@ type HarnessTest struct {
 	// parent harness and its subtests.
 	postgresServer *postgresTestServer
 
-	// managers holds the wallet managers created for this subtest. They are
-	// closed after every registered wallet has stopped.
-	managers []*wallet.Manager
+	// wallets owns the wallet registrations for each Manager.
+	wallets map[*wallet.Manager]walletRegistration
 
 	// mu protects harness state that can be accessed across the main test and
 	// subtests. This includes the wallet registry and idempotent shutdown.
 	mu sync.Mutex
-
-	// wallets is the set of wallets created by a test case.
-	wallets []*wallet.Wallet
 
 	// stopped prevents stopping shared infrastructure more than once.
 	stopped bool
@@ -239,7 +240,14 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	})
 	require.NoError(h, err, "failed to create wallet manager")
 
-	h.managers = append(h.managers, manager)
+	h.mu.Lock()
+
+	if h.wallets == nil {
+		h.wallets = make(map[*wallet.Manager]walletRegistration)
+	}
+
+	h.wallets[manager] = make(walletRegistration)
+	h.mu.Unlock()
 
 	// Verify the Manager opened the backend requested by the -db flag without
 	// adding a production accessor solely for the test.
@@ -252,11 +260,22 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 func (h *HarnessTest) teardownWallets(ctx context.Context) error {
 	err := h.stopActiveWallets(ctx)
 
-	for _, manager := range h.managers {
+	h.mu.Lock()
+
+	managers := make([]*wallet.Manager, 0, len(h.wallets))
+	for manager := range h.wallets {
+		managers = append(managers, manager)
+	}
+
+	h.mu.Unlock()
+
+	for _, manager := range managers {
 		err = errors.Join(err, manager.Close())
 	}
 
-	h.managers = nil
+	h.mu.Lock()
+	h.wallets = nil
+	h.mu.Unlock()
 
 	return err
 }
@@ -330,26 +349,52 @@ func validateFileBackendArtifact(dbType, dbPath string) error {
 	return nil
 }
 
-// RegisterWallet registers a wallet with the harness.
+// RegisterWallet registers a wallet with its harness-owned manager.
 //
 // Registered wallets are automatically included in harness-level assertions,
 // such as MineBlocks.
-func (h *HarnessTest) RegisterWallet(w *wallet.Wallet) {
+func (h *HarnessTest) RegisterWallet(manager *wallet.Manager,
+	w *wallet.Wallet) {
+
 	h.Helper()
 
-	if w == nil {
-		h.Fatalf("cannot register nil wallet")
-	}
+	h.registerWallet(manager, w, nil)
+}
+
+// registerWallet records a wallet under manager and copies reloadConfig when
+// provided.
+func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
+	reloadConfig *wallet.Config) {
+
+	h.Helper()
 
 	h.mu.Lock()
-	h.wallets = append(h.wallets, w)
-	h.mu.Unlock()
+	defer h.mu.Unlock()
+
+	registration, ok := h.wallets[manager]
+	require.True(h, ok, "manager is not owned by this harness")
+	require.NotNil(h, w, "cannot register nil wallet")
+
+	for _, registered := range h.wallets {
+		_, exists := registered[w]
+		require.False(
+			h, exists,
+			"wallet is already registered with this harness",
+		)
+	}
+
+	var config *wallet.Config
+	if reloadConfig != nil {
+		copiedConfig := *reloadConfig
+		config = &copiedConfig
+	}
+
+	registration[w] = config
 }
 
 // DeregisterWallet releases a wallet from harness ownership.
 //
-// It returns false when the wallet is nil or was not registered. The remaining
-// registrations retain their original order.
+// It returns false when the wallet is nil or was not registered.
 func (h *HarnessTest) DeregisterWallet(w *wallet.Wallet) bool {
 	h.Helper()
 
@@ -360,12 +405,12 @@ func (h *HarnessTest) DeregisterWallet(w *wallet.Wallet) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	for i, registered := range h.wallets {
-		if registered != w {
+	for _, registration := range h.wallets {
+		if _, ok := registration[w]; !ok {
 			continue
 		}
 
-		h.wallets = append(h.wallets[:i], h.wallets[i+1:]...)
+		delete(registration, w)
 
 		return true
 	}
@@ -375,8 +420,8 @@ func (h *HarnessTest) DeregisterWallet(w *wallet.Wallet) bool {
 
 // ReleaseManager releases a Manager from harness teardown ownership.
 //
-// It returns false when the Manager is nil or was not registered. The remaining
-// registrations retain their original order.
+// It returns false when the Manager is nil, was not registered, or has any
+// registered wallets.
 func (h *HarnessTest) ReleaseManager(manager *wallet.Manager) bool {
 	h.Helper()
 
@@ -384,25 +429,33 @@ func (h *HarnessTest) ReleaseManager(manager *wallet.Manager) bool {
 		return false
 	}
 
-	for i, registered := range h.managers {
-		if registered != manager {
-			continue
-		}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
-		h.managers = append(h.managers[:i], h.managers[i+1:]...)
-
-		return true
+	registration, ok := h.wallets[manager]
+	if !ok || len(registration) != 0 {
+		return false
 	}
 
-	return false
+	delete(h.wallets, manager)
+
+	return true
 }
 
 // ActiveWallets returns a snapshot of wallets registered with this harness.
+// The order is unspecified.
 func (h *HarnessTest) ActiveWallets() []*wallet.Wallet {
 	h.Helper()
 
 	h.mu.Lock()
-	wallets := append([]*wallet.Wallet(nil), h.wallets...)
+
+	var wallets []*wallet.Wallet
+	for _, registration := range h.wallets {
+		for w := range registration {
+			wallets = append(wallets, w)
+		}
+	}
+
 	h.mu.Unlock()
 
 	return wallets
@@ -495,14 +548,7 @@ func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 
 	var stopErr error
 
-	for i, w := range h.ActiveWallets() {
-		if w == nil {
-			// Keep cleanup robust against partially initialized test state. A
-			// caller could register a wallet reference and fail before the
-			// assignment completes.
-			continue
-		}
-
+	for _, w := range h.ActiveWallets() {
 		// The modern Wallet controller's Stop method is idempotent.
 		//
 		// NOTE: We intentionally don't call the deprecated WaitForShutdown/
@@ -510,9 +556,9 @@ func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 		// legacy fields initialized.
 		err := w.Stop(ctx)
 		if err != nil {
-			stopErr = errors.Join(stopErr, fmt.Errorf(
-				"stop wallet %d: %w", i, err,
-			))
+			stopErr = errors.Join(
+				stopErr, fmt.Errorf("stop wallet: %w", err),
+			)
 		}
 	}
 
