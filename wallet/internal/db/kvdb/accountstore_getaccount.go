@@ -207,20 +207,30 @@ func effectiveAddrSchema(scopeSchema waddrmgr.ScopeAddrSchema,
 // at the public boundary.
 func resolveMasterFingerprintForAccount(ns walletdb.ReadBucket,
 	scope waddrmgr.KeyScope,
-	props *waddrmgr.AccountProperties) (uint32, error) {
+	props *waddrmgr.AccountProperties,
+	accountIsImported bool) (*uint32, error) {
 
 	persisted, ok, err := getAccountMasterFingerprint(
 		ns, scope, props.AccountNumber,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("read master fingerprint: %w", err)
+		return nil, fmt.Errorf("read master fingerprint: %w", err)
 	}
 
 	if ok {
-		return persisted, nil
+		return &persisted, nil
 	}
 
-	return props.MasterKeyFingerprint, nil
+	// Imported XPub accounts persist the importer-supplied fingerprint on
+	// their waddrmgr row. The keyless imported-address pseudo-account has no
+	// fingerprint, so keep it absent.
+	if accountIsImported && props.AccountPubKey != nil {
+		fingerprint := props.MasterKeyFingerprint
+
+		return &fingerprint, nil
+	}
+
+	return nil, nil //nolint:nilnil // Absence triggers the wallet fallback.
 }
 
 // loadAccountInfo materializes a db.AccountInfo from waddrmgr's
@@ -258,7 +268,7 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 	}
 
 	fingerprint, err := resolveMasterFingerprintForAccount(
-		ns, scope, props,
+		ns, scope, props, accountIsImported,
 	)
 	if err != nil {
 		return nil, err
