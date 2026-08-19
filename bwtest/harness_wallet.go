@@ -2,16 +2,16 @@ package bwtest
 
 import (
 	"bytes"
-	"strings"
-	"time"
-
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
+	"strings"
+	"time"
 )
 
 const (
@@ -328,6 +328,26 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	}
 
 	return funding
+}
+
+// DustThreshold returns the smallest amount an output paying pkScript may
+// carry without the network refusing it as dust. Any amount below it is dust.
+//
+// The limit depends on the output's script, so it is taken from the relay
+// policy rather than written down as a number that would silently drift from
+// it. The policy states dust as the comparison
+// value*1000/threshold < relayFee, which first holds at the threshold itself,
+// so the threshold is the smallest amount that clears it at the default relay
+// fee. A case paying a different relay fee cannot use this.
+//
+// The script is assumed spendable, which is what paying a wallet address
+// produces. An unspendable script is dust at any amount and has no threshold.
+func (h *HarnessTest) DustThreshold(pkScript []byte) btcutil.Amount {
+	h.Helper()
+
+	output := wire.TxOut{PkScript: pkScript}
+
+	return btcutil.Amount(mempool.GetDustThreshold(&output))
 }
 
 // ensureAccount makes sure an account exists for the given key scope, creating
