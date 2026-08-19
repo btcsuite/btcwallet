@@ -123,6 +123,14 @@ func NewBitcoindBackend(t *testing.T, logDir string) *BitcoindBackend {
 	}
 }
 
+// SupportsMempoolAcceptance reports that bitcoind answers the mempool
+// acceptance test: it serves testmempoolaccept over RPC.
+//
+// NOTE: This is part of the ChainBackend interface.
+func (b *BitcoindBackend) SupportsMempoolAcceptance() bool {
+	return true
+}
+
 // Name returns the identifier of the backend.
 func (b *BitcoindBackend) Name() string {
 	return backendBitcoind
