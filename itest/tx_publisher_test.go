@@ -199,3 +199,84 @@ func testCheckMempoolAcceptanceRejected(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "rejected transaction consumed the coin")
 	require.True(h, utxo.Spendable, "coin is no longer spendable")
 }
+
+// testBroadcastTransaction verifies that a published transaction reaches the
+// network and becomes visible through the wallet's own coin view, both while it
+// waits in the mempool and once it is mined.
+func testBroadcastTransaction(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txPublisherFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	// The second coin is never named by the transaction. It stays behind as
+	// the control that tells "this coin was spent" apart from "the wallet
+	// lost sight of its coins".
+	spent, untouched := funding.WalletOutpoints[0], funding.WalletOutpoints[1]
+
+	addr := h.NewWalletAddressOfType(w, txPublisherFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(h, err, "failed to broadcast transaction")
+
+	txid := tx.TxHash()
+
+	// The transaction reached the network.
+	h.AssertTxInMempool(txid)
+
+	// Before it is mined the wallet already reflects it: the coin it spends
+	// is gone from the spendable set.
+	_, err = w.GetUtxo(h.Context(), spent)
+	require.ErrorIs(
+		h, err, wallet.ErrUnknownOutput,
+		"broadcast left the spent coin in the wallet",
+	)
+
+	// The output it creates is a wallet coin, and reports no confirmations
+	// while it waits.
+	created := wire.OutPoint{Hash: txid, Index: 0}
+
+	unconfirmed, err := w.GetUtxo(h.Context(), created)
+	require.NoError(
+		h, err, "broadcast output did not become a wallet coin",
+	)
+	require.Equal(
+		h, btcutil.Amount(oneBTC-spendFee), unconfirmed.Amount,
+		"unexpected output amount",
+	)
+	require.Zero(
+		h, unconfirmed.Confirmations,
+		"unmined output reports confirmations",
+	)
+
+	// The wallet tracks the transaction it published.
+	_, err = w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "broadcast transaction is not tracked")
+
+	// The coin the transaction never named is untouched.
+	_, err = w.GetUtxo(h.Context(), untouched)
+	require.NoError(h, err, "broadcast consumed an unrelated coin")
+
+	h.MineBlockWithTx(tx)
+
+	// Confirmation is visible through the same coin view.
+	confirmed, err := w.GetUtxo(h.Context(), created)
+	require.NoError(h, err, "mined output is no longer a wallet coin")
+	require.Equal(
+		h, int32(1), confirmed.Confirmations,
+		"mined output reports unexpected confirmations",
+	)
+	require.True(h, confirmed.Spendable, "mined output is not spendable")
+}
