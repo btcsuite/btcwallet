@@ -68,6 +68,43 @@ Funding is also available on its own through `(*HarnessTest).FundWallet` and
 Manager-focused tests should continue to create wallets through the manager API
 directly.
 
+## Signed Transactions
+
+`(*HarnessTest).SignSpend` authors and signs a transaction from a wallet's own
+coins. It takes a `SpendFixture` naming the inputs and the outputs, and returns
+the signed transaction:
+
+```go
+tx := t.SignSpend(w, bwtest.SpendFixture{
+	Inputs:  []wire.OutPoint{funding.WalletOutpoints[0]},
+	Outputs: []wire.TxOut{{Value: amount, PkScript: pkScript}},
+})
+```
+
+The inputs and outputs are used verbatim, in the order given, and every input is
+final. Unlike `CreateTransaction` no coin selection, change or output policy is
+applied, so a case can author a transaction the network is required to reject —
+a dust payment, a fee the relay will not carry — which is what publication tests
+need. Cases that mean to test coin selection or change should use
+`CreateTransaction` instead.
+
+The wallet must be started, synced and unlocked, and it must own every named
+input.
+
+To build a rejected output without writing down an amount that drifts from
+policy, `(*HarnessTest).DustThreshold` returns the smallest amount an output
+paying a given script may carry; anything below it is dust.
+
+## Chain Backend Capabilities
+
+Not every backend answers every question. `ChainBackend.SupportsMempoolAcceptance`
+reports whether the backend under test runs the mempool acceptance check, and
+each backend answers for the client it constructs so the answer cannot drift
+from the implementation. Neutrino is a light client with no mempool and reports
+the check as unimplemented instead of returning a verdict, so cases reach it as
+`t.Backend.SupportsMempoolAcceptance()` and assert a definite result on both
+sides of the split rather than skipping a backend.
+
 ## Fast Scrypt
 
 `bwtest` sets `waddrmgr.DefaultScryptOptions` to `waddrmgr.FastScryptOptions` via
