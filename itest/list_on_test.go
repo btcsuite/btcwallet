@@ -119,4 +119,8 @@ var allTestCases = []*testCase{
 		Name:     "txpublisher check acceptance",
 		TestFunc: testCheckMempoolAcceptanceAccepted,
 	},
+	{
+		Name:     "txpublisher reject acceptance",
+		TestFunc: testCheckMempoolAcceptanceRejected,
+	},
 }
