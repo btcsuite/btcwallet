@@ -90,3 +90,112 @@ func testCheckMempoolAcceptanceAccepted(h *bwtest.HarnessTest) {
 		h, before, after, "acceptance check changed the wallet's coins",
 	)
 }
+
+// testCheckMempoolAcceptanceRejected verifies that representative rejections
+// come back as stable error identities rather than backend-specific text, and
+// that a refused transaction is no more published than an accepted one.
+func testCheckMempoolAcceptanceRejected(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txPublisherFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	spent := funding.WalletOutpoints[0]
+
+	addr := h.NewWalletAddressOfType(w, txPublisherFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	// One satoshi under the threshold for this script is dust by the
+	// relay's own definition, so the assertion tracks the policy instead of
+	// a number that would drift from it.
+	dust := int64(h.DustThreshold(pkScript)) - 1
+
+	// A second output absorbs the rest of the coin, so the dust payment is
+	// the only rule this transaction breaks. Paying the remainder as fee
+	// instead would break the maximum fee rate as well and leave which
+	// rejection the backend reports up to the order of its checks.
+	dustTx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{
+			{
+				Value:    dust,
+				PkScript: pkScript,
+			},
+			{
+				Value:    oneBTC - spendFee - dust,
+				PkScript: pkScript,
+			},
+		},
+	})
+
+	// An input the chain has never seen cannot be signed by anyone, so this
+	// transaction is built directly rather than through the wallet.
+	unknown := unknownOutpoint()
+
+	unknownInputTx := wire.NewMsgTx(wire.TxVersion)
+	unknownInputTx.AddTxIn(wire.NewTxIn(&unknown, nil, nil))
+	unknownInputTx.AddTxOut(&wire.TxOut{
+		Value:    oneBTC - spendFee,
+		PkScript: pkScript,
+	})
+
+	// Spending one coin twice is malformed before any policy applies, so
+	// this transaction is likewise built directly: no signer would produce
+	// it.
+	duplicateInputTx := wire.NewMsgTx(wire.TxVersion)
+	duplicateInputTx.AddTxIn(wire.NewTxIn(&spent, nil, nil))
+	duplicateInputTx.AddTxIn(wire.NewTxIn(&spent, nil, nil))
+	duplicateInputTx.AddTxOut(&wire.TxOut{
+		Value:    oneBTC - spendFee,
+		PkScript: pkScript,
+	})
+
+	rejections := []struct {
+		name string
+		tx   *wire.MsgTx
+		want error
+	}{
+		{
+			name: "dust payment",
+			tx:   dustTx,
+			want: chain.ErrDust,
+		},
+		{
+			name: "unknown input",
+			tx:   unknownInputTx,
+			want: chain.ErrMissingInputs,
+		},
+		{
+			name: "duplicate input",
+			tx:   duplicateInputTx,
+			want: chain.ErrDuplicateInput,
+		},
+	}
+
+	for _, rejection := range rejections {
+		want := rejection.want
+
+		// A backend with no mempool judges none of these. It reports
+		// the check as unimplemented instead of naming the rule that
+		// was broken, which is just as definite an answer.
+		if !h.Backend.SupportsMempoolAcceptance() {
+			want = chain.ErrUnimplemented
+		}
+
+		err := w.CheckMempoolAcceptance(h.Context(), rejection.tx)
+		require.ErrorIs(
+			h, err, want, "unexpected verdict for %s",
+			rejection.name,
+		)
+
+		h.AssertTxNotInMempool(rejection.tx.TxHash())
+	}
+
+	// A refused transaction leaves the coin it named still spendable.
+	utxo, err := w.GetUtxo(h.Context(), spent)
+	require.NoError(h, err, "rejected transaction consumed the coin")
+	require.True(h, utxo.Spendable, "coin is no longer spendable")
+}
