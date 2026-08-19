@@ -420,3 +420,37 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "refused transaction consumed the coin")
 	require.True(h, utxo.Spendable, "coin is no longer spendable")
 }
+
+// testCheckMempoolAcceptanceWalletState verifies the lifecycle gate on the
+// acceptance check: it is unavailable before the wallet starts and after it
+// stops, so a caller asking during startup or shutdown is told the wallet is
+// not running rather than something about its transaction.
+func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType:  txPublisherFundingType,
+		Unstarted: true,
+	})
+
+	// The gate refuses the transaction before anything looks at its
+	// content, so this only has to be non-nil. It is never published.
+	tx := wire.NewMsgTx(wire.TxVersion)
+
+	err := w.CheckMempoolAcceptance(h.Context(), tx)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"acceptance check before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	// Stop the wallet, then deregister it so the harness does not drive a
+	// stopped wallet during teardown.
+	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+
+	err = w.CheckMempoolAcceptance(h.Context(), tx)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"acceptance check after stop not rejected",
+	)
+}
