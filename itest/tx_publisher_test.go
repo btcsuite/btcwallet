@@ -280,3 +280,60 @@ func testBroadcastTransaction(h *bwtest.HarnessTest) {
 	)
 	require.True(h, confirmed.Spendable, "mined output is not spendable")
 }
+
+// testBroadcastAlreadyKnown verifies that publishing a transaction the network
+// already holds succeeds rather than failing, and publishes it only once. The
+// wallet rebroadcasts its unmined transactions on every sync step, so a repeat
+// that reported failure would make ordinary operation look broken.
+func testBroadcastAlreadyKnown(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txPublisherFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	addr := h.NewWalletAddressOfType(w, txPublisherFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[0]},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	txid := tx.TxHash()
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(h, err, "failed to broadcast transaction")
+
+	h.AssertTxInMempool(txid)
+
+	// Publishing the same transaction again succeeds.
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(
+		h, err, "re-broadcast of a mempool transaction was refused",
+	)
+
+	// The repeat published nothing new: the network still holds one copy.
+	mempool := h.AssertNumTxnsInMempool(1)
+	require.Equal(
+		h, txid, mempool[0], "unexpected transaction in the mempool",
+	)
+
+	// The wallet's coin view is unchanged by the repeat, so the second
+	// attempt did not re-record or invalidate what the first claimed.
+	created := wire.OutPoint{Hash: txid, Index: 0}
+
+	utxo, err := w.GetUtxo(h.Context(), created)
+	require.NoError(h, err, "re-broadcast dropped the wallet's output")
+	require.Equal(
+		h, btcutil.Amount(oneBTC-spendFee), utxo.Amount,
+		"unexpected output amount",
+	)
+
+	h.MineBlockWithTx(tx)
+}
