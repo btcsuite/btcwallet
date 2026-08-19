@@ -2,16 +2,18 @@ package bwtest
 
 import (
 	"bytes"
+	"strings"
+	"time"
+
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/mempool"
+	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
-	"strings"
-	"time"
 )
 
 const (
@@ -348,6 +350,78 @@ func (h *HarnessTest) DustThreshold(pkScript []byte) btcutil.Amount {
 	output := wire.TxOut{PkScript: pkScript}
 
 	return btcutil.Amount(mempool.GetDustThreshold(&output))
+}
+
+// spendTxVersion is the transaction version SignSpend authors. Version 2 is
+// the standard version both supported chain backends relay.
+const spendTxVersion = 2
+
+// SpendFixture describes a transaction the harness authors from a wallet's own
+// coins and signs with the wallet's keys.
+type SpendFixture struct {
+	// Inputs are the wallet-owned coins the transaction spends.
+	Inputs []wire.OutPoint
+
+	// Outputs are the transaction's outputs. No change output is added, so
+	// whatever the outputs leave behind is paid as the fee.
+	Outputs []wire.TxOut
+}
+
+// SignSpend returns a signed transaction spending the wallet coins the fixture
+// names.
+//
+// The inputs and outputs are used exactly as given, in the order given. Unlike
+// CreateTransaction this applies no coin selection, no change and no output
+// policy, which is what lets a case author a transaction the network is
+// required to reject. The wallet must be started, synced and unlocked.
+func (h *HarnessTest) SignSpend(w *wallet.Wallet,
+	fixture SpendFixture) *wire.MsgTx {
+
+	h.Helper()
+
+	inputs := make([]*wire.OutPoint, len(fixture.Inputs))
+	sequences := make([]uint32, len(fixture.Inputs))
+
+	for i := range fixture.Inputs {
+		inputs[i] = &fixture.Inputs[i]
+
+		// Every input is final. No case needs replaceability, and a
+		// transaction that signals it changes how a backend judges a
+		// conflict with an unconfirmed transaction. A case that wants
+		// replacement should add the knob then, rather than inherit it
+		// from a zero value.
+		sequences[i] = wire.MaxTxInSequenceNum
+	}
+
+	// psbt.New keeps the output pointers it is given, so the returned
+	// transaction would otherwise share its outputs with the caller's
+	// fixture, and mutating the fixture would alter an already-signed
+	// transaction. Hand it copies instead.
+	outputs := make([]*wire.TxOut, len(fixture.Outputs))
+	for i := range fixture.Outputs {
+		output := fixture.Outputs[i]
+		outputs[i] = &output
+	}
+
+	packet, err := psbt.New(inputs, outputs, spendTxVersion, 0, sequences)
+	require.NoError(h, err, "failed to create psbt")
+
+	// The wallet supplies each input's previous output and derivation path
+	// from its own records, so the fixture only has to name the outpoints.
+	// Unknown inputs are an error rather than a silently unsigned input,
+	// which would surface later as an opaque finalization failure.
+	packet, err = w.DecorateInputs(h.Context(), packet, false)
+	require.NoError(h, err, "failed to decorate psbt inputs")
+
+	// FinalizePsbt signs the wallet-owned inputs on its way to building the
+	// final witnesses, so a separate SignPsbt call would add nothing.
+	err = w.FinalizePsbt(h.Context(), packet)
+	require.NoError(h, err, "failed to finalize psbt")
+
+	tx, err := psbt.Extract(packet)
+	require.NoError(h, err, "failed to extract signed transaction")
+
+	return tx
 }
 
 // ensureAccount makes sure an account exists for the given key scope, creating
