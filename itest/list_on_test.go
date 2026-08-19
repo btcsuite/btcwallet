@@ -139,4 +139,8 @@ var allTestCases = []*testCase{
 		Name:     "txpublisher acceptance state",
 		TestFunc: testCheckMempoolAcceptanceWalletState,
 	},
+	{
+		Name:     "txpublisher broadcast state",
+		TestFunc: testBroadcastWalletState,
+	},
 }
