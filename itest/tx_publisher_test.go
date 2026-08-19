@@ -454,3 +454,35 @@ func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
 		"acceptance check after stop not rejected",
 	)
 }
+
+// testBroadcastWalletState verifies the same lifecycle gate on Broadcast, which
+// enforces it separately from the acceptance check.
+func testBroadcastWalletState(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType:  txPublisherFundingType,
+		Unstarted: true,
+	})
+
+	// The gate refuses the transaction before anything looks at its
+	// content, so this only has to be non-nil. It is never published.
+	tx := wire.NewMsgTx(wire.TxVersion)
+
+	err := w.Broadcast(h.Context(), tx, "")
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"broadcast before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	// Stop the wallet, then deregister it so the harness does not drive a
+	// stopped wallet during teardown.
+	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"broadcast after stop not rejected",
+	)
+}
