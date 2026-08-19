@@ -96,3 +96,76 @@ func TestJitterTicker(t *testing.T) {
 		require.True(t, diff < 121*time.Millisecond, "diff: %v", diff)
 	}
 }
+
+// newTestJitterTicker starts a ticker and returns a channel that is closed
+// when the ticker's start goroutine exits.
+func newTestJitterTicker(d time.Duration) (*JitterTicker, <-chan struct{}) {
+	minimum, maximum := calculateMinMax(d, 0)
+	ticker := &JitterTicker{
+		c:        make(chan time.Time, 1),
+		duration: d,
+		min:      minimum,
+		max:      maximum,
+		quit:     make(chan struct{}),
+	}
+	ticker.C = (<-chan time.Time)(ticker.c)
+
+	done := make(chan struct{})
+	go func() {
+		ticker.start()
+		close(done)
+	}()
+
+	return ticker, done
+}
+
+func TestJitterTickerStop(t *testing.T) {
+	t.Parallel()
+
+	ticker, done := newTestJitterTicker(time.Hour)
+	ticker.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ticker start goroutine did not exit")
+	}
+}
+
+func TestJitterTickerStopIdempotent(t *testing.T) {
+	t.Parallel()
+
+	ticker, done := newTestJitterTicker(time.Hour)
+
+	require.NotPanics(t, func() {
+		ticker.Stop()
+		ticker.Stop()
+	})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ticker start goroutine did not exit")
+	}
+}
+
+func TestJitterTickerStopConcurrentWithTick(t *testing.T) {
+	t.Parallel()
+
+	// A zero duration keeps the timer ready while Stop is called, exercising
+	// the select interleaving between a timer tick and the quit signal.
+	ticker, done := newTestJitterTicker(0)
+	select {
+	case <-ticker.C:
+	case <-time.After(time.Second):
+		t.Fatal("ticker did not produce a tick")
+	}
+
+	ticker.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ticker start goroutine did not exit")
+	}
+}
