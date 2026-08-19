@@ -337,3 +337,86 @@ func testBroadcastAlreadyKnown(h *bwtest.HarnessTest) {
 
 	h.MineBlockWithTx(tx)
 }
+
+// testBroadcastRejected verifies that a transaction the network refuses is
+// reported with a stable identity and claims no coin: neither of its outputs
+// becomes spendable, and the coin it named is still there afterwards.
+func testBroadcastRejected(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txPublisherFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	spent := funding.WalletOutpoints[0]
+
+	addr := h.NewWalletAddressOfType(w, txPublisherFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	// A dust payment is a well formed transaction the network will not
+	// relay, which is what this case needs: the wallet has every reason to
+	// record it and only the backend's answer to stop it. The second output
+	// absorbs the rest of the coin so dust is the only rule it breaks, and
+	// both outputs pay the wallet, so a refusal that still left the wallet
+	// holding coins would be visible below.
+	//
+	// A double spend of an unconfirmed transaction was tried as the subject
+	// here and dropped: bitcoind enables full replace-by-fee by default, so
+	// it judges the second transaction as a replacement bid, accepting it
+	// when it pays more and reporting an insufficient fee when it pays
+	// less, while btcd reports a mempool conflict. One condition with three
+	// outcomes is not a contract a caller can branch on.
+	dust := int64(h.DustThreshold(pkScript)) - 1
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{
+			{
+				Value:    dust,
+				PkScript: pkScript,
+			},
+			{
+				Value:    oneBTC - spendFee - dust,
+				PkScript: pkScript,
+			},
+		},
+	})
+
+	err = w.Broadcast(h.Context(), tx, "")
+
+	require.ErrorIs(
+		h, err, chain.ErrDust, "dust transaction was not refused",
+	)
+
+	// The refusal published nothing.
+	h.AssertTxNotInMempool(tx.TxHash())
+
+	// It claimed no coin either. Neither output became one, which both of
+	// them would have, since both pay the wallet.
+	//
+	// Whether the transaction was recorded at all is deliberately not
+	// asserted, because it differs by backend and the difference is not
+	// this task's to define. A backend that answers the acceptance check
+	// refuses before Broadcast records anything, while neutrino has no
+	// answer to refuse with, so it records, publishes, and invalidates the
+	// row once its peer rejects. Both leave the coin view below identical;
+	// what the store keeps for an invalidated transaction belongs to the
+	// invalidation task.
+	for i := range tx.TxOut {
+		_, err = w.GetUtxo(h.Context(), wire.OutPoint{
+			Hash:  tx.TxHash(),
+			Index: uint32(i),
+		})
+		require.ErrorIs(
+			h, err, wallet.ErrUnknownOutput,
+			"refused transaction left output %d in the wallet", i,
+		)
+	}
+
+	// And the coin it named is untouched.
+	utxo, err := w.GetUtxo(h.Context(), spent)
+	require.NoError(h, err, "refused transaction consumed the coin")
+	require.True(h, utxo.Spendable, "coin is no longer spendable")
+}
