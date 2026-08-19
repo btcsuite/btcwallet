@@ -32,6 +32,15 @@ func NewNeutrinoBackend(t *testing.T, _ string) *NeutrinoBackend {
 	return &NeutrinoBackend{}
 }
 
+// SupportsMempoolAcceptance reports that neutrino does not answer the mempool
+// acceptance test. A light client keeps no mempool, so its TestMempoolAccept
+// returns chain.ErrUnimplemented for every transaction.
+//
+// NOTE: This is part of the ChainBackend interface.
+func (n *NeutrinoBackend) SupportsMempoolAcceptance() bool {
+	return false
+}
+
 // Name returns the identifier of the backend.
 func (n *NeutrinoBackend) Name() string {
 	return backendNeutrino
