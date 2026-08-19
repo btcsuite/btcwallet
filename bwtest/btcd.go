@@ -55,6 +55,14 @@ func NewBtcdBackend(t *testing.T, logDir string) *BtcdBackend {
 	}
 }
 
+// SupportsMempoolAcceptance reports that btcd answers the mempool acceptance
+// test: it serves testmempoolaccept over RPC.
+//
+// NOTE: This is part of the ChainBackend interface.
+func (b *BtcdBackend) SupportsMempoolAcceptance() bool {
+	return true
+}
+
 // Name returns the identifier of the backend.
 func (b *BtcdBackend) Name() string {
 	return backendBtcd
