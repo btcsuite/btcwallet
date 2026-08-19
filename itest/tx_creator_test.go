@@ -720,17 +720,10 @@ func testCreateTransactionOutputBoundaries(h *bwtest.HarnessTest) {
 		KeyScope:    scope,
 	}
 
-	// The dust limit depends on the output's script, so the edge is derived
-	// from the relay policy itself rather than written down as a number
-	// that would silently drift from it.
-	candidate := wire.TxOut{PkScript: payment.PkScript}
-	for candidate.Value = 1; ; candidate.Value++ {
-		if !txrules.IsDustOutput(&candidate, txrules.DefaultRelayFeePerKb) {
-			break
-		}
-	}
-
-	smallestPayment := candidate.Value
+	// The dust limit depends on the output's script, and the harness derives
+	// it from the relay policy, so the edge here cannot drift from the one
+	// the publication cases use.
+	smallestPayment := int64(h.DustThreshold(payment.PkScript))
 
 	// One satoshi below that edge is dust, and the edge itself is payable.
 	_, err = w.CreateTransaction(h.Context(), &wallet.TxIntent{
