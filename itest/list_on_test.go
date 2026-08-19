@@ -115,4 +115,8 @@ var allTestCases = []*testCase{
 		Name:     "txcreator wallet state",
 		TestFunc: testCreateTransactionWalletState,
 	},
+	{
+		Name:     "txpublisher check acceptance",
+		TestFunc: testCheckMempoolAcceptanceAccepted,
+	},
 }
