@@ -39,9 +39,18 @@ var (
 type TxPublisher interface {
 	// CheckMempoolAcceptance checks if a transaction would be accepted by
 	// the mempool without broadcasting.
+	//
+	// Not every chain backend keeps a mempool to ask. One that does not,
+	// such as a light client, returns chain.ErrUnimplemented instead of a
+	// verdict, so a caller that must work against any backend treats that
+	// as "unknown" rather than as a rejection.
 	CheckMempoolAcceptance(ctx context.Context, tx *wire.MsgTx) error
 
 	// Broadcast broadcasts a transaction to the network.
+	//
+	// When the backend cannot answer the acceptance check, the transaction
+	// is published without one, so a nil return means it was sent, not that
+	// the network accepted it.
 	Broadcast(ctx context.Context, tx *wire.MsgTx, label string) error
 }
 
@@ -50,6 +59,13 @@ var _ TxPublisher = (*Wallet)(nil)
 
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
 // mempool without broadcasting.
+//
+// A chain backend with no mempool cannot answer the question and returns
+// chain.ErrUnimplemented rather than a verdict; a backend too old to serve the
+// check returns rpcclient.ErrBackendVersion. Neither means the transaction was
+// rejected.
+//
+// NOTE: This is part of the TxPublisher interface.
 func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	tx *wire.MsgTx) error {
 
@@ -99,6 +115,10 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 
 // Broadcast broadcasts a tx to the network. It is the main implementation of
 // the TxPublisher interface.
+//
+// A backend that cannot answer the mempool acceptance check does not stop the
+// publish: the tx is sent without a verdict, so a nil return reports that it
+// was handed to the network, not that the network kept it.
 func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	label string) error {
 
