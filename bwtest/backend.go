@@ -26,6 +26,16 @@ type ChainBackend interface {
 	// Name returns the name of the backend ("btcd", "bitcoind", "neutrino").
 	Name() string
 
+	// SupportsMempoolAcceptance reports whether the clients this backend
+	// creates answer the mempool acceptance test. A backend that keeps no
+	// mempool reports the check as unimplemented instead of returning a
+	// verdict.
+	//
+	// Each backend answers for the client it constructs, so the answer
+	// cannot drift from the implementation the way a central lookup by
+	// name would.
+	SupportsMempoolAcceptance() bool
+
 	// Start launches the chain backend.
 	Start() error
 
