@@ -131,4 +131,8 @@ var allTestCases = []*testCase{
 		Name:     "txpublisher broadcast known",
 		TestFunc: testBroadcastAlreadyKnown,
 	},
+	{
+		Name:     "txpublisher reject broadcast",
+		TestFunc: testBroadcastRejected,
+	},
 }
