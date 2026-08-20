@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // GetUtxo retrieves one current wallet-owned UTXO by outpoint.
@@ -28,14 +29,14 @@ func (s *Store) GetUtxo(ctx context.Context,
 	err = s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetUtxoByOutpoint(
 			ctx, sqlc.GetUtxoByOutpointParams{
-				NowUtc:      time.Now().UTC(),
+				NowUtc:      timestamp(time.Now().UTC()),
 				WalletID:    int64(query.WalletID),
 				TxHash:      query.OutPoint.Hash[:],
 				OutputIndex: outputIndex,
 			},
 		)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("utxo %s: %w", query.OutPoint,
 					db.ErrUtxoNotFound)
 			}
@@ -67,7 +68,7 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 	}
 
 	keyScope, hasScope, err := db.KeyScopeFromNullIDs(
-		row.Purpose, row.CoinType,
+		nullableInt64(row.Purpose), nullableInt64(row.CoinType),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("key scope: %w", err)
@@ -75,10 +76,10 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 
 	err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
 		IsDerived:        row.AddressIsDerived,
-		DerivedAddressID: row.DerivedAddressID,
-		AccountID:        row.AccountID,
-		AccountIsDerived: row.AccountIsDerived,
-		AccountNumber:    row.AccountNumber,
+		DerivedAddressID: nullableInt64(row.DerivedAddressID),
+		AccountID:        nullableInt64(row.AccountID),
+		AccountIsDerived: nullableBool(row.AccountIsDerived),
+		AccountNumber:    nullableInt64(row.AccountNumber),
 	})
 	if err != nil {
 		return nil, err
@@ -86,7 +87,7 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 
 	utxo, err := utxoInfoFromRow(
 		row.TxHash, row.OutputIndex, row.Amount, row.ScriptPubKey,
-		row.ReceivedTime, row.IsCoinbase, row.BlockHeight,
+		row.ReceivedTime.Time, row.IsCoinbase, row.BlockHeight,
 	)
 	if err != nil {
 		return nil, err
@@ -116,7 +117,7 @@ func utxoInfoFromGetRow(row sqlc.GetUtxoByOutpointRow) (*db.UtxoInfo,
 // UtxoInfo shape.
 func utxoInfoFromRow(hash []byte, outputIndex int32, amount int64,
 	pkScript []byte, received time.Time, isCoinbase bool,
-	blockHeight sql.NullInt32) (*db.UtxoInfo, error) {
+	blockHeight pgtype.Int4) (*db.UtxoInfo, error) {
 
 	index, err := db.Int64ToUint32(int64(outputIndex))
 	if err != nil {
@@ -125,7 +126,7 @@ func utxoInfoFromRow(hash []byte, outputIndex int32, amount int64,
 
 	var height *uint32
 	if blockHeight.Valid {
-		heightValue, err := db.NullInt32ToUint32(blockHeight)
+		heightValue, err := nullableInt32ToUint32(blockHeight)
 		if err != nil {
 			return nil, fmt.Errorf("utxo block height: %w", err)
 		}

@@ -2,13 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"iter"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ListWallets returns a page of wallets matching the given query.
@@ -72,7 +72,7 @@ func listWalletsParams(
 	}
 
 	if req.After != nil {
-		params.CursorID = sql.NullInt64{
+		params.CursorID = pgtype.Int8{
 			Int64: int64(*req.After),
 			Valid: true,
 		}

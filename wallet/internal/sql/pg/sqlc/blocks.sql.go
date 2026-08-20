@@ -15,7 +15,7 @@ WHERE block_height = $1
 `
 
 func (q *Queries) DeleteBlock(ctx context.Context, blockHeight int32) error {
-	_, err := q.exec(ctx, q.deleteBlockStmt, DeleteBlock, blockHeight)
+	_, err := q.db.Exec(ctx, DeleteBlock, blockHeight)
 	return err
 }
 
@@ -29,7 +29,7 @@ WHERE block_height = $1
 `
 
 func (q *Queries) GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error) {
-	row := q.queryRow(ctx, q.getBlockByHeightStmt, GetBlockByHeight, blockHeight)
+	row := q.db.QueryRow(ctx, GetBlockByHeight, blockHeight)
 	var i Block
 	err := row.Scan(&i.BlockHeight, &i.HeaderHash, &i.BlockTimestamp)
 	return i, err
@@ -54,7 +54,7 @@ type GetBlocksInRangeParams struct {
 }
 
 func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error) {
-	rows, err := q.query(ctx, q.getBlocksInRangeStmt, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
+	rows, err := q.db.Query(ctx, GetBlocksInRange, arg.StartHeight, arg.EndHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -66,9 +66,6 @@ func (q *Queries) GetBlocksInRange(ctx context.Context, arg GetBlocksInRangePara
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -89,6 +86,6 @@ type InsertBlockParams struct {
 }
 
 func (q *Queries) InsertBlock(ctx context.Context, arg InsertBlockParams) error {
-	_, err := q.exec(ctx, q.insertBlockStmt, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
+	_, err := q.db.Exec(ctx, InsertBlock, arg.BlockHeight, arg.HeaderHash, arg.BlockTimestamp)
 	return err
 }

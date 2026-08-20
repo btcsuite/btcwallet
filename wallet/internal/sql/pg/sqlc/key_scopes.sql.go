@@ -35,7 +35,7 @@ type CreateKeyScopeParams struct {
 
 // Creates a new key scope for a wallet and returns its ID.
 func (q *Queries) CreateKeyScope(ctx context.Context, arg CreateKeyScopeParams) (int64, error) {
-	row := q.queryRow(ctx, q.createKeyScopeStmt, CreateKeyScope,
+	row := q.db.QueryRow(ctx, CreateKeyScope,
 		arg.WalletID,
 		arg.Purpose,
 		arg.CoinType,
@@ -55,11 +55,11 @@ WHERE id = $1
 
 // Deletes a key scope by its ID.
 func (q *Queries) DeleteKeyScope(ctx context.Context, id int64) (int64, error) {
-	result, err := q.exec(ctx, q.deleteKeyScopeStmt, DeleteKeyScope, id)
+	result, err := q.db.Exec(ctx, DeleteKeyScope, id)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const DeleteKeyScopeSecrets = `-- name: DeleteKeyScopeSecrets :execrows
@@ -69,11 +69,11 @@ WHERE scope_id = $1
 
 // Deletes the secrets for a key scope.
 func (q *Queries) DeleteKeyScopeSecrets(ctx context.Context, scopeID int64) (int64, error) {
-	result, err := q.exec(ctx, q.deleteKeyScopeSecretsStmt, DeleteKeyScopeSecrets, scopeID)
+	result, err := q.db.Exec(ctx, DeleteKeyScopeSecrets, scopeID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const GetAndIncrementNextAccountNumber = `-- name: GetAndIncrementNextAccountNumber :one
@@ -87,7 +87,7 @@ RETURNING (next_account_number - 1)::BIGINT AS account_number
 // increments the persisted counter. Returns the current value before
 // incrementing.
 func (q *Queries) GetAndIncrementNextAccountNumber(ctx context.Context, id int64) (int64, error) {
-	row := q.queryRow(ctx, q.getAndIncrementNextAccountNumberStmt, GetAndIncrementNextAccountNumber, id)
+	row := q.db.QueryRow(ctx, GetAndIncrementNextAccountNumber, id)
 	var account_number int64
 	err := row.Scan(&account_number)
 	return account_number, err
@@ -118,7 +118,7 @@ type GetKeyScopeByIDRow struct {
 
 // Retrieves a key scope by its ID.
 func (q *Queries) GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error) {
-	row := q.queryRow(ctx, q.getKeyScopeByIDStmt, GetKeyScopeByID, id)
+	row := q.db.QueryRow(ctx, GetKeyScopeByID, id)
 	var i GetKeyScopeByIDRow
 	err := row.Scan(
 		&i.ID,
@@ -163,7 +163,7 @@ type GetKeyScopeByWalletAndScopeRow struct {
 
 // Retrieves a key scope by wallet ID, purpose, and coin type.
 func (q *Queries) GetKeyScopeByWalletAndScope(ctx context.Context, arg GetKeyScopeByWalletAndScopeParams) (GetKeyScopeByWalletAndScopeRow, error) {
-	row := q.queryRow(ctx, q.getKeyScopeByWalletAndScopeStmt, GetKeyScopeByWalletAndScope, arg.WalletID, arg.Purpose, arg.CoinType)
+	row := q.db.QueryRow(ctx, GetKeyScopeByWalletAndScope, arg.WalletID, arg.Purpose, arg.CoinType)
 	var i GetKeyScopeByWalletAndScopeRow
 	err := row.Scan(
 		&i.ID,
@@ -187,7 +187,7 @@ WHERE scope_id = $1
 
 // Retrieves the secrets for a key scope.
 func (q *Queries) GetKeyScopeSecrets(ctx context.Context, scopeID int64) (KeyScopeSecret, error) {
-	row := q.queryRow(ctx, q.getKeyScopeSecretsStmt, GetKeyScopeSecrets, scopeID)
+	row := q.db.QueryRow(ctx, GetKeyScopeSecrets, scopeID)
 	var i KeyScopeSecret
 	err := row.Scan(&i.ScopeID, &i.EncryptedCoinPrivKey)
 	return i, err
@@ -210,7 +210,7 @@ type InsertKeyScopeSecretsParams struct {
 // Inserts secrets for a spendable key scope. Watch-only scopes are represented
 // by an absent key_scope_secrets row.
 func (q *Queries) InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error {
-	_, err := q.exec(ctx, q.insertKeyScopeSecretsStmt, InsertKeyScopeSecrets, arg.ScopeID, arg.EncryptedCoinPrivKey)
+	_, err := q.db.Exec(ctx, InsertKeyScopeSecrets, arg.ScopeID, arg.EncryptedCoinPrivKey)
 	return err
 }
 
@@ -240,7 +240,7 @@ type ListKeyScopesByWalletRow struct {
 
 // Lists all key scopes for a wallet, ordered by ID.
 func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]ListKeyScopesByWalletRow, error) {
-	rows, err := q.query(ctx, q.listKeyScopesByWalletStmt, ListKeyScopesByWallet, walletID)
+	rows, err := q.db.Query(ctx, ListKeyScopesByWallet, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,9 +260,6 @@ func (q *Queries) ListKeyScopesByWallet(ctx context.Context, walletID int64) ([]
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

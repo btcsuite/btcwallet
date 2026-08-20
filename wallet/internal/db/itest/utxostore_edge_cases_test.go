@@ -9,7 +9,6 @@ import (
 	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
 	"github.com/stretchr/testify/require"
 )
 
@@ -183,7 +182,7 @@ func TestDeleteExpiredLeasesRemovesOnlyExpired(t *testing.T) {
 
 	query := "UPDATE utxo_leases SET expires_at = ? " +
 		"WHERE wallet_id = ? AND lock_id = ?"
-	if _, ok := any(store).(*pg.Store); ok {
+	if isPGTestStore(store) {
 		query = "UPDATE utxo_leases SET expires_at = $1 " +
 			"WHERE wallet_id = $2 AND lock_id = $3"
 	}
@@ -345,7 +344,7 @@ func TestGetUtxoAndLeaseRejectLargeOutputIndex(t *testing.T) {
 		},
 	)
 
-	if _, ok := any(store).(*pg.Store); ok {
+	if isPGTestStore(store) {
 		require.ErrorContains(t, err, "convert output index")
 		require.ErrorContains(t, leaseErr, "convert output index")
 		require.ErrorContains(t, releaseErr, "could not cast")

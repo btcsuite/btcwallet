@@ -113,7 +113,7 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 
 	return db.CreateDerivedAccountRow{
 		AccountID:     row.ID,
-		AccountNumber: row.AccountNumber,
+		AccountNumber: nullableInt64(row.AccountNumber),
 		CreatedAt:     row.CreatedAt,
 	}, nil
 }

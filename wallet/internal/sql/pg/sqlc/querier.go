@@ -6,8 +6,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
@@ -40,7 +40,7 @@ type Querier interface {
 	// Performance:
 	// - Locks the target utxo row during resolution so concurrent spend updates on
 	//   that row serialize with lease acquisition.
-	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (pgtype.Timestamp, error)
 	// Advances the external branch's next index to the supplied value during
 	// recovery horizon extension. The GREATEST guard keeps the counter monotonic
 	// so a slower concurrent writer cannot regress it below an already-recorded
@@ -483,7 +483,7 @@ type Querier interface {
 	// Performance:
 	// - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
 	//   to one wallet-scoped parent.
-	ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]sql.NullInt64, error)
+	ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]pgtype.Int8, error)
 	// Lists all confirmed transactions for a wallet in the provided height range.
 	//
 	// How:

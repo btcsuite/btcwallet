@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -44,7 +43,7 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	RowID int64
 
 	// AccountNumber is the nullable BIP44 number for derived accounts.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 
 	// AccountName is the human-readable account name.
 	AccountName string
@@ -62,7 +61,7 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	PublicKey []byte
 
 	// MasterFingerprint is the nullable account master key fingerprint.
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint Nullable[int64]
 
 	// IsWatchOnly reports the wallet-level watch-only state.
 	IsWatchOnly bool
@@ -110,10 +109,10 @@ func optionalAccountID(rowID int64) (*uint32, error) {
 }
 
 // optionalAccountNumber converts a nullable SQL account number to a pointer.
-func optionalAccountNumber(accountNumber sql.NullInt64) (*uint32, error) {
+func optionalAccountNumber(accountNumber Nullable[int64]) (*uint32, error) {
 	var result *uint32
 	if accountNumber.Valid {
-		converted, err := validateAccountNumber(accountNumber.Int64)
+		converted, err := validateAccountNumber(accountNumber.Value)
 		if err != nil {
 			return nil, fmt.Errorf("account number: %w", err)
 		}
@@ -150,7 +149,7 @@ func getKeyCounts(external, internal, imported int64) (uint32, uint32,
 // validateAccountShape checks that account shape agrees with account-number
 // presence.
 func validateAccountShape(isDerived bool,
-	accountNumber sql.NullInt64) error {
+	accountNumber Nullable[int64]) error {
 
 	switch {
 	case isDerived && !accountNumber.Valid:
@@ -164,18 +163,6 @@ func validateAccountShape(isDerived bool,
 	default:
 		return nil
 	}
-}
-
-// DerivedAddressAccountNumber converts a derived account number from an
-// account lookup row to the wallet-compatible uint32 account number.
-func DerivedAddressAccountNumber(accountNumber sql.NullInt64) (uint32,
-	error) {
-
-	if !accountNumber.Valid {
-		return 0, ErrNilDBAccountNumber
-	}
-
-	return validateAccountNumber(accountNumber.Int64)
 }
 
 // DerivedAddressAccountSchema builds the effective address schema from the
@@ -232,7 +219,7 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 
 	var fingerprint uint32
 	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
+		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Value)
 		if err != nil {
 			return nil, fmt.Errorf("master fingerprint: %w", err)
 		}
@@ -375,7 +362,7 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	RowID int64
 
 	// AccountNumber is the nullable BIP44 number for derived accounts.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 
 	// AccountName is the human-readable account name.
 	AccountName string
@@ -393,7 +380,7 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 	PublicKey []byte
 
 	// MasterFingerprint is the nullable account master key fingerprint.
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint Nullable[int64]
 
 	// IsWatchOnly reports the wallet-level watch-only state.
 	IsWatchOnly bool
@@ -461,7 +448,7 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 
 	var fingerprint uint32
 	if row.MasterFingerprint.Valid {
-		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Int64)
+		fingerprint, err = Int64ToUint32(row.MasterFingerprint.Value)
 		if err != nil {
 			return nil, fmt.Errorf("master fingerprint: %w", err)
 		}

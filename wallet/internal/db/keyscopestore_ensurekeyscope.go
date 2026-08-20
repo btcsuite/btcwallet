@@ -2,8 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 )
 
@@ -23,6 +21,9 @@ func getAddrSchemaForScope(scope KeyScope) (ScopeAddrSchema, error) {
 // uses when a backend only needs the scope ID and keeps row-shape adaptation
 // local.
 type EnsureKeyScopeOps interface {
+	// IsMissingRow reports whether err is the backend's no-row sentinel.
+	IsMissingRow(err error) bool
+
 	// GetKeyScope returns the existing scope row ID for the wallet/scope pair.
 	GetKeyScope(ctx context.Context, walletID uint32, scope KeyScope) (int64,
 		error)
@@ -44,7 +45,7 @@ func EnsureKeyScopeWithOps(ctx context.Context, ops EnsureKeyScopeOps,
 		return scopeID, nil
 	}
 
-	if !errors.Is(getErr, sql.ErrNoRows) {
+	if !ops.IsMissingRow(getErr) {
 		return 0, fmt.Errorf("check key scope: %w", getErr)
 	}
 
@@ -65,7 +66,7 @@ func EnsureKeyScopeWithOps(ctx context.Context, ops EnsureKeyScopeOps,
 		return id, nil
 	}
 
-	if !errors.Is(err, sql.ErrNoRows) {
+	if !ops.IsMissingRow(err) {
 		return 0, fmt.Errorf("create key scope: %w", err)
 	}
 

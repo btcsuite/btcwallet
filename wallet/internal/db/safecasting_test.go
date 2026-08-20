@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"math"
 	"testing"
 
@@ -274,85 +273,30 @@ func TestUint32ToInt16(t *testing.T) {
 	}
 }
 
-// TestUint32ToNullInt32 checks that we respect the signed 32 bit limits
-// before converting an uint32 value into sql.NullInt32. It should fail
-// loudly when the value is out of range or when valid is false.
-func TestUint32ToNullInt32(t *testing.T) {
+// TestInt32ToUint32 checks that non-negative signed values convert to uint32.
+func TestInt32ToUint32(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
-		val     uint32
-		want    sql.NullInt32
-		wantErr bool
-	}{
-		{
-			name: "zero",
-			val:  0,
-			want: sql.NullInt32{Int32: 0, Valid: true},
-		},
-		{
-			name: "max int32",
-			val:  math.MaxInt32,
-			want: sql.NullInt32{
-				Int32: math.MaxInt32,
-				Valid: true,
-			},
-		},
-		{
-			name:    "overflow",
-			val:     uint32(math.MaxInt32) + 1,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := Uint32ToNullInt32(tc.val)
-			if tc.wantErr {
-				require.ErrorIs(t, err, ErrCastingOverflow)
-				return
-			}
-
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
-
-// TestNullInt32ToUint32 checks that we convert a sql.NullInt32 to uint32
-// only when the value is marked as valid and fits within the uint32 range.
-// It should fail loudly for any out of range or invalid value.
-func TestNullInt32ToUint32(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		val     sql.NullInt32
+		val     int32
 		want    uint32
 		wantErr error
 	}{
 		{
 			name: "zero",
-			val:  sql.NullInt32{Int32: 0, Valid: true},
+			val:  0,
 			want: 0,
 		},
 		{
 			name: "positive",
-			val:  sql.NullInt32{Int32: 42, Valid: true},
+			val:  42,
 			want: 42,
 		},
 		{
-			name:    "negative overflow",
-			val:     sql.NullInt32{Int32: -1, Valid: true},
+			name:    "negative",
+			val:     -1,
 			wantErr: ErrCastingOverflow,
-		},
-		{
-			name:    "invalid null",
-			val:     sql.NullInt32{Valid: false},
-			wantErr: ErrInvalidNullInt,
 		},
 	}
 
@@ -360,7 +304,7 @@ func TestNullInt32ToUint32(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := NullInt32ToUint32(tc.val)
+			got, err := Int32ToUint32(tc.val)
 			if tc.wantErr != nil {
 				require.ErrorIs(t, err, tc.wantErr)
 				return
@@ -370,46 +314,4 @@ func TestNullInt32ToUint32(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
-}
-
-// TestNullableInt32ToSQLInt32 checks that optional int32 values become a valid
-// sql.NullInt32 only when the pointer is present.
-func TestNullableInt32ToSQLInt32(t *testing.T) {
-	t.Parallel()
-
-	value := int32(42)
-
-	require.Equal(t, sql.NullInt32{}, NullableInt32ToSQLInt32(nil))
-	require.Equal(t,
-		sql.NullInt32{Int32: value, Valid: true},
-		NullableInt32ToSQLInt32(&value),
-	)
-}
-
-// TestNullableInt32ToSQLInt64 checks that optional int32 values become a valid
-// sql.NullInt64 only when the pointer is present.
-func TestNullableInt32ToSQLInt64(t *testing.T) {
-	t.Parallel()
-
-	value := int32(42)
-
-	require.Equal(t, sql.NullInt64{}, NullableInt32ToSQLInt64(nil))
-	require.Equal(t,
-		sql.NullInt64{Int64: int64(value), Valid: true},
-		NullableInt32ToSQLInt64(&value),
-	)
-}
-
-// TestNullableUint32ToSQLInt64 checks that optional uint32 values become a
-// valid sql.NullInt64 only when the pointer is present.
-func TestNullableUint32ToSQLInt64(t *testing.T) {
-	t.Parallel()
-
-	value := uint32(42)
-
-	require.Equal(t, sql.NullInt64{}, NullableUint32ToSQLInt64(nil))
-	require.Equal(t,
-		sql.NullInt64{Int64: int64(value), Valid: true},
-		NullableUint32ToSQLInt64(&value),
-	)
 }

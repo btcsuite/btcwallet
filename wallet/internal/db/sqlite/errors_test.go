@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 	sqlite3 "modernc.org/sqlite/lib"
 )
+
+// TestMapErrConnectionSentinels verifies database/sql connection failures stay
+// owned by the SQLite adapter.
+func TestMapErrConnectionSentinels(t *testing.T) {
+	t.Parallel()
+
+	for _, testErr := range []error{driver.ErrBadConn, sql.ErrConnDone} {
+		sqlErr := mapErr(testErr)
+		require.NotNil(t, sqlErr)
+		require.Equal(t, dberr.BackendSQLite, sqlErr.Backend)
+		require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+		require.ErrorIs(t, sqlErr, testErr)
+	}
+}
 
 // TestMapErrConstraint verifies that SQLite constraint violations are mapped to
 // permanent constraint failures.

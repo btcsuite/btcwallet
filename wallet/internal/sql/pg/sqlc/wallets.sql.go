@@ -7,7 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const CreateWallet = `-- name: CreateWallet :one
@@ -32,7 +33,7 @@ type CreateWalletParams struct {
 }
 
 func (q *Queries) CreateWallet(ctx context.Context, arg CreateWalletParams) (int64, error) {
-	row := q.queryRow(ctx, q.createWalletStmt, CreateWallet,
+	row := q.db.QueryRow(ctx, CreateWallet,
 		arg.WalletName,
 		arg.IsImported,
 		arg.ManagerVersion,
@@ -74,18 +75,18 @@ type GetWalletByIDRow struct {
 	ManagerVersion         int32
 	IsWatchOnly            bool
 	MasterHdPubKey         []byte
-	SyncedHeight           sql.NullInt32
-	BirthdayHeight         sql.NullInt32
-	BirthdayTimestamp      sql.NullTime
-	UpdatedAt              sql.NullTime
+	SyncedHeight           pgtype.Int4
+	BirthdayHeight         pgtype.Int4
+	BirthdayTimestamp      pgtype.Timestamp
+	UpdatedAt              pgtype.Timestamp
 	SyncedBlockHash        []byte
-	SyncedBlockTimestamp   sql.NullInt64
+	SyncedBlockTimestamp   pgtype.Int8
 	BirthdayBlockHash      []byte
-	BirthdayBlockTimestamp sql.NullInt64
+	BirthdayBlockTimestamp pgtype.Int8
 }
 
 func (q *Queries) GetWalletByID(ctx context.Context, id int64) (GetWalletByIDRow, error) {
-	row := q.queryRow(ctx, q.getWalletByIDStmt, GetWalletByID, id)
+	row := q.db.QueryRow(ctx, GetWalletByID, id)
 	var i GetWalletByIDRow
 	err := row.Scan(
 		&i.ID,
@@ -136,18 +137,18 @@ type GetWalletByNameRow struct {
 	ManagerVersion         int32
 	IsWatchOnly            bool
 	MasterHdPubKey         []byte
-	SyncedHeight           sql.NullInt32
-	BirthdayHeight         sql.NullInt32
-	BirthdayTimestamp      sql.NullTime
-	UpdatedAt              sql.NullTime
+	SyncedHeight           pgtype.Int4
+	BirthdayHeight         pgtype.Int4
+	BirthdayTimestamp      pgtype.Timestamp
+	UpdatedAt              pgtype.Timestamp
 	SyncedBlockHash        []byte
-	SyncedBlockTimestamp   sql.NullInt64
+	SyncedBlockTimestamp   pgtype.Int8
 	BirthdayBlockHash      []byte
-	BirthdayBlockTimestamp sql.NullInt64
+	BirthdayBlockTimestamp pgtype.Int8
 }
 
 func (q *Queries) GetWalletByName(ctx context.Context, walletName string) (GetWalletByNameRow, error) {
-	row := q.queryRow(ctx, q.getWalletByNameStmt, GetWalletByName, walletName)
+	row := q.db.QueryRow(ctx, GetWalletByName, walletName)
 	var i GetWalletByNameRow
 	err := row.Scan(
 		&i.ID,
@@ -180,7 +181,7 @@ WHERE wallet_id = $1
 `
 
 func (q *Queries) GetWalletSecrets(ctx context.Context, walletID int64) (WalletSecret, error) {
-	row := q.queryRow(ctx, q.getWalletSecretsStmt, GetWalletSecrets, walletID)
+	row := q.db.QueryRow(ctx, GetWalletSecrets, walletID)
 	var i WalletSecret
 	err := row.Scan(
 		&i.WalletID,
@@ -213,7 +214,7 @@ type InsertWalletSecretsParams struct {
 }
 
 func (q *Queries) InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error {
-	_, err := q.exec(ctx, q.insertWalletSecretsStmt, InsertWalletSecrets,
+	_, err := q.db.Exec(ctx, InsertWalletSecrets,
 		arg.WalletID,
 		arg.MasterPrivParams,
 		arg.EncryptedCryptoPrivKey,
@@ -237,13 +238,13 @@ INSERT INTO wallet_sync_states (
 
 type InsertWalletSyncStateParams struct {
 	WalletID          int64
-	SyncedHeight      sql.NullInt32
-	BirthdayHeight    sql.NullInt32
-	BirthdayTimestamp sql.NullTime
+	SyncedHeight      pgtype.Int4
+	BirthdayHeight    pgtype.Int4
+	BirthdayTimestamp pgtype.Timestamp
 }
 
 func (q *Queries) InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error {
-	_, err := q.exec(ctx, q.insertWalletSyncStateStmt, InsertWalletSyncState,
+	_, err := q.db.Exec(ctx, InsertWalletSyncState,
 		arg.WalletID,
 		arg.SyncedHeight,
 		arg.BirthdayHeight,
@@ -281,7 +282,7 @@ LIMIT $2::BIGINT
 `
 
 type ListWalletsParams struct {
-	CursorID  sql.NullInt64
+	CursorID  pgtype.Int8
 	PageLimit int64
 }
 
@@ -292,21 +293,21 @@ type ListWalletsRow struct {
 	ManagerVersion         int32
 	IsWatchOnly            bool
 	MasterHdPubKey         []byte
-	SyncedHeight           sql.NullInt32
-	BirthdayHeight         sql.NullInt32
-	BirthdayTimestamp      sql.NullTime
-	UpdatedAt              sql.NullTime
+	SyncedHeight           pgtype.Int4
+	BirthdayHeight         pgtype.Int4
+	BirthdayTimestamp      pgtype.Timestamp
+	UpdatedAt              pgtype.Timestamp
 	SyncedBlockHash        []byte
-	SyncedBlockTimestamp   sql.NullInt64
+	SyncedBlockTimestamp   pgtype.Int8
 	BirthdayBlockHash      []byte
-	BirthdayBlockTimestamp sql.NullInt64
+	BirthdayBlockTimestamp pgtype.Int8
 }
 
 // Lists wallets using cursor-based pagination. If cursor_id is NULL, starts
 // from the beginning; otherwise returns wallets with id > cursor_id. Returns up
 // to page_limit rows.
 func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]ListWalletsRow, error) {
-	rows, err := q.query(ctx, q.listWalletsStmt, ListWallets, arg.CursorID, arg.PageLimit)
+	rows, err := q.db.Query(ctx, ListWallets, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -334,9 +335,6 @@ func (q *Queries) ListWallets(ctx context.Context, arg ListWalletsParams) ([]Lis
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -362,7 +360,7 @@ type UpdateWalletSecretsParams struct {
 }
 
 func (q *Queries) UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecretsParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateWalletSecretsStmt, UpdateWalletSecrets,
+	result, err := q.db.Exec(ctx, UpdateWalletSecrets,
 		arg.MasterPrivParams,
 		arg.EncryptedCryptoPrivKey,
 		arg.EncryptedCryptoScriptKey,
@@ -372,7 +370,7 @@ func (q *Queries) UpdateWalletSecrets(ctx context.Context, arg UpdateWalletSecre
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const UpdateWalletSyncState = `-- name: UpdateWalletSyncState :execrows
@@ -395,13 +393,13 @@ WHERE
 
 type UpdateWalletSyncStateParams struct {
 	WalletID          int64
-	SyncedHeight      sql.NullInt32
-	BirthdayHeight    sql.NullInt32
-	BirthdayTimestamp sql.NullTime
+	SyncedHeight      pgtype.Int4
+	BirthdayHeight    pgtype.Int4
+	BirthdayTimestamp pgtype.Timestamp
 }
 
 func (q *Queries) UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyncStateParams) (int64, error) {
-	result, err := q.exec(ctx, q.updateWalletSyncStateStmt, UpdateWalletSyncState,
+	result, err := q.db.Exec(ctx, UpdateWalletSyncState,
 		arg.WalletID,
 		arg.SyncedHeight,
 		arg.BirthdayHeight,
@@ -410,5 +408,5 @@ func (q *Queries) UpdateWalletSyncState(ctx context.Context, arg UpdateWalletSyn
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

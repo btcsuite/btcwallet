@@ -7,8 +7,8 @@ package sqlc
 
 import (
 	"context"
-	"database/sql"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const Balance = `-- name: Balance :one
@@ -109,15 +109,15 @@ WHERE
 `
 
 type BalanceParams struct {
-	NowUtc           time.Time
+	NowUtc           pgtype.Timestamp
 	WalletID         int64
-	Purpose          sql.NullInt64
-	CoinType         sql.NullInt64
-	AccountNumber    sql.NullInt64
-	AccountName      sql.NullString
-	MinConfirms      sql.NullInt32
-	MaxConfirms      sql.NullInt32
-	CoinbaseMaturity sql.NullInt32
+	Purpose          pgtype.Int8
+	CoinType         pgtype.Int8
+	AccountNumber    pgtype.Int8
+	AccountName      pgtype.Text
+	MinConfirms      pgtype.Int4
+	MaxConfirms      pgtype.Int4
+	CoinbaseMaturity pgtype.Int4
 }
 
 type BalanceRow struct {
@@ -147,7 +147,7 @@ type BalanceRow struct {
 //   - Uses the address/account/scope joins to keep ownership validation and
 //     account filtering in one pass.
 func (q *Queries) Balance(ctx context.Context, arg BalanceParams) (BalanceRow, error) {
-	row := q.queryRow(ctx, q.balanceStmt, Balance,
+	row := q.db.QueryRow(ctx, Balance,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.Purpose,
@@ -179,7 +179,7 @@ WHERE
 
 type ClearUtxosSpentByTxIDParams struct {
 	WalletID    int64
-	SpentByTxID sql.NullInt64
+	SpentByTxID pgtype.Int8
 }
 
 // Clears spent_by pointers for all UTXOs spent by the provided transaction ID.
@@ -192,11 +192,11 @@ type ClearUtxosSpentByTxIDParams struct {
 //   - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
 //     ownership through the creating transaction.
 func (q *Queries) ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error) {
-	result, err := q.exec(ctx, q.clearUtxosSpentByTxIDStmt, ClearUtxosSpentByTxID, arg.WalletID, arg.SpentByTxID)
+	result, err := q.db.Exec(ctx, ClearUtxosSpentByTxID, arg.WalletID, arg.SpentByTxID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const DeleteUtxosByTxID = `-- name: DeleteUtxosByTxID :execrows
@@ -225,11 +225,11 @@ type DeleteUtxosByTxIDParams struct {
 //   - Uses the `(tx_id)` index to keep the delete bounded to one transaction's
 //     outputs, then rechecks wallet ownership through the parent transaction.
 func (q *Queries) DeleteUtxosByTxID(ctx context.Context, arg DeleteUtxosByTxIDParams) (int64, error) {
-	result, err := q.exec(ctx, q.deleteUtxosByTxIDStmt, DeleteUtxosByTxID, arg.WalletID, arg.TxID)
+	result, err := q.db.Exec(ctx, DeleteUtxosByTxID, arg.WalletID, arg.TxID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }
 
 const GetUtxoByOutpoint = `-- name: GetUtxoByOutpoint :one
@@ -281,7 +281,7 @@ WHERE
 `
 
 type GetUtxoByOutpointParams struct {
-	NowUtc      time.Time
+	NowUtc      pgtype.Timestamp
 	WalletID    int64
 	TxHash      []byte
 	OutputIndex int32
@@ -292,18 +292,18 @@ type GetUtxoByOutpointRow struct {
 	OutputIndex      int32
 	Amount           int64
 	ScriptPubKey     []byte
-	ReceivedTime     time.Time
+	ReceivedTime     pgtype.Timestamp
 	IsCoinbase       bool
-	BlockHeight      sql.NullInt32
+	BlockHeight      pgtype.Int4
 	AddressIsDerived bool
-	DerivedAddressID sql.NullInt64
-	AccountID        sql.NullInt64
-	AccountIsDerived sql.NullBool
-	AccountNumber    sql.NullInt64
+	DerivedAddressID pgtype.Int8
+	AccountID        pgtype.Int8
+	AccountIsDerived pgtype.Bool
+	AccountNumber    pgtype.Int8
 	TypeID           int16
-	Purpose          sql.NullInt64
-	CoinType         sql.NullInt64
-	AccountName      sql.NullString
+	Purpose          pgtype.Int8
+	CoinType         pgtype.Int8
+	AccountName      pgtype.Text
 	HasScript        bool
 	IsLocked         bool
 }
@@ -324,7 +324,7 @@ type GetUtxoByOutpointRow struct {
 //   - The wallet-scoped tx hash lookup and unique outpoint constraint keep the
 //     join fanout to at most one candidate output.
 func (q *Queries) GetUtxoByOutpoint(ctx context.Context, arg GetUtxoByOutpointParams) (GetUtxoByOutpointRow, error) {
-	row := q.queryRow(ctx, q.getUtxoByOutpointStmt, GetUtxoByOutpoint,
+	row := q.db.QueryRow(ctx, GetUtxoByOutpoint,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.TxHash,
@@ -391,7 +391,7 @@ type GetUtxoIDByOutpointParams struct {
 //   - Uses the wallet-scoped transaction hash lookup first, then narrows to the
 //     unique `(tx_id, output_index)` outpoint.
 func (q *Queries) GetUtxoIDByOutpoint(ctx context.Context, arg GetUtxoIDByOutpointParams) (int64, error) {
-	row := q.queryRow(ctx, q.getUtxoIDByOutpointStmt, GetUtxoIDByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, GetUtxoIDByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -417,7 +417,7 @@ type GetUtxoSpendByOutpointParams struct {
 }
 
 type GetUtxoSpendByOutpointRow struct {
-	SpentByTxID  sql.NullInt64
+	SpentByTxID  pgtype.Int8
 	ScriptPubKey []byte
 }
 
@@ -436,7 +436,7 @@ type GetUtxoSpendByOutpointRow struct {
 //   - Targets one wallet-scoped outpoint through the unique `(tx_id,
 //     output_index)` key after the parent hash lookup.
 func (q *Queries) GetUtxoSpendByOutpoint(ctx context.Context, arg GetUtxoSpendByOutpointParams) (GetUtxoSpendByOutpointRow, error) {
-	row := q.queryRow(ctx, q.getUtxoSpendByOutpointStmt, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, GetUtxoSpendByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var i GetUtxoSpendByOutpointRow
 	err := row.Scan(&i.SpentByTxID, &i.ScriptPubKey)
 	return i, err
@@ -475,7 +475,7 @@ type HasInvalidWalletUtxoByOutpointParams struct {
 //   - Targets one wallet-scoped outpoint through the parent tx lookup plus the
 //     unique `(tx_id, output_index)` key.
 func (q *Queries) HasInvalidWalletUtxoByOutpoint(ctx context.Context, arg HasInvalidWalletUtxoByOutpointParams) (bool, error) {
-	row := q.queryRow(ctx, q.hasInvalidWalletUtxoByOutpointStmt, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
+	row := q.db.QueryRow(ctx, HasInvalidWalletUtxoByOutpoint, arg.WalletID, arg.TxHash, arg.OutputIndex)
 	var has_invalid bool
 	err := row.Scan(&has_invalid)
 	return has_invalid, err
@@ -524,7 +524,7 @@ type InsertUtxoParams struct {
 //   - Single-row insert. The main cost is the wallet-ownership validation join
 //     plus FK and uniqueness checks.
 func (q *Queries) InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error) {
-	row := q.queryRow(ctx, q.insertUtxoStmt, InsertUtxo,
+	row := q.db.QueryRow(ctx, InsertUtxo,
 		arg.OutputIndex,
 		arg.Amount,
 		arg.TxID,
@@ -584,7 +584,7 @@ type ListOutputsToWatchRow struct {
 //   - Locked (leased) outputs are intentionally retained because leasing is
 //     modelled separately from existence and the rescan must still watch them.
 func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error) {
-	rows, err := q.query(ctx, q.listOutputsToWatchStmt, ListOutputsToWatch, walletID)
+	rows, err := q.db.Query(ctx, ListOutputsToWatch, walletID)
 	if err != nil {
 		return nil, err
 	}
@@ -596,9 +596,6 @@ func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]Lis
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -636,22 +633,19 @@ type ListSpendingTxIDsByParentTxIDParams struct {
 // Performance:
 //   - Uses the `(tx_id)` and `(spent_by_tx_id)` indexes to keep the walk bounded
 //     to one wallet-scoped parent.
-func (q *Queries) ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]sql.NullInt64, error) {
-	rows, err := q.query(ctx, q.listSpendingTxIDsByParentTxIDStmt, ListSpendingTxIDsByParentTxID, arg.WalletID, arg.TxID)
+func (q *Queries) ListSpendingTxIDsByParentTxID(ctx context.Context, arg ListSpendingTxIDsByParentTxIDParams) ([]pgtype.Int8, error) {
+	rows, err := q.db.Query(ctx, ListSpendingTxIDsByParentTxID, arg.WalletID, arg.TxID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []sql.NullInt64
+	var items []pgtype.Int8
 	for rows.Next() {
-		var spent_by_tx_id sql.NullInt64
+		var spent_by_tx_id pgtype.Int8
 		if err := rows.Scan(&spent_by_tx_id); err != nil {
 			return nil, err
 		}
 		items = append(items, spent_by_tx_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -750,14 +744,14 @@ ORDER BY u.amount, t.tx_hash, u.output_index
 `
 
 type ListUtxosParams struct {
-	NowUtc        time.Time
+	NowUtc        pgtype.Timestamp
 	WalletID      int64
-	Purpose       sql.NullInt64
-	CoinType      sql.NullInt64
-	AccountNumber sql.NullInt64
-	AccountName   sql.NullString
-	MinConfirms   sql.NullInt32
-	MaxConfirms   sql.NullInt32
+	Purpose       pgtype.Int8
+	CoinType      pgtype.Int8
+	AccountNumber pgtype.Int8
+	AccountName   pgtype.Text
+	MinConfirms   pgtype.Int4
+	MaxConfirms   pgtype.Int4
 }
 
 type ListUtxosRow struct {
@@ -765,18 +759,18 @@ type ListUtxosRow struct {
 	OutputIndex      int32
 	Amount           int64
 	ScriptPubKey     []byte
-	ReceivedTime     time.Time
+	ReceivedTime     pgtype.Timestamp
 	IsCoinbase       bool
-	BlockHeight      sql.NullInt32
+	BlockHeight      pgtype.Int4
 	AddressIsDerived bool
-	DerivedAddressID sql.NullInt64
-	AccountID        sql.NullInt64
-	AccountIsDerived sql.NullBool
-	AccountNumber    sql.NullInt64
+	DerivedAddressID pgtype.Int8
+	AccountID        pgtype.Int8
+	AccountIsDerived pgtype.Bool
+	AccountNumber    pgtype.Int8
 	TypeID           int16
-	Purpose          sql.NullInt64
-	CoinType         sql.NullInt64
-	AccountName      sql.NullString
+	Purpose          pgtype.Int8
+	CoinType         pgtype.Int8
+	AccountName      pgtype.Text
 	HasScript        bool
 	IsLocked         bool
 }
@@ -802,7 +796,7 @@ type ListUtxosRow struct {
 //   - Treats min/max confirmations as optional filters so callers can
 //     distinguish "not set" from an explicit zero-conf request.
 func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtxosRow, error) {
-	rows, err := q.query(ctx, q.listUtxosStmt, ListUtxos,
+	rows, err := q.db.Query(ctx, ListUtxos,
 		arg.NowUtc,
 		arg.WalletID,
 		arg.Purpose,
@@ -843,9 +837,6 @@ func (q *Queries) ListUtxos(ctx context.Context, arg ListUtxosParams) ([]ListUtx
 		}
 		items = append(items, i)
 	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -877,8 +868,8 @@ type MarkUtxoSpentParams struct {
 	WalletID        int64
 	TxHash          []byte
 	OutputIndex     int32
-	SpentByTxID     sql.NullInt64
-	SpentInputIndex sql.NullInt32
+	SpentByTxID     pgtype.Int8
+	SpentInputIndex pgtype.Int4
 }
 
 // Marks a wallet-owned UTXO as spent by a transaction.
@@ -896,7 +887,7 @@ type MarkUtxoSpentParams struct {
 //   - Targets one outpoint in one wallet; the subquery uses the unique
 //     wallet-scoped tx hash lookup.
 func (q *Queries) MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (int64, error) {
-	result, err := q.exec(ctx, q.markUtxoSpentStmt, MarkUtxoSpent,
+	result, err := q.db.Exec(ctx, MarkUtxoSpent,
 		arg.WalletID,
 		arg.TxHash,
 		arg.OutputIndex,
@@ -906,5 +897,5 @@ func (q *Queries) MarkUtxoSpent(ctx context.Context, arg MarkUtxoSpentParams) (i
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	return result.RowsAffected(), nil
 }

@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // DeleteTx atomically removes one unmined transaction and restores any wallet
@@ -63,7 +64,7 @@ func (o deleteTxOps) ClearSpentUtxos(ctx context.Context, walletID uint32,
 		ctx,
 		sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID:    int64(walletID),
-			SpentByTxID: sql.NullInt64{Int64: txID, Valid: true},
+			SpentByTxID: pgtype.Int8{Int64: txID, Valid: true},
 		},
 	)
 	if err != nil {
@@ -161,7 +162,7 @@ func getDeleteTxMeta(ctx context.Context, qtx *sqlc.Queries,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return sqlc.GetTransactionMetaByHashRow{},
 				fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}

@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
+	btcutil "github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // GetAccount retrieves information about a specific account, identified by its
@@ -53,7 +54,7 @@ func (p accountGetQueries) GetAccountByNumber(ctx context.Context,
 			WalletID: int64(query.WalletID),
 			Purpose:  int64(query.Scope.Purpose),
 			CoinType: int64(query.Scope.Coin),
-			AccountNumber: sql.NullInt64{
+			AccountNumber: pgtype.Int8{
 				Int64: int64(*query.AccountNumber),
 				Valid: true,
 			},
@@ -98,7 +99,7 @@ func (p accountGetQueries) GetAccountByName(ctx context.Context,
 // mapGetAccountErr normalizes PostgreSQL not-found transport errors to the
 // backend-neutral account contract.
 func mapGetAccountErr(err error) error {
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return db.ErrAccountNotFound
 	}
 

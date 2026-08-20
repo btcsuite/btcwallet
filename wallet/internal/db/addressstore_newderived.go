@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -31,13 +30,13 @@ type DerivedAddressAccount struct {
 
 	// AccountNumber is the BIP44 account number; NULL for non-derived
 	// (imported) accounts.
-	AccountNumber sql.NullInt64
+	AccountNumber Nullable[int64]
 
 	// AccountName is the human-readable account name.
 	AccountName string
 
 	// MasterFingerprint is the root fingerprint stored on the account.
-	MasterFingerprint sql.NullInt64
+	MasterFingerprint Nullable[int64]
 
 	// Purpose is the BIP43 purpose component of the owning scope.
 	Purpose int64
@@ -141,14 +140,8 @@ func NewDerivedAddressWithOps(ctx context.Context,
 		return nil, fmt.Errorf("get account: %w", err)
 	}
 
-	// Non-derived accounts have a NULL account_number; their derivation uses
-	// AccountPubKey directly so a BIP44 number is not available.
-	accountNumValue, errAccount := DerivedAddressAccountNumber(
-		account.AccountNumber,
-	)
-
 	accountNumber, err := resolveAccountNumber(
-		account.IsDerived, accountNumValue, errAccount,
+		account.IsDerived, account.AccountNumber,
 	)
 	if err != nil {
 		return nil, err
@@ -293,29 +286,31 @@ func derivedAddressInput(ctx context.Context,
 
 // resolveAccountNumber maps the account-number lookup result to the optional
 // BIP44 account number, enforcing the wallet-derived/imported shape invariant.
-func resolveAccountNumber(accountIsDerived bool, accountNumValue uint32,
-	errAccount error) (*uint32, error) {
+func resolveAccountNumber(accountIsDerived bool,
+	accountNumber Nullable[int64]) (*uint32, error) {
 
-	var accountNumber *uint32
+	var resolved *uint32
 
-	switch {
-	case errAccount == nil:
-		if !accountIsDerived {
-			return nil, fmt.Errorf("%w: non-derived account has "+
-				"derived account number", errAccountShapeCorruption)
-		}
-
-		accountNumber = &accountNumValue
-
-	case errors.Is(errAccount, ErrNilDBAccountNumber):
+	if !accountNumber.Valid {
 		if accountIsDerived {
 			return nil, fmt.Errorf("%w: derived account missing "+
 				"account number", errAccountShapeCorruption)
 		}
 
-	default:
-		return nil, fmt.Errorf("account number: %w", errAccount)
+		return resolved, nil
 	}
 
-	return accountNumber, nil
+	if !accountIsDerived {
+		return nil, fmt.Errorf("%w: non-derived account has derived "+
+			"account number", errAccountShapeCorruption)
+	}
+
+	accountNumValue, err := validateAccountNumber(accountNumber.Value)
+	if err != nil {
+		return nil, fmt.Errorf("account number: %w", err)
+	}
+
+	resolved = &accountNumValue
+
+	return resolved, nil
 }

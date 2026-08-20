@@ -2,10 +2,10 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // RenameAccount changes the name of an account. The account can be identified
@@ -35,7 +35,7 @@ func (p accountRenameOps) RenameByNumber(ctx context.Context,
 			WalletID: int64(params.WalletID),
 			Purpose:  int64(params.Scope.Purpose),
 			CoinType: int64(params.Scope.Coin),
-			AccountNumber: sql.NullInt64{
+			AccountNumber: pgtype.Int8{
 				Int64: int64(*params.AccountNumber),
 				Valid: true,
 			},

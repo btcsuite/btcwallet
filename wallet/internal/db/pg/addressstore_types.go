@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // addressTypeRowToInfo converts a PostgreSQL address type row to an
@@ -65,7 +65,7 @@ func (s *Store) GetAddressType(ctx context.Context,
 
 	err := s.execRead(ctx, func(q *sqlc.Queries) error {
 		row, err := q.GetAddressTypeByID(ctx, int16(id))
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("address type %d: %w", id,
 				db.ErrAddressTypeNotFound)
 		}

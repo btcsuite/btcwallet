@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // NewDerivedAddress creates a new address for a given account and key scope.
@@ -53,7 +53,7 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 			AccountName: key.AccountName,
 		},
 	)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return db.DerivedAddressAccount{}, db.ErrAccountNotFound
 	}
 
@@ -70,9 +70,9 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 
 	return db.DerivedAddressAccount{
 		AccountID:         row.ID,
-		AccountNumber:     row.AccountNumber,
+		AccountNumber:     nullableInt64(row.AccountNumber),
 		AccountName:       row.AccountName,
-		MasterFingerprint: row.MasterFingerprint,
+		MasterFingerprint: nullableInt64(row.MasterFingerprint),
 		Purpose:           row.Purpose,
 		CoinType:          row.CoinType,
 		IsDerived:         row.IsDerived,
@@ -129,7 +129,7 @@ func (o newDerivedAddressOps) CreateDerivedAddress(ctx context.Context,
 
 	return db.CreateDerivedAddressRow{
 		ID:        row.ID,
-		CreatedAt: row.CreatedAt,
+		CreatedAt: row.CreatedAt.Time,
 	}, nil
 }
 

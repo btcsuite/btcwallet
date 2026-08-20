@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"testing"
 	"time"
 
@@ -33,22 +32,19 @@ func TestAddressRowToInfoRejectsImportedAccountNumber(t *testing.T) {
 
 	_, err := AddressRowToInfo(AddressInfoRow[int64]{
 		ID:               1,
-		DerivedAddressID: sqlNullInt64(1),
-		AccountID:        sqlNullInt64(2),
-		AccountNumber:    sqlNullInt64(3),
-		AccountName:      sqlNullString("hardware"),
-		Purpose:          sqlNullInt64(int64(KeyScopeBIP0084.Purpose)),
-		CoinType:         sqlNullInt64(int64(KeyScopeBIP0084.Coin)),
+		DerivedAddressID: presentInt64(1),
+		AccountID:        presentInt64(2),
+		AccountNumber:    presentInt64(3),
+		AccountName:      presentString("hardware"),
+		Purpose:          presentInt64(int64(KeyScopeBIP0084.Purpose)),
+		CoinType:         presentInt64(int64(KeyScopeBIP0084.Coin)),
 		TypeID:           int64(WitnessPubKey),
 		IsDerived:        true,
-		AccountIsDerived: sql.NullBool{
-			Bool:  false,
-			Valid: true,
-		},
-		ScriptPubKey:  []byte{0x51},
-		CreatedAt:     time.Unix(1710006001, 0),
-		AddressBranch: sqlNullInt64(0),
-		AddressIndex:  sqlNullInt64(0),
+		AccountIsDerived: NewNullable(false),
+		ScriptPubKey:     []byte{0x51},
+		CreatedAt:        time.Unix(1710006001, 0),
+		AddressBranch:    presentInt64(0),
+		AddressIndex:     presentInt64(0),
 		IDToAddrType: func(int64) (AddressType, error) {
 			return WitnessPubKey, nil
 		},
@@ -56,12 +52,12 @@ func TestAddressRowToInfoRejectsImportedAccountNumber(t *testing.T) {
 	require.ErrorIs(t, err, errAccountShapeCorruption)
 }
 
-// sqlNullInt64 creates a valid nullable integer for address conversion tests.
-func sqlNullInt64(value int64) sql.NullInt64 {
-	return sql.NullInt64{Int64: value, Valid: true}
+// presentInt64 creates a present nullable integer for address conversion tests.
+func presentInt64(value int64) Nullable[int64] {
+	return NewNullable(value)
 }
 
-// sqlNullString creates a valid nullable string for address conversion tests.
-func sqlNullString(value string) sql.NullString {
-	return sql.NullString{String: value, Valid: true}
+// presentString creates a present nullable string for address conversion tests.
+func presentString(value string) Nullable[string] {
+	return NewNullable(value)
 }

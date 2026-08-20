@@ -1,11 +1,11 @@
 package pg
 
 import (
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // walletInfoRow is a type constraint for PostgreSQL wallet info row types
@@ -23,13 +23,13 @@ type walletRowParams struct {
 	isImported             bool
 	managerVersion         int32
 	isWatchOnly            bool
-	syncedHeight           sql.NullInt32
+	syncedHeight           pgtype.Int4
 	syncedBlockHash        []byte
-	syncedBlockTimestamp   sql.NullInt64
-	birthdayHeight         sql.NullInt32
-	birthdayTimestamp      sql.NullTime
+	syncedBlockTimestamp   pgtype.Int8
+	birthdayHeight         pgtype.Int4
+	birthdayTimestamp      pgtype.Timestamp
 	birthdayBlockHash      []byte
-	birthdayBlockTimestamp sql.NullInt64
+	birthdayBlockTimestamp pgtype.Int8
 	masterPubKey           []byte
 }
 

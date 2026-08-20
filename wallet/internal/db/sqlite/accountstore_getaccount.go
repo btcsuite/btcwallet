@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
+	btcutil "github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 )

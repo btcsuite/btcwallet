@@ -1,11 +1,11 @@
 package pg
 
 import (
-	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,7 +16,7 @@ func TestUtxoInfoFromPgRowInvalidOutputIndex(t *testing.T) {
 	hash := chainhash.Hash{15}
 	_, err := utxoInfoFromRow(
 		hash[:], -1, 1000, []byte{0x59}, time.Unix(1000, 0), false,
-		sql.NullInt32{},
+		pgtype.Int4{},
 	)
 	require.ErrorContains(t, err, "utxo output index")
 }
@@ -28,7 +28,7 @@ func TestUtxoInfoFromPgRowInvalidBlockHeight(t *testing.T) {
 	hash := chainhash.Hash{16}
 	_, err := utxoInfoFromRow(
 		hash[:], 0, 1000, []byte{0x5a}, time.Unix(1001, 0), false,
-		sql.NullInt32{Int32: -1, Valid: true},
+		pgtype.Int4{Int32: -1, Valid: true},
 	)
 	require.ErrorContains(t, err, "utxo block height")
 }

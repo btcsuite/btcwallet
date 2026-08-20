@@ -38,15 +38,15 @@ func accountRowToInfo[T accountInfoRow](row T) (*db.AccountInfo, error) {
 	return db.AccountRowToInfo(
 		db.AccountInfoRow[int16]{
 			RowID:             base.ID,
-			AccountNumber:     base.AccountNumber,
+			AccountNumber:     nullableInt64(base.AccountNumber),
 			AccountName:       base.AccountName,
 			IsDerived:         base.IsDerived,
 			ExternalKeyCount:  base.ExternalKeyCount,
 			InternalKeyCount:  base.InternalKeyCount,
 			PublicKey:         base.PublicKey,
-			MasterFingerprint: base.MasterFingerprint,
+			MasterFingerprint: nullableInt64(base.MasterFingerprint),
 			IsWatchOnly:       base.WalletIsWatchOnly,
-			CreatedAt:         base.CreatedAt,
+			CreatedAt:         base.CreatedAt.Time,
 			Purpose:           base.Purpose,
 			CoinType:          base.CoinType,
 			InternalTypeID:    base.InternalTypeID,

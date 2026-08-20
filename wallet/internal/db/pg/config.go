@@ -2,9 +2,10 @@ package pg
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Config holds the configuration for the PostgreSQL database.
@@ -28,13 +29,17 @@ func (c *Config) Validate() error {
 		return db.ErrEmptyDSN
 	}
 
-	_, err := pgx.ParseConfig(c.Dsn)
+	_, err := pgxpool.ParseConfig(c.Dsn)
 	if err != nil {
 		return fmt.Errorf("invalid DSN: %w", err)
 	}
 
 	if c.MaxConnections < 0 {
 		return db.ErrNegativeMaxConns
+	}
+
+	if c.MaxConnections > math.MaxInt32 {
+		return fmt.Errorf("max connections: %w", db.ErrCastingOverflow)
 	}
 
 	return nil

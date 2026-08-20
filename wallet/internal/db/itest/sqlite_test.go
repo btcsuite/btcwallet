@@ -16,6 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// isPGTestStore reports whether store is the PostgreSQL test backend.
+func isPGTestStore(any) bool {
+	return false
+}
+
 // NewTestStore creates a new SQLite database for testing with migrations
 // applied. Each test gets its own temporary database file.
 func NewTestStore(t *testing.T) *sqlite.Store {

@@ -1,6 +1,7 @@
 package pg
 
 import (
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -74,6 +75,14 @@ func TestConfigValidateErrors(t *testing.T) {
 				MaxConnections: -5,
 			},
 			expectedErr: db.ErrNegativeMaxConns,
+		},
+		{
+			name: "max connections overflow",
+			config: Config{
+				Dsn:            "postgres://localhost/db",
+				MaxConnections: math.MaxInt32 + 1,
+			},
+			expectedErr: db.ErrCastingOverflow,
 		},
 	}
 

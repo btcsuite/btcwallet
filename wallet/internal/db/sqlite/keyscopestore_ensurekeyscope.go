@@ -60,6 +60,11 @@ type sqliteEnsureKeyScopeOps struct {
 // Verify sqliteEnsureKeyScopeOps implements db.EnsureKeyScopeOps.
 var _ db.EnsureKeyScopeOps = sqliteEnsureKeyScopeOps{}
 
+// IsMissingRow implements db.EnsureKeyScopeOps.
+func (sqliteEnsureKeyScopeOps) IsMissingRow(err error) bool {
+	return isNoRows(err)
+}
+
 // GetKeyScope implements db.EnsureKeyScopeOps.
 func (o sqliteEnsureKeyScopeOps) GetKeyScope(ctx context.Context,
 	walletID uint32, scope db.KeyScope) (int64, error) {

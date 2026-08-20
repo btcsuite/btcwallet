@@ -2,12 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // CreateImportedAccount stores an imported account identified by an extended
@@ -82,7 +83,7 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 			ScopeID:     req.ScopeID,
 			AccountName: req.Name,
 			PublicKey:   req.PublicKey,
-			MasterFingerprint: sql.NullInt64{
+			MasterFingerprint: pgtype.Int8{
 				Int64: int64(req.MasterFingerprint),
 				Valid: true,
 			},
@@ -125,7 +126,7 @@ func getWalletWatchOnly(ctx context.Context, qtx *sqlc.Queries,
 		return row.IsWatchOnly, nil
 	}
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("wallet %d: %w", walletID,
 			db.ErrWalletNotFound)
 	}
@@ -146,15 +147,15 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 	return db.AccountPropsRowToInfo(
 		db.AccountPropsRow[int16]{
 			RowID:             accountID,
-			AccountNumber:     row.AccountNumber,
+			AccountNumber:     nullableInt64(row.AccountNumber),
 			AccountName:       row.AccountName,
 			IsDerived:         row.IsDerived,
 			ExternalKeyCount:  row.ExternalKeyCount,
 			InternalKeyCount:  row.InternalKeyCount,
 			PublicKey:         row.PublicKey,
-			MasterFingerprint: row.MasterFingerprint,
+			MasterFingerprint: nullableInt64(row.MasterFingerprint),
 			IsWatchOnly:       row.WalletIsWatchOnly,
-			CreatedAt:         row.CreatedAt,
+			CreatedAt:         row.CreatedAt.Time,
 			Purpose:           row.Purpose,
 			CoinType:          row.CoinType,
 			InternalTypeID:    row.InternalTypeID,

@@ -2,12 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"time"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -53,9 +54,24 @@ func (s *Store) execWrite(ctx context.Context,
 	fn func(*sqlc.Queries) error) error {
 
 	_, err := dbruntime.Write(
-		ctx, s,
-		func(tx *sql.Tx) *sqlc.Queries {
-			return s.queries.WithTx(tx)
+		ctx, s, dbruntime.WriteTxOps[pgx.Tx, *sqlc.Queries]{
+			Begin: func(ctx context.Context) (pgx.Tx, error) {
+				return s.pool.Begin(ctx)
+			},
+			Bind: func(tx pgx.Tx) *sqlc.Queries {
+				return s.queries.WithTx(tx)
+			},
+			Commit: func(tx pgx.Tx) dbruntime.CommitResult {
+				err := tx.Commit(ctx)
+
+				return dbruntime.CommitResult{
+					Err:       err,
+					Ambiguous: isCommitAmbiguous(err),
+				}
+			},
+			Rollback: func(tx pgx.Tx) error {
+				return rollbackTx(tx.Rollback)
+			},
 		},
 		func(qtx *sqlc.Queries) (struct{}, error) {
 			return struct{}{}, fn(qtx)
@@ -63,6 +79,17 @@ func (s *Store) execWrite(ctx context.Context,
 	)
 
 	return err
+}
+
+// rollbackTx rolls back a PostgreSQL transaction with a fresh bounded context
+// so caller cancellation cannot prevent cleanup.
+func rollbackTx(rollback func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), db.DefaultConnectionTimeout,
+	)
+	defer cancel()
+
+	return rollback(ctx)
 }
 
 // defaultReadConfig returns the PostgreSQL read retry policy.
@@ -85,6 +112,11 @@ func (s *Store) CheckHealthy() error {
 // error model while preserving ordinary domain errors unchanged.
 func (s *Store) ClassifyError(err error) error {
 	return dberr.Normalize(dberr.BackendPostgres, mapErr, err)
+}
+
+// IsNoRows reports whether err is the PostgreSQL query no-row sentinel.
+func (s *Store) IsNoRows(err error) bool {
+	return isNoRows(err)
 }
 
 // RecordError records one classified PostgreSQL backend error and marks the
@@ -112,11 +144,6 @@ func (s *Store) RecordRetryExhausted() {
 // outcome.
 func (s *Store) RecordAmbiguousTxCommit() {
 	s.runtimeStats.RecordAmbiguousTxCommit()
-}
-
-// RawDB returns the PostgreSQL database handle used by shared runtime writes.
-func (s *Store) RawDB() *sql.DB {
-	return s.db
 }
 
 // StatsSnapshot returns the current PostgreSQL runtime counters.

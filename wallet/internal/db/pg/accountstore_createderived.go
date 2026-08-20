@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // CreateDerivedAccount creates a new derived account with the given name and
@@ -81,13 +81,13 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
 			ScopeID: scopeID,
-			AccountNumber: sql.NullInt64{
+			AccountNumber: pgtype.Int8{
 				Int64: accountNumber,
 				Valid: true,
 			},
 			AccountName: name,
 			PublicKey:   derived.PublicKey,
-			MasterFingerprint: sql.NullInt64{
+			MasterFingerprint: pgtype.Int8{
 				Int64: int64(derived.MasterKeyFingerprint),
 				Valid: true,
 			},
@@ -112,7 +112,7 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 
 	return db.CreateDerivedAccountRow{
 		AccountID:     row.ID,
-		AccountNumber: row.AccountNumber,
-		CreatedAt:     row.CreatedAt,
+		AccountNumber: nullableInt64(row.AccountNumber),
+		CreatedAt:     row.CreatedAt.Time,
 	}, nil
 }

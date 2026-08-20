@@ -2,8 +2,6 @@ package dberr
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -113,7 +111,7 @@ func TestExtractSQLErrorClass(t *testing.T) {
 		BackendPostgres,
 		ReasonSerialization,
 		"40001",
-		driver.ErrBadConn,
+		io.EOF,
 	))
 
 	sqlErr := extractSQLError(err)
@@ -148,15 +146,11 @@ func TestExtractSQLError(t *testing.T) {
 func TestClassifyConnErr(t *testing.T) {
 	t.Parallel()
 
-	err := classifyConnErr(BackendPostgres, driver.ErrBadConn)
+	err := classifyConnErr(BackendPostgres, io.EOF)
 	require.NotNil(t, err)
 	require.Equal(t, BackendPostgres, err.Backend)
 	require.Equal(t, ReasonUnavailable, err.Reason)
 	require.Equal(t, ClassTransient, err.Class())
-
-	err = classifyConnErr(BackendSQLite, sql.ErrConnDone)
-	require.NotNil(t, err)
-	require.Equal(t, ReasonUnavailable, err.Reason)
 
 	err = classifyConnErr(BackendSQLite, netTimeoutError{})
 	require.NotNil(t, err)
@@ -165,8 +159,8 @@ func TestClassifyConnErr(t *testing.T) {
 	err = classifyConnErr(BackendSQLite, temporaryNetError{err: io.EOF})
 	require.Nil(t, err)
 
-	require.Nil(t, classifyConnErr(Backend(""), driver.ErrBadConn))
-	require.Nil(t, classifyConnErr(BackendSQLite, sql.ErrNoRows))
+	require.Nil(t, classifyConnErr(Backend(""), io.EOF))
+	require.Nil(t, classifyConnErr(BackendSQLite, errConstraint))
 }
 
 // TestCoreHelpers verifies the remaining backend-agnostic helper branches.
@@ -179,7 +173,7 @@ func TestCoreHelpers(t *testing.T) {
 
 	wrappedCanceled := fmt.Errorf("query accounts: %w", context.Canceled)
 	require.Same(t, wrappedCanceled, unwrapContextErr(wrappedCanceled))
-	require.NoError(t, unwrapContextErr(sql.ErrNoRows))
+	require.NoError(t, unwrapContextErr(errConstraint))
 }
 
 // TestNormalize verifies the backend-aware normalization flow that keeps
@@ -197,7 +191,7 @@ func TestNormalize(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, extractSQLError(err))
 
-	err = Normalize(BackendPostgres, noOpMapper, driver.ErrBadConn)
+	err = Normalize(BackendPostgres, noOpMapper, io.EOF)
 
 	sqlErr := extractSQLError(err)
 	require.NotNil(t, sqlErr)

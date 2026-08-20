@@ -13,6 +13,7 @@ import (
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,12 +80,12 @@ func CreateAccountWithNumber(t *testing.T, queries *sqlc.Queries,
 		t.Context(), sqlc.CreateDerivedAccountParams{
 			ScopeID:     scopeID,
 			AccountName: name,
-			AccountNumber: sql.NullInt64{
+			AccountNumber: pgtype.Int8{
 				Int64: int64(accountNumber),
 				Valid: true,
 			},
 			PublicKey:         RandomBytes(32),
-			MasterFingerprint: sql.NullInt64{},
+			MasterFingerprint: pgtype.Int8{},
 		},
 	)
 	require.NoError(t, err)

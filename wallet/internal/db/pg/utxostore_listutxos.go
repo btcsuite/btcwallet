@@ -35,10 +35,10 @@ func (s *Store) ListUTXOs(ctx context.Context,
 		for i, row := range rows {
 			err = db.ValidateUtxoAddressShape(db.UtxoAddressShape{
 				IsDerived:        row.AddressIsDerived,
-				DerivedAddressID: row.DerivedAddressID,
-				AccountID:        row.AccountID,
-				AccountIsDerived: row.AccountIsDerived,
-				AccountNumber:    row.AccountNumber,
+				DerivedAddressID: nullableInt64(row.DerivedAddressID),
+				AccountID:        nullableInt64(row.AccountID),
+				AccountIsDerived: nullableBool(row.AccountIsDerived),
+				AccountNumber:    nullableInt64(row.AccountNumber),
 			})
 			if err != nil {
 				return err
@@ -46,7 +46,7 @@ func (s *Store) ListUTXOs(ctx context.Context,
 
 			utxo, err := utxoInfoFromRow(
 				row.TxHash, row.OutputIndex, row.Amount,
-				row.ScriptPubKey, row.ReceivedTime, row.IsCoinbase,
+				row.ScriptPubKey, row.ReceivedTime.Time, row.IsCoinbase,
 				row.BlockHeight,
 			)
 			if err != nil {
@@ -75,17 +75,17 @@ func (s *Store) ListUTXOs(ctx context.Context,
 // check the query performs in SQL, in line with the existing Balance /
 // lease-query convention this repo follows.
 func buildListUtxosParams(query db.ListUtxosQuery) sqlc.ListUtxosParams {
-	purpose, coinType := db.ScopeFilter(query.Scope)
+	purpose, coinType := scopeFilter(query.Scope)
 
 	return sqlc.ListUtxosParams{
-		NowUtc:        time.Now().UTC(),
+		NowUtc:        timestamp(time.Now().UTC()),
 		WalletID:      int64(query.WalletID),
 		Purpose:       purpose,
 		CoinType:      coinType,
-		AccountNumber: db.NullableUint32ToSQLInt64(query.Account),
-		AccountName:   db.NullableStringToSQLNullString(query.AccountName),
-		MinConfirms:   db.NullableInt32ToSQLInt32(query.MinConfs),
-		MaxConfirms:   db.NullableInt32ToSQLInt32(query.MaxConfs),
+		AccountNumber: nullableInt64FromUint32(query.Account),
+		AccountName:   nullableStringFromPtr(query.AccountName),
+		MinConfirms:   nullableInt32FromPtr(query.MinConfs),
+		MaxConfirms:   nullableInt32FromPtr(query.MaxConfs),
 	}
 }
 
@@ -101,7 +101,7 @@ func applyListRowEnrichment(utxo *db.UtxoInfo,
 	}
 
 	keyScope, hasScope, err := db.KeyScopeFromNullIDs(
-		row.Purpose, row.CoinType,
+		nullableInt64(row.Purpose), nullableInt64(row.CoinType),
 	)
 	if err != nil {
 		return fmt.Errorf("key scope: %w", err)

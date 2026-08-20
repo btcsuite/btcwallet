@@ -2,12 +2,12 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const maxSQLBlockHeight = int32(1<<31 - 1)
@@ -72,7 +72,7 @@ func rewindWalletTransactions(ctx context.Context, qtx *sqlc.Queries,
 
 		updated, err := qtx.UpdateTransactionStateByHash(
 			ctx, sqlc.UpdateTransactionStateByHashParams{
-				BlockHeight: sql.NullInt32{},
+				BlockHeight: pgtype.Int4{},
 				Status:      int16(status),
 				WalletID:    int64(params.WalletID),
 				TxHash:      row.TxHash,
@@ -195,7 +195,7 @@ func (o rollbackToBlockOps) MarkTxRootsOrphaned(ctx context.Context,
 		// row-local state patch.
 		rows, err := o.qtx.UpdateTransactionStateByHash(
 			ctx, sqlc.UpdateTransactionStateByHashParams{
-				BlockHeight: sql.NullInt32{},
+				BlockHeight: pgtype.Int4{},
 				Status:      int16(db.TxStatusOrphaned),
 				WalletID:    int64(walletID),
 				TxHash:      txHash[:],
@@ -238,7 +238,7 @@ func (o rollbackToBlockOps) ClearDescendantSpends(
 	_, err := o.qtx.ClearUtxosSpentByTxID(
 		ctx, sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID: walletID,
-			SpentByTxID: sql.NullInt64{
+			SpentByTxID: pgtype.Int8{
 				Int64: descendantID,
 				Valid: true,
 			},

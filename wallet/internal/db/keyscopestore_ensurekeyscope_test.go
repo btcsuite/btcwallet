@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
@@ -15,6 +14,7 @@ var (
 	errTestGetScope     = errors.New("get scope")
 	errTestCreateScope  = errors.New("create scope")
 	errTestRefetchScope = errors.New("refetch scope")
+	errTestMissingScope = errors.New("missing scope")
 )
 
 // Ensure mockEnsureKeyScopeOps implements EnsureKeyScopeOps at compile time.
@@ -23,6 +23,11 @@ var _ EnsureKeyScopeOps = (*mockEnsureKeyScopeOps)(nil)
 // mockEnsureKeyScopeOps implements EnsureKeyScopeOps for testing.
 type mockEnsureKeyScopeOps struct {
 	mock.Mock
+}
+
+// IsMissingRow reports whether err is the test missing-row sentinel.
+func (m *mockEnsureKeyScopeOps) IsMissingRow(err error) bool {
+	return errors.Is(err, errTestMissingScope)
 }
 
 // GetKeyScope returns the scope ID for a given wallet and key scope.
@@ -111,7 +116,7 @@ func TestEnsureKeyScopeWithOpsMissingDefaultSchemaPath(t *testing.T) {
 
 	// Scope does not exist; get returns ErrNoRows.
 	getCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	// Create should be called with the default schema (no override).
@@ -150,7 +155,7 @@ func TestEnsureKeyScopeWithOpsMissingSchemaOverridePath(t *testing.T) {
 
 	// Scope does not exist; get returns ErrNoRows.
 	getCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	// Create should be called with the provided override schema.
@@ -170,7 +175,8 @@ func TestEnsureKeyScopeWithOpsMissingSchemaOverridePath(t *testing.T) {
 }
 
 // TestEnsureKeyScopeWithOpsCreateConflictRefetchPath verifies that when create
-// returns sql.ErrNoRows (conflict), the helper refetches the scope created
+// returns the missing-row sentinel (conflict), the helper refetches the scope
+// created
 // concurrently.
 func TestEnsureKeyScopeWithOpsCreateConflictRefetchPath(t *testing.T) {
 	t.Parallel()
@@ -187,13 +193,13 @@ func TestEnsureKeyScopeWithOpsCreateConflictRefetchPath(t *testing.T) {
 
 	// First get: scope does not exist.
 	firstGetCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	// Create hits conflict (ON CONFLICT DO NOTHING), returns ErrNoRows.
 	createCall := ops.On("CreateKeyScope", ctx, walletID, scope,
 		defaultSchema,
-	).Return(int64(0), sql.ErrNoRows).Once()
+	).Return(int64(0), errTestMissingScope).Once()
 
 	// Refetch: scope now exists from concurrent creation.
 	secondGetCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
@@ -261,7 +267,7 @@ func TestEnsureKeyScopeWithOpsCreateErrorWrapping(t *testing.T) {
 
 	// Scope does not exist.
 	getCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	// Create returns a real database error (not ErrNoRows).
@@ -299,13 +305,13 @@ func TestEnsureKeyScopeWithOpsRefetchErrorAfterCreateConflict(t *testing.T) {
 
 	// First get: scope does not exist.
 	firstGetCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	// Create hits conflict, returns ErrNoRows.
 	createCall := ops.On("CreateKeyScope", ctx, walletID, scope,
 		defaultSchema,
-	).Return(int64(0), sql.ErrNoRows).Once()
+	).Return(int64(0), errTestMissingScope).Once()
 
 	// Refetch fails with a real database error.
 	secondGetCall := ops.On("GetKeyScope", ctx, walletID, scope).Return(
@@ -341,7 +347,7 @@ func TestEnsureKeyScopeWithOpsUnknownScopeReturnsError(t *testing.T) {
 
 	// Scope does not exist in the database.
 	getCall := ops.On("GetKeyScope", ctx, walletID, unknownScope).Return(
-		int64(0), sql.ErrNoRows,
+		int64(0), errTestMissingScope,
 	).Once()
 
 	mock.InOrder(getCall)

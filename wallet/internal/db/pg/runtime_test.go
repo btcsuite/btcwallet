@@ -1,7 +1,7 @@
 package pg
 
 import (
-	"database/sql"
+	"context"
 	"io"
 	"math"
 	"testing"
@@ -11,7 +11,9 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +27,7 @@ func TestClassifyErrorReturnsOriginalErrors(t *testing.T) {
 		dberr.BackendPostgres,
 		dberr.ReasonConstraint,
 		codeUniqueViolation,
-		sql.ErrTxDone,
+		pgx.ErrTxClosed,
 	)
 	tests := []struct {
 		name string
@@ -57,6 +59,36 @@ func TestClassifyErrorTransportError(t *testing.T) {
 	var sqlErr *dberr.SQLError
 	require.ErrorAs(t, classifiedErr, &sqlErr)
 	require.Equal(t, dberr.ReasonUnavailable, sqlErr.Reason)
+}
+
+// TestRollbackTxUsesFreshContext verifies that PostgreSQL rollback cleanup is
+// bounded independently of the caller's context.
+func TestRollbackTxUsesFreshContext(t *testing.T) {
+	t.Parallel()
+
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	cancelCaller()
+	require.ErrorIs(t, callerCtx.Err(), context.Canceled)
+
+	var (
+		cleanupErr  error
+		deadline    time.Time
+		hasDeadline bool
+	)
+
+	err := rollbackTx(func(ctx context.Context) error {
+		cleanupErr = ctx.Err()
+		deadline, hasDeadline = ctx.Deadline()
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, cleanupErr)
+	require.True(t, hasDeadline)
+	require.WithinDuration(
+		t, time.Now().Add(db.DefaultConnectionTimeout), deadline,
+		time.Second,
+	)
 }
 
 // TestClassifyErrorBackendErrors verifies that PostgreSQL backend-native
@@ -112,13 +144,26 @@ func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 
 	// A single-row range result drives the :many GetBlocksInRange scan path
 	// without standing up a real postgres store.
-	rows := newSQLiteRows(
-		t, "SELECT ?, ?, ?", int32(144), blockHash[:], timestamp.Unix(),
-	)
-	require.NoError(t, rows.Err())
+	rows := &mockRows{}
+	rows.On("Next").Return(true).Once()
+	rows.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
+		dest, ok := args.Get(0).([]any)
+		require.True(t, ok)
+		require.NoError(t, scanValues([]any{
+			int32(144), blockHash[:], timestamp.Unix(),
+		}, dest))
+	}).Return(nil).Once()
+	rows.On("Next").Return(false).Once()
+	rows.On("Err").Return(nil).Once()
+	rows.On("Close").Return().Once()
+
+	queryDB := &mockDBTX{}
+	queryDB.On(
+		"Query", mock.Anything, mock.Anything, mock.Anything,
+	).Return(rows, nil).Once()
 
 	store := &Store{
-		queries: sqlc.New(rowDBTX{queryRows: rows}),
+		queries: sqlc.New(queryDB),
 	}
 
 	blocks, err := store.ListSyncedBlocks(
@@ -134,6 +179,8 @@ func TestListSyncedBlocksBuildsBlock(t *testing.T) {
 		Height:    144,
 		Timestamp: timestamp,
 	}, blocks[0])
+	rows.AssertExpectations(t)
+	queryDB.AssertExpectations(t)
 }
 
 // TestEnsureBlockExistsRejectsConflictingBlock verifies that insert-or-ignore
@@ -147,15 +194,29 @@ func TestEnsureBlockExistsRejectsConflictingBlock(t *testing.T) {
 		Timestamp: time.Unix(1710003500, 0),
 	}
 	conflictingHash := chainhash.Hash{10, 9, 8}
-	qtx := sqlc.New(rowDBTX{
-		row: newSQLiteRow(
-			t, "SELECT ?, ?, ?", int32(block.Height),
-			conflictingHash[:], block.Timestamp.Unix(),
-		),
-	})
+	row := &mockRow{}
+	row.On("Scan", mock.Anything).Run(func(args mock.Arguments) {
+		dest, ok := args.Get(0).([]any)
+		require.True(t, ok)
+		require.NoError(t, scanValues([]any{
+			int32(block.Height), conflictingHash[:],
+			block.Timestamp.Unix(),
+		}, dest))
+	}).Return(nil).Once()
+
+	dbtx := &mockDBTX{}
+	dbtx.On(
+		"Exec", mock.Anything, mock.Anything, mock.Anything,
+	).Return(pgconn.NewCommandTag("INSERT 0 0"), nil).Once()
+	dbtx.On(
+		"QueryRow", mock.Anything, mock.Anything, mock.Anything,
+	).Return(row).Once()
+	qtx := sqlc.New(dbtx)
 
 	err := ensureBlockExists(t.Context(), qtx, block)
 	require.ErrorIs(t, err, db.ErrBlockMismatch)
+	row.AssertExpectations(t)
+	dbtx.AssertExpectations(t)
 }
 
 // TestListSyncedBlocksRejectsHugeRange verifies that a span that overflows the

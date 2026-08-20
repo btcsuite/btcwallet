@@ -1,7 +1,6 @@
 package db
 
 import (
-	"database/sql"
 	"testing"
 	"time"
 
@@ -17,7 +16,7 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 
 	row := AccountInfoRow[int16]{
 		RowID:            42,
-		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
+		AccountNumber:    NewNullable(int64(7)),
 		AccountName:      "strict",
 		IsDerived:        true,
 		ExternalKeyCount: 1,

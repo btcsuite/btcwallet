@@ -2,13 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"iter"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ListAddresses returns a page of addresses matching the given query.
@@ -116,12 +116,12 @@ func listRawImportedAddresses(ctx context.Context, q *sqlc.Queries,
 }
 
 // rawAddressCursor converts an optional page cursor into a nullable sqlc value.
-func rawAddressCursor(q db.ListAddressesQuery) sql.NullInt64 {
+func rawAddressCursor(q db.ListAddressesQuery) pgtype.Int8 {
 	if q.Page.After == nil {
-		return sql.NullInt64{}
+		return pgtype.Int8{}
 	}
 
-	return sql.NullInt64{
+	return pgtype.Int8{
 		Int64: int64(*q.Page.After),
 		Valid: true,
 	}
@@ -141,7 +141,7 @@ func buildAddressPageParams(
 	}
 
 	if q.Page.After != nil {
-		params.CursorID = sql.NullInt64{
+		params.CursorID = pgtype.Int8{
 			Int64: int64(*q.Page.After),
 			Valid: true,
 		}

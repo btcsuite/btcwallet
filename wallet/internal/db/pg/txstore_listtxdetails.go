@@ -2,11 +2,11 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ListTxDetails lists detailed wallet-scoped transaction views using wallet
@@ -58,7 +58,7 @@ func (o *listTxDetailsOps) ListUnmined(ctx context.Context,
 			ID:       row.ID,
 			Hash:     row.TxHash,
 			RawTx:    row.RawTx,
-			Received: row.ReceivedTime,
+			Received: row.ReceivedTime.Time,
 			Status:   int64(row.TxStatus),
 			Label:    row.TxLabel,
 		}
@@ -87,7 +87,7 @@ func (o *listTxDetailsOps) ListConfirmed(ctx context.Context, walletID uint32,
 	for i, row := range rows {
 		block, err := buildBlock(
 			row.BlockHeight, row.BlockHash,
-			sql.NullInt64{Int64: row.BlockTimestamp, Valid: true},
+			pgtype.Int8{Int64: row.BlockTimestamp, Valid: true},
 		)
 		if err != nil {
 			return nil, err
@@ -97,7 +97,7 @@ func (o *listTxDetailsOps) ListConfirmed(ctx context.Context, walletID uint32,
 			ID:       row.ID,
 			Hash:     row.TxHash,
 			RawTx:    row.RawTx,
-			Received: row.ReceivedTime,
+			Received: row.ReceivedTime.Time,
 			Block:    block,
 			Status:   int64(row.TxStatus),
 			Label:    row.TxLabel,

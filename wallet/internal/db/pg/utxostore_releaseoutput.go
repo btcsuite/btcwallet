@@ -2,13 +2,13 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // ReleaseOutput atomically releases a lease when the caller provides the
@@ -52,7 +52,7 @@ func (o *releaseOutputOps) LookupUtxoID(ctx context.Context,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, db.ErrReleaseOutputUtxoNotFound
 		}
 
@@ -90,11 +90,11 @@ func (o *releaseOutputOps) ActiveLockID(ctx context.Context, walletID uint32,
 		ctx, sqlc.GetActiveUtxoLeaseLockIDParams{
 			WalletID: int64(walletID),
 			UtxoID:   utxoID,
-			NowUtc:   nowUTC,
+			NowUtc:   timestamp(nowUTC),
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, db.ErrReleaseOutputNoActiveLease
 		}
 

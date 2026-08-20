@@ -23,13 +23,60 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	pgschema "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/docker/go-connections/nat"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// pgTestStore owns integration-only adapters around a PostgreSQL Store.
+type pgTestStore struct {
+	*pg.Store
+
+	sqlDB *sql.DB
+}
+
+var _ db.Store = (*pgTestStore)(nil)
+
+// DB returns the shared-pool database/sql adapter used by integration tests.
+func (s *pgTestStore) DB() *sql.DB {
+	return s.sqlDB
+}
+
+// RollbackAllMigrations rolls back all PostgreSQL migrations.
+func (s *pgTestStore) RollbackAllMigrations() error {
+	return pgschema.RollbackMigrations(context.Background(), s.sqlDB)
+}
+
+// ApplyAllMigrations reapplies all PostgreSQL migrations.
+func (s *pgTestStore) ApplyAllMigrations() error {
+	return pgschema.ApplyMigrations(context.Background(), s.sqlDB)
+}
+
+// Close closes the integration adapter and native PostgreSQL Store.
+func (s *pgTestStore) Close() error {
+	err := s.sqlDB.Close()
+	storeErr := s.Store.Close()
+
+	if err != nil {
+		return fmt.Errorf("close integration database: %w", err)
+	}
+
+	return storeErr
+}
+
+// isPGTestStore reports whether store is the PostgreSQL test backend.
+func isPGTestStore(store any) bool {
+	_, ok := store.(*pgTestStore)
+
+	return ok
+}
 
 const (
 	// pgMaxIdentifierLen is the PostgreSQL maximum identifier length
@@ -249,7 +296,7 @@ func sanitizedPgDBName(t *testing.T) string {
 // limit allows, exhausting the PostgreSQL connection pool. Avoid this by
 // creating NewTestStore inside each parallel subtest so its lifecycle is tied
 // to the subtest's parallel slot.
-func NewTestStore(t *testing.T) *pg.Store {
+func NewTestStore(t *testing.T) *pgTestStore {
 	t.Helper()
 
 	return NewTestStoreWithDerive(t, mockDeriveFunc())
@@ -258,7 +305,16 @@ func NewTestStore(t *testing.T) *pg.Store {
 // NewTestStoreWithDerive creates a new PostgreSQL database for testing with the
 // provided address derivation function.
 func NewTestStoreWithDerive(t *testing.T,
-	deriveAddress db.AddressDerivationFunc) *pg.Store {
+	deriveAddress db.AddressDerivationFunc) *pgTestStore {
+
+	t.Helper()
+
+	return newTestStore(t, deriveAddress, 0)
+}
+
+// newTestStore creates a PostgreSQL test store with an explicit pool limit.
+func newTestStore(t *testing.T, deriveAddress db.AddressDerivationFunc,
+	maxConnections int) *pgTestStore {
 
 	t.Helper()
 	ctx := t.Context()
@@ -291,23 +347,52 @@ func NewTestStoreWithDerive(t *testing.T,
 
 	cfg := pg.Config{
 		Dsn:            testConnStr,
-		MaxConnections: 0,
+		MaxConnections: maxConnections,
 		DeriveAddress:  deriveAddress,
 	}
 
 	store, err := pg.NewStore(t.Context(), cfg)
 	require.NoError(t, err, "failed to create postgres store")
 
+	testStore := &pgTestStore{
+		Store: store,
+		sqlDB: stdlib.OpenDBFromPool(store.Pool()),
+	}
+
 	t.Cleanup(func() {
-		_ = store.Close()
+		_ = testStore.Close()
 	})
 
-	return store
+	return testStore
+}
+
+// TestPGTestStoreSharesPool verifies the integration adapter releases
+// its connection back to the native pool when only one pool slot is available.
+func TestPGTestStoreSharesPool(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStore(t, mockDeriveFunc(), 1)
+	sqlDB := store.DB()
+	require.Same(t, sqlDB, store.DB())
+
+	ctx, cancel := context.WithTimeout(
+		t.Context(), db.DefaultConnectionTimeout,
+	)
+	defer cancel()
+
+	require.NoError(t, sqlDB.PingContext(ctx))
+	require.Zero(t, store.Pool().Stat().AcquiredConns())
+
+	wallets, err := store.Queries().ListWallets(
+		ctx, sqlc.ListWalletsParams{PageLimit: 1},
+	)
+	require.NoError(t, err)
+	require.Empty(t, wallets)
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
 // provided parent transaction hash.
-func childSpendingTxIDs(t *testing.T, store *pg.Store,
+func childSpendingTxIDs(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	txHash chainhash.Hash) []int64 {
 
@@ -340,7 +425,7 @@ func childSpendingTxIDs(t *testing.T, store *pg.Store,
 
 // txIDByHash returns the database row ID for the given wallet-scoped
 // transaction hash and reports whether the row exists.
-func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
+func txIDByHash(t *testing.T, store *pgTestStore, walletID uint32,
 	txHash chainhash.Hash) (int64, bool) {
 
 	t.Helper()
@@ -352,7 +437,7 @@ func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false
 		}
 
@@ -364,7 +449,7 @@ func txIDByHash(t *testing.T, store *pg.Store, walletID uint32,
 
 // setTxStatus rewrites one wallet-scoped transaction row to the provided
 // status using the internal status-update query.
-func setTxStatus(t *testing.T, store *pg.Store, walletID uint32,
+func setTxStatus(t *testing.T, store *pgTestStore, walletID uint32,
 	txHash chainhash.Hash, status db.TxStatus) {
 
 	t.Helper()
@@ -385,7 +470,7 @@ func setTxStatus(t *testing.T, store *pg.Store, walletID uint32,
 
 // walletUtxoExists reports whether one wallet-scoped outpoint is currently
 // present in the UTXO set.
-func walletUtxoExists(t *testing.T, store *pg.Store,
+func walletUtxoExists(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	outPoint wire.OutPoint) bool {
 
@@ -399,7 +484,7 @@ func walletUtxoExists(t *testing.T, store *pg.Store,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false
 		}
 
@@ -411,7 +496,7 @@ func walletUtxoExists(t *testing.T, store *pg.Store,
 
 // walletUtxoSpent reports whether one wallet-scoped outpoint exists and is
 // recorded as spent, i.e. its spend edge points at a spending transaction.
-func walletUtxoSpent(t *testing.T, store *pg.Store,
+func walletUtxoSpent(t *testing.T, store *pgTestStore,
 	walletID uint32,
 	outPoint wire.OutPoint) bool {
 
@@ -425,7 +510,7 @@ func walletUtxoSpent(t *testing.T, store *pg.Store,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false
 		}
 
@@ -436,7 +521,7 @@ func walletUtxoSpent(t *testing.T, store *pg.Store,
 }
 
 // clearUtxosSpentByTxID clears all UTXO spend edges claimed by one transaction.
-func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
+func clearUtxosSpentByTxID(t *testing.T, store *pgTestStore,
 	walletID uint32, txHash chainhash.Hash) {
 
 	t.Helper()
@@ -447,7 +532,7 @@ func clearUtxosSpentByTxID(t *testing.T, store *pg.Store,
 	rows, err := store.Queries().ClearUtxosSpentByTxID(
 		t.Context(), sqlc.ClearUtxosSpentByTxIDParams{
 			WalletID: int64(walletID),
-			SpentByTxID: sql.NullInt64{
+			SpentByTxID: pgtype.Int8{
 				Int64: txID,
 				Valid: true,
 			},

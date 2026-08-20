@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
+	btcutil "github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 )
@@ -24,18 +24,18 @@ func (s *Store) Balance(ctx context.Context,
 	var result db.BalanceResult
 
 	err = s.execRead(ctx, func(q *sqlc.Queries) error {
-		purpose, coinType := db.ScopeFilter(params.Scope)
+		purpose, coinType := scopeFilter(params.Scope)
 
 		balance, err := q.Balance(ctx, sqlc.BalanceParams{
-			NowUtc:        nowUTC,
+			NowUtc:        timestamp(nowUTC),
 			WalletID:      int64(params.WalletID),
 			Purpose:       purpose,
 			CoinType:      coinType,
-			AccountNumber: db.NullableUint32ToSQLInt64(params.Account),
-			AccountName:   db.NullableStringToSQLNullString(params.Name),
-			MinConfirms:   db.NullableInt32ToSQLInt32(params.MinConfs),
-			MaxConfirms:   db.NullableInt32ToSQLInt32(params.MaxConfs),
-			CoinbaseMaturity: db.NullableInt32ToSQLInt32(
+			AccountNumber: nullableInt64FromUint32(params.Account),
+			AccountName:   nullableStringFromPtr(params.Name),
+			MinConfirms:   nullableInt32FromPtr(params.MinConfs),
+			MaxConfirms:   nullableInt32FromPtr(params.MaxConfs),
+			CoinbaseMaturity: nullableInt32FromPtr(
 				params.CoinbaseMaturity,
 			),
 		})

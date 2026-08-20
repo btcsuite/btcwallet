@@ -2,14 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
-	"github.com/btcsuite/btcd/btcutil/v2"
+	btcutil "github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
 )
 
 // txDetailEdgesOps adapts postgres owned-edge queries to the shared tx-detail
@@ -65,7 +65,7 @@ func (o *getTxDetailOps) LoadBase(ctx context.Context,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return db.TxDetailBase{}, fmt.Errorf("tx %s: %w",
 				query.Txid, db.ErrTxNotFound)
 		}
@@ -99,7 +99,7 @@ func txDetailBaseFromHashRow(row sqlc.GetTransactionByHashRow) (
 		ID:       row.ID,
 		Hash:     row.TxHash,
 		RawTx:    row.RawTx,
-		Received: row.ReceivedTime,
+		Received: row.ReceivedTime.Time,
 		Block:    block,
 		Status:   int64(row.TxStatus),
 		Label:    row.TxLabel,

@@ -14,6 +14,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestValidateUtxoAddressShape verifies driver-neutral nullable values retain
+// the derived and imported ownership invariants.
+func TestValidateUtxoAddressShape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		shape   UtxoAddressShape
+		wantErr error
+	}{
+		{
+			name: "raw imported",
+		},
+		{
+			name: "derived account",
+			shape: UtxoAddressShape{
+				IsDerived:        true,
+				DerivedAddressID: NewNullable(int64(1)),
+				AccountID:        NewNullable(int64(2)),
+				AccountIsDerived: NewNullable(true),
+				AccountNumber:    NewNullable(int64(3)),
+			},
+		},
+		{
+			name: "imported account with number",
+			shape: UtxoAddressShape{
+				IsDerived:        true,
+				DerivedAddressID: NewNullable(int64(1)),
+				AccountID:        NewNullable(int64(2)),
+				AccountIsDerived: NewNullable(false),
+				AccountNumber:    NewNullable(int64(3)),
+			},
+			wantErr: errAccountShapeCorruption,
+		},
+		{
+			name: "missing path",
+			shape: UtxoAddressShape{
+				IsDerived: true,
+			},
+			wantErr: errAddressShapeCorruption,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateUtxoAddressShape(test.shape)
+			if test.wantErr == nil {
+				require.NoError(t, err)
+				return
+			}
+
+			require.ErrorIs(t, err, test.wantErr)
+		})
+	}
+}
+
 // TestBuildOutPoint verifies the common hash/index conversion shared by both
 // SQL backends when building a valid public outpoint.
 //

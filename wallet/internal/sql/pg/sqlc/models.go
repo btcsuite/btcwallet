@@ -5,8 +5,7 @@
 package sqlc
 
 import (
-	"database/sql"
-	"time"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Account struct {
@@ -15,10 +14,10 @@ type Account struct {
 	ScopeID           int64
 	AccountName       string
 	IsDerived         bool
-	AccountNumber     sql.NullInt64
-	MasterFingerprint sql.NullInt64
+	AccountNumber     pgtype.Int8
+	MasterFingerprint pgtype.Int8
 	PublicKey         []byte
-	CreatedAt         time.Time
+	CreatedAt         pgtype.Timestamp
 	NextExternalIndex int64
 	NextInternalIndex int64
 }
@@ -35,7 +34,7 @@ type Address struct {
 	ScriptPubKey []byte
 	ScriptTypeID int16
 	PubKey       []byte
-	CreatedAt    time.Time
+	CreatedAt    pgtype.Timestamp
 }
 
 type AddressSecret struct {
@@ -84,10 +83,10 @@ type Transaction struct {
 	ID             int64
 	TxHash         []byte
 	RawTx          []byte
-	BlockHeight    sql.NullInt32
-	ConfirmedOrder sql.NullInt64
+	BlockHeight    pgtype.Int4
+	ConfirmedOrder pgtype.Int8
 	TxStatus       int16
-	ReceivedTime   time.Time
+	ReceivedTime   pgtype.Timestamp
 	IsCoinbase     bool
 	TxLabel        string
 }
@@ -97,7 +96,7 @@ type TxReplacement struct {
 	ID              int64
 	ReplacedTxID    int64
 	ReplacementTxID int64
-	CreatedAt       time.Time
+	CreatedAt       pgtype.Timestamp
 }
 
 type Utxo struct {
@@ -106,15 +105,15 @@ type Utxo struct {
 	OutputIndex     int32
 	Amount          int64
 	AddressID       int64
-	SpentByTxID     sql.NullInt64
-	SpentInputIndex sql.NullInt32
+	SpentByTxID     pgtype.Int8
+	SpentInputIndex pgtype.Int4
 }
 
 type UtxoLease struct {
 	WalletID  int64
 	UtxoID    int64
 	LockID    []byte
-	ExpiresAt time.Time
+	ExpiresAt pgtype.Timestamp
 }
 
 type Wallet struct {
@@ -136,8 +135,8 @@ type WalletSecret struct {
 
 type WalletSyncState struct {
 	WalletID          int64
-	SyncedHeight      sql.NullInt32
-	BirthdayHeight    sql.NullInt32
-	BirthdayTimestamp sql.NullTime
-	UpdatedAt         time.Time
+	SyncedHeight      pgtype.Int4
+	BirthdayHeight    pgtype.Int4
+	BirthdayTimestamp pgtype.Timestamp
+	UpdatedAt         pgtype.Timestamp
 }

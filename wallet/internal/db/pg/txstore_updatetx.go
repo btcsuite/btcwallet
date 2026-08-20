@@ -2,13 +2,14 @@ package pg
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // UpdateTx patches the mutable metadata for one wallet-scoped transaction.
@@ -32,7 +33,7 @@ type updateTxOps struct {
 
 	// blockHeight caches the validated postgres block-height wrapper prepared
 	// for the later state update query.
-	blockHeight sql.NullInt32
+	blockHeight pgtype.Int4
 
 	// status caches the postgres status code prepared for the later state
 	// update query.
@@ -54,7 +55,7 @@ func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 		},
 	)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("tx %s: %w", txHash, db.ErrTxNotFound)
 		}
 
@@ -69,7 +70,7 @@ func (o *updateTxOps) LoadIsCoinbase(ctx context.Context, walletID uint32,
 func (o *updateTxOps) PrepareState(ctx context.Context,
 	state db.UpdateTxState) error {
 
-	blockHeight := sql.NullInt32{}
+	blockHeight := pgtype.Int4{}
 
 	if state.Block != nil {
 		height, err := requireBlockMatches(ctx, o.qtx, state.Block)
@@ -77,7 +78,7 @@ func (o *updateTxOps) PrepareState(ctx context.Context,
 			return fmt.Errorf("require confirming block: %w", err)
 		}
 
-		blockHeight = sql.NullInt32{Int32: height, Valid: true}
+		blockHeight = pgtype.Int4{Int32: height, Valid: true}
 	}
 
 	o.blockHeight = blockHeight
