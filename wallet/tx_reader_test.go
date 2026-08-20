@@ -19,6 +19,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestTxStatusString tests the caller-facing string form for every public
+// transaction status and for an unsupported numeric value.
+func TestTxStatusString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		status TxStatus
+		want   string
+	}{
+		{
+			name:   "unknown",
+			status: TxStatusUnknown,
+			want:   "unknown",
+		}, {
+			name:   "pending",
+			status: TxStatusPending,
+			want:   "pending",
+		}, {
+			name:   "published",
+			status: TxStatusPublished,
+			want:   "published",
+		}, {
+			name:   "replaced",
+			status: TxStatusReplaced,
+			want:   "replaced",
+		}, {
+			name:   "failed",
+			status: TxStatusFailed,
+			want:   "failed",
+		}, {
+			name:   "orphaned",
+			status: TxStatusOrphaned,
+			want:   "orphaned",
+		}, {
+			name:   "unsupported",
+			status: TxStatus(255),
+			want:   "unknown",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Select the public status whose caller-facing form
+			// is under test.
+			status := tc.status
+
+			// Act: Render the status without exposing its numeric code.
+			result := status.String()
+
+			// Assert: Check the stable public status name.
+			require.Equal(t, tc.want, result)
+		})
+	}
+}
+
 // TestBuildTxDetailFromStore tests the detailed store-backed tx builder.
 func TestBuildTxDetailFromStore(t *testing.T) {
 	t.Parallel()
@@ -90,7 +148,7 @@ func TestBuildTxDetailFromStoreRequiresMsgTx(t *testing.T) {
 	_, err := w.buildTxDetailFromStore(txDetails, 1)
 
 	// Assert: Check that the contract violation is reported.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
 }
 
 // TestGetTxPropagatesNilMsgTx tests that GetTx returns store detail contract
@@ -112,7 +170,7 @@ func TestGetTxPropagatesNilMsgTx(t *testing.T) {
 	_, err := w.GetTx(t.Context(), *TstTxHash)
 
 	// Assert: Check that the contract violation is propagated.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
 }
 
 // TestListTxnsPropagatesNilMsgTx tests that ListTxns returns store detail
@@ -136,7 +194,7 @@ func TestListTxnsPropagatesNilMsgTx(t *testing.T) {
 	_, err := w.ListTxns(t.Context(), 0, 1000)
 
 	// Assert: Check that the contract violation is propagated.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
 }
 
 // TestGetTxSuccess tests the GetTx method of the wallet for success scenarios.
