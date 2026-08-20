@@ -30,6 +30,11 @@ var (
 	// TxDetailInfo contract and omits the parsed transaction. Callers can
 	// match this error with errors.Is.
 	ErrNilTxDetailMsgTx = errors.New("tx detail MsgTx is nil")
+
+	// ErrInvalidTxStatus is returned when the store supplies a persisted
+	// transaction status that the public wallet API cannot represent. Callers
+	// can match this error with errors.Is.
+	ErrInvalidTxStatus = errors.New("invalid tx status")
 )
 
 // TxReader provides an interface for querying tx history.
@@ -300,12 +305,18 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 		return nil, ErrNilTxDetailMsgTx
 	}
 
+	status, err := txStatusFromDB(txDetails.Status)
+	if err != nil {
+		return nil, fmt.Errorf("convert tx status: %w", err)
+	}
+
 	msgTx := txDetails.MsgTx
 
 	details := buildBasicTxDetail(
 		txDetails.Hash, txDetails.SerializedTx, txDetails.Label,
 		txDetails.Received, msgTx,
 	)
+	details.Status = status
 
 	w.populateBlockDetails(details, txDetails.Block, currentHeight)
 	w.calculateValueAndFeeFromStore(details, txDetails, msgTx)
@@ -313,6 +324,32 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 	w.populatePrevOuts(details, msgTx, txDetails.OwnedInputs)
 
 	return details, nil
+}
+
+// txStatusFromDB converts the internal store status into the public wallet
+// status without coupling their enum values.
+func txStatusFromDB(status db.TxStatus) (TxStatus, error) {
+	switch status {
+	case db.TxStatusPending:
+		return TxStatusPending, nil
+
+	case db.TxStatusPublished:
+		return TxStatusPublished, nil
+
+	case db.TxStatusReplaced:
+		return TxStatusReplaced, nil
+
+	case db.TxStatusFailed:
+		return TxStatusFailed, nil
+
+	case db.TxStatusOrphaned:
+		return TxStatusOrphaned, nil
+
+	default:
+		return TxStatusUnknown, fmt.Errorf(
+			"%w: %d", ErrInvalidTxStatus, status,
+		)
+	}
 }
 
 // buildBasicTxDetail builds the common non-wallet-relative fields for one tx
