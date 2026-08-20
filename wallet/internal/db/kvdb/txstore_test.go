@@ -1274,6 +1274,7 @@ func TestGetTxDetailSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, spend.Hash, detail.Hash)
 	require.Nil(t, detail.Block)
+	require.Equal(t, db.TxStatusPublished, detail.Status)
 	require.Len(t, detail.OwnedInputs, 1)
 	require.Len(t, detail.OwnedOutputs, 2)
 	require.Equal(t, funding.Hash, spend.MsgTx.TxIn[0].PreviousOutPoint.Hash)
@@ -1469,6 +1470,7 @@ func TestListTxDetailsCopiesMsgTx(t *testing.T) {
 	msgHashByDetailHash := make(map[chainhash.Hash]chainhash.Hash, len(details))
 	for _, detail := range details {
 		require.NotNil(t, detail.MsgTx)
+		require.Equal(t, db.TxStatusPublished, detail.Status)
 		msgHashByDetailHash[detail.Hash] = detail.MsgTx.TxHash()
 	}
 

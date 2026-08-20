@@ -26,9 +26,15 @@ var (
 	// store.
 	ErrTxNotFound = errors.New("tx not found")
 
-	// errNilTxDetailMsgTx is returned when a store detail row violates the
-	// TxDetailInfo contract and omits the parsed transaction.
-	errNilTxDetailMsgTx = errors.New("tx detail MsgTx is nil")
+	// ErrNilTxDetailMsgTx is returned when a store detail row violates the
+	// TxDetailInfo contract and omits the parsed transaction. Callers can
+	// match this error with errors.Is.
+	ErrNilTxDetailMsgTx = errors.New("tx detail MsgTx is nil")
+
+	// ErrInvalidTxStatus is returned when the store supplies a persisted
+	// transaction status that the public wallet API cannot represent. Callers
+	// can match this error with errors.Is.
+	ErrInvalidTxStatus = errors.New("invalid tx status")
 )
 
 // TxReader provides an interface for querying tx history.
@@ -88,6 +94,71 @@ type BlockDetails struct {
 	Timestamp int64
 }
 
+// TxStatus describes the wallet-relative validity of a transaction.
+//
+// SQL-backed readers can return every persisted status because they retain
+// terminal transaction attempts for audit history. The kvdb backend only
+// returns TxStatusPending or TxStatusPublished because its legacy store does
+// not retain terminal attempts.
+type TxStatus uint8
+
+// txStatusUnknownString keeps unset and unsupported values on the same public
+// fallback representation.
+const txStatusUnknownString = "unknown"
+
+const (
+	// TxStatusUnknown identifies an unset or unrecognized public transaction
+	// status. Wallet readers do not return this status for a valid store row.
+	TxStatusUnknown TxStatus = iota
+
+	// TxStatusPending identifies a locally-authored transaction that the
+	// wallet has not published successfully.
+	TxStatusPending
+
+	// TxStatusPublished identifies a valid transaction observed by the
+	// wallet. Block distinguishes confirmed from unconfirmed transactions.
+	TxStatusPublished
+
+	// TxStatusReplaced identifies a transaction invalidated by an RBF
+	// replacement.
+	TxStatusReplaced
+
+	// TxStatusFailed identifies a transaction invalidated by a conflicting
+	// spend.
+	TxStatusFailed
+
+	// TxStatusOrphaned identifies a coinbase transaction disconnected from
+	// the best chain.
+	TxStatusOrphaned
+)
+
+// String returns the caller-facing name of the transaction status. Unmapped
+// values render as unknown instead of exposing an internal numeric code.
+func (s TxStatus) String() string {
+	switch s {
+	case TxStatusUnknown:
+		return txStatusUnknownString
+
+	case TxStatusPending:
+		return "pending"
+
+	case TxStatusPublished:
+		return "published"
+
+	case TxStatusReplaced:
+		return "replaced"
+
+	case TxStatusFailed:
+		return "failed"
+
+	case TxStatusOrphaned:
+		return "orphaned"
+
+	default:
+		return txStatusUnknownString
+	}
+}
+
 // TxDetail describes a tx relevant to a wallet. This is a flattened
 // and information-dense structure designed to be returned by the TxReader
 // interface.
@@ -127,6 +198,9 @@ type TxDetail struct {
 
 	// Block contains details of the block that includes this tx.
 	Block *BlockDetails
+
+	// Status is the wallet-relative validity state of the transaction.
+	Status TxStatus
 
 	// ReceivedTime is the time the tx was received by the wallet.
 	ReceivedTime time.Time
@@ -228,7 +302,12 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 	currentHeight int32) (*TxDetail, error) {
 
 	if txDetails.MsgTx == nil {
-		return nil, errNilTxDetailMsgTx
+		return nil, ErrNilTxDetailMsgTx
+	}
+
+	status, err := txStatusFromDB(txDetails.Status)
+	if err != nil {
+		return nil, fmt.Errorf("convert tx status: %w", err)
 	}
 
 	msgTx := txDetails.MsgTx
@@ -237,6 +316,7 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 		txDetails.Hash, txDetails.SerializedTx, txDetails.Label,
 		txDetails.Received, msgTx,
 	)
+	details.Status = status
 
 	w.populateBlockDetails(details, txDetails.Block, currentHeight)
 	w.calculateValueAndFeeFromStore(details, txDetails, msgTx)
@@ -244,6 +324,32 @@ func (w *Wallet) buildTxDetailFromStore(txDetails *db.TxDetailInfo,
 	w.populatePrevOuts(details, msgTx, txDetails.OwnedInputs)
 
 	return details, nil
+}
+
+// txStatusFromDB converts the internal store status into the public wallet
+// status without coupling their enum values.
+func txStatusFromDB(status db.TxStatus) (TxStatus, error) {
+	switch status {
+	case db.TxStatusPending:
+		return TxStatusPending, nil
+
+	case db.TxStatusPublished:
+		return TxStatusPublished, nil
+
+	case db.TxStatusReplaced:
+		return TxStatusReplaced, nil
+
+	case db.TxStatusFailed:
+		return TxStatusFailed, nil
+
+	case db.TxStatusOrphaned:
+		return TxStatusOrphaned, nil
+
+	default:
+		return TxStatusUnknown, fmt.Errorf(
+			"%w: %d", ErrInvalidTxStatus, status,
+		)
+	}
 }
 
 // buildBasicTxDetail builds the common non-wallet-relative fields for one tx

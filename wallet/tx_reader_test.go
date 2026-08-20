@@ -19,6 +19,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestTxStatusString tests the caller-facing string form for every public
+// transaction status and for an unsupported numeric value.
+func TestTxStatusString(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		status TxStatus
+		want   string
+	}{
+		{
+			name:   "unknown",
+			status: TxStatusUnknown,
+			want:   "unknown",
+		}, {
+			name:   "pending",
+			status: TxStatusPending,
+			want:   "pending",
+		}, {
+			name:   "published",
+			status: TxStatusPublished,
+			want:   "published",
+		}, {
+			name:   "replaced",
+			status: TxStatusReplaced,
+			want:   "replaced",
+		}, {
+			name:   "failed",
+			status: TxStatusFailed,
+			want:   "failed",
+		}, {
+			name:   "orphaned",
+			status: TxStatusOrphaned,
+			want:   "orphaned",
+		}, {
+			name:   "unsupported",
+			status: TxStatus(255),
+			want:   "unknown",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Select the public status whose caller-facing form
+			// is under test.
+			status := tc.status
+
+			// Act: Render the status without exposing its numeric code.
+			result := status.String()
+
+			// Assert: Check the stable public status name.
+			require.Equal(t, tc.want, result)
+		})
+	}
+}
+
 // TestBuildTxDetailFromStore tests the detailed store-backed tx builder.
 func TestBuildTxDetailFromStore(t *testing.T) {
 	t.Parallel()
@@ -90,7 +148,25 @@ func TestBuildTxDetailFromStoreRequiresMsgTx(t *testing.T) {
 	_, err := w.buildTxDetailFromStore(txDetails, 1)
 
 	// Assert: Check that the contract violation is reported.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
+}
+
+// TestBuildTxDetailFromStoreRequiresValidStatus tests that unsupported store
+// statuses cannot silently convert to the public pending status.
+func TestBuildTxDetailFromStoreRequiresValidStatus(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a store detail row with an unsupported status.
+	minedDetails, _ := createMinedTxDetail(t)
+	txDetails := txDetailInfoFromLegacy(minedDetails)
+	txDetails.Status = db.TxStatus(255)
+	w, _ := createStartedWalletWithMocks(t)
+
+	// Act: Build the public detail from the malformed store row.
+	_, err := w.buildTxDetailFromStore(txDetails, 1)
+
+	// Assert: Check that the unsupported status fails closed.
+	require.ErrorIs(t, err, ErrInvalidTxStatus)
 }
 
 // TestGetTxPropagatesNilMsgTx tests that GetTx returns store detail contract
@@ -112,7 +188,7 @@ func TestGetTxPropagatesNilMsgTx(t *testing.T) {
 	_, err := w.GetTx(t.Context(), *TstTxHash)
 
 	// Assert: Check that the contract violation is propagated.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
 }
 
 // TestListTxnsPropagatesNilMsgTx tests that ListTxns returns store detail
@@ -136,7 +212,7 @@ func TestListTxnsPropagatesNilMsgTx(t *testing.T) {
 	_, err := w.ListTxns(t.Context(), 0, 1000)
 
 	// Assert: Check that the contract violation is propagated.
-	require.ErrorIs(t, err, errNilTxDetailMsgTx)
+	require.ErrorIs(t, err, ErrNilTxDetailMsgTx)
 }
 
 // TestGetTxSuccess tests the GetTx method of the wallet for success scenarios.
@@ -181,6 +257,67 @@ func TestGetTxSuccess(t *testing.T) {
 			// Assert: Check that the correct details are returned.
 			require.NoError(t, err)
 			require.Equal(t, tc.expectedTxDetail, details)
+		})
+	}
+}
+
+// TestGetTxStatus tests that GetTx preserves every persisted transaction
+// status through the wallet-owned public contract.
+func TestGetTxStatus(t *testing.T) {
+	t.Parallel()
+
+	// Keep the exhaustive store-to-wallet mapping in one test so a new
+	// database state cannot silently map to the public zero value.
+	testCases := []struct {
+		name       string
+		dbStatus   db.TxStatus
+		wantStatus TxStatus
+	}{
+		{
+			name:       "pending",
+			dbStatus:   db.TxStatusPending,
+			wantStatus: TxStatusPending,
+		}, {
+			name:       "published",
+			dbStatus:   db.TxStatusPublished,
+			wantStatus: TxStatusPublished,
+		}, {
+			name:       "replaced",
+			dbStatus:   db.TxStatusReplaced,
+			wantStatus: TxStatusReplaced,
+		}, {
+			name:       "failed",
+			dbStatus:   db.TxStatusFailed,
+			wantStatus: TxStatusFailed,
+		}, {
+			name:       "orphaned",
+			dbStatus:   db.TxStatusOrphaned,
+			wantStatus: TxStatusOrphaned,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Mock one store detail with the selected status.
+			legacyDetails, _ := createUnminedTxDetail(t)
+			storeDetails := txDetailInfoFromLegacy(legacyDetails)
+			storeDetails.Status = tc.dbStatus
+			w, mocks := createStartedWalletWithMocks(t)
+			mocks.store.On(
+				"GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+					WalletID: w.id,
+					Txid:     *TstTxHash,
+				},
+			).Return(storeDetails, nil).Once()
+
+			// Act: Get the transaction through the public wallet API.
+			details, err := w.GetTx(t.Context(), *TstTxHash)
+
+			// Assert: Check that the public status matches the store row.
+			require.NoError(t, err)
+			require.Equal(t, tc.wantStatus, details.Status)
 		})
 	}
 }
@@ -230,6 +367,64 @@ func TestListTxnsSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, details, 1)
 	require.Equal(t, expectedTxDetail, details[0])
+}
+
+// TestListTxnsStatus tests that ListTxns preserves every persisted transaction
+// status through the wallet-owned public contract.
+func TestListTxnsStatus(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build five listed store rows from one valid transaction
+	// fixture, assigning every persisted status once so one call exercises
+	// the complete list conversion path.
+	legacyDetails, _ := createUnminedTxDetail(t)
+	baseDetails := *txDetailInfoFromLegacy(legacyDetails)
+
+	pendingDetails := baseDetails
+	pendingDetails.Status = db.TxStatusPending
+
+	publishedDetails := baseDetails
+	publishedDetails.Status = db.TxStatusPublished
+
+	replacedDetails := baseDetails
+	replacedDetails.Status = db.TxStatusReplaced
+
+	failedDetails := baseDetails
+	failedDetails.Status = db.TxStatusFailed
+
+	orphanedDetails := baseDetails
+	orphanedDetails.Status = db.TxStatusOrphaned
+
+	storeDetails := []db.TxDetailInfo{
+		pendingDetails,
+		publishedDetails,
+		replacedDetails,
+		failedDetails,
+		orphanedDetails,
+	}
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.store.On(
+		"ListTxDetails", mock.Anything, db.ListTxDetailsQuery{
+			WalletID:    w.id,
+			StartHeight: 0,
+			EndHeight:   1000,
+		},
+	).Return(storeDetails, nil).Once()
+
+	// Act: List every transaction through one public wallet call.
+	details, err := w.ListTxns(t.Context(), 0, 1000)
+
+	// Assert: Check that every returned row preserves its corresponding
+	// persisted status in order.
+	require.NoError(t, err)
+	require.Len(t, details, len(storeDetails))
+
+	require.Equal(t, TxStatusPending, details[0].Status)
+	require.Equal(t, TxStatusPublished, details[1].Status)
+	require.Equal(t, TxStatusReplaced, details[2].Status)
+	require.Equal(t, TxStatusFailed, details[3].Status)
+	require.Equal(t, TxStatusOrphaned, details[4].Status)
 }
 
 // createUnminedTxDetail creates a test transaction that sends funds from the
@@ -334,6 +529,7 @@ func createUnminedTxDetail(t *testing.T) (*wtxmgr.TxDetails, *TxDetail) {
 		Hash:          *TstTxHash,
 		RawTx:         TstSerializedTx,
 		Label:         testLabel,
+		Status:        TxStatusPublished,
 		Value:         totalCredits - debitAmt,
 		Fee:           fee,
 		FeeRate:       btcunit.CalcSatPerVByte(fee, weight.ToVB()),
@@ -399,6 +595,7 @@ func txDetailInfoFromLegacy(details *wtxmgr.TxDetails) *db.TxDetailInfo {
 		SerializedTx: details.SerializedTx,
 		Received:     details.Received,
 		Block:        block,
+		Status:       db.TxStatusPublished,
 		Label:        details.Label,
 		OwnedInputs:  ownedInputs,
 		OwnedOutputs: ownedOutputs,
