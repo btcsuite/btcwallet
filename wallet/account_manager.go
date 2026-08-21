@@ -115,26 +115,26 @@ type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
 	NewAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*db.AccountInfo, error)
+		*AccountInfo, error)
 
 	// ListAccounts returns a list of all accounts managed by the wallet.
-	ListAccounts(ctx context.Context) ([]db.AccountInfo, error)
+	ListAccounts(ctx context.Context) ([]AccountInfo, error)
 
 	// ListAccountsByScope returns a list of all accounts for a given key
 	// scope.
 	ListAccountsByScope(ctx context.Context, scope waddrmgr.KeyScope) (
-		[]db.AccountInfo, error)
+		[]AccountInfo, error)
 
 	// ListAccountsByName searches for accounts with the given name across
 	// all key scopes. Because names are not globally unique, this may
 	// return multiple results.
 	ListAccountsByName(ctx context.Context, name string) (
-		[]db.AccountInfo, error)
+		[]AccountInfo, error)
 
 	// GetAccount returns the snapshot for a specific account, looked up
 	// by its key scope and unique name within that scope.
 	GetAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*db.AccountInfo, error)
+		*AccountInfo, error)
 
 	// RenameAccount renames an existing account. To uniquely identify the
 	// account, the key scope must be provided. The new name must be unique
@@ -154,7 +154,7 @@ type AccountManager interface {
 	ImportAccount(ctx context.Context, name string,
 		accountKey *hdkeychain.ExtendedKey,
 		masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-		dryRun bool) (*db.AccountInfo, error)
+		dryRun bool) (*AccountInfo, error)
 }
 
 // A compile time check to ensure that Wallet implements the interface.
@@ -166,7 +166,7 @@ var _ AccountManager = (*Wallet)(nil)
 // accounts have no transaction history (this is a deviation from the BIP0044
 // spec, which allows no unused account gaps).
 func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
-	name string) (*db.AccountInfo, error) {
+	name string) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -201,11 +201,16 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
-	return info, nil
+	accountInfo, err := accountInfoFromDB(*info)
+	if err != nil {
+		return nil, err
+	}
+
+	return &accountInfo, nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total
-// balance into the canonical db.AccountInfo shape the public wallet
+// balance into the canonical AccountInfo shape the public wallet
 // API now exposes. The legacy waddrmgr path does not separate
 // confirmed/unconfirmed balances, so the supplied total is reported
 // on ConfirmedBalance; UnconfirmedBalance stays zero. For derived accounts,
@@ -213,16 +218,17 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 // lock-state-dependent waddrmgr account properties.
 func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	total btcutil.Amount, isImported bool, walletWatchOnly bool,
-	masterFingerprint uint32) db.AccountInfo {
+	masterFingerprint uint32) AccountInfo {
 
 	var pubKey []byte
 	if props.AccountPubKey != nil {
 		pubKey = []byte(props.AccountPubKey.String())
 	}
 
-	var accountNumber *uint32
+	var accountNumber *AccountNumber
 	if !isImported {
-		accountNumber = &props.AccountNumber
+		accountNum := AccountNumber(props.AccountNumber)
+		accountNumber = &accountNum
 	}
 
 	isWatchOnly := walletWatchOnly
@@ -237,38 +243,34 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 		fingerprint = props.MasterKeyFingerprint
 	}
 
-	scope := db.KeyScope(props.KeyScope)
-	addrSchema := db.ScopeAddrMap[scope]
+	addrSchema := waddrmgr.ScopeAddrMap[props.KeyScope]
 
 	if props.AddrSchema != nil {
-		override, err := db.ScopeAddrSchemaFromWaddrmgr(*props.AddrSchema)
-		if err != nil {
-			log.Errorf("propertiesToAccountInfo: skipping invalid "+
-				"AddrSchema override (%v); falling back to scope "+
-				"default", err)
-		} else {
-			addrSchema = override
-		}
+		addrSchema = *props.AddrSchema
 	}
 
-	return db.AccountInfo{
-		AccountNumber:        accountNumber,
-		AccountName:          props.AccountName,
-		IsImported:           isImported,
-		ExternalKeyCount:     props.ExternalKeyCount,
-		InternalKeyCount:     props.InternalKeyCount,
-		ImportedKeyCount:     props.ImportedKeyCount,
-		IsWatchOnly:          isWatchOnly,
-		KeyScope:             scope,
-		AddrSchema:           addrSchema,
-		PublicKey:            pubKey,
-		MasterKeyFingerprint: fingerprint,
-		ConfirmedBalance:     total,
+	result := AccountInfo{
+		AccountNumber:    accountNumber,
+		AccountName:      props.AccountName,
+		IsImported:       isImported,
+		ExternalKeyCount: props.ExternalKeyCount,
+		InternalKeyCount: props.InternalKeyCount,
+		ImportedKeyCount: props.ImportedKeyCount,
+		IsWatchOnly:      isWatchOnly,
+		KeyScope:         props.KeyScope,
+		AddrSchema:       addrSchema,
+		PublicKey:        pubKey,
+		ConfirmedBalance: total,
 	}
+
+	masterKeyFingerprint := MasterFingerprint(fingerprint)
+	result.MasterKeyFingerprint = &masterKeyFingerprint
+
+	return result
 }
 
 // ListAccounts returns every account across all key scopes with its balance.
-func (w *Wallet) ListAccounts(ctx context.Context) ([]db.AccountInfo, error) {
+func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
@@ -282,7 +284,7 @@ func (w *Wallet) ListAccounts(ctx context.Context) ([]db.AccountInfo, error) {
 // listAccountInfos returns cache.ListAccounts snapshots with wallet-cached
 // master fingerprints injected for derived account rows.
 func (w *Wallet) listAccountInfos(ctx context.Context,
-	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
+	query db.ListAccountsQuery) ([]AccountInfo, error) {
 
 	infos, err := w.cache.ListAccounts(ctx, query)
 	if err != nil {
@@ -295,12 +297,12 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 		}
 	}
 
-	return infos, nil
+	return accountInfosFromDB(infos)
 }
 
 // ListAccountsByScope returns all accounts for the given key scope.
 func (w *Wallet) ListAccountsByScope(ctx context.Context,
-	scope waddrmgr.KeyScope) ([]db.AccountInfo, error) {
+	scope waddrmgr.KeyScope) ([]AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -317,7 +319,7 @@ func (w *Wallet) ListAccountsByScope(ctx context.Context,
 
 // ListAccountsByName returns every account matching name across all scopes.
 func (w *Wallet) ListAccountsByName(ctx context.Context,
-	name string) ([]db.AccountInfo, error) {
+	name string) ([]AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -334,7 +336,7 @@ func (w *Wallet) ListAccountsByName(ctx context.Context,
 // The account snapshot, including the running balance, is fetched in a
 // single Store read.
 func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
-	name string) (*db.AccountInfo, error) {
+	name string) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -367,7 +369,12 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		info.MasterKeyFingerprint = w.masterFingerprint
 	}
 
-	return info, nil
+	accountInfo, err := accountInfoFromDB(*info)
+	if err != nil {
+		return nil, err
+	}
+
+	return &accountInfo, nil
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
@@ -424,16 +431,26 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 func (w *Wallet) ImportAccount(ctx context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
-	dryRun bool) (*db.AccountInfo, error) {
+	dryRun bool) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
-	return w.importAccountInternal(
+	info, err := w.importAccountInternal(
 		ctx, name, accountKey, masterKeyFingerprint, addrType, dryRun,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	accountInfo, err := accountInfoFromDB(*info)
+	if err != nil {
+		return nil, err
+	}
+
+	return &accountInfo, nil
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,

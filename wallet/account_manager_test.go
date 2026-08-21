@@ -144,10 +144,12 @@ func TestPropertiesToAccountInfoLockedDerivedNotMisclassified(t *testing.T) {
 	}, 123, false, false, masterFingerprint)
 
 	require.NotNil(t, info.AccountNumber)
-	require.Equal(t, uint32(7), *info.AccountNumber)
+	require.Equal(t, AccountNumber(7), *info.AccountNumber)
 	require.False(t, info.IsImported)
 	require.False(t, info.IsWatchOnly)
-	require.Equal(t, masterFingerprint, info.MasterKeyFingerprint)
+	require.Equal(
+		t, MasterFingerprint(masterFingerprint), *info.MasterKeyFingerprint,
+	)
 }
 
 // TestValidateExtendedPubKeyNil verifies that a nil account key is rejected
@@ -176,7 +178,11 @@ func TestPropertiesToAccountInfoImportedClassifiedAndMasked(t *testing.T) {
 	require.Nil(t, info.AccountNumber)
 	require.True(t, info.IsImported)
 	require.True(t, info.IsWatchOnly)
-	require.Equal(t, importedFingerprint, info.MasterKeyFingerprint)
+
+	expectedFingerprint := MasterFingerprint(importedFingerprint)
+	require.Equal(
+		t, expectedFingerprint, *info.MasterKeyFingerprint,
+	)
 }
 
 // TestListAccounts verifies ListAccounts returns account snapshots with the
@@ -215,7 +221,9 @@ func TestListAccounts(t *testing.T) {
 
 	require.Len(t, accounts, 1)
 	require.Equal(t, "default", accounts[0].AccountName)
-	require.Equal(t, masterFP, accounts[0].MasterKeyFingerprint)
+	require.Equal(
+		t, MasterFingerprint(masterFP), *accounts[0].MasterKeyFingerprint,
+	)
 }
 
 // TestListAccountsByScope verifies the scope filter narrows the query.
@@ -390,11 +398,13 @@ func TestGetAccount(t *testing.T) {
 	info, err := w.GetAccount(t.Context(), scope, name)
 	require.NoError(t, err)
 	require.NotNil(t, info.AccountNumber)
-	require.Equal(t, uint32(1), *info.AccountNumber)
+	require.Equal(t, AccountNumber(1), *info.AccountNumber)
 	require.Equal(t, name, info.AccountName)
 	require.Equal(t, btcutil.Amount(100), info.ConfirmedBalance)
 	require.Equal(t, btcutil.Amount(23), info.UnconfirmedBalance)
-	require.Equal(t, masterFP, info.MasterKeyFingerprint)
+	require.Equal(
+		t, MasterFingerprint(masterFP), *info.MasterKeyFingerprint,
+	)
 }
 
 // TestGetAccountIncludesImportedPseudoAccount verifies that the AccountInfo
@@ -467,8 +477,12 @@ func TestNewAccount(t *testing.T) {
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
-	require.Equal(t, uint32(1), *account.AccountNumber)
-	require.Equal(t, stub.masterKeyFingerprint, account.MasterKeyFingerprint)
+	require.Equal(t, AccountNumber(1), *account.AccountNumber)
+
+	expectedFingerprint := MasterFingerprint(stub.masterKeyFingerprint)
+	require.Equal(
+		t, expectedFingerprint, *account.MasterKeyFingerprint,
+	)
 
 	// Duplicate-name path.
 	expectAccountDeriveSetup(t, deps, stub)
@@ -523,7 +537,7 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
-	require.Equal(t, uint32(1), *account.AccountNumber)
+	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 }
 
 // TestRenameAccount verifies RenameAccount routes through
@@ -587,11 +601,12 @@ func TestImportAccount(t *testing.T) {
 			MasterFingerprint: masterFP,
 			PublicKey:         []byte(acctPubKey.String()),
 		}).Return(&db.AccountInfo{
-		AccountName: testAccountName,
-		IsImported:  true,
-		IsWatchOnly: true,
-		KeyScope:    dbScope,
-		PublicKey:   []byte(acctPubKey.String()),
+		AccountName:          testAccountName,
+		IsImported:           true,
+		IsWatchOnly:          true,
+		KeyScope:             dbScope,
+		PublicKey:            []byte(acctPubKey.String()),
+		MasterKeyFingerprint: masterFP,
 	}, nil).Once()
 
 	props, err := w.ImportAccount(
@@ -600,6 +615,9 @@ func TestImportAccount(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
+	require.Equal(
+		t, MasterFingerprint(masterFP), *props.MasterKeyFingerprint,
+	)
 }
 
 // TestImportAccountDryRun verifies that dry-run imports still route through

@@ -17,7 +17,6 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
-	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
@@ -937,9 +936,9 @@ func signMultipleInputsWithTweaker(tb testing.TB, w *Wallet, tx *wire.MsgTx,
 // listAccountsDeprecated wraps the deprecated Accounts API to satisfy the same
 // contract as ListAccounts by calling Accounts across all active key scopes
 // and aggregating the results.
-func listAccountsDeprecated(w *Wallet) ([]db.AccountInfo, error) {
+func listAccountsDeprecated(w *Wallet) ([]AccountInfo, error) {
 	var (
-		allAccounts   []db.AccountInfo
+		allAccounts   []AccountInfo
 		scopeManagers = w.addrStore.ActiveScopedKeyManagers()
 	)
 
@@ -965,10 +964,10 @@ func listAccountsDeprecated(w *Wallet) ([]db.AccountInfo, error) {
 // same contract as ListAccountsByName by calling Accounts API across all active
 // key scopes, filtering by account name, and aggregating the results.
 func listAccountsByNameDeprecated(w *Wallet,
-	name string) ([]db.AccountInfo, error) {
+	name string) ([]AccountInfo, error) {
 
 	var (
-		matchingAccounts []db.AccountInfo
+		matchingAccounts []AccountInfo
 		scopeManagers    = w.addrStore.ActiveScopedKeyManagers()
 	)
 
@@ -998,7 +997,7 @@ func listAccountsByNameDeprecated(w *Wallet,
 // contract as GetAccount by calling Accounts API across all active key scopes
 // and filtering by account name.
 func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
-	accountName string) (*db.AccountInfo, error) {
+	accountName string) (*AccountInfo, error) {
 
 	result, err := w.Accounts(scope)
 	if err != nil {
@@ -1018,7 +1017,7 @@ func getAccountDeprecated(w *Wallet, scope waddrmgr.KeyScope,
 
 // accountResultToInfo converts the deprecated account result shape into the
 // account-info shape used by the replacement read APIs.
-func accountResultToInfo(w *Wallet, account AccountResult) db.AccountInfo {
+func accountResultToInfo(w *Wallet, account AccountResult) AccountInfo {
 	isImported := account.AccountNumber == waddrmgr.ImportedAddrAccount
 
 	return propertiesToAccountInfo(
