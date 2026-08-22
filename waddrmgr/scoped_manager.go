@@ -1892,6 +1892,90 @@ func (s *ScopedKeyManager) RenameAccount(ns walletdb.ReadWriteBucket,
 	return err
 }
 
+// RemoveAccount removes the given watch-only account from the manager,
+// together with every address derived from it. The manager stops tracking the
+// account entirely: its addresses no longer resolve and its name becomes
+// available again. Callers are responsible for removing any transaction store
+// state referencing the removed addresses.
+//
+// Only watch-only accounts, i.e. accounts backed by an imported account
+// public key rather than by the wallet's own master key, can be removed. The
+// manager's reserved accounts and the default account are refused. The last
+// account counter is deliberately left untouched, so a removed account's
+// number is never reused.
+//
+// This function must be called from within a database transaction that is
+// aborted when an error is returned, as a failure partway leaves the account
+// only partially removed.
+func (s *ScopedKeyManager) RemoveAccount(ns walletdb.ReadWriteBucket,
+	account uint32) error {
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	// Ensure that a reserved account is not being removed.
+	if isReservedAccountNum(account) {
+		str := "reserved account cannot be removed"
+		return managerError(ErrInvalidAccount, str, nil)
+	}
+
+	// The wallet's first account is created together with the wallet
+	// itself and is assumed to exist throughout its lifetime.
+	if account == DefaultAccountNum {
+		str := "default account cannot be removed"
+		return managerError(ErrInvalidAccount, str, nil)
+	}
+
+	rowInterface, err := fetchAccountInfo(ns, &s.scope, account)
+	if err != nil {
+		return err
+	}
+
+	// Only removing a watch-only account is supported: any other kind is
+	// backed by the wallet's own key material, and removing it would
+	// orphan keys the wallet cannot give up.
+	row, ok := rowInterface.(*dbWatchOnlyAccountRow)
+	if !ok {
+		str := fmt.Sprintf("account %d is not a watch-only account "+
+			"and cannot be removed", account)
+		return managerError(ErrInvalidAccount, str, nil)
+	}
+
+	// Remove the account's addresses first. The account's index sub-bucket
+	// holds the hash of every address ever derived for it, and those
+	// hashes key both the address rows and the used-address markers.
+	addrHashes, err := deleteAddrAccountIndex(ns, &s.scope, account)
+	if err != nil {
+		return err
+	}
+	for _, addrHash := range addrHashes {
+		err := deleteAddressByHash(ns, &s.scope, addrHash)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Then remove the account row together with both of its indexes.
+	if err := deleteAccountIDIndex(ns, &s.scope, account); err != nil {
+		return err
+	}
+	if err := deleteAccountNameIndex(ns, &s.scope, row.name); err != nil {
+		return err
+	}
+	if err := deleteAccountRow(ns, &s.scope, account); err != nil {
+		return err
+	}
+
+	// Finally, drop the cached state: the account's info, and the address
+	// cache wholesale, since it is keyed by script address rather than by
+	// account. Watch-only accounts never contribute to deriveOnUnlock, so
+	// there is nothing to clean up there.
+	delete(s.acctInfo, account)
+	s.addrs = make(map[addrKey]ManagedAddress)
+
+	return nil
+}
+
 // ImportPrivateKey imports a WIF private key into the address manager.  The
 // imported address is created using either a compressed or uncompressed
 // serialized public key, depending on the CompressPubKey bool of the WIF.
