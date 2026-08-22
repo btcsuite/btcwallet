@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/netparams"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -296,6 +297,93 @@ func (w *Wallet) importAccountScope(ns walletdb.ReadWriteBucket, name string,
 		return nil, err
 	}
 	return scopedMgr.AccountProperties(ns, account)
+}
+
+// RemoveAccount removes the watch-only account with the given name from the
+// given key scope, together with every address derived from it and every
+// unspent transaction output paying to one of those addresses. The wallet
+// stops tracking the account entirely: its addresses no longer resolve, its
+// UTXOs no longer count towards the wallet's balance and its name becomes
+// available for a new import. The funds themselves are unaffected — whoever
+// holds the account's keys retains full control, and re-importing the same
+// account public key followed by a rescan restores tracking.
+//
+// Only watch-only accounts, i.e. accounts registered through ImportAccount,
+// can be removed; the wallet's reserved accounts and its default account are
+// refused. The removal is also refused while one of the account's outputs is
+// leased for coin selection or spent by an unmined transaction, since
+// removing it would leave that state dangling.
+//
+// NOTE: The chain backend's notification filters are additive, so the removed
+// addresses remain watched until the next restart. Notifications for them are
+// dropped once their addresses are no longer known to the wallet, though
+// transactions paying to them may still be recorded (without any credit)
+// until then. Confirmed transaction history involving the account remains in
+// the store.
+func (w *Wallet) RemoveAccount(keyScope waddrmgr.KeyScope, name string) error {
+	return walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		addrmgrNs := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		txmgrNs := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		scopedMgr, err := w.Manager.FetchScopedKeyManager(keyScope)
+		if err != nil {
+			return err
+		}
+
+		account, err := scopedMgr.LookupAccount(addrmgrNs, name)
+		if err != nil {
+			return err
+		}
+
+		// Collect the output scripts of every address the account has
+		// derived, so that the account's outputs can be identified in
+		// the transaction store below.
+		ownedScripts := make(map[string]struct{})
+		err = scopedMgr.ForEachAccountAddress(
+			addrmgrNs, account,
+			func(maddr waddrmgr.ManagedAddress) error {
+				script, err := txscript.PayToAddrScript(
+					maddr.Address(),
+				)
+				if err != nil {
+					return err
+				}
+
+				ownedScripts[string(script)] = struct{}{}
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		// Find every output the store still considers ours that pays
+		// to one of the account's addresses. OutputsToWatch includes
+		// leased outputs and outputs spent by unmined transactions,
+		// both of which RemoveCredits refuses, so such outputs fail
+		// the removal cleanly instead of being missed.
+		outputs, err := w.TxStore.OutputsToWatch(txmgrNs)
+		if err != nil {
+			return err
+		}
+		var removedOps []wire.OutPoint
+		for _, output := range outputs {
+			if _, ok := ownedScripts[string(output.PkScript)]; ok {
+				removedOps = append(removedOps, output.OutPoint)
+			}
+		}
+		err = w.TxStore.RemoveCredits(txmgrNs, removedOps)
+		if err != nil {
+			return err
+		}
+
+		// With the account's outputs withdrawn from the transaction
+		// store, the account itself and all of its addresses can go.
+		// Doing this within the same database transaction keeps the
+		// address manager and the transaction store consistent with
+		// each other no matter where a failure happens.
+		return scopedMgr.RemoveAccount(addrmgrNs, account)
+	})
 }
 
 // ImportAccountDryRun serves as a dry run implementation of ImportAccount. This
