@@ -70,6 +70,34 @@ The legacy JSON-RPC contract (`getbalance`, `listaccounts`,
 external consumers do not break. Wallet-internal callers migrate to the
 single-bucket shape.
 
+### Supplied account XPub custody
+
+The public account-creation operations in ADR 0013 supply no matching private
+account material. SQL therefore accepts their unnumbered and numbered
+caller-supplied XPub shapes only in a uniformly watch-only wallet. This
+does not change the Store-level rule that a spendable wallet may contain
+externally sourced account material only when matching encrypted private
+account material is supplied.
+
+These public-only caller-supplied account shapes cannot coexist in one SQL
+wallet with wallet-root-derived accounts. The supplied shapes require a
+uniformly watch-only wallet, while wallet-root account derivation uses the
+spendable wallet's private root. The immutable wallet custody mode prevents
+those paths from being combined.
+
+Importing a private wallet root is different from supplying an account XPub.
+Accounts derived from that root remain wallet-root-derived and may be
+spendable.
+
+An account's immutable `NoChainSync` value is independent of this custody
+rule. Spendable and uniformly watch-only wallets may each contain accounts
+with either value; excluding an account from automatic chain synchronization
+neither adds nor removes signing capability.
+
+The legacy kvdb mixed-mode exception remains limited to arbitrary, unnumbered,
+watch-chain account imports; it does not provide path-bound identity or SQL
+parity. ADR 0013 owns the account identity and chain-sync decisions.
+
 ### Imported addresses land in a reserved wallet-level bucket
 
 An imported address — with or without private-key material — is never
@@ -193,6 +221,9 @@ model.
 - [ADR 0011](0011-no-addresses-used-column.md): addresses table omits the
   `used` column (related — also a "compute, don't persist" choice; this ADR
   makes the opposite call by persisting wallet-level watch-only).
+- [ADR 0013](0013-normalized-account-address-identity.md): defines account
+  provenance, optional number and fingerprint, scope, schema, and chain-sync
+  policy independently of wallet custody.
 - [Bitcoin Core v23.0 release notes][btc-core-v23-release]: documents
   descriptor wallets becoming the default wallet type for new wallets.
 - [Bitcoin Core `createwallet` documentation][btc-core-createwallet]:
