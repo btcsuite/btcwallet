@@ -48,7 +48,8 @@ relationship metadata, but do not rewrite its historical decision body.
   ADR 0004's import trigger and target scope.
 - [ADR 0006: Wallet Transaction Manager SQL
   Schema](./0006-wtxmgr-sql-schema.md) defines the relational `wtxmgr` schema;
-  amended by ADR 0015 for SQL block identity and canonical-frontier semantics.
+  amended by ADR 0015 for SQL block identity and canonical-frontier semantics
+  and by ADR 0017 for transaction/UTXO integrity and mutation ordering.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
@@ -63,3 +64,7 @@ relationship metadata, but do not rewrite its historical decision body.
   Ownership](./0015-sql-shared-chain-ownership.md) supersedes ADR 0002, applies
   aggregate lifecycle and admission to every maintained Manager, and assigns
   SQL shared-chain ownership.
+- [ADR 0017: SQL Transaction and UTXO
+  Integrity](./0017-sql-transaction-utxo-integrity.md) preserves existing SQL
+  integrity mechanisms and defines the evidence and ordering boundaries for
+  the remaining behavioral fixes.

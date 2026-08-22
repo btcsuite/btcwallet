@@ -10,7 +10,9 @@
 - **Amends:** None.
 - **Supersedes:** None.
 - **Amended by:** [ADR 0015](0015-sql-shared-chain-ownership.md) for SQL block
-  identity and canonical-frontier semantics.
+  identity and canonical-frontier semantics, and
+  [ADR 0017](0017-sql-transaction-utxo-integrity.md) for transaction/UTXO
+  integrity and mutation ordering.
 - **Superseded by:** None.
 
 ## 1. Context

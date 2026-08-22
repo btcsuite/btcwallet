@@ -1,6 +1,9 @@
 # Wallet Data Model and Lifecycle
 
-This document defines the core data model, state machines, and design philosophy of the `btcwallet` transaction subsystem. It serves as the definitive reference for understanding how the wallet manages money, history, and state.
+This document describes the transaction subsystem's conceptual data model and
+lifecycle. [ADR 0017](./adr/0017-sql-transaction-utxo-integrity.md) records the
+current SQL integrity mechanisms, demonstrated gaps, and mutation-ordering
+contract; the diagrams below do not prescribe a new graph representation.
 
 For the exact write-path rules that apply transaction ingress, invalidation, and rollback to the stored graph, see [Transaction Invalidation Flows](./tx_invalidation_flows.md).
 
@@ -17,12 +20,21 @@ Our data model distinguishes between data integrity and operational efficiency:
 *   **Structurally Transaction-Centered:** Data integrity flows from the parent Transaction to the child UTXO. A UTXO cannot exist without a creating transaction. If a transaction is invalid (double-spent), its outputs are invalid.
 *   **Operationally UTXO-Centered:** The read path is optimized for UTXOs. 99% of wallet operations (calculating balance, selecting coins for a new payment) query the **UTXO set**, not the transaction history.
 
-### 1.2 The "Immutable History" Policy
+### 1.2 Retained History and Explicit Removal
 
-We adhere to a strict **"Never Delete History"** policy.
+Invalidation retains history by status. Explicit unconfirmed-transaction
+removal has a different contract.
+
 *   **Chain Data is Immutable:** Once a transaction is mined, it happened. We record it.
 *   **Intent is Immutable:** If a user attempts a transaction that later fails (e.g., RBF replaced), that attempt is part of the wallet's audit trail.
-*   **Soft Deletion:** We do not physically `DELETE` rows. Invalid or replaced transactions are marked with a status (`failed`, `replaced`) so they are ignored by balance calculations but preserved for history.
+*   **Invalidation:** Failed, replaced, and orphaned rows remain readable while
+    live UTXO queries exclude their outputs.
+*   **Explicit Removal:** Store `DeleteTx` removes an active unmined leaf.
+    Wallet `DeleteUnconfirmedTx` uses Store `DeleteUnminedTx` to remove an
+    active unmined root and its unmined descendants, including descendants
+    made terminal by an earlier event. Removal clears their spends and deletes
+    their outputs before deleting transaction rows. Later chain discovery may
+    record those transactions again. Neither path requires normalized inputs.
 
 ---
 
@@ -73,10 +85,15 @@ Mapping (conceptual -> SQL):
 | --- | --- |
 | `TxHash` | `transactions.tx_hash` (unique per `wallet_id`) |
 | Transaction row ID | `(transactions.wallet_id, transactions.id)` |
-| OutPoint (`TxHash:Index`) | `(utxos.wallet_id, utxos.tx_id, utxos.output_index)` |
+| OutPoint | `(utxos.tx_id, utxos.output_index)`, wallet via transaction |
 | Address (address book) | `addresses.id` (address-manager schema) |
 | Confirmation | `transactions.block_height` (FK to `blocks(block_height)`) |
 | Lease | `(utxo_leases.wallet_id, utxo_leases.utxo_id)` |
+
+UTXO wallet identity is derived through its creating transaction. Existing
+triggers require its address and spender to belong to the same wallet; lease
+triggers enforce the same tenancy. Raw transaction inputs preserve graph edges
+through non-owned outputs and support history reads after spend links clear.
 
 ### 2.1 Entity Roles
 
@@ -141,7 +158,9 @@ Factual-balance note: the SQL Store layer treats both `pending` and
 conservative spendability policy (for example, excluding `pending` parents) is
 applied by higher-level callers on top of that factual base.
 
-*Note: There is no "Abandoned" state. A broadcast transaction cannot be safely abandoned; it can only be invalidated by double-spending its inputs.*
+There is no `abandoned` status transition. Explicit removal changes local
+history, not network validity. A broadcast transaction may still confirm and
+be recorded again; invalidation instead retains the terminal transaction.
 
 ---
 
@@ -273,14 +292,12 @@ When a transaction (Tx C) becomes invalid because *its input* was spent by a con
 
 Architectural consequence: Recursive invalidation can require graph traversal across transaction chains. Typical wallet histories are shallow, but the design should acknowledge worst-case depth and define an execution strategy (batch processing, recursion limits, and/or iterative traversal) to avoid pathological performance.
 
-Suggested implementation strategy:
-1.  Start with a queue of newly-invalid transactions (double-spent, replaced, or orphaned).
-2.  Mark those transactions `failed`/`replaced`/`orphaned`.
-3.  Find UTXOs created by those transactions.
-4.  For each such UTXO, find transactions that spend it and enqueue them.
-5.  Repeat until the queue is empty.
-
-This can be implemented with an application-side loop (portable across databases) or a database-side recursive CTE (PostgreSQL).
+The maintained SQL workflows decode candidate transactions' raw inputs and
+collect descendants to a fixed point before mutation. This includes children
+through non-owned outputs, which a walk of wallet UTXO spend pointers alone
+would miss. They then clear affected spends and update statuses in one write
+transaction. ADR 0017 distinguishes this existing traversal from the separate
+requirement to order competing graph writers across discovery and commit.
 
 ### 5.4 Coin Selection
 Coin selection queries focus purely on the UTXO set:
@@ -310,7 +327,11 @@ wallet-scoped through `transactions.wallet_id`, and other rows either carry
 This avoids conflicts and makes correctness properties explicit.
 
 *   **Consistency model:** The system assumes ACID semantics from the database. Reorg handling, status transitions, and lease acquisition must be performed as explicit SQL transactions.
-*   **Concurrency primitive:** UTXO leases are the wallet-level lock. Coin selection must exclude leased UTXOs, and lease acquisition should be treated as part of the same atomic unit as input selection.
+*   **Lease scope:** UTXO leases reserve coins for selection; they do not order
+    ingestion against descendant discovery or branch mutation. SQLite already
+    uses immediate write transactions. PostgreSQL needs the narrow ordering
+    correction and evidence described by ADR 0017 before its graph invariant
+    can be assumed under an explicit read-committed policy.
 *   **Coinbase maturity:** Coinbase UTXOs require 100 confirmations. This rule should be enforced in a single, well-defined caller-side policy path to avoid accidental selection of immature funds.
 
 Suggested enforcement: a parameterized caller-side query helper or composition layer that takes `current_height` and filters out coinbase UTXOs where `current_height - block_height < 100`.
