@@ -1,6 +1,13 @@
 # Wallet Data Model and Lifecycle
 
-This document defines the core data model, state machines, and design philosophy of the `btcwallet` transaction subsystem. It serves as the definitive reference for understanding how the wallet manages money, history, and state.
+This document describes the conceptual data model, state machines, and design
+philosophy of the `btcwallet` transaction subsystem. It explains how the
+wallet understands money, history, and lifecycle state.
+
+For the canonical target SQL integrity and mutation-ownership contract, see
+[ADR 0015](./adr/0015-sql-transaction-utxo-integrity.md). Where this guide
+describes current behavior or a conceptual lifecycle, ADR 0015 governs target
+SQL relations and their write and deletion ownership.
 
 For the exact write-path rules that apply transaction ingress, invalidation, and rollback to the stored graph, see [Transaction Invalidation Flows](./tx_invalidation_flows.md).
 
@@ -17,12 +24,22 @@ Our data model distinguishes between data integrity and operational efficiency:
 *   **Structurally Transaction-Centered:** Data integrity flows from the parent Transaction to the child UTXO. A UTXO cannot exist without a creating transaction. If a transaction is invalid (double-spent), its outputs are invalid.
 *   **Operationally UTXO-Centered:** The read path is optimized for UTXOs. 99% of wallet operations (calculating balance, selecting coins for a new payment) query the **UTXO set**, not the transaction history.
 
-### 1.2 The "Immutable History" Policy
+### 1.2 The Retained History Policy
 
-We adhere to a strict **"Never Delete History"** policy.
+Invalidation retains mined and attempted transaction history by status instead
+of deleting it as a side effect.
+
 *   **Chain Data is Immutable:** Once a transaction is mined, it happened. We record it.
 *   **Intent is Immutable:** If a user attempts a transaction that later fails (e.g., RBF replaced), that attempt is part of the wallet's audit trail.
-*   **Soft Deletion:** We do not physically `DELETE` rows. Invalid or replaced transactions are marked with a status (`failed`, `replaced`) so they are ignored by balance calculations but preserved for history.
+*   **Soft Invalidation:** Invalid or replaced transactions are marked with a
+    status (`failed`, `replaced`) so balance calculations ignore them while
+    history retains them.
+*   **Explicit Leaf Deletion:** `DeleteTx` may physically remove an active
+    unmined leaf after proving that no normalized child input remains and
+    clearing its outward UTXO relations in one transaction. This ordered
+    maintenance operation is distinct from invalidation, replacement, rewind,
+    and rollback, which retain graph history as specified by
+    [ADR 0015](./adr/0015-sql-transaction-utxo-integrity.md#mutation-ownership).
 
 ---
 
@@ -141,7 +158,12 @@ Factual-balance note: the SQL Store layer treats both `pending` and
 conservative spendability policy (for example, excluding `pending` parents) is
 applied by higher-level callers on top of that factual base.
 
-*Note: There is no "Abandoned" state. A broadcast transaction cannot be safely abandoned; it can only be invalidated by double-spending its inputs.*
+There is no `abandoned` status transition. `DeleteTx` may physically remove
+an unmined `pending` or `published` leaf as explicit local-history
+maintenance, but deletion does not assert that a broadcast transaction became
+invalid or disappeared from the network. A retained row becomes terminal only
+through the graph event assigned by ADR 0015: conflict, explicit invalidation,
+or coinbase-disconnect rewind or rollback.
 
 ---
 
@@ -213,7 +235,10 @@ When the blockchain reorganizes (disconnects blocks):
 1.  **Block** record is disconnected from the best chain (deleted/replaced).
 2.  **Transactions** in that block have their `BlockHeight` set to `NULL`.
 3.  **Effect (non-coinbase):** Regular transactions revert to `Unconfirmed` state (but remain `published`).
-    *   **Coinbase special case:** Coinbase transactions from the disconnected block are marked `orphaned` (as per ADR 0006) instead of reverting to `Unconfirmed`, since they cannot exist outside of the block that created them.
+    *   **Coinbase special case:** Coinbase transactions from the disconnected
+        block are marked `orphaned` (as per ADR 0015) instead of reverting to
+        `Unconfirmed`, since they cannot exist outside of the block that
+        created them.
 4.  **Cascading Effect:**
     *   Outputs created by these txs become `Unconfirmed` (except for outputs of `orphaned` coinbase txs, which are no longer considered part of the spendable UTXO set).
     *   Inputs spent by these txs revert to `Unspent` (if the spending tx is completely invalidated).

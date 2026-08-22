@@ -39,7 +39,8 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0003: Optimistic CFilter Batch Scanning](./0003-optimistic-cfilter-batching.md) - Optimizes BIP 157/158 Compact Filter synchronization using optimistic batch scanning.
 - [ADR 0004: Targeted Rescan vs. Global Rewind](./0004-targeted-rescan-vs-rewind.md) - Introduces "Targeted Rescans" to replace global "Rewinds" for more efficient transaction discovery.
 - [ADR 0005: Explicit Rescan on Import](./0005-no-auto-rescan-on-import.md) - Disables automatic blockchain scanning during import operations, requiring explicit user initiation.
-- [ADR 0006: Wallet Transaction Manager SQL Schema](./0006-wtxmgr-sql-schema.md) - Defines the relational SQL schema for the Wallet Transaction Manager (`wtxmgr`) migration.
+- [ADR 0006: Wallet Transaction Manager SQL Schema](./0006-wtxmgr-sql-schema.md)
+  - Superseded by ADR 0015.
 - [ADR 0007: XChaCha20-Poly1305 Encryption](./0007-xchacha20-poly1305-encryption.md) - Replaces XSalsa20-Poly1305 with XChaCha20-Poly1305 for encrypting private key material.
 - [ADR 0008: Integration Test Framework](./0008-integration-test-framework.md) - Defines a modular integration test framework for chain and database backend permutations.
 - [ADR 0009: Single-Passphrase Encryption Model](./0009-single-passphrase-encryption.md) - Adopts a single-passphrase model that encrypts private data only while keeping public wallet metadata in plaintext.
@@ -50,3 +51,8 @@ relationship metadata, but do not rewrite its historical decision body.
 - [ADR 0014: Durable SQL Database Identity](./0014-sql-database-identity.md) -
   Defines the durable role-wallet identity and identity-first initialization
   order for SQLite and PostgreSQL.
+- [ADR 0015: SQL Transaction and UTXO Integrity][adr-0015]
+  - Supersedes ADR 0006 with wallet-scoped normalized inputs, exact spend
+    identity, late-parent handling, and event-owned graph mutations.
+
+[adr-0015]: ./0015-sql-transaction-utxo-integrity.md

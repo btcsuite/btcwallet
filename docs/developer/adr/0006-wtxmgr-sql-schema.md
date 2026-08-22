@@ -1,5 +1,17 @@
 # ADR 0006: Wallet Transaction Manager SQL Schema
 
+## Status
+
+- **Status:** Superseded
+- **Date:** 2026-08-26
+
+## Relationships
+
+- **Amends:** None.
+- **Supersedes:** None.
+- **Amended by:** None.
+- **Superseded by:** [ADR 0015](./0015-sql-transaction-utxo-integrity.md).
+
 ## 1. Context
 
 As part of the migration from a Key-Value store to a relational SQL backend, the Wallet Transaction Manager (`wtxmgr`) requires a new schema design. The `wtxmgr` is responsible for tracking:
