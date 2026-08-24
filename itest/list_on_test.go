@@ -265,4 +265,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter label boundaries",
 		TestFunc: testLabelTxBoundaries,
 	},
+	{
+		Name:     "txwriter reject unknown transaction",
+		TestFunc: testLabelTxRejectUnknown,
+	},
 }
