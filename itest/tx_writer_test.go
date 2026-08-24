@@ -243,3 +243,43 @@ func testLabelTxRejectOversize(h *bwtest.HarnessTest) {
 		"refused label replaced or truncated the stored one",
 	)
 }
+
+// testLabelTxSurvivesReload verifies that a label is durable rather than
+// remembered by the running wallet: after the wallet is stopped, its database
+// closed, and the same wallet loaded again, both readers still report it.
+func testLabelTxSurvivesReload(h *bwtest.HarnessTest) {
+	const label = "rent for march"
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, label)
+	require.NoError(h, err, "failed to label transaction")
+
+	reloaded := h.ReloadWallet(w)
+
+	detail, err := reloaded.GetTx(h.Context(), txHash)
+	require.NoError(
+		h, err, "reloaded wallet lost the labeled transaction",
+	)
+	require.Equal(
+		h, label, detail.Label, "reloaded wallet lost the label",
+	)
+
+	details, err := reloaded.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions")
+
+	listed := make(map[chainhash.Hash]string, len(details))
+	for _, detail := range details {
+		listed[detail.Hash] = detail.Label
+	}
+
+	require.Equal(
+		h, label, listed[txHash],
+		"reloaded wallet listed the transaction without its label",
+	)
+}
