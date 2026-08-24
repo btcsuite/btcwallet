@@ -5,12 +5,15 @@
 package txauthor
 
 import (
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
+	"github.com/stretchr/testify/require"
 )
 
 func p2pkhOutputs(amounts ...btcutil.Amount) []*wire.TxOut {
@@ -164,13 +167,16 @@ func TestNewUnsignedTransaction(t *testing.T) {
 		},
 
 		// Test that zero change outputs are not included
-		// (ChangeAmount=0 means don't include any change output).
+		// (ChangeAmount=0 means don't include any change output). The
+		// single unspent output covers the payment and the maximum
+		// required fee exactly, leaving nothing over.
 		12: {
 			UnspentOutputs: p2pkhOutputs(1e8),
-			Outputs:        p2pkhOutputs(1e8),
-			RelayFee:       0,
-			ChangeAmount:   0,
-			InputCount:     1,
+			Outputs: p2pkhOutputs(1e8 - txrules.FeeForSerializeSize(1e3,
+				txsizes.EstimateVirtualSize(1, 0, 0, 0, p2pkhOutputs(0), txsizes.P2WPKHPkScriptSize))),
+			RelayFee:     1e3,
+			ChangeAmount: 0,
+			InputCount:   1,
 		},
 	}
 
@@ -221,4 +227,143 @@ func TestNewUnsignedTransaction(t *testing.T) {
 				i, len(tx.Tx.TxIn), test.InputCount)
 		}
 	}
+}
+
+// p2wpkhScript returns a well-formed pay-to-witness-pubkey-hash script. An
+// input redeeming this script is sized identically to the one the initial fee
+// estimate assumes, so construction settles on a fee in a single pass.
+func p2wpkhScript() []byte {
+	script := make([]byte, txsizes.P2WPKHPkScriptSize)
+	script[0] = txscript.OP_0
+	script[1] = txscript.OP_DATA_20
+
+	return script
+}
+
+// countingSources returns an input source and a change source that record how
+// often they were invoked, so a test can prove a request was rejected before
+// either callback ran. The input source funds exactly what it is asked for.
+func countingSources(t *testing.T) (InputSource, *ChangeSource, *int, *int) {
+	t.Helper()
+
+	var inputCalls, changeCalls int
+
+	inputSource := func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		inputCalls++
+
+		return target, []*wire.TxIn{{}}, []btcutil.Amount{target},
+			[][]byte{p2wpkhScript()}, nil
+	}
+
+	changeSource := &ChangeSource{
+		NewScript: func() ([]byte, error) {
+			changeCalls++
+
+			return make([]byte, txsizes.P2WPKHPkScriptSize), nil
+		},
+		ScriptSize: txsizes.P2WPKHPkScriptSize,
+	}
+
+	return inputSource, changeSource, &inputCalls, &changeCalls
+}
+
+// TestNewUnsignedTransactionChecksAmounts verifies that a malformed output set
+// or fee rate is refused by transaction construction, and that the refusal
+// happens before either the input source or the change source is consulted.
+func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		outputs  []*wire.TxOut
+		relayFee btcutil.Amount
+		wantErr  error
+	}{{
+		name:     "a zero fee rate is rejected",
+		outputs:  p2pkhOutputs(1e6),
+		relayFee: 0,
+		wantErr:  ErrFeeRateNotPositive,
+	}, {
+		name:     "a negative fee rate is rejected",
+		outputs:  p2pkhOutputs(1e6),
+		relayFee: -1e3,
+		wantErr:  ErrFeeRateNotPositive,
+	}, {
+		name:     "a nil output is rejected",
+		outputs:  []*wire.TxOut{nil},
+		relayFee: 1e3,
+		wantErr:  ErrNilOutput,
+	}, {
+		name:     "a negative output value is rejected",
+		outputs:  p2pkhOutputs(-1),
+		relayFee: 1e3,
+		wantErr:  ErrOutputValueNegative,
+	}, {
+		name:     "an output above the maximum is rejected",
+		outputs:  p2pkhOutputs(btcutil.MaxSatoshi + 1),
+		relayFee: 1e3,
+		wantErr:  ErrOutputValueExceedsMax,
+	}, {
+		name: "an output set summing above the maximum is rejected",
+		outputs: p2pkhOutputs(
+			btcutil.MaxSatoshi-1e8, 1e8+1,
+		),
+		relayFee: 1e3,
+		wantErr:  ErrOutputTotalExceedsMax,
+	}, {
+		// The rounded fee this rate implies cannot be represented, so
+		// it is reported rather than silently clamped to the maximum.
+		name:     "an unrepresentable rounded fee is rejected",
+		outputs:  p2pkhOutputs(1e6),
+		relayFee: 2e16,
+		wantErr:  ErrFeeOutOfRange,
+	}, {
+		// This rate does not even survive multiplication by the size.
+		name:     "a fee product overflow is rejected",
+		outputs:  p2pkhOutputs(1e6),
+		relayFee: math.MaxInt64 / 2,
+		wantErr:  ErrFeeOverflow,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			inputSource, changeSource, inputCalls, changeCalls :=
+				countingSources(t)
+
+			tx, err := NewUnsignedTransaction(
+				tc.outputs, tc.relayFee, inputSource,
+				changeSource,
+			)
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, tx)
+			require.Zero(t, *inputCalls)
+			require.Zero(t, *changeCalls)
+		})
+	}
+}
+
+// TestNewUnsignedTransactionNilOutputs verifies that a transaction with no
+// non-change outputs still authors. A sweep pays its entire input value to a
+// single change output and declares no outputs of its own, so the checked
+// output set must accept a nil slice.
+func TestNewUnsignedTransactionNilOutputs(t *testing.T) {
+	t.Parallel()
+
+	inputSource, changeSource, inputCalls, changeCalls := countingSources(t)
+
+	tx, err := NewUnsignedTransaction(nil, 1e3, inputSource, changeSource)
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+	require.Equal(t, 1, *inputCalls)
+	require.Equal(t, 1, *changeCalls)
+
+	// The input source funds exactly the requested target, which is the fee
+	// alone, so there is nothing left over to pay out as change.
+	require.Equal(t, -1, tx.ChangeIndex)
+	require.Empty(t, tx.Tx.TxOut)
 }
