@@ -30,6 +30,13 @@ const (
 	oneBTC   = 1 * btcutil.SatoshiPerBitcoin
 	twoBTC   = 2 * btcutil.SatoshiPerBitcoin
 	threeBTC = 3 * btcutil.SatoshiPerBitcoin
+
+	// spendFee is the fee in satoshis that the fixtures spending a wallet's
+	// own coins leave behind. It clears the relay minimum by a wide margin
+	// while staying far below the backend's default maximum fee rate of
+	// 10,000 sat/vbyte, above which an otherwise valid transaction is
+	// rejected as paying absurdly much.
+	spendFee = 10_000
 )
 
 // relayFeeRate is the default relay fee, one satoshi per virtual byte. Any
