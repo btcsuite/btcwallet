@@ -18,12 +18,6 @@ import (
 // is never stated twice.
 const txPublisherFundingType = waddrmgr.WitnessPubKey
 
-// spendFee is the fee in satoshis that the publication fixtures leave behind.
-// It clears the relay minimum by a wide margin while staying far below the
-// backend's default maximum fee rate of 10,000 sat/vbyte, above which an
-// otherwise valid transaction is rejected as paying absurdly much.
-const spendFee = 10_000
-
 // testCheckMempoolAcceptanceAccepted verifies that the acceptance check reports
 // the chain backend's verdict for a spendable transaction, and that asking the
 // question publishes nothing: the transaction reaches neither the network nor
