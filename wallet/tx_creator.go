@@ -82,6 +82,24 @@ var (
 	// errNegativeHeight is returned when a height expected to be non-negative
 	// is negative.
 	errNegativeHeight = errors.New("negative height")
+
+	// ErrNilTxOutput is returned when an output set contains a nil output.
+	ErrNilTxOutput = errors.New("nil transaction output")
+
+	// ErrOutputTotalExceedsMax is returned when a transaction's outputs are
+	// individually valid but sum to more than the maximum representable
+	// amount.
+	ErrOutputTotalExceedsMax = errors.New(
+		"total output amount exceeds maximum value",
+	)
+
+	// ErrAmountOverflow is returned when the arithmetic that establishes a
+	// transaction's target, sufficiency, or change cannot be represented.
+	ErrAmountOverflow = errors.New("transaction amount arithmetic overflows")
+
+	// ErrFeeOutOfRange is returned when the fee a transaction would pay is
+	// not a representable amount.
+	ErrFeeOutOfRange = errors.New("transaction fee out of range")
 )
 
 var (
@@ -677,7 +695,7 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 		txOutputs, feeSatPerKb, inputSource, changeSource,
 	)
 	if err != nil {
-		return nil, err
+		return nil, translateAuthorError(err)
 	}
 
 	// Randomize the position of the change output, if one was created. This
@@ -688,6 +706,50 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 	}
 
 	return tx, nil
+}
+
+// translateAuthorError maps the checked-arithmetic errors the txauthor module
+// reports onto the wallet's own error vocabulary, so callers of the public
+// wrappers match on one set of sentinels. It is the single translation point
+// for both CreateTransaction and FundPsbt.
+//
+// Classes the wallet already names keep their existing identity: an output
+// value violation reports the txrules error the intent-level check would have
+// reported, and a non-positive fee rate reports ErrMissingFeeRate. Only the
+// classes the wallet had no name for get a new one. The originating txauthor
+// error is retained in the chain so a caller can still match on it, and any
+// error this function does not recognise, including an InputSourceError, is
+// returned untouched.
+func translateAuthorError(err error) error {
+	switch {
+	case errors.Is(err, txauthor.ErrNilOutput):
+		return fmt.Errorf("%w: %w", ErrNilTxOutput, err)
+
+	case errors.Is(err, txauthor.ErrOutputValueNegative):
+		return fmt.Errorf("%w: %w", txrules.ErrAmountNegative, err)
+
+	case errors.Is(err, txauthor.ErrOutputValueExceedsMax):
+		return fmt.Errorf("%w: %w", txrules.ErrAmountExceedsMax, err)
+
+	case errors.Is(err, txauthor.ErrOutputTotalExceedsMax):
+		return fmt.Errorf("%w: %w", ErrOutputTotalExceedsMax, err)
+
+	case errors.Is(err, txauthor.ErrAmountOverflow),
+		errors.Is(err, txauthor.ErrAmountUnderflow):
+
+		return fmt.Errorf("%w: %w", ErrAmountOverflow, err)
+
+	case errors.Is(err, txauthor.ErrFeeRateNotPositive):
+		return fmt.Errorf("%w: %w", ErrMissingFeeRate, err)
+
+	case errors.Is(err, txauthor.ErrFeeOverflow),
+		errors.Is(err, txauthor.ErrFeeOutOfRange):
+
+		return fmt.Errorf("%w: %w", ErrFeeOutOfRange, err)
+
+	default:
+		return err
+	}
 }
 
 // determineChangeSource determines the source for the transaction's change
