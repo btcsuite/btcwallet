@@ -273,4 +273,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter reject oversize label",
 		TestFunc: testLabelTxRejectOversize,
 	},
+	{
+		Name:     "txwriter label survives reload",
+		TestFunc: testLabelTxSurvivesReload,
+	},
 }
