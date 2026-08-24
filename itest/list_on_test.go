@@ -221,4 +221,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader empty history",
 		TestFunc: testListTxnsEmptyHistory,
 	},
+	{
+		Name:     "txreader missing transaction",
+		TestFunc: testGetTxMissing,
+	},
 }
