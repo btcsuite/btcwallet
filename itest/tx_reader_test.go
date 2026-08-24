@@ -3,8 +3,10 @@
 package itest
 
 import (
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,4 +60,24 @@ func testListTxnsEmptyHistory(h *bwtest.HarnessTest) {
 		require.NoError(h, err, "failed to list %s", tc.name)
 		require.Empty(h, details, "%s reported a transaction", tc.name)
 	}
+}
+
+// testGetTxMissing verifies that a transaction the wallet does not hold is
+// reported as missing with a stable identity.
+func testGetTxMissing(h *bwtest.HarnessTest) {
+	// The wallet is funded so that it holds a transaction of its own. That
+	// is what separates a miss here from the empty-history case: the reader
+	// has something to find and still reports this hash as absent.
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	// The outpoint no wallet knows names a transaction that was never
+	// mined and never authored here, so its hash is unknown too.
+	_, err := w.GetTx(h.Context(), unknownOutpoint().Hash)
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"unknown transaction not reported as missing",
+	)
 }
