@@ -225,4 +225,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader missing transaction",
 		TestFunc: testGetTxMissing,
 	},
+	{
+		Name:     "txreader received transaction",
+		TestFunc: testGetTxReceived,
+	},
 }
