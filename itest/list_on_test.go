@@ -269,4 +269,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter reject unknown transaction",
 		TestFunc: testLabelTxRejectUnknown,
 	},
+	{
+		Name:     "txwriter reject oversize label",
+		TestFunc: testLabelTxRejectOversize,
+	},
 }
