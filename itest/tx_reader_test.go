@@ -426,3 +426,42 @@ func testGetTxMined(h *bwtest.HarnessTest) {
 		"confirmation altered the transaction beyond its block",
 	)
 }
+
+// testGetTxConfirmations verifies that the confirmation count a transaction
+// reports follows the chain tip as blocks accumulate above it.
+func testGetTxConfirmations(h *bwtest.HarnessTest) {
+	// blocksMined is how far the chain advances past the funding block. Any
+	// count above zero works; two makes an off-by-one visible.
+	const blocksMined = 2
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txid := funding.Tx.TxHash()
+
+	// The funding block is the tip, so the transaction in it is confirmed
+	// exactly once.
+	detail, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to get the funding transaction")
+	require.Equal(
+		h, int32(1), detail.Confirmations, "unexpected initial confirmations",
+	)
+
+	h.MineEmptyBlocks(blocksMined)
+
+	// Each block mined above it counts, and the block containing it still
+	// counts as the first.
+	detail, err = w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to get the funding transaction")
+	require.Equal(
+		h, int32(1+blocksMined), detail.Confirmations,
+		"confirmations did not follow the chain tip",
+	)
+
+	// The block it sits in has not moved.
+	require.Equal(
+		h, funding.BlockHeight, detail.Block.Height, "unexpected block height",
+	)
+}
