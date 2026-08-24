@@ -257,4 +257,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter label transaction",
 		TestFunc: testLabelTx,
 	},
+	{
+		Name:     "txwriter replace label",
+		TestFunc: testLabelTxReplace,
+	},
 }

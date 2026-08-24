@@ -58,3 +58,34 @@ func testLabelTx(h *bwtest.HarnessTest) {
 
 	require.Equal(h, label, listed[txHash], "list read lost the label")
 }
+
+// testLabelTxReplace verifies the documented replacement contract: a label
+// written over an existing one takes its place, rather than being refused as a
+// duplicate or accumulating alongside it.
+func testLabelTxReplace(h *bwtest.HarnessTest) {
+	const (
+		original    = "rent for march"
+		replacement = "rent for april"
+	)
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, original)
+	require.NoError(h, err, "failed to write the original label")
+
+	err = w.LabelTx(h.Context(), txHash, replacement)
+
+	require.NoError(h, err, "labeling an already-labeled transaction "+
+		"was refused")
+
+	detail, err := w.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "failed to read the relabeled transaction")
+	require.Equal(
+		h, replacement, detail.Label, "transaction kept its first label",
+	)
+}
