@@ -253,4 +253,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader durable reopen",
 		TestFunc: testTxReaderDurableReopen,
 	},
+	{
+		Name:     "txwriter label transaction",
+		TestFunc: testLabelTx,
+	},
 }
