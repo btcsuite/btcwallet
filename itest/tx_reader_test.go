@@ -659,3 +659,34 @@ func testListTxnsBoundaries(h *bwtest.HarnessTest) {
 	// The harness requires an empty mempool once a case succeeds.
 	h.MineBlockWithTx(hist.unminedTx)
 }
+
+// testListTxnsAgreesWithGetTx verifies that the two readers describe the same
+// transaction identically, so a caller's choice between them cannot change what
+// it learns.
+func testListTxnsAgreesWithGetTx(h *bwtest.HarnessTest) {
+	hist := newTxReaderHistory(h)
+
+	w := hist.wallet
+
+	// This range covers the whole history, the transaction still waiting in
+	// the mempool included, so the comparison covers a result with no block
+	// as well as confirmed ones.
+	listed, err := w.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions")
+	require.Len(
+		h, listed, len(hist.txids()), "unexpected transaction count",
+	)
+
+	for _, listedDetail := range listed {
+		point, err := w.GetTx(h.Context(), listedDetail.Hash)
+		require.NoError(h, err, "failed to get %v", listedDetail.Hash)
+
+		require.Equal(
+			h, listedDetail, point,
+			"the readers disagree about %v", listedDetail.Hash,
+		)
+	}
+
+	// The harness requires an empty mempool once a case succeeds.
+	h.MineBlockWithTx(hist.unminedTx)
+}
