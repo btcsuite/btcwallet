@@ -283,3 +283,39 @@ func testLabelTxSurvivesReload(h *bwtest.HarnessTest) {
 		"reloaded wallet listed the transaction without its label",
 	)
 }
+
+// testLabelTxWalletState verifies the lifecycle gate on labeling: it is
+// unavailable before the wallet starts and after it stops, so a caller writing
+// during startup or shutdown is told the wallet is not running rather than
+// something about the transaction.
+func testLabelTxWalletState(h *bwtest.HarnessTest) {
+	const label = "rent for march"
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		AddrType:  txWriterFundingType,
+		Unstarted: true,
+	})
+
+	// The gate refuses before anything looks the transaction up, so this
+	// only has to be a hash. Nothing is labeled.
+	txHash := unknownOutpoint().Hash
+
+	err := w.LabelTx(h.Context(), txHash, label)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"labeling before start not rejected",
+	)
+
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
+	// Stop the wallet, then deregister it so the harness does not drive a
+	// stopped wallet during teardown.
+	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+
+	err = w.LabelTx(h.Context(), txHash, label)
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"labeling after stop not rejected",
+	)
+}
