@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -464,4 +465,197 @@ func testGetTxConfirmations(h *bwtest.HarnessTest) {
 	require.Equal(
 		h, funding.BlockHeight, detail.Block.Height, "unexpected block height",
 	)
+}
+
+// txReaderHistory is the transaction history the range, agreement and reload
+// cases all read: the transaction that funded the wallet, one spend confirmed
+// in a block of its own, and one spend left waiting in the mempool.
+//
+// It holds only what newTxReaderHistory arranged. Every read under test, and
+// every assertion about it, stays in the case.
+type txReaderHistory struct {
+	// wallet is the funded, unlocked wallet holding the history.
+	wallet *wallet.Wallet
+
+	// fundingTx paid the wallet its coins, and fundHeight is the block
+	// that confirmed it.
+	fundingTx  *wire.MsgTx
+	fundHeight int32
+
+	// minedTx spends the first coin and was confirmed on its own at
+	// minedHeight, which is the chain tip.
+	minedTx     *wire.MsgTx
+	minedHeight int32
+
+	// unminedTx spends the second coin and is still in the mempool. A case
+	// that finishes with the history has to confirm it, because the
+	// harness requires an empty mempool on success.
+	unminedTx *wire.MsgTx
+}
+
+// txids returns the hashes of every transaction the wallet holds, oldest
+// first. Cases derive their expected transaction count from its length rather
+// than restating a number the fixture already determines.
+func (hist txReaderHistory) txids() []chainhash.Hash {
+	return []chainhash.Hash{
+		hist.fundingTx.TxHash(),
+		hist.minedTx.TxHash(),
+		hist.unminedTx.TxHash(),
+	}
+}
+
+// newTxReaderHistory funds a wallet and leaves it holding one confirmed spend
+// and one unconfirmed one.
+//
+// Each spend is confirmed in a block of its own, so every block holds exactly
+// one wallet transaction and the order a reader reports does not depend on how
+// a backend arranges transactions within a block.
+func newTxReaderHistory(h *bwtest.HarnessTest) txReaderHistory {
+	h.Helper()
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
+		Unlocked: true,
+	})
+
+	// Both spends pay the wallet, which keeps every transaction in the
+	// history wallet-relevant on both sides.
+	addr := h.NewWalletAddressOfType(w, txReaderFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	minedTx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[0]},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), minedTx, "")
+	require.NoError(h, err, "failed to broadcast the transaction to mine")
+
+	h.MineBlockWithTx(minedTx)
+
+	_, minedHeight := h.GetBestBlock()
+
+	// The second coin stays in the mempool, so the unmined leg of a range
+	// has something to report.
+	unminedTx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[1]},
+		Outputs: []wire.TxOut{{
+			Value:    twoBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	err = w.Broadcast(h.Context(), unminedTx, "")
+	require.NoError(h, err, "failed to broadcast the unmined transaction")
+
+	return txReaderHistory{
+		wallet:      w,
+		fundingTx:   funding.Tx,
+		fundHeight:  funding.BlockHeight,
+		minedTx:     minedTx,
+		minedHeight: minedHeight,
+		unminedTx:   unminedTx,
+	}
+}
+
+// testListTxnsBoundaries verifies which transactions each supported range
+// selects and the order it reports them in, at the edges of a history whose
+// every block holds exactly one wallet transaction.
+func testListTxnsBoundaries(h *bwtest.HarnessTest) {
+	hist := newTxReaderHistory(h)
+
+	w := hist.wallet
+	fundHeight, spendHeight := hist.fundHeight, hist.minedHeight
+
+	txids := hist.txids()
+	fundingTxid, minedTxid, unminedTxid := txids[0], txids[1], txids[2]
+
+	// The row below the funded block subtracts one from its height, and a
+	// negative height is the unmined sentinel rather than a block. The
+	// miner mines well past genesis before any case runs, so this holds,
+	// but a fixture that ever funded at height zero would silently turn
+	// that row into a different query instead of failing.
+	require.Positive(
+		h, fundHeight,
+		"fixture funded too close to genesis for the boundary rows",
+	)
+
+	testCases := []struct {
+		name        string
+		startHeight int32
+		endHeight   int32
+		want        []chainhash.Hash
+	}{{
+		name:        "unmined only",
+		startHeight: unminedHeight,
+		endHeight:   unminedHeight,
+		want:        []chainhash.Hash{unminedTxid},
+	}, {
+		name:        "confirmed then unmined",
+		startHeight: 0,
+		endHeight:   unminedHeight,
+		want: []chainhash.Hash{
+			fundingTxid, minedTxid, unminedTxid,
+		},
+	}, {
+		name:        "unmined then confirmed in reverse",
+		startHeight: unminedHeight,
+		endHeight:   0,
+		want: []chainhash.Hash{
+			unminedTxid, minedTxid, fundingTxid,
+		},
+	}, {
+		name:        "block below the first transaction",
+		startHeight: fundHeight - 1,
+		endHeight:   fundHeight - 1,
+		want:        []chainhash.Hash{},
+	}, {
+		name:        "first block holding a transaction",
+		startHeight: fundHeight,
+		endHeight:   fundHeight,
+		want:        []chainhash.Hash{fundingTxid},
+	}, {
+		name:        "chain tip",
+		startHeight: spendHeight,
+		endHeight:   spendHeight,
+		want:        []chainhash.Hash{minedTxid},
+	}, {
+		name:        "block above the chain tip",
+		startHeight: spendHeight + 1,
+		endHeight:   spendHeight + 1,
+		want:        []chainhash.Hash{},
+	}, {
+		name:        "whole confirmed history",
+		startHeight: fundHeight,
+		endHeight:   spendHeight,
+		want:        []chainhash.Hash{fundingTxid, minedTxid},
+	}, {
+		name:        "whole confirmed history reversed",
+		startHeight: spendHeight,
+		endHeight:   fundHeight,
+		want:        []chainhash.Hash{minedTxid, fundingTxid},
+	}}
+
+	for _, tc := range testCases {
+		details, err := w.ListTxns(
+			h.Context(), tc.startHeight, tc.endHeight,
+		)
+		require.NoError(h, err, "failed to list %s", tc.name)
+
+		got := make([]chainhash.Hash, 0, len(details))
+		for _, detail := range details {
+			got = append(got, detail.Hash)
+		}
+
+		require.Equal(h, tc.want, got, "unexpected result for %s", tc.name)
+	}
+
+	// The harness requires an empty mempool once a case succeeds.
+	h.MineBlockWithTx(hist.unminedTx)
 }

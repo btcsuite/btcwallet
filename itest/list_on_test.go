@@ -241,4 +241,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader confirmation count",
 		TestFunc: testGetTxConfirmations,
 	},
+	{
+		Name:     "txreader list boundaries",
+		TestFunc: testListTxnsBoundaries,
+	},
 }
