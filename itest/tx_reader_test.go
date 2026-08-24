@@ -344,3 +344,85 @@ func testGetTxUnmined(h *bwtest.HarnessTest) {
 	// confirm the transaction now that the unmined view has been read.
 	h.MineBlockWithTx(tx)
 }
+
+// testGetTxMined verifies that confirming a transaction adds the block that
+// contains it and the confirmations it earned, and changes nothing else about
+// how the wallet reports it.
+func testGetTxMined(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	addr := h.NewWalletAddressOfType(w, txReaderFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{funding.WalletOutpoints[0]},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	txid := tx.TxHash()
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(h, err, "failed to broadcast transaction")
+
+	// Read the unconfirmed view first, so the comparison below is against
+	// what confirmation actually changed rather than against a second
+	// description of the same transaction.
+	unmined, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to get the published transaction")
+
+	block := h.MineBlockWithTx(tx)
+	_, height := h.GetBestBlock()
+
+	mined, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to get the confirmed transaction")
+
+	// The block that confirmed it is now reported, and the mined block is
+	// the chain tip, so the transaction has exactly one confirmation.
+	require.Equal(
+		h, block.BlockHash(), mined.Block.Hash, "unexpected block hash",
+	)
+	require.Equal(h, height, mined.Block.Height, "unexpected block height")
+	require.Equal(
+		h, block.Header.Timestamp.Unix(), mined.Block.Timestamp,
+		"unexpected block timestamp",
+	)
+	require.Equal(h, int32(1), mined.Confirmations, "unexpected confirmations")
+
+	// The wallet still reports a time at which it saw the transaction, but
+	// which time that is does not survive confirmation on every backend, so
+	// it is held out of the comparison below rather than asserted.
+	//
+	// kvdb rebuilds the stored record from the confirming notification,
+	// through InsertConfirmedTx, so the record takes that notification's
+	// timestamp. Its own confirmedBatchLabel keeps the stored label across
+	// the same transition, but nothing does that for the received time. The
+	// SQL backends keep the time the wallet first saw the transaction.
+	// Which of the two the public reader should report is a question for
+	// the store, not for this case to settle by picking one.
+	require.False(h, mined.ReceivedTime.IsZero(), "no received time")
+
+	// Nothing else about the transaction changed. Comparing the whole
+	// result with only the confirmation facts removed leaves no field that
+	// could have been quietly rewritten.
+	unconfirmed := *mined
+	unconfirmed.Block = nil
+	unconfirmed.Confirmations = 0
+
+	// Carried over rather than compared: this is the exemption explained
+	// above, not an assertion that the two times agree.
+	unconfirmed.ReceivedTime = unmined.ReceivedTime
+
+	require.Equal(
+		h, unmined, &unconfirmed,
+		"confirmation altered the transaction beyond its block",
+	)
+}
