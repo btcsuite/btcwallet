@@ -191,3 +191,55 @@ func testLabelTxRejectUnknown(h *bwtest.HarnessTest) {
 		h, kept, detail.Label, "refused label displaced the stored one",
 	)
 }
+
+// testLabelTxRejectOversize verifies that the first label longer than the
+// wallet stores is refused by every backend, and that the refusal leaves the
+// transaction's existing label in place rather than truncating it to fit.
+//
+// The rejection is asserted only as an error. Every backend enforces the limit
+// itself, so the caller receives whichever of three unrelated values that
+// backend produces: kvdb reports wtxmgr.ErrLabelTooLong, SQLite a violated
+// CHECK constraint, and PostgreSQL an overlong value for its column type. There
+// is no wallet error identity to match on, and matching any one backend's text
+// would tie this case to a detail no contract promises. That missing identity
+// is a gap in LabelTx, not in this case.
+//
+// The identities LabelTx does publish are ruled out instead, so the case still
+// fails if the write is ever refused for a reason other than the label it was
+// given.
+func testLabelTxRejectOversize(h *bwtest.HarnessTest) {
+	const kept = "rent for march"
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, kept)
+	require.NoError(h, err, "failed to label the funding transaction")
+
+	// One character past the longest label testLabelTxBoundaries stores, so
+	// length is the only thing wrong with it.
+	oversize := strings.Repeat("x", wtxmgr.TxLabelLimit+1)
+
+	err = w.LabelTx(h.Context(), txHash, oversize)
+
+	require.Error(h, err, "label longer than the limit was accepted")
+	require.NotErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"label was refused for a transaction the wallet holds",
+	)
+	require.NotErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"label was refused by the lifecycle gate on a running wallet",
+	)
+
+	detail, err := w.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "failed to read the labeled transaction")
+	require.Equal(
+		h, kept, detail.Label,
+		"refused label replaced or truncated the stored one",
+	)
+}
