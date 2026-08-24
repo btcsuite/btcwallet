@@ -36,12 +36,12 @@ The `bitcoind` backend uses ZMQ for block/tx notifications.
 
 `bwtest` owns wallet creation, funding and lock policy so component tests do
 not each define their own. `(*HarnessTest).NewWallet` takes a `WalletFixture`
-describing what the case needs and returns the wallet with the outpoints funding
+describing what the case needs and returns the wallet with what funding
 produced:
 
 ```go
 func testFoo(t *bwtest.HarnessTest) {
-	w, outpoints := t.NewWallet(bwtest.WalletFixture{
+	w, funding := t.NewWallet(bwtest.WalletFixture{
 		AddrType: waddrmgr.WitnessPubKey,
 		Amounts:  []btcutil.Amount{oneBTC, twoBTC},
 		Unlocked: true,
@@ -65,6 +65,14 @@ Pass that wallet to `(*HarnessTest).ReloadWallet(w)` when a component test needs
 to reopen it. A successful reload consumes the old generation and returns a
 fresh, registered, started, but locked replacement pointer from the same
 persistent store. Use the returned pointer for a later reload.
+
+`WalletFunding` reports the coins in `WalletOutpoints`, in the order of the
+requested amounts, and whatever the funding transaction paid elsewhere in
+`ForeignOutpoints`. It also reports the funding transaction itself as `Tx`, with
+the block that confirmed it as `Block` and `BlockHeight`; all three are nil or
+zero when the fixture funded nothing. The wallet did not author that
+transaction, so a case describing how the wallet reports a received transaction
+cannot reconstruct it from the amounts it asked for.
 
 Two convenience wrappers remain for cases that need nothing else:
 
