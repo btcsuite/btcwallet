@@ -783,7 +783,7 @@ func TestAuthorTransactionChecksAmounts(t *testing.T) {
 		name:    "zero fee rate",
 		outputs: []wire.TxOut{{Value: 50_000, PkScript: script}},
 		feeRate: btcunit.NewSatPerKVByte(0),
-		wantErr: ErrMissingFeeRate,
+		wantErr: ErrInvalidFeeRate,
 	}}
 
 	for _, tc := range testCases {
@@ -830,10 +830,10 @@ func TestAuthorTransactionChecksAmounts(t *testing.T) {
 	}
 }
 
-// TestTranslateAuthorError verifies that every checked-arithmetic error the
-// txauthor module reports is given a wallet-facing identity, that the
-// originating error stays in the chain, and that anything else passes through
-// untouched.
+// TestTranslateAuthorError verifies that each txauthor condition the wallet
+// names is given a wallet-facing identity, that the originating error stays in
+// the chain, that translation leaves the message alone, and that everything
+// else passes through untouched.
 func TestTranslateAuthorError(t *testing.T) {
 	t.Parallel()
 
@@ -842,10 +842,6 @@ func TestTranslateAuthorError(t *testing.T) {
 		err  error
 		want error
 	}{{
-		name: "nil output",
-		err:  txauthor.ErrNilOutput,
-		want: ErrNilTxOutput,
-	}, {
 		name: "negative output value",
 		err:  txauthor.ErrOutputValueNegative,
 		want: txrules.ErrAmountNegative,
@@ -858,17 +854,9 @@ func TestTranslateAuthorError(t *testing.T) {
 		err:  txauthor.ErrOutputTotalExceedsMax,
 		want: ErrOutputTotalExceedsMax,
 	}, {
-		name: "amount overflow",
-		err:  txauthor.ErrAmountOverflow,
-		want: ErrAmountOverflow,
-	}, {
-		name: "amount underflow",
-		err:  txauthor.ErrAmountUnderflow,
-		want: ErrAmountOverflow,
-	}, {
 		name: "non-positive fee rate",
 		err:  txauthor.ErrFeeRateNotPositive,
-		want: ErrMissingFeeRate,
+		want: ErrInvalidFeeRate,
 	}, {
 		name: "fee product overflow",
 		err:  txauthor.ErrFeeOverflow,
@@ -889,8 +877,46 @@ func TestTranslateAuthorError(t *testing.T) {
 
 			got := translateAuthorError(wrapped)
 
+			// Both identities resolve: the wallet's, so callers need
+			// not import the nested module, and the originating one,
+			// for anyone who wants the finer distinction.
 			require.ErrorIs(t, got, tc.want)
 			require.ErrorIs(t, got, tc.err)
+
+			// Translation must not restate what the originating error
+			// already says. Several wallet sentinels carry text that
+			// duplicates their txauthor counterpart word for word, so
+			// composing the two would print the same clause twice.
+			require.Equal(t, wrapped.Error(), got.Error())
+		})
+	}
+
+	// Conditions the wallet deliberately does not name arrive unchanged.
+	// A nil output cannot occur through authorTransaction, which takes its
+	// outputs by value, and the checked add and subtract guards cannot fire
+	// behind CheckOutputs and the sufficiency checks.
+	unnamed := []struct {
+		name string
+		err  error
+	}{{
+		name: "nil output",
+		err:  txauthor.ErrNilOutput,
+	}, {
+		name: "amount overflow",
+		err:  txauthor.ErrAmountOverflow,
+	}, {
+		name: "amount underflow",
+		err:  txauthor.ErrAmountUnderflow,
+	}}
+
+	for _, tc := range unnamed {
+		t.Run(tc.name+" passes through", func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("authoring: %w", tc.err)
+
+			got := translateAuthorError(wrapped)
+			require.Equal(t, wrapped, got)
 		})
 	}
 

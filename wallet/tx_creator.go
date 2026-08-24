@@ -83,23 +83,31 @@ var (
 	// is negative.
 	errNegativeHeight = errors.New("negative height")
 
-	// ErrNilTxOutput is returned when an output set contains a nil output.
-	ErrNilTxOutput = errors.New("nil transaction output")
+	// The two errors below name the same conditions as their txauthor
+	// counterparts, deliberately including their names. They exist so a
+	// caller can match an authoring failure without importing the nested
+	// module; the originating txauthor error stays in the chain for anyone
+	// who wants the finer distinction.
 
 	// ErrOutputTotalExceedsMax is returned when a transaction's outputs are
 	// individually valid but sum to more than the maximum representable
-	// amount.
+	// amount. Unlike the per-output bounds, this one has no counterpart in
+	// validateTxIntent, so it is reported from the authoring boundary.
 	ErrOutputTotalExceedsMax = errors.New(
 		"total output amount exceeds maximum value",
 	)
 
-	// ErrAmountOverflow is returned when the arithmetic that establishes a
-	// transaction's target, sufficiency, or change cannot be represented.
-	ErrAmountOverflow = errors.New("transaction amount arithmetic overflows")
-
 	// ErrFeeOutOfRange is returned when the fee a transaction would pay is
-	// not a representable amount.
+	// not a representable amount. DefaultMaxFeeRate keeps this out of reach
+	// at its default value, but that bound is a mutable package variable
+	// intended to become configurable: raised far enough, an ordinary
+	// multi-input transaction can price a fee above MaxSatoshi.
 	ErrFeeOutOfRange = errors.New("transaction fee out of range")
+
+	// ErrInvalidFeeRate is returned when a fee rate reaches transaction
+	// authoring at or below zero. This is distinct from ErrMissingFeeRate,
+	// which reports an intent that never carried a usable rate at all.
+	ErrInvalidFeeRate = errors.New("invalid fee rate")
 )
 
 var (
@@ -708,44 +716,73 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 	return tx, nil
 }
 
+// authorError gives an authoring failure a wallet-facing identity without
+// restating it. Its message is the originating error's alone, while errors.Is
+// resolves both the wallet sentinel, through Is, and everything the originating
+// error already matched, through Unwrap. Wrapping with a second %w verb would
+// match both too, but would render the wallet sentinel's text and the txauthor
+// error's text one after the other, and for most of these classes those say the
+// same thing twice.
+//
+// This mirrors AmbiguousTxCommitError in wallet/internal/db/runtime.
+type authorError struct {
+	// sentinel is the wallet-facing identity this failure reports as.
+	sentinel error
+
+	// cause is the originating txauthor error, which supplies the message.
+	cause error
+}
+
+// Error returns the originating error's message.
+func (e *authorError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the originating txauthor error.
+func (e *authorError) Unwrap() error {
+	return e.cause
+}
+
+// Is reports whether target is the wallet sentinel this failure carries.
+func (e *authorError) Is(target error) bool {
+	return errors.Is(e.sentinel, target)
+}
+
 // translateAuthorError maps the checked-arithmetic errors the txauthor module
 // reports onto the wallet's own error vocabulary, so callers of the public
 // wrappers match on one set of sentinels. It is the single translation point
 // for both CreateTransaction and FundPsbt.
 //
-// Classes the wallet already names keep their existing identity: an output
-// value violation reports the txrules error the intent-level check would have
-// reported, and a non-positive fee rate reports ErrMissingFeeRate. Only the
-// classes the wallet had no name for get a new one. The originating txauthor
-// error is retained in the chain so a caller can still match on it, and any
-// error this function does not recognise, including an InputSourceError, is
-// returned untouched.
+// Output value violations report the same txrules errors validateTxIntent
+// reports, which costs no new API and keeps one identity per condition across
+// both layers. The two conditions validateTxIntent has no counterpart for get a
+// wallet sentinel of their own.
+//
+// Everything else is returned untouched: an InputSourceError, so "cannot fund
+// this" stays distinguishable from "will not author this", and the checked
+// arithmetic classes no caller can observe. A nil output cannot occur, because
+// authorTransaction takes its outputs by value; the add and subtract guards
+// cannot fire, because CheckOutputs bounds the target and the sufficiency
+// checks bound the rest. Naming those in the wallet would be exported API with
+// nothing behind it.
 func translateAuthorError(err error) error {
 	switch {
-	case errors.Is(err, txauthor.ErrNilOutput):
-		return fmt.Errorf("%w: %w", ErrNilTxOutput, err)
-
 	case errors.Is(err, txauthor.ErrOutputValueNegative):
-		return fmt.Errorf("%w: %w", txrules.ErrAmountNegative, err)
+		return &authorError{txrules.ErrAmountNegative, err}
 
 	case errors.Is(err, txauthor.ErrOutputValueExceedsMax):
-		return fmt.Errorf("%w: %w", txrules.ErrAmountExceedsMax, err)
+		return &authorError{txrules.ErrAmountExceedsMax, err}
 
 	case errors.Is(err, txauthor.ErrOutputTotalExceedsMax):
-		return fmt.Errorf("%w: %w", ErrOutputTotalExceedsMax, err)
-
-	case errors.Is(err, txauthor.ErrAmountOverflow),
-		errors.Is(err, txauthor.ErrAmountUnderflow):
-
-		return fmt.Errorf("%w: %w", ErrAmountOverflow, err)
+		return &authorError{ErrOutputTotalExceedsMax, err}
 
 	case errors.Is(err, txauthor.ErrFeeRateNotPositive):
-		return fmt.Errorf("%w: %w", ErrMissingFeeRate, err)
+		return &authorError{ErrInvalidFeeRate, err}
 
 	case errors.Is(err, txauthor.ErrFeeOverflow),
 		errors.Is(err, txauthor.ErrFeeOutOfRange):
 
-		return fmt.Errorf("%w: %w", ErrFeeOutOfRange, err)
+		return &authorError{ErrFeeOutOfRange, err}
 
 	default:
 		return err
