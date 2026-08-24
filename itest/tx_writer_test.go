@@ -3,10 +3,13 @@
 package itest
 
 import (
+	"strings"
+
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,4 +91,56 @@ func testLabelTxReplace(h *bwtest.HarnessTest) {
 	require.Equal(
 		h, replacement, detail.Label, "transaction kept its first label",
 	)
+}
+
+// testLabelTxBoundaries verifies the ends of the label length range every
+// backend accepts: one character, and the longest label the wallet stores.
+//
+// The upper limit is wtxmgr.TxLabelLimit, which is the only exported name for
+// it; the SQL schemas restate the same number as a column constraint. Labels
+// are built from ASCII deliberately, because kvdb counts the limit in bytes
+// while the SQL schemas count it in characters, and only ASCII makes the one
+// number mean the same thing on all three backends.
+//
+// The values just outside this range are not rows here. One character above it
+// is refused by every backend, but with a backend-specific error rather than a
+// wallet error identity, so it is asserted separately in
+// testLabelTxRejectOversize. The empty label below it has no single behavior to
+// assert at all: the SQL backends accept it and clear the label, while kvdb
+// refuses it.
+func testLabelTxBoundaries(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	labels := []struct {
+		name  string
+		label string
+	}{
+		{
+			name:  "shortest label",
+			label: strings.Repeat("x", 1),
+		},
+		{
+			name:  "longest label",
+			label: strings.Repeat("x", wtxmgr.TxLabelLimit),
+		},
+	}
+
+	for _, tc := range labels {
+		err := w.LabelTx(h.Context(), txHash, tc.label)
+		require.NoError(h, err, "%s was refused", tc.name)
+
+		detail, err := w.GetTx(h.Context(), txHash)
+		require.NoError(
+			h, err, "failed to read transaction after %s", tc.name,
+		)
+		require.Equal(
+			h, tc.label, detail.Label, "%s came back altered",
+			tc.name,
+		)
+	}
 }
