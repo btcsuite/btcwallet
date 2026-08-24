@@ -249,4 +249,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader reader agreement",
 		TestFunc: testListTxnsAgreesWithGetTx,
 	},
+	{
+		Name:     "txreader durable reopen",
+		TestFunc: testTxReaderDurableReopen,
+	},
 }
