@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -246,4 +247,100 @@ func testGetTxReceived(h *bwtest.HarnessTest) {
 		)
 		require.False(h, prevOut.IsOurs, "input %d claimed by the wallet", i)
 	}
+}
+
+// testGetTxUnmined verifies every field the reader reports for a transaction
+// the wallet published and the network has not yet confirmed: it has no block,
+// no confirmations, and a fee the wallet can state because it owns every input.
+func testGetTxUnmined(h *bwtest.HarnessTest) {
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txReaderFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+		Unlocked: true,
+	})
+
+	spent := funding.WalletOutpoints[0]
+
+	// Paying the wallet itself keeps both sides of the transaction in its
+	// records, which is what lets it state the fee below.
+	addr := h.NewWalletAddressOfType(w, txReaderFundingType)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(h, err, "failed to create payment pkscript")
+
+	tx := h.SignSpend(w, bwtest.SpendFixture{
+		Inputs: []wire.OutPoint{spent},
+		Outputs: []wire.TxOut{{
+			Value:    oneBTC - spendFee,
+			PkScript: pkScript,
+		}},
+	})
+
+	txid := tx.TxHash()
+
+	var rawTx bytes.Buffer
+	require.NoError(h, tx.Serialize(&rawTx), "failed to serialize spend")
+
+	err = w.Broadcast(h.Context(), tx, "")
+	require.NoError(h, err, "failed to broadcast transaction")
+
+	detail, err := w.GetTx(h.Context(), txid)
+	require.NoError(h, err, "failed to get the published transaction")
+
+	require.Equal(h, txid, detail.Hash, "unexpected hash")
+	require.Equal(h, rawTx.Bytes(), detail.RawTx, "unexpected raw transaction")
+	require.Equal(h, txReaderStatus, detail.Status, "unexpected status")
+	require.Empty(h, detail.Label, "unexpected label")
+	require.False(h, detail.ReceivedTime.IsZero(), "no received time")
+
+	// Nothing confirms it yet.
+	require.Nil(h, detail.Block, "unmined transaction reports a block")
+	require.Zero(
+		h, detail.Confirmations, "unmined transaction reports confirmations",
+	)
+
+	// The wallet paid itself, so the only value it gave up is the fee, and
+	// every input being its own is what lets it name that fee at all.
+	require.Equal(
+		h, btcutil.Amount(-spendFee), detail.Value, "unexpected value",
+	)
+	require.Equal(h, btcutil.Amount(spendFee), detail.Fee, "unexpected fee")
+
+	weight := btcunit.NewWeightUnit(uint64(
+		blockchain.GetTransactionWeight(btcutil.NewTx(tx)),
+	))
+	require.Equal(h, weight, detail.Weight, "unexpected weight")
+
+	feeRate := btcunit.CalcSatPerVByte(btcutil.Amount(spendFee), weight.ToVB())
+	require.True(
+		h, feeRate.Equal(detail.FeeRate),
+		"unexpected fee rate %v", detail.FeeRate,
+	)
+
+	// Its single output pays the wallet.
+	require.Len(h, detail.Outputs, 1, "unexpected output count")
+
+	output := detail.Outputs[0]
+	require.Equal(h, 0, output.Index, "unexpected output index")
+	require.Equal(h, pkScript, output.PkScript, "unexpected output script")
+	require.Equal(
+		h, btcutil.Amount(oneBTC-spendFee), output.Amount,
+		"unexpected output amount",
+	)
+	require.Equal(h, txReaderScriptClass, output.Type, "unexpected output type")
+	require.Len(h, output.Addresses, 1, "unexpected output address count")
+	require.Equal(
+		h, addr.EncodeAddress(), output.Addresses[0].EncodeAddress(),
+		"unexpected output address",
+	)
+	require.True(h, output.IsOurs, "wallet disowns its own output")
+
+	// And its single input spends the coin the wallet was funded with.
+	require.Len(h, detail.PrevOuts, 1, "unexpected input count")
+	require.Equal(h, spent, detail.PrevOuts[0].OutPoint, "unexpected input")
+	require.True(h, detail.PrevOuts[0].IsOurs, "wallet disowns its own input")
+
+	// The harness requires an empty mempool once a case succeeds, so
+	// confirm the transaction now that the unmined view has been read.
+	h.MineBlockWithTx(tx)
 }
