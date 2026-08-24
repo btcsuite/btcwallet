@@ -690,3 +690,61 @@ func testListTxnsAgreesWithGetTx(h *bwtest.HarnessTest) {
 	// The harness requires an empty mempool once a case succeeds.
 	h.MineBlockWithTx(hist.unminedTx)
 }
+
+// testTxReaderDurableReopen verifies that the transaction view a wallet
+// reports survives closing it and opening the same durable wallet again, which
+// is the lifecycle a stored history has to cross to be worth storing.
+func testTxReaderDurableReopen(h *bwtest.HarnessTest) {
+	// The history includes a transaction still in the mempool because that
+	// is the state a reopen could most easily lose: it is held by the
+	// wallet alone, with no block to recover it from.
+	hist := newTxReaderHistory(h)
+
+	w := hist.wallet
+
+	// Compare whole results rather than chosen fields, so nothing the
+	// reopen lost can hide in a field the comparison skipped.
+	before, err := w.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions")
+
+	// Everything below compares the history against itself, which an empty
+	// history satisfies without proving anything survived. Require the
+	// fixture's transactions to be there before making that comparison the
+	// subject.
+	require.Len(
+		h, before, len(hist.txids()), "unexpected transaction count",
+	)
+
+	points := make([]*wallet.TxDetail, 0, len(before))
+	for _, detail := range before {
+		point, err := w.GetTx(h.Context(), detail.Hash)
+		require.NoError(h, err, "failed to get %v", detail.Hash)
+
+		points = append(points, point)
+	}
+
+	w = h.ReloadWallet(w)
+
+	// No readiness check follows the reopen on purpose. Nothing is mined
+	// across it and the synced tip is durable, so a wallet that has
+	// finished starting already reports the same tip and the same
+	// confirmations. Waiting here would hide it if that were ever untrue.
+	after, err := w.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions after reopen")
+	require.Equal(
+		h, before, after, "the reopened wallet lists a different history",
+	)
+
+	for _, point := range points {
+		reopened, err := w.GetTx(h.Context(), point.Hash)
+		require.NoError(h, err, "failed to get %v after reopen", point.Hash)
+
+		require.Equal(
+			h, point, reopened,
+			"the reopened wallet describes %v differently", point.Hash,
+		)
+	}
+
+	// The harness requires an empty mempool once a case succeeds.
+	h.MineBlockWithTx(hist.unminedTx)
+}
