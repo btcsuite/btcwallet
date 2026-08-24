@@ -233,4 +233,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader unmined transaction",
 		TestFunc: testGetTxUnmined,
 	},
+	{
+		Name:     "txreader mined transaction",
+		TestFunc: testGetTxMined,
+	},
 }
