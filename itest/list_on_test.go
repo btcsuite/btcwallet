@@ -261,4 +261,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter replace label",
 		TestFunc: testLabelTxReplace,
 	},
+	{
+		Name:     "txwriter label boundaries",
+		TestFunc: testLabelTxBoundaries,
+	},
 }
