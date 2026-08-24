@@ -217,4 +217,8 @@ var allTestCases = []*testCase{
 		Name:     "txpublisher broadcast state",
 		TestFunc: testBroadcastWalletState,
 	},
+	{
+		Name:     "txreader empty history",
+		TestFunc: testListTxnsEmptyHistory,
+	},
 }
