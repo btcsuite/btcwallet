@@ -305,8 +305,27 @@ func (h *HarnessTest) NewWalletAddressOfType(w *wallet.Wallet,
 	return addr
 }
 
-// WalletFunding describes the outputs a funding transaction created.
+// WalletFunding describes the funding transaction and the outputs it created.
+//
+// A fixture that funded nothing returns the zero value, whose Tx and Block are
+// nil. Only a caller that asked for amounts may dereference them.
 type WalletFunding struct {
+	// Tx is the funding transaction itself. It is reported because the
+	// wallet did not author it: its inputs are the miner's, so a case
+	// asserting how the wallet reports a received transaction cannot
+	// reconstruct it from what it asked for.
+	//
+	// Nil when the fixture funded nothing.
+	Tx *wire.MsgTx
+
+	// Block is the block that confirmed Tx, and BlockHeight is that
+	// block's height. Together they are the chain facts a case needs to
+	// state where the funding transaction landed.
+	//
+	// Block is nil, and BlockHeight zero, when the fixture funded nothing.
+	Block       *wire.MsgBlock
+	BlockHeight int32
+
 	// WalletOutpoints are the outputs the funded wallet owns, in the order
 	// of the amounts that were requested.
 	WalletOutpoints []wire.OutPoint
@@ -358,13 +377,19 @@ func (h *HarnessTest) FundWalletOfType(w *wallet.Wallet,
 	// Confirm the funding transaction and wait for every registered wallet
 	// to sync the mined block.
 	tx := h.AssertTxInMempool(*txid)
-	h.MineBlockWithTx(tx)
+	block := h.MineBlockWithTx(tx)
+
+	// The block just mined is the tip, so its height is the chain's.
+	_, blockHeight := h.GetBestBlock()
 
 	// Locate each wallet output's index within the funding transaction so
 	// callers receive ready-to-use outpoints in the order of the amounts
 	// argument.
 	owned := make(map[uint32]struct{}, len(outputs))
 	funding := WalletFunding{
+		Tx:              tx,
+		Block:           block,
+		BlockHeight:     blockHeight,
 		WalletOutpoints: make([]wire.OutPoint, 0, len(outputs)),
 	}
 
