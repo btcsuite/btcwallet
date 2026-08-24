@@ -245,4 +245,8 @@ var allTestCases = []*testCase{
 		Name:     "txreader list boundaries",
 		TestFunc: testListTxnsBoundaries,
 	},
+	{
+		Name:     "txreader reader agreement",
+		TestFunc: testListTxnsAgreesWithGetTx,
+	},
 }
