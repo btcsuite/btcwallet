@@ -277,4 +277,8 @@ var allTestCases = []*testCase{
 		Name:     "txwriter label survives reload",
 		TestFunc: testLabelTxSurvivesReload,
 	},
+	{
+		Name:     "txwriter wallet state",
+		TestFunc: testLabelTxWalletState,
+	},
 }
