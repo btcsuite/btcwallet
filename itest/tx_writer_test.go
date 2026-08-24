@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
@@ -143,4 +144,50 @@ func testLabelTxBoundaries(h *bwtest.HarnessTest) {
 			tc.name,
 		)
 	}
+}
+
+// testLabelTxRejectUnknown verifies that labeling a transaction the wallet does
+// not hold is refused with the same identity a read of it reports, and that the
+// refusal leaves no trace: no transaction is invented for the label to hang on,
+// and the label already stored elsewhere is untouched.
+func testLabelTxRejectUnknown(h *bwtest.HarnessTest) {
+	const (
+		kept     = "rent for march"
+		rejected = "for a transaction the wallet has never seen"
+	)
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, kept)
+	require.NoError(h, err, "failed to label the funding transaction")
+
+	// The outpoint no wallet knows names a transaction no wallet knows.
+	unknown := unknownOutpoint().Hash
+
+	err = w.LabelTx(h.Context(), unknown, rejected)
+
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"labeling an unknown transaction was accepted",
+	)
+
+	// A label cannot bring its transaction into existence, so the wallet
+	// still does not hold the one it just refused to label.
+	_, err = w.GetTx(h.Context(), unknown)
+	require.ErrorIs(
+		h, err, wallet.ErrTxNotFound,
+		"refused label created a transaction",
+	)
+
+	// Nor may the refusal reach the transaction the wallet does hold.
+	detail, err := w.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "failed to read the labeled transaction")
+	require.Equal(
+		h, kept, detail.Label, "refused label displaced the stored one",
+	)
 }
