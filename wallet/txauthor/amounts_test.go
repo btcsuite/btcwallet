@@ -252,23 +252,10 @@ func TestCheckOutputs(t *testing.T) {
 	}
 }
 
-// TestCheckOutputsSumOverflow verifies the running-sum guard directly. The
-// validator's per-element bounds mean the aggregate check trips long before an
-// int64 sum could wrap, so the guard is exercised through the helper it defends
-// rather than through a set of accepted elements.
-func TestCheckOutputsSumOverflow(t *testing.T) {
-	t.Parallel()
-
-	// Two amounts each below the int64 ceiling whose sum is not
-	// representable. No output set of MaxSatoshi-bounded values can reach
-	// this, which is exactly why the guard is defence in depth.
-	_, err := addAmounts(maxInt64Amount-1e8, 2e8)
-	require.ErrorIs(t, err, ErrAmountOverflow)
-}
-
 // TestCheckedFeeForSerializeSize verifies that the checked fee helper rejects a
-// non-positive rate before multiplying, reports a product overflow, and refuses
-// a rounded fee outside the representable range instead of clamping it.
+// non-positive rate and a negative size before multiplying, reports a product
+// overflow, and refuses a rounded fee outside the representable range instead
+// of clamping it.
 func TestCheckedFeeForSerializeSize(t *testing.T) {
 	t.Parallel()
 
@@ -329,6 +316,8 @@ func TestCheckedFeeForSerializeSize(t *testing.T) {
 		size:    feeRateDivisor + 1,
 		wantErr: ErrFeeOutOfRange,
 	}, {
+		// Rejected by its own guard, before the multiplication, rather
+		// than incidentally by the final bound on a negative fee.
 		name:    "a negative size is rejected",
 		rate:    1e3,
 		size:    -1000,

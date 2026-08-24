@@ -240,33 +240,46 @@ func p2wpkhScript() []byte {
 	return script
 }
 
-// countingSources returns an input source and a change source that record how
-// often they were invoked, so a test can prove a request was rejected before
-// either callback ran. The input source funds exactly what it is asked for.
-func countingSources(t *testing.T) (InputSource, *ChangeSource, *int, *int) {
+// countedSources bundles an input source and a change source with the tally of
+// how often each was invoked, so a test can prove a request was rejected before
+// either callback ran.
+type countedSources struct {
+	// input funds exactly what it is asked for.
+	input InputSource
+
+	// change hands out a fixed P2WPKH-sized script.
+	change *ChangeSource
+
+	// inputCalls and changeCalls count invocations of the two callbacks.
+	inputCalls  int
+	changeCalls int
+}
+
+// newCountedSources builds a counted input and change source pair.
+func newCountedSources(t *testing.T) *countedSources {
 	t.Helper()
 
-	var inputCalls, changeCalls int
+	s := &countedSources{}
 
-	inputSource := func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+	s.input = func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
 		[]btcutil.Amount, [][]byte, error) {
 
-		inputCalls++
+		s.inputCalls++
 
 		return target, []*wire.TxIn{{}}, []btcutil.Amount{target},
 			[][]byte{p2wpkhScript()}, nil
 	}
 
-	changeSource := &ChangeSource{
+	s.change = &ChangeSource{
 		NewScript: func() ([]byte, error) {
-			changeCalls++
+			s.changeCalls++
 
 			return make([]byte, txsizes.P2WPKHPkScriptSize), nil
 		},
 		ScriptSize: txsizes.P2WPKHPkScriptSize,
 	}
 
-	return inputSource, changeSource, &inputCalls, &changeCalls
+	return s
 }
 
 // TestNewUnsignedTransactionChecksAmounts verifies that a malformed output set
@@ -331,18 +344,17 @@ func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			inputSource, changeSource, inputCalls, changeCalls :=
-				countingSources(t)
+			sources := newCountedSources(t)
 
 			tx, err := NewUnsignedTransaction(
-				tc.outputs, tc.relayFee, inputSource,
-				changeSource,
+				tc.outputs, tc.relayFee, sources.input,
+				sources.change,
 			)
 
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Nil(t, tx)
-			require.Zero(t, *inputCalls)
-			require.Zero(t, *changeCalls)
+			require.Zero(t, sources.inputCalls)
+			require.Zero(t, sources.changeCalls)
 		})
 	}
 }
@@ -354,13 +366,19 @@ func TestNewUnsignedTransactionChecksAmounts(t *testing.T) {
 func TestNewUnsignedTransactionNilOutputs(t *testing.T) {
 	t.Parallel()
 
-	inputSource, changeSource, inputCalls, changeCalls := countingSources(t)
+	sources := newCountedSources(t)
 
-	tx, err := NewUnsignedTransaction(nil, 1e3, inputSource, changeSource)
+	tx, err := NewUnsignedTransaction(nil, 1e3, sources.input, sources.change)
 	require.NoError(t, err)
 	require.NotNil(t, tx)
-	require.Equal(t, 1, *inputCalls)
-	require.Equal(t, 1, *changeCalls)
+	require.Equal(t, 1, sources.inputCalls)
+
+	// The change script is allocated even though the result carries no
+	// change output. That is the allocation timing Task 356 owns, not
+	// something this test asserts as desirable: when 356 lands and the
+	// script is only requested once a change output is known to survive,
+	// this expectation becomes zero.
+	require.Equal(t, 1, sources.changeCalls)
 
 	// The input source funds exactly the requested target, which is the fee
 	// alone, so there is nothing left over to pay out as change.

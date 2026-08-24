@@ -121,6 +121,13 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		return nil, err
 	}
 
+	// The three checked add and subtract calls below cannot currently fail.
+	// CheckOutputs bounds the target and CheckedFeeForSerializeSize bounds
+	// the fee, so their sum stays far inside an int64; each subtraction is
+	// guarded by the comparison immediately above it. They are checked
+	// anyway, so that a later change to either bound cannot reintroduce a
+	// silent wrap, but a reader should not go looking for the input that
+	// trips them.
 	for {
 		// Form the target the inputs must cover once, and hold on to it
 		// so the sufficiency comparison below tests the very same value
@@ -207,10 +214,10 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 
 // countInputTypes classifies the previous output scripts an input set redeems.
 // The counts drive the virtual size estimate, since each script type costs a
-// different amount of witness and signature data to spend.
-func countInputTypes(scripts [][]byte) (int, int, int, int) {
-	var nested, p2wpkh, p2tr, p2pkh int
-
+// different amount of witness and signature data to spend. The results are
+// named because they are four values of the same type: transposing any two at
+// the call site would compile and surface only as a slightly wrong fee.
+func countInputTypes(scripts [][]byte) (p2pkh, p2tr, p2wpkh, nested int) {
 	for _, pkScript := range scripts {
 		switch {
 		// If this is a p2sh output, we assume this is a nested P2WKH.

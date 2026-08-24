@@ -142,12 +142,18 @@ func CheckOutputs(outputs []*wire.TxOut) (btcutil.Amount, error) {
 // virtual size at the given rate, reporting an error instead of returning a
 // value that cannot be represented.
 //
-// The rate operand is rejected at or below zero before it is multiplied,
-// because no meaningful fee can follow from such a rate. The rate-by-size
-// product is checked for overflow, and the rounded fee must land within
+// Both operands are rejected before they are multiplied: a rate at or below
+// zero, because no meaningful fee can follow from it, and a negative size,
+// because it can only come from a caller error. The rate-by-size product is
+// then checked for overflow, and the rounded fee must land within
 // 0..MaxSatoshi. A fee that rounds down to zero is charged the rate itself,
 // matching the one-kilo-virtual-byte floor mempools apply; the rate is positive
 // by then, so the floor is too.
+//
+// Sizes themselves belong to the size estimator, not here. Rejecting a negative
+// one is not an opinion about how sizes are computed: it keeps a wrapped
+// product from landing back inside the representable range and yielding a
+// plausible but wrong fee, which the final bound alone could not rule out.
 func CheckedFeeForSerializeSize(feeRatePerKb btcutil.Amount,
 	txSerializeSize int) (btcutil.Amount, error) {
 
@@ -156,11 +162,17 @@ func CheckedFeeForSerializeSize(feeRatePerKb btcutil.Amount,
 			feeRatePerKb)
 	}
 
+	if txSerializeSize < 0 {
+		return 0, fmt.Errorf("%w: negative size %d", ErrFeeOutOfRange,
+			txSerializeSize)
+	}
+
 	size := btcutil.Amount(txSerializeSize)
 	product := feeRatePerKb * size
 
-	// The rate is positive, so a size of zero is the only operand that makes
-	// the division round-trip undefined; it trivially cannot overflow.
+	// Both operands are now non-negative, so a size of zero is the only one
+	// that makes the division round-trip undefined; it trivially cannot
+	// overflow.
 	if size != 0 && product/size != feeRatePerKb {
 		return 0, fmt.Errorf("%w: %d * %d", ErrFeeOverflow,
 			feeRatePerKb, size)
@@ -171,9 +183,7 @@ func CheckedFeeForSerializeSize(feeRatePerKb btcutil.Amount,
 		fee = feeRatePerKb
 	}
 
-	// A negative size produces a negative fee, which this bound rejects
-	// alongside a fee that is simply too large to represent.
-	if fee < 0 || fee > btcutil.MaxSatoshi {
+	if fee > btcutil.MaxSatoshi {
 		return 0, fmt.Errorf("%w: %d", ErrFeeOutOfRange, fee)
 	}
 
