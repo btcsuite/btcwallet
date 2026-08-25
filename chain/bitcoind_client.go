@@ -1280,7 +1280,7 @@ func (c *BitcoindClient) filterTx(txDetails *btcutil.Tx,
 		pkScript, err := txscript.ComputePkScript(sig, witness)
 		if err != nil {
 			// Non-standard outputs can be safely skipped.
-			log.Warnf("Received non-standard input sig=%x, "+
+			log.Debugf("Received non-standard input sig=%x, "+
 				"witness=%x", sig, witness)
 
 			continue
