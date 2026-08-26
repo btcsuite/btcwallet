@@ -132,6 +132,10 @@ var allTestCases = []*testCase{
 		TestFunc: testControllerChangePassphraseRejectUnlocked,
 	},
 	{
+		Name:     "controller unlock timeout",
+		TestFunc: testControllerUnlockTimeout,
+	},
+	{
 		Name:     "controller info",
 		TestFunc: testControllerInfo,
 	},
