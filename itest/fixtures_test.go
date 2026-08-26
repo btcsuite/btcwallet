@@ -31,6 +31,10 @@ const (
 	// enough that the lease never expires mid-test.
 	leaseDuration = 10 * time.Minute
 
+	// pollTimeout bounds waits for asynchronous wallet state changes, such
+	// as unconfirmed transaction notifications and timer-driven locks.
+	pollTimeout = 30 * time.Second
+
 	// The funding and payment amounts shared by the component test cases.
 	halfBTC  = btcutil.SatoshiPerBitcoin / 2
 	oneBTC   = 1 * btcutil.SatoshiPerBitcoin
