@@ -17,12 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	// pollTimeout bounds waits for asynchronous wallet state changes, such
-	// as unconfirmed transaction notifications and lease expiry.
-	pollTimeout = 30 * time.Second
-)
-
 // testListUnspent verifies ListUnspent field enrichment, amount ordering,
 // account and confirmation filters, and the pre-start state gate.
 func testListUnspent(h *bwtest.HarnessTest) {
