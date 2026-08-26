@@ -3,7 +3,11 @@
 package itest
 
 import (
+	"errors"
+	"time"
+
 	"github.com/btcsuite/btcwallet/bwtest"
+	"github.com/btcsuite/btcwallet/bwtest/wait"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
@@ -258,4 +262,37 @@ func testControllerChangePassphraseRejectUnlocked(h *bwtest.HarnessTest) {
 		h, err, "old passphrase should survive unlocked rejection",
 	)
 	requireLocked(h, w, false)
+}
+
+// testControllerUnlockTimeout verifies that a positive Unlock timeout returns
+// the Wallet to its public locked state.
+func testControllerUnlockTimeout(h *bwtest.HarnessTest) {
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	requireLocked(h, w, true)
+
+	// Use a positive timeout long enough that the immediate unlocked
+	// assertion observes the post-Unlock state before the timer can fire.
+	err := w.Unlock(h.Context(), wallet.UnlockRequest{
+		Passphrase: []byte(bwtest.TestWalletPrivatePassphrase),
+		Timeout:    5 * time.Second,
+	})
+	require.NoError(h, err, "failed to unlock wallet")
+	requireLocked(h, w, false)
+
+	err = wait.NoError(
+		func() error {
+			info, err := w.Info(h.Context())
+			if err != nil {
+				return err
+			}
+
+			if !info.Locked {
+				return errors.New("wallet still unlocked")
+			}
+
+			return nil
+		},
+		pollTimeout,
+	)
+	require.NoError(h, err, "wallet did not lock after unlock timeout")
 }
