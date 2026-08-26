@@ -6,10 +6,13 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -287,4 +290,284 @@ func TestStoreUpdateWalletSecretsBypassesRead(t *testing.T) {
 			walletRow.AssertExpectations(t)
 		})
 	}
+}
+
+// TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit verifies the public Store
+// method performs one durable read after the runtime classifies one lost commit
+// acknowledgement, without retrying the mutation.
+func TestStoreUpdateWalletSecretsVerifiesAmbiguousCommit(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Drive an exact wallet update through database/sql, make the real
+	// transaction Commit return EOF, and expose the matching tuple only through
+	// the Store's generated read query. Strict expectations establish the sole
+	// write and sole verification-read budget at the authoritative boundary.
+	params := testWalletSecretsUpdate()
+	store, sqlMock := newMockWalletSecretsStore(t)
+	walletRow := testWalletRow(t, params.WalletID)
+	secretsRow := testWalletSecretsRow(t, params)
+
+	sqlMock.On("Open", "").Return(sqlMock, nil).Once()
+	sqlMock.On(
+		"BeginTx", mock.Anything, driver.TxOptions{},
+	).Return(sqlMock, nil).Once()
+	sqlMock.On(
+		"QueryContext", mock.Anything, sqlc.GetWalletByID,
+		[]driver.NamedValue{{
+			Ordinal: 1, Value: int64(params.WalletID),
+		}},
+	).Return(walletRow, nil).Once()
+	sqlMock.On(
+		"ExecContext", mock.Anything, sqlc.UpdateWalletSecrets,
+		[]driver.NamedValue{
+			{Ordinal: 1, Value: params.MasterPrivParams},
+			{Ordinal: 2, Value: params.EncryptedCryptoPrivKey},
+			{Ordinal: 3, Value: params.EncryptedCryptoScriptKey},
+			{Ordinal: 4, Value: params.EncryptedMasterHdPrivKey},
+			{Ordinal: 5, Value: int64(params.WalletID)},
+		},
+	).Return(driver.RowsAffected(1), nil).Once()
+	sqlMock.On("Commit").Return(io.EOF).Once()
+	sqlMock.On(
+		"QueryContext", mock.Anything, sqlc.GetWalletSecrets,
+		[]driver.NamedValue{{
+			Ordinal: 1, Value: int64(params.WalletID),
+		}},
+	).Return(secretsRow, nil).Once()
+	sqlMock.On("Close").Return(nil).Once()
+
+	// Act: Invoke the public Store method so the shared runtime discovers the
+	// ambiguous commit and the Store resolves it with its real read path.
+	err := store.UpdateWalletSecrets(t.Context(), params)
+
+	// Assert: The exact durable tuple converts the lost acknowledgement to the
+	// binary success result. Closing the Store completes its expected
+	// lifecycle; direct SQL and row expectation checks prove one transaction,
+	// no mutation retry, and one verification read through production wiring.
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), store.StatsSnapshot().AmbiguousTxCommits)
+	require.NoError(t, store.Close())
+	sqlMock.AssertExpectations(t)
+	walletRow.AssertExpectations(t)
+	secretsRow.AssertExpectations(t)
+}
+
+// mockWalletSecretsReader controls verifier-only reads while using mock.Mock
+// to retain strict expectations for focused policy tests.
+type mockWalletSecretsReader struct {
+	mock.Mock
+}
+
+// GetWalletSecrets returns one configured durable row so verifier tests can
+// cover matching, unavailable, and bounded-read outcomes independently.
+func (m *mockWalletSecretsReader) GetWalletSecrets(ctx context.Context,
+	walletID uint32) (*db.WalletSecrets, error) {
+
+	args := m.Called(ctx, walletID)
+	secrets, _ := args.Get(0).(*db.WalletSecrets)
+
+	return secrets, args.Error(1)
+}
+
+// TestVerifyWalletSecretsCommitClassifiesRead verifies exact success and every
+// single-field mismatch without leaking the runtime ambiguity marker.
+func TestVerifyWalletSecretsCommitClassifiesRead(t *testing.T) {
+	t.Parallel()
+
+	params := testWalletSecretsUpdate()
+	errTransport := errors.New("commit connection lost")
+	tests := []struct {
+		name      string
+		persisted db.WalletSecrets
+		wantNil   bool
+	}{
+		{
+			name: "exact tuple",
+			persisted: db.WalletSecrets{
+				MasterPrivParams:         []byte{1, 2},
+				EncryptedCryptoPrivKey:   []byte{3, 4},
+				EncryptedCryptoScriptKey: []byte{5, 6},
+				EncryptedMasterHdPrivKey: []byte{7, 8},
+			},
+			wantNil: true,
+		},
+		{
+			name: "master parameters differ",
+			persisted: db.WalletSecrets{
+				MasterPrivParams:         []byte{9, 2},
+				EncryptedCryptoPrivKey:   []byte{3, 4},
+				EncryptedCryptoScriptKey: []byte{5, 6},
+				EncryptedMasterHdPrivKey: []byte{7, 8},
+			},
+		},
+		{
+			name: "private crypto key differs",
+			persisted: db.WalletSecrets{
+				MasterPrivParams:         []byte{1, 2},
+				EncryptedCryptoPrivKey:   []byte{9, 4},
+				EncryptedCryptoScriptKey: []byte{5, 6},
+				EncryptedMasterHdPrivKey: []byte{7, 8},
+			},
+		},
+		{
+			name: "script crypto key differs",
+			persisted: db.WalletSecrets{
+				MasterPrivParams:         []byte{1, 2},
+				EncryptedCryptoPrivKey:   []byte{3, 4},
+				EncryptedCryptoScriptKey: []byte{9, 6},
+				EncryptedMasterHdPrivKey: []byte{7, 8},
+			},
+		},
+		{
+			name: "master HD private key differs",
+			persisted: db.WalletSecrets{
+				MasterPrivParams:         []byte{1, 2},
+				EncryptedCryptoPrivKey:   []byte{3, 4},
+				EncryptedCryptoScriptKey: []byte{5, 6},
+				EncryptedMasterHdPrivKey: []byte{9, 8},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Return the case's complete data-only tuple for one
+			// ambiguous result. Canceling the caller proves the follow-up
+			// read receives an independent live context with a deadline.
+			persisted := test.persisted
+			callerCtx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			ambiguousErr := &dbruntime.AmbiguousTxCommitError{
+				Err: errTransport,
+			}
+			reader := &mockWalletSecretsReader{}
+			reader.On(
+				"GetWalletSecrets", mock.MatchedBy(
+					func(ctx context.Context) bool {
+						deadline, bounded := ctx.Deadline()
+
+						return ctx.Err() == nil && bounded &&
+							deadline.After(time.Now())
+					},
+				), params.WalletID,
+			).Return(&persisted, nil).Once()
+
+			// Act: Resolve the lost commit reply from the configured
+			// PostgreSQL observation without retrying the mutation.
+			err := verifyWalletSecretsCommit(
+				callerCtx, params, time.Second, ambiguousErr,
+				reader.GetWalletSecrets,
+			)
+
+			// Assert: Only the exact tuple succeeds. Every other
+			// observation is an ordinary error retaining its useful
+			// causes. The explicit field checks show that every populated
+			// verification buffer is destroyed before the helper returns.
+			if test.wantNil {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				require.ErrorIs(t, err, errTransport)
+				require.NotErrorIs(
+					t, err, dbruntime.ErrAmbiguousTxCommit,
+				)
+			}
+
+			require.Equal(t, []byte{0, 0}, persisted.MasterPrivParams)
+			require.Equal(
+				t, []byte{0, 0}, persisted.EncryptedCryptoPrivKey,
+			)
+			require.Equal(
+				t, []byte{0, 0}, persisted.EncryptedCryptoScriptKey,
+			)
+			require.Equal(
+				t, []byte{0, 0}, persisted.EncryptedMasterHdPrivKey,
+			)
+			reader.AssertExpectations(t)
+		})
+	}
+}
+
+// TestVerifyWalletSecretsCommitReturnsReadError verifies an unavailable
+// verification read returns both useful causes without fabricating a row.
+func TestVerifyWalletSecretsCommitReturnsReadError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Configure the reader to return the valid Store failure shape
+	// of a nil row plus an error after PostgreSQL loses the commit
+	// acknowledgement.
+	params := testWalletSecretsUpdate()
+	errTransport := errors.New("commit connection lost")
+	errRead := errors.New("verification unavailable")
+	ambiguousErr := &dbruntime.AmbiguousTxCommitError{Err: errTransport}
+	reader := &mockWalletSecretsReader{}
+	reader.On(
+		"GetWalletSecrets", mock.Anything, params.WalletID,
+	).Return(nil, errRead).Once()
+
+	// Act: Ask the verifier to settle the ambiguous write from the unavailable
+	// read, using the same method value that the public Store passes.
+	err := verifyWalletSecretsCommit(
+		t.Context(), params, time.Second, ambiguousErr,
+		reader.GetWalletSecrets,
+	)
+
+	// Assert: The ordinary Store error retains both the transport and read
+	// causes, omits the runtime marker, and satisfies the sole read
+	// expectation.
+	require.ErrorIs(t, err, errTransport)
+	require.ErrorIs(t, err, errRead)
+	require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+	reader.AssertExpectations(t)
+}
+
+// TestUpdateWalletSecretsWithCommitVerificationBoundsRead verifies that a
+// detached verification cannot hang after PostgreSQL loses the commit reply.
+func TestUpdateWalletSecretsWithCommitVerificationBoundsRead(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Make the verification read block until its own context expires,
+	// using a short injected bound so the test proves both deadline propagation
+	// and termination without waiting for the production timeout.
+	params := testWalletSecretsUpdate()
+	errTransport := errors.New("commit connection lost")
+	ambiguousErr := &dbruntime.AmbiguousTxCommitError{Err: errTransport}
+	reader := &mockWalletSecretsReader{}
+	reader.On(
+		"GetWalletSecrets", mock.MatchedBy(func(ctx context.Context) bool {
+			_, bounded := ctx.Deadline()
+
+			return bounded
+		}), params.WalletID,
+	).Run(func(args mock.Arguments) {
+		// Waiting on the supplied context makes this mock model an unavailable
+		// read whose only shutdown path is the production verification bound.
+		ctx, ok := args.Get(0).(context.Context)
+		if !ok {
+			t.Fatalf("verification context has type %T", args.Get(0))
+		}
+
+		<-ctx.Done()
+	}).Return(nil, context.DeadlineExceeded).Once()
+
+	// Act: Resolve with a millisecond-scale bound and measure the complete call
+	// so an accidentally unbounded detached context makes the test time out.
+	started := time.Now()
+	err := verifyWalletSecretsCommit(
+		t.Context(), params, 10*time.Millisecond, ambiguousErr,
+		reader.GetWalletSecrets,
+	)
+	elapsed := time.Since(started)
+
+	// Assert: The read exits from its deadline, retains the transport and
+	// timeout causes as an ordinary Store error, and finishes well below a
+	// defensive ceiling that tolerates normal scheduler delay.
+	require.ErrorIs(t, err, errTransport)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+	require.Less(t, elapsed, time.Second)
+	reader.AssertExpectations(t)
 }
