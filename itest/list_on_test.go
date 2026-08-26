@@ -112,6 +112,26 @@ var allTestCases = []*testCase{
 		TestFunc: testControllerUnlockLock,
 	},
 	{
+		Name:     "controller change passphrase locked",
+		TestFunc: testControllerChangePassphraseLocked,
+	},
+	{
+		Name:     "controller change passphrase unlocked",
+		TestFunc: testControllerChangePassphraseUnlocked,
+	},
+	{
+		Name:     "controller change passphrase lifecycle",
+		TestFunc: testControllerChangePassphraseLifecycle,
+	},
+	{
+		Name:     "controller change passphrase reject locked",
+		TestFunc: testControllerChangePassphraseRejectLocked,
+	},
+	{
+		Name:     "controller change passphrase reject unlocked",
+		TestFunc: testControllerChangePassphraseRejectUnlocked,
+	},
+	{
 		Name:     "controller info",
 		TestFunc: testControllerInfo,
 	},
