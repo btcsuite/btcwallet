@@ -138,7 +138,7 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 		return w, WalletFunding{}
 	}
 
-	err = w.Start(h.Context())
+	err = manager.StartWallet(h.Context(), w)
 	require.NoError(h, err, "failed to start wallet")
 
 	if fixture.Unlocked {
@@ -196,7 +196,8 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 
 	ctx := h.Context()
 	require.NoError(
-		h, current.Stop(ctx), "failed to stop wallet before reload",
+		h, manager.StopWallet(ctx, current),
+		"failed to stop wallet before reload",
 	)
 	require.True(
 		h, h.DeregisterWallet(current), "failed to deregister wallet",
@@ -214,7 +215,9 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 	require.NotSame(h, current, w, "reload returned the original wallet")
 
 	h.registerWallet(manager, w, &cfg)
-	require.NoError(h, w.Start(ctx), "failed to start reloaded wallet")
+	require.NoError(
+		h, manager.StartWallet(ctx, w), "failed to start reloaded wallet",
+	)
 
 	return w
 }
