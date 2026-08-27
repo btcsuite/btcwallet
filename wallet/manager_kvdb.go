@@ -27,6 +27,7 @@ type kvdbManagerBackend struct {
 	store       *kvdb.Store //nolint:staticcheck // Remove with kvdb support.
 	addressMgr  *waddrmgr.Manager
 	walletName  string
+	walletData  *walletData
 }
 
 // Compile-time assertion that kvdbManagerBackend implements managerBackend.
@@ -101,6 +102,10 @@ func (b *kvdbManagerBackend) load(ctx context.Context,
 	cfg Config) (*walletData, error) {
 
 	if b.store != nil {
+		if cfg.Name == b.walletName {
+			return b.walletData, nil
+		}
+
 		return nil, fmt.Errorf("%w: kvdb serves one wallet per "+
 			"database; %q is already loaded", ErrInvalidParam,
 			b.walletName)
@@ -155,6 +160,7 @@ func (b *kvdbManagerBackend) open(ctx context.Context, walletName string,
 	b.store = store
 	b.addressMgr = addressMgr
 	b.walletName = walletName
+	b.walletData = data
 	retain = true
 
 	return data, nil
