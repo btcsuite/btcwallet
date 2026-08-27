@@ -49,3 +49,8 @@ Instead of a single status enum, we track three separate dimensions:
 ## 4. Status
 
 Accepted and Implemented.
+
+Task 368 supersedes only the lifecycle-owner part of this decision. The modern
+runtime is started and stopped through its exact owning `Manager`, while the
+`Controller` remains the public surface for wallet operations. See
+`docs/developer/scanning_sync_architecture.md` for the current lifecycle flow.

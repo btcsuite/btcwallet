@@ -4,14 +4,19 @@ This document details the architecture of the `btcwallet` synchronization subsys
 
 ## 1. High-Level Architecture
 
-The synchronization system is designed around a **Controller-Worker-State** pattern, separating the public API from the background work and the core logic.
+The synchronization system uses a **Manager-Controller-Worker-State** pattern.
+The Manager owns each runtime incarnation, the Controller serves wallet
+operations, and workers keep blocking synchronization separate from both.
 
 ```mermaid
 graph TD
-    User[User / RPC] -->|Calls Start/Rescan/Unlock| Controller
+    User[User / RPC] -->|Calls Start/Stop| Manager
+    User -->|Calls Rescan/Unlock| Controller
     
     subgraph "Wallet Package"
-        Controller[Controller] -->|Manages| State[Wallet State]
+        Manager[Manager] -->|Owns lifecycle| State[Wallet State]
+        Manager -->|Publishes| Syncer
+        Controller[Controller] -->|Validates operations| State
         Controller -->|Sends Req| Syncer[Syncer]
         
         Syncer -->|Maintains| RecoveryState[Recovery State]
@@ -22,7 +27,8 @@ graph TD
 
 ### 1.1 Key Components
 
-*   **Controller (`wallet/controller.go`)**: The public face of the wallet. It manages the wallet's lifecycle (`Start`, `Stop`), handles authentication (`Lock`, `Unlock`), and acts as the gatekeeper for state transitions. It does *not* perform blocking chain operations directly.
+*   **Manager (`wallet/manager.go`)**: Owns the lifecycle of each exact Wallet runtime pointer. `StartWallet` and `StopWallet` serialize through that runtime's lazy coordinator, and `Load` replaces a terminal pointer with a fresh incarnation.
+*   **Controller (`wallet/controller.go`)**: The public face for wallet operations such as authentication, rescans, and status. It validates operation state but does *not* own runtime Start or Stop and does not perform blocking chain operations directly.
 *   **Syncer (`wallet/syncer.go`)**: A dedicated background worker responsible for the main synchronization loop. It communicates with the chain backend (e.g., `bitcoind`, `neutrino`), orchestrates batch scanning, and handles blockchain reorganizations (rollbacks).
 *   **RecoveryState (`wallet/recovery.go`)**: A specialized state machine that encapsulates the logic for *what* to scan for. It manages BIP32 derivation horizons, address lookahead windows, and the set of watched outpoints. It is purely logic and memory-based, decoupled from the I/O mechanisms of the Syncer.
 
@@ -33,11 +39,21 @@ graph TD
 To manage concurrency and API availability safely, the wallet employs an **Orthogonal State Model**. Instead of a single monolithic status (e.g., "Syncing"), we track three independent dimensions of state. This decoupling allows for precise representation of complex conditions (e.g., a wallet can be "Started" AND "Syncing" AND "Locked") without state explosion.
 
 ### 2.1 Lifecycle (System State)
-Tracks the runtime status of the wallet's main event loop and background processes.
-*   **Stopped**: The wallet is idle. No background routines are running.
+Tracks one Manager-owned runtime incarnation. A stopped instance is terminal;
+loading the durable wallet again returns a new runtime pointer.
+*   **Created**: The runtime is fully assembled but has not started workers.
 *   **Starting**: The wallet is in the middle of its synchronous startup sequence (e.g., loading accounts, verifying birthday).
 *   **Started**: The wallet is fully operational. `mainLoop` and `chainLoop` are running.
 *   **Stopping**: A shutdown signal has been sent; the wallet is waiting for background routines to exit.
+*   **Stopped**: The runtime has joined its workers, locked the Vault, and recorded terminal completion.
+
+Startup setup runs outside the lifecycle coordinator so cancellation or an
+admitted Stop can win before worker publication. The coordinator then
+serializes the final decision with the Manager: it either publishes every
+worker and Start success together, or joins failed/canceled setup and begins
+teardown. Teardown is caller-independent, so canceling one Stop wait cannot
+abandon worker joining, Vault locking, or the terminal result. A later `Load`
+waits for that result before installing one fresh runtime pointer.
 
 ### 2.2 Synchronization (Chain State)
 Tracks data freshness relative to the blockchain backend.
