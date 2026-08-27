@@ -35,7 +35,7 @@ func testListUnspent(h *bwtest.HarnessTest) {
 		"list unspent before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	// A fresh wallet has no UTXOs.
 	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
@@ -142,7 +142,7 @@ func testListUnspent(h *bwtest.HarnessTest) {
 // coinbase maturity.
 func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	// The Spendable assertion below requires unlocking the wallet.
 	h.UnlockWallet(w)
@@ -215,7 +215,7 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 	}
 
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	h.FundWallet(w, oneBTC)
 
@@ -299,7 +299,7 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 		"get utxo before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	// The Spendable assertion below required unlocking the wallet.
 	h.UnlockWallet(w)
@@ -375,7 +375,7 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 		"lease output before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 
@@ -477,7 +477,7 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 		"release output before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	outpoints := h.FundWallet(w, oneBTC).WalletOutpoints
 
@@ -545,7 +545,7 @@ func testListLeasedOutputs(h *bwtest.HarnessTest) {
 		"list leased outputs before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 

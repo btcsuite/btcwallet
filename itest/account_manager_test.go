@@ -327,7 +327,7 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 	_, err = w.NewAccount(ctx, scope, lockedName)
 
 	require.Error(h, err, "locked wallet created an account")
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	require.NoError(h, h.StopWallet(w), "failed to stop wallet")
 
 	_, err = w.NewAccount(ctx, scope, stoppedName)
 
@@ -640,7 +640,7 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	durableInfo := *durable
 	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
 	require.Equal(h, wantLockedRename, durableInfo)
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	require.NoError(h, h.StopWallet(w), "failed to stop wallet")
 
 	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
 
@@ -986,7 +986,7 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 
 	wantCount := len(accounts)
 
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	require.NoError(h, h.StopWallet(w), "failed to stop wallet")
 
 	_, err = w.ImportAccount(
 		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
