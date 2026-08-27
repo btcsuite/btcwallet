@@ -73,6 +73,12 @@ func (c *walletLifecycleCoordinator) runStart(ctx context.Context,
 func (c *walletLifecycleCoordinator) publishStart(ctx context.Context,
 	result chan<- error) error {
 
+	if hooks := c.manager.lifecycleTestHooks; hooks != nil &&
+		hooks.beforeStartPublication != nil {
+
+		hooks.beforeStartPublication(c)
+	}
+
 	c.manager.Lock()
 	defer c.manager.Unlock()
 

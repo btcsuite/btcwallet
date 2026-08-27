@@ -123,6 +123,18 @@ type Manager struct {
 
 	// chainParams is fixed at construction and shared by every wallet.
 	chainParams *chaincfg.Params
+
+	// lifecycleTestHooks acknowledge exact coordinator boundaries in unit
+	// tests. Production Managers leave this nil, so the hooks never affect
+	// lifecycle behavior or become another source of runtime state.
+	lifecycleTestHooks *managerLifecycleTestHooks
+}
+
+// managerLifecycleTestHooks exposes deterministic synchronization points to
+// package tests without changing the public Manager lifecycle contract.
+type managerLifecycleTestHooks struct {
+	beforeStartPublication func(*walletLifecycleCoordinator)
+	beforeTerminalWait     func(*walletRuntimeEntry)
 }
 
 // walletRuntimeEntry binds one fully assembled Wallet pointer to its
@@ -411,16 +423,59 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
-	m.Lock()
-	defer m.Unlock()
+	for {
+		m.Lock()
 
-	// A wallet already installed under this name is returned as is. The
-	// Manager lock makes a miss the sole assembly owner until installation.
-	existingEntry, ok := m.wallets[cfg.Name]
-	if ok {
-		return existingEntry.wallet, nil
+		entry := m.wallets[cfg.Name]
+		if entry == nil {
+			wallet, err := m.installLoadedWallet(cfg)
+			m.Unlock()
+
+			return wallet, err
+		}
+
+		lc := lifecycle(entry.wallet.state.lifecycle.Load())
+
+		terminal := entry.stopAccepted || lc == lifecycleStopping ||
+			lc == lifecycleStopped
+		if !terminal {
+			wallet := entry.wallet
+
+			m.Unlock()
+
+			return wallet, nil
+		}
+
+		terminalDone := entry.terminalDone
+
+		m.Unlock()
+
+		if hooks := m.lifecycleTestHooks; hooks != nil &&
+			hooks.beforeTerminalWait != nil {
+
+			hooks.beforeTerminalWait(entry)
+		}
+
+		<-terminalDone
+
+		m.Lock()
+
+		if m.wallets[cfg.Name] != entry {
+			m.Unlock()
+
+			continue
+		}
+
+		wallet, err := m.installLoadedWallet(cfg)
+		m.Unlock()
+
+		return wallet, err
 	}
+}
 
+// installLoadedWallet assembles and installs cfg while the Manager lock is
+// held.
+func (m *Manager) installLoadedWallet(cfg Config) (*Wallet, error) {
 	data, err := m.backend.load(context.Background(), cfg)
 	if err != nil {
 		// Hide the database sentinel at the public Manager boundary while
