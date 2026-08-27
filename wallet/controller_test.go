@@ -84,7 +84,7 @@ func TestHandleUnlockReq_Errors(t *testing.T) {
 	t.Run("ErrStateForbidden", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange: Create a test wallet. By default, it is in the 'Stopped'
+		// Arrange: Create a test wallet. By default, it is in the 'Created'
 		// state.
 		w, _ := createTestWalletWithMocks(t)
 
@@ -266,7 +266,7 @@ func TestHandleLockReq(t *testing.T) {
 func TestHandleLockReq_Errors(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet in the default 'Stopped' state.
+	// Arrange: Create a test wallet in the default 'Created' state.
 	w, _ := createTestWalletWithMocks(t)
 
 	req := newLockReq()
@@ -345,15 +345,16 @@ func TestHandleChangePassphraseReq(t *testing.T) {
 	require.NoError(t, resp)
 }
 
-// TestControllerStart verifies that the Start method correctly initializes the
-// wallet, verifying the birthday block, loading accounts, cleaning up locks,
-// and starting the syncer.
+// TestControllerStart verifies Manager startup initializes the wallet by
+// verifying the birthday block, loading accounts, cleaning up locks, and
+// starting the syncer.
 func TestControllerStart(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create a test wallet and mock all dependencies required for
 	// startup.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	// 1. Mock verifyBirthday: Expect a call to retrieve the birthday
 	//    block.
@@ -381,7 +382,7 @@ func TestControllerStart(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify that Start returned no error and the wallet state is
 	// 'Started'.
@@ -389,7 +390,7 @@ func TestControllerStart(t *testing.T) {
 	require.True(t, w.state.isStarted())
 
 	// Cleanup: Stop the wallet to release resources.
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 	require.NoError(t, err)
 	w.wg.Wait()
 }
@@ -636,13 +637,14 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 	})
 }
 
-// TestControllerStop verifies that the Stop method correctly shuts down the
-// wallet, waiting for the syncer and other background processes to exit.
+// TestControllerStop verifies Manager shutdown waits for the syncer and other
+// background processes to exit.
 func TestControllerStop(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: Create and start a test wallet.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	// Setup mocks for the startup sequence.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
@@ -664,7 +666,7 @@ func TestControllerStop(t *testing.T) {
 		<-ctx.Done()
 	}).Return(nil).Once()
 
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 	require.True(t, w.state.isStarted())
 
 	// Put the wallet in the unlocked state, mirroring a wallet that holds
@@ -677,7 +679,7 @@ func TestControllerStop(t *testing.T) {
 	deps.vault.On("Lock").Return().Once()
 
 	// Act: Stop the wallet.
-	err := w.Stop(t.Context())
+	err := manager.StopWallet(t.Context(), w)
 
 	// Assert: Verify that Stop returned no error and the wallet state is
 	// no longer 'Started'.
@@ -686,7 +688,7 @@ func TestControllerStop(t *testing.T) {
 	deps.vault.AssertExpectations(t)
 
 	// Act: Call Stop again to verify idempotency.
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 
 	// Assert: Verify that subsequent Stop calls are safe and return no
 	// error.
@@ -700,6 +702,7 @@ func TestControllerLock(t *testing.T) {
 
 	// Arrange: Create and start a test wallet.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
@@ -711,7 +714,7 @@ func TestControllerLock(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 
 	// Transition the wallet to the 'Unlocked' state for testing.
 	w.state.toUnlocked()
@@ -733,7 +736,7 @@ func TestControllerLock(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Cleanup: Stop the wallet to release resources.
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 	require.NoError(t, err)
 	w.wg.Wait()
 }
@@ -745,6 +748,7 @@ func TestControllerUnlock(t *testing.T) {
 
 	// Arrange: Create and start a test wallet.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
@@ -756,7 +760,7 @@ func TestControllerUnlock(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 	require.False(t, w.state.isUnlocked())
 
 	pass := []byte("password")
@@ -778,7 +782,7 @@ func TestControllerUnlock(t *testing.T) {
 
 	expectStopTeardown(deps)
 
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 	require.NoError(t, err)
 	w.wg.Wait()
 }
@@ -791,6 +795,7 @@ func TestControllerChangePassphrase(t *testing.T) {
 
 	// Arrange: Create and start a test wallet.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	// Setup mocks for startup.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
@@ -802,7 +807,7 @@ func TestControllerChangePassphrase(t *testing.T) {
 		mock.Anything).Return(nil).Once()
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
 
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 
 	req := ChangePassphraseRequest{
 		ChangePrivate: true,
@@ -829,7 +834,7 @@ func TestControllerChangePassphrase(t *testing.T) {
 	require.NoError(t, err)
 
 	// Cleanup: Stop the wallet to release resources.
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 	require.NoError(t, err)
 	w.wg.Wait()
 }
@@ -925,6 +930,7 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 
 	// Arrange: Setup a wallet with existing accounts in the address store.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 	accountNumber0 := uint32(0)
 	accountNumber1 := uint32(1)
 
@@ -947,14 +953,14 @@ func TestControllerStart_WithAccounts(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify success.
 	require.NoError(t, err)
 	require.True(t, w.state.isStarted())
 
 	// Cleanup.
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, manager.StopWallet(t.Context(), w))
 	w.wg.Wait()
 }
 
@@ -1177,7 +1183,7 @@ func TestControllerChangePassphrase_Interrupted_SendShutdown(t *testing.T) {
 func TestHandleChangePassphraseReq_Errors(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a test wallet in the default 'Stopped' state.
+	// Arrange: Create a test wallet in the default 'Created' state.
 	w, _ := createTestWalletWithMocks(t)
 
 	req := changePassphraseReq{
@@ -1201,6 +1207,7 @@ func TestControllerInfo(t *testing.T) {
 
 	// Arrange: Create and start a test wallet with mocked subsystems.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	syncedTo := &db.Block{
 		Hash:   chainhash.Hash{100},
@@ -1226,7 +1233,7 @@ func TestControllerInfo(t *testing.T) {
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
 
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{SyncedTo: syncedTo}, nil,
@@ -1246,7 +1253,7 @@ func TestControllerInfo(t *testing.T) {
 	require.True(t, info.Locked)
 
 	// Cleanup: Stop the wallet to release resources.
-	err = w.Stop(t.Context())
+	err = manager.StopWallet(t.Context(), w)
 	require.NoError(t, err)
 	w.wg.Wait()
 }
@@ -1261,9 +1268,13 @@ func TestControllerInfoSyncTipErrors(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		startLoadedWalletForTest(t, w)
+		manager := testManagerForWallet(w)
 
-		deps.store.On("GetWallet", mock.Anything, "").Return(
+		expectLifecycleSetup(deps)
+		expectStopTeardown(deps)
+		startLoadedWalletForTest(t, manager, w)
+
+		deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 			nil, errDBMock,
 		).Once()
 
@@ -1275,9 +1286,13 @@ func TestControllerInfoSyncTipErrors(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		startLoadedWalletForTest(t, w)
+		manager := testManagerForWallet(w)
 
-		deps.store.On("GetWallet", mock.Anything, "").Return(
+		expectLifecycleSetup(deps)
+		expectStopTeardown(deps)
+		startLoadedWalletForTest(t, manager, w)
+
+		deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 			&db.WalletInfo{}, nil,
 		).Once()
 		deps.syncer.On("syncState").Return(syncStateSynced)
@@ -1381,17 +1396,21 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 
 	// Arrange: Setup mock expectations where GetWallet fails.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
+
+	expectStopTeardown(deps)
 
 	deps.store.On(
 		"GetWallet", mock.Anything, mock.Anything,
 	).Return(nil, errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
 	require.False(t, w.state.isStarted())
+	require.NoError(t, manager.StopWallet(t.Context(), w))
 }
 
 // TestControllerStart_DBGetAllAccountsFail verifies Start fails when
@@ -1402,6 +1421,9 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 	// Arrange: Setup mock expectations where account lookup fails during
 	// startup.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
+
+	expectStopTeardown(deps)
 
 	deps.store.On(
 		"GetWallet", mock.Anything, mock.Anything,
@@ -1412,11 +1434,12 @@ func TestControllerStart_DBGetAllAccountsFail(t *testing.T) {
 		Return([]db.AccountInfo(nil), errDBMock).Once()
 
 	// Act: Attempt to start the wallet.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
 	require.False(t, w.state.isStarted())
+	require.NoError(t, manager.StopWallet(t.Context(), w))
 }
 
 // TestControllerStart_BirthdayNotSet verifies the flow when birthday block is
@@ -1427,6 +1450,7 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	// Arrange: Setup mock expectations where the birthday block is not set
 	// and must be located from the chain.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	birthday := time.Now()
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
@@ -1463,14 +1487,14 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	expectStopTeardown(deps)
 
 	// Act: Start the wallet.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify success.
 	require.NoError(t, err)
 	require.True(t, w.state.isStarted())
 
 	// Clean up.
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, manager.StopWallet(t.Context(), w))
 	w.wg.Wait()
 }
 
@@ -1519,6 +1543,9 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 	// Arrange: Setup mock expectations where cleanup of expired locks
 	// fails.
 	w, deps := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
+
+	expectStopTeardown(deps)
 
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
@@ -1531,11 +1558,12 @@ func TestControllerStart_DeleteExpiredFail(t *testing.T) {
 		Return(errDBMock).Once()
 
 	// Act: Attempt to start.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
 	require.False(t, w.state.isStarted())
+	require.NoError(t, manager.StopWallet(t.Context(), w))
 }
 
 // TestControllerUnlock_NegativeTimeout verifies Unlock with negative
@@ -1643,12 +1671,13 @@ func TestControllerStart_AlreadyStarted(t *testing.T) {
 
 	// Arrange: Setup a started wallet.
 	w, _ := createTestWalletWithMocks(t)
+	manager := testManagerForWallet(w)
 
 	require.NoError(t, w.state.toStarting())
 	require.NoError(t, w.state.toStarted())
 
 	// Act: Attempt to start again.
-	err := w.Start(t.Context())
+	err := manager.StartWallet(t.Context(), w)
 
 	// Assert: Verify error.
 	require.ErrorIs(t, err, ErrWalletAlreadyStarted)

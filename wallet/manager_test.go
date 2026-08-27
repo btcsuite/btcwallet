@@ -128,10 +128,10 @@ func TestManagerCreateSuccess(t *testing.T) {
 			// newly created wallet in its internal map, keyed by the
 			// configuration name.
 			m.RLock()
-			loadedEntry, ok := m.wallets["test-wallet"]
+			entry, ok := m.wallets["test-wallet"]
 			m.RUnlock()
 			require.True(t, ok)
-			require.Same(t, w, loadedEntry.wallet)
+			require.Same(t, w, entry.wallet)
 
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
@@ -452,6 +452,7 @@ func TestManagerLoadSuccess(t *testing.T) {
 
 	// Release the database so a second Manager can open the same file: one
 	// bbolt handle per file, and the Manager owns it.
+	stopTestManagerWallets(t, m)
 	require.NoError(t, m.Close())
 
 	// Open a second Manager over the same database to simulate a fresh start
@@ -597,8 +598,12 @@ func TestManagerString(t *testing.T) {
 		{
 			name: "multiple sorted",
 			setup: func(m *Manager) {
-				m.wallets["wallet-b"] = newWalletRuntimeEntry(&Wallet{})
-				m.wallets["wallet-a"] = newWalletRuntimeEntry(&Wallet{})
+				m.wallets["wallet-b"] = &walletRuntimeEntry{
+					wallet: &Wallet{},
+				}
+				m.wallets["wallet-a"] = &walletRuntimeEntry{
+					wallet: &Wallet{},
+				}
 			},
 			expected: "active_wallets=[wallet-a wallet-b]",
 		},
@@ -784,7 +789,8 @@ func TestManagerKVDBRejectsSecondName(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, first, again)
 
-	startLoadedWalletForTest(t, again)
+	markTestWalletBirthdayVerified(t, again)
+	startLoadedWalletForTest(t, m, again)
 	_, err = again.ListAccounts(t.Context())
 	require.NoError(t, err)
 }
@@ -854,6 +860,7 @@ func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 
 			// Close releases the one database the Manager owns. It is
 			// called once, after quiescence.
+			stopTestManagerWallets(t, m)
 			require.NoError(t, m.Close())
 		})
 	}
@@ -929,11 +936,15 @@ func TestManagerIgnoresPerWalletDBAndChainParams(t *testing.T) {
 			// Assert: a *fresh* Manager over the same database performs
 			// a real Load with the same nil-field Config, so the
 			// injection is proven off the cached-hit path too.
+			stopTestManagerWallets(t, m)
 			require.NoError(t, m.Close())
 
 			reopened, err := open()
 			require.NoError(t, err)
-			t.Cleanup(func() { _ = reopened.Close() })
+			t.Cleanup(func() {
+				stopTestManagerWallets(t, reopened)
+				_ = reopened.Close()
+			})
 
 			fresh, err := reopened.Load(cfg)
 			require.NoError(t, err)
@@ -976,6 +987,7 @@ func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, w)
+	stopTestManagerWallets(t, m)
 	require.NoError(t, m.Close())
 
 	// Assert: a fresh Manager opens the wallet with the passphrase it was
@@ -987,5 +999,6 @@ func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
 	loaded, err := reopened.Load(loadCfg)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
+	stopTestManagerWallets(t, reopened)
 	require.NoError(t, reopened.Close())
 }

@@ -29,10 +29,6 @@ const (
 )
 
 var (
-	// ErrWalletNotStopped is returned when an attempt is made to start the
-	// wallet when it is not in the stopped state.
-	ErrWalletNotStopped = errors.New("wallet not in stopped state")
-
 	// ErrWalletAlreadyStarted is returned when an attempt is made to start
 	// the wallet when it is already started.
 	ErrWalletAlreadyStarted = errors.New("wallet already started")
@@ -133,8 +129,7 @@ type ChangePassphraseRequest struct {
 	PrivateNew []byte
 }
 
-// Controller provides an interface for managing the wallet's lifecycle and
-// state.
+// Controller provides an interface for managing wallet operations and state.
 type Controller interface {
 	// Unlock unlocks the wallet with a passphrase. The wallet will remain
 	// unlocked until explicitly locked or the provided lock duration
@@ -152,15 +147,6 @@ type Controller interface {
 	// configuration and dynamic synchronization state.
 	Info(ctx context.Context) (*Info, error)
 
-	// Start starts the background processes necessary to manage the wallet.
-	// It returns an error if the wallet is already started.
-	Start(ctx context.Context) error
-
-	// Stop signals all wallet background processes to shutdown and blocks
-	// until they have all exited. It returns an error if the context is
-	// canceled before the shutdown is complete.
-	Stop(ctx context.Context) error
-
 	// Resync rewinds the wallet's synchronization state to a specific
 	// block height.
 	Resync(ctx context.Context, startHeight uint32) error
@@ -171,64 +157,6 @@ type Controller interface {
 	// synchronization state.
 	Rescan(ctx context.Context, startHeight uint32,
 		targets []waddrmgr.AccountScope) error
-}
-
-// Start starts the background processes necessary to manage the wallet.
-//
-// This is part of the Controller interface.
-func (w *Wallet) Start(startCtx context.Context) error {
-	// 1. Attempt to transition from Stopped to Starting.
-	err := w.state.toStarting()
-	if err != nil {
-		return err
-	}
-
-	// 2. Setup background resources.
-	//
-	// w.lifetimeCtx governs the lifecycle of all background goroutines.
-	// It is canceled when stop() is called.
-	w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
-
-	// 3. Perform runtime setup.
-	//
-	// We use startCtx here because these operations must complete
-	// synchronously before the wallet is considered "started". If
-	// startCtx is canceled, the startup sequence aborts.
-	err = w.performRuntimeSetup(startCtx)
-	if err != nil {
-		// Cleanup resources.
-		w.cancel()
-
-		// Revert state if setup fails.
-		stopErr := w.state.toStopped()
-		if stopErr != nil {
-			log.Warnf("Failed to revert state to stopped: %v",
-				stopErr)
-		}
-
-		return err
-	}
-
-	// 4. Start background goroutines.
-	w.wg.Add(1)
-
-	go w.mainLoop()
-
-	w.wg.Add(1)
-
-	go func() {
-		defer w.wg.Done()
-
-		w.runSyncLoop()
-	}()
-
-	// 5. Mark the wallet as fully started.
-	err = w.state.toStarted()
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 // runSyncLoop executes the main chain synchronization loop with automatic
@@ -335,61 +263,6 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	err = w.store.DeleteExpiredLeases(startCtx, w.id)
 	if err != nil {
 		return fmt.Errorf("delete expired leases: %w", err)
-	}
-
-	return nil
-}
-
-// Stop signals all wallet background processes to shutdown and blocks until
-// they have all exited. It returns an error if the context is canceled before
-// the shutdown is complete.
-//
-// This is part of the Controller interface.
-func (w *Wallet) Stop(stopCtx context.Context) error {
-	// Attempt to transition from Started to Stopping.
-	err := w.state.toStopping()
-	if err != nil {
-		// If the wallet is not started, we can consider it stopped.
-		log.Warnf("Wallet already stopped: %v", err)
-		return nil
-	}
-
-	// Signal all background processes to stop.
-	//
-	// It is safe to call w.cancel() here because the successful transition
-	// to Stopping guarantees that we were previously in the Started state,
-	// which in turn guarantees that start() has completed initialization
-	// of w.lifetimeCtx and w.cancel.
-	//
-	// Additionally, w.cancel() is idempotent, so it is safe to call even
-	// if it has effectively already been called (though the state machine
-	// guarantees we only reach this point once).
-	w.cancel()
-
-	// Wait for all goroutines to finish.
-	done := make(chan struct{})
-	go func() {
-		w.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-stopCtx.Done():
-		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
-	}
-
-	// Lock the key vault so no decrypted signing keys outlive the shutdown.
-	// The background goroutines have exited, so no signer is running.
-	// Unconditional rather than gated on the unlocked state bit: Lock is
-	// void and idempotent, so a never-unlocked vault is a no-op, and gating
-	// would only add a way to skip it.
-	w.keyVault.Lock()
-
-	// Mark the wallet as stopped.
-	err = w.state.toStopped()
-	if err != nil {
-		return err
 	}
 
 	return nil

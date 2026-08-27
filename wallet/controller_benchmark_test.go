@@ -265,14 +265,14 @@ func runNewSync(b *testing.B, miner *rpctest.Harness, method SyncMethod) {
 		// Setup a fresh modern wallet.
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
 		require.NoError(b, err)
-		w := setupNewWallet(b, seed, cfg)
+		manager, w := setupNewWallet(b, seed, cfg)
 
 		stopProfile := startProfiling(b)
 
 		b.StartTimer()
 
 		// Start modern controller and syncing.
-		err = w.Start(b.Context())
+		err = manager.StartWallet(b.Context(), w)
 		require.NoError(b, err)
 
 		// Poll until the controller reports it is synced.
@@ -314,7 +314,7 @@ func runNewSyncData(b *testing.B, miner *rpctest.Harness, seed []byte,
 		cfg.Chain = chainClient
 		cfg.SyncMethod = method
 
-		w := setupNewWallet(b, seed, cfg)
+		manager, w := setupNewWallet(b, seed, cfg)
 
 		stopProfile := startProfiling(b)
 
@@ -322,7 +322,7 @@ func runNewSyncData(b *testing.B, miner *rpctest.Harness, seed []byte,
 		b.StartTimer()
 
 		// Start modern controller and syncing.
-		err := w.Start(b.Context())
+		err := manager.StartWallet(b.Context(), w)
 		require.NoError(b, err)
 
 		// Poll until the controller reports it is synced.
@@ -389,7 +389,9 @@ func setupLegacyWallet(tb testing.TB, seed []byte) *Wallet {
 // setupNewWallet initializes a modern wallet using the Manager API. It accepts
 // a Config which should at least have the Chain client populated. It
 // automatically registers resource cleanup.
-func setupNewWallet(tb testing.TB, seed []byte, cfg Config) *Wallet {
+func setupNewWallet(tb testing.TB, seed []byte, cfg Config) (*Manager,
+	*Wallet) {
+
 	tb.Helper()
 
 	privPass := []byte("private")
@@ -410,11 +412,11 @@ func setupNewWallet(tb testing.TB, seed []byte, cfg Config) *Wallet {
 	// Register cleanup function to handle the Controller shutdown and close
 	// the database handle after the benchmark subtest.
 	tb.Cleanup(func() {
-		_ = w.Stop(tb.Context())
+		_ = manager.StopWallet(tb.Context(), w)
 		// The Manager owns the store; the wallet closes nothing.
 	})
 
-	return w
+	return manager, w
 }
 
 // setupChain prepares a btcd node and generates the required blocks.
@@ -457,9 +459,9 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 	cfg := defaultWalletConfig(tb)
 	cfg.Chain = setupChainClient(tb, miner)
 
-	templateW := setupNewWallet(tb, seed, cfg)
+	templateManager, templateW := setupNewWallet(tb, seed, cfg)
 
-	err := templateW.Start(tb.Context())
+	err := templateManager.StartWallet(tb.Context(), templateW)
 	require.NoError(tb, err)
 
 	// Unlock template wallet to derive addresses.
@@ -496,7 +498,7 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 
 	// Stop the template wallet now that setup is complete. The Manager keeps
 	// the store open until test cleanup.
-	_ = templateW.Stop(tb.Context())
+	_ = templateManager.StopWallet(tb.Context(), templateW)
 
 	// Ensure we selected the correct number of targets.
 	require.Len(tb, targetAddrs, numUTXOs,
