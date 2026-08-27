@@ -128,10 +128,10 @@ func TestManagerCreateSuccess(t *testing.T) {
 			// newly created wallet in its internal map, keyed by the
 			// configuration name.
 			m.RLock()
-			loadedW, ok := m.wallets["test-wallet"]
+			loadedEntry, ok := m.wallets["test-wallet"]
 			m.RUnlock()
 			require.True(t, ok)
-			require.Same(t, w, loadedW)
+			require.Same(t, w, loadedEntry.wallet)
 
 			// If ModeShell, verify account was imported.
 			if tc.params.Mode == ModeShell {
@@ -317,7 +317,7 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 
 			backend := &recordingManagerBackend{}
 			m := &Manager{
-				wallets:     make(map[string]*Wallet),
+				wallets:     make(map[string]*walletRuntimeEntry),
 				backend:     backend,
 				chainParams: &chainParams,
 			}
@@ -407,7 +407,7 @@ func TestManagerCreateExcessRecoveryWindow(t *testing.T) {
 
 	backend := &recordingManagerBackend{}
 	m := &Manager{
-		wallets:     make(map[string]*Wallet),
+		wallets:     make(map[string]*walletRuntimeEntry),
 		backend:     backend,
 		chainParams: &chainParams,
 	}
@@ -465,10 +465,10 @@ func TestManagerLoadSuccess(t *testing.T) {
 
 	// Ensure the loaded wallet is correctly registered in the new manager.
 	m2.RLock()
-	loadedW, ok := m2.wallets["test-wallet"]
+	entry, ok := m2.wallets["test-wallet"]
 	m2.RUnlock()
 	require.True(t, ok)
-	require.Same(t, w, loadedW)
+	require.Same(t, w, entry.wallet)
 	require.Zero(t, w.ID())
 
 	// The master HD fingerprint is read through the Store during load. A
@@ -597,8 +597,8 @@ func TestManagerString(t *testing.T) {
 		{
 			name: "multiple sorted",
 			setup: func(m *Manager) {
-				m.wallets["wallet-b"] = &Wallet{}
-				m.wallets["wallet-a"] = &Wallet{}
+				m.wallets["wallet-b"] = newWalletRuntimeEntry(&Wallet{})
+				m.wallets["wallet-a"] = newWalletRuntimeEntry(&Wallet{})
 			},
 			expected: "active_wallets=[wallet-a wallet-b]",
 		},

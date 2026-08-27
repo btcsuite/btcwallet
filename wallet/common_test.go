@@ -142,7 +142,7 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 	tb.Helper()
 
 	return &Manager{
-		wallets: make(map[string]*Wallet),
+		wallets: make(map[string]*walletRuntimeEntry),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },

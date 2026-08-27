@@ -115,7 +115,7 @@ type Manager struct {
 	// installation. A ModeShell Create imports its initial accounts after
 	// installation, so a wallet can be observed here before that import
 	// finishes.
-	wallets map[string]*Wallet
+	wallets map[string]*walletRuntimeEntry
 
 	// backend owns the database and resolves the storage dependencies for
 	// every wallet this Manager serves.
@@ -123,6 +123,35 @@ type Manager struct {
 
 	// chainParams is fixed at construction and shared by every wallet.
 	chainParams *chaincfg.Params
+}
+
+// walletRuntimeEntry binds one fully assembled Wallet pointer to its
+// Manager-owned runtime lifecycle.
+type walletRuntimeEntry struct {
+	wallet *Wallet
+
+	// coordinator is published together with the first accepted lifecycle
+	// request. It remains nil when Create or Load only installs a Wallet.
+	coordinator *walletLifecycleCoordinator
+
+	// startAccepted and stopAccepted are protected by the Manager lock. They
+	// make request admission indivisible with lazy coordinator publication.
+	startAccepted bool
+	stopAccepted  bool
+
+	// terminalDone closes after teardownErr is recorded and the lifecycle
+	// coordinator has no more work for this runtime.
+	terminalDone chan struct{}
+	teardownErr  error
+}
+
+// newWalletRuntimeEntry binds a fully assembled Wallet to fresh lifecycle
+// completion state.
+func newWalletRuntimeEntry(w *Wallet) *walletRuntimeEntry {
+	return &walletRuntimeEntry{
+		wallet:       w,
+		terminalDone: make(chan struct{}),
+	}
 }
 
 // NewManager opens the one database described by cfg and returns a Manager that
@@ -155,7 +184,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}
 
 	return &Manager{
-		wallets:     make(map[string]*Wallet),
+		wallets:     make(map[string]*walletRuntimeEntry),
 		backend:     backend,
 		chainParams: cfg.ChainParams,
 	}, nil
@@ -225,7 +254,7 @@ func (m *Manager) Create(cfg Config,
 	}
 
 	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	m.wallets[cfg.Name] = newWalletRuntimeEntry(w)
 	m.Unlock()
 
 	// If we are in shell mode and have initial accounts, we import them now.
@@ -387,9 +416,9 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 
 	// A wallet already installed under this name is returned as is. The
 	// Manager lock makes a miss the sole assembly owner until installation.
-	existingW, ok := m.wallets[cfg.Name]
+	existingEntry, ok := m.wallets[cfg.Name]
 	if ok {
-		return existingW, nil
+		return existingEntry.wallet, nil
 	}
 
 	data, err := m.backend.load(context.Background(), cfg)
@@ -406,7 +435,7 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	}
 
 	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	m.wallets[cfg.Name] = newWalletRuntimeEntry(w)
 
 	return w, nil
 }
