@@ -25,8 +25,8 @@ func NewTestStore(t *testing.T) *sqlite.Store {
 	return NewTestStoreWithDerive(t, mockDeriveFunc())
 }
 
-// NewTestStoreWithDerive creates a new SQLite database for testing with the
-// provided address derivation function.
+// NewTestStoreWithDerive creates a regression-identity SQLite database with
+// the provided derivation function so established tests traverse the gate.
 func NewTestStoreWithDerive(t *testing.T,
 	deriveAddress db.AddressDerivationFunc) *sqlite.Store {
 
@@ -52,6 +52,126 @@ func NewTestStoreWithDerive(t *testing.T,
 	})
 
 	return store
+}
+
+// openIdentityStore joins open/close errors so rejection leaks no SQLite Store.
+func openIdentityStore(t *testing.T, dbPath string,
+	identity db.DatabaseIdentity) (*sqlite.Store, error) {
+
+	t.Helper()
+
+	cfg := sqlite.Config{DBPath: dbPath, Identity: identity}
+
+	store, err := sqlite.NewStore(t.Context(), cfg)
+	if store == nil {
+		return nil, errors.Join(err, errors.New("nil Store"))
+	}
+
+	return store, errors.Join(err, store.Close())
+}
+
+// TestSQLiteDatabaseIdentity proves startup gating against real database files.
+func TestSQLiteDatabaseIdentity(t *testing.T) {
+	// Arrange: Build the ordinary and same-prefix signet tuples reused below.
+	c := chaincfg.DefaultSignetChallenge
+	digest := chainhash.DoubleHashB(append([]byte{byte(len(c))}, c...))
+	otherDigest := append([]byte(nil), digest...)
+	otherDigest[len(otherDigest)-1] ^= 1
+	signetParams := &chaincfg.SigNetParams
+	regtest, regErr := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	testnet, testErr := db.NewDatabaseIdentity(&chaincfg.TestNet3Params, nil)
+	signet, sigErr := db.NewDatabaseIdentity(signetParams, digest)
+	otherSignet, otherErr := db.NewDatabaseIdentity(signetParams, otherDigest)
+	require.NoError(t, errors.Join(regErr, testErr, sigErr, otherErr))
+
+	t.Run("initializes and reopens", func(t *testing.T) {
+		// Arrange: Select one empty file for both startup attempts.
+		dbPath := filepath.Join(t.TempDir(), "identity.db")
+
+		// Act: Open the file twice with the same regression-test tuple.
+		_, firstErr := openIdentityStore(t, dbPath, regtest)
+		_, secondErr := openIdentityStore(t, dbPath, regtest)
+
+		// Assert: Initial creation and matching reopen both return a Store.
+		require.NoError(t, errors.Join(firstErr, secondErr))
+	})
+
+	t.Run("rejects wrong network", func(t *testing.T) {
+		// Arrange: Persist regression testnet in one isolated file.
+		dbPath := filepath.Join(t.TempDir(), "identity.db")
+		_, err := openIdentityStore(t, dbPath, regtest)
+		require.NoError(t, err)
+
+		// Act: Try testnet, then retry the stored regression-test tuple.
+		rejected, rejectErr := openIdentityStore(t, dbPath, testnet)
+		_, reopenErr := openIdentityStore(t, dbPath, regtest)
+
+		// Assert: Only the mismatch stops and returns no Store.
+		require.ErrorIs(t, rejectErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, rejected)
+		require.NoError(t, reopenErr)
+	})
+
+	t.Run("rejects different signet", func(t *testing.T) {
+		// Arrange: Persist one full signet challenge digest.
+		dbPath := filepath.Join(t.TempDir(), "identity.db")
+		_, err := openIdentityStore(t, dbPath, signet)
+		require.NoError(t, err)
+
+		// Act: Try the other digest, then retry the stored digest.
+		rejected, rejectErr := openIdentityStore(t, dbPath, otherSignet)
+		_, reopenErr := openIdentityStore(t, dbPath, signet)
+
+		// Assert: The full digest mismatch leaves the original usable.
+		require.ErrorIs(t, rejectErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, rejected)
+		require.NoError(t, reopenErr)
+	})
+
+	t.Run("rejects populated file", func(t *testing.T) {
+		// Arrange: Raw DDL creates non-API sqliteX state that exposes LIKE `_`.
+		dbPath := filepath.Join(t.TempDir(), "identity.db")
+		fixtureDB, err := sql.Open("sqlite", dbPath)
+		require.NoError(t, err)
+		_, err = fixtureDB.ExecContext(t.Context(), "CREATE TABLE sqliteX(x)")
+		require.NoError(t, err)
+		require.NoError(t, fixtureDB.Close())
+
+		// Act: Attempt startup, then inspect durable state through raw SQL.
+		store, openErr := openIdentityStore(t, dbPath, regtest)
+		inspectDB, inspectErr := sql.Open("sqlite", dbPath)
+
+		var (
+			objectCount int
+			journalMode string
+		)
+
+		if inspectErr == nil {
+			inspectErr = inspectDB.QueryRowContext(t.Context(), `
+				SELECT COUNT(*) FROM sqlite_schema
+				WHERE name NOT GLOB 'sqlite_*'
+			`).Scan(&objectCount)
+		}
+
+		if inspectErr == nil {
+			inspectErr = inspectDB.QueryRowContext(
+				t.Context(), "PRAGMA journal_mode",
+			).Scan(&journalMode)
+		}
+
+		if inspectDB != nil {
+			inspectErr = errors.Join(inspectErr, inspectDB.Close())
+		}
+
+		// Assert: Rejection leaves only the fixture and never enables WAL.
+		require.ErrorIs(t, openErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, store)
+		require.NoError(t, inspectErr)
+		require.Equal(t, 1, objectCount)
+		require.Equal(t, "delete", journalMode)
+	})
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
