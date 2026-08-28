@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -33,11 +34,14 @@ func NewTestStoreWithDerive(t *testing.T,
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
 
 	cfg := sqlite.Config{
 		DBPath:         dbPath,
 		MaxConnections: 0,
 		DeriveAddress:  deriveAddress,
+		Identity:       identity,
 	}
 
 	store, err := sqlite.NewStore(t.Context(), cfg)

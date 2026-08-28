@@ -51,6 +51,7 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 //	field                       kvdb    sqlite    postgres
 //	DataSource, runtime policy         all backends
 //	MaxConnections                     SQL backends
+//	SignetChallengeDigest              SQL backends
 //	NoFreelistSync, Timeout            kvdb only
 type ManagerConfig struct {
 	// Backend selects the database implementation. Required.
@@ -101,6 +102,11 @@ type ManagerConfig struct {
 	// MaxCFilterItems sets the automatic compact-filter fallback threshold.
 	// Zero uses the syncer's default threshold.
 	MaxCFilterItems uint32
+
+	// SignetChallengeDigest is DoubleSHA256(byte(len(challenge)) || challenge)
+	// in returned array order. It is nil off signet; its first four bytes,
+	// decoded little-endian, must equal ChainParams.Net.
+	SignetChallengeDigest []byte
 
 	// NoFreelistSync controls bbolt freelist synchronization.
 	//
