@@ -9,7 +9,8 @@ import (
 	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
-	_ "github.com/jackc/pgx/v5/stdlib" // Import pgx driver for postgres database/sql support.
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Store is the PostgreSQL implementation of the
@@ -39,10 +40,15 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	dbConn, err := sql.Open("pgx", cfg.Dsn)
+	connConfig, err := pgx.ParseConfig(cfg.Dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("parse database config: %w", err)
 	}
+
+	// Put pg_temp last so it cannot shadow unqualified wallet objects.
+	connConfig.RuntimeParams["search_path"] = "btcwallet, pg_temp"
+
+	dbConn := stdlib.OpenDB(*connConfig)
 
 	connCtx, cancel := context.WithTimeout(ctx, db.DefaultConnectionTimeout)
 	defer cancel()
@@ -62,13 +68,20 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 	dbConn.SetMaxIdleConns(maxConns)
 	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlc.New(dbConn)
+	err = initializeDatabaseIdentity(ctx, dbConn, cfg.Identity)
+	if err != nil {
+		_ = dbConn.Close()
+
+		return nil, fmt.Errorf("initialize database identity: %w", err)
+	}
 
 	err = pg.ApplyMigrations(dbConn)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
+
+	queries := sqlc.New(dbConn)
 
 	return &Store{
 		db:            dbConn,
