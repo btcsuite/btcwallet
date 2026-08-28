@@ -13,9 +13,12 @@ SQL_DIR := wallet/internal/sql
 # SQL file paths.
 SQL_POSTGRES_DIR := $(SQL_DIR)/pg
 SQL_POSTGRES_MIGRATIONS := $(SQL_POSTGRES_DIR)/migrations
+SQL_POSTGRES_BOOTSTRAP := $(SQL_POSTGRES_DIR)/bootstrap
 SQL_POSTGRES_QUERIES := $(SQL_POSTGRES_DIR)/queries
 SQL_SQLITE_DIR := $(SQL_DIR)/sqlite
 SQL_SQLITE_MIGRATIONS := $(SQL_SQLITE_DIR)/migrations
+SQL_SQLITE_BOOTSTRAP := $(SQL_SQLITE_DIR)/bootstrap
+SQL_SQLITE_ASSETS := $(SQL_SQLITE_DIR)/assets
 SQL_SQLITE_QUERIES := $(SQL_SQLITE_DIR)/queries
 
 RM := rm -f
@@ -255,10 +258,16 @@ tidy-module-check: tidy-module
 sql-parse:
 	@$(call print, "Validating SQL files (postgres migrations).")
 	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS) --format none
+	@$(call print, "Validating SQL files (postgres bootstrap DDL).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_BOOTSTRAP) --format none
 	@$(call print, "Validating SQL files (postgres queries).")
 	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES) --format none
 	@$(call print, "Validating SQL files (sqlite migrations).")
 	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS) --format none
+	@$(call print, "Validating SQL files (sqlite bootstrap DDL).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_BOOTSTRAP) --format none
+	@$(call print, "Validating SQL files (sqlite assets).")
+	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_ASSETS) --format none
 	@$(call print, "Validating SQL files (sqlite queries).")
 	$(SQLFLUFF) parse --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES) --format none
 
@@ -276,10 +285,16 @@ sqlc-check: sqlc
 sql-format:
 	@$(call print, "Formatting SQL files (postgres migrations).")
 	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Formatting SQL files (postgres bootstrap DDL).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_BOOTSTRAP)
 	@$(call print, "Formatting SQL files (postgres queries).")
 	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
 	@$(call print, "Formatting SQL files (sqlite migrations).")
 	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Formatting SQL files (sqlite bootstrap DDL).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_BOOTSTRAP)
+	@$(call print, "Formatting SQL files (sqlite assets).")
+	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_ASSETS)
 	@$(call print, "Formatting SQL files (sqlite queries).")
 	$(SQLFLUFF) format --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
 
@@ -292,10 +307,16 @@ sql-format-check: sql-format
 sql-lint:
 	@$(call print, "Linting SQL files (postgres migrations).")
 	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres bootstrap DDL).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_BOOTSTRAP)
 	@$(call print, "Linting SQL files (postgres queries).")
 	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
 	@$(call print, "Linting SQL files (sqlite migrations).")
 	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite bootstrap DDL).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_BOOTSTRAP)
+	@$(call print, "Linting SQL files (sqlite assets).")
+	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_ASSETS)
 	@$(call print, "Linting SQL files (sqlite queries).")
 	$(SQLFLUFF) fix --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
 
@@ -303,10 +324,16 @@ sql-lint:
 sql-lint-check:
 	@$(call print, "Linting SQL files (postgres migrations).")
 	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_MIGRATIONS)
+	@$(call print, "Linting SQL files (postgres bootstrap DDL).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_BOOTSTRAP)
 	@$(call print, "Linting SQL files (postgres queries).")
 	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect postgres $(SQL_POSTGRES_QUERIES)
 	@$(call print, "Linting SQL files (sqlite migrations).")
 	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_MIGRATIONS)
+	@$(call print, "Linting SQL files (sqlite bootstrap DDL).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_BOOTSTRAP)
+	@$(call print, "Linting SQL files (sqlite assets).")
+	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_ASSETS)
 	@$(call print, "Linting SQL files (sqlite queries).")
 	$(SQLFLUFF) lint --config /sql/.sqlfluff --dialect sqlite $(SQL_SQLITE_QUERIES)
 
