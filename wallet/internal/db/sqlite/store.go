@@ -40,7 +40,6 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 	}
 
 	dsn := cfg.DBPath + "?_pragma=foreign_keys=on"
-	dsn += "&_pragma=journal_mode=WAL"
 	dsn += "&_txlock=immediate"
 	dsn += "&_pragma=busy_timeout=5000"
 	dsn += "&_time_format=sqlite"
@@ -68,13 +67,37 @@ func NewStore(ctx context.Context, cfg Config) (*Store,
 	dbConn.SetMaxIdleConns(maxConns)
 	dbConn.SetConnMaxIdleTime(db.DefaultConnIdleLifetime)
 
-	queries := sqlc.New(dbConn)
+	err = initializeDatabaseIdentity(ctx, dbConn, cfg.Identity)
+	if err != nil {
+		_ = dbConn.Close()
+
+		return nil, fmt.Errorf("initialize database identity: %w", err)
+	}
+
+	var journalMode string
+
+	err = dbConn.QueryRowContext(
+		ctx, sqlite.DatabaseIdentityJournal,
+	).Scan(&journalMode)
+	if err != nil {
+		_ = dbConn.Close()
+
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+
+	if journalMode != "wal" {
+		_ = dbConn.Close()
+
+		return nil, fmt.Errorf("enable WAL: got %q", journalMode)
+	}
 
 	err = sqlite.ApplyMigrations(dbConn)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
+
+	queries := sqlc.New(dbConn)
 
 	return &Store{
 		db:            dbConn,
