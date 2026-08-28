@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
 )
 
-// newSQLiteManagerBackend opens the SQLite Store owned by a Manager.
-func newSQLiteManagerBackend(ctx context.Context,
-	cfg ManagerConfig) (*sqlManagerBackend, error) {
+// newSQLiteManagerBackend opens the SQLite Store owned by a Manager and passes
+// the Manager's validated network identity into Store startup.
+func newSQLiteManagerBackend(ctx context.Context, cfg ManagerConfig,
+	identity db.DatabaseIdentity) (*sqlManagerBackend, error) {
 
 	err := os.MkdirAll(filepath.Dir(cfg.DataSource), defaultWalletDBDirPerm)
 	if err != nil {
@@ -22,6 +24,7 @@ func newSQLiteManagerBackend(ctx context.Context,
 		DBPath:         cfg.DataSource,
 		MaxConnections: cfg.MaxConnections,
 		DeriveAddress:  newSQLAddressDeriver(&cfg.ChainParams),
+		Identity:       identity,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite store: %w", err)

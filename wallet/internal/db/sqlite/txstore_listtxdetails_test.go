@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -117,13 +118,15 @@ func TestListTxDetailsReturnsRowsWithoutBlock(t *testing.T) {
 	require.Equal(t, db.TxStatusFailed, statusesByHash[failedTx.TxHash()])
 }
 
-// newTestStore creates one SQLite store backed by a temporary database file.
+// newTestStore gives an isolated Store its required regression identity.
 func newTestStore(t *testing.T) (*Store, func()) {
 	t.Helper()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbID, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
 
-	store, err := NewStore(t.Context(), Config{DBPath: dbPath})
+	store, err := NewStore(t.Context(), Config{DBPath: dbPath, Identity: dbID})
 	require.NoError(t, err)
 
 	return store, func() {
