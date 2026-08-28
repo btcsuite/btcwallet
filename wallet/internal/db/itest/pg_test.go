@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
@@ -288,11 +289,14 @@ func NewTestStoreWithDerive(t *testing.T,
 
 	// Build the connection string for the test database.
 	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
 
 	cfg := pg.Config{
 		Dsn:            testConnStr,
 		MaxConnections: 0,
 		DeriveAddress:  deriveAddress,
+		Identity:       identity,
 	}
 
 	store, err := pg.NewStore(t.Context(), cfg)

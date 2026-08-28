@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
@@ -138,6 +139,35 @@ func TestManagerSQLiteCreateLoadCached(t *testing.T) {
 	loaded, err := m.Load(LoadWalletParams{Name: params.Name})
 	require.NoError(t, err)
 	require.Same(t, w, loaded)
+}
+
+// TestNewManagerClassifiesDatabaseIdentityMismatch proves public callers can
+// distinguish a persisted network mismatch without importing internal/db.
+func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Initialize one SQLite file with the regression-test identity.
+	dbPath := filepath.Join(t.TempDir(), "identity.sqlite")
+	manager, err := NewManager(t.Context(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  dbPath,
+		ChainParams: chainParams,
+		ChainSource: &bwmock.Chain{},
+	})
+	require.NoError(t, err)
+	require.NoError(t, manager.Close())
+
+	// Act: Reopen the same file through the public API with testnet identity.
+	rejected, err := NewManager(t.Context(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  dbPath,
+		ChainParams: chaincfg.TestNet3Params,
+		ChainSource: &bwmock.Chain{},
+	})
+
+	// Assert: The wallet-owned sentinel identifies the rejected Manager.
+	require.ErrorIs(t, err, ErrDatabaseIdentityMismatch)
+	require.Nil(t, rejected)
 }
 
 // TestSQLiteCreateWalletParamsBirthdayVerbatim verifies that the SQLite

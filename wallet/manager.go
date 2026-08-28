@@ -19,6 +19,14 @@ var (
 
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
+
+	// ErrInvalidDatabaseIdentity reports invalid Manager network identity
+	// input before a SQL database is opened.
+	ErrInvalidDatabaseIdentity = errors.New("invalid database identity")
+
+	// ErrDatabaseIdentityMismatch reports that an existing SQL database is
+	// owned by a different or malformed network identity.
+	ErrDatabaseIdentityMismatch = errors.New("database identity mismatch")
 )
 
 // CreateMode determines how a new wallet is initialized.
@@ -171,6 +179,11 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		cfg.AutoLockDuration = defaultLockDuration
 	}
 
+	identity, err := newManagerDatabaseIdentity(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	var backend managerBackend
 
 	switch cfg.Backend {
@@ -178,14 +191,14 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		backend, err = newKVDBManagerBackend(cfg)
 
 	case DBBackendSQLite:
-		backend, err = newSQLiteManagerBackend(ctx, cfg)
+		backend, err = newSQLiteManagerBackend(ctx, cfg, identity)
 
 	case DBBackendPostgres:
-		backend, err = newPostgresManagerBackend(ctx, cfg)
+		backend, err = newPostgresManagerBackend(ctx, cfg, identity)
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, translateDatabaseIdentityError(err)
 	}
 
 	return &Manager{
@@ -193,6 +206,40 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		backend: backend,
 		config:  cfg,
 	}, nil
+}
+
+// newManagerDatabaseIdentity validates the owned network snapshot before a SQL
+// connection is opened while leaving the legacy kvdb startup path unchanged.
+func newManagerDatabaseIdentity(
+	cfg ManagerConfig) (db.DatabaseIdentity, error) {
+
+	if cfg.Backend == DBBackendKVDB {
+		return db.DatabaseIdentity{}, nil
+	}
+
+	identity, err := db.NewDatabaseIdentity(
+		&cfg.ChainParams, cfg.SignetChallengeDigest,
+	)
+	if err != nil {
+		return db.DatabaseIdentity{}, translateDatabaseIdentityError(err)
+	}
+
+	return identity, nil
+}
+
+// translateDatabaseIdentityError exposes internal identity classifications at
+// the public Manager boundary while preserving unrelated backend failures.
+func translateDatabaseIdentityError(err error) error {
+	switch {
+	case errors.Is(err, db.ErrInvalidDatabaseIdentity):
+		return fmt.Errorf("%w: %w", ErrInvalidDatabaseIdentity, err)
+
+	case errors.Is(err, db.ErrDatabaseIdentityMismatch):
+		return fmt.Errorf("%w: %w", ErrDatabaseIdentityMismatch, err)
+
+	default:
+		return err
+	}
 }
 
 // Close releases the database this Manager owns.

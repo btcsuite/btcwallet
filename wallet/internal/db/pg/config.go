@@ -20,9 +20,12 @@ type Config struct {
 	// store allocates an account branch/index. It may be nil when the store
 	// is used only for operations that do not create derived addresses.
 	DeriveAddress db.AddressDerivationFunc
+
+	// Identity is the validated network tuple matched before wallet access.
+	Identity db.DatabaseIdentity
 }
 
-// Validate checks that the Config values are valid.
+// Validate rejects connection settings or identity before database I/O.
 func (c *Config) Validate() error {
 	if c.Dsn == "" {
 		return db.ErrEmptyDSN
@@ -37,5 +40,5 @@ func (c *Config) Validate() error {
 		return db.ErrNegativeMaxConns
 	}
 
-	return nil
+	return c.Identity.Validate()
 }
