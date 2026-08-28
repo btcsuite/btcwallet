@@ -10,7 +10,10 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -99,6 +102,111 @@ func (c *mockChainConn) GetBlockHeader(hash *chainhash.Hash) (*wire.BlockHeader,
 	}
 
 	return &block.Header, nil
+}
+
+func addMaturingOutputLock(t *testing.T, w *Wallet, spendHeight int32) {
+	t.Helper()
+
+	creditTx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{Value: 1000}},
+	}
+
+	creditRec, err := wtxmgr.NewTxRecordFromMsgTx(creditTx, time.Now())
+	require.NoError(t, err)
+
+	creditBlock := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{1},
+			Height: spendHeight - 1,
+		},
+		Time: time.Now(),
+	}
+	creditOutpoint := wire.OutPoint{
+		Hash:  creditRec.Hash,
+		Index: 0,
+	}
+
+	spendTx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{{
+			PreviousOutPoint: creditOutpoint,
+		}},
+		TxOut: []*wire.TxOut{{Value: 900}},
+	}
+
+	spendRec, err := wtxmgr.NewTxRecordFromMsgTx(spendTx, time.Now())
+	require.NoError(t, err)
+
+	spendBlock := &wtxmgr.BlockMeta{
+		Block: wtxmgr.Block{
+			Hash:   chainhash.Hash{2},
+			Height: spendHeight,
+		},
+		Time: time.Now(),
+	}
+
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+
+		err := w.TxStore.InsertTx(ns, creditRec, creditBlock)
+		if err != nil {
+			return err
+		}
+
+		err = w.TxStore.AddCredit(
+			ns, creditRec, creditBlock, 0, false,
+		)
+		if err != nil {
+			return err
+		}
+
+		_, err = w.TxStore.LockOutput(
+			ns, wtxmgr.LockID{1}, creditOutpoint, time.Hour,
+			wtxmgr.WithReleaseAfterSpend(3),
+		)
+		if err != nil {
+			return err
+		}
+
+		return w.TxStore.InsertTx(ns, spendRec, spendBlock)
+	})
+	require.NoError(t, err)
+}
+
+// TestCatchUpHashesMaturesOutputLocks verifies that offline rescan progress
+// releases retained output leases at the validated catch-up tip.
+func TestCatchUpHashesMaturesOutputLocks(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	const (
+		spendHeight   = 2
+		catchUpHeight = 4
+	)
+	addMaturingOutputLock(t, w, spendHeight)
+
+	chainConn := createMockChainConn(
+		w.chainParams.GenesisBlock, catchUpHeight, defaultBlockInterval,
+	)
+	err := w.catchUpHashes(chainConn, catchUpHeight)
+	require.NoError(t, err)
+
+	var locks []*wtxmgr.LockedOutput
+
+	err = walletdb.View(w.db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+
+		var err error
+
+		locks, err = w.TxStore.ListLockedOutputs(ns)
+
+		return err
+	})
+	require.NoError(t, err)
+	require.Empty(t, locks)
+	require.Equal(t, int32(catchUpHeight), w.Manager.SyncedTo().Height)
 }
 
 // mockBirthdayStore is a mock in-memory implementation of the birthdayStore interface
