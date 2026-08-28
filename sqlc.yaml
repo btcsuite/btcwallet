@@ -3,7 +3,11 @@
 version: "2"
 sql:
   - engine: "postgresql"
-    schema: "wallet/internal/sql/pg/migrations"
+    schema:
+      - "wallet/internal/sql/pg/migrations"
+      # Bootstrap DDL lets sqlc type-check identity queries; Store startup
+      # applies it before numbered migrations.
+      - "wallet/internal/sql/pg/bootstrap"
     queries: "wallet/internal/sql/pg/queries"
     gen:
       go:
@@ -24,7 +28,11 @@ sql:
         emit_prepared_queries: true
 
   - engine: "sqlite"
-    schema: "wallet/internal/sql/sqlite/migrations"
+    schema:
+      - "wallet/internal/sql/sqlite/migrations"
+      # Bootstrap DDL lets sqlc type-check identity queries; Store startup
+      # applies it before numbered migrations.
+      - "wallet/internal/sql/sqlite/bootstrap"
     queries: "wallet/internal/sql/sqlite/queries"
     gen:
       go:
