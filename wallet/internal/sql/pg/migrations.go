@@ -14,15 +14,16 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// newMigrationInstance creates a migrate instance from embedded postgres
-// migrations.
+// newMigrationInstance pins metadata to btcwallet despite ambient search paths.
 func newMigrationInstance(db *sql.DB) (*gomigrate.Migrate, error) {
 	sourceDriver, err := iofs.New(migrationFS, "migrations")
 	if err != nil {
 		return nil, fmt.Errorf("create source driver: %w", err)
 	}
 
-	driver, err := migrate.WithInstance(db, &migrate.Config{})
+	driver, err := migrate.WithInstance(db, &migrate.Config{
+		SchemaName: WalletSchemaName,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("create postgres driver: %w", err)
 	}
