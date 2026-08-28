@@ -1,5 +1,9 @@
 module github.com/btcsuite/btcwallet
 
+// TODO: Remove this replace after publishing a wtxmgr release that contains
+// release-after-spend output leases.
+replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
+
 require (
 	github.com/btcsuite/btcd v0.25.1-0.20260310163610-1c55c7c18179
 	github.com/btcsuite/btcd/btcec/v2 v2.3.5
