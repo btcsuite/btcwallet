@@ -3,13 +3,18 @@ package sqlite
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfigValidateSuccess tests valid Config scenarios.
+// TestConfigValidateSuccess isolates pool rules with fixed path and identity.
 func TestConfigValidateSuccess(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Fix path and identity so each case isolates pool validation.
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name   string
@@ -35,7 +40,12 @@ func TestConfigValidateSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			tc.config.Identity = identity
+
+			// Act: Validate each fully assembled SQLite configuration.
 			err := tc.config.Validate()
+
+			// Assert: Default and bounded pools both accept the identity.
 			require.NoError(t, err)
 		})
 	}

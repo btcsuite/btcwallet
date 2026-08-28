@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,6 +133,26 @@ func TestManagerConfigValidate(t *testing.T) {
 			require.ErrorIs(t, err, test.wantIs)
 			require.ErrorContains(t, err, test.wantMsg)
 		})
+	}
+}
+
+// TestNewManagerRejectsInvalidSQLIdentity proves identity precedes SQL setup.
+func TestNewManagerRejectsInvalidSQLIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A missing signet digest and unusable source expose ordering.
+	for _, backend := range []DBBackend{DBBackendSQLite, DBBackendPostgres} {
+		cfg := ManagerConfig{
+			Backend: backend, DataSource: "\x00/db",
+			ChainParams: &chaincfg.SigNetParams,
+		}
+
+		// Act: Construct the Manager through the selected SQL backend.
+		manager, err := NewManager(t.Context(), cfg)
+
+		// Assert: Invalid identity wins before the unusable source is read.
+		require.ErrorIs(t, err, db.ErrInvalidDatabaseIdentity, backend)
+		require.Nil(t, manager, backend)
 	}
 }
 

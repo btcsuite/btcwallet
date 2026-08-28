@@ -1652,15 +1652,18 @@ func TestScriptForOutputScriptClasses(t *testing.T) {
 func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	t.Parallel()
 
-	// Imported addresses never derive, so a stub derivation is enough.
+	// Arrange: Use a stub deriver and real identity for the imported address.
 	deriveAddress := func(context.Context,
 		db.AddressDerivationParams) (*db.DerivedAddressData, error) {
 
 		return nil, errDerivationFailed
 	}
+	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
+	require.NoError(t, err)
 	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
 		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
 		DeriveAddress: deriveAddress,
+		Identity:      identity,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1717,9 +1720,9 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	require.NoError(t, err)
 	chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
 
+	// Act: Import, inspect ciphertext, then resolve before and after locking.
 	info, err := w.ImportTaprootScript(t.Context(), tapscript)
 	require.NoError(t, err)
-	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
 
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
@@ -1738,9 +1741,6 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	require.NotEmpty(t, secret.EncryptedScript)
-	require.NotEqual(t, encodedScript, secret.EncryptedScript,
-		"a watch-only wallet's script must not persist in plaintext")
 
 	// ScriptForOutput reads the imported script back through the same vault
 	// that sealed it, returning the revealed leaf script.
@@ -1748,7 +1748,6 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 		t.Context(), wire.TxOut{PkScript: pkScript},
 	)
 	require.NoError(t, err)
-	require.Equal(t, leafScript, got.Script)
 
 	// A locked vault has no key to open the script with: the script key is
 	// zeroed on lock even on a watch-only wallet.
@@ -1757,8 +1756,13 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	_, err = w.ScriptForOutput(
 		t.Context(), wire.TxOut{PkScript: pkScript},
 	)
-	require.ErrorIs(t, err, keyvault.ErrVaultLocked)
 
+	// Assert: The import is sealed, resolves unlocked, and fails when locked.
+	require.Equal(t, waddrmgr.TaprootScript, info.AddrType)
+	require.NotEmpty(t, secret.EncryptedScript)
+	require.NotEqual(t, encodedScript, secret.EncryptedScript)
+	require.Equal(t, leafScript, got.Script)
+	require.ErrorIs(t, err, keyvault.ErrVaultLocked)
 	chain.AssertExpectations(t)
 }
 
@@ -1982,10 +1986,13 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 
 		return w.deriveAddressData(ctx, params)
 	}
+	identity, err := db.NewDatabaseIdentity(&chainParams, nil)
+	require.NoError(t, err)
 
 	store, err := sqlitedb.NewStore(t.Context(), sqlitedb.Config{
 		DBPath:        filepath.Join(t.TempDir(), "wallet.sqlite"),
 		DeriveAddress: deriveAddress,
+		Identity:      identity, // Reject cross-network SQL reuse.
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
