@@ -256,39 +256,13 @@ func NewTestStore(t *testing.T) *pg.Store {
 	return NewTestStoreWithDerive(t, mockDeriveFunc())
 }
 
-// NewTestStoreWithDerive creates a new PostgreSQL database for testing with the
-// provided address derivation function.
+// NewTestStoreWithDerive creates a regression-identity PostgreSQL database with
+// the provided derivation function so established tests traverse the gate.
 func NewTestStoreWithDerive(t *testing.T,
 	deriveAddress db.AddressDerivationFunc) *pg.Store {
 
 	t.Helper()
-	ctx := t.Context()
-
-	container, err := GetPostgresContainer(ctx)
-	require.NoError(t, err, "failed to get postgres container")
-
-	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err, "failed to get connection string")
-
-	// Connect to the default database to create our test database.
-	adminDB, err := sql.Open("pgx", connStr)
-	require.NoError(t, err, "failed to open admin connection")
-	require.NotNil(t, adminDB, "admin connection is nil")
-
-	// Create a database name based on the test name.
-	dbName := sanitizedPgDBName(t)
-
-	// Create the test database.
-	createDBStmt := "CREATE DATABASE " + dbName
-	_, err = adminDB.ExecContext(ctx, createDBStmt)
-	require.NoError(t, err, "failed to create test database")
-
-	// Close the connection to avoid leaking an idle connection during tests.
-	// The container is reused across all tests, so we explicitly clean this up.
-	_ = adminDB.Close()
-
-	// Build the connection string for the test database.
-	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
+	testConnStr := newPostgresIdentityDSN(t)
 	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
 	require.NoError(t, err)
 
@@ -307,6 +281,154 @@ func NewTestStoreWithDerive(t *testing.T,
 	})
 
 	return store
+}
+
+// newPostgresIdentityDSN uses admin SQL to isolate one schema-absent DSN.
+func newPostgresIdentityDSN(t *testing.T) string {
+	t.Helper()
+
+	ctx := t.Context()
+	container, err := GetPostgresContainer(ctx)
+	require.NoError(t, err, "failed to get postgres container")
+	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err, "failed to get connection string")
+
+	// Connect to the default database to create our test database.
+	adminDB, err := sql.Open("pgx", connStr)
+	require.NoError(t, err, "failed to open admin connection")
+	require.NotNil(t, adminDB, "admin connection is nil")
+
+	// Create a database name based on the test name.
+	dbName := sanitizedPgDBName(t)
+
+	// Create the test database.
+	_, err = adminDB.ExecContext(ctx, "CREATE DATABASE "+dbName)
+
+	// Close the connection to avoid leaking an idle connection during tests.
+	// The container is reused across all tests, so we explicitly clean this up.
+	_ = adminDB.Close()
+
+	require.NoError(t, err, "failed to create test database")
+
+	// Build the connection string for the test database.
+	return strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
+}
+
+// openIdentityStore joins open/close errors so rejection leaks no PG Store.
+func openIdentityStore(t *testing.T, dsn string,
+	id db.DatabaseIdentity) (*pg.Store, error) {
+
+	t.Helper()
+
+	store, err := pg.NewStore(t.Context(), pg.Config{Dsn: dsn, Identity: id})
+	if store == nil {
+		return nil, errors.Join(err, errors.New("nil Store"))
+	}
+
+	return store, errors.Join(err, store.Close())
+}
+
+// TestPostgresDatabaseIdentity proves startup gating against real bare storage.
+func TestPostgresDatabaseIdentity(t *testing.T) {
+	// Arrange: Build the ordinary and same-prefix signet tuples reused below.
+	c := chaincfg.DefaultSignetChallenge
+	digest := chainhash.DoubleHashB(append([]byte{byte(len(c))}, c...))
+	otherDigest := append([]byte(nil), digest...)
+	otherDigest[len(otherDigest)-1] ^= 1
+	signetParams := &chaincfg.SigNetParams
+	regtest, regErr := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	testnet, testErr := db.NewDatabaseIdentity(&chaincfg.TestNet3Params, nil)
+	signet, sigErr := db.NewDatabaseIdentity(signetParams, digest)
+	otherSignet, otherErr := db.NewDatabaseIdentity(signetParams, otherDigest)
+	require.NoError(t, errors.Join(regErr, testErr, sigErr, otherErr))
+
+	t.Run("initializes and reopens", func(t *testing.T) {
+		// Arrange: Select one bare database for both startup attempts.
+		dsn := newPostgresIdentityDSN(t)
+
+		// Act: Open the database twice with the regression-test tuple.
+		_, firstErr := openIdentityStore(t, dsn, regtest)
+		_, secondErr := openIdentityStore(t, dsn, regtest)
+
+		// Assert: Initial creation and matching reopen both return a Store.
+		require.NoError(t, errors.Join(firstErr, secondErr))
+	})
+
+	t.Run("rejects wrong network", func(t *testing.T) {
+		// Arrange: Persist regression testnet in one bare database.
+		dsn := newPostgresIdentityDSN(t)
+		_, err := openIdentityStore(t, dsn, regtest)
+		require.NoError(t, err)
+
+		// Act: Try testnet, then retry the stored regression-test tuple.
+		rejected, rejectErr := openIdentityStore(t, dsn, testnet)
+		_, reopenErr := openIdentityStore(t, dsn, regtest)
+
+		// Assert: Only the mismatch stops and returns no Store.
+		require.ErrorIs(t, rejectErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, rejected)
+		require.NoError(t, reopenErr)
+	})
+
+	t.Run("rejects different signet", func(t *testing.T) {
+		// Arrange: Persist one full signet challenge digest.
+		dsn := newPostgresIdentityDSN(t)
+		_, err := openIdentityStore(t, dsn, signet)
+		require.NoError(t, err)
+
+		// Act: Try the other digest, then retry the stored digest.
+		rejected, rejectErr := openIdentityStore(t, dsn, otherSignet)
+		_, reopenErr := openIdentityStore(t, dsn, signet)
+
+		// Assert: The full digest mismatch leaves the original usable.
+		require.ErrorIs(t, rejectErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, rejected)
+		require.NoError(t, reopenErr)
+	})
+
+	t.Run("rejects populated schema", func(t *testing.T) {
+		// Arrange: Seed a function-only schema to prove non-adoption.
+		dsn := newPostgresIdentityDSN(t)
+		q := "CREATE FUNCTION btcwallet.f() RETURNS int LANGUAGE SQL RETURN 1"
+		seed, err := sql.Open("pgx", dsn)
+		require.NoError(t, err)
+		_, err = seed.ExecContext(t.Context(), "CREATE SCHEMA btcwallet")
+		require.NoError(t, err)
+		_, err = seed.ExecContext(t.Context(), q)
+		require.NoError(t, err)
+		require.NoError(t, seed.Close())
+
+		// Act: Attempt startup, then inspect durable state through raw SQL.
+		store, openErr := openIdentityStore(t, dsn, regtest)
+		inspectDB, inspectErr := sql.Open("pgx", dsn)
+
+		var functionPresent, relationsAbsent bool
+
+		if inspectErr == nil {
+			inspectErr = inspectDB.QueryRowContext(t.Context(), `
+				SELECT
+					to_regprocedure('btcwallet.f()') IS NOT NULL,
+					NOT EXISTS (
+						SELECT 1 FROM pg_class AS c
+						JOIN pg_namespace AS n ON n.oid = c.relnamespace
+						WHERE n.nspname = 'btcwallet'
+					)
+			`).Scan(&functionPresent, &relationsAbsent)
+		}
+
+		if inspectDB != nil {
+			inspectErr = errors.Join(inspectErr, inspectDB.Close())
+		}
+
+		// Assert: Rejection preserves the function and creates no relations.
+		require.ErrorIs(t, openErr, db.ErrDatabaseIdentityMismatch)
+		require.Nil(t, store)
+		require.NoError(t, inspectErr)
+		require.True(t, functionPresent)
+		require.True(t, relationsAbsent)
+	})
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
