@@ -81,6 +81,9 @@ type Querier interface {
 	// - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
 	//   ownership through the creating transaction.
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
+	// CountDatabaseIdentities verifies the singleton invariant before any stored
+	// values are trusted by startup.
+	CountDatabaseIdentities(ctx context.Context) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
 	// Creates the parent row for a wallet-derived account under the given scope.
@@ -190,6 +193,9 @@ type Querier interface {
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int32) (Block, error)
 	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	// GetDatabaseIdentity reads the canonical row only after startup has proved
+	// that exactly one row exists.
+	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
 	// Retrieves a key scope by its ID.
 	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
@@ -279,6 +285,9 @@ type Querier interface {
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	// InsertDatabaseIdentity writes the only permitted row after the namespace
+	// probe proves the fixed schema is absent and safe to claim.
+	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
 	// Inserts secrets for a spendable key scope. Watch-only scopes are represented
 	// by an absent key_scope_secrets row.
 	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
@@ -330,6 +339,9 @@ type Querier interface {
 	InsertUtxo(ctx context.Context, arg InsertUtxoParams) (int64, error)
 	InsertWalletSecrets(ctx context.Context, arg InsertWalletSecretsParams) error
 	InsertWalletSyncState(ctx context.Context, arg InsertWalletSyncStateParams) error
+	// InspectDatabaseIdentityNamespace permits first adoption only when the fixed
+	// schema is absent and identifies a marked schema only by its ordinary table.
+	InspectDatabaseIdentityNamespace(ctx context.Context) (InspectDatabaseIdentityNamespaceRow, error)
 	// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 	ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error)
 	// Lists all accounts for a wallet.

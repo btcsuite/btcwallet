@@ -80,6 +80,9 @@ type Querier interface {
 	// - Uses the `(spent_by_tx_id)` index to find affected rows and rechecks wallet
 	//   ownership through the creating transaction.
 	ClearUtxosSpentByTxID(ctx context.Context, arg ClearUtxosSpentByTxIDParams) (int64, error)
+	// CountDatabaseIdentities verifies the singleton invariant before any stored
+	// values are trusted by startup.
+	CountDatabaseIdentities(ctx context.Context) (int64, error)
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
 	// Creates the parent row for a wallet-derived account under the given scope.
@@ -187,6 +190,9 @@ type Querier interface {
 	GetAndIncrementNextInternalIndex(ctx context.Context, id int64) (int64, error)
 	GetBlockByHeight(ctx context.Context, blockHeight int64) (Block, error)
 	GetBlocksInRange(ctx context.Context, arg GetBlocksInRangeParams) ([]Block, error)
+	// GetDatabaseIdentity reads the canonical row only after startup has proved
+	// that exactly one row exists.
+	GetDatabaseIdentity(ctx context.Context) (GetDatabaseIdentityRow, error)
 	// Retrieves a key scope by its ID.
 	GetKeyScopeByID(ctx context.Context, id int64) (GetKeyScopeByIDRow, error)
 	// Retrieves a key scope by wallet ID, purpose, and coin type.
@@ -276,6 +282,9 @@ type Querier interface {
 	// Not used for derived addresses (their keys are derived from account key).
 	InsertAddressSecret(ctx context.Context, arg InsertAddressSecretParams) error
 	InsertBlock(ctx context.Context, arg InsertBlockParams) error
+	// InsertDatabaseIdentity writes the only permitted row after catalog checks
+	// prove that an unmarked SQLite file is empty and safe to claim.
+	InsertDatabaseIdentity(ctx context.Context, arg InsertDatabaseIdentityParams) error
 	// Inserts secrets for a spendable key scope. Watch-only scopes are represented
 	// by an absent key_scope_secrets row.
 	InsertKeyScopeSecrets(ctx context.Context, arg InsertKeyScopeSecretsParams) error
