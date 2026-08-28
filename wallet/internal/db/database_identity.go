@@ -2,6 +2,8 @@ package db
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -99,4 +101,38 @@ func (i DatabaseIdentity) Matches(genesisHash []byte, networkMagic int64,
 			i.hasSignetInput && bytes.Equal(
 				signetDigest, i.signetDigest[:],
 			))
+}
+
+// VerifyStoredDatabaseIdentity applies the backend-neutral singleton and tuple
+// contract while leaving operational query failures distinguishable.
+func VerifyStoredDatabaseIdentity(ctx context.Context,
+	identity DatabaseIdentity,
+	count func(context.Context) (int64, error),
+	read func(context.Context) ([]byte, int64, []byte, error)) error {
+
+	rowCount, err := count(ctx)
+	if err != nil {
+		return fmt.Errorf("count database identities: %w", err)
+	}
+
+	if rowCount != 1 {
+		return fmt.Errorf("%w: identity row count is %d",
+			ErrDatabaseIdentityMismatch, rowCount)
+	}
+
+	genesisHash, networkMagic, signetDigest, err := read(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: singleton row is missing",
+			ErrDatabaseIdentityMismatch)
+	}
+
+	if err != nil {
+		return fmt.Errorf("read database identity: %w", err)
+	}
+
+	if !identity.Matches(genesisHash, networkMagic, signetDigest) {
+		return ErrDatabaseIdentityMismatch
+	}
+
+	return nil
 }

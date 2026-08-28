@@ -275,6 +275,29 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	require.NoError(t, zeroManager.Close())
 }
 
+// TestNewManagerRejectsInvalidSQLIdentity proves identity precedes SQL setup.
+func TestNewManagerRejectsInvalidSQLIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: A missing signet digest and unusable data source expose ordering
+	// after every unrelated Manager runtime input passes validation.
+	for _, backend := range []DBBackend{DBBackendSQLite, DBBackendPostgres} {
+		cfg := ManagerConfig{
+			Backend:     backend,
+			DataSource:  "\x00/db",
+			ChainParams: chaincfg.SigNetParams,
+			ChainSource: &bwmock.Chain{},
+		}
+
+		// Act: Construct the Manager through the selected SQL backend.
+		manager, err := NewManager(t.Context(), cfg)
+
+		// Assert: Invalid identity wins before the unusable source is read.
+		require.ErrorIs(t, err, ErrInvalidDatabaseIdentity, backend)
+		require.Nil(t, manager, backend)
+	}
+}
+
 // TestManagerConfigTimeout verifies that an unset walletdb timeout falls
 // back to the default instead of zero, which walletdb treats as no wait.
 func TestManagerConfigTimeout(t *testing.T) {
