@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"net"
 	"os"
 	"regexp"
@@ -262,11 +263,34 @@ func NewTestStoreWithDerive(t *testing.T,
 	deriveAddress db.AddressDerivationFunc) *pg.Store {
 
 	t.Helper()
-	ctx := t.Context()
+	testConnStr := newPostgresIdentityDSN(t)
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
 
+	cfg := pg.Config{
+		Dsn:            testConnStr,
+		MaxConnections: 0,
+		DeriveAddress:  deriveAddress,
+		Identity:       identity,
+	}
+
+	store, err := pg.NewStore(t.Context(), cfg)
+	require.NoError(t, err, "failed to create postgres store")
+
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	return store
+}
+
+// newPostgresIdentityDSN uses admin SQL to isolate one schema-absent DSN.
+func newPostgresIdentityDSN(t *testing.T) string {
+	t.Helper()
+
+	ctx := t.Context()
 	container, err := GetPostgresContainer(ctx)
 	require.NoError(t, err, "failed to get postgres container")
-
 	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err, "failed to get connection string")
 
@@ -288,25 +312,104 @@ func NewTestStoreWithDerive(t *testing.T,
 	_ = adminDB.Close()
 
 	// Build the connection string for the test database.
-	testConnStr := strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
+	return strings.Replace(connStr, "/postgres?", "/"+dbName+"?", 1)
+}
+
+// postgresDatabaseIdentityFixture exposes PostgreSQL setup behind the shared
+// contract while keeping the concrete NewStore call visible in this file.
+func postgresDatabaseIdentityFixture(t *testing.T,
+	dsn string) databaseIdentityFixture {
+
+	t.Helper()
+
+	return databaseIdentityFixture{
+		driver: "pgx",
+		source: dsn,
+		open: func(identity db.DatabaseIdentity) (
+			io.Closer, error) {
+
+			store, err := pg.NewStore(
+				t.Context(), pg.Config{Dsn: dsn, Identity: identity},
+			)
+			if store == nil {
+				return nil, err
+			}
+
+			return store, err
+		},
+		malformations: map[string][]string{
+			// Preserve the marker table while removing its required row.
+			"missing singleton": {
+				"DELETE FROM btcwallet.database_identity",
+			},
+			// Replace the marker with one missing every identity column.
+			"unreadable table": {
+				"DROP TABLE btcwallet.database_identity",
+				"CREATE TABLE btcwallet.database_identity (id SMALLINT)",
+			},
+			// Remove constraints so PostgreSQL can persist oversized magic.
+			"invalid stored value": {
+				"DROP TABLE btcwallet.database_identity",
+				`CREATE TABLE btcwallet.database_identity (
+					id SMALLINT PRIMARY KEY,
+					genesis_hash BYTEA NOT NULL,
+					network_magic BIGINT NOT NULL,
+					signet_challenge_digest BYTEA
+				)`,
+				`INSERT INTO btcwallet.database_identity VALUES (
+					1, decode(repeat('00', 32), 'hex'), 4294967296, NULL
+				)`,
+			},
+		},
+	}
+}
+
+// newDatabaseIdentityFixture gives the shared contract one isolated database.
+func newDatabaseIdentityFixture(t *testing.T) databaseIdentityFixture {
+	t.Helper()
+
+	return postgresDatabaseIdentityFixture(t, newPostgresIdentityDSN(t))
+}
+
+// TestPostgresDatabaseIdentityRejectsPopulatedSchema proves startup does not
+// add any relation beside foreign state in an unmarked wallet namespace.
+func TestPostgresDatabaseIdentityRejectsPopulatedSchema(t *testing.T) {
+	// Arrange: Seed a function-only schema to prove non-adoption.
+	dsn := newPostgresIdentityDSN(t)
+	q := "CREATE FUNCTION btcwallet.f() RETURNS int LANGUAGE SQL RETURN 1"
+	seed, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	_, err = seed.ExecContext(t.Context(), "CREATE SCHEMA btcwallet")
+	require.NoError(t, err)
+	_, err = seed.ExecContext(t.Context(), q)
+	require.NoError(t, err)
+	fixture := postgresDatabaseIdentityFixture(t, dsn)
 	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
 	require.NoError(t, err)
 
-	cfg := pg.Config{
-		Dsn:            testConnStr,
-		MaxConnections: 0,
-		DeriveAddress:  deriveAddress,
-		Identity:       identity,
-	}
+	// Act: Attempt startup, then count every durable schema relation.
+	store, openErr := openIdentityStore(t, fixture, identity)
 
-	store, err := pg.NewStore(t.Context(), cfg)
-	require.NoError(t, err, "failed to create postgres store")
+	var functionPresent, relationsAbsent bool
 
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
+	inspectErr := seed.QueryRowContext(t.Context(), `
+		SELECT
+			to_regprocedure('btcwallet.f()') IS NOT NULL,
+			NOT EXISTS (
+				SELECT 1 FROM pg_class AS c
+				JOIN pg_namespace AS n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'btcwallet'
+			)
+	`).Scan(&functionPresent, &relationsAbsent)
+	closeErr := seed.Close()
 
-	return store
+	// Assert: The function remains and no identity, migration, or wallet
+	// relation was added.
+	require.ErrorIs(t, openErr, db.ErrDatabaseIdentityMismatch)
+	require.Nil(t, store)
+	require.NoError(t, errors.Join(inspectErr, closeErr))
+	require.True(t, functionPresent)
+	require.True(t, relationsAbsent)
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the
