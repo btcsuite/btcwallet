@@ -1,12 +1,37 @@
 package sqlite
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
+
+// TestDatabaseIdentityCancellationPreservesCause proves startup failures do
+// not masquerade as persisted identity mismatches.
+func TestDatabaseIdentityCancellationPreservesCause(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Cancel before BeginTx so no identity state can be inspected.
+	identity, err := db.NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
+	dbConn, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Attempt initialization and close the unused database handle.
+	initErr := initializeDatabaseIdentity(ctx, dbConn, identity)
+	closeErr := dbConn.Close()
+
+	// Assert: Cancellation remains detectable without the mismatch sentinel.
+	require.ErrorIs(t, initErr, context.Canceled)
+	require.NotErrorIs(t, initErr, db.ErrDatabaseIdentityMismatch)
+	require.NoError(t, closeErr)
+}
 
 // TestConfigValidateSuccess isolates pool rules with fixed path and identity.
 func TestConfigValidateSuccess(t *testing.T) {
