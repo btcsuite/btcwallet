@@ -45,6 +45,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.clearUtxosSpentByTxIDStmt, err = db.PrepareContext(ctx, ClearUtxosSpentByTxID); err != nil {
 		return nil, fmt.Errorf("error preparing query ClearUtxosSpentByTxID: %w", err)
 	}
+	if q.countDatabaseIdentitiesStmt, err = db.PrepareContext(ctx, CountDatabaseIdentities); err != nil {
+		return nil, fmt.Errorf("error preparing query CountDatabaseIdentities: %w", err)
+	}
 	if q.createAccountSecretStmt, err = db.PrepareContext(ctx, CreateAccountSecret); err != nil {
 		return nil, fmt.Errorf("error preparing query CreateAccountSecret: %w", err)
 	}
@@ -141,6 +144,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.getBlocksInRangeStmt, err = db.PrepareContext(ctx, GetBlocksInRange); err != nil {
 		return nil, fmt.Errorf("error preparing query GetBlocksInRange: %w", err)
 	}
+	if q.getDatabaseIdentityStmt, err = db.PrepareContext(ctx, GetDatabaseIdentity); err != nil {
+		return nil, fmt.Errorf("error preparing query GetDatabaseIdentity: %w", err)
+	}
 	if q.getKeyScopeByIDStmt, err = db.PrepareContext(ctx, GetKeyScopeByID); err != nil {
 		return nil, fmt.Errorf("error preparing query GetKeyScopeByID: %w", err)
 	}
@@ -183,6 +189,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertBlockStmt, err = db.PrepareContext(ctx, InsertBlock); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertBlock: %w", err)
 	}
+	if q.insertDatabaseIdentityStmt, err = db.PrepareContext(ctx, InsertDatabaseIdentity); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertDatabaseIdentity: %w", err)
+	}
 	if q.insertKeyScopeSecretsStmt, err = db.PrepareContext(ctx, InsertKeyScopeSecrets); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertKeyScopeSecrets: %w", err)
 	}
@@ -203,6 +212,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.insertWalletSyncStateStmt, err = db.PrepareContext(ctx, InsertWalletSyncState); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertWalletSyncState: %w", err)
+	}
+	if q.inspectDatabaseIdentityNamespaceStmt, err = db.PrepareContext(ctx, InspectDatabaseIdentityNamespace); err != nil {
+		return nil, fmt.Errorf("error preparing query InspectDatabaseIdentityNamespace: %w", err)
 	}
 	if q.listAccountsByScopeStmt, err = db.PrepareContext(ctx, ListAccountsByScope); err != nil {
 		return nil, fmt.Errorf("error preparing query ListAccountsByScope: %w", err)
@@ -347,6 +359,11 @@ func (q *Queries) Close() error {
 	if q.clearUtxosSpentByTxIDStmt != nil {
 		if cerr := q.clearUtxosSpentByTxIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing clearUtxosSpentByTxIDStmt: %w", cerr)
+		}
+	}
+	if q.countDatabaseIdentitiesStmt != nil {
+		if cerr := q.countDatabaseIdentitiesStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing countDatabaseIdentitiesStmt: %w", cerr)
 		}
 	}
 	if q.createAccountSecretStmt != nil {
@@ -509,6 +526,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing getBlocksInRangeStmt: %w", cerr)
 		}
 	}
+	if q.getDatabaseIdentityStmt != nil {
+		if cerr := q.getDatabaseIdentityStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing getDatabaseIdentityStmt: %w", cerr)
+		}
+	}
 	if q.getKeyScopeByIDStmt != nil {
 		if cerr := q.getKeyScopeByIDStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing getKeyScopeByIDStmt: %w", cerr)
@@ -579,6 +601,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertBlockStmt: %w", cerr)
 		}
 	}
+	if q.insertDatabaseIdentityStmt != nil {
+		if cerr := q.insertDatabaseIdentityStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertDatabaseIdentityStmt: %w", cerr)
+		}
+	}
 	if q.insertKeyScopeSecretsStmt != nil {
 		if cerr := q.insertKeyScopeSecretsStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertKeyScopeSecretsStmt: %w", cerr)
@@ -612,6 +639,11 @@ func (q *Queries) Close() error {
 	if q.insertWalletSyncStateStmt != nil {
 		if cerr := q.insertWalletSyncStateStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertWalletSyncStateStmt: %w", cerr)
+		}
+	}
+	if q.inspectDatabaseIdentityNamespaceStmt != nil {
+		if cerr := q.inspectDatabaseIdentityNamespaceStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing inspectDatabaseIdentityNamespaceStmt: %w", cerr)
 		}
 	}
 	if q.listAccountsByScopeStmt != nil {
@@ -835,6 +867,7 @@ type Queries struct {
 	advanceNextInternalIndexStmt                *sql.Stmt
 	balanceStmt                                 *sql.Stmt
 	clearUtxosSpentByTxIDStmt                   *sql.Stmt
+	countDatabaseIdentitiesStmt                 *sql.Stmt
 	createAccountSecretStmt                     *sql.Stmt
 	createDerivedAccountStmt                    *sql.Stmt
 	createDerivedAddressStmt                    *sql.Stmt
@@ -867,6 +900,7 @@ type Queries struct {
 	getAndIncrementNextInternalIndexStmt        *sql.Stmt
 	getBlockByHeightStmt                        *sql.Stmt
 	getBlocksInRangeStmt                        *sql.Stmt
+	getDatabaseIdentityStmt                     *sql.Stmt
 	getKeyScopeByIDStmt                         *sql.Stmt
 	getKeyScopeByWalletAndScopeStmt             *sql.Stmt
 	getKeyScopeSecretsStmt                      *sql.Stmt
@@ -881,6 +915,7 @@ type Queries struct {
 	hasInvalidWalletUtxoByOutpointStmt          *sql.Stmt
 	insertAddressSecretStmt                     *sql.Stmt
 	insertBlockStmt                             *sql.Stmt
+	insertDatabaseIdentityStmt                  *sql.Stmt
 	insertKeyScopeSecretsStmt                   *sql.Stmt
 	insertTransactionStmt                       *sql.Stmt
 	insertTxReplacementEdgeStmt                 *sql.Stmt
@@ -888,6 +923,7 @@ type Queries struct {
 	insertUtxoStmt                              *sql.Stmt
 	insertWalletSecretsStmt                     *sql.Stmt
 	insertWalletSyncStateStmt                   *sql.Stmt
+	inspectDatabaseIdentityNamespaceStmt        *sql.Stmt
 	listAccountsByScopeStmt                     *sql.Stmt
 	listAccountsByWalletStmt                    *sql.Stmt
 	listAccountsByWalletAndNameStmt             *sql.Stmt
@@ -936,6 +972,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		advanceNextInternalIndexStmt:                q.advanceNextInternalIndexStmt,
 		balanceStmt:                                 q.balanceStmt,
 		clearUtxosSpentByTxIDStmt:                   q.clearUtxosSpentByTxIDStmt,
+		countDatabaseIdentitiesStmt:                 q.countDatabaseIdentitiesStmt,
 		createAccountSecretStmt:                     q.createAccountSecretStmt,
 		createDerivedAccountStmt:                    q.createDerivedAccountStmt,
 		createDerivedAddressStmt:                    q.createDerivedAddressStmt,
@@ -968,6 +1005,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		getAndIncrementNextInternalIndexStmt:        q.getAndIncrementNextInternalIndexStmt,
 		getBlockByHeightStmt:                        q.getBlockByHeightStmt,
 		getBlocksInRangeStmt:                        q.getBlocksInRangeStmt,
+		getDatabaseIdentityStmt:                     q.getDatabaseIdentityStmt,
 		getKeyScopeByIDStmt:                         q.getKeyScopeByIDStmt,
 		getKeyScopeByWalletAndScopeStmt:             q.getKeyScopeByWalletAndScopeStmt,
 		getKeyScopeSecretsStmt:                      q.getKeyScopeSecretsStmt,
@@ -982,6 +1020,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		hasInvalidWalletUtxoByOutpointStmt:          q.hasInvalidWalletUtxoByOutpointStmt,
 		insertAddressSecretStmt:                     q.insertAddressSecretStmt,
 		insertBlockStmt:                             q.insertBlockStmt,
+		insertDatabaseIdentityStmt:                  q.insertDatabaseIdentityStmt,
 		insertKeyScopeSecretsStmt:                   q.insertKeyScopeSecretsStmt,
 		insertTransactionStmt:                       q.insertTransactionStmt,
 		insertTxReplacementEdgeStmt:                 q.insertTxReplacementEdgeStmt,
@@ -989,6 +1028,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertUtxoStmt:                              q.insertUtxoStmt,
 		insertWalletSecretsStmt:                     q.insertWalletSecretsStmt,
 		insertWalletSyncStateStmt:                   q.insertWalletSyncStateStmt,
+		inspectDatabaseIdentityNamespaceStmt:        q.inspectDatabaseIdentityNamespaceStmt,
 		listAccountsByScopeStmt:                     q.listAccountsByScopeStmt,
 		listAccountsByWalletStmt:                    q.listAccountsByWalletStmt,
 		listAccountsByWalletAndNameStmt:             q.listAccountsByWalletAndNameStmt,

@@ -55,6 +55,13 @@ type Block struct {
 	BlockTimestamp int64
 }
 
+type BtcwalletDatabaseIdentity struct {
+	ID                    int64
+	GenesisHash           []byte
+	NetworkMagic          int64
+	SignetChallengeDigest []byte
+}
+
 type DerivedAddress struct {
 	AddressID     int64
 	WalletID      int64
