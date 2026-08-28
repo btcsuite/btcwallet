@@ -17,15 +17,18 @@ This is the knowledge base for the `wallet/internal/sql/` subsystem. It manages
 |:--------------------------|:---------------------|:--------------------------------------------|
 | **PostgreSQL Queries**    | `pg/queries/`        | Raw SQL query files for PostgreSQL.         |
 | **PostgreSQL Migrations** | `pg/migrations/`     | Schema migration files for PostgreSQL.      |
+| **PostgreSQL Bootstrap**  | `pg/bootstrap/`      | Pre-migration identity DDL for PostgreSQL.  |
 | **PostgreSQL Generated**  | `pg/sqlc/`           | Generated Go code from sqlc for PostgreSQL. |
 | **SQLite Queries**        | `sqlite/queries/`    | Raw SQL query files for SQLite.             |
 | **SQLite Migrations**     | `sqlite/migrations/` | Schema migration files for SQLite.          |
+| **SQLite Bootstrap**      | `sqlite/bootstrap/`  | Pre-migration identity DDL for SQLite.      |
 | **SQLite Generated**      | `sqlite/sqlc/`       | Generated Go code from sqlc for SQLite.     |
 
 ## GENERATED CODE BOUNDARIES
 - Don't edit any files under `sqlc/` directories directly, including `*.sql.go`,
   `models.go`, `db.go`, and `querier.go`.
-- Modify the source `.sql` files under `queries/` or `migrations/` instead.
+- Modify source `.sql` under `queries/`, `migrations/`, or `bootstrap/`
+  instead.
 - Run `make sql` to regenerate the Go code after making changes. This command is
   mutating, runs lint auto-fixes, and rewrites files. Always run it on a clean
   git tree.
