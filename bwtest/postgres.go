@@ -211,8 +211,8 @@ func postgresDatabaseDSN(adminDSN, database string) (string, error) {
 	return dsn.String(), nil
 }
 
-// validatePostgresSchema verifies that the PostgreSQL data source is reachable
-// and contains the migrated wallet schema.
+// validatePostgresSchema checks that migrations reached the fixed btcwallet
+// namespace selected after identity startup.
 func validatePostgresSchema(dsn string) (err error) {
 	dbConn, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -234,7 +234,7 @@ func validatePostgresSchema(dsn string) (err error) {
 		SELECT EXISTS (
 			SELECT 1
 			FROM information_schema.tables
-			WHERE table_schema = 'public' AND table_name = 'wallets'
+			WHERE table_schema = 'btcwallet' AND table_name = 'wallets'
 		)
 	`).Scan(&exists)
 	if err != nil {
