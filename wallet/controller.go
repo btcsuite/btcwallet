@@ -235,7 +235,7 @@ func (w *Wallet) Start(startCtx context.Context) error {
 // retries and exponential backoff. It ensures the wallet attempts to stay
 // synced even if the backend connection is flaky.
 func (w *Wallet) runSyncLoop() {
-	backoff := initialBackoff
+	backoff := w.initialSyncBackoff()
 
 	for {
 		startTime := time.Now()
@@ -270,6 +270,16 @@ func (w *Wallet) runSyncLoop() {
 	}
 }
 
+// initialSyncBackoff returns the Wallet-local retry policy, preserving the
+// controller default for legacy or test Wallets assembled without Manager.
+func (w *Wallet) initialSyncBackoff() time.Duration {
+	if w.cfg.WalletSyncRetryInterval <= 0 {
+		return initialBackoff
+	}
+
+	return w.cfg.WalletSyncRetryInterval
+}
+
 // waitForBackoff handles the delay between synchronization retry attempts. It
 // resets the backoff if the previous run was stable, waits for the calculated
 // delay, and then returns the updated backoff duration for the next attempt.
@@ -280,7 +290,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 	// If the syncer ran for a significant amount of time, we consider it a
 	// "stable" run and reset the backoff.
 	if time.Since(startTime) > stableRunTime {
-		backoff = initialBackoff
+		backoff = w.initialSyncBackoff()
 	}
 
 	log.Infof("Restarting sync loop in %v...", backoff)
