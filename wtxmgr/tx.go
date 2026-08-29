@@ -398,6 +398,90 @@ func (s *Store) RemoveUnminedTx(ns walletdb.ReadWriteBucket, rec *TxRecord) erro
 	return s.removeConflict(ns, rec)
 }
 
+// RemoveCredits removes the unspent credits identified by the given outpoints
+// from the store, both mined and unmined, so that the wallet stops treating
+// them as its own. The mined balance is decremented by the amount of every
+// removed mined credit. This is to be used when the wallet withdraws ownership
+// of outputs it previously tracked, such as when an imported account is
+// removed together with its addresses.
+//
+// The transaction records the credits are part of are deliberately left in
+// place: other credits of the same transactions may still belong to the
+// wallet, and the balance and pkScript lookups both resolve through the
+// record.
+//
+// A credit that is locked for coin selection or already spent by an unmined
+// transaction is refused with ErrInput rather than removed, since deleting it
+// would leave the lease or the spending chain dangling. An outpoint with no
+// corresponding unspent credit is ignored, making the call idempotent.
+//
+// This function must be called from within a database transaction that is
+// aborted when an error is returned, as a refused outpoint would otherwise
+// leave the removals that preceded it committed.
+func (s *Store) RemoveCredits(ns walletdb.ReadWriteBucket,
+	ops []wire.OutPoint) error {
+
+	minedBalance, err := fetchMinedBalance(ns)
+	if err != nil {
+		return err
+	}
+	balanceChanged := false
+	now := s.clock.Now()
+
+	for i := range ops {
+		op := ops[i]
+		opKey := canonicalOutPoint(&op.Hash, op.Index)
+
+		if _, _, isLocked := isLockedOutput(ns, op, now); isLocked {
+			str := fmt.Sprintf("output %v is locked for coin "+
+				"selection and cannot be removed", op)
+			return storeError(ErrInput, str, nil)
+		}
+		if existsRawUnminedInput(ns, opKey) != nil {
+			str := fmt.Sprintf("output %v is spent by an unmined "+
+				"transaction and cannot be removed", op)
+			return storeError(ErrInput, str, nil)
+		}
+
+		// An unmined credit is a single row keyed by the outpoint and
+		// never part of the mined balance.
+		if existsRawUnminedCredit(ns, opKey) != nil {
+			err := deleteRawUnminedCredit(ns, opKey)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		// A mined credit is found through the unspent index, which
+		// resolves the outpoint to the credit's key in its block.
+		unspentKey, credKey := existsUnspent(ns, &op)
+		if credKey == nil {
+			continue
+		}
+
+		amt, err := fetchRawCreditAmount(existsRawCredit(ns, credKey))
+		if err != nil {
+			return err
+		}
+		if err := deleteRawCredit(ns, credKey); err != nil {
+			return err
+		}
+		if err := deleteRawUnspent(ns, unspentKey); err != nil {
+			return err
+		}
+
+		minedBalance -= amt
+		balanceChanged = true
+	}
+
+	if balanceChanged {
+		return putMinedBalance(ns, minedBalance)
+	}
+
+	return nil
+}
+
 // insertMinedTx inserts a new transaction record for a mined transaction into
 // the database under the confirmed bucket. It guarantees that, if the
 // tranasction was previously unconfirmed, then it will take care of cleaning up

@@ -2901,3 +2901,193 @@ func TestOutputLocks(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveCredits asserts that removing unspent credits drops them from the
+// balance and the unspent set without touching their transaction records, and
+// that leased and unmined-spent outputs are refused.
+func TestRemoveCredits(t *testing.T) {
+	t.Parallel()
+
+	store, db, err := testStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	b100 := &BlockMeta{
+		Block: Block{Height: 100},
+		Time:  time.Now(),
+	}
+
+	// A mined deposit with two credits, so that one can be removed while
+	// the other proves removal does not bleed into sibling credits of the
+	// same transaction.
+	fundingHash := chainhash.Hash{1}
+	deposit := spendOutput(&fundingHash, 0, 1e8, 5e7)
+	depRec, err := NewTxRecordFromMsgTx(deposit, b100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, depRec, b100); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddCredit(ns, depRec, b100, 0, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddCredit(ns, depRec, b100, 1, false); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// An unmined deposit with a single credit.
+	otherFundingHash := chainhash.Hash{2}
+	unminedDeposit := spendOutput(&otherFundingHash, 0, 2e7)
+	unminedRec, err := NewTxRecordFromMsgTx(unminedDeposit, b100.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, unminedRec, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := store.AddCredit(ns, unminedRec, nil, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// checkBalance compares the store's balance at the given minimum
+	// confirmations against an expected value.
+	checkBalance := func(expected btcutil.Amount, minConf int32) {
+		t.Helper()
+
+		commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+			b, err := store.Balance(ns, minConf, b100.Height)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b != expected {
+				t.Fatalf("expected balance %v at minconf %d, "+
+					"got %v", expected, minConf, b)
+			}
+		})
+	}
+	checkBalance(1e8+5e7, 1)
+	checkBalance(1e8+5e7+2e7, 0)
+
+	// Remove the second mined credit and the unmined credit in one call.
+	removed := []wire.OutPoint{
+		{Hash: depRec.Hash, Index: 1},
+		{Hash: unminedRec.Hash, Index: 0},
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.RemoveCredits(ns, removed); err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkBalance(1e8, 1)
+	checkBalance(1e8, 0)
+
+	// Only the untouched sibling credit remains in the unspent set.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		unspent, err := store.UnspentOutputs(ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unspent) != 1 {
+			t.Fatalf("expected 1 unspent output, got %d",
+				len(unspent))
+		}
+		expectedOp := wire.OutPoint{Hash: depRec.Hash, Index: 0}
+		if unspent[0].OutPoint != expectedOp {
+			t.Fatalf("expected unspent output %v, got %v",
+				expectedOp, unspent[0].OutPoint)
+		}
+	})
+
+	// Removing the same outpoints again is a no-op.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.RemoveCredits(ns, removed); err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkBalance(1e8, 0)
+
+	// A leased output is refused until the lease is released.
+	remainingOp := wire.OutPoint{Hash: depRec.Hash, Index: 0}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		_, err := store.LockOutput(
+			ns, LockID{1}, remainingOp, 10*time.Minute,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	err = walletdb.Update(db, func(dbTx walletdb.ReadWriteTx) error {
+		ns := dbTx.ReadWriteBucket(namespaceKey)
+		return store.RemoveCredits(ns, []wire.OutPoint{remainingOp})
+	})
+	if storeErr, ok := err.(Error); !ok || storeErr.Code != ErrInput {
+		t.Fatalf("expected ErrInput for leased output, got %v", err)
+	}
+
+	// The refusal must not have removed anything. The balance cannot show
+	// that while the lease still excludes the output from it, so release
+	// the lease first: the output reappears, and removing it then
+	// succeeds.
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		err := store.UnlockOutput(ns, LockID{1}, remainingOp)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkBalance(1e8, 0)
+
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		err := store.RemoveCredits(ns, []wire.OutPoint{remainingOp})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	checkBalance(0, 0)
+
+	// An output spent by an unmined transaction is refused: removing it
+	// would leave the spending chain dangling.
+	b101 := &BlockMeta{
+		Block: Block{Height: 101},
+		Time:  time.Now(),
+	}
+	lateFundingHash := chainhash.Hash{3}
+	lateDeposit := spendOutput(&lateFundingHash, 0, 3e7)
+	lateRec, err := NewTxRecordFromMsgTx(lateDeposit, b101.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spender := spendOutput(&lateRec.Hash, 0, 1e7)
+	spenderRec, err := NewTxRecordFromMsgTx(spender, b101.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitDBTx(t, store, db, func(ns walletdb.ReadWriteBucket) {
+		if err := store.InsertTx(ns, lateRec, b101); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddCredit(ns, lateRec, b101, 0, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.InsertTx(ns, spenderRec, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	err = walletdb.Update(db, func(dbTx walletdb.ReadWriteTx) error {
+		ns := dbTx.ReadWriteBucket(namespaceKey)
+		return store.RemoveCredits(ns, []wire.OutPoint{
+			{Hash: lateRec.Hash, Index: 0},
+		})
+	})
+	if storeErr, ok := err.(Error); !ok || storeErr.Code != ErrInput {
+		t.Fatalf("expected ErrInput for unmined-spent output, got %v",
+			err)
+	}
+}

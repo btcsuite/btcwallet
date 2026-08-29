@@ -3301,3 +3301,306 @@ func TestManagedAddressValidation(t *testing.T) {
 	}
 
 }
+
+// TestRemoveAccount asserts that removing a watch-only account deletes the
+// account row, its name indexes and every address derived from it, without
+// disturbing other accounts, and that the account's name becomes usable again
+// while its number is never reused.
+func TestRemoveAccount(t *testing.T) {
+	t.Parallel()
+
+	teardown, db := emptyDB(t)
+	defer teardown()
+
+	// We'll start the test by creating a new watch-only root manager that
+	// will be used for the duration of the test.
+	var mgr *Manager
+	err := walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns, err := tx.CreateTopLevelBucket(waddrmgrNamespaceKey)
+		if err != nil {
+			return err
+		}
+		err = Create(
+			ns, nil, pubPassphrase, nil,
+			&chaincfg.MainNetParams, fastScrypt, time.Time{},
+		)
+		if err != nil {
+			return err
+		}
+		mgr, err = Open(ns, pubPassphrase, &chaincfg.MainNetParams)
+		if err != nil {
+			return err
+		}
+
+		_, err = mgr.NewScopedKeyManager(
+			ns, KeyScopeBIP0044, ScopeAddrMap[KeyScopeBIP0044])
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create/open: unexpected error: %v", err)
+	}
+	defer mgr.Close()
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	if err != nil {
+		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0044, err)
+	}
+
+	// Derive three distinct account public keys: one account to remove,
+	// one that must survive the removal untouched, and one for proving the
+	// name becomes reusable.
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		t.Fatalf("NewMaster: unexpected error: %v", err)
+	}
+	scopeKey, err := deriveCoinTypeKey(masterKey, KeyScopeBIP0044)
+	if err != nil {
+		t.Fatalf("derive: unexpected error: %v", err)
+	}
+	acctKeys := make([]*hdkeychain.ExtendedKey, 4)
+	for i := range acctKeys {
+		acctKey, err := deriveAccountKey(scopeKey, uint32(i))
+		if err != nil {
+			t.Fatalf("derive: unexpected error: %v", err)
+		}
+		acctKeys[i], err = acctKey.Neuter()
+		if err != nil {
+			t.Fatalf("neuter: unexpected error: %v", err)
+		}
+	}
+
+	// Create the removal candidate and the surviving account, and derive
+	// external and internal addresses for both.
+	const removedName = "external"
+	var (
+		removedAcct, keptAcct   uint32
+		removedAddrs, keptAddrs []ManagedAddress
+	)
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		// The first account created takes the default account number,
+		// which is not removable, so create a placeholder for it
+		// before the removal candidate.
+		_, err = scopedMgr.NewAccountWatchingOnly(
+			ns, "first", acctKeys[0], 0, nil,
+		)
+		if err != nil {
+			return err
+		}
+
+		removedAcct, err = scopedMgr.NewAccountWatchingOnly(
+			ns, removedName, acctKeys[1], 0, nil,
+		)
+		if err != nil {
+			return err
+		}
+		keptAcct, err = scopedMgr.NewAccountWatchingOnly(
+			ns, "keep", acctKeys[2], 0, nil,
+		)
+		if err != nil {
+			return err
+		}
+
+		extAddrs, err := scopedMgr.NextExternalAddresses(
+			ns, removedAcct, 2,
+		)
+		if err != nil {
+			return err
+		}
+		intAddrs, err := scopedMgr.NextInternalAddresses(
+			ns, removedAcct, 1,
+		)
+		if err != nil {
+			return err
+		}
+		removedAddrs = append(extAddrs, intAddrs...)
+
+		keptAddrs, err = scopedMgr.NextExternalAddresses(
+			ns, keptAcct, 1,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Mark one of the doomed addresses as used so that the
+		// used-address marker's removal is exercised too.
+		return scopedMgr.MarkUsed(ns, removedAddrs[0].Address())
+	})
+	if err != nil {
+		t.Fatalf("unable to set up accounts: %v", err)
+	}
+
+	usedAddrID := removedAddrs[0].Address().ScriptAddress()
+	scope := scopedMgr.Scope()
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		if !fetchAddressUsed(ns, &scope, usedAddrID) {
+			t.Fatal("expected address to be marked used")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the account.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return scopedMgr.RemoveAccount(ns, removedAcct)
+	})
+	if err != nil {
+		t.Fatalf("unable to remove account: %v", err)
+	}
+
+	// The account, its name and all of its addresses must be gone, while
+	// the second account is untouched.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+
+		_, err := scopedMgr.AccountName(ns, removedAcct)
+		checkManagerError(
+			t, "removed account name", err, ErrAccountNotFound,
+		)
+
+		_, err = scopedMgr.LookupAccount(ns, removedName)
+		checkManagerError(
+			t, "removed account lookup", err, ErrAccountNotFound,
+		)
+
+		for i, addr := range removedAddrs {
+			_, err := scopedMgr.Address(ns, addr.Address())
+			checkManagerError(
+				t, fmt.Sprintf("removed address %d", i), err,
+				ErrAddressNotFound,
+			)
+		}
+
+		if fetchAddressUsed(ns, &scope, usedAddrID) {
+			t.Fatal("expected used-address marker to be removed")
+		}
+
+		numAddrs := 0
+		err = scopedMgr.ForEachAccountAddress(
+			ns, removedAcct, func(ManagedAddress) error {
+				numAddrs++
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if numAddrs != 0 {
+			t.Fatalf("expected no addresses for removed account, "+
+				"got %d", numAddrs)
+		}
+
+		name, err := scopedMgr.AccountName(ns, keptAcct)
+		if err != nil {
+			return err
+		}
+		if name != "keep" {
+			t.Fatalf("expected kept account name 'keep', got %q",
+				name)
+		}
+		if _, err := scopedMgr.Address(ns, keptAddrs[0].Address()); err != nil {
+			t.Fatalf("expected kept address to resolve: %v", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The removed account's name is available again, but its number is not
+	// reused.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+
+		newAcct, err := scopedMgr.NewAccountWatchingOnly(
+			ns, removedName, acctKeys[3], 0, nil,
+		)
+		if err != nil {
+			return err
+		}
+		if newAcct == removedAcct {
+			t.Fatalf("account number %d was reused", removedAcct)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unable to reuse account name: %v", err)
+	}
+
+	// Reserved accounts, the default account and unknown accounts are all
+	// refused.
+	guards := []struct {
+		name    string
+		account uint32
+		code    ErrorCode
+	}{
+		{"default account", DefaultAccountNum, ErrInvalidAccount},
+		{"imported account", ImportedAddrAccount, ErrInvalidAccount},
+		{"unknown account", 9999, ErrAccountNotFound},
+	}
+	for _, guard := range guards {
+		err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+			return scopedMgr.RemoveAccount(ns, guard.account)
+		})
+		checkManagerError(t, guard.name, err, guard.code)
+	}
+}
+
+// TestRemoveAccountNonWatchOnly asserts that an account derived from the
+// wallet's own master key cannot be removed.
+func TestRemoveAccountNonWatchOnly(t *testing.T) {
+	t.Parallel()
+
+	teardown, db, mgr := setupManager(t)
+	defer teardown()
+
+	scopedMgr, err := mgr.FetchScopedKeyManager(KeyScopeBIP0044)
+	if err != nil {
+		t.Fatalf("unable to fetch scope %v: %v", KeyScopeBIP0044, err)
+	}
+
+	// Deriving a new account from the seed requires the manager to be
+	// unlocked.
+	var account uint32
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		if err := mgr.Unlock(ns, privPassphrase); err != nil {
+			return err
+		}
+
+		account, err = scopedMgr.NewAccount(ns, "seeded")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("unable to create seeded account: %v", err)
+	}
+
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return scopedMgr.RemoveAccount(ns, account)
+	})
+	checkManagerError(t, "non-watch-only account", err, ErrInvalidAccount)
+
+	// The refused account must still be intact.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(waddrmgrNamespaceKey)
+		name, err := scopedMgr.AccountName(ns, account)
+		if err != nil {
+			return err
+		}
+		if name != "seeded" {
+			t.Fatalf("expected account name 'seeded', got %q", name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

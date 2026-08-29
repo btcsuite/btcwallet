@@ -4,12 +4,16 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -292,4 +296,131 @@ func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	addrManaged, err := w.AddressInfo(intAddr)
 	require.NoError(t, err)
 	require.Equal(t, true, addrManaged.Imported())
+}
+
+// TestRemoveAccount asserts that removing an imported watch-only account
+// deletes the account, its addresses and its unspent outputs from the wallet,
+// without disturbing the wallet's own accounts, and that the account's name
+// becomes importable again.
+func TestRemoveAccount(t *testing.T) {
+	t.Parallel()
+
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Import an account using the BIP-0084 test vector.
+	var tc *testCase
+	for _, candidate := range testCases {
+		if candidate.name == "bip84" {
+			tc = candidate
+		}
+	}
+	require.NotNil(t, tc)
+
+	root, err := hdkeychain.NewKeyFromString(tc.masterPriv)
+	require.NoError(t, err)
+	acctPub := deriveAcctPubKey(
+		t, root, tc.expectedScope, hardenedKey(tc.accountIndex),
+	)
+
+	const acctName = "removable"
+	acct, err := w.ImportAccount(
+		acctName, acctPub, root.ParentFingerprint(), &tc.addrType,
+	)
+	require.NoError(t, err)
+	require.Equal(t, tc.expectedScope, acct.KeyScope)
+
+	// Derive an address on the imported account and one on the wallet's
+	// own default account, then confirm one deposit to each in a single
+	// transaction, so that removal provably only takes the imported
+	// account's credit with it.
+	importedAddr, err := w.NewAddress(
+		acct.AccountNumber, acct.KeyScope,
+	)
+	require.NoError(t, err)
+	defaultAddr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	require.NoError(t, err)
+
+	importedScript, err := txscript.PayToAddrScript(importedAddr)
+	require.NoError(t, err)
+	defaultScript, err := txscript.PayToAddrScript(defaultAddr)
+	require.NoError(t, err)
+
+	const importedAmt, defaultAmt = int64(2e6), int64(3e6)
+	incomingTx := &wire.MsgTx{
+		TxIn: []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{
+			{Value: importedAmt, PkScript: importedScript},
+			{Value: defaultAmt, PkScript: defaultScript},
+		},
+	}
+	addUtxo(t, w, incomingTx)
+
+	// Mark the wallet as synced to the block the deposit confirmed in, so
+	// that balance calculations see it as confirmed.
+	err = walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(waddrmgrNamespaceKey)
+		return w.Manager.SetSyncedTo(ns, &waddrmgr.BlockStamp{
+			Height:    testBlockHeight,
+			Hash:      *testBlockHash,
+			Timestamp: time.Unix(1387737310, 0),
+		})
+	})
+	require.NoError(t, err)
+
+	balance, err := w.CalculateBalance(1)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(importedAmt+defaultAmt), balance)
+
+	// The imported account reports its deposit before the removal.
+	balances, err := w.AccountBalances(tc.expectedScope, 1)
+	require.NoError(t, err)
+	balanceByName := make(map[string]btcutil.Amount)
+	for _, acctBalance := range balances {
+		balanceByName[acctBalance.AccountName] =
+			acctBalance.AccountBalance
+	}
+	require.Equal(
+		t, btcutil.Amount(importedAmt), balanceByName[acctName],
+	)
+
+	// Remove the account, deposit and all.
+	require.NoError(t, w.RemoveAccount(tc.expectedScope, acctName))
+
+	// The account is gone entirely: it no longer resolves, its balance no
+	// longer counts towards the wallet's and its output is neither listed
+	// nor misattributed to another account.
+	_, err = w.AccountNumber(tc.expectedScope, acctName)
+	require.Error(t, err)
+
+	balance, err = w.CalculateBalance(1)
+	require.NoError(t, err)
+	require.Equal(t, btcutil.Amount(defaultAmt), balance)
+
+	balances, err = w.AccountBalances(tc.expectedScope, 1)
+	require.NoError(t, err)
+	for _, acctBalance := range balances {
+		require.NotEqual(t, acctName, acctBalance.AccountName)
+	}
+
+	unspent, err := w.ListUnspent(0, testBlockHeight, "")
+	require.NoError(t, err)
+	require.Len(t, unspent, 1)
+	require.Equal(t, defaultAddr.String(), unspent[0].Address)
+
+	// The same extended public key can be imported again under the same
+	// name, with a fresh account number.
+	acct2, err := w.ImportAccount(
+		acctName, acctPub, root.ParentFingerprint(), &tc.addrType,
+	)
+	require.NoError(t, err)
+	require.NotEqual(t, acct.AccountNumber, acct2.AccountNumber)
+
+	// The wallet's own accounts cannot be removed, nor can accounts that
+	// do not exist.
+	err = w.RemoveAccount(waddrmgr.KeyScopeBIP0084, "default")
+	require.ErrorContains(t, err, "cannot be removed")
+
+	err = w.RemoveAccount(tc.expectedScope, "does-not-exist")
+	require.Error(t, err)
 }
