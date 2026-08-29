@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	"github.com/btcsuite/btcwallet/chain"
 )
 
 const (
@@ -47,10 +48,10 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 // fields apply to only certain backends, which is documented here rather than
 // prevented by a second validation layer:
 //
-//	field                      kvdb    sqlite    postgres
-//	DataSource, ChainParams    all backends
-//	MaxConnections             SQL backends
-//	NoFreelistSync, Timeout    kvdb only
+//	field                       kvdb    sqlite    postgres
+//	DataSource, runtime policy         all backends
+//	MaxConnections                     SQL backends
+//	NoFreelistSync, Timeout            kvdb only
 type ManagerConfig struct {
 	// Backend selects the database implementation. Required.
 	Backend DBBackend
@@ -64,8 +65,42 @@ type ManagerConfig struct {
 	MaxConnections int
 
 	// ChainParams identifies the network every wallet in this Manager runs
-	// on. Required; the Manager copies it into each wallet's config.
-	ChainParams *chaincfg.Params
+	// on.
+	//
+	// NOTE: The Manager retains an ownership-isolated value. Callers must
+	// provide complete canonical parameters with non-nil genesis data,
+	// proof-of-work limit, checkpoint hashes, and deployment boundaries.
+	// Manager does not validate those invariants; malformed parameters may
+	// panic while the snapshot is built or a managed Wallet uses it.
+	ChainParams chaincfg.Params
+
+	// ChainSource is the caller-owned source shared by every managed Wallet.
+	// Callers must supply a usable implementation. Manager neither starts,
+	// stops, nor validates it, so nil or typed-nil values may panic when a
+	// managed Wallet uses the source.
+	//
+	// TODO(yy): Replace direct Wallet consumption with Manager-owned fan-out
+	// so one source can deliver every event to each managed Wallet without
+	// competing receivers.
+	ChainSource chain.Interface
+
+	// SyncMethod selects the synchronization strategy shared by all Wallets.
+	SyncMethod SyncMethod
+
+	// WalletSyncRetryInterval sets the initial synchronization retry delay.
+	// Zero preserves the current default; values above maxBackoff are invalid.
+	WalletSyncRetryInterval time.Duration
+
+	// RecoveryWindow sets the shared address-discovery lookahead.
+	RecoveryWindow uint32
+
+	// AutoLockDuration sets the omitted-timeout unlock duration. Non-positive
+	// values use the safe default rather than disabling automatic locking.
+	AutoLockDuration time.Duration
+
+	// MaxCFilterItems sets the automatic compact-filter fallback threshold.
+	// Zero uses the syncer's default threshold.
+	MaxCFilterItems uint32
 
 	// NoFreelistSync controls bbolt freelist synchronization.
 	//
@@ -98,7 +133,7 @@ func (c ManagerConfig) validate() error {
 		return fmt.Errorf("%w: DataSource", ErrMissingParam)
 	}
 
-	if c.ChainParams == nil {
+	if c.ChainParams.Name == "" {
 		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
 	}
 
