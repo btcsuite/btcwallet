@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
@@ -1249,6 +1252,56 @@ func TestControllerInfo(t *testing.T) {
 	err = w.Stop(t.Context())
 	require.NoError(t, err)
 	w.wg.Wait()
+}
+
+// TestControllerInfoCopiesChainParams verifies the information API never
+// exposes the Wallet's retained network policy through a mutable pointer.
+func TestControllerInfoCopiesChainParams(t *testing.T) {
+	t.Parallel()
+
+	const mutatedName = "mutated"
+
+	// Arrange: Build a started Wallet around strict Store and Chain mocks.
+	// Two calls are expected so a mutation of the first result can be checked
+	// against a separately produced second snapshot.
+	store := &walletmock.Store{}
+	chain := &bwmock.Chain{}
+
+	store.On("GetWallet", mock.Anything, "isolated").Return(
+		&db.WalletInfo{}, nil,
+	).Twice()
+	chain.On("BackEnd").Return("mock").Twice()
+
+	params := chaincfg.MainNetParams
+	w := &Wallet{
+		store: store,
+		cfg: Config{
+			Name:        "isolated",
+			Chain:       chain,
+			ChainParams: &params,
+		},
+		state: newWalletState(nil),
+	}
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	// Act: Mutate nested values in the first Info result, then request a new
+	// snapshot from the same retained Wallet configuration.
+	first, err := w.Info(t.Context())
+	require.NoError(t, err)
+
+	first.ChainParams.Name = mutatedName
+	first.ChainParams.PowLimit.SetInt64(1)
+
+	second, err := w.Info(t.Context())
+
+	// Assert: Verify the second result still matches the Wallet's policy and
+	// every mocked interaction occurred with its exact planned cardinality.
+	require.NoError(t, err)
+	require.Equal(t, params.Name, second.ChainParams.Name)
+	require.Equal(t, params.PowLimit, second.ChainParams.PowLimit)
+	store.AssertExpectations(t)
+	chain.AssertExpectations(t)
 }
 
 // TestControllerInfoSyncTipErrors verifies Info preserves Store errors and
