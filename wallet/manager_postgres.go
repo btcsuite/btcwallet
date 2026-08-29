@@ -14,7 +14,7 @@ func newPostgresManagerBackend(ctx context.Context,
 	store, err := pg.NewStore(ctx, pg.Config{
 		Dsn:            cfg.DataSource,
 		MaxConnections: cfg.MaxConnections,
-		DeriveAddress:  newSQLAddressDeriver(cfg.ChainParams),
+		DeriveAddress:  newSQLAddressDeriver(&cfg.ChainParams),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open postgres store: %w", err)

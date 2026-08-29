@@ -31,7 +31,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:     DBBackendKVDB,
 				DataSource:  WalletDBName,
-				ChainParams: &chaincfg.SimNetParams,
+				ChainParams: chaincfg.SimNetParams,
 			},
 		},
 		{
@@ -39,7 +39,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:     DBBackendSQLite,
 				DataSource:  testSQLiteDBName,
-				ChainParams: &chaincfg.SimNetParams,
+				ChainParams: chaincfg.SimNetParams,
 			},
 		},
 		{
@@ -47,7 +47,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:     DBBackendPostgres,
 				DataSource:  "postgres://user:pass@localhost/wallet",
-				ChainParams: &chaincfg.SimNetParams,
+				ChainParams: chaincfg.SimNetParams,
 			},
 		},
 		{
@@ -57,7 +57,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:        DBBackendSQLite,
 				DataSource:     testSQLiteDBName,
-				ChainParams:    &chaincfg.SimNetParams,
+				ChainParams:    chaincfg.SimNetParams,
 				NoFreelistSync: true,
 				Timeout:        time.Second,
 			},
@@ -73,7 +73,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:     DBBackend("mysql"),
 				DataSource:  WalletDBName,
-				ChainParams: &chaincfg.SimNetParams,
+				ChainParams: chaincfg.SimNetParams,
 			},
 			wantIs:  errUnsupportedBackend,
 			wantMsg: "mysql",
@@ -82,7 +82,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			name: "no data source",
 			cfg: ManagerConfig{
 				Backend:     DBBackendKVDB,
-				ChainParams: &chaincfg.SimNetParams,
+				ChainParams: chaincfg.SimNetParams,
 			},
 			wantIs:  ErrMissingParam,
 			wantMsg: "DataSource",
@@ -101,7 +101,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:        DBBackendSQLite,
 				DataSource:     testSQLiteDBName,
-				ChainParams:    &chaincfg.SimNetParams,
+				ChainParams:    chaincfg.SimNetParams,
 				MaxConnections: -1,
 			},
 			wantIs:  ErrInvalidParam,
@@ -112,7 +112,7 @@ func TestManagerConfigValidate(t *testing.T) {
 			cfg: ManagerConfig{
 				Backend:        DBBackendPostgres,
 				DataSource:     "postgres://localhost/wallet",
-				ChainParams:    &chaincfg.SimNetParams,
+				ChainParams:    chaincfg.SimNetParams,
 				MaxConnections: -1,
 			},
 			wantIs:  ErrInvalidParam,
