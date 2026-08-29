@@ -3,6 +3,8 @@ package wallet
 import (
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -117,4 +119,77 @@ func (c ManagerConfig) timeout() time.Duration {
 	}
 
 	return c.Timeout
+}
+
+// cloneChainParams returns an ownership-isolated network snapshot. The copy
+// includes every nested mutable value so later caller or Info mutations cannot
+// change the network policy retained by a Manager or Wallet.
+func cloneChainParams(params chaincfg.Params) (chaincfg.Params, error) {
+	cloned := params
+	cloned.DNSSeeds = slices.Clone(params.DNSSeeds)
+
+	cloned.GenesisBlock = params.GenesisBlock.Copy()
+	genesisHash := *params.GenesisHash
+	cloned.GenesisHash = &genesisHash
+	cloned.PowLimit = new(big.Int).Set(params.PowLimit)
+
+	// RegressionNetParams has no BIP0034Hash, so preserve that legitimate
+	// absence while isolating the hash used by networks that define one.
+	if params.BIP0034Hash != nil {
+		bip0034Hash := *params.BIP0034Hash
+		cloned.BIP0034Hash = &bip0034Hash
+	}
+
+	cloned.Checkpoints = slices.Clone(params.Checkpoints)
+	for i := range cloned.Checkpoints {
+		checkpointHash := *params.Checkpoints[i].Hash
+		cloned.Checkpoints[i].Hash = &checkpointHash
+	}
+
+	for i, deployment := range params.Deployments {
+		deployment, err := cloneDeployment(deployment)
+		if err != nil {
+			return chaincfg.Params{}, fmt.Errorf(
+				"clone deployment %d: %w", i, err,
+			)
+		}
+
+		cloned.Deployments[i] = deployment
+	}
+
+	return cloned, nil
+}
+
+// cloneDeployment recreates supported time boundaries without retaining their
+// mutable clock state. Unknown implementations fail closed because copying an
+// interface value would silently share caller state.
+func cloneDeployment(deployment chaincfg.ConsensusDeployment) (
+	chaincfg.ConsensusDeployment, error) {
+
+	cloned := deployment
+	switch starter := deployment.DeploymentStarter.(type) {
+	case *chaincfg.MedianTimeDeploymentStarter:
+		cloned.DeploymentStarter = chaincfg.NewMedianTimeDeploymentStarter(
+			starter.StartTime(),
+		)
+
+	default:
+		return chaincfg.ConsensusDeployment{}, fmt.Errorf(
+			"%w: unsupported deployment starter %T",
+			ErrInvalidParam, starter)
+	}
+
+	switch ender := deployment.DeploymentEnder.(type) {
+	case *chaincfg.MedianTimeDeploymentEnder:
+		cloned.DeploymentEnder = chaincfg.NewMedianTimeDeploymentEnder(
+			ender.EndTime(),
+		)
+
+	default:
+		return chaincfg.ConsensusDeployment{}, fmt.Errorf(
+			"%w: unsupported deployment ender %T",
+			ErrInvalidParam, ender)
+	}
+
+	return cloned, nil
 }
