@@ -486,10 +486,17 @@ func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("decode wallet sync tip: %w", err)
 	}
 
+	// Info is an ownership boundary, so return a fresh network snapshot
+	// instead of exposing the Wallet's retained mutable configuration.
+	chainParams, err := cloneChainParams(*w.cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("copy chain parameters: %w", err)
+	}
+
 	info := &Info{
 		BirthdayBlock:    w.birthdayBlock,
 		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      w.cfg.ChainParams,
+		ChainParams:      &chainParams,
 		Locked:           !w.state.isUnlocked(),
 		Synced:           w.state.isSynced(),
 		SyncedTo:         syncedTo,
