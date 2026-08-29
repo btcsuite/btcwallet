@@ -8,18 +8,45 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/stretchr/testify/require"
 )
 
 // testSQLiteDBName is the SQLite data source the config tests share.
 const testSQLiteDBName = "wallet.sqlite"
 
-// TestManagerConfigValidate verifies that a Manager's database configuration is
-// checked once, at construction, and that nothing is defaulted: an unset
-// backend or data source is an error rather than a guess, so a wallet is never
-// opened somewhere the caller did not name.
+// validRuntimeManagerConfig builds a complete SQLite configuration. Validation
+// tests mutate one field at a time so failures cannot be masked by an unrelated
+// missing input.
+func validRuntimeManagerConfig() ManagerConfig {
+	cfg := ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  testSQLiteDBName,
+		ChainParams: chaincfg.SimNetParams,
+		ChainSource: &bwmock.Chain{},
+	}
+
+	return cfg
+}
+
+// TestManagerConfigValidate verifies database and runtime policy are checked
+// together before Manager construction can open caller-selected storage.
 func TestManagerConfigValidate(t *testing.T) {
 	t.Parallel()
+
+	// Arrange: Derive runtime cases from complete backend configurations and
+	// mutate one field at a time, alongside the existing database boundaries,
+	// so no unrelated missing input can mask the decision under test.
+	unknownSync := validRuntimeManagerConfig()
+	unknownSync.SyncMethod = SyncMethodFullBlocks + 1
+	negativeRetry := validRuntimeManagerConfig()
+	negativeRetry.WalletSyncRetryInterval = -time.Second
+	maximumRetry := validRuntimeManagerConfig()
+	maximumRetry.WalletSyncRetryInterval = maxBackoff
+	aboveMaximumRetry := validRuntimeManagerConfig()
+	aboveMaximumRetry.WalletSyncRetryInterval = maxBackoff + 1
+	aboveMaximumRecovery := validRuntimeManagerConfig()
+	aboveMaximumRecovery.RecoveryWindow = MaxRecoveryWindow + 1
 	tests := []struct {
 		name    string
 		cfg     ManagerConfig
@@ -32,6 +59,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:     DBBackendKVDB,
 				DataSource:  WalletDBName,
 				ChainParams: chaincfg.SimNetParams,
+				ChainSource: &bwmock.Chain{},
 			},
 		},
 		{
@@ -40,6 +68,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:     DBBackendSQLite,
 				DataSource:  testSQLiteDBName,
 				ChainParams: chaincfg.SimNetParams,
+				ChainSource: &bwmock.Chain{},
 			},
 		},
 		{
@@ -48,6 +77,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:     DBBackendPostgres,
 				DataSource:  "postgres://user:pass@localhost/wallet",
 				ChainParams: chaincfg.SimNetParams,
+				ChainSource: &bwmock.Chain{},
 			},
 		},
 		{
@@ -58,6 +88,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:        DBBackendSQLite,
 				DataSource:     testSQLiteDBName,
 				ChainParams:    chaincfg.SimNetParams,
+				ChainSource:    &bwmock.Chain{},
 				NoFreelistSync: true,
 				Timeout:        time.Second,
 			},
@@ -102,6 +133,7 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:        DBBackendSQLite,
 				DataSource:     testSQLiteDBName,
 				ChainParams:    chaincfg.SimNetParams,
+				ChainSource:    &bwmock.Chain{},
 				MaxConnections: -1,
 			},
 			wantIs:  ErrInvalidParam,
@@ -113,10 +145,39 @@ func TestManagerConfigValidate(t *testing.T) {
 				Backend:        DBBackendPostgres,
 				DataSource:     "postgres://localhost/wallet",
 				ChainParams:    chaincfg.SimNetParams,
+				ChainSource:    &bwmock.Chain{},
 				MaxConnections: -1,
 			},
 			wantIs:  ErrInvalidParam,
 			wantMsg: "MaxConnections",
+		},
+		{
+			name:    "unknown sync method",
+			cfg:     unknownSync,
+			wantIs:  ErrInvalidParam,
+			wantMsg: "SyncMethod",
+		},
+		{
+			name:    "negative retry interval",
+			cfg:     negativeRetry,
+			wantIs:  ErrInvalidParam,
+			wantMsg: "WalletSyncRetryInterval",
+		},
+		{
+			name: "maximum retry interval",
+			cfg:  maximumRetry,
+		},
+		{
+			name:    "retry interval above maximum",
+			cfg:     aboveMaximumRetry,
+			wantIs:  ErrInvalidParam,
+			wantMsg: "WalletSyncRetryInterval",
+		},
+		{
+			name:    "recovery window above maximum",
+			cfg:     aboveMaximumRecovery,
+			wantIs:  ErrInvalidParam,
+			wantMsg: "RecoveryWindow",
 		},
 	}
 
@@ -124,7 +185,12 @@ func TestManagerConfigValidate(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Act: Validate only the case's immutable constructor input,
+			// without opening the configured data source.
 			err := test.cfg.validate()
+
+			// Assert: Successful cases remain accepted, while failures
+			// preserve both their sentinel and caller-facing field context.
 			if test.wantIs == nil {
 				require.NoError(t, err)
 
