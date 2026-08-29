@@ -1751,24 +1751,24 @@ func TestControllerLock_StateError(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestWaitForBackoff_StableRun verifies that the backoff is reset to the
-// initial value if the syncer has been running for a stable amount of time.
-func TestWaitForBackoff_StableRun(t *testing.T) {
+// TestWaitForBackoffStableRun verifies a stable sync run resets to the
+// Wallet-local retry policy instead of an independent controller constant.
+func TestWaitForBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with a canceled context to avoid waiting.
+	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
+	// timer seam that records the reset value while firing immediately.
+	retryInterval := 3 * time.Second
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		cfg: Config{
+			WalletSyncRetryInterval: retryInterval,
+		},
 	}
-
-	// Mock a start time that exceeds the stable run time.
 	startTime := time.Now().Add(-stableRunTime - time.Minute)
 	currentBackoff := maxBackoff
-
-	// Mock the timer function to fire immediately.
 	timerFn := func(d time.Duration) <-chan time.Time {
-		// Verify that the backoff was reset to initial before waiting.
-		require.Equal(t, initialBackoff, d)
+		require.Equal(t, retryInterval, d)
 
 		c := make(chan time.Time, 1)
 		c <- time.Now()
@@ -1776,12 +1776,13 @@ func TestWaitForBackoff_StableRun(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
+	// Act: Apply retry backoff after a run long enough to be stable.
 	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
 
-	// Assert: Verify that the operation continued and backoff doubled.
+	// Assert: Verify the configured interval was used and exponential growth
+	// continues from that Manager-owned reset point.
 	require.True(t, ok)
-	require.Equal(t, initialBackoff*2, nextBackoff)
+	require.Equal(t, retryInterval*2, nextBackoff)
 }
 
 // TestWaitForBackoff_UnstableRun verifies that the backoff duration doubles
