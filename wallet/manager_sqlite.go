@@ -21,7 +21,7 @@ func newSQLiteManagerBackend(ctx context.Context,
 	store, err := sqlite.NewStore(ctx, sqlite.Config{
 		DBPath:         cfg.DataSource,
 		MaxConnections: cfg.MaxConnections,
-		DeriveAddress:  newSQLAddressDeriver(cfg.ChainParams),
+		DeriveAddress:  newSQLAddressDeriver(&cfg.ChainParams),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite store: %w", err)

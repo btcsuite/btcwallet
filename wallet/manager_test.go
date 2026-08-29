@@ -890,13 +890,15 @@ func TestManagerIgnoresPerWalletDBAndChainParams(t *testing.T) {
 
 			dbPath := filepath.Join(t.TempDir(), tc.file)
 			open := func() (*Manager, error) {
-				return NewManager(
-					t.Context(), ManagerConfig{
-						Backend:     tc.backend,
-						DataSource:  dbPath,
-						ChainParams: &chainParams,
-					},
-				)
+				// Populate only inputs owned by the selected backend so SQL
+				// cases cannot accidentally depend on legacy credentials.
+				cfg := ManagerConfig{
+					Backend:     tc.backend,
+					DataSource:  dbPath,
+					ChainParams: chainParams,
+					ChainSource: &bwmock.Chain{},
+				}
+				return NewManager(t.Context(), cfg)
 			}
 
 			seed, err := hdkeychain.GenerateSeed(

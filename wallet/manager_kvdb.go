@@ -63,7 +63,7 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 
 	return &kvdbManagerBackend{
 		db:          dbConn,
-		chainParams: cfg.ChainParams,
+		chainParams: &cfg.ChainParams,
 	}, nil
 }
 

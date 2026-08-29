@@ -111,7 +111,7 @@ type Manager struct {
 	sync.RWMutex
 
 	// wallets holds the active wallets keyed by their unique name. The
-	// Manager lock serializes Create and Load through assembly and cache
+	// Manager lock serializes runtime assembly, Store access, and cache
 	// installation. A ModeShell Create imports its initial accounts after
 	// installation, so a wallet can be observed here before that import
 	// finishes.
@@ -157,7 +157,7 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	return &Manager{
 		wallets:     make(map[string]*Wallet),
 		backend:     backend,
-		chainParams: cfg.ChainParams,
+		chainParams: &cfg.ChainParams,
 	}, nil
 }
 
