@@ -233,11 +233,18 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 			"kvdb, sqlite, and postgres", h.dbType)
 	}
 
-	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
-		Backend:     backend,
-		DataSource:  h.WalletDBSource,
-		ChainParams: h.NetParams(),
-	})
+	// The Manager owns one immutable runtime policy. Harness scenarios share
+	// their existing chain client with every Wallet assembled by that Manager.
+	managerCfg := wallet.ManagerConfig{
+		Backend:                 backend,
+		DataSource:              h.WalletDBSource,
+		ChainParams:             *h.NetParams(),
+		ChainSource:             h.ChainClient,
+		RecoveryWindow:          defaultWalletRecoveryWindow,
+		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
+	}
+
+	manager, err := wallet.NewManager(h.Context(), managerCfg)
 	require.NoError(h, err, "failed to create wallet manager")
 
 	h.mu.Lock()

@@ -230,7 +230,8 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 		m, err := NewManager(t.Context(), ManagerConfig{
 			Backend:     DBBackendSQLite,
 			DataSource:  dbPath,
-			ChainParams: &chainParams,
+			ChainParams: chainParams,
+			ChainSource: &bwmock.Chain{},
 		})
 		require.NoError(t, err)
 

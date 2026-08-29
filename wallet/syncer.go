@@ -1552,7 +1552,7 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 // bypassing filters and streaming full blocks (especially from a local node)
 // is often more performant and uses less CPU time overall. This threshold is
 // conservative to favor CFilters for typical wallet sizes (<10k items).
-const defaultMaxCFilterItems = 100000
+const defaultMaxCFilterItems uint32 = 100000
 
 // dispatchScanStrategy chooses and executes the appropriate scanning strategy
 // based on the wallet's configuration and heuristics.
@@ -1583,10 +1583,11 @@ func (s *syncer) dispatchScanStrategy(ctx context.Context,
 			threshold = defaultMaxCFilterItems
 		}
 
-		if scanState.WatchListSize() > threshold {
+		watchListSize := scanState.WatchListSize()
+		if int64(watchListSize) > int64(threshold) {
 			log.Infof("Auto sync: Watchlist size %d > %d, "+
 				"switching to full blocks for performance",
-				scanState.WatchListSize(), threshold)
+				watchListSize, threshold)
 
 			return s.scanBatchWithFullBlocks(
 				ctx, scanState, startHeight, hashes,
