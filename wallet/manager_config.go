@@ -115,10 +115,21 @@ type ManagerConfig struct {
 	Timeout time.Duration
 }
 
-// validate checks a ManagerConfig once, at construction. There is no
-// defaulting: an unset backend or data source is an error rather than a guess,
-// so a wallet is never opened somewhere the caller did not name.
+// validate checks Manager-wide ownership and backend consistency before any
+// Store is opened. Safe duration defaults are applied only when the immutable
+// runtime snapshot is built after this validation succeeds.
 func (c ManagerConfig) validate() error {
+	err := c.validateBackend()
+	if err != nil {
+		return err
+	}
+
+	return c.validateRuntimePolicy()
+}
+
+// validateBackend checks the Store selector and its common connection inputs
+// together so backend errors remain independent from Wallet runtime policy.
+func (c ManagerConfig) validateBackend() error {
 	switch c.Backend {
 	case DBBackendKVDB, DBBackendSQLite, DBBackendPostgres:
 
@@ -133,15 +144,41 @@ func (c ManagerConfig) validate() error {
 		return fmt.Errorf("%w: DataSource", ErrMissingParam)
 	}
 
-	if c.ChainParams.Name == "" {
-		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
-	}
-
 	// MaxConnections is a SQL pool bound; kvdb ignores it, so only the SQL
 	// backends validate it.
 	if c.Backend != DBBackendKVDB && c.MaxConnections < 0 {
 		return fmt.Errorf("%w: MaxConnections must not be negative",
 			ErrInvalidParam)
+	}
+
+	return nil
+}
+
+// validateRuntimePolicy checks the chain and synchronization values copied
+// into every managed Wallet before any backend can observe the configuration.
+func (c ManagerConfig) validateRuntimePolicy() error {
+	if c.ChainParams.Name == "" {
+		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
+	}
+
+	switch c.SyncMethod {
+	case SyncMethodAuto, SyncMethodCFilters, SyncMethodFullBlocks:
+
+	default:
+		return fmt.Errorf("%w: SyncMethod %d", ErrInvalidParam,
+			c.SyncMethod)
+	}
+
+	if c.WalletSyncRetryInterval < 0 ||
+		c.WalletSyncRetryInterval > maxBackoff {
+
+		return fmt.Errorf("%w: WalletSyncRetryInterval must be between 0 "+
+			"and %v", ErrInvalidParam, maxBackoff)
+	}
+
+	if c.RecoveryWindow > MaxRecoveryWindow {
+		return fmt.Errorf("%w: RecoveryWindow must not exceed %d",
+			ErrInvalidParam, MaxRecoveryWindow)
 	}
 
 	return nil
