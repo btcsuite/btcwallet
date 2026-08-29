@@ -238,7 +238,7 @@ type Config struct {
 	// scanning when SyncMethodAuto is used. This avoids the CPU bottleneck
 	// of client-side filter matching for large watchlists. If 0, a default
 	// of 100,000 is used.
-	MaxCFilterItems int
+	MaxCFilterItems uint32
 }
 
 // validate checks the configuration for consistency and completeness.

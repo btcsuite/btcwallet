@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet"
 	"github.com/stretchr/testify/require"
 )
@@ -132,10 +133,14 @@ func TestReleaseManagerRemovesRegisteredManager(t *testing.T) {
 func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a Manager owned by a harness.
+	// Arrange: give the harness the strict chain mock required by the
+	// Manager's shared runtime policy. This lifecycle-only test does not
+	// expect any chain calls.
+	chainSource := &bwmock.Chain{}
 	h := &HarnessTest{
 		T:              t,
 		dbType:         "kvdb",
+		ChainClient:    chainSource,
 		WalletDBSource: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 	manager := h.NewWalletManager()
@@ -152,12 +157,14 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 		//nolint:staticcheck // This test intentionally reopens legacy kvdb.
 		Backend:     wallet.DBBackendKVDB,
 		DataSource:  h.WalletDBSource,
-		ChainParams: h.NetParams(),
+		ChainParams: *h.NetParams(),
+		ChainSource: h.ChainClient,
 	})
 	require.NoError(
 		t, err, "released Manager must leave the database available",
 	)
 	require.NoError(t, reopened.Close())
+	chainSource.AssertExpectations(t)
 }
 
 // TestTeardownWalletsClosesManagerAfterFailedCreate verifies that centralized
@@ -201,19 +208,25 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 
 	t.Helper()
 
+	// Arrange: provide the complete Manager policy, including a strict chain
+	// mock with no expected calls because this test stops before chain sync.
+	chainSource := &bwmock.Chain{}
 	h := &HarnessTest{
 		T:              t,
 		dbType:         dbType,
+		ChainClient:    chainSource,
 		WalletDBSource: filepath.Join(t.TempDir(), "wallet.db"),
 	}
 
 	manager := h.NewWalletManager()
 	require.NotNil(t, manager)
 
-	// Force Create to fail after the Manager has opened its database.
+	// Act: force Create to fail after the Manager has opened its database,
+	// then run centralized teardown through the same path used by the
+	// integration harness.
 	pubPass := []byte("public")
 	cfg := wallet.Config{
-		Name:          "failed-create",
+		Name:          "",
 		PubPassphrase: pubPass,
 	}
 	w, err := manager.Create(cfg, wallet.CreateWalletParams{
@@ -239,14 +252,19 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 			"probably never closed")
 	}
 
-	// A fresh Manager proves the database was released.
-	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
+	// Assert: a fresh Manager proves teardown released the database, while
+	// the strict chain mock proves neither failed creation nor cleanup
+	// crossed into chain synchronization.
+	reopenCfg := wallet.ManagerConfig{
 		Backend:     backend,
 		DataSource:  h.WalletDBSource,
-		ChainParams: h.NetParams(),
-	})
+		ChainParams: *h.NetParams(),
+		ChainSource: h.ChainClient,
+	}
+	reopened, err := wallet.NewManager(t.Context(), reopenCfg)
 	require.NoError(t, err, "teardown must release the database")
 	require.NoError(t, reopened.Close())
+	chainSource.AssertExpectations(t)
 }
 
 // TestBackendArtifactPostgresRejectsInvalidDSN verifies that PostgreSQL
