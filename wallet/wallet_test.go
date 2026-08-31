@@ -41,6 +41,25 @@ var (
 	}
 )
 
+// TestErrIndeterminateCommitWrapping verifies that operation context can wrap
+// an indeterminate durable-mutation result without hiding its public identity.
+func TestErrIndeterminateCommitWrapping(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: choose representative context that a wallet operation would
+	// retain while reporting an indeterminate commit to its caller.
+	operation := "create wallet"
+
+	// Act: wrap the sentinel with the standard error-chain mechanism used to
+	// preserve operation-specific context at public boundaries.
+	err := fmt.Errorf("%s: %w", operation, ErrIndeterminateCommit)
+
+	// Assert: confirm callers can match the stable identity without losing
+	// the useful context that identifies the affected operation.
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.ErrorContains(t, err, operation)
+}
+
 // TestConfigValidate ensures that the Config.validate method correctly
 // identifies missing required parameters.
 func TestConfigValidate(t *testing.T) {
