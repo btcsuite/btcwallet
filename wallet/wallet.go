@@ -107,6 +107,12 @@ var (
 	// ErrInvalidParam is returned when a parameter is invalid.
 	ErrInvalidParam = errors.New("invalid config parameter")
 
+	// ErrIndeterminateCommit is returned when a durable mutation receives an
+	// ambiguous commit response and the wallet's public boundary cannot prove
+	// whether the mutation persisted. Callers should use errors.Is to match
+	// this identity through operation-specific context.
+	ErrIndeterminateCommit = errors.New("indeterminate commit")
+
 	// Namespace bucket keys.
 	waddrmgrNamespaceKey = []byte("waddrmgr")
 	wtxmgrNamespaceKey   = []byte("wtxmgr")
