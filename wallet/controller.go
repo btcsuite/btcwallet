@@ -52,6 +52,10 @@ var (
 	// ErrInvalidPassphrase is returned when a supplied passphrase does not
 	// match the one guarding the wallet.
 	ErrInvalidPassphrase = keyvault.ErrInvalidPassphrase
+
+	// ErrEmptyPassphrase is returned when a passphrase change selects no
+	// passphrase or omits a required private passphrase.
+	ErrEmptyPassphrase = keyvault.ErrEmptyPassphrase
 )
 
 // UnlockRequest contains the parameters for unlocking the wallet.
@@ -103,7 +107,8 @@ type Info struct {
 // The two halves are selected independently. A SQL wallet has only the private
 // passphrase; kvdb additionally protects its public metadata with a separate
 // public passphrase, so a caller on that backend may rotate either half or
-// both.
+// both. At least one half must be selected. Private rotation requires non-empty
+// old and new passphrases; legacy public passphrases may be empty.
 type ChangePassphraseRequest struct {
 	// ChangePublic indicates whether the public passphrase should be
 	// changed.

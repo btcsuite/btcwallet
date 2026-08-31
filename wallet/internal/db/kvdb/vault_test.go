@@ -2,6 +2,7 @@ package kvdb
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/btcsuite/btclog"
@@ -9,6 +10,24 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/require"
 )
+
+// TestLegacyWalletVaultChangePassphraseValidatesBeforeContext verifies that
+// invalid parameters retain their identity and operation context even when the
+// request context is already canceled.
+func TestLegacyWalletVaultChangePassphraseValidatesBeforeContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	vault := &LegacyWalletVault{}
+	err := vault.ChangePassphrase(ctx, keyvault.ChangePassphraseParams{
+		PrivateOld: []byte("wrong-private-passphrase"),
+		PrivateNew: []byte{},
+	})
+	require.ErrorIs(t, err, keyvault.ErrEmptyPassphrase)
+	require.ErrorContains(t, err, "vault ChangePassphrase")
+}
 
 // TestLegacyWalletVaultTranslatesManagerSentinels verifies that the adapter
 // surfaces keyvault sentinels rather than leaking the underlying waddrmgr
@@ -185,6 +204,14 @@ func TestLegacyWalletVaultChangePassphrase(t *testing.T) {
 			PublicNew: newPubPass,
 		},
 		wantErr:    keyvault.ErrInvalidPassphrase,
+		wantUnlock: testPrivPass,
+	}, {
+		name: "empty new private mutates nothing",
+		params: keyvault.ChangePassphraseParams{
+			PrivateOld: testPrivPass,
+			PrivateNew: []byte{},
+		},
+		wantErr:    keyvault.ErrEmptyPassphrase,
 		wantUnlock: testPrivPass,
 	}}
 

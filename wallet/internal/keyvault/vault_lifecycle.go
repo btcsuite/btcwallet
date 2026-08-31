@@ -223,6 +223,12 @@ func decryptCryptoKey(masterPrivateKey *snacl.SecretKey,
 func (v *WalletVault) ChangePassphrase(ctx context.Context,
 	params ChangePassphraseParams) error {
 
+	err := params.Validate()
+	if err != nil {
+		return fmt.Errorf("wallet %d vault ChangePassphrase: %w",
+			v.walletID, err)
+	}
+
 	// Validate before touching any secret. A SQL wallet has no public
 	// passphrase, so a request naming one cannot be served in full and must
 	// leave the persisted state untouched rather than rotating the private
@@ -230,10 +236,6 @@ func (v *WalletVault) ChangePassphrase(ctx context.Context,
 	if params.PublicOld != nil {
 		return fmt.Errorf("wallet %d vault ChangePassphrase: %w",
 			v.walletID, ErrPublicPassphraseUnsupported)
-	}
-
-	if params.PrivateOld == nil {
-		return nil
 	}
 
 	oldPassphrase, newPassphrase := params.PrivateOld, params.PrivateNew
