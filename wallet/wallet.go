@@ -3293,11 +3293,23 @@ func (w *Wallet) LockedOutpoints() []btcjson.TransactionInput {
 func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 	duration time.Duration) (time.Time, error) {
 
+	return w.LeaseOutputWithOptions(id, op, duration)
+}
+
+// LeaseOutputWithOptions locks an output to the given ID and applies optional
+// transaction-store lock behavior.
+func (w *Wallet) LeaseOutputWithOptions(id wtxmgr.LockID, op wire.OutPoint,
+	duration time.Duration,
+	optFuncs ...wtxmgr.LockOutputOption) (time.Time, error) {
+
 	var expiry time.Time
 	err := walletdb.Update(w.db, func(tx walletdb.ReadWriteTx) error {
 		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
 		var err error
-		expiry, err = w.TxStore.LockOutput(ns, id, op, duration)
+
+		expiry, err = w.TxStore.LockOutput(
+			ns, id, op, duration, optFuncs...,
+		)
 		return err
 	})
 	return expiry, err
