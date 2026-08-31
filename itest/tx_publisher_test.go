@@ -435,11 +435,11 @@ func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
 		"acceptance check before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	// Stop the wallet, then deregister it so the harness does not drive a
 	// stopped wallet during teardown.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(h, h.StopWallet(w), "failed to stop wallet")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
 	err = w.CheckMempoolAcceptance(h.Context(), tx)
@@ -467,11 +467,11 @@ func testBroadcastWalletState(h *bwtest.HarnessTest) {
 		"broadcast before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(h, h.StartWallet(w), "failed to start wallet")
 
 	// Stop the wallet, then deregister it so the harness does not drive a
 	// stopped wallet during teardown.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(h, h.StopWallet(w), "failed to stop wallet")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
 	err = w.Broadcast(h.Context(), tx, "")

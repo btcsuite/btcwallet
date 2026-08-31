@@ -35,6 +35,19 @@ func fixedTestSeed() []byte {
 	return seed
 }
 
+// expectLifecycleSetup programs the blocking setup calls for one StartWallet.
+func expectLifecycleSetup(deps *mockWalletDeps) {
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).Return(
+		[]db.AccountInfo(nil), nil,
+	).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything,
+		mock.Anything).Return(nil).Once()
+}
+
 var (
 	errDBMock         = errors.New("db error")
 	errChainMock      = errors.New("chain error")
@@ -130,7 +143,10 @@ func testSQLiteManager(tb testing.TB) *Manager {
 		ChainParams: &chainParams,
 	})
 	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = m.Close() })
+	tb.Cleanup(func() {
+		stopTestManagerWallets(tb, m)
+		_ = m.Close()
+	})
 
 	return m
 }
@@ -142,7 +158,7 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 	tb.Helper()
 
 	return &Manager{
-		wallets: make(map[string]*Wallet),
+		wallets: make(map[string]*walletRuntimeEntry),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },
@@ -151,13 +167,86 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 	}
 }
 
-// startLoadedWalletForTest marks a loaded wallet as started without launching
-// chain sync goroutines.
-func startLoadedWalletForTest(t *testing.T, w *Wallet) {
+// testManagerForWallet registers an already constructed test Wallet as one
+// exact Manager-owned runtime.
+func testManagerForWallet(w *Wallet) *Manager {
+	if w.cfg.Name == "" {
+		w.cfg.Name = "test-wallet"
+	}
+
+	return &Manager{
+		wallets: map[string]*walletRuntimeEntry{
+			w.cfg.Name: newWalletRuntimeEntry(w),
+		},
+	}
+}
+
+// startLoadedWalletForTest starts an existing Manager runtime with a mock
+// syncer and registers terminal teardown.
+func startLoadedWalletForTest(t *testing.T, m *Manager, w *Wallet) {
 	t.Helper()
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	syncer, ok := w.sync.(*mockChainSyncer)
+	if !ok {
+		syncer = &mockChainSyncer{}
+	}
+
+	syncer.On("run", mock.Anything).Return(nil).Once()
+	w.sync = syncer
+	w.state.syncer = syncer
+
+	require.NoError(t, m.StartWallet(t.Context(), w))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
+		defer cancel()
+
+		require.NoError(t, m.StopWallet(ctx, w))
+	})
+}
+
+// markTestWalletBirthdayVerified persists a verified genesis birthday so an
+// integration-backed Wallet can start without a live chain fixture.
+func markTestWalletBirthdayVerified(t *testing.T, w *Wallet) {
+	t.Helper()
+
+	info, err := w.store.GetWallet(t.Context(), w.cfg.Name)
+	require.NoError(t, err)
+
+	block := &db.Block{Timestamp: time.Unix(0, 0).UTC()}
+	err = w.store.UpdateWallet(t.Context(), db.UpdateWalletParams{
+		WalletID:      info.ID,
+		BirthdayBlock: block,
+		SyncedTo:      block,
+	})
+	require.NoError(t, err)
+}
+
+// stopTestManagerWallets stops every currently published runtime before a
+// test releases the Manager-owned backend.
+func stopTestManagerWallets(tb testing.TB, m *Manager) {
+	tb.Helper()
+
+	m.RLock()
+
+	wallets := make([]*Wallet, 0, len(m.wallets))
+	for _, entry := range m.wallets {
+		// Some representation tests install skeletal entries that own no
+		// runtime resources.
+		if entry.wallet != nil && entry.terminalDone != nil {
+			wallets = append(wallets, entry.wallet)
+		}
+	}
+
+	m.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, w := range wallets {
+		require.NoError(tb, m.StopWallet(ctx, w))
+	}
 }
 
 // testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
@@ -172,7 +261,10 @@ func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 		ChainParams: &chainParams,
 	})
 	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = m.Close() })
+	tb.Cleanup(func() {
+		stopTestManagerWallets(tb, m)
+		_ = m.Close()
+	})
 
 	return m
 }
@@ -330,8 +422,10 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 
 	expectStopTeardown(deps)
 
+	manager := testManagerForWallet(w)
+
 	// Start the wallet.
-	require.NoError(t, w.Start(t.Context()))
+	require.NoError(t, manager.StartWallet(t.Context(), w))
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(
@@ -339,7 +433,7 @@ func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
 		)
 		defer cancel()
 
-		require.NoError(t, w.Stop(ctx))
+		require.NoError(t, manager.StopWallet(ctx, w))
 	})
 
 	return w, deps

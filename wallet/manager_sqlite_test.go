@@ -257,16 +257,21 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 		Birthday:          time.Now(),
 	})
 	require.NoError(t, err)
+	stopTestManagerWallets(t, creator)
 	require.NoError(t, creator.Close())
 
 	// Act: a fresh Manager reads the wallet back off disk.
 	m := newManager()
-	t.Cleanup(func() { _ = m.Close() })
+	t.Cleanup(func() {
+		stopTestManagerWallets(t, m)
+		_ = m.Close()
+	})
 
 	w, err := m.Load(cfg)
 	require.NoError(t, err)
 
-	startLoadedWalletForTest(t, w)
+	markTestWalletBirthdayVerified(t, w)
+	startLoadedWalletForTest(t, m, w)
 	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
 	w.state.toUnlocked()
 

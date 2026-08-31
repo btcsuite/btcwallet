@@ -87,6 +87,12 @@ type HarnessTest struct {
 	cleaned bool
 }
 
+// managedWallet binds a registered runtime to its lifecycle-owning Manager.
+type managedWallet struct {
+	manager *wallet.Manager
+	wallet  *wallet.Wallet
+}
+
 // SetupHarness creates a new HarnessTest.
 func SetupHarness(t *testing.T, chainBackendType, dbType string) *HarnessTest {
 	t.Helper()
@@ -461,6 +467,67 @@ func (h *HarnessTest) ActiveWallets() []*wallet.Wallet {
 	return wallets
 }
 
+// StartWallet starts a registered runtime through its owning Manager.
+func (h *HarnessTest) StartWallet(w *wallet.Wallet) error {
+	h.Helper()
+
+	manager, ok := h.walletManager(w)
+	if !ok {
+		return errors.New("wallet is not registered")
+	}
+
+	return manager.StartWallet(h.Context(), w)
+}
+
+// StopWallet stops a registered runtime through its owning Manager.
+func (h *HarnessTest) StopWallet(w *wallet.Wallet) error {
+	h.Helper()
+
+	manager, ok := h.walletManager(w)
+	if !ok {
+		return errors.New("wallet is not registered")
+	}
+
+	return manager.StopWallet(h.Context(), w)
+}
+
+// walletManager returns the lifecycle owner registered for w.
+func (h *HarnessTest) walletManager(w *wallet.Wallet) (*wallet.Manager, bool) {
+	h.Helper()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for manager, registration := range h.wallets {
+		if _, ok := registration[w]; ok {
+			return manager, true
+		}
+	}
+
+	return nil, false
+}
+
+// activeManagedWallets returns a snapshot of lifecycle registrations.
+func (h *HarnessTest) activeManagedWallets() []managedWallet {
+	h.Helper()
+
+	h.mu.Lock()
+
+	var wallets []managedWallet
+	for manager, registration := range h.wallets {
+		for w := range registration {
+			wallets = append(wallets, managedWallet{
+				manager: manager,
+				wallet:  w,
+			})
+		}
+	}
+
+	h.mu.Unlock()
+
+	return wallets
+}
+
 // RunTestCase executes a harness test case.
 //
 // Any panic from the test function is converted into a fatal test failure with
@@ -548,13 +615,8 @@ func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
 
 	var stopErr error
 
-	for _, w := range h.ActiveWallets() {
-		// The modern Wallet controller's Stop method is idempotent.
-		//
-		// NOTE: We intentionally don't call the deprecated WaitForShutdown/
-		// ShuttingDown methods here, as modern wallets might not have the
-		// legacy fields initialized.
-		err := w.Stop(ctx)
+	for _, managed := range h.activeManagedWallets() {
+		err := managed.manager.StopWallet(ctx, managed.wallet)
 		if err != nil {
 			stopErr = errors.Join(
 				stopErr, fmt.Errorf("stop wallet: %w", err),

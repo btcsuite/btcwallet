@@ -12,40 +12,47 @@ import (
 func TestStateSecureByDefault(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a new state in Stopped (default) mode.
+	// Arrange: Create a new state in its default Created and locked mode.
 	syncer := &mockChainSyncer{}
 	s := newWalletState(syncer)
 
-	// Act & Assert: Verify initial state.
-	require.False(t, s.isStarted())
-	require.False(t, s.isRunning())
+	// Act: Read the initial lifecycle and running-state observations.
+	initialStarted := s.isStarted()
+	initialRunning := s.isRunning()
+	initialLifecycle := lifecycle(s.lifecycle.Load())
 
-	// Act: Transition to Starting.
-	err := s.toStarting()
-	require.NoError(t, err)
+	// Assert: The default runtime is Created with no active workers.
+	require.False(t, initialStarted)
+	require.False(t, initialRunning)
+	require.Equal(t, lifecycleCreated, initialLifecycle)
 
-	// Act: Transition to Started.
-	err = s.toStarted()
-	require.NoError(t, err)
+	// Act: Advance the runtime through Starting and Started.
+	startingErr := s.toStarting()
+	startedErr := s.toStarted()
+
+	// Assert: Both transitions succeed and Started reports active workers.
+	require.NoError(t, startingErr)
+	require.NoError(t, startedErr)
 	require.True(t, s.isStarted())
 	require.True(t, s.isRunning())
 
-	// Act: Transition to Stopping.
-	err = s.toStopping()
-	require.NoError(t, err)
+	// Act: Move the active runtime into Stopping.
+	stoppingErr := s.toStopping()
+
+	// Assert: Stopping succeeds and no longer reports an active runtime.
+	require.NoError(t, stoppingErr)
 	require.False(t, s.isStarted())
-
-	// Stopping is NOT running.
 	require.False(t, s.isRunning())
 
-	// Act: Transition to Stopped.
-	err = s.toStopped()
-	require.NoError(t, err)
-	require.False(t, s.isRunning())
+	// Act: Complete terminal Stop and attempt another Stop transition.
+	stoppedErr := s.toStopped()
+	repeatedStopErr := s.toStopping()
 
-	// Assert: Invalid transition (Stop when already Stopped).
-	err = s.toStopping()
-	require.ErrorIs(t, err, ErrStateForbidden)
+	// Assert: Stopped remains inactive and rejects another generation.
+	require.NoError(t, stoppedErr)
+	require.False(t, s.isStarted())
+	require.False(t, s.isRunning())
+	require.ErrorIs(t, repeatedStopErr, ErrStateForbidden)
 }
 
 // TestStateAuthentication verifies locking and unlocking logic.
@@ -179,7 +186,7 @@ func TestStateThreadSafety(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Assert: State should be valid (either stopped, starting, or
+	// Assert: State should be valid (either created, starting, or
 	// stopping).
 	// Just ensure no panics occurred.
 }
@@ -222,6 +229,16 @@ func TestStateLifecycleTransitions(t *testing.T) {
 		lifecycle lifecycle
 		running   bool
 	}{
+		{
+			name:      "created is not running",
+			lifecycle: lifecycleCreated,
+			running:   false,
+		},
+		{
+			name:      "starting is running",
+			lifecycle: lifecycleStarting,
+			running:   true,
+		},
 		{
 			name:      "started is running",
 			lifecycle: lifecycleStarted,
@@ -324,14 +341,19 @@ func TestStateStartStop(t *testing.T) {
 		require.False(t, state.unlocked.Load())
 	})
 
-	t.Run("stop fail not started", func(t *testing.T) {
+	t.Run("stop success from created", func(t *testing.T) {
 		t.Parallel()
 
+		// Arrange: Keep a newly assembled runtime in Created state.
 		state := newWalletState(nil)
-		state.lifecycle.Store(uint32(lifecycleStopped))
 
+		// Act: Admit terminal Stop before the runtime has started.
 		err := state.toStopping()
-		require.ErrorIs(t, err, ErrStateForbidden)
+
+		// Assert: Created transitions directly to Stopping.
+		require.NoError(t, err)
+		require.Equal(t, uint32(lifecycleStopping),
+			state.lifecycle.Load())
 	})
 }
 

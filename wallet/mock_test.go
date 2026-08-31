@@ -75,18 +75,6 @@ func (m *mockController) Info(ctx context.Context) (*Info, error) {
 	return args.Get(0).(*Info), args.Error(1)
 }
 
-// Start implements the Controller interface.
-func (m *mockController) Start(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-// Stop implements the Controller interface.
-func (m *mockController) Stop(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
 // Resync implements the Controller interface.
 func (m *mockController) Resync(ctx context.Context, startHeight uint32) error {
 	args := m.Called(ctx, startHeight)

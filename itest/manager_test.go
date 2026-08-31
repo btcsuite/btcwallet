@@ -24,7 +24,10 @@ func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
 
 	created, err := setupManager.Create(cfg, params)
 	require.NoError(h, err, "failed to create wallet")
-	require.NoError(h, created.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(
+		h, setupManager.StopWallet(h.Context(), created),
+		"failed to stop wallet",
+	)
 	require.NoError(h, setupManager.Close(), "failed to close setup manager")
 	require.True(
 		h, h.ReleaseManager(setupManager),
@@ -96,7 +99,7 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	// wallet early and duplicate the harness-owned teardown.
 	h.RegisterWallet(manager, w)
 
-	err = w.Start(h.Context())
+	err = manager.StartWallet(h.Context(), w)
 	require.NoError(h, err, "failed to start wallet")
 
 	// Wait for the wallet to catch up to the existing tip before mining new
@@ -117,7 +120,7 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
-	err = w.Start(h.Context())
+	err = manager.StartWallet(h.Context(), w)
 	require.NoError(h, err, "failed to start wallet")
 
 	// Creating a duplicate while the original is still cached must fail before
@@ -128,7 +131,9 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 
 	// Keep both resources registered until shutdown succeeds, then open a new
 	// Manager over the durable store.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(
+		h, manager.StopWallet(h.Context(), w), "failed to stop wallet",
+	)
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
@@ -155,7 +160,7 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
-	err = w.Start(h.Context())
+	err = manager.StartWallet(h.Context(), w)
 	require.NoError(h, err, "failed to start wallet")
 
 	firstInfo, err := w.Info(h.Context())
@@ -179,7 +184,9 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 
 	// Keep both resources registered until shutdown succeeds, then reload from
 	// their durable state with a fresh Manager.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(
+		h, manager.StopWallet(h.Context(), w), "failed to stop wallet",
+	)
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
@@ -191,7 +198,7 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	h.RegisterWallet(manager, reloaded)
 	require.NotSame(h, w, reloaded, "reload returned the torn-down instance")
 
-	err = reloaded.Start(h.Context())
+	err = manager.StartWallet(h.Context(), reloaded)
 	require.NoError(h, err, "failed to start reloaded wallet")
 
 	reloadedInfo, err := reloaded.Info(h.Context())
@@ -245,7 +252,9 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to create watch-only wallet")
 	h.RegisterWallet(manager, w)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(
+		h, manager.StartWallet(h.Context(), w), "failed to start wallet",
+	)
 	h.AssertWalletSynced(w)
 
 	require.True(h, w.IsWatchOnly(), "created wallet is not watch-only")
@@ -255,7 +264,9 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 
 	// Keep both resources registered until shutdown succeeds, then reload from
 	// the durable store with a fresh Manager.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(
+		h, manager.StopWallet(h.Context(), w), "failed to stop wallet",
+	)
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
@@ -266,7 +277,8 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	h.RegisterWallet(manager, reloaded)
 
 	require.NoError(
-		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
+		h, manager.StartWallet(h.Context(), reloaded),
+		"failed to start reloaded wallet",
 	)
 	require.True(
 		h, reloaded.IsWatchOnly(),

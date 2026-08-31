@@ -8,9 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testControllerStartStop verifies the wallet lifecycle: a wallet starts and
-// stops cleanly, Stop is idempotent, a stopped instance restarts cleanly, and
-// a fresh Load yields a working instance.
+// testControllerStartStop verifies that Manager lifecycle is terminal: Stop is
+// idempotent, the stopped pointer cannot restart, and Load yields a fresh
+// working instance.
 func testControllerStartStop(h *bwtest.HarnessTest) {
 	cfg, params := h.TestWalletConfig()
 
@@ -19,29 +19,35 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(
+		h, manager.StartWallet(h.Context(), w), "failed to start wallet",
+	)
 
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(
+		h, manager.StopWallet(h.Context(), w), "failed to stop wallet",
+	)
 
 	// A second Stop is a no-op.
-	require.NoError(h, w.Stop(h.Context()), "second stop should be a no-op")
-
-	require.NoError(h, w.Start(h.Context()), "failed to restart stopped wallet")
+	require.NoError(
+		h, manager.StopWallet(h.Context(), w),
+		"second stop should be a no-op",
+	)
+	require.ErrorIs(
+		h, manager.StartWallet(h.Context(), w), wallet.ErrWalletStopped,
+		"stopped runtime restarted",
+	)
 
 	// Keep the original wallet registered until Stop succeeds. Then remove it
 	// so MineBlocks cannot poll a stopped wallet during reload.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop restarted wallet")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
-	// Keep the Manager registered until Close succeeds, then reload from disk.
-	require.NoError(h, manager.Close(), "failed to close wallet manager")
-	require.True(h, h.ReleaseManager(manager), "failed to release manager")
-	manager = h.NewWalletManager()
+	// Reload through the same Manager to replace the terminal runtime.
 	reloaded, err := manager.Load(cfg)
 	require.NoError(h, err, "failed to reload wallet")
 	h.RegisterWallet(manager, reloaded)
 	require.NoError(
-		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
+		h, manager.StartWallet(h.Context(), reloaded),
+		"failed to start reloaded wallet",
 	)
 }
 
@@ -70,7 +76,9 @@ func testControllerUnlockLock(h *bwtest.HarnessTest) {
 		"lock before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(
+		h, manager.StartWallet(h.Context(), w), "failed to start wallet",
+	)
 
 	// A freshly started wallet is locked.
 	requireLocked(h, w, true)
@@ -134,7 +142,9 @@ func testControllerInfo(h *bwtest.HarnessTest) {
 		h, err, wallet.ErrStateForbidden, "info before start not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	require.NoError(
+		h, manager.StartWallet(h.Context(), w), "failed to start wallet",
+	)
 	h.AssertWalletSynced(w)
 
 	// Capture the baseline at the current chain tip so the next block measures
