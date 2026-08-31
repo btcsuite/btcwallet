@@ -128,6 +128,10 @@ var allTestCases = []*testCase{
 		TestFunc: testControllerChangePassphraseRejectLocked,
 	},
 	{
+		Name:     "controller change passphrase reject empty",
+		TestFunc: testControllerChangePassphraseRejectEmpty,
+	},
+	{
 		Name:     "controller change passphrase reject unlocked",
 		TestFunc: testControllerChangePassphraseRejectUnlocked,
 	},

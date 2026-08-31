@@ -4,12 +4,17 @@ package keyvault
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/waddrmgr"
 )
 
 // ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
 var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
+
+// ErrEmptyPassphrase reports that a passphrase rotation request selected no
+// passphrase or omitted a required private passphrase.
+var ErrEmptyPassphrase = errors.New("empty vault passphrase")
 
 // ErrVaultLocked reports that an operation requiring unlocked runtime state
 // was attempted while the vault was locked.
@@ -48,9 +53,10 @@ type Vault interface {
 	// ChangePassphrase re-wraps the persisted wallet secrets according to
 	// params.
 	//
-	// Implementations validate the whole request before reading or
-	// mutating any secret, so a request an implementation cannot serve in
-	// full changes nothing.
+	// Invalid parameters take precedence over context and backend-specific
+	// errors. A request with no selected passphrase or an incomplete private
+	// old/new pair returns ErrEmptyPassphrase before any secret is read or
+	// mutated.
 	//
 	// The rotation preserves the vault's original locked/unlocked state: an
 	// unlocked vault stays unlocked with its runtime keys unchanged, and a
@@ -75,7 +81,8 @@ var ErrPublicPassphraseUnsupported = errors.New(
 // The two halves are independent because the legacy kvdb format protects
 // public metadata and private key material under separate passphrases and can
 // rotate either or both in one transaction. A non-nil old passphrase selects
-// that half; this preserves a non-nil empty passphrase as a valid request.
+// that half. Private rotation requires non-empty old and new passphrases;
+// legacy public passphrases may be empty. At least one half must be selected.
 type ChangePassphraseParams struct {
 	// PublicOld and PublicNew contain the old and new public passphrases. A
 	// non-nil PublicOld requests their rotation.
@@ -89,4 +96,28 @@ type ChangePassphraseParams struct {
 	// A non-nil PrivateOld requests their rotation.
 	PrivateOld []byte
 	PrivateNew []byte
+}
+
+// Validate verifies backend-neutral passphrase rotation requirements.
+func (p ChangePassphraseParams) Validate() error {
+	publicChangeSelected := p.PublicOld != nil
+	privateChangeSelected := p.PrivateOld != nil
+
+	if !privateChangeSelected && p.PrivateNew != nil {
+		return fmt.Errorf("private old passphrase: %w", ErrEmptyPassphrase)
+	}
+
+	if !publicChangeSelected && !privateChangeSelected {
+		return fmt.Errorf("no passphrase selected: %w", ErrEmptyPassphrase)
+	}
+
+	if privateChangeSelected && len(p.PrivateOld) == 0 {
+		return fmt.Errorf("private old passphrase: %w", ErrEmptyPassphrase)
+	}
+
+	if privateChangeSelected && len(p.PrivateNew) == 0 {
+		return fmt.Errorf("private new passphrase: %w", ErrEmptyPassphrase)
+	}
+
+	return nil
 }

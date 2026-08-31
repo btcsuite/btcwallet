@@ -1888,6 +1888,12 @@ func TestWaitForBackoff_Shutdown(t *testing.T) {
 func TestPassphraseSentinelIsReachable(t *testing.T) {
 	t.Parallel()
 
-	require.ErrorIs(t, fmt.Errorf("vault: %w",
-		keyvault.ErrInvalidPassphrase), ErrInvalidPassphrase)
+	require.ErrorIs(
+		t, fmt.Errorf("vault: %w", keyvault.ErrInvalidPassphrase),
+		ErrInvalidPassphrase,
+	)
+	require.ErrorIs(
+		t, fmt.Errorf("vault: %w", keyvault.ErrEmptyPassphrase),
+		ErrEmptyPassphrase,
+	)
 }
