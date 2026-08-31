@@ -1,6 +1,7 @@
 package keyvault
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -354,6 +355,34 @@ func TestWalletVaultChangePassphraseWrongOldPassphrase(t *testing.T) {
 		oldState.cryptoKeyPrivate[:],
 	)
 	require.False(t, vault.IsLocked())
+}
+
+// TestWalletVaultChangePassphraseEmptyPrivateNew verifies that an empty new
+// private passphrase takes precedence over context and credential errors before
+// persisted state is read or mutated.
+func TestWalletVaultChangePassphraseEmptyPrivateNew(t *testing.T) {
+	t.Parallel()
+
+	const walletID = uint32(22)
+
+	store := new(bwmock.Store)
+	t.Cleanup(func() {
+		store.AssertNotCalled(t, "GetWalletSecrets")
+		store.AssertNotCalled(t, "UpdateWalletSecrets")
+	})
+
+	vault := NewWalletVault(store, walletID, false)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := vault.ChangePassphrase(
+		ctx, ChangePassphraseParams{
+			PrivateOld: wrongPassphrase,
+			PrivateNew: []byte{},
+		},
+	)
+	require.ErrorIs(t, err, ErrEmptyPassphrase)
+	require.True(t, vault.IsLocked())
 }
 
 // TestWalletVaultChangePassphraseUpdateErrorPreservesState verifies that

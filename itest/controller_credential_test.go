@@ -229,6 +229,74 @@ func testControllerChangePassphraseRejectLocked(h *bwtest.HarnessTest) {
 	requireLocked(h, w, false)
 }
 
+// testControllerChangePassphraseRejectEmpty verifies that a missing selection
+// and incomplete private passphrase pairs are rejected without changing the
+// credential state.
+func testControllerChangePassphraseRejectEmpty(h *bwtest.HarnessTest) {
+	const (
+		oldPassphrase   = bwtest.TestWalletPrivatePassphrase
+		wrongPassphrase = "wrong-private-passphrase"
+		newPassphrase   = "controller-new-private-passphrase"
+	)
+
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	requireLocked(h, w, true)
+
+	tests := []struct {
+		name        string
+		req         wallet.ChangePassphraseRequest
+		wantContext string
+	}{
+		{
+			name:        "no selection",
+			wantContext: "no passphrase selected",
+		},
+		{
+			name: "empty private pair",
+			req: wallet.ChangePassphraseRequest{
+				ChangePrivate: true,
+			},
+			wantContext: "private old passphrase",
+		},
+		{
+			name: "private old without new",
+			req: wallet.ChangePassphraseRequest{
+				ChangePrivate: true,
+				PrivateOld:    []byte(wrongPassphrase),
+			},
+			wantContext: "private new passphrase",
+		},
+		{
+			name: "private new without old",
+			req: wallet.ChangePassphraseRequest{
+				ChangePrivate: true,
+				PrivateNew:    []byte(newPassphrase),
+			},
+			wantContext: "private old passphrase",
+		},
+	}
+
+	for _, test := range tests {
+		err := w.ChangePassphrase(h.Context(), test.req)
+		require.ErrorIs(
+			h, err, wallet.ErrEmptyPassphrase,
+			"%s should return empty-passphrase error", test.name,
+		)
+		require.ErrorContains(h, err, test.wantContext)
+	}
+
+	requireLocked(h, w, true)
+
+	err := w.Unlock(h.Context(), wallet.UnlockRequest{
+		Passphrase: []byte(oldPassphrase),
+		Timeout:    -1,
+	})
+	require.NoError(
+		h, err, "old passphrase should survive empty-passphrase rejections",
+	)
+	requireLocked(h, w, false)
+}
+
 // testControllerChangePassphraseRejectUnlocked verifies a wrong current
 // passphrase is rejected while the Wallet is unlocked.
 func testControllerChangePassphraseRejectUnlocked(h *bwtest.HarnessTest) {
