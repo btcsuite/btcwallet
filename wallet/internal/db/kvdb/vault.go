@@ -134,50 +134,61 @@ func (v *LegacyWalletVault) crypt(op func(waddrmgr.CryptoKeyType,
 func (v *LegacyWalletVault) ChangePassphrase(ctx context.Context,
 	params keyvault.ChangePassphraseParams) error {
 
+	err := params.Validate()
+	if err != nil {
+		return fmt.Errorf("legacy wallet vault ChangePassphrase: %w", err)
+	}
+
 	// Bail before the walletdb access and the expensive scrypt derivation
 	// when the request is already canceled.
-	err := checkContext(ctx)
+	err = checkContext(ctx)
 	if err != nil {
 		return err
 	}
 
 	changePublic := params.PublicOld != nil
-
 	changePrivate := params.PrivateOld != nil
-	if !changePublic && !changePrivate {
-		return nil
-	}
 
 	err = walletdb.Update(v.db, func(tx walletdb.ReadWriteTx) error {
-		ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
-		if ns == nil {
-			return errMissingAddrmgrNamespace
-		}
-
-		if changePublic {
-			err := v.mgr.ChangePassphrase(
-				ns, params.PublicOld, params.PublicNew, false,
-				&waddrmgr.DefaultScryptOptions,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
-		if changePrivate {
-			err := v.mgr.ChangePassphrase(
-				ns, params.PrivateOld, params.PrivateNew, true,
-				&waddrmgr.DefaultScryptOptions,
-			)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
+		return v.changePassphraseTx(
+			tx, params, changePublic, changePrivate,
+		)
 	})
 	if err != nil {
 		return fmt.Errorf("update: %w", translateVaultErr(err))
+	}
+
+	return nil
+}
+
+//nolint:staticcheck // Applies the legacy kvdb dual-passphrase fields.
+func (v *LegacyWalletVault) changePassphraseTx(tx walletdb.ReadWriteTx,
+	params keyvault.ChangePassphraseParams, changePublic,
+	changePrivate bool) error {
+
+	ns := tx.ReadWriteBucket(waddrmgr.NamespaceKey)
+	if ns == nil {
+		return errMissingAddrmgrNamespace
+	}
+
+	if changePublic {
+		err := v.mgr.ChangePassphrase(
+			ns, params.PublicOld, params.PublicNew, false,
+			&waddrmgr.DefaultScryptOptions,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	if changePrivate {
+		err := v.mgr.ChangePassphrase(
+			ns, params.PrivateOld, params.PrivateNew, true,
+			&waddrmgr.DefaultScryptOptions,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
