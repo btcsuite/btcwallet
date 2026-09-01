@@ -48,6 +48,7 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 //	field                      kvdb    sqlite    postgres
 //	DataSource, ChainParams    all backends
 //	MaxConnections             SQL backends
+//	SignetChallengeDigest      SQL backends
 //	NoFreelistSync, Timeout    kvdb only
 type ManagerConfig struct {
 	// Backend selects the database implementation. Required.
@@ -64,6 +65,11 @@ type ManagerConfig struct {
 	// ChainParams identifies the network every wallet in this Manager runs
 	// on. Required; the Manager copies it into each wallet's config.
 	ChainParams *chaincfg.Params
+
+	// SignetChallengeDigest is DoubleSHA256(byte(len(challenge)) || challenge)
+	// in returned array order. It is nil off signet; its first four bytes,
+	// decoded little-endian, must equal ChainParams.Net.
+	SignetChallengeDigest []byte
 
 	// NoFreelistSync controls bbolt freelist synchronization.
 	//

@@ -137,6 +137,18 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		return nil, err
 	}
 
+	// Build one SQL identity before connection setup so invalid signet input
+	// cannot reach either backend.
+	var identity db.DatabaseIdentity
+	if cfg.Backend != DBBackendKVDB {
+		identity, err = db.NewDatabaseIdentity(
+			cfg.ChainParams, cfg.SignetChallengeDigest,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var backend managerBackend
 
 	switch cfg.Backend {
@@ -144,10 +156,10 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		backend, err = newKVDBManagerBackend(cfg)
 
 	case DBBackendSQLite:
-		backend, err = newSQLiteManagerBackend(ctx, cfg)
+		backend, err = newSQLiteManagerBackend(ctx, cfg, identity)
 
 	case DBBackendPostgres:
-		backend, err = newPostgresManagerBackend(ctx, cfg)
+		backend, err = newPostgresManagerBackend(ctx, cfg, identity)
 	}
 
 	if err != nil {
