@@ -71,7 +71,7 @@ func TestAddAmounts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := addAmounts(tc.a, tc.b)
+			got, err := AddAmounts(tc.a, tc.b)
 
 			if tc.wantErr {
 				require.ErrorIs(t, err, ErrAmountOverflow)
@@ -341,4 +341,232 @@ func TestCheckedFeeForSerializeSize(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// inputsWithCount builds an input set of the given size. Only its length is
+// meaningful to the validator, so every input spends the same throwaway
+// outpoint.
+func inputsWithCount(count int) []*wire.TxIn {
+	inputs := make([]*wire.TxIn, 0, count)
+	for range count {
+		inputs = append(
+			inputs, wire.NewTxIn(&wire.OutPoint{}, nil, nil),
+		)
+	}
+
+	return inputs
+}
+
+// TestCheckInputs verifies that the input-result validator accepts a set whose
+// values are representable and sum to the total the source reported, and
+// rejects every way that agreement can break: a value count that does not match
+// the inputs, an out-of-range reported total, an out-of-range value, an
+// aggregate above the maximum, and a total the values do not add up to.
+func TestCheckInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		total      btcutil.Amount
+		inputCount int
+		values     []btcutil.Amount
+		wantErr    error
+	}{{
+		// A source with nothing to give reports a total below the
+		// target rather than an error, so an empty result must stay
+		// valid.
+		name:       "an empty result totals zero",
+		total:      0,
+		inputCount: 0,
+		values:     nil,
+	}, {
+		name:       "a single input totals its own value",
+		total:      1e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{1e8},
+	}, {
+		name:       "several inputs total their sum",
+		total:      6e8,
+		inputCount: 3,
+		values:     []btcutil.Amount{1e8, 2e8, 3e8},
+	}, {
+		name:       "a zero-valued input is permitted",
+		total:      1e8,
+		inputCount: 2,
+		values:     []btcutil.Amount{0, 1e8},
+	}, {
+		name:       "the maximum input value is permitted",
+		total:      maxAmount,
+		inputCount: 1,
+		values:     []btcutil.Amount{maxAmount},
+	}, {
+		name:       "an aggregate at exactly the maximum is permitted",
+		total:      maxAmount,
+		inputCount: 2,
+		values:     []btcutil.Amount{maxAmount - 1e8, 1e8},
+	}, {
+		name:       "fewer values than inputs is rejected",
+		total:      1e8,
+		inputCount: 2,
+		values:     []btcutil.Amount{1e8},
+		wantErr:    ErrInputCountMismatch,
+	}, {
+		name:       "more values than inputs is rejected",
+		total:      2e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{1e8, 1e8},
+		wantErr:    ErrInputCountMismatch,
+	}, {
+		name:       "a negative reported total is rejected",
+		total:      -1,
+		inputCount: 0,
+		values:     nil,
+		wantErr:    ErrInputTotalNegative,
+	}, {
+		name:       "a reported total above the maximum is rejected",
+		total:      maxAmount + 1,
+		inputCount: 1,
+		values:     []btcutil.Amount{maxAmount + 1},
+		wantErr:    ErrInputTotalExceedsMax,
+	}, {
+		name:       "a negative value is rejected",
+		total:      1e8,
+		inputCount: 2,
+		values:     []btcutil.Amount{2e8, -1e8},
+		wantErr:    ErrInputValueNegative,
+	}, {
+		name:       "a value above the maximum is rejected",
+		total:      1e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{maxAmount + 1},
+		wantErr:    ErrInputValueExceedsMax,
+	}, {
+		// Each value is individually valid and the reported total is
+		// representable; only the sum of the values is not.
+		name:       "an aggregate above the maximum is rejected",
+		total:      maxAmount,
+		inputCount: 2,
+		values:     []btcutil.Amount{maxAmount, maxAmount},
+		wantErr:    ErrInputTotalExceedsMax,
+	}, {
+		// This is the violation that funds change out of value the
+		// source never supplied.
+		name:       "an over-reported total is rejected",
+		total:      2e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{1e8},
+		wantErr:    ErrInputTotalMismatch,
+	}, {
+		name:       "an under-reported total is rejected",
+		total:      1e8,
+		inputCount: 2,
+		values:     []btcutil.Amount{1e8, 1e8},
+		wantErr:    ErrInputTotalMismatch,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := checkInputs(
+				tc.total, inputsWithCount(tc.inputCount),
+				tc.values,
+			)
+
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestCheckInputSource verifies that the decorator hands a well-formed result
+// through unchanged, refuses a result that violates the amount contract, and
+// leaves a source's own failure alone rather than inspecting what accompanied
+// it.
+func TestCheckInputSource(t *testing.T) {
+	t.Parallel()
+
+	scripts := [][]byte{{0x01}}
+
+	t.Run("a nil source stays nil", func(t *testing.T) {
+		t.Parallel()
+
+		require.Nil(t, CheckInputSource(nil))
+	})
+
+	t.Run("a valid result passes through", func(t *testing.T) {
+		t.Parallel()
+
+		var gotTarget btcutil.Amount
+
+		source := func(target btcutil.Amount) (btcutil.Amount,
+			[]*wire.TxIn, []btcutil.Amount, [][]byte, error) {
+
+			gotTarget = target
+
+			return 1e8, inputsWithCount(1),
+				[]btcutil.Amount{1e8}, scripts, nil
+		}
+
+		total, inputs, values, gotScripts, err := CheckInputSource(
+			source,
+		)(5e7)
+		require.NoError(t, err)
+
+		// The target reaches the wrapped source untouched, and every
+		// part of its answer is returned as given.
+		require.Equal(t, btcutil.Amount(5e7), gotTarget)
+		require.Equal(t, btcutil.Amount(1e8), total)
+		require.Len(t, inputs, 1)
+		require.Equal(t, []btcutil.Amount{1e8}, values)
+		require.Equal(t, scripts, gotScripts)
+	})
+
+	t.Run("a lying total is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		source := func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+			[]btcutil.Amount, [][]byte, error) {
+
+			return 1e9, inputsWithCount(1),
+				[]btcutil.Amount{1e8}, scripts, nil
+		}
+
+		total, inputs, values, gotScripts, err := CheckInputSource(
+			source,
+		)(1e8)
+		require.ErrorIs(t, err, ErrInputTotalMismatch)
+
+		// Nothing of the rejected result is handed back, so a caller
+		// that ignores the error cannot spend it.
+		require.Zero(t, total)
+		require.Nil(t, inputs)
+		require.Nil(t, values)
+		require.Nil(t, gotScripts)
+	})
+
+	t.Run("a source error is not replaced", func(t *testing.T) {
+		t.Parallel()
+
+		// The source fails and also returns a malformed result. The
+		// failure is what it means, so the result is not examined and
+		// the reason it could not fund survives intact.
+		sourceErr := insufficientFundsError{}
+		source := func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+			[]btcutil.Amount, [][]byte, error) {
+
+			return 1e9, nil, []btcutil.Amount{-1}, nil, sourceErr
+		}
+
+		_, _, _, _, err := CheckInputSource(source)(1e8)
+		require.ErrorIs(t, err, sourceErr)
+
+		var inputSourceErr InputSourceError
+		require.ErrorAs(t, err, &inputSourceErr)
+	})
 }
