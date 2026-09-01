@@ -55,6 +55,11 @@ func (insufficientFundsError) Error() string {
 	return "insufficient funds available to construct transaction"
 }
 
+// ChangeOutputOrigin marks an output that the authoring boundary created
+// itself rather than one the caller asked for. It is the only negative value
+// OutputOrigin ever holds.
+const ChangeOutputOrigin = -1
+
 // AuthoredTx holds the state of a newly-created transaction and the change
 // output (if one was added).
 type AuthoredTx struct {
@@ -63,6 +68,20 @@ type AuthoredTx struct {
 	PrevInputValues []btcutil.Amount
 	TotalInput      btcutil.Amount
 	ChangeIndex     int // negative if no change
+
+	// OutputOrigin records where every output in Tx.TxOut came from:
+	// OutputOrigin[i] is the index the output held in the caller's own
+	// output slice, or ChangeOutputOrigin for the change output this
+	// package added.
+	//
+	// Callers that attach per-output metadata need this because authoring
+	// neither preserves the caller's output order nor leaves the change
+	// output in a fixed place: change is appended and then randomized. The
+	// alternative, recognising an output by its value and script, cannot
+	// tell two identical outputs apart, so it is not a substitute.
+	//
+	// It always has one entry per output in Tx.TxOut.
+	OutputOrigin []int
 }
 
 // ChangeSource provides change output scripts for transaction creation.
@@ -193,6 +212,13 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 
 		changeIndex := -1
 
+		// Outputs start out in the caller's own order, so each one
+		// still stands at the index it was handed to us at.
+		outputOrigin := make([]int, len(outputs))
+		for i := range outputOrigin {
+			outputOrigin[i] = i
+		}
+
 		// Reuse the sufficiency remainder rather than re-deriving the
 		// change from the input total a second time.
 		changeAmount, err := subAmounts(remainingAmount, maxRequiredFee)
@@ -210,6 +236,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 
 			l := len(outputs)
 			unsignedTransaction.TxOut = append(outputs[:l:l], change)
+			outputOrigin = append(outputOrigin, ChangeOutputOrigin)
 			changeIndex = l
 		}
 
@@ -219,6 +246,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			PrevInputValues: inputValues,
 			TotalInput:      inputAmount,
 			ChangeIndex:     changeIndex,
+			OutputOrigin:    outputOrigin,
 		}, nil
 	}
 }
@@ -257,8 +285,21 @@ func RandomizeOutputPosition(outputs []*wire.TxOut, index int) int {
 
 // RandomizeChangePosition randomizes the position of an authored transaction's
 // change output.  This should be done before signing.
+//
+// OutputOrigin follows the same swap, so a caller can still tell which of its
+// own outputs now sits where, and which output is the change.
 func (tx *AuthoredTx) RandomizeChangePosition() {
-	tx.ChangeIndex = RandomizeOutputPosition(tx.Tx.TxOut, tx.ChangeIndex)
+	oldIndex := tx.ChangeIndex
+	tx.ChangeIndex = RandomizeOutputPosition(tx.Tx.TxOut, oldIndex)
+
+	// An AuthoredTx assembled by hand rather than by
+	// NewUnsignedTransaction carries no provenance to move.
+	if len(tx.OutputOrigin) != len(tx.Tx.TxOut) {
+		return
+	}
+
+	tx.OutputOrigin[oldIndex], tx.OutputOrigin[tx.ChangeIndex] =
+		tx.OutputOrigin[tx.ChangeIndex], tx.OutputOrigin[oldIndex]
 }
 
 // SecretsSource provides private keys and redeem scripts necessary for

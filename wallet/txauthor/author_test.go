@@ -480,3 +480,151 @@ func TestNewUnsignedTransactionChecksInputs(t *testing.T) {
 		})
 	}
 }
+
+// TestNewUnsignedTransactionOutputOrigin verifies that the authored result
+// records where every one of its outputs came from, both when a change output
+// survives the dust check and when it does not.
+func TestNewUnsignedTransactionOutputOrigin(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+
+		outputs []*wire.TxOut
+
+		// exactFunding funds the transaction to the satoshi, leaving
+		// nothing over for a change output.
+		exactFunding bool
+
+		wantOrigin []int
+	}{{
+		// With nothing left over there is no change output, so
+		// provenance is the caller's own order, unchanged.
+		name:         "no change output",
+		outputs:      p2pkhOutputs(1e6, 2e6),
+		exactFunding: true,
+		wantOrigin:   []int{0, 1},
+	}, {
+		// The input leaves a spendable remainder, so change is
+		// appended after the caller's outputs and marked as ours.
+		name:       "change output appended",
+		outputs:    p2pkhOutputs(1e6, 2e6),
+		wantOrigin: []int{0, 1, ChangeOutputOrigin},
+	}, {
+		name:       "single output with change",
+		outputs:    p2pkhOutputs(1e6),
+		wantOrigin: []int{0, ChangeOutputOrigin},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sources := newCountedSources(t)
+
+			inputSource := sources.input
+			if !tc.exactFunding {
+				inputSource = makeInputSource(
+					p2pkhOutputs(1e8),
+				)
+			}
+
+			tx, err := NewUnsignedTransaction(
+				tc.outputs, 1e3, inputSource, sources.change,
+			)
+			require.NoError(t, err)
+
+			require.Equal(t, tc.wantOrigin, tx.OutputOrigin)
+
+			// Provenance only means anything if it covers every
+			// output, so the two must stay the same length.
+			require.Len(t, tx.OutputOrigin, len(tx.Tx.TxOut))
+
+			// The entry marked as ours must be the one the result
+			// reports as change.
+			if tx.ChangeIndex >= 0 {
+				require.Equal(
+					t, ChangeOutputOrigin,
+					tx.OutputOrigin[tx.ChangeIndex],
+				)
+			} else {
+				require.NotContains(
+					t, tx.OutputOrigin, ChangeOutputOrigin,
+				)
+			}
+		})
+	}
+}
+
+// TestRandomizeChangePositionMovesOrigin verifies that provenance follows the
+// change output through randomization, so that both the change output and each
+// caller output can still be located afterwards. It repeats the randomization
+// enough times to cover every landing position.
+func TestRandomizeChangePositionMovesOrigin(t *testing.T) {
+	t.Parallel()
+
+	const outputCount = 4
+
+	// A run of randomizations is needed because the change output may land
+	// back on its own position; a single run would not exercise a move.
+	for i := 0; i < 50; i++ {
+		outputs := p2pkhOutputs(1e6, 2e6, 3e6)
+		change := wire.NewTxOut(4e6, make([]byte, 22))
+
+		tx := &AuthoredTx{
+			Tx: &wire.MsgTx{
+				TxOut: append(outputs, change),
+			},
+			ChangeIndex:  outputCount - 1,
+			OutputOrigin: []int{0, 1, 2, ChangeOutputOrigin},
+		}
+
+		tx.RandomizeChangePosition()
+
+		require.Len(t, tx.OutputOrigin, len(tx.Tx.TxOut))
+
+		// Provenance and the reported change index must agree on which
+		// output is the change.
+		require.Equal(
+			t, ChangeOutputOrigin, tx.OutputOrigin[tx.ChangeIndex],
+		)
+		require.Equal(
+			t, change, tx.Tx.TxOut[tx.ChangeIndex],
+		)
+
+		// Every caller output must still be reachable through its
+		// recorded origin, and no origin may be duplicated or lost.
+		seen := make(map[int]bool, outputCount)
+		for pos, origin := range tx.OutputOrigin {
+			require.False(t, seen[origin])
+			seen[origin] = true
+
+			if origin == ChangeOutputOrigin {
+				continue
+			}
+
+			require.Equal(
+				t, outputs[origin], tx.Tx.TxOut[pos],
+			)
+		}
+		require.Len(t, seen, outputCount)
+	}
+}
+
+// TestRandomizeChangePositionWithoutOrigin verifies that an AuthoredTx built
+// by hand, without provenance, still randomizes rather than panicking. Callers
+// outside this package construct such values in their own tests.
+func TestRandomizeChangePositionWithoutOrigin(t *testing.T) {
+	t.Parallel()
+
+	tx := &AuthoredTx{
+		Tx: &wire.MsgTx{
+			TxOut: p2pkhOutputs(1e6, 2e6),
+		},
+		ChangeIndex: 1,
+	}
+
+	require.NotPanics(t, tx.RandomizeChangePosition)
+	require.Empty(t, tx.OutputOrigin)
+	require.GreaterOrEqual(t, tx.ChangeIndex, 0)
+}
