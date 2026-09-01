@@ -12,6 +12,7 @@ import (
 
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 )
 
 var (
@@ -246,4 +247,38 @@ func taprootDerivationsEqual(a, b []*psbt.TaprootBip32Derivation) bool {
 	}
 
 	return true
+}
+
+// restoreOutputMetadata rebuilds a packet's output records so that each one
+// sits with the output it describes, using the provenance the authoring
+// boundary recorded.
+//
+// Authoring does not hand the caller's outputs back in the order it was given
+// them: change is appended past them and then randomized into an arbitrary
+// position. Reading the provenance is what makes the mapping exact. The
+// alternative, matching an output by its value and script, cannot tell two
+// outputs paying the same amount to the same script apart, and would attribute
+// one caller's metadata to the other's output.
+//
+// The change output is the wallet's own, so it starts with no metadata; the
+// funding path fills it in from the address it derived.
+func restoreOutputMetadata(callerOutputs []psbt.POutput,
+	origin []int) ([]psbt.POutput, error) {
+
+	outputs := make([]psbt.POutput, len(origin))
+	for i, from := range origin {
+		if from == txauthor.ChangeOutputOrigin {
+			continue
+		}
+
+		if from < 0 || from >= len(callerOutputs) {
+			return nil, fmt.Errorf("%w: output %d claims caller "+
+				"output %d of %d", ErrPacketMalformed, i, from,
+				len(callerOutputs))
+		}
+
+		outputs[i] = callerOutputs[from]
+	}
+
+	return outputs, nil
 }

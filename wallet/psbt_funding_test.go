@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/stretchr/testify/require"
 )
 
@@ -370,4 +371,117 @@ func TestRestoreInputMetadataSkipsWalletInputs(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, testDecoratedInput(), packet.Inputs[0])
+}
+
+// TestRestoreOutputMetadata verifies that each caller output's metadata lands
+// with the output it describes, wherever authoring moved that output to, and
+// that the change output starts with none of its own.
+func TestRestoreOutputMetadata(t *testing.T) {
+	t.Parallel()
+
+	// Three caller outputs, each recognisable by its redeem script alone,
+	// so a misplaced record is visible rather than merely wrong.
+	callerOutputs := []psbt.POutput{
+		{RedeemScript: []byte{0xa0}},
+		{RedeemScript: []byte{0xa1}},
+		{RedeemScript: []byte{0xa2}},
+	}
+
+	tests := []struct {
+		name   string
+		origin []int
+		want   [][]byte
+	}{{
+		name:   "caller order preserved",
+		origin: []int{0, 1, 2},
+		want:   [][]byte{{0xa0}, {0xa1}, {0xa2}},
+	}, {
+		name:   "change appended last",
+		origin: []int{0, 1, 2, txauthor.ChangeOutputOrigin},
+		want:   [][]byte{{0xa0}, {0xa1}, {0xa2}, nil},
+	}, {
+		// The shape RandomizeChangePosition produces: change swapped
+		// into an interior position, and the output that stood there
+		// moved to the end.
+		name:   "change randomized into the middle",
+		origin: []int{0, txauthor.ChangeOutputOrigin, 2, 1},
+		want:   [][]byte{{0xa0}, nil, {0xa2}, {0xa1}},
+	}, {
+		name:   "change randomized to the front",
+		origin: []int{txauthor.ChangeOutputOrigin, 1, 2, 0},
+		want:   [][]byte{nil, {0xa1}, {0xa2}, {0xa0}},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outputs, err := restoreOutputMetadata(
+				callerOutputs, tc.origin,
+			)
+			require.NoError(t, err)
+			require.Len(t, outputs, len(tc.origin))
+
+			for i, want := range tc.want {
+				require.Equal(
+					t, want, outputs[i].RedeemScript,
+					"output %d", i,
+				)
+			}
+		})
+	}
+}
+
+// TestRestoreOutputMetadataDuplicateOutputs verifies that two outputs paying
+// the same amount to the same script keep their own metadata. This is the case
+// value-and-script matching cannot get right, and the reason provenance is
+// carried explicitly.
+func TestRestoreOutputMetadataDuplicateOutputs(t *testing.T) {
+	t.Parallel()
+
+	// Identical outputs as far as the transaction is concerned, told apart
+	// only by the metadata the caller attached to each.
+	callerOutputs := []psbt.POutput{
+		{RedeemScript: []byte{0xa0}},
+		{RedeemScript: []byte{0xa1}},
+	}
+
+	outputs, err := restoreOutputMetadata(
+		callerOutputs, []int{1, txauthor.ChangeOutputOrigin, 0},
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, []byte{0xa1}, outputs[0].RedeemScript)
+	require.Nil(t, outputs[1].RedeemScript)
+	require.Equal(t, []byte{0xa0}, outputs[2].RedeemScript)
+}
+
+// TestRestoreOutputMetadataRejectsBadOrigin verifies that provenance naming an
+// output the caller never supplied is refused rather than read out of bounds.
+func TestRestoreOutputMetadataRejectsBadOrigin(t *testing.T) {
+	t.Parallel()
+
+	callerOutputs := []psbt.POutput{{RedeemScript: []byte{0xa0}}}
+
+	tests := []struct {
+		name   string
+		origin []int
+	}{{
+		name:   "an origin past the caller's outputs",
+		origin: []int{0, 1},
+	}, {
+		name:   "an origin below the change marker",
+		origin: []int{0, -2},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := restoreOutputMetadata(
+				callerOutputs, tc.origin,
+			)
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
 }
