@@ -22,6 +22,9 @@ CREATE TABLE accounts (
     -- number. Imported xpub accounts leave this FALSE.
     is_derived BOOLEAN NOT NULL,
 
+    -- Whether automatic chain synchronization excludes this account.
+    no_chain_sync BOOLEAN NOT NULL DEFAULT FALSE,
+
     -- BIP44 account number allocated by the wallet for derived accounts.
     -- Imported xpub accounts leave this NULL and are identified by id/name.
     account_number BIGINT,
@@ -98,7 +101,8 @@ BEGIN
         OR NEW.wallet_id IS DISTINCT FROM OLD.wallet_id
         OR NEW.scope_id IS DISTINCT FROM OLD.scope_id
         OR NEW.is_derived IS DISTINCT FROM OLD.is_derived
-        OR NEW.account_number IS DISTINCT FROM OLD.account_number THEN
+        OR NEW.account_number IS DISTINCT FROM OLD.account_number
+        OR NEW.no_chain_sync IS DISTINCT FROM OLD.no_chain_sync THEN
 
         RAISE EXCEPTION 'account identity cannot be changed after creation'
             USING ERRCODE = '23514'; -- check_violation
@@ -109,7 +113,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_assert_account_identity_immutable
-BEFORE UPDATE OF id, wallet_id, scope_id, is_derived, account_number ON accounts
+BEFORE UPDATE OF id, wallet_id, scope_id, is_derived, account_number,
+no_chain_sync ON accounts
 FOR EACH ROW
 EXECUTE FUNCTION assert_account_identity_immutable();
 
