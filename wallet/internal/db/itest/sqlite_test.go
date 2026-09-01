@@ -130,7 +130,7 @@ func TestSQLiteDatabaseIdentityRejectsPopulatedFile(t *testing.T) {
 	require.NoError(t, err)
 
 	// Act: Attempt startup, then inspect durable state through raw SQL.
-	store, openErr := openIdentityStore(t, fixture, identity)
+	store, openErr := openAndCloseIdentityStore(t, fixture, identity)
 	inspectDB, inspectErr := sql.Open("sqlite", dbPath)
 
 	var (
