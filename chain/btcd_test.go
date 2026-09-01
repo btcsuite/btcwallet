@@ -1,13 +1,17 @@
 package chain
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -15,6 +19,17 @@ import (
 // setupBtcd starts up a btcd node with cfilters enabled and returns a client
 // wrapper of this connection.
 func setupBtcd(t *testing.T) (*rpctest.Harness, *RPCClient) {
+	t.Helper()
+
+	miner := setupBtcdMiner(t)
+	client := setupBtcdClient(t, miner)
+
+	return miner, client
+}
+
+// setupBtcdMiner starts a cfilter-enabled btcd harness independently from its
+// notification client so tests can establish chain history before subscribing.
+func setupBtcdMiner(t *testing.T) *rpctest.Harness {
 	t.Helper()
 
 	trickle := fmt.Sprintf("--trickleinterval=%v", 10*time.Millisecond)
@@ -30,6 +45,15 @@ func setupBtcd(t *testing.T) (*rpctest.Harness, *RPCClient) {
 	t.Cleanup(func() {
 		require.NoError(t, miner.TearDown())
 	})
+
+	return miner
+}
+
+// setupBtcdClient connects the production websocket adapter after any test
+// history exists, preventing pre-subscription transactions from entering its
+// notification stream.
+func setupBtcdClient(t *testing.T, miner *rpctest.Harness) *RPCClient {
+	t.Helper()
 
 	rpcConf := miner.RPCConfig()
 	client, err := NewRPCClientWithConfig(&RPCClientConfig{
@@ -56,7 +80,7 @@ func setupBtcd(t *testing.T) (*rpctest.Harness, *RPCClient) {
 		client.Stop()
 	})
 
-	return miner, client
+	return client
 }
 
 // TestValidateConfig checks the `validate` method on the RPCClientConfig
@@ -193,4 +217,110 @@ func TestRPCClientBatchMethods(t *testing.T) {
 
 	// Run batch method tests.
 	testInterfaceBatchMethods(t, miner, client)
+}
+
+// TestRPCClientWatchAddrsFromTip verifies btcd against the shared live-tip
+// registration contract.
+func TestRPCClientWatchAddrsFromTip(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: mine the historical payment before starting the production
+	// websocket client, ensuring no pre-registration event remains in flight.
+	miner := setupBtcdMiner(t)
+	addr := mineHistoricalWatchAddr(t, miner)
+	client := setupBtcdClient(t, miner)
+
+	// Act: run the backend-neutral sequence against the established history,
+	// repeat registration, and publish a distinct future payment.
+	testWatchAddrsFromTipConformance(t, miner, client, addr)
+
+	// Assert: the shared routine returns only after exactly one future payment
+	// and a later block barrier exclude historical or duplicate delivery.
+}
+
+// mineHistoricalWatchAddr confirms a payment before a notification client is
+// started, proving later registration does not initiate a backend history scan
+// without relying on ordering between independent transport event streams.
+func mineHistoricalWatchAddr(t *testing.T,
+	miner *rpctest.Harness) address.Address {
+
+	t.Helper()
+
+	addr, err := miner.NewAddress()
+	require.NoError(t, err)
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+	historicalTx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 1000, PkScript: pkScript}}, 5, false,
+	)
+	require.NoError(t, err)
+	_, err = miner.GenerateAndSubmitBlock(
+		[]*btcutil.Tx{btcutil.NewTx(historicalTx)}, -1, time.Time{},
+	)
+	require.NoError(t, err)
+
+	return addr
+}
+
+// testWatchAddrsFromTipConformance proves the public no-history, idempotence,
+// and future-delivery contract through the production backend interface.
+func testWatchAddrsFromTipConformance(t *testing.T, miner *rpctest.Harness,
+	client Interface, addr address.Address) {
+
+	t.Helper()
+
+	// Arrange: enable block notifications and drain the connection marker. The
+	// supplied address was paid before this client started, so any delivery of
+	// that confirmed payment can only come from an unintended historical scan.
+	err := client.NotifyBlocks()
+	require.NoError(t, err)
+
+	ntfns := client.Notifications()
+	waitForClientConnected(t, ntfns)
+
+	pkScript, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Act: register the same address twice, then create and publish a distinct
+	// transaction whose first possible delivery is after both calls return.
+	err = client.WatchAddrsFromTip(t.Context(), []address.Address{addr})
+	require.NoError(t, err)
+	err = client.WatchAddrsFromTip(t.Context(), []address.Address{addr})
+	require.NoError(t, err)
+
+	futureTx, err := miner.CreateTransaction(
+		[]*wire.TxOut{{Value: 2000, PkScript: pkScript}}, 5, false,
+	)
+	require.NoError(t, err)
+	_, err = client.SendRawTransaction(futureTx, true)
+	require.NoError(t, err)
+
+	// Assert: accept only the future transaction, then mine an empty block as a
+	// post-delivery synchronization barrier. Any historical or duplicate
+	// relevant transaction observed before that later block fails the contract.
+	futureHash := futureTx.TxHash()
+	waitForExclusiveRelevantTx(t, ntfns, &futureHash)
+
+	barrierBlock, err := miner.GenerateAndSubmitBlock(nil, -1, time.Time{})
+	require.NoError(t, err)
+	waitForNoRelevantTxUntilBlock(t, ntfns, barrierBlock.Hash())
+}
+
+// TestRPCClientWatchAddrsFromTipCanceled verifies that cancellation is checked
+// before the concrete btcd client is used or any registration can occur.
+func TestRPCClientWatchAddrsFromTipCanceled(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create an intentionally uninitialized client and an already
+	// canceled context. The test would panic if registration reached btcd.
+	client := &RPCClient{}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: invoke the live-tip API with no addresses after cancellation.
+	err := client.WatchAddrsFromTip(ctx, nil)
+
+	// Assert: require the context error, proving cancellation was evaluated
+	// before dereferencing or mutating the backend client.
+	require.ErrorIs(t, err, context.Canceled)
 }
