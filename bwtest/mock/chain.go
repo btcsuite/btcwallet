@@ -162,6 +162,16 @@ func (m *Chain) NotifyReceived(addrs []address.Address) error {
 	return args.Error(0)
 }
 
+// WatchAddrsFromTip implements the chain.Interface interface and delegates the
+// full contextual call through mock.Mock so tests can assert the live-watch
+// delivery boundary explicitly.
+func (m *Chain) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	args := m.Called(ctx, addrs)
+	return args.Error(0)
+}
+
 // NotifyBlocks implements the chain.Interface interface.
 func (m *Chain) NotifyBlocks() error {
 	args := m.Called()

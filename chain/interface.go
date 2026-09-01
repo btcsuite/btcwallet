@@ -53,6 +53,12 @@ type Interface interface {
 	Rescan(*chainhash.Hash, []address.Address,
 		map[wire.OutPoint]address.Address) error
 	NotifyReceived([]address.Address) error
+
+	// WatchAddrsFromTip requests address notification registration after a
+	// context cancellation preflight. Btcd and bitcoind add only live filter
+	// entries. Neutrino temporarily retains NotifyReceived's legacy historical
+	// behavior until its live-watch lifecycle receives a dedicated design.
+	WatchAddrsFromTip(context.Context, []address.Address) error
 	NotifyBlocks() error
 	Notifications() <-chan interface{}
 	BackEnd() string
