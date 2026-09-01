@@ -21,6 +21,12 @@ var (
 	errUnexpectedUpdatedRows = errors.New("unexpected updated row count")
 )
 
+// PostgreSQL constraint constants expose exact SQLSTATE values to shared tests.
+const (
+	driverConstraintNotNull   = "23502"
+	driverConstraintImmutable = "23514"
+)
+
 // testBackend returns the SQL backend expected by PostgreSQL itests.
 func testBackend() dberr.Backend {
 	return dberr.BackendPostgres
@@ -39,14 +45,22 @@ func requireConstraintSQLError(t *testing.T, err error) {
 	require.ErrorIs(t, err, sqlErr)
 }
 
-// requireDriverConstraintError verifies that a direct PostgreSQL driver error
-// indicates a constraint violation before store-level error wrapping occurs.
-func requireDriverConstraintError(t *testing.T, err error) {
+// requireDriverConstraintError checks SQLSTATE or its immutable default.
+func requireDriverConstraintError(t *testing.T, err error,
+	expected ...string) {
+
 	t.Helper()
 
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
-	require.Equal(t, "23514", pgErr.Code)
+	require.LessOrEqual(t, len(expected), 1)
+
+	expectedCode := driverConstraintImmutable
+	if len(expected) == 1 {
+		expectedCode = expected[0]
+	}
+
+	require.Equal(t, expectedCode, pgErr.Code)
 }
 
 // CreateBlockFixture inserts a test block into the database and returns it.
@@ -134,6 +148,49 @@ func createImportedAccountRaw(t *testing.T, dbConn *sql.DB, walletID uint32,
 
 	_, err := dbConn.ExecContext(
 		t.Context(), stmt, int64(walletID), scopeID, name, RandomBytes(32),
+	)
+
+	return err
+}
+
+// createImportedAccountWithNullNoChainSyncRaw bypasses the typed Store bool so
+// tests can verify PostgreSQL rejects a missing account synchronization policy.
+func createImportedAccountWithNullNoChainSyncRaw(t *testing.T,
+	dbConn *sql.DB, walletID uint32, scopeID int64, name string) error {
+
+	t.Helper()
+
+	const stmt = `
+		INSERT INTO accounts (
+			wallet_id,
+			scope_id,
+			account_name,
+			is_derived,
+			no_chain_sync,
+			public_key
+		) VALUES ($1, $2, $3, FALSE, NULL, $4)`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, int64(walletID), scopeID, name, RandomBytes(32),
+	)
+
+	return err
+}
+
+// updateAccountNoChainSyncRaw bypasses the immutable Store API so tests can
+// verify PostgreSQL rejects changes to an account's synchronization policy.
+func updateAccountNoChainSyncRaw(t *testing.T, dbConn *sql.DB,
+	accountID int64, noChainSync bool) error {
+
+	t.Helper()
+
+	const stmt = `
+		UPDATE accounts
+		SET no_chain_sync = $1
+		WHERE id = $2`
+
+	_, err := dbConn.ExecContext(
+		t.Context(), stmt, noChainSync, accountID,
 	)
 
 	return err
