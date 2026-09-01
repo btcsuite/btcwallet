@@ -94,6 +94,41 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateImportedAccountPersistsNoChainSync verifies the non-default
+// policy survives the real SQL imported-account creation and final reload.
+func TestCreateImportedAccountPersistsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create one isolated spendable wallet and imported account input
+	// carrying true, the value that exposes missing insert or reload plumbing.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "imported-no-chain-sync-wallet")
+	params := db.CreateImportedAccountParams{
+		WalletID:            walletID,
+		Name:                "imported-no-chain-sync",
+		Scope:               db.KeyScopeBIP0084,
+		PublicKey:           RandomBytes(32),
+		EncryptedPrivateKey: RandomBytes(32),
+		NoChainSync:         true,
+	}
+
+	// Act: create the imported account and independently reload its normalized
+	// row by scope and name.
+	created, createErr := store.CreateImportedAccount(t.Context(), params)
+	loaded, loadErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, params.Scope, params.Name,
+		),
+	)
+
+	// Assert: both Store paths return true, proving neither insert nor reload
+	// silently collapses the non-default policy to false.
+	require.NoError(t, createErr)
+	require.NoError(t, loadErr)
+	require.True(t, created.NoChainSync)
+	require.True(t, loaded.NoChainSync)
+}
+
 // TestCreateImportedAccountMissingWallet verifies that CreateImportedAccount
 // returns ErrWalletNotFound when the wallet does not exist.
 func TestCreateImportedAccountMissingWallet(t *testing.T) {
