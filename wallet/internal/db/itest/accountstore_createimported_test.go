@@ -94,39 +94,61 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	}
 }
 
-// TestCreateImportedAccountPersistsNoChainSync verifies the non-default
-// policy survives the real SQL imported-account creation and final reload.
+// TestCreateImportedAccountPersistsNoChainSync verifies both policy values pass
+// through the real SQL imported-account create and read paths unchanged.
 func TestCreateImportedAccountPersistsNoChainSync(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: create one isolated spendable wallet and imported account input
-	// carrying true, the value that exposes missing insert or reload plumbing.
+	// Arrange: create one isolated spendable wallet and two valid imported
+	// account requests that differ only in the policy value being persisted.
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "imported-no-chain-sync-wallet")
-	params := db.CreateImportedAccountParams{
+	falseParams := db.CreateImportedAccountParams{
 		WalletID:            walletID,
-		Name:                "imported-no-chain-sync",
+		Name:                "imported-policy-false",
+		Scope:               db.KeyScopeBIP0084,
+		PublicKey:           RandomBytes(32),
+		EncryptedPrivateKey: RandomBytes(32),
+		NoChainSync:         false,
+	}
+	trueParams := db.CreateImportedAccountParams{
+		WalletID:            walletID,
+		Name:                "imported-policy-true",
 		Scope:               db.KeyScopeBIP0084,
 		PublicKey:           RandomBytes(32),
 		EncryptedPrivateKey: RandomBytes(32),
 		NoChainSync:         true,
 	}
 
-	// Act: create the imported account and independently reload its normalized
-	// row by scope and name.
-	created, createErr := store.CreateImportedAccount(t.Context(), params)
-	loaded, loadErr := store.GetAccount(
+	// Act: create both accounts and independently reload each row through the
+	// normal Store read path.
+	createdFalse, createFalseErr := store.CreateImportedAccount(
+		t.Context(), falseParams,
+	)
+	createdTrue, createTrueErr := store.CreateImportedAccount(
+		t.Context(), trueParams,
+	)
+	loadedFalse, loadFalseErr := store.GetAccount(
 		t.Context(), getAccountQueryByName(
-			walletID, params.Scope, params.Name,
+			walletID, falseParams.Scope, falseParams.Name,
+		),
+	)
+	loadedTrue, loadTrueErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, trueParams.Scope, trueParams.Name,
 		),
 	)
 
-	// Assert: both Store paths return true, proving neither insert nor reload
-	// silently collapses the non-default policy to false.
-	require.NoError(t, createErr)
-	require.NoError(t, loadErr)
-	require.True(t, created.NoChainSync)
-	require.True(t, loaded.NoChainSync)
+	// Assert: both creation results and both fresh reads retain their exact
+	// values, covering the default and non-default policies equally.
+	require.NoError(t, createFalseErr)
+	require.NoError(t, createTrueErr)
+	require.NoError(t, loadFalseErr)
+	require.NoError(t, loadTrueErr)
+	require.False(t, createdFalse.NoChainSync)
+	require.True(t, createdTrue.NoChainSync)
+	require.False(t, loadedFalse.NoChainSync)
+	require.True(t, loadedTrue.NoChainSync)
 }
 
 // TestCreateImportedAccountMissingWallet verifies that CreateImportedAccount

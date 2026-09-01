@@ -196,6 +196,64 @@ func TestDerivedAccountNumberImmutable(t *testing.T) {
 	requireDriverConstraintError(t, err)
 }
 
+// TestAccountNoChainSyncConstraints verifies direct SQL receives the false
+// default but cannot store NULL or update an existing policy.
+func TestAccountNoChainSyncConstraints(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create one true-valued account for the immutable update.
+	// Store creation always includes a typed bool and exposes no policy
+	// mutation, so backend fixture helpers use raw SQL to reach the schema
+	// default, NULL rejection, and update trigger that the API cannot exercise.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "account-no-chain-sync-constraints")
+	scope := db.KeyScopeBIP0084
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       scope,
+			Name:        "immutable-policy",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	scopeID := GetKeyScopeID(t, store.Queries(), walletID, scope)
+	accountID := GetAccountID(
+		t, store.Queries(), scopeID, "immutable-policy",
+	)
+
+	// Act: use matching backend fixtures to omit the column, insert NULL, and
+	// update the persisted true value without leaking SQL dialect details here.
+	defaultErr := createImportedAccountRaw(
+		t, store.DB(), walletID, scopeID, "defaulted",
+	)
+	nullErr := createImportedAccountWithNullNoChainSyncRaw(
+		t, store.DB(), walletID, scopeID, "null-insert",
+	)
+	updateErr := updateAccountNoChainSyncRaw(
+		t, store.DB(), accountID, false,
+	)
+
+	defaulted, defaultReadErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(walletID, scope, "defaulted"),
+	)
+	immutable, immutableReadErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, "immutable-policy",
+		),
+	)
+
+	// Assert: successful omission resolves false, while each rejection carries
+	// the exact native code for its intended rule and leaves true unchanged.
+	require.NoError(t, defaultErr)
+	require.NoError(t, defaultReadErr)
+	require.False(t, defaulted.NoChainSync)
+	requireDriverConstraintError(t, nullErr, driverConstraintNotNull)
+	requireDriverConstraintError(t, updateErr, driverConstraintImmutable)
+	require.NoError(t, immutableReadErr)
+	require.True(t, immutable.NoChainSync)
+}
+
 // TestCreateDerivedAccountIgnoresImportedAccounts verifies that imported
 // accounts do not consume the persisted next derived-account number.
 func TestCreateDerivedAccountIgnoresImportedAccounts(t *testing.T) {
