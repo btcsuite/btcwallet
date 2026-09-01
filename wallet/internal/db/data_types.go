@@ -573,6 +573,10 @@ type CreateImportedAccountParams struct {
 	// DryRun simulates the import without committing any database writes.
 	DryRun bool
 
+	// NoChainSync requests that automatic chain synchronization skip this
+	// account. The legacy kvdb backend ignores this field.
+	NoChainSync bool
+
 	// AddrSchema optionally overrides the scope's default address schema for
 	// this imported account.
 	AddrSchema *ScopeAddrSchema

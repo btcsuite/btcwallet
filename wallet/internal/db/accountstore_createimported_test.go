@@ -48,7 +48,11 @@ func TestCreateImportedAccountParamsValidate(t *testing.T) {
 func TestCreateImportedAccountWithOps(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: configure one complete imported-account workflow with the
+	// non-default synchronization policy. Exact once-only expectations prove
+	// the policy reaches the insert without disturbing operation ordering.
 	params := testCreateImportedAccountParams()
+	params.NoChainSync = true
 	createdAt := time.Unix(123, 0)
 	expectedInfo := &AccountInfo{
 		AccountName:          params.Name,
@@ -59,13 +63,10 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		AddrSchema:           ScopeAddrMap[params.Scope],
 		PublicKey:            params.PublicKey,
 		MasterKeyFingerprint: ptrUint32(params.MasterFingerprint),
+		NoChainSync:          true,
 	}
 
 	ops := &mockCreateImportedAccountOps{}
-	t.Cleanup(func() {
-		ops.AssertExpectations(t)
-	})
-
 	walletCall := ops.On(
 		"IsWalletWatchOnly", mock.Anything, params.WalletID,
 	).Return(false, nil).Once()
@@ -80,6 +81,7 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 			Name:              params.Name,
 			PublicKey:         params.PublicKey,
 			MasterFingerprint: params.MasterFingerprint,
+			NoChainSync:       true,
 		},
 	).Return(int64(22), nil).Once()
 	secretCall := ops.On(
@@ -94,8 +96,11 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		walletCall, ensureScopeCall, createCall, secretCall, reloadCall,
 	)
 
+	// Act: run the backend-independent imported-account workflow.
 	info, err := CreateImportedAccountWithOps(t.Context(), params, ops)
 
+	// Assert: the final reloaded account retains existing metadata and the
+	// requested policy, while every backend stage satisfies its expectation.
 	require.NoError(t, err)
 	require.Same(t, expectedInfo, info)
 	require.Equal(t, createdAt, info.CreatedAt)
@@ -104,6 +109,8 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 	require.NotNil(t, info.MasterKeyFingerprint)
 	require.Equal(t, params.MasterFingerprint,
 		*info.MasterKeyFingerprint)
+	require.True(t, info.NoChainSync)
+	ops.AssertExpectations(t)
 }
 
 // TestCreateImportedAccountWithOpsRejectsInvalidParams verifies the shared
