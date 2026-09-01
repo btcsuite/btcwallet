@@ -935,6 +935,330 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 		funded.Inputs[0].WitnessUtxo.PkScript)
 }
 
+// expectManualFundingSources registers the store and chain lookups a
+// completion-mode funding run performs against a single caller-selected UTXO:
+// eligibility, change allocation, and input decoration.
+//
+// It returns the address the UTXO pays to, so the caller can build the packet
+// that spends it.
+func expectManualFundingSources(t *testing.T, w *Wallet, mocks *mockWalletDeps,
+	outPoint wire.OutPoint) (*wire.TxOut, *btcec.PublicKey) {
+
+	t.Helper()
+
+	inputKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	inputAddr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(inputKey.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+
+	inputScript, err := txscript.PayToAddrScript(inputAddr)
+	require.NoError(t, err)
+
+	utxo := &wire.TxOut{Value: 1_000_000, PkScript: inputScript}
+
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id, OutPoint: outPoint,
+	}).Return(&db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.Amount(utxo.Value),
+		PkScript: inputScript,
+		Height:   1,
+	}, nil)
+
+	mocks.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id, Txid: outPoint.Hash,
+	}).Return(testStoreTxDetail(outPoint.Hash, utxo), nil)
+
+	// The change source, which is derived under the default account.
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	accountInfo := &db.AccountInfo{
+		AccountNumber: &defaultAccountNum,
+		AccountName:   waddrmgr.DefaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[scope],
+	}
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+	}).Return(accountInfo, nil)
+
+	// Change derivation resolves the account by name, and only falls back
+	// to a lookup by number when the name has been changed, so this
+	// expectation is optional.
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope,
+		AccountNumber: &defaultAccountNum,
+	}).Return(accountInfo, nil).Maybe()
+
+	changeKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	changeAddr, err := address.NewAddressTaproot(
+		schnorr.SerializePubKey(changeKey.PubKey()), &chainParams,
+	)
+	require.NoError(t, err)
+
+	changeScript, err := txscript.PayToAddrScript(changeAddr)
+	require.NoError(t, err)
+
+	mocks.store.On("NewDerivedAddress", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID: w.id, AccountName: defaultAccountName,
+			Scope: scope, Change: true,
+		},
+	).Return(&db.AddressInfo{ScriptPubKey: changeScript}, nil).Once()
+
+	// Input decoration and change output decoration both resolve their
+	// address through the store.
+	expectSignerDerivedAddressInfo(
+		t, w, mocks, inputAddr, db.WitnessPubKey, inputKey.PubKey(),
+	)
+
+	// The change output is only looked up once funding gets as far as
+	// decorating it, which a run that is refused earlier never does.
+	changeAccountNum := uint32(0)
+	mocks.store.On("GetAddress", mock.Anything, db.GetAddressQuery{
+		WalletID: w.id, ScriptPubKey: changeScript,
+	}).Maybe().Return(&db.AddressInfo{
+		ScriptPubKey:         changeScript,
+		AddrType:             db.TaprootPubKey,
+		AccountNumber:        &changeAccountNum,
+		KeyScope:             scope,
+		MasterKeyFingerprint: 1,
+		HasDerivationPath:    true,
+		PubKey:               changeKey.PubKey().SerializeCompressed(),
+	}, nil)
+
+	return utxo, inputKey.PubKey()
+}
+
+// TestFundPsbtPreservesCallerMetadata verifies that everything a caller
+// attached to its packet survives funding.
+//
+// Funding rebuilds the transaction from scratch, so none of this survives on
+// its own: the version and locktime are authoring's defaults, every input is
+// rebuilt with a default sequence number, and the record lists are sized to
+// the new transaction. Each one has to be carried across deliberately, and
+// this is the test that says so.
+func TestFundPsbtPreservesCallerMetadata(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+	_, _ = expectManualFundingSources(t, w, mocks, outPoint)
+
+	// Arrange: a packet that names its own input, and that carries a
+	// deliberate choice in every field funding could otherwise reset.
+	const (
+		callerVersion  = int32(3)
+		callerLockTime = uint32(800_000)
+
+		// A sequence below the maximum minus one, which is what opts a
+		// transaction into replacement and enables its locktime.
+		callerSequence = uint32(0xfffffffd)
+	)
+
+	tx := wire.NewMsgTx(callerVersion)
+	tx.LockTime = callerLockTime
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: outPoint,
+		Sequence:         callerSequence,
+	})
+
+	paymentScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx.AddTxOut(&wire.TxOut{Value: 400_000, PkScript: paymentScript})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	callerWitnessScript := []byte{0x51, 0x52, 0x53}
+	callerLeafScript := []*psbt.TaprootTapLeafScript{{
+		ControlBlock: bytes.Repeat([]byte{0xc0}, 33),
+		Script:       []byte{0x51},
+		LeafVersion:  txscript.BaseLeafVersion,
+	}}
+	callerOutputScript := []byte{0x54, 0x55}
+
+	packet.Inputs[0].WitnessScript = callerWitnessScript
+	packet.Inputs[0].TaprootLeafScript = callerLeafScript
+	packet.Inputs[0].SighashType = txscript.SigHashNone |
+		txscript.SigHashAnyOneCanPay
+	packet.Outputs[0].WitnessScript = callerOutputScript
+
+	before := clonePacket(packet)
+
+	// Act.
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+	require.NoError(t, err)
+
+	// Assert: the caller's own packet was never the thing rewritten.
+	require.NotSame(t, packet, funded)
+	require.Equal(t, before, packet)
+
+	// Assert: the transaction-level choices survived.
+	require.Equal(t, callerVersion, funded.UnsignedTx.Version)
+	require.Equal(t, callerLockTime, funded.UnsignedTx.LockTime)
+
+	// Assert: the caller's input kept its sequence number and its own
+	// records, and gained the wallet's view of the coin it spends.
+	inputIdx := -1
+	for i, txIn := range funded.UnsignedTx.TxIn {
+		if txIn.PreviousOutPoint == outPoint {
+			inputIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, inputIdx, 0)
+
+	require.Equal(
+		t, callerSequence, funded.UnsignedTx.TxIn[inputIdx].Sequence,
+	)
+
+	fundedInput := funded.Inputs[inputIdx]
+	require.Equal(t, callerWitnessScript, fundedInput.WitnessScript)
+	require.Equal(t, callerLeafScript, fundedInput.TaprootLeafScript)
+	require.Equal(
+		t, txscript.SigHashNone|txscript.SigHashAnyOneCanPay,
+		fundedInput.SighashType,
+	)
+	require.NotNil(t, fundedInput.WitnessUtxo)
+	require.Len(t, fundedInput.Bip32Derivation, 1)
+
+	// Assert: the caller's output metadata is still on the caller's
+	// output, wherever sorting moved it to, and the change output is
+	// somewhere else entirely.
+	require.Len(t, funded.UnsignedTx.TxOut, 2)
+	require.GreaterOrEqual(t, changeIndex, int32(0))
+
+	paymentIdx := -1
+	for i, txOut := range funded.UnsignedTx.TxOut {
+		if txOut.Value == 400_000 {
+			paymentIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, paymentIdx, 0)
+	require.NotEqual(t, int32(paymentIdx), changeIndex)
+
+	require.Equal(
+		t, callerOutputScript, funded.Outputs[paymentIdx].WitnessScript,
+	)
+
+	// Assert: the change output carries the wallet's derivation and none
+	// of the caller's metadata, since it is not the caller's output.
+	require.Len(t, funded.Outputs[changeIndex].Bip32Derivation, 1)
+	require.Nil(t, funded.Outputs[changeIndex].WitnessScript)
+}
+
+// TestFundPsbtRejectsContradictedUtxo verifies that a caller that tells the
+// wallet something untrue about the wallet's own coin is refused, rather than
+// being handed a packet that silently says something else than it asked for.
+func TestFundPsbtRejectsContradictedUtxo(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+	utxo, _ := expectManualFundingSources(t, w, mocks, outPoint)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+
+	paymentScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx.AddTxOut(&wire.TxOut{Value: 400_000, PkScript: paymentScript})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	// The caller claims the input is worth more than the wallet's own
+	// record of it says.
+	packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+		Value:    utxo.Value * 2,
+		PkScript: utxo.PkScript,
+	}
+
+	before := clonePacket(packet)
+
+	funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+
+	require.ErrorIs(t, err, ErrConflictingInputMetadata)
+	require.Nil(t, funded)
+	require.Equal(t, before, packet)
+}
+
+// TestFundPsbtDuplicateOutputs verifies that two outputs paying exactly the
+// same amount to exactly the same script each keep their own metadata through
+// funding, and that neither is mistaken for the change output.
+//
+// Nothing about these two outputs tells them apart, so anything that
+// recognises an output by what it pays attributes one's metadata to the other,
+// and can pick either as the change output.
+func TestFundPsbtDuplicateOutputs(t *testing.T) {
+	t.Parallel()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outPoint := wire.OutPoint{Hash: chainhash.Hash{7}, Index: 0}
+	_, _ = expectManualFundingSources(t, w, mocks, outPoint)
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+
+	// Two outputs that are identical as far as the transaction is
+	// concerned, told apart only by the metadata attached to each.
+	paymentScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx.AddTxOut(&wire.TxOut{Value: 300_000, PkScript: paymentScript})
+	tx.AddTxOut(&wire.TxOut{Value: 300_000, PkScript: paymentScript})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	packet.Outputs[0].WitnessScript = []byte{0xa0}
+	packet.Outputs[1].WitnessScript = []byte{0xa1}
+
+	before := clonePacket(packet)
+
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		FeeRate: defaultFeeRate,
+	})
+	require.NoError(t, err)
+	require.Equal(t, before, packet)
+
+	// Both records survive, each still its own, and neither has been
+	// duplicated over the other.
+	var tags [][]byte
+	for i := range funded.Outputs {
+		if int32(i) == changeIndex {
+			continue
+		}
+
+		tags = append(tags, funded.Outputs[i].WitnessScript)
+	}
+	require.ElementsMatch(t, [][]byte{{0xa0}, {0xa1}}, tags)
+
+	// The change output is the wallet's own: it carries the wallet's
+	// derivation and none of the caller's tags.
+	require.GreaterOrEqual(t, changeIndex, int32(0))
+	require.Len(t, funded.Outputs[changeIndex].Bip32Derivation, 1)
+	require.Nil(t, funded.Outputs[changeIndex].WitnessScript)
+}
+
 // TestFundPsbtRejectsMalformedPacket verifies that a packet the structural
 // gate refuses is refused before the wallet has acted on it at all.
 //
@@ -1425,54 +1749,6 @@ func TestCreateTxIntentManual(t *testing.T) {
 	require.Equal(t, expectedUTXOs, inputsManual.UTXOs)
 }
 
-// TestFindChangeIndex tests that findChangeIndex correctly locates the change
-// output in the sorted PSBT packet.
-func TestFindChangeIndex(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Create three distinct transaction outputs.
-	out1 := &wire.TxOut{Value: 1000, PkScript: []byte{1}}
-	out2 := &wire.TxOut{Value: 2000, PkScript: []byte{2}}
-
-	// Identified as the change output.
-	changeOut := &wire.TxOut{Value: 500, PkScript: []byte{3}}
-
-	// Arrange: Setup a PSBT Packet where the outputs are sorted
-	// differently, with the change output now at index 0: [changeOut,
-	// out1, out2].
-	packet := &psbt.Packet{
-		UnsignedTx: &wire.MsgTx{
-			TxOut: []*wire.TxOut{changeOut, out1, out2},
-		},
-	}
-
-	// Act: Call findChangeIndex to locate the change output within the
-	// sorted packet.
-	idx, err := findChangeIndex(changeOut, packet)
-
-	// Assert: Verify that no error occurred and the change index found in
-	// the packet is 0, matching its new sorted position.
-	require.NoError(t, err)
-	require.Equal(t, int32(0), idx)
-
-	// Act: Call findChangeIndex for the case with no change output (nil).
-	idx, err = findChangeIndex(nil, packet)
-
-	// Assert: Verify that no error occurred and the returned index is -1,
-	// correctly indicating the absence of a change output.
-	require.NoError(t, err)
-	require.Equal(t, int32(-1), idx)
-
-	// Act: Call findChangeIndex for a change output not present in the
-	// packet.
-	unknownOut := &wire.TxOut{Value: 9999, PkScript: []byte{4}}
-	idx, err = findChangeIndex(unknownOut, packet)
-
-	// Assert: Verify that no error occurred and the returned index is -1.
-	require.NoError(t, err)
-	require.Equal(t, int32(-1), idx)
-}
-
 // TestAddChangeOutputInfoSuccess tests that addChangeOutputInfo correctly adds
 // derivation information to the change output.
 func TestAddChangeOutputInfoSuccess(t *testing.T) {
@@ -1662,6 +1938,23 @@ func TestAddChangeOutputInfoErrDerivationUnknown(t *testing.T) {
 	require.ErrorContains(t, err, "change addr is an imported addr")
 }
 
+// testFundingPacket returns a caller packet in the shape populatePsbtPacket
+// is given one: the wallet's own clone of a validated packet, still carrying
+// whatever the caller attached to it.
+func testFundingPacket(outPoints ...wire.OutPoint) *psbt.Packet {
+	tx := wire.NewMsgTx(2)
+	for _, outPoint := range outPoints {
+		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outPoint})
+	}
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	if err != nil {
+		panic(err)
+	}
+
+	return packet
+}
+
 // TestPopulatePsbtPacketErrors tests error paths in populatePsbtPacket.
 func TestPopulatePsbtPacketErrors(t *testing.T) {
 	t.Parallel()
@@ -1700,13 +1993,17 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 				PkScript: scriptOut,
 			}},
 		},
-		ChangeIndex: 0, // Output 0 is change
+
+		// Output 0 is change, so it came from the wallet rather than
+		// from any of the caller's own outputs.
+		ChangeIndex:  0,
+		OutputOrigin: []int{txauthor.ChangeOutputOrigin},
 	}
 
 	t.Run("DecorateInputs fails", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createStartedWalletWithMocks(t)
-		packet := &psbt.Packet{}
+		packet := testFundingPacket(outPoint)
 
 		// Mock store UTXO failure (DecorateInputs ->
 		// fetchAndValidateUtxo).
@@ -1724,7 +2021,7 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 	t.Run("addChangeOutputInfo fails", func(t *testing.T) {
 		t.Parallel()
 		w, mocks := createStartedWalletWithMocks(t)
-		packet := &psbt.Packet{}
+		packet := testFundingPacket(outPoint)
 
 		// Mock store UTXO and parent transaction lookups.
 		txOut := &wire.TxOut{Value: 1000, PkScript: scriptIn}
@@ -1756,6 +2053,22 @@ func TestPopulatePsbtPacketErrors(t *testing.T) {
 			t.Context(), packet, authoredTx,
 		)
 		require.ErrorIs(t, err, errDb)
+	})
+
+	t.Run("provenance does not match the outputs", func(t *testing.T) {
+		t.Parallel()
+		w, _ := createStartedWalletWithMocks(t)
+
+		// Provenance naming a caller output that does not exist is
+		// refused before any lookup, so the store carries no
+		// expectations here.
+		broken := *authoredTx
+		broken.OutputOrigin = []int{4}
+
+		_, _, err := w.populatePsbtPacket(
+			t.Context(), testFundingPacket(outPoint), &broken,
+		)
+		require.ErrorIs(t, err, ErrPacketMalformed)
 	})
 }
 
@@ -1799,10 +2112,17 @@ func TestPopulatePsbtPacketSuccess(t *testing.T) {
 			TxOut: []*wire.TxOut{changeOut, paymentOut},
 		},
 		ChangeIndex: 0,
+
+		// The change output was randomized into the front, so the
+		// caller's only output now stands second.
+		OutputOrigin: []int{txauthor.ChangeOutputOrigin, 0},
 	}
 
-	// Arrange: Create empty packet (will be overwritten).
-	packet := &psbt.Packet{}
+	// Arrange: Create the caller's packet, which named the payment output
+	// and left the input to coin selection.
+	packet := testFundingPacket()
+	packet.UnsignedTx.AddTxOut(paymentOut)
+	packet.Outputs = make([]psbt.POutput, 1)
 
 	w, mocks := createStartedWalletWithMocks(t)
 
