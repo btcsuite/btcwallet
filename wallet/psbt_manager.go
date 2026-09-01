@@ -597,14 +597,22 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 		return nil, 0, err
 	}
 
-	// Validate the funding intent before proceeding.
+	// Validate the funding intent, and the packet inside it, before
+	// anything is allocated on its behalf. Nothing below this point is
+	// free: source preparation derives a change address, and authoring
+	// consults the wallet's coins.
 	err = w.validateFundIntent(intent)
 	if err != nil {
 		return nil, 0, err
 	}
 
+	// Everything from here on works on a clone. The caller's packet is
+	// never the thing being rewritten, so however this ends, and however
+	// far it got, the caller gets its own packet back exactly as it was.
+	packet := clonePacket(intent.Packet)
+
 	// Create a TxIntent from the FundIntent.
-	txIntent := w.createTxIntent(intent)
+	txIntent := w.createTxIntent(packet, intent)
 
 	err = normalizeAndValidateTxIntent(txIntent)
 	if err != nil {
@@ -625,14 +633,14 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	}
 
 	// Populate the PSBT packet with the new transaction details.
-	packet, changeIndex, err := w.populatePsbtPacket(
-		ctx, intent.Packet, authoredTx,
+	funded, changeIndex, err := w.populatePsbtPacket(
+		ctx, packet, authoredTx,
 	)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	return packet, changeIndex, nil
+	return funded, changeIndex, nil
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
@@ -733,12 +741,19 @@ func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 // is well-formed and unambiguous. This function is called before any funding
 // logic to ensure that the caller has provided a valid intent.
 //
+// It is side-effect free, and it runs before the wallet has committed to
+// anything on the intent's behalf, so a caller that is refused here has not
+// had a change address derived or its coins consulted.
+//
 // The following checks are performed:
 //  1. The intent must not be nil.
 //  2. The PSBT packet must not be nil.
-//  3. If the PSBT has no inputs (automatic coin selection mode), it must have
+//  3. The packet must be structurally admissible for funding, which among
+//     other things means it must carry no signatures: funding rewrites the
+//     very transaction any existing signature commits to.
+//  4. If the PSBT has no inputs (automatic coin selection mode), it must have
 //     at least one output.
-//  4. If the PSBT has inputs, a coin selection policy must not be specified
+//  5. If the PSBT has inputs, a coin selection policy must not be specified
 //     (mutual exclusivity).
 func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 	// The intent must not be nil.
@@ -751,6 +766,14 @@ func (w *Wallet) validateFundIntent(intent *FundIntent) error {
 		return fmt.Errorf(
 			"%w: psbt packet cannot be nil", ErrNilTxIntent,
 		)
+	}
+
+	// The shared structural gate. Everything it rejects would otherwise be
+	// discovered somewhere further in, after the wallet had already acted
+	// on the packet.
+	err := validatePacket(intent.Packet, psbtOpFund)
+	if err != nil {
+		return err
 	}
 
 	// If the PSBT has no inputs (automatic coin selection mode), it must
@@ -814,10 +837,12 @@ func findChangeIndex(changeOutput *wire.TxOut,
 //     to `TxIntent.ChangeSource`. Any default change source determination
 //     (e.g., when `FundIntent.ChangeSource` is `nil`) is delegated to the
 //     underlying `TxCreator`'s `determineChangeSource` method.
-func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
+func (w *Wallet) createTxIntent(packet *psbt.Packet,
+	intent *FundIntent) *TxIntent {
+
 	// First, we'll copy the outputs from the PSBT packet to the TxIntent.
-	outputs := make([]wire.TxOut, len(intent.Packet.UnsignedTx.TxOut))
-	for i, txOut := range intent.Packet.UnsignedTx.TxOut {
+	outputs := make([]wire.TxOut, len(packet.UnsignedTx.TxOut))
+	for i, txOut := range packet.UnsignedTx.TxOut {
 		outputs[i] = *txOut
 	}
 
@@ -830,7 +855,7 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 
 	// Now, we'll determine the input source based on whether the PSBT
 	// packet already contains inputs.
-	if len(intent.Packet.UnsignedTx.TxIn) == 0 {
+	if len(packet.UnsignedTx.TxIn) == 0 {
 		// If the packet has no inputs, we'll use the policy-based input
 		// source from the intent. This will trigger automatic coin
 		// selection by the wallet. The caller is responsible for
@@ -842,9 +867,9 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 		// source. This bypasses coin selection and tells the wallet to
 		// use the exact inputs provided in the PSBT.
 		utxos := make(
-			[]wire.OutPoint, len(intent.Packet.UnsignedTx.TxIn),
+			[]wire.OutPoint, len(packet.UnsignedTx.TxIn),
 		)
-		for i, txIn := range intent.Packet.UnsignedTx.TxIn {
+		for i, txIn := range packet.UnsignedTx.TxIn {
 			utxos[i] = txIn.PreviousOutPoint
 		}
 

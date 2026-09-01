@@ -903,6 +903,10 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 		fixture.inputKey.PubKey(),
 	)
 
+	// Arrange: Keep a copy of the caller's packet as it was handed over,
+	// to compare the caller's own packet against afterwards.
+	before := clonePacket(packet)
+
 	// Act: Fund the packet through FundPsbt with an explicit automatic
 	// selection policy and the fixture's fee rate.
 	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
@@ -911,11 +915,13 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 		FeeRate: defaultFeeRate,
 	})
 
-	// Assert: FundPsbt must mutate and return the caller's packet, select
-	// exactly the fixture UTXO, preserve the 99,700-sat payment, decorate
-	// the input with that UTXO, and report -1 because no change survived.
+	// Assert: FundPsbt must return a funded packet of its own, leaving the
+	// caller's untouched, select exactly the fixture UTXO, preserve the
+	// 99,700-sat payment, decorate the input with that UTXO, and report -1
+	// because no change survived.
 	require.NoError(t, err)
-	require.Same(t, packet, funded)
+	require.NotSame(t, packet, funded)
+	require.Equal(t, before, packet)
 	require.Equal(t, int32(-1), changeIndex)
 	require.Len(t, funded.UnsignedTx.TxIn, 1)
 	require.Equal(t, fixture.utxo.OutPoint,
@@ -927,6 +933,173 @@ func TestFundPsbtExplicitPolicy(t *testing.T) {
 		funded.Inputs[0].WitnessUtxo.Value)
 	require.Equal(t, fixture.utxo.PkScript,
 		funded.Inputs[0].WitnessUtxo.PkScript)
+}
+
+// TestFundPsbtRejectsMalformedPacket verifies that a packet the structural
+// gate refuses is refused before the wallet has acted on it at all.
+//
+// The mocked store carries no expectations, so any lookup the funding path
+// attempted would fail the test outright. That is the assertion: a caller
+// whose packet is rejected has had no change address derived and no coins
+// consulted on its behalf, and its own packet comes back untouched.
+func TestFundPsbtRejectsMalformedPacket(t *testing.T) {
+	t.Parallel()
+
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+
+	tests := []struct {
+		name    string
+		mutate  func(*psbt.Packet)
+		wantErr error
+	}{{
+		name: "a packet spending one outpoint twice",
+		mutate: func(p *psbt.Packet) {
+			outPoint := wire.OutPoint{Hash: chainhash.Hash{9}}
+			p.UnsignedTx.TxIn = []*wire.TxIn{{
+				PreviousOutPoint: outPoint,
+			}, {
+				PreviousOutPoint: outPoint,
+			}}
+			p.Inputs = make([]psbt.PInput, 2)
+		},
+		wantErr: ErrDuplicateInput,
+	}, {
+		// Funding appends a change output and re-sorts, which is
+		// exactly the pairing SIGHASH_SINGLE commits to.
+		name: "a packet asking for sighash single",
+		mutate: func(p *psbt.Packet) {
+			p.UnsignedTx.TxIn = []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{
+					Hash: chainhash.Hash{9},
+				},
+			}}
+			p.Inputs = []psbt.PInput{{
+				SighashType: txscript.SigHashSingle,
+			}}
+		},
+		wantErr: ErrUnsafeSighash,
+	}, {
+		// Funding cannot promise to preserve a field it cannot even
+		// name, so it refuses rather than dropping it silently.
+		name: "a packet carrying unclassified fields",
+		mutate: func(p *psbt.Packet) {
+			p.Unknowns = []*psbt.Unknown{{
+				Key:   []byte{0xfc},
+				Value: []byte{0x01},
+			}}
+		},
+		wantErr: ErrUnclassifiedField,
+	}, {
+		name: "a packet whose records do not match its transaction",
+		mutate: func(p *psbt.Packet) {
+			p.Outputs = nil
+		},
+		wantErr: ErrPacketMalformed,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+			mocks.syncer.On("syncState").
+				Return(syncStateSynced).Once()
+
+			tx := wire.NewMsgTx(wire.TxVersion)
+			tx.AddTxOut(&wire.TxOut{
+				Value: 10_000, PkScript: script,
+			})
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			tc.mutate(packet)
+
+			before := clonePacket(packet)
+
+			funded, changeIndex, err := w.FundPsbt(
+				t.Context(), &FundIntent{
+					Packet:  packet,
+					FeeRate: defaultFeeRate,
+				},
+			)
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, funded)
+			require.Zero(t, changeIndex)
+			require.Equal(t, before, packet)
+		})
+	}
+}
+
+// TestFundPsbtRejectsSignedPacket verifies that funding refuses a packet that
+// already carries signature material.
+//
+// Funding rebuilds the transaction, adding inputs and a change output and
+// re-sorting both, so a signature made over the packet as it stands cannot
+// survive it. Funding around the signature and handing back a packet whose
+// signature is quietly void is the worse of the two outcomes.
+func TestFundPsbtRejectsSignedPacket(t *testing.T) {
+	t.Parallel()
+
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+
+	tests := []struct {
+		name string
+		sign func(*psbt.PInput)
+	}{{
+		name: "a partial signature",
+		sign: func(in *psbt.PInput) {
+			in.PartialSigs = []*psbt.PartialSig{{
+				PubKey:    bytes.Repeat([]byte{0x02}, 33),
+				Signature: bytes.Repeat([]byte{0x01}, 71),
+			}}
+		},
+	}, {
+		name: "a taproot key spend signature",
+		sign: func(in *psbt.PInput) {
+			in.TaprootKeySpendSig = bytes.Repeat([]byte{0x01}, 64)
+		},
+	}, {
+		name: "a finalized input",
+		sign: func(in *psbt.PInput) {
+			in.FinalScriptWitness = []byte{0x01}
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mocks := createStartedWalletWithMocks(t)
+			mocks.syncer.On("syncState").
+				Return(syncStateSynced).Once()
+
+			tx := wire.NewMsgTx(wire.TxVersion)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: wire.OutPoint{
+					Hash: chainhash.Hash{9},
+				},
+			})
+			tx.AddTxOut(&wire.TxOut{
+				Value: 10_000, PkScript: script,
+			})
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			tc.sign(&packet.Inputs[0])
+
+			before := clonePacket(packet)
+
+			funded, _, err := w.FundPsbt(t.Context(), &FundIntent{
+				Packet:  packet,
+				FeeRate: defaultFeeRate,
+			})
+
+			require.ErrorIs(t, err, ErrPacketSigned)
+			require.Nil(t, funded)
+			require.Equal(t, before, packet)
+		})
+	}
 }
 
 // TestFundPsbtInvalidTxIntent verifies wrapper rewiring preserves transaction
@@ -1181,7 +1354,7 @@ func TestCreateTxIntentAuto(t *testing.T) {
 	}
 
 	// Act: Call createTxIntent to convert the FundIntent.
-	txIntent := w.createTxIntent(intent)
+	txIntent := w.createTxIntent(packet, intent)
 
 	// Assert: Verify that the basic fields of the resulting TxIntent
 	// match the input FundIntent.
@@ -1233,7 +1406,7 @@ func TestCreateTxIntentManual(t *testing.T) {
 	}
 
 	// Act: Call createTxIntent to convert the FundIntent.
-	txIntent := w.createTxIntent(intent)
+	txIntent := w.createTxIntent(packet, intent)
 
 	// Assert: Verify that the basic fields of the resulting TxIntent
 	// match the input FundIntent.
