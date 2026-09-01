@@ -6,8 +6,10 @@ package wallet
 
 import (
 	"bytes"
+	"math/rand"
 	"testing"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
@@ -481,6 +483,223 @@ func TestRestoreOutputMetadataRejectsBadOrigin(t *testing.T) {
 			_, err := restoreOutputMetadata(
 				callerOutputs, tc.origin,
 			)
+			require.ErrorIs(t, err, ErrPacketMalformed)
+		})
+	}
+}
+
+// randomPacket builds a packet with a random set of inputs and outputs, some
+// of them deliberately identical, for the sort to be exercised against.
+func randomPacket(t *testing.T, rng *rand.Rand) (*psbt.Packet, []int) {
+	t.Helper()
+
+	numInputs := rng.Intn(6) + 1
+	numOutputs := rng.Intn(6) + 1
+
+	tx := &wire.MsgTx{}
+	inputs := make([]psbt.PInput, 0, numInputs)
+	for i := 0; i < numInputs; i++ {
+		var hash chainhash.Hash
+
+		// A small alphabet of hashes, so that duplicate transaction
+		// IDs and index-only ordering come up rather than being drowned
+		// out by random ones.
+		hash[0] = byte(rng.Intn(3))
+		hash[31] = byte(rng.Intn(3))
+
+		tx.TxIn = append(tx.TxIn, &wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  hash,
+				Index: uint32(rng.Intn(3)),
+			},
+		})
+		inputs = append(inputs, psbt.PInput{
+			WitnessScript: []byte{byte(i)},
+		})
+	}
+
+	outputs := make([]psbt.POutput, 0, numOutputs)
+	origin := make([]int, 0, numOutputs)
+	for i := 0; i < numOutputs; i++ {
+		tx.TxOut = append(tx.TxOut, &wire.TxOut{
+			Value: int64(rng.Intn(3) * 1000),
+			PkScript: bytes.Repeat(
+				[]byte{byte(rng.Intn(3))}, 22,
+			),
+		})
+		outputs = append(outputs, psbt.POutput{
+			RedeemScript: []byte{byte(i)},
+		})
+		origin = append(origin, i)
+	}
+
+	return &psbt.Packet{
+		UnsignedTx: tx,
+		Inputs:     inputs,
+		Outputs:    outputs,
+	}, origin
+}
+
+// TestSortPacketMatchesLibrarySort verifies that the wallet's own sort puts a
+// packet in the same BIP69 order the psbt library does.
+//
+// The wallet sorts through a permutation of its own so that it can carry
+// provenance along, which is a reimplementation of an ordering someone else
+// already defines. This test is what keeps the two from drifting apart.
+func TestSortPacketMatchesLibrarySort(t *testing.T) {
+	t.Parallel()
+
+	rng := rand.New(rand.NewSource(1))
+
+	for i := 0; i < 200; i++ {
+		packet, origin := randomPacket(t, rng)
+		reference := clonePacket(packet)
+
+		_, err := sortPacket(packet, origin)
+		require.NoError(t, err)
+
+		require.NoError(t, psbt.InPlaceSort(reference))
+
+		require.Equal(
+			t, reference.UnsignedTx.TxIn, packet.UnsignedTx.TxIn,
+		)
+		require.Equal(
+			t, reference.UnsignedTx.TxOut, packet.UnsignedTx.TxOut,
+		)
+	}
+}
+
+// TestSortPacketCarriesRecords verifies that the per-input and per-output
+// records move with the inputs and outputs they describe, rather than being
+// left behind at their old positions.
+func TestSortPacketCarriesRecords(t *testing.T) {
+	t.Parallel()
+
+	rng := rand.New(rand.NewSource(2))
+
+	for i := 0; i < 200; i++ {
+		packet, origin := randomPacket(t, rng)
+
+		// Each record names the position it started at, so a record
+		// that failed to move with its input or output is visible.
+		inputFor := make(map[byte]wire.OutPoint)
+		for i, txIn := range packet.UnsignedTx.TxIn {
+			inputFor[packet.Inputs[i].WitnessScript[0]] =
+				txIn.PreviousOutPoint
+		}
+
+		outputFor := make(map[byte]*wire.TxOut)
+		for i, txOut := range packet.UnsignedTx.TxOut {
+			outputFor[packet.Outputs[i].RedeemScript[0]] = txOut
+		}
+
+		_, err := sortPacket(packet, origin)
+		require.NoError(t, err)
+
+		for i, txIn := range packet.UnsignedTx.TxIn {
+			tag := packet.Inputs[i].WitnessScript[0]
+			require.Equal(
+				t, inputFor[tag], txIn.PreviousOutPoint,
+			)
+		}
+
+		for i, txOut := range packet.UnsignedTx.TxOut {
+			tag := packet.Outputs[i].RedeemScript[0]
+			require.Equal(t, outputFor[tag], txOut)
+		}
+	}
+}
+
+// TestSortPacketFindsChange verifies that the change output is located after
+// sorting even when another output pays exactly the same amount to exactly the
+// same script.
+//
+// This is the case that value-and-script matching gets wrong, and it is not a
+// contrived one: a caller paying itself the same amount it receives as change
+// produces it.
+func TestSortPacketFindsChange(t *testing.T) {
+	t.Parallel()
+
+	script := bytes.Repeat([]byte{0x51}, 22)
+
+	// Three outputs of the same value and script, of which the second is
+	// the change. Nothing about the outputs themselves tells them apart.
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxOut: []*wire.TxOut{
+				{Value: 1000, PkScript: script},
+				{Value: 1000, PkScript: script},
+				{Value: 1000, PkScript: script},
+			},
+		},
+		Outputs: []psbt.POutput{
+			{RedeemScript: []byte{0xa0}},
+			{RedeemScript: []byte{0xa1}},
+			{RedeemScript: []byte{0xa2}},
+		},
+	}
+
+	origin := []int{0, txauthor.ChangeOutputOrigin, 1}
+
+	changeIndex, err := sortPacket(packet, origin)
+	require.NoError(t, err)
+
+	// The sort is stable, so the identical outputs keep their order and
+	// the change output is still the second one, carrying its own record.
+	require.Equal(t, int32(1), changeIndex)
+	require.Equal(
+		t, []byte{0xa1}, packet.Outputs[changeIndex].RedeemScript,
+	)
+}
+
+// TestSortPacketWithoutChange verifies that a packet with no change output
+// reports no change index rather than pointing at an arbitrary output.
+func TestSortPacketWithoutChange(t *testing.T) {
+	t.Parallel()
+
+	packet, origin := randomPacket(t, rand.New(rand.NewSource(3)))
+
+	changeIndex, err := sortPacket(packet, origin)
+	require.NoError(t, err)
+	require.Equal(t, int32(-1), changeIndex)
+}
+
+// TestSortPacketRejectsMismatchedRecords verifies that a packet whose records
+// do not line up with its transaction is refused rather than sorted into an
+// arrangement where they line up by accident.
+func TestSortPacketRejectsMismatchedRecords(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*psbt.Packet, *[]int)
+	}{{
+		name: "too few input records",
+		mutate: func(p *psbt.Packet, _ *[]int) {
+			p.Inputs = nil
+		},
+	}, {
+		name: "too few output records",
+		mutate: func(p *psbt.Packet, _ *[]int) {
+			p.Outputs = nil
+		},
+	}, {
+		name: "provenance short of the outputs",
+		mutate: func(_ *psbt.Packet, origin *[]int) {
+			*origin = nil
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			packet, origin := randomPacket(
+				t, rand.New(rand.NewSource(4)),
+			)
+			tc.mutate(packet, &origin)
+
+			_, err := sortPacket(packet, origin)
 			require.ErrorIs(t, err, ErrPacketMalformed)
 		})
 	}

@@ -8,8 +8,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"sort"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
@@ -281,4 +284,129 @@ func restoreOutputMetadata(callerOutputs []psbt.POutput,
 	}
 
 	return outputs, nil
+}
+
+// sortPacket sorts a packet's inputs and outputs into BIP69 order, carrying
+// the per-input and per-output records along with the wire inputs and outputs
+// they describe, and returns the position the change output ended up at, or -1
+// if the packet has no change output.
+//
+// The wallet cannot use psbt.InPlaceSort here and then go looking for its
+// change output afterwards, because there is nothing left to look for it by:
+// two outputs paying the same amount to the same script are identical to
+// anything that inspects them, and the caller is told the wrong index for its
+// change. Sorting through an explicit permutation instead lets the provenance
+// move with the outputs, so the change output is read off rather than
+// rediscovered.
+//
+// The order this produces is BIP69's, the same one psbt.InPlaceSort produces,
+// with one added property: outputs that BIP69 does not distinguish keep the
+// order the caller gave them.
+func sortPacket(packet *psbt.Packet, origin []int) (int32, error) {
+	tx := packet.UnsignedTx
+
+	if len(packet.Inputs) != len(tx.TxIn) ||
+		len(packet.Outputs) != len(tx.TxOut) ||
+		len(origin) != len(tx.TxOut) {
+
+		return 0, fmt.Errorf("%w: cannot sort a packet whose records "+
+			"do not match its transaction", ErrPacketMalformed)
+	}
+
+	inputOrder := sortOrder(len(tx.TxIn), func(i, j int) bool {
+		return lessOutPoint(
+			tx.TxIn[i].PreviousOutPoint,
+			tx.TxIn[j].PreviousOutPoint,
+		)
+	})
+
+	tx.TxIn = permute(tx.TxIn, inputOrder)
+	packet.Inputs = permute(packet.Inputs, inputOrder)
+
+	outputOrder := sortOrder(len(tx.TxOut), func(i, j int) bool {
+		return lessTxOut(tx.TxOut[i], tx.TxOut[j])
+	})
+
+	tx.TxOut = permute(tx.TxOut, outputOrder)
+	packet.Outputs = permute(packet.Outputs, outputOrder)
+	sorted := permute(origin, outputOrder)
+
+	return changeIndexOf(sorted)
+}
+
+// changeIndexOf reports the position the change output holds in a sorted
+// provenance list, or -1 if the packet has no change output.
+func changeIndexOf(origin []int) (int32, error) {
+	for i, from := range origin {
+		if from != txauthor.ChangeOutputOrigin {
+			continue
+		}
+
+		if i > math.MaxInt32 {
+			return 0, ErrChangeIndexOutOfRange
+		}
+
+		// The bound above makes this conversion safe.
+		//
+		//nolint:gosec
+		return int32(i), nil
+	}
+
+	return -1, nil
+}
+
+// sortOrder returns the permutation that puts n elements in order according to
+// less, which is stated over the elements' original positions.
+//
+// The sort is stable, so elements the ordering does not distinguish keep the
+// order they arrived in rather than an arbitrary one.
+func sortOrder(n int, less func(i, j int) bool) []int {
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+
+	sort.SliceStable(order, func(i, j int) bool {
+		return less(order[i], order[j])
+	})
+
+	return order
+}
+
+// permute returns the elements of a slice rearranged into the given order.
+func permute[T any](values []T, order []int) []T {
+	permuted := make([]T, len(order))
+	for i, from := range order {
+		permuted[i] = values[from]
+	}
+
+	return permuted
+}
+
+// lessOutPoint is BIP69's ordering over the outpoints a transaction spends:
+// by transaction ID as it is displayed, then by output index.
+func lessOutPoint(a, b wire.OutPoint) bool {
+	if a.Hash == b.Hash {
+		return a.Index < b.Index
+	}
+
+	// Transaction IDs are stored in the reverse of the byte order they are
+	// displayed and compared in, so walk them from the far end.
+	for i := chainhash.HashSize - 1; i >= 0; i-- {
+		if a.Hash[i] != b.Hash[i] {
+			return a.Hash[i] < b.Hash[i]
+		}
+	}
+
+	return false
+}
+
+// lessTxOut is BIP69's ordering over a transaction's outputs: by amount, then
+// by the script each pays.
+func lessTxOut(a, b *wire.TxOut) bool {
+	if a.Value == b.Value {
+		return bytes.Compare(a.PkScript, b.PkScript) < 0
+	}
+
+	return a.Value < b.Value
 }
