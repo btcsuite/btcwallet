@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/stretchr/testify/require"
 )
 
@@ -194,6 +195,152 @@ func TestDerivedAccountNumberImmutable(t *testing.T) {
 	err := updateDerivedAccountNumberRaw(t, store.DB(), accountID, 99)
 	require.Error(t, err)
 	requireDriverConstraintError(t, err)
+}
+
+// TestAccountNoChainSyncConstraints verifies direct SQL receives the false
+// default but cannot store NULL, an invalid SQLite boolean, or a policy update.
+func TestAccountNoChainSyncConstraints(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a true-valued account for immutable update attempts and
+	// build dialect-neutral statements for defaulted and explicit inserts.
+	store := NewTestStore(t)
+	queries := store.Queries()
+	walletID := newWallet(t, store, "account-no-chain-sync-constraints")
+	scope := db.KeyScopeBIP0084
+
+	const existingName = "existing-no-chain-sync"
+
+	_, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       scope,
+			Name:        existingName,
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	scopeID := GetKeyScopeID(t, queries, walletID, scope)
+	accountID := GetAccountID(t, queries, scopeID, existingName)
+
+	omittedInsert := fmt.Sprintf(`INSERT INTO accounts
+		(wallet_id, scope_id, account_name, is_derived, public_key)
+		VALUES (%s, %s, %s, FALSE, %s)`, testQueryParam(1),
+		testQueryParam(2), testQueryParam(3), testQueryParam(4))
+	explicitInsert := fmt.Sprintf(`INSERT INTO accounts
+		(wallet_id, scope_id, account_name, is_derived, no_chain_sync,
+		 public_key) VALUES (%s, %s, %s, FALSE, %s, %s)`,
+		testQueryParam(1), testQueryParam(2), testQueryParam(3),
+		testQueryParam(4), testQueryParam(5))
+	update := fmt.Sprintf(`UPDATE accounts SET no_chain_sync = %s
+		WHERE id = %s`, testQueryParam(1), testQueryParam(2))
+
+	// testCase couples each raw statement with the account state expected
+	// afterward, allowing one assertion path to cover both accepted defaults
+	// and rejected mutations without hiding dialect-specific behavior.
+	type testCase struct {
+		name            string
+		accountName     string
+		query           string
+		args            []any
+		wantErr         bool
+		wantExists      bool
+		wantNoChainSync bool
+	}
+
+	tests := []testCase{
+		{
+			name:        "omitted insert defaults false",
+			accountName: "defaulted",
+			query:       omittedInsert,
+			args: []any{
+				walletID, scopeID, "defaulted", RandomBytes(32),
+			},
+			wantExists:      true,
+			wantNoChainSync: false,
+		},
+		{
+			name:        "explicit null insert rejected",
+			accountName: "null-insert",
+			query:       explicitInsert,
+			args: []any{
+				walletID, scopeID, "null-insert", nil, RandomBytes(32),
+			},
+			wantErr: true,
+		},
+		{
+			name:        "update false rejected",
+			accountName: existingName,
+			query:       update,
+			args: []any{
+				false, accountID,
+			},
+			wantErr:         true,
+			wantExists:      true,
+			wantNoChainSync: true,
+		},
+		{
+			name:        "update null rejected",
+			accountName: existingName,
+			query:       update,
+			args: []any{
+				nil, accountID,
+			},
+			wantErr:         true,
+			wantExists:      true,
+			wantNoChainSync: true,
+		},
+	}
+	if testBackend() == dberr.BackendSQLite {
+		// SQLite accepts flexible integer storage unless the column check owns
+		// the boolean domain, so exercise the otherwise-valid value two.
+		tests = append(tests, testCase{
+			name:        "invalid sqlite boolean rejected",
+			accountName: "invalid-boolean",
+			query:       explicitInsert,
+			args: []any{
+				walletID, scopeID, "invalid-boolean", 2, RandomBytes(32),
+			},
+			wantErr: true,
+		})
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Act: bypass the Store write path and attempt the selected raw
+			// insert or immutable-field update.
+			_, execErr := store.DB().ExecContext(
+				t.Context(), test.query, test.args...,
+			)
+
+			// Assert: the database accepts only the omitted/defaulted insert.
+			// Re-reading proves rejected inserts leave nothing and rejected
+			// updates preserve the original true value.
+			if test.wantErr {
+				require.Error(t, execErr)
+				require.Regexp(
+					t, `constraint|SQLSTATE 235(02|14)`, execErr.Error(),
+				)
+			} else {
+				require.NoError(t, execErr)
+			}
+
+			info, readErr := store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, scope, test.accountName,
+				),
+			)
+			if !test.wantExists {
+				require.ErrorIs(t, readErr, db.ErrAccountNotFound)
+				return
+			}
+
+			require.NoError(t, readErr)
+			require.Equal(
+				t, test.wantNoChainSync, info.NoChainSync,
+			)
+		})
+	}
 }
 
 // TestCreateDerivedAccountIgnoresImportedAccounts verifies that imported

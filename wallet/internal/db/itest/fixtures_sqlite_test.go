@@ -27,6 +27,12 @@ func testBackend() dberr.Backend {
 	return dberr.BackendSQLite
 }
 
+// testQueryParam returns SQLite's positional marker so shared raw-SQL tests
+// bind values safely without duplicating their dialect-neutral assertions.
+func testQueryParam(_ int) string {
+	return "?"
+}
+
 // requireConstraintSQLError verifies that a real SQLite constraint failure
 // reaches callers as the shared SQL error wrapper.
 func requireConstraintSQLError(t *testing.T, err error) {
