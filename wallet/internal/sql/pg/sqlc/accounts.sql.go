@@ -233,6 +233,7 @@ INSERT INTO accounts (
     scope_id,
     account_name,
     is_derived,
+    no_chain_sync,
     account_number,
     public_key,
     master_fingerprint
@@ -242,16 +243,18 @@ SELECT
     ks.id AS scope_id,
     $1 AS account_name,
     TRUE AS is_derived,
-    $2 AS account_number,
-    $3 AS public_key,
-    $4 AS master_fingerprint
+    $2 AS no_chain_sync,
+    $3 AS account_number,
+    $4 AS public_key,
+    $5 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $5
+WHERE ks.id = $6
 RETURNING id, account_number, created_at
 `
 
 type CreateDerivedAccountParams struct {
 	AccountName       string
+	NoChainSync       bool
 	AccountNumber     sql.NullInt64
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
@@ -265,9 +268,12 @@ type CreateDerivedAccountRow struct {
 }
 
 // Creates the parent row for a wallet-derived account under the given scope.
+// The synchronization policy is bound verbatim as immutable account metadata;
+// recording it here deliberately performs no chain operation.
 func (q *Queries) CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error) {
 	row := q.queryRow(ctx, q.createDerivedAccountStmt, CreateDerivedAccount,
 		arg.AccountName,
+		arg.NoChainSync,
 		arg.AccountNumber,
 		arg.PublicKey,
 		arg.MasterFingerprint,
@@ -284,6 +290,7 @@ INSERT INTO accounts (
     scope_id,
     account_name,
     is_derived,
+    no_chain_sync,
     public_key,
     master_fingerprint
 )
@@ -292,15 +299,17 @@ SELECT
     ks.id AS scope_id,
     $1 AS account_name,
     FALSE AS is_derived,
-    $2 AS public_key,
-    $3 AS master_fingerprint
+    $2 AS no_chain_sync,
+    $3 AS public_key,
+    $4 AS master_fingerprint
 FROM key_scopes AS ks
-WHERE ks.id = $4
+WHERE ks.id = $5
 RETURNING id, created_at
 `
 
 type CreateImportedAccountParams struct {
 	AccountName       string
+	NoChainSync       bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	ScopeID           int64
@@ -313,9 +322,12 @@ type CreateImportedAccountRow struct {
 
 // Creates a new imported xpub account under the given scope. Imported xpub
 // accounts are HD account-like rows but do not have BIP44 account numbers.
+// The synchronization policy is bound verbatim as immutable account metadata;
+// recording it here deliberately performs no chain operation.
 func (q *Queries) CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error) {
 	row := q.queryRow(ctx, q.createImportedAccountStmt, CreateImportedAccount,
 		arg.AccountName,
+		arg.NoChainSync,
 		arg.PublicKey,
 		arg.MasterFingerprint,
 		arg.ScopeID,
@@ -331,6 +343,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -357,6 +370,7 @@ type GetAccountByScopeAndNameRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -378,6 +392,7 @@ func (q *Queries) GetAccountByScopeAndName(ctx context.Context, arg GetAccountBy
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -398,6 +413,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -424,6 +440,7 @@ type GetAccountByScopeAndNumberRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -445,6 +462,7 @@ func (q *Queries) GetAccountByScopeAndNumber(ctx context.Context, arg GetAccount
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -465,6 +483,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -497,6 +516,7 @@ type GetAccountByWalletScopeAndNameRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -523,6 +543,7 @@ func (q *Queries) GetAccountByWalletScopeAndName(ctx context.Context, arg GetAcc
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -543,6 +564,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -576,6 +598,7 @@ type GetAccountByWalletScopeAndNumberRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -602,6 +625,7 @@ func (q *Queries) GetAccountByWalletScopeAndNumber(ctx context.Context, arg GetA
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.CreatedAt,
 		&i.Purpose,
 		&i.CoinType,
@@ -621,6 +645,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -642,6 +667,7 @@ type GetAccountPropsByIdRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	CreatedAt         time.Time
@@ -662,6 +688,7 @@ func (q *Queries) GetAccountPropsById(ctx context.Context, id int64) (GetAccount
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.CreatedAt,
@@ -681,6 +708,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -707,6 +735,7 @@ type GetAccountPropsByWalletAndIdRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	PublicKey         []byte
 	MasterFingerprint sql.NullInt64
 	CreatedAt         time.Time
@@ -727,6 +756,7 @@ func (q *Queries) GetAccountPropsByWalletAndId(ctx context.Context, arg GetAccou
 		&i.AccountNumber,
 		&i.AccountName,
 		&i.IsDerived,
+		&i.NoChainSync,
 		&i.PublicKey,
 		&i.MasterFingerprint,
 		&i.CreatedAt,
@@ -813,6 +843,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -835,6 +866,7 @@ type ListAccountsByScopeRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -862,6 +894,7 @@ func (q *Queries) ListAccountsByScope(ctx context.Context, scopeID int64) ([]Lis
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.IsDerived,
+			&i.NoChainSync,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -892,6 +925,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -914,6 +948,7 @@ type ListAccountsByWalletRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -941,6 +976,7 @@ func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]L
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.IsDerived,
+			&i.NoChainSync,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -971,6 +1007,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -998,6 +1035,7 @@ type ListAccountsByWalletAndNameRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -1025,6 +1063,7 @@ func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccou
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.IsDerived,
+			&i.NoChainSync,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
@@ -1055,6 +1094,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -1086,6 +1126,7 @@ type ListAccountsByWalletScopeRow struct {
 	AccountNumber     sql.NullInt64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	CreatedAt         time.Time
 	Purpose           int64
 	CoinType          int64
@@ -1113,6 +1154,7 @@ func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccount
 			&i.AccountNumber,
 			&i.AccountName,
 			&i.IsDerived,
+			&i.NoChainSync,
 			&i.CreatedAt,
 			&i.Purpose,
 			&i.CoinType,
