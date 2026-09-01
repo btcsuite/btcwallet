@@ -22,6 +22,9 @@ CREATE TABLE accounts (
     -- number. Imported xpub accounts leave this FALSE.
     is_derived BOOLEAN NOT NULL,
 
+    -- Whether automatic chain synchronization excludes this account.
+    no_chain_sync BOOLEAN NOT NULL DEFAULT FALSE,
+
     -- BIP44 account number allocated by the wallet for derived accounts.
     -- Imported xpub accounts leave this NULL and are identified by id/name.
     account_number INTEGER,
@@ -45,6 +48,9 @@ CREATE TABLE accounts (
 
     -- Shape marker must be boolean.
     CHECK (is_derived IN (0, 1)),
+
+    -- Synchronization policy must use SQLite's boolean integer domain.
+    CHECK (no_chain_sync IN (FALSE, TRUE)),
 
     -- External derivation index must be non-negative.
     CHECK (next_external_index >= 0),
@@ -103,6 +109,7 @@ WHEN
     OR new.scope_id != old.scope_id
     OR new.is_derived != old.is_derived
     OR new.account_number IS NOT old.account_number
+    OR new.no_chain_sync IS NOT old.no_chain_sync
 BEGIN
     SELECT raise(ABORT, 'account identity cannot be changed after creation');
 END;
