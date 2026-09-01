@@ -87,6 +87,8 @@ type Querier interface {
 	// Inserts the encrypted private key material for an account.
 	CreateAccountSecret(ctx context.Context, arg CreateAccountSecretParams) error
 	// Creates the parent row for a wallet-derived account under the given scope.
+	// The synchronization policy is bound verbatim as immutable account metadata;
+	// recording it here deliberately performs no chain operation.
 	CreateDerivedAccount(ctx context.Context, arg CreateDerivedAccountParams) (CreateDerivedAccountRow, error)
 	// Creates the parent address row for an HD-derived address. The caller inserts
 	// the path and account ownership into derived_addresses in the same transaction.
@@ -95,6 +97,8 @@ type Querier interface {
 	CreateDerivedAddressPath(ctx context.Context, arg CreateDerivedAddressPathParams) error
 	// Creates a new imported xpub account under the given scope. Imported xpub
 	// accounts are HD account-like rows but do not have BIP44 account numbers.
+	// The synchronization policy is bound verbatim as immutable account metadata;
+	// recording it here deliberately performs no chain operation.
 	CreateImportedAccount(ctx context.Context, arg CreateImportedAccountParams) (CreateImportedAccountRow, error)
 	// Creates a raw imported address with no account or derivation path.
 	CreateImportedAddress(ctx context.Context, arg CreateImportedAddressParams) (CreateImportedAddressRow, error)

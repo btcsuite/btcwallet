@@ -15,6 +15,7 @@ type Account struct {
 	ScopeID           int64
 	AccountName       string
 	IsDerived         bool
+	NoChainSync       bool
 	AccountNumber     sql.NullInt64
 	MasterFingerprint sql.NullInt64
 	PublicKey         []byte
