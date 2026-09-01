@@ -187,6 +187,14 @@ func (c *MempoolChain) Rescan(*chainhash.Hash, []address.Address,
 // NotifyReceived implements the chain.Interface interface.
 func (c *MempoolChain) NotifyReceived([]address.Address) error { return nil }
 
+// WatchAddrsFromTip implements chain.Interface for the deterministic mempool
+// fake. It has no notification filter, but still preserves caller cancellation.
+func (c *MempoolChain) WatchAddrsFromTip(ctx context.Context,
+	_ []address.Address) error {
+
+	return ctx.Err()
+}
+
 // NotifyBlocks implements the chain.Interface interface.
 func (c *MempoolChain) NotifyBlocks() error { return nil }
 
