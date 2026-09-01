@@ -385,3 +385,98 @@ func TestNewUnsignedTransactionNilOutputs(t *testing.T) {
 	require.Equal(t, -1, tx.ChangeIndex)
 	require.Empty(t, tx.Tx.TxOut)
 }
+
+// TestNewUnsignedTransactionChecksInputs verifies that a result from a hostile
+// or broken input source is refused, and that the refusal happens after the
+// source was consulted but before any change is allocated from the value it
+// claimed to supply.
+func TestNewUnsignedTransactionChecksInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		total      btcutil.Amount
+		inputCount int
+		values     []btcutil.Amount
+		wantErr    error
+	}{{
+		// Left unchecked, this is the result that pays change out of
+		// value the source never supplied.
+		name:       "an over-reported total is rejected",
+		total:      1e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{1e6},
+		wantErr:    ErrInputTotalMismatch,
+	}, {
+		name:       "an under-reported total is rejected",
+		total:      1e6,
+		inputCount: 2,
+		values:     []btcutil.Amount{1e6, 1e6},
+		wantErr:    ErrInputTotalMismatch,
+	}, {
+		name:       "a negative reported total is rejected",
+		total:      -1e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{-1e8},
+		wantErr:    ErrInputTotalNegative,
+	}, {
+		name:       "a negative input value is rejected",
+		total:      1e8,
+		inputCount: 2,
+		values:     []btcutil.Amount{2e8, -1e8},
+		wantErr:    ErrInputValueNegative,
+	}, {
+		name:       "an input value above the maximum is rejected",
+		total:      maxAmount,
+		inputCount: 1,
+		values:     []btcutil.Amount{maxAmount + 1},
+		wantErr:    ErrInputValueExceedsMax,
+	}, {
+		name:       "a value count unequal to the inputs is rejected",
+		total:      2e8,
+		inputCount: 1,
+		values:     []btcutil.Amount{1e8, 1e8},
+		wantErr:    ErrInputCountMismatch,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Fund the request from a source that answers with the
+			// malformed result under test. Its inputs are scripted
+			// so that nothing but the amounts is wrong.
+			sources := newCountedSources(t)
+			sources.input = func(btcutil.Amount) (btcutil.Amount,
+				[]*wire.TxIn, []btcutil.Amount, [][]byte,
+				error) {
+
+				sources.inputCalls++
+
+				scripts := make(
+					[][]byte, len(tc.values),
+				)
+				for i := range scripts {
+					scripts[i] = p2wpkhScript()
+				}
+
+				return tc.total, inputsWithCount(tc.inputCount),
+					tc.values, scripts, nil
+			}
+
+			tx, err := NewUnsignedTransaction(
+				p2pkhOutputs(1e6), 1e3, sources.input,
+				sources.change,
+			)
+
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, tx)
+
+			// The source was consulted once and its answer refused
+			// there and then: no change was allocated against the
+			// value it claimed.
+			require.Equal(t, 1, sources.inputCalls)
+			require.Zero(t, sources.changeCalls)
+		})
+	}
+}
