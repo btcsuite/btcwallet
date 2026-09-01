@@ -199,6 +199,61 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountPersistsNoChainSync verifies each boolean value is
+// stored by the real SQL create path and returned by both create and get.
+func TestCreateDerivedAccountPersistsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain synchronized",
+			noChainSync: false,
+		},
+		{
+			name:        "automatic sync disabled",
+			noChainSync: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: create an isolated wallet and a valid derived-account
+			// request carrying the selected synchronization policy.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "derived-"+test.name)
+			params := db.CreateDerivedAccountParams{
+				WalletID:    walletID,
+				Scope:       db.KeyScopeBIP0084,
+				Name:        "derived-policy",
+				NoChainSync: test.noChainSync,
+			}
+
+			// Act: persist the account and reload it by its stable scope/name
+			// selector through the normal Store read path.
+			created, createErr := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
+			loaded, loadErr := store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, params.Scope, params.Name,
+				),
+			)
+
+			// Assert: both operations succeed and expose the exact requested
+			// value, demonstrating that neither insert nor read defaults it.
+			require.NoError(t, createErr)
+			require.NoError(t, loadErr)
+			require.Equal(t, test.noChainSync, created.NoChainSync)
+			require.Equal(t, test.noChainSync, loaded.NoChainSync)
+		})
+	}
+}
+
 // TestCreateDerivedAccountMissingWallet verifies that CreateDerivedAccount
 // returns ErrWalletNotFound when the wallet does not exist.
 func TestCreateDerivedAccountMissingWallet(t *testing.T) {

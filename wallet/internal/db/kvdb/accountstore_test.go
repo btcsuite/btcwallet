@@ -524,6 +524,56 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.Equal(t, savingsAccountName, read.AccountName)
 }
 
+// TestCreateDerivedAccountRejectsNoChainSync verifies kvdb refuses a policy it
+// cannot persist before derivation or account mutation begins.
+func TestCreateDerivedAccountRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: prepare a valid account request whose only unsupported input is
+	// the SQL-only synchronization policy, and record whether derivation runs.
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	const accountName = "no-chain-sync"
+
+	deriveCalled := false
+	deriveFn := func(context.Context, db.KeyScope, uint32,
+		bool) (*db.DerivedAccountData, error) {
+
+		deriveCalled = true
+
+		return &db.DerivedAccountData{}, nil
+	}
+
+	// Act: request the unsupported policy through the kvdb Store and then try
+	// to resolve the same account name from the legacy data model.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name:        accountName,
+			NoChainSync: true,
+		}, deriveFn,
+	)
+	name := accountName
+	_, readErr := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	})
+
+	// Assert: the unsupported request fails as an invalid parameter before the
+	// callback runs, returns no result, and leaves no account row behind.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Nil(t, info)
+	require.False(t, deriveCalled)
+	require.ErrorIs(t, readErr, db.ErrAccountNotFound)
+}
+
 // TestCreateDerivedAccountRollsBackOnDeriveError verifies that when the
 // derivation callback fails after the account number has been allocated,
 // the underlying walletdb transaction rolls back so the lastAccount counter

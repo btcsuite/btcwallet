@@ -538,6 +538,11 @@ type CreateDerivedAccountParams struct {
 
 	// Name is the name of the new account.
 	Name string
+
+	// NoChainSync records whether automatic chain synchronization should omit
+	// this account. Persisting the policy does not itself change derivation,
+	// custody, signing, or chain behavior.
+	NoChainSync bool
 }
 
 // CreateImportedAccountParams contains the data required to store an imported
