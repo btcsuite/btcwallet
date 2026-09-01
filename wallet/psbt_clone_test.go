@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
+	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,4 +116,27 @@ func TestClonePacketRoundTrip(t *testing.T) {
 	require.NoError(t, clonePacket(packet).Serialize(&cloned))
 
 	require.Equal(t, original.Bytes(), cloned.Bytes())
+}
+
+// TestClonePacketPreservesAbsentFields verifies that a clone compares equal to
+// what it was copied from even where one of the packet's record lists is
+// absent rather than empty.
+//
+// Callers compare a packet they got back against the one they handed over, so
+// a clone that turned an absent list into an empty one would report a change
+// that never happened.
+func TestClonePacketPreservesAbsentFields(t *testing.T) {
+	t.Parallel()
+
+	// A packet whose record lists are absent entirely, as one that failed
+	// the length checks would be.
+	packet := &psbt.Packet{UnsignedTx: wire.NewMsgTx(2)}
+	require.Equal(t, packet, clonePacket(packet))
+
+	// And one where a list is present but empty, which must stay empty
+	// rather than becoming absent.
+	packet = testPacket(t)
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{}
+	packet.Outputs[0].Bip32Derivation = []*psbt.Bip32Derivation{}
+	require.Equal(t, packet, clonePacket(packet))
 }

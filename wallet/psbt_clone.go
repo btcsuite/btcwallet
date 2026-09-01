@@ -24,21 +24,27 @@ func clonePacket(packet *psbt.Packet) *psbt.Packet {
 		return nil
 	}
 
-	clone := &psbt.Packet{
-		Inputs:  make([]psbt.PInput, len(packet.Inputs)),
-		Outputs: make([]psbt.POutput, len(packet.Outputs)),
-	}
+	clone := &psbt.Packet{}
 
 	if packet.UnsignedTx != nil {
 		clone.UnsignedTx = packet.UnsignedTx.Copy()
 	}
 
-	for i := range packet.Inputs {
-		clone.Inputs[i] = clonePInput(&packet.Inputs[i])
+	// An absent record list stays absent. A clone that turned one into an
+	// empty list would not compare equal to what it was copied from, which
+	// is the one thing callers use a clone for.
+	if packet.Inputs != nil {
+		clone.Inputs = make([]psbt.PInput, len(packet.Inputs))
+		for i := range packet.Inputs {
+			clone.Inputs[i] = clonePInput(&packet.Inputs[i])
+		}
 	}
 
-	for i := range packet.Outputs {
-		clone.Outputs[i] = clonePOutput(&packet.Outputs[i])
+	if packet.Outputs != nil {
+		clone.Outputs = make([]psbt.POutput, len(packet.Outputs))
+		for i := range packet.Outputs {
+			clone.Outputs[i] = clonePOutput(&packet.Outputs[i])
+		}
 	}
 
 	clone.XPubs = cloneXPubs(packet.XPubs)
