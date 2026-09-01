@@ -15,11 +15,14 @@ import (
 func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: build one normalized SQL row with a non-default synchronization
+	// policy so conversion must preserve both account metadata additions.
 	row := AccountInfoRow[int16]{
 		RowID:            42,
 		AccountNumber:    sql.NullInt64{Int64: 7, Valid: true},
 		AccountName:      "strict",
 		IsDerived:        true,
+		NoChainSync:      true,
 		ExternalKeyCount: 1,
 		InternalKeyCount: 2,
 		CreatedAt:        time.Unix(123, 0).UTC(),
@@ -29,13 +32,19 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 		ExternalTypeID:   int16(NestedWitnessPubKey),
 	}
 
+	// Act: convert the complete row through the same normalization used by SQL
+	// get and list operations.
 	info, err := AccountRowToInfo(row)
+
+	// Assert: conversion retains the effective schema, internal row identity,
+	// and exact synchronization policy without interpreting it.
 	require.NoError(t, err)
 	require.Equal(t, ScopeAddrSchema{
 		ExternalAddrType: NestedWitnessPubKey,
 		InternalAddrType: NestedWitnessPubKey,
 	}, info.AddrSchema)
 	require.Equal(t, int64(42), info.rowID)
+	require.True(t, info.NoChainSync)
 }
 
 // TestOptionalMasterFingerprintPreservesPresence verifies SQL NULL and valid

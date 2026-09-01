@@ -261,7 +261,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 
 	return BuildAccountInfo(
 		accountID, &accNumber, params.Name, false, 0, 0, 0,
-		walletIsWatchOnly, row.CreatedAt, params.Scope, addrSchema,
+		walletIsWatchOnly, false, row.CreatedAt, params.Scope, addrSchema,
 		derived.PublicKey, &masterFingerprint,
 		0, 0,
 	), nil

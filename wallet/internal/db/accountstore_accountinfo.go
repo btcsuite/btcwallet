@@ -52,6 +52,10 @@ type AccountPropsRow[AddrTypeId ~int16 | ~int64] struct {
 	// IsDerived reports whether the row represents a wallet-derived account.
 	IsDerived bool
 
+	// NoChainSync is the immutable automatic synchronization policy loaded
+	// from the account row.
+	NoChainSync bool
+
 	// ExternalKeyCount is the number of external keys derived so far.
 	ExternalKeyCount int64
 
@@ -285,6 +289,7 @@ func AccountPropsRowToInfo[AddrTypeId ~int16 | ~int64](
 		},
 		AddrSchema:  addrSchema,
 		IsWatchOnly: row.IsWatchOnly,
+		NoChainSync: row.NoChainSync,
 		CreatedAt:   row.CreatedAt,
 	}, nil
 }
@@ -415,11 +420,12 @@ func ScopeAddrSchemaToWaddrmgr(
 // confirmedBalance and unconfirmedBalance are populated verbatim from
 // the caller; create paths pass zero (a fresh account has no UTXOs)
 // while the read paths feed real values from the dedicated
-// AccountBalance / AccountBalances queries.
+// AccountBalance / AccountBalances queries. noChainSync is copied as stored;
+// this constructor records policy but intentionally performs no chain action.
 func BuildAccountInfo(accountID *uint32, accountNum *uint32,
 	accountName string,
 	isImported bool, externalKeyCount, internalKeyCount,
-	importedKeyCount uint32, isWatchOnly bool, createdAt time.Time,
+	importedKeyCount uint32, isWatchOnly, noChainSync bool, createdAt time.Time,
 	scope KeyScope, addrSchema ScopeAddrSchema, publicKey []byte,
 	masterKeyFingerprint *uint32,
 	confirmedBalance, unconfirmedBalance btcutil.Amount) *AccountInfo {
@@ -435,6 +441,7 @@ func BuildAccountInfo(accountID *uint32, accountNum *uint32,
 		ConfirmedBalance:     confirmedBalance,
 		UnconfirmedBalance:   unconfirmedBalance,
 		IsWatchOnly:          isWatchOnly,
+		NoChainSync:          noChainSync,
 		CreatedAt:            createdAt,
 		KeyScope:             scope,
 		AddrSchema:           addrSchema,
@@ -457,6 +464,10 @@ type AccountInfoRow[AccOriginId ~int16 | ~int64] struct {
 
 	// IsDerived reports whether the row represents a wallet-derived account.
 	IsDerived bool
+
+	// NoChainSync is the immutable automatic synchronization policy loaded
+	// from the account row.
+	NoChainSync bool
 
 	// ExternalKeyCount is the number of external keys derived so far.
 	ExternalKeyCount int64
@@ -550,6 +561,7 @@ func AccountRowToInfo[AccOriginId ~int16 | ~int64](
 		accountID, accountNum, row.AccountName, !row.IsDerived,
 		externalKeyCount,
 		internalKeyCount, importedKeyCount, row.IsWatchOnly,
+		row.NoChainSync,
 		row.CreatedAt,
 		KeyScope{Purpose: purposeNum, Coin: coinTypeNum}, addrSchema,
 		row.PublicKey, fingerprint,

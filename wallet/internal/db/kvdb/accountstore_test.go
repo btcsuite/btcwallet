@@ -80,6 +80,8 @@ func createDerivedAccount(t *testing.T, dbConn walletdb.DB,
 func TestGetAccountByName(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: persist one ordinary derived account in the legacy format and
+	// retain its name and number for the normalized read assertions.
 	store, mgr, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
@@ -88,6 +90,8 @@ func TestGetAccountByName(t *testing.T) {
 		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, accountName,
 	)
 
+	// Act: load the legacy row through the shared AccountInfo conversion,
+	// without any SQL-only account metadata in storage.
 	info, err := store.GetAccount(t.Context(), db.GetAccountQuery{
 		Scope: db.KeyScope{
 			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
@@ -95,6 +99,9 @@ func TestGetAccountByName(t *testing.T) {
 		},
 		Name: &accountName,
 	})
+
+	// Assert: the legacy fields are preserved and the absent synchronization
+	// policy is reported truthfully as false.
 	require.NoError(t, err)
 	require.NotNil(t, info)
 	require.Equal(t, accountName, info.AccountName)
@@ -113,6 +120,7 @@ func TestGetAccountByName(t *testing.T) {
 	parsed, err := hdkeychain.NewKeyFromString(string(info.PublicKey))
 	require.NoError(t, err)
 	require.False(t, parsed.IsPrivate())
+	require.False(t, info.NoChainSync)
 }
 
 // TestGetAccountByNumber verifies the AccountNumber-keyed lookup branch.
@@ -190,18 +198,27 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 func TestListAccountsByNameIncludesImportedPseudoAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: select the implicit imported-address account, which is encoded
+	// entirely by legacy waddrmgr state without SQL account policy metadata.
 	store, _, cleanup := newAccountStoreFixture(t)
 	t.Cleanup(cleanup)
 
 	name := waddrmgr.ImportedAddrAccountName
+
+	// Act: list accounts through the second kvdb read surface that materializes
+	// normalized AccountInfo values.
 	infos, err := store.ListAccounts(t.Context(), db.ListAccountsQuery{
 		Name: &name,
 	})
+
+	// Assert: the pseudo-account remains intact and truthfully reports the
+	// historical chain-synchronized behavior.
 	require.NoError(t, err)
 	require.Len(t, infos, 1)
 	require.Equal(t, waddrmgr.ImportedAddrAccountName, infos[0].AccountName)
 	require.True(t, infos[0].IsImported)
 	require.Nil(t, infos[0].AccountNumber)
+	require.False(t, infos[0].NoChainSync)
 }
 
 // TestRenameAccountByName verifies that RenameAccount renames by old

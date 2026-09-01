@@ -438,6 +438,10 @@ type AccountInfo struct {
 	// may be removed in a future cleanup task.
 	IsWatchOnly bool
 
+	// NoChainSync reports whether automatic chain synchronization excludes
+	// this account.
+	NoChainSync bool
+
 	// CreatedAt is the timestamp when the account was created in the database.
 	CreatedAt time.Time
 
