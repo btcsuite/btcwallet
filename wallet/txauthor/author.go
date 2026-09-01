@@ -101,6 +101,12 @@ type ChangeSource struct {
 // follows input selection, but it still completes before changeSource.NewScript
 // is called.
 //
+// Every amount fetchInputs reports is checked too. Its result passes through
+// CheckInputSource, so an out-of-range value, a value set that does not match
+// the inputs, and a total that is not the sum of the values supplied are all
+// refused at the point the source returns them - before the sufficiency test
+// reads that total, and before any change is derived from it.
+//
 // BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
@@ -121,6 +127,11 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		return nil, err
 	}
 
+	// Validate the source once here rather than its result once per
+	// iteration: the loop may ask for coins repeatedly as the fee grows,
+	// and each answer is a fresh set of amounts to be trusted.
+	fetchInputs = CheckInputSource(fetchInputs)
+
 	// The three checked add and subtract calls below cannot currently fail.
 	// CheckOutputs bounds the target and CheckedFeeForSerializeSize bounds
 	// the fee, so their sum stays far inside an int64; each subtraction is
@@ -132,7 +143,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		// Form the target the inputs must cover once, and hold on to it
 		// so the sufficiency comparison below tests the very same value
 		// the input source was asked for.
-		targetTotal, err := addAmounts(targetAmount, targetFee)
+		targetTotal, err := AddAmounts(targetAmount, targetFee)
 		if err != nil {
 			return nil, err
 		}
