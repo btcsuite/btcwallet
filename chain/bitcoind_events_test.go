@@ -3,6 +3,7 @@ package chain
 import (
 	"fmt"
 	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,7 +96,6 @@ func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			// Initialize a fresh miner for the test case.
 			miner1 := setupMiner(t)
@@ -106,6 +106,77 @@ func runBitcoindEventsTests(t *testing.T, rpcPolling bool) {
 
 			test.testFn(t, miner1, btcClient)
 		})
+	}
+}
+
+// TestBitcoindEventsWatchAddrsFromTip applies the live-tip contract.
+//
+//nolint:paralleltest // Btcd's rpctest ports can collide across subtests.
+func TestBitcoindEventsWatchAddrsFromTip(t *testing.T) {
+	backends := []struct {
+		name       string
+		rpcPolling bool
+	}{
+		{
+			name:       "ZMQ",
+			rpcPolling: false,
+		},
+		{
+			name:       "RPC",
+			rpcPolling: true,
+		},
+	}
+
+	for _, backend := range backends {
+		t.Run(backend.name, func(t *testing.T) {
+			// Arrange: mine history before bitcoind starts and select its
+			// transport from data, excluding stale ZMQ transaction events.
+			miner := setupMiner(t)
+			addr := mineHistoricalWatchAddr(t, miner)
+			client := setupBitcoind(t, miner, backend.rpcPolling)
+
+			// Act: prove no hidden rescan with an isolated client, then run
+			// the production contract on the selected transport.
+			assertWatchAddrsFromTipDoesNotRescan(t, client, addr)
+			testWatchAddrsFromTipConformance(
+				t, miner, client, addr,
+			)
+
+			// Assert: one future notification drains through a later block.
+		})
+	}
+}
+
+// assertWatchAddrsFromTipDoesNotRescan uses a handler-free test client.
+func assertWatchAddrsFromTipDoesNotRescan(t *testing.T,
+	client *BitcoindClient, addr address.Address) {
+
+	t.Helper()
+
+	// Arrange: start only the sibling queue so registration owns the wait
+	// group and every tracked goroutine belongs to the operation under test.
+	probe, err := client.chainConn.NewBitcoindClient()
+	require.NoError(t, err)
+	probe.notificationQueue.Start()
+
+	atomic.StoreUint32(&probe.notifyBlocks, 1)
+	defer probe.Stop()
+
+	// Act: wait for registration work, then enqueue its FIFO marker.
+	err = probe.WatchAddrsFromTip(t.Context(), []address.Address{addr})
+	require.NoError(t, err)
+	probe.WaitForShutdown()
+
+	probe.notificationQueue.ChanIn() <- ClientConnected{}
+
+	// Assert: reach the marker without a historical rescan completion.
+	for ntfn := range probe.Notifications() {
+		if _, ok := ntfn.(ClientConnected); ok {
+			return
+		}
+
+		_, rescanned := ntfn.(*RescanFinished)
+		require.False(t, rescanned)
 	}
 }
 
@@ -704,6 +775,103 @@ func waitForClientConnected(t *testing.T, ntfns <-chan any) {
 		case <-timer.C:
 			require.FailNow(t, "timed out for ClientConnected "+
 				"notification")
+		}
+	}
+}
+
+// waitForExclusiveRelevantTx rejects every unexpected transaction.
+func waitForExclusiveRelevantTx(t *testing.T, ntfns <-chan any,
+	hash *chainhash.Hash) {
+
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			switch value := ntfn.(type) {
+			case RelevantTx:
+				require.True(
+					t, value.TxRecord.Hash.IsEqual(hash),
+					"received unexpected relevant transaction %v",
+					value.TxRecord.Hash,
+				)
+
+				return
+
+			case FilteredBlockConnected:
+				// Bitcoind groups confirmed matches in block notifications,
+				// so inspect every record to expose a historical replay.
+				var found bool
+				for _, tx := range value.RelevantTxs {
+					require.True(
+						t, tx.Hash.IsEqual(hash),
+						"received unexpected relevant transaction %v",
+						tx.Hash,
+					)
+					require.False(
+						t, found,
+						"received duplicate relevant transaction %v",
+						tx.Hash,
+					)
+					found = true
+				}
+
+				if found {
+					return
+				}
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out waiting for RelevantTx "+
+				"notification")
+		}
+	}
+}
+
+// waitForNoRelevantTxUntilBlock drains notifications through an exact later
+// block, failing if a duplicate or delayed historical transaction appears.
+func waitForNoRelevantTxUntilBlock(t *testing.T, ntfns <-chan any,
+	hash *chainhash.Hash) {
+
+	t.Helper()
+
+	timer := time.NewTimer(defaultTestTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case ntfn := <-ntfns:
+			switch value := ntfn.(type) {
+			case RelevantTx:
+				require.FailNowf(
+					t, "unexpected relevant transaction",
+					"received transaction %v after the expected "+
+						"future delivery", value.TxRecord.Hash,
+				)
+
+			case FilteredBlockConnected:
+				// Every confirmed match after the expected delivery is a
+				// duplicate or delayed historical notification.
+				for _, tx := range value.RelevantTxs {
+					require.FailNowf(
+						t, "unexpected relevant transaction",
+						"received transaction %v after the "+
+							"expected future delivery", tx.Hash,
+					)
+				}
+
+			case BlockConnected:
+				if value.Hash.IsEqual(hash) {
+					return
+				}
+			}
+
+		case <-timer.C:
+			require.FailNow(t, "timed out waiting for post-delivery "+
+				"BlockConnected notification")
 		}
 	}
 }
