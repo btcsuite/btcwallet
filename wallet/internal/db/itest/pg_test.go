@@ -388,7 +388,7 @@ func TestPostgresDatabaseIdentityRejectsPopulatedSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	// Act: Attempt startup, then count every durable schema relation.
-	store, openErr := openIdentityStore(t, fixture, identity)
+	store, openErr := openAndCloseIdentityStore(t, fixture, identity)
 
 	var functionPresent, relationsAbsent bool
 

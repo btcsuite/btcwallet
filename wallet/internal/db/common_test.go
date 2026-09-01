@@ -1,6 +1,8 @@
 package db
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -133,4 +135,34 @@ func TestDatabaseIdentityCopiesValues(t *testing.T) {
 	require.NoError(t, identity.Validate())
 	require.Equal(t, chaincfg.SigNetParams.GenesisHash[:], gotGenesis)
 	require.Equal(t, chainhash.DoubleHashB(prefixedChallenge), gotDigest)
+}
+
+// TestVerifyStoredDatabaseIdentityPreservesOperationalError proves count and
+// read failures remain distinguishable from a persisted identity mismatch.
+func TestVerifyStoredDatabaseIdentityPreservesOperationalError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Make the count and row-read callbacks fail independently with
+	// the same observable operational cause.
+	identity, err := NewDatabaseIdentity(&chaincfg.RegressionNetParams, nil)
+	require.NoError(t, err)
+
+	operationErr := errors.New("query interrupted")
+	count := func(context.Context) (int64, error) { return 1, nil }
+	badCount := func(context.Context) (int64, error) { return 0, operationErr }
+	read := func(context.Context) ([]byte, int64, []byte, error) {
+		return nil, 0, nil, operationErr
+	}
+
+	// Act: Verify each failing query through the shared callback boundary.
+	countErr := VerifyStoredDatabaseIdentity(
+		t.Context(), identity, badCount, read,
+	)
+	readErr := VerifyStoredDatabaseIdentity(t.Context(), identity, count, read)
+
+	// Assert: Both causes survive without the persisted mismatch sentinel.
+	require.ErrorIs(t, countErr, operationErr)
+	require.NotErrorIs(t, countErr, ErrDatabaseIdentityMismatch)
+	require.ErrorIs(t, readErr, operationErr)
+	require.NotErrorIs(t, readErr, ErrDatabaseIdentityMismatch)
 }
