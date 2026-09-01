@@ -20,6 +20,11 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
+	// The legacy format has no per-account synchronization policy. Normalize
+	// the by-value request so the shared workflow also returns the stored false
+	// value while kvdb silently retains its historical behavior.
+	params.NoChainSync = false
+
 	mgr := s.addrStore
 
 	var info *db.AccountInfo
@@ -129,7 +134,7 @@ func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
 // public key is encrypted via waddrmgr cryptoKeyPub inside
 // PutDerivedAccountWithKeys.
 func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
-	_ int64, accountNumber int64, name string,
+	_ int64, accountNumber int64, name string, _ bool,
 	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
 
 	if o.scopedMgr == nil {

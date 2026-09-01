@@ -40,13 +40,17 @@ func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 func TestCreateDerivedAccountWithOps(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: configure every backend stage for one successful derived account
+	// with the non-default synchronization policy. The exact insert expectation
+	// proves the shared workflow forwards the policy once and in order.
 	params := CreateDerivedAccountParams{
 		WalletID: 7,
 		Scope: KeyScope{
 			Purpose: 49,
 			Coin:    0,
 		},
-		Name: "savings",
+		Name:        "savings",
+		NoChainSync: true,
 	}
 	createdAt := time.Unix(123, 0)
 	expectedRow := CreateDerivedAccountRow{
@@ -55,12 +59,6 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	}
 
 	ops := &mockCreateDerivedAccountOps{}
-	t.Cleanup(func() {
-		ops.AssertExpectations(t)
-	})
-
-	// Verify call order: WalletWatchOnly -> EnsureScope ->
-	// AllocateAccountNumber -> CreateDerivedAccount.
 	walletCall := ops.On("WalletWatchOnly", mock.Anything, uint32(7)).Return(
 		true, nil,
 	).Once()
@@ -72,16 +70,21 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	).Return(int64(12), nil).Once()
 	createCall := ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
-		"savings", mock.Anything,
+		"savings", true, mock.Anything,
 	).Return(expectedRow, nil).Once()
 
 	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
 
+	// Act: run the backend-independent workflow with the configured operations
+	// and valid watch-only derivation result.
 	ctx := t.Context()
 	info, err := CreateDerivedAccountWithOps(
 		ctx, params, ops, testValidWatchOnlyDeriveFn(),
 	)
 
+	// Assert: the normalized result retains all existing account properties and
+	// the requested policy, while every expected backend stage runs exactly
+	// once.
 	require.NoError(t, err)
 	require.NotNil(t, info.AccountNumber)
 	require.Equal(t, uint32(12), *info.AccountNumber)
@@ -91,6 +94,8 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, params.Scope, info.KeyScope)
 	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
+	require.True(t, info.NoChainSync)
+	ops.AssertExpectations(t)
 }
 
 // TestCreateDerivedAccountWithOpsRejectsInvalidParams verifies that the shared
@@ -142,7 +147,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 	).Once()
 	ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
-		mock.Anything,
+		false, mock.Anything,
 	).Return(
 		CreateDerivedAccountRow{
 			CreatedAt: time.Unix(456, 0),
@@ -275,7 +280,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 					int64(9), nil,
 				).Once()
 				ops.On("CreateDerivedAccount", mock.Anything, int64(8),
-					int64(9), "savings", mock.Anything,
+					int64(9), "savings", false, mock.Anything,
 				).Return(
 					CreateDerivedAccountRow{}, errTestBoom,
 				).Once()
@@ -341,7 +346,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 	).Once()
 	ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
-		derived,
+		false, derived,
 	).Return(
 		CreateDerivedAccountRow{
 			AccountNumber: sql.NullInt64{Int64: 9, Valid: true},
@@ -644,10 +649,12 @@ func (m *mockCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 
 // CreateDerivedAccount implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64, name string,
+	scopeID int64, accountNumber int64, name string, noChainSync bool,
 	derived *DerivedAccountData) (CreateDerivedAccountRow, error) {
 
-	args := m.Called(ctx, scopeID, accountNumber, name, derived)
+	args := m.Called(
+		ctx, scopeID, accountNumber, name, noChainSync, derived,
+	)
 
 	row, ok := args.Get(0).(CreateDerivedAccountRow)
 	if !ok {
