@@ -200,6 +200,41 @@ func TestCreateDerivedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateDerivedAccountPersistsNoChainSync verifies the non-default policy
+// is stored by the real SQL create path and returned by both create and get.
+func TestCreateDerivedAccountPersistsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create an isolated wallet and a valid derived-account request
+	// carrying true, the value that would expose omitted persistence plumbing.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "derived-no-chain-sync")
+	params := db.CreateDerivedAccountParams{
+		WalletID:    walletID,
+		Scope:       db.KeyScopeBIP0084,
+		Name:        "derived-policy",
+		NoChainSync: true,
+	}
+
+	// Act: persist the account and independently reload it through the normal
+	// Store read path.
+	created, createErr := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	loaded, loadErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, params.Scope, params.Name,
+		),
+	)
+
+	// Assert: both surfaces return true, proving neither insert nor read
+	// silently collapses the non-default policy to false.
+	require.NoError(t, createErr)
+	require.NoError(t, loadErr)
+	require.True(t, created.NoChainSync)
+	require.True(t, loaded.NoChainSync)
+}
+
 // TestCreateDerivedAccountMissingWallet verifies that CreateDerivedAccount
 // returns ErrWalletNotFound when the wallet does not exist.
 func TestCreateDerivedAccountMissingWallet(t *testing.T) {

@@ -536,6 +536,10 @@ type CreateDerivedAccountParams struct {
 
 	// Name is the name of the new account.
 	Name string
+
+	// NoChainSync requests that automatic chain synchronization skip this
+	// account. The legacy kvdb backend ignores this field.
+	NoChainSync bool
 }
 
 // CreateImportedAccountParams contains the data required to store an imported
