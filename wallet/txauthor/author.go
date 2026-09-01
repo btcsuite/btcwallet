@@ -132,7 +132,7 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		// Form the target the inputs must cover once, and hold on to it
 		// so the sufficiency comparison below tests the very same value
 		// the input source was asked for.
-		targetTotal, err := addAmounts(targetAmount, targetFee)
+		targetTotal, err := AddAmounts(targetAmount, targetFee)
 		if err != nil {
 			return nil, err
 		}

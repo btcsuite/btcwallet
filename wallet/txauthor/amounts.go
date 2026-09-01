@@ -42,6 +42,43 @@ var (
 		"transaction output total exceeds maximum value",
 	)
 
+	// ErrInputCountMismatch is returned when an input source reports a
+	// different number of input values than inputs.
+	ErrInputCountMismatch = errors.New(
+		"input value count does not match input count",
+	)
+
+	// ErrInputValueNegative is returned when a single input carries a
+	// negative value.
+	ErrInputValueNegative = errors.New(
+		"transaction input amount is negative",
+	)
+
+	// ErrInputValueExceedsMax is returned when a single input carries more
+	// than the maximum representable amount.
+	ErrInputValueExceedsMax = errors.New(
+		"transaction input amount exceeds maximum value",
+	)
+
+	// ErrInputTotalNegative is returned when an input source reports a
+	// negative total.
+	ErrInputTotalNegative = errors.New(
+		"transaction input total is negative",
+	)
+
+	// ErrInputTotalExceedsMax is returned when an input total is more than
+	// the maximum representable amount, whether as reported by the source
+	// or as summed from the values it supplied.
+	ErrInputTotalExceedsMax = errors.New(
+		"transaction input total exceeds maximum value",
+	)
+
+	// ErrInputTotalMismatch is returned when the total an input source
+	// reports is not the sum of the values it supplied.
+	ErrInputTotalMismatch = errors.New(
+		"transaction input total does not match input values",
+	)
+
 	// ErrAmountOverflow is returned when adding two amounts would overflow.
 	ErrAmountOverflow = errors.New("amount addition overflows")
 
@@ -63,9 +100,16 @@ var (
 	ErrFeeOutOfRange = errors.New("fee is not a representable amount")
 )
 
-// addAmounts returns the sum of two amounts, reporting ErrAmountOverflow
-// rather than wrapping when the sum is not representable.
-func addAmounts(a, b btcutil.Amount) (btcutil.Amount, error) {
+// AddAmounts returns the sum of two amounts, reporting ErrAmountOverflow
+// rather than wrapping when the sum is not representable. It bounds nothing
+// else: an operand or a sum outside 0..MaxSatoshi is arithmetically fine and is
+// the caller's to reject.
+//
+// This is the primitive an input source accumulates its total with, so it is
+// exported for sources living outside this module. Its subtraction counterpart
+// stays unexported because establishing sufficiency and change is this
+// package's own work and no source performs it.
+func AddAmounts(a, b btcutil.Amount) (btcutil.Amount, error) {
 	sum := a + b
 
 	// A sum that moved the wrong way relative to the sign of the addend is
@@ -79,7 +123,7 @@ func addAmounts(a, b btcutil.Amount) (btcutil.Amount, error) {
 
 // subAmounts returns the difference of two amounts, reporting
 // ErrAmountUnderflow rather than wrapping when the difference is not
-// representable. It is the counterpart of addAmounts and is used for every
+// representable. It is the counterpart of AddAmounts and is used for every
 // subtraction that establishes sufficiency or change.
 func subAmounts(a, b btcutil.Amount) (btcutil.Amount, error) {
 	diff := a - b
@@ -101,7 +145,7 @@ func subAmounts(a, b btcutil.Amount) (btcutil.Amount, error) {
 // A nil or empty set is valid and totals zero: a sweep authors a transaction
 // whose only output is change, and has no non-change outputs to declare.
 //
-// The running sum is added through addAmounts as defence in depth. Because
+// The running sum is added through AddAmounts as defence in depth. Because
 // every accepted element is non-negative and bounded by MaxSatoshi, the
 // aggregate bound below is reached long before the sum could overflow, so that
 // guard is not expected to fire on any set built from accepted elements.
@@ -123,7 +167,7 @@ func CheckOutputs(outputs []*wire.TxOut) (btcutil.Amount, error) {
 				ErrOutputValueExceedsMax, i, output.Value)
 		}
 
-		sum, err := addAmounts(total, btcutil.Amount(output.Value))
+		sum, err := AddAmounts(total, btcutil.Amount(output.Value))
 		if err != nil {
 			return 0, fmt.Errorf("output total: %w", err)
 		}
@@ -136,6 +180,114 @@ func CheckOutputs(outputs []*wire.TxOut) (btcutil.Amount, error) {
 	}
 
 	return total, nil
+}
+
+// CheckInputSource wraps an input source so that every result it produces is
+// validated before a caller can act on it. Construction asks a source for
+// coins and then spends the total it reports: on that total rest the
+// sufficiency test, the fee it can afford, and the change it pays back to the
+// wallet. A source that reports more than it supplied therefore funds change
+// out of value that does not exist, and one that reports a value outside the
+// representable range skews the fee. Neither is visible at the point of use,
+// so it is checked at the point of return.
+//
+// A source error is returned untouched and its result is not inspected. That
+// keeps an InputSourceError - "I cannot fund this" - distinct from a violation
+// of this contract, which says the source is wrong rather than short.
+//
+// A nil source is returned as nil: there is nothing to wrap, and wrapping it
+// would turn the caller's own nil-callback panic into one raised from here.
+func CheckInputSource(source InputSource) InputSource {
+	if source == nil {
+		return nil
+	}
+
+	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		total, inputs, inputValues, scripts, err := source(target)
+		if err != nil {
+			return 0, nil, nil, nil, err
+		}
+
+		err = checkInputs(total, inputs, inputValues)
+		if err != nil {
+			return 0, nil, nil, nil, err
+		}
+
+		return total, inputs, inputValues, scripts, nil
+	}
+}
+
+// checkInputs validates one input-source result: every value and the reported
+// total must lie in 0..MaxSatoshi, the values must be as many as the inputs,
+// and their checked sum must be the total the source reported.
+//
+// An empty result is valid and totals zero. A source that has nothing to give
+// says so by reporting less than the target, which is the caller's business,
+// not a malformed answer.
+//
+// The scripts a source returns are not checked here. This validates amounts,
+// and a source may legitimately supply none: cmd/sweepaccount returns nil
+// scripts for its inputs because it signs over RPC and never needs the previous
+// output scripts. Whether an input set may go unscripted belongs to the
+// signing precondition, not to this arithmetic.
+func checkInputs(total btcutil.Amount, inputs []*wire.TxIn,
+	inputValues []btcutil.Amount) error {
+
+	if len(inputValues) != len(inputs) {
+		return fmt.Errorf("%w: %d values for %d inputs",
+			ErrInputCountMismatch, len(inputValues), len(inputs))
+	}
+
+	// Bound what the source claims before summing what it supplied, so a
+	// nonsense total is named as such rather than surfacing as a mismatch
+	// against a perfectly good value set.
+	if total < 0 {
+		return fmt.Errorf("%w: %d", ErrInputTotalNegative, total)
+	}
+
+	if total > btcutil.MaxSatoshi {
+		return fmt.Errorf("%w: reported %d", ErrInputTotalExceedsMax,
+			total)
+	}
+
+	sum := btcutil.Amount(0)
+
+	for i, value := range inputValues {
+		if value < 0 {
+			return fmt.Errorf("%w: index %d has %d",
+				ErrInputValueNegative, i, value)
+		}
+
+		if value > btcutil.MaxSatoshi {
+			return fmt.Errorf("%w: index %d has %d",
+				ErrInputValueExceedsMax, i, value)
+		}
+
+		// As in CheckOutputs, the checked add is defence in depth:
+		// every accepted value is non-negative and bounded by
+		// MaxSatoshi, so the aggregate bound below is reached long
+		// before the sum could overflow. A reader should not go looking
+		// for the input set that trips it.
+		checked, err := AddAmounts(sum, value)
+		if err != nil {
+			return fmt.Errorf("input total: %w", err)
+		}
+
+		sum = checked
+	}
+
+	if sum > btcutil.MaxSatoshi {
+		return fmt.Errorf("%w: summed %d", ErrInputTotalExceedsMax, sum)
+	}
+
+	if sum != total {
+		return fmt.Errorf("%w: reported %d, values sum to %d",
+			ErrInputTotalMismatch, total, sum)
+	}
+
+	return nil
 }
 
 // CheckedFeeForSerializeSize calculates the fee for a transaction of some
