@@ -68,10 +68,12 @@ func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 
 // CreateDerivedAccount implements db.CreateDerivedAccountOps. The shared
 // CreateDerivedAccountWithOps workflow validates derived before invoking
-// this method, so derived must be non-nil; defensively reject anyway in
-// case a future caller skips that validation.
+// this method, so derived must be non-nil; defensively reject anyway in case a
+// future caller skips that validation. The requested synchronization policy is
+// bound verbatim as immutable metadata and deliberately causes no chain action
+// in this adapter.
 func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64, name string,
+	scopeID int64, accountNumber int64, name string, noChainSync bool,
 	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
 
 	if derived == nil {
@@ -80,7 +82,8 @@ func (o createDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
 
 	row, err := o.q.CreateDerivedAccount(
 		ctx, sqlc.CreateDerivedAccountParams{
-			ScopeID: scopeID,
+			ScopeID:     scopeID,
+			NoChainSync: noChainSync,
 			AccountNumber: sql.NullInt64{
 				Int64: accountNumber,
 				Valid: true,

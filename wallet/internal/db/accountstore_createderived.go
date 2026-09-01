@@ -66,7 +66,8 @@ type CreateDerivedAccountRow struct {
 //     stored wallet state
 //   - ensure the requested key scope exists before allocating from its counter
 //   - allocate the next derived account number for that scope
-//   - insert the derived account row with the allocated number
+//   - insert the derived account row with the allocated number and requested
+//     synchronization policy
 //   - normalize the inserted row into the public AccountInfo result
 //
 // The adapter methods map directly to those stages so the shared helper keeps
@@ -91,11 +92,12 @@ type CreateDerivedAccountOps interface {
 	AllocateAccountNumber(ctx context.Context, scopeID int64) (int64, error)
 
 	// CreateDerivedAccount inserts the derived account row using the provided
-	// scope ID, allocated account number, public account name, and the
-	// wallet-derived account material returned by the workflow's
-	// AccountDerivationFunc.
+	// scope ID, allocated account number, public account name, requested
+	// synchronization policy, and wallet-derived material returned by the
+	// workflow's AccountDerivationFunc. The adapter stores the policy verbatim
+	// as immutable metadata and does not apply chain behavior.
 	CreateDerivedAccount(ctx context.Context, scopeID int64,
-		accountNumber int64, name string,
+		accountNumber int64, name string, noChainSync bool,
 		d *DerivedAccountData) (CreateDerivedAccountRow, error)
 }
 
@@ -241,7 +243,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 	}
 
 	row, err := ops.CreateDerivedAccount(
-		ctx, scopeID, allocated, params.Name, derived,
+		ctx, scopeID, allocated, params.Name, params.NoChainSync, derived,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create account: %w", err)
@@ -261,7 +263,8 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 
 	return BuildAccountInfo(
 		accountID, &accNumber, params.Name, false, 0, 0, 0,
-		walletIsWatchOnly, false, row.CreatedAt, params.Scope, addrSchema,
+		walletIsWatchOnly, params.NoChainSync, row.CreatedAt, params.Scope,
+		addrSchema,
 		derived.PublicKey, &masterFingerprint,
 		0, 0,
 	), nil
