@@ -576,6 +576,11 @@ type CreateImportedAccountParams struct {
 	// DryRun simulates the import without committing any database writes.
 	DryRun bool
 
+	// NoChainSync records whether automatic chain synchronization should omit
+	// this account. It is account metadata only and does not change imported
+	// key custody, ownership, signing, or chain behavior by itself.
+	NoChainSync bool
+
 	// AddrSchema optionally overrides the scope's default address schema for
 	// this imported account.
 	AddrSchema *ScopeAddrSchema

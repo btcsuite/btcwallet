@@ -733,6 +733,51 @@ func TestCreateImportedAccount(t *testing.T) {
 	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), *info.AccountID)
 }
 
+// TestCreateImportedAccountRejectsNoChainSync verifies kvdb refuses imported
+// account policy that its legacy watch-only row cannot persist.
+func TestCreateImportedAccountRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create valid deterministic public account material so the
+	// synchronization policy is the request's only unsupported field.
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xBC}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	const accountName = "imported-no-chain-sync"
+
+	params := db.CreateImportedAccountParams{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name:              accountName,
+		MasterFingerprint: 0xDEADBEEF,
+		PublicKey:         []byte(masterPub.String()),
+		NoChainSync:       true,
+	}
+
+	// Act: request the unsupported policy through the kvdb Store and then try
+	// to load the same name from the legacy account data.
+	info, createErr := store.CreateImportedAccount(t.Context(), params)
+	name := accountName
+	_, readErr := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: params.Scope,
+		Name:  &name,
+	})
+
+	// Assert: rejection occurs before mutation, returning no snapshot and
+	// leaving no imported account for the follow-up read to discover.
+	require.ErrorIs(t, createErr, db.ErrInvalidParam)
+	require.Nil(t, info)
+	require.ErrorIs(t, readErr, db.ErrAccountNotFound)
+}
+
 // TestCreateImportedAccountRejectsPrivateKey verifies that the kvdb
 // adapter refuses imported accounts with private key material on
 // spendable wallets, since waddrmgr's accountWatchOnly row has no
