@@ -438,6 +438,12 @@ type AccountInfo struct {
 	// may be removed in a future cleanup task.
 	IsWatchOnly bool
 
+	// NoChainSync reports the account's durable automatic synchronization
+	// policy. It is independent of wallet custody and does not change key
+	// derivation, signing ability, transaction ownership, or chain behavior by
+	// itself; consumers decide how to apply the stored value.
+	NoChainSync bool
+
 	// CreatedAt is the timestamp when the account was created in the database.
 	CreatedAt time.Time
 

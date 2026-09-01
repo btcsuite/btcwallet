@@ -38,6 +38,66 @@ func TestAccountRowToInfoPopulatesAddrSchema(t *testing.T) {
 	require.Equal(t, int64(42), info.rowID)
 }
 
+// TestAccountInfoConversionsPreserveNoChainSync verifies both normalized SQL
+// row shapes carry the stored synchronization policy into AccountInfo without
+// interpreting or applying it.
+func TestAccountInfoConversionsPreserveNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain synchronized",
+			noChainSync: false,
+		},
+		{
+			name:        "automatic sync disabled",
+			noChainSync: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: build both row shapes from the same valid derived
+			// account identity, varying only the persisted policy bit. The
+			// address type IDs keep conversion focused on policy propagation.
+			accountNumber := sql.NullInt64{Int64: 7, Valid: true}
+			infoRow := AccountInfoRow[int16]{
+				AccountNumber:  accountNumber,
+				AccountName:    "derived",
+				IsDerived:      true,
+				NoChainSync:    test.noChainSync,
+				InternalTypeID: int16(WitnessPubKey),
+				ExternalTypeID: int16(WitnessPubKey),
+			}
+			propsRow := AccountPropsRow[int16]{
+				AccountNumber:  accountNumber,
+				AccountName:    "derived",
+				IsDerived:      true,
+				NoChainSync:    test.noChainSync,
+				InternalTypeID: int16(WitnessPubKey),
+				ExternalTypeID: int16(WitnessPubKey),
+			}
+
+			// Act: convert the list/get row and the property row through
+			// their independent normalization paths.
+			info, infoErr := AccountRowToInfo(infoRow)
+			props, propsErr := AccountPropsRowToInfo(propsRow)
+
+			// Assert: both conversions succeed and preserve the exact stored
+			// value, proving neither path falls back to Go's false zero value.
+			require.NoError(t, infoErr)
+			require.NoError(t, propsErr)
+			require.Equal(t, test.noChainSync, info.NoChainSync)
+			require.Equal(t, test.noChainSync, props.NoChainSync)
+		})
+	}
+}
+
 // TestOptionalMasterFingerprintPreservesPresence verifies SQL NULL and valid
 // values remain distinguishable, including a valid zero fingerprint.
 func TestOptionalMasterFingerprintPreservesPresence(t *testing.T) {

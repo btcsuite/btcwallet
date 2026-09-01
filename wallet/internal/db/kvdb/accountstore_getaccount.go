@@ -305,6 +305,10 @@ func loadAccountInfo(ns walletdb.ReadBucket,
 		InternalKeyCount: props.InternalKeyCount,
 		ImportedKeyCount: props.ImportedKeyCount,
 		IsWatchOnly:      walletWatchOnly || accountIsImported,
+		// The legacy account encoding has no per-account synchronization
+		// policy, so every kvdb account truthfully reports the historical
+		// chain-synchronized behavior.
+		NoChainSync: false,
 		KeyScope: db.KeyScope{
 			Purpose: scope.Purpose,
 			Coin:    scope.Coin,

@@ -115,6 +115,46 @@ func TestGetAccountByName(t *testing.T) {
 	require.False(t, parsed.IsPrivate())
 }
 
+// TestAccountReadsReportChainSync verifies kvdb account reads explicitly expose
+// the historical synchronized policy because its legacy rows cannot store the
+// SQL-only per-account flag.
+func TestAccountReadsReportChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a normal derived kvdb account and prepare name-based get
+	// and list selectors that resolve the same legacy account row.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	const accountName = "chain-synchronized"
+	createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, accountName,
+	)
+	name := accountName
+	query := db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	}
+
+	// Act: load the account through both kvdb read surfaces that materialize
+	// AccountInfo values.
+	info, getErr := store.GetAccount(t.Context(), query)
+	infos, listErr := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Name: &name,
+	})
+
+	// Assert: both reads succeed, select exactly the intended row, and report
+	// false rather than implying the unsupported policy was persisted.
+	require.NoError(t, getErr)
+	require.NoError(t, listErr)
+	require.False(t, info.NoChainSync)
+	require.Len(t, infos, 1)
+	require.False(t, infos[0].NoChainSync)
+}
+
 // TestGetAccountByNumber verifies the AccountNumber-keyed lookup branch.
 func TestGetAccountByNumber(t *testing.T) {
 	t.Parallel()
