@@ -21,6 +21,12 @@ const (
 	// to constrain the upper confirmation range.
 	maxConfsLimit = math.MaxInt32
 
+	// unminedHeight is the height that stands for "no confirming block" in
+	// the range ListTxns takes. A negative start includes the unmined
+	// transactions before the confirmed ones, a negative end includes them
+	// after, and both negative asks for the unmined transactions alone.
+	unminedHeight = -1
+
 	// leaseDuration is the standard lease length for tests. It is long
 	// enough that the lease never expires mid-test.
 	leaseDuration = 10 * time.Minute

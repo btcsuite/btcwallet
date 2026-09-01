@@ -26,12 +26,6 @@ const txReaderFundingType = waddrmgr.WitnessPubKey
 // address belongs to.
 const txReaderScriptClass = txscript.WitnessV0PubKeyHashTy
 
-// unminedHeight is the height that stands for "no confirming block" in the
-// range ListTxns takes. A negative start includes the unmined transactions
-// before the confirmed ones, a negative end includes them after, and both
-// negative asks for the unmined transactions alone.
-const unminedHeight = -1
-
 // Every transaction a case here can produce is one the wallet published, since
 // no public wallet API records a transaction in any other state: Broadcast and
 // the syncer both record published transactions, and nothing else writes a
