@@ -67,6 +67,9 @@ type WatchOnlyAccount struct {
 // CreateWalletParams holds the parameters required to initialize a new wallet.
 // These are one-time inputs used during the creation process.
 type CreateWalletParams struct {
+	// Name is the durable identity used for Manager cache and Store operations.
+	Name string
+
 	// Mode determines which fields below are required.
 	Mode CreateMode
 
@@ -88,11 +91,10 @@ type CreateWalletParams struct {
 	// Birthday is the wallet's birthday.
 	Birthday time.Time
 
-	// PubPassphrase is the public passphrase for the wallet.
+	// PubPassphrase creates the legacy kvdb wallet. SQL backends ignore it
+	// because they have no public encryption passphrase.
 	//
-	// Deprecated: only the kvdb backend has a public passphrase. A SQL
-	// wallet seals its metadata under a single passphrase, so this field is
-	// ignored there and goes away with kvdb support.
+	// Remove this field with kvdb support.
 	PubPassphrase []byte
 
 	// PrivatePassphrase is the private passphrase for the wallet.
@@ -226,15 +228,11 @@ func validateManagedWalletName(name string) error {
 	return nil
 }
 
-// Create creates a new wallet based on the provided configuration and
-// initialization parameters. It initializes the database structure and then
-// loads the wallet.
-func (m *Manager) Create(cfg Config,
-	params CreateWalletParams) (*Wallet, error) {
-
-	// Only the durable name is still read from Config until the maintained API
-	// is narrowed; all chain and runtime policy comes from Manager.
-	err := validateManagedWalletName(cfg.Name)
+// Create persists and assembles a Wallet with Manager-owned runtime policy.
+func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
+	// Validate identity before key derivation or Store work can produce a less
+	// useful error or side effect.
+	err := validateManagedWalletName(params.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -244,20 +242,23 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	walletCfg, err := m.config.walletConfig(cfg.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	rootKey, err := m.deriveRootKey(walletCfg, params)
+	rootKey, err := m.deriveRootKey(params)
 	if err != nil {
 		return nil, err
 	}
 
 	m.Lock()
-	data, err := m.backend.create(
-		context.Background(), walletCfg, params, rootKey,
-	)
+
+	// The Manager mutex keeps runtime assembly, Store mutation, and cache
+	// publication atomic so no partial Wallet becomes observable.
+	walletCfg, err := m.config.walletConfig(params.Name)
+	if err != nil {
+		m.Unlock()
+
+		return nil, err
+	}
+
+	data, err := m.backend.create(context.Background(), params, rootKey)
 	if err != nil {
 		m.Unlock()
 
@@ -461,15 +462,15 @@ func (m *Manager) Load(params LoadWalletParams) (*Wallet, error) {
 
 // deriveRootKey resolves the master extended key after creation parameters have
 // passed validation.
-func (m *Manager) deriveRootKey(cfg Config,
+func (m *Manager) deriveRootKey(
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
 	if params.Mode == ModeGenSeed {
-		return m.genRootKey(cfg)
+		return m.genRootKey()
 	}
 
 	if params.Mode == ModeImportSeed {
-		return m.deriveFromSeed(cfg, params.Seed)
+		return m.deriveFromSeed(params.Seed)
 	}
 
 	if params.Mode == ModeImportExtKey {
@@ -483,18 +484,18 @@ func (m *Manager) deriveRootKey(cfg Config,
 
 // genRootKey generates a fresh random seed and derives its master extended
 // private key.
-func (m *Manager) genRootKey(cfg Config) (*hdkeychain.ExtendedKey, error) {
+func (m *Manager) genRootKey() (*hdkeychain.ExtendedKey, error) {
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate seed: %w", err)
 	}
 
-	return m.deriveFromSeed(cfg, seed)
+	return m.deriveFromSeed(seed)
 }
 
 // deriveFromSeed derives the master extended private key from the provided
 // seed.
-func (m *Manager) deriveFromSeed(cfg Config, seed []byte) (
+func (m *Manager) deriveFromSeed(seed []byte) (
 	*hdkeychain.ExtendedKey, error) {
 
 	// Ensure a seed was provided for restoration.
@@ -503,7 +504,7 @@ func (m *Manager) deriveFromSeed(cfg Config, seed []byte) (
 	}
 
 	// Derive the master extended private key from the provided seed.
-	key, err := hdkeychain.NewMaster(seed, cfg.ChainParams)
+	key, err := hdkeychain.NewMaster(seed, &m.config.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive master key: %w", err)
 	}

@@ -68,7 +68,7 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 }
 
 // create initializes and opens the one legacy wallet served by the backend.
-func (b *kvdbManagerBackend) create(ctx context.Context, cfg Config,
+func (b *kvdbManagerBackend) create(ctx context.Context,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
@@ -93,7 +93,7 @@ func (b *kvdbManagerBackend) create(ctx context.Context, cfg Config,
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
-	return b.open(ctx, cfg.Name, adapterCfg)
+	return b.open(ctx, params.Name, adapterCfg)
 }
 
 // load opens the one existing legacy wallet served by the backend.
