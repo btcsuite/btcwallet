@@ -1341,22 +1341,21 @@ func fetchLockedOutput(ns walletdb.ReadBucket,
 }
 
 // isLockedOutput determines whether an output is locked. If it is, its assigned
-// ID is returned, along with its absolute expiration time. If the output lock
-// exists, but its expiration has been met, then the output is considered
-// unlocked.
+// ID is returned, along with its absolute expiration time. Confirmation-
+// controlled locks ignore that time and remain active until explicit release or
+// spend maturity. Other locks become inactive when their expiration is met.
 func isLockedOutput(ns walletdb.ReadBucket, op wire.OutPoint,
 	timeNow time.Time) (LockID, time.Time, bool) {
 
-	lockID, expiry, releaseAfterSpendConfs, spendHeight, exists :=
+	lockID, expiry, releaseAfterSpendConfs, _, exists :=
 		fetchLockedOutput(ns, op)
 	if !exists {
 		return LockID{}, time.Time{}, false
 	}
 
-	// Once a retained lease has observed a confirmed spend, its wall clock
-	// expiry no longer applies. A negative spend height means that the observed
-	// spend was disconnected and is waiting to confirm again.
-	if releaseAfterSpendConfs > 0 && spendHeight != 0 {
+	// A confirmation-controlled lease uses explicit release or spend maturity
+	// instead of wall-clock expiry for its complete lifetime.
+	if releaseAfterSpendConfs > 0 {
 		return lockID, expiry, true
 	}
 

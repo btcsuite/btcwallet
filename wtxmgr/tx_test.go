@@ -2752,17 +2752,17 @@ func TestOutputLocks(t *testing.T) {
 			},
 		},
 		{
-			// Asserts that reusing an ID after its retained lease
-			// expires does not carry the old release policy into the
-			// new lease.
-			name: "reuse lock ID after expiry",
+			// Asserts that a confirmation-controlled lease ignores its
+			// wall-clock expiry but still permits explicit owner release.
+			name: "confirmation lease ignores wall clock",
 			run: func(t *testing.T, s *Store, ns walletdb.ReadWriteBucket) {
 				t.Helper()
 
-				lockID := LockID{1}
+				lockID1 := LockID{1}
+				lockID2 := LockID{2}
 
 				expiry, err := s.LockOutput(
-					ns, lockID, confirmedOutPoint, 10*time.Minute,
+					ns, lockID1, confirmedOutPoint, 10*time.Minute,
 					WithReleaseAfterSpend(3),
 				)
 				if err != nil {
@@ -2778,34 +2778,36 @@ func TestOutputLocks(t *testing.T) {
 
 				testClock.SetTime(expiry)
 				assertLocked(
-					t, ns, confirmedOutPoint, s.clock.Now(), false,
+					t, ns, confirmedOutPoint, s.clock.Now(), true,
 				)
+
+				err = s.DeleteExpiredLockedOutputs(ns)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertRetainedLock(t, s, ns, 3, 0)
 
 				_, err = s.LockOutput(
-					ns, lockID, confirmedOutPoint, 10*time.Minute,
+					ns, lockID2, confirmedOutPoint, 10*time.Minute,
+				)
+				if err != ErrOutputAlreadyLocked {
+					t.Fatalf("expected %v, got %v",
+						ErrOutputAlreadyLocked, err)
+				}
+
+				unlock(
+					t, s, ns, lockID2, confirmedOutPoint,
+					ErrOutputUnlockNotAllowed,
+				)
+				unlock(t, s, ns, lockID1, confirmedOutPoint, nil)
+
+				_, err = s.LockOutput(
+					ns, lockID1, confirmedOutPoint, 10*time.Minute,
 				)
 				if err != nil {
 					t.Fatal(err)
 				}
-
 				assertRetainedLock(t, s, ns, 0, 0)
-
-				txHash := confirmedTx.TxHash()
-				spendTx := spendOutput(&txHash, 0, 500)
-
-				spendRec, err := NewTxRecordFromMsgTx(
-					spendTx, time.Now(),
-				)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				err = s.InsertTx(ns, spendRec, block)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				assertOutputLocksExist(t, s, ns)
 			},
 		},
 		{
@@ -3066,6 +3068,14 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 			return err
 		}
 
+		// The first confirmation may arrive after the wall-clock deadline.
+		// Confirmation-controlled leases must still record that spend.
+		store.clock.(*clock.TestClock).SetTime(expiry.Add(time.Second))
+		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
+			return err
+		}
+		assertRetainedLock(t, store, ns, 3, 0)
+
 		if err := store.InsertTx(ns, spendRec, spendBlock); err != nil {
 			return err
 		}
@@ -3083,7 +3093,7 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 
 		// Renewing the lease must preserve the disconnected spend state
 		// and its configured release depth.
-		_, err = store.LockOutput(
+		renewedExpiry, err := store.LockOutput(
 			ns, lockID, creditOutpoint, 10*time.Minute,
 		)
 		if err != nil {
@@ -3118,7 +3128,9 @@ func TestOutputLockReleaseAfterSpendAcrossReorg(t *testing.T) {
 
 		// A lease that has observed a spend must survive its wall clock
 		// expiry while that spend is disconnected.
-		store.clock.(*clock.TestClock).SetTime(expiry.Add(time.Second))
+		store.clock.(*clock.TestClock).SetTime(
+			renewedExpiry.Add(time.Second),
+		)
 		if err := store.DeleteExpiredLockedOutputs(ns); err != nil {
 			return err
 		}
