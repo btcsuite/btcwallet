@@ -22,8 +22,9 @@ type managerBackend interface {
 	create(ctx context.Context, cfg Config, params CreateWalletParams,
 		rootKey *hdkeychain.ExtendedKey) (*walletData, error)
 
-	// load opens an existing wallet on the backend.
-	load(ctx context.Context, cfg Config) (*walletData, error)
+	// load opens durable wallet data with a narrow request that cannot alter
+	// the Manager-owned Wallet runtime policy.
+	load(ctx context.Context, params LoadWalletParams) (*walletData, error)
 
 	// close releases the database and any live managers owned by the backend.
 	close() error
