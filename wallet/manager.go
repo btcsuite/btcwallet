@@ -99,6 +99,21 @@ type CreateWalletParams struct {
 	PrivatePassphrase []byte
 }
 
+// LoadWalletParams identifies an existing Wallet and carries inputs needed
+// only while its backend opens durable state.
+type LoadWalletParams struct {
+	// Name is the required runtime identity used by the Manager cache and SQL
+	// wallet lookup. The legacy kvdb backend also uses it for the one Wallet
+	// instance it can serve, but does not persist it as an alias.
+	Name string
+
+	// PubPassphrase opens the legacy kvdb wallet. SQL backends ignore it
+	// because they have no public encryption passphrase.
+	//
+	// Remove this field with kvdb support.
+	PubPassphrase []byte
+}
+
 // Manager is a high-level manager that handles the lifecycle of multiple
 // wallets. It acts as a factory for creating and loading wallets, and can
 // optionally track the active wallets.
@@ -143,11 +158,13 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("copy chain parameters: %w", err)
 	}
+
 	cfg.ChainParams = chainParams
 
 	if cfg.WalletSyncRetryInterval == 0 {
 		cfg.WalletSyncRetryInterval = initialBackoff
 	}
+
 	if cfg.AutoLockDuration <= 0 {
 		cfg.AutoLockDuration = defaultLockDuration
 	}
@@ -238,7 +255,6 @@ func (m *Manager) Create(cfg Config,
 	}
 
 	m.Lock()
-
 	data, err := m.backend.create(
 		context.Background(), walletCfg, params, rootKey,
 	)
@@ -393,22 +409,23 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 	return nil
 }
 
-// Load loads an existing wallet from the provided configuration. It opens the
-// database, initializes the wallet structure, and registers it with the manager
-// for tracking. If the named wallet does not exist, Load returns
-// ErrWalletNotFound.
-func (m *Manager) Load(cfg Config) (*Wallet, error) {
-	err := validateManagedWalletName(cfg.Name)
+// Load opens the requested durable Wallet and assembles it from Manager-owned
+// runtime policy. If it does not exist, Load returns ErrWalletNotFound.
+func (m *Manager) Load(params LoadWalletParams) (*Wallet, error) {
+	// Validate identity before cache or backend work so every backend reports
+	// the same caller error for an empty name.
+	err := validateManagedWalletName(params.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	name := cfg.Name
+	name := params.Name
+
 	m.Lock()
 	defer m.Unlock()
 
-	// A wallet already installed under this name is returned as is. The
-	// Manager lock makes a miss the sole assembly owner until installation.
+	// Serializing the cache check through installation ensures concurrent cold
+	// Loads share the one Wallet assembled by the first caller.
 	existingW, ok := m.wallets[name]
 	if ok {
 		return existingW, nil
@@ -421,10 +438,9 @@ func (m *Manager) Load(cfg Config) (*Wallet, error) {
 		return nil, err
 	}
 
-	// The backend still receives the request Config at this compatibility
-	// boundary because kvdb needs its public passphrase. Runtime policy comes
-	// exclusively from walletCfg and is never read from the request.
-	data, err := m.backend.load(context.Background(), cfg)
+	// Only the narrow request reaches the backend. The assembled Wallet never
+	// retains a legacy public passphrase.
+	data, err := m.backend.load(context.Background(), params)
 	if err != nil {
 		// Hide the database sentinel at the public Manager boundary while
 		// retaining the requested wallet name for caller diagnostics.

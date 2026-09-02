@@ -57,7 +57,10 @@ func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
 			ready.Done()
 			<-start
 
-			w, err := manager.Load(cfg)
+			w, err := manager.Load(wallet.LoadWalletParams{
+				Name:          cfg.Name,
+				PubPassphrase: params.PubPassphrase,
+			})
 			results <- result{wallet: w, err: err}
 		}()
 	}
@@ -173,7 +176,10 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 
 	// Loading an already-loaded wallet returns the same live instance
 	// without rebuilding.
-	wCached, err := manager.Load(cfg)
+	wCached, err := manager.Load(wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 	require.NoError(h, err, "failed to load cached wallet")
 	require.Same(h, w, wCached, "load of cached wallet rebuilt the instance")
 
@@ -186,7 +192,10 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	manager = h.NewWalletManager()
 
 	// Reload a fresh instance from the same durable store.
-	reloaded, err := manager.Load(cfg)
+	reloaded, err := manager.Load(wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 	require.NoError(h, err, "failed to reload wallet")
 	h.RegisterWallet(manager, reloaded)
 	require.NotSame(h, w, reloaded, "reload returned the torn-down instance")
@@ -216,11 +225,14 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 func testManagerLoadMissing(h *bwtest.HarnessTest) {
 	// Arrange a manager whose durable store has never contained the named
 	// wallet from the standard test configuration.
-	cfg, _ := h.TestWalletConfig()
+	cfg, params := h.TestWalletConfig()
 	manager := h.NewWalletManager()
 
 	// Act by asking the manager to load the never-created wallet.
-	w, err := manager.Load(cfg)
+	w, err := manager.Load(wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 
 	// Assert that the public missing-wallet contract is returned without a
 	// partially assembled wallet.
@@ -261,7 +273,10 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 
 	manager = h.NewWalletManager()
-	reloaded, err := manager.Load(cfg)
+	reloaded, err := manager.Load(wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 	require.NoError(h, err, "failed to reload watch-only wallet")
 	h.RegisterWallet(manager, reloaded)
 
