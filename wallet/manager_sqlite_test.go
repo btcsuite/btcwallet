@@ -224,14 +224,18 @@ func TestBirthdayWithSafetyMargin(t *testing.T) {
 func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Prepare a shared strict chain mock with one required address
+	// notification, then create and close the durable SQLite Wallet so no
+	// runtime instance remains cached.
 	dbPath := filepath.Join(t.TempDir(), "runtime.sqlite")
+	chainMock := &bwmock.Chain{}
 
 	newManager := func() *Manager {
 		m, err := NewManager(t.Context(), ManagerConfig{
 			Backend:     DBBackendSQLite,
 			DataSource:  dbPath,
 			ChainParams: chainParams,
-			ChainSource: &bwmock.Chain{},
+			ChainSource: chainMock,
 		})
 		require.NoError(t, err)
 
@@ -241,15 +245,11 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
-	chain := &bwmock.Chain{}
-	cfg := Config{
-		Chain:       chain,
-		ChainParams: &chainParams,
-		Name:        testWalletName,
-	}
+	cfg := Config{Name: testWalletName}
 	privPass := []byte("private")
 
-	// Arrange: create, then close the Manager so nothing is cached.
+	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Once()
+
 	creator := newManager()
 	_, err = creator.Create(cfg, CreateWalletParams{
 		Mode:              ModeImportSeed,
@@ -260,7 +260,8 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, creator.Close())
 
-	// Act: a fresh Manager reads the wallet back off disk.
+	// Act: Have a fresh Manager load the Wallet, unlock its vault, and derive
+	// an address through the Store callback installed during construction.
 	m := newManager()
 	t.Cleanup(func() { _ = m.Close() })
 
@@ -277,13 +278,14 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	chain.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
-
-	// Assert: NewAddress goes through the store's installed address deriver.
 	addr, err := w.NewAddress(
 		t.Context(), waddrmgr.DefaultAccountName,
 		waddrmgr.WitnessPubKey, false,
 	)
+
+	// Assert: The public derivation succeeds and its required notification
+	// proves the loaded Wallet received the Manager-owned chain source.
 	require.NoError(t, err, "NewAddress requires the installed deriver")
 	require.NotNil(t, addr)
+	chainMock.AssertExpectations(t)
 }
