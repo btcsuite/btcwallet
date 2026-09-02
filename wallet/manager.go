@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
@@ -121,8 +120,8 @@ type Manager struct {
 	// every wallet this Manager serves.
 	backend managerBackend
 
-	// chainParams is fixed at construction and shared by every wallet.
-	chainParams *chaincfg.Params
+	// config is the immutable shared policy retained at construction.
+	config ManagerConfig
 }
 
 // NewManager opens the one database described by cfg and returns a Manager that
@@ -135,6 +134,22 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	err := cfg.validate()
 	if err != nil {
 		return nil, err
+	}
+
+	// Clone mutable network state and resolve defaults before the backend is
+	// opened, making the retained configuration the sole runtime authority for
+	// every Wallet assembled by this Manager.
+	chainParams, err := cloneChainParams(cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("copy chain parameters: %w", err)
+	}
+	cfg.ChainParams = chainParams
+
+	if cfg.WalletSyncRetryInterval == 0 {
+		cfg.WalletSyncRetryInterval = initialBackoff
+	}
+	if cfg.AutoLockDuration <= 0 {
+		cfg.AutoLockDuration = defaultLockDuration
 	}
 
 	var backend managerBackend
@@ -155,9 +170,9 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}
 
 	return &Manager{
-		wallets:     make(map[string]*Wallet),
-		backend:     backend,
-		chainParams: &cfg.ChainParams,
+		wallets: make(map[string]*Wallet),
+		backend: backend,
+		config:  cfg,
 	}, nil
 }
 
@@ -184,21 +199,25 @@ func (m *Manager) String() string {
 	return fmt.Sprintf("active_wallets=%v", names)
 }
 
+// validateManagedWalletName rejects an absent durable identity before cache,
+// key-derivation, or Store work can obscure the caller error.
+func validateManagedWalletName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: Name", ErrMissingParam)
+	}
+
+	return nil
+}
+
 // Create creates a new wallet based on the provided configuration and
 // initialization parameters. It initializes the database structure and then
 // loads the wallet.
 func (m *Manager) Create(cfg Config,
 	params CreateWalletParams) (*Wallet, error) {
 
-	// The Manager owns the network for every wallet it serves, so overwrite
-	// the caller's copy before validating. A caller that leaves it unset, or
-	// sets a conflicting one, gets the Manager's.
-	cfg.ChainParams = m.chainParams
-
-	// Validate the configuration and parameters before touching the cache
-	// or any store, so a malformed request fails on its own merits rather
-	// than on a name collision or store error.
-	err := cfg.validate()
+	// Only the durable name is still read from Config until the maintained API
+	// is narrowed; all chain and runtime policy comes from Manager.
+	err := validateManagedWalletName(cfg.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +227,12 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	rootKey, err := m.deriveRootKey(cfg, params)
+	walletCfg, err := m.config.walletConfig(cfg.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	rootKey, err := m.deriveRootKey(walletCfg, params)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +240,7 @@ func (m *Manager) Create(cfg Config,
 	m.Lock()
 
 	data, err := m.backend.create(
-		context.Background(), cfg, params, rootKey,
+		context.Background(), walletCfg, params, rootKey,
 	)
 	if err != nil {
 		m.Unlock()
@@ -224,8 +248,8 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	w := newManagedWallet(walletCfg, data)
+	m.wallets[walletCfg.Name] = w
 	m.Unlock()
 
 	// If we are in shell mode and have initial accounts, we import them now.
@@ -375,7 +399,7 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 // ErrWalletNotFound.
 func (m *Manager) Load(cfg Config) (*Wallet, error) {
 	// The Manager owns the network for every wallet it serves; see Create.
-	cfg.ChainParams = m.chainParams
+	cfg.ChainParams = &m.config.ChainParams
 
 	err := cfg.validate()
 	if err != nil {

@@ -203,6 +203,80 @@ func TestManagerConfigValidate(t *testing.T) {
 	}
 }
 
+// TestManagerRetainsRuntimeSnapshot verifies NewManager copies and normalizes
+// caller policy before that snapshot is assembled into a managed Wallet.
+func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Give a kvdb Manager mutable network inputs plus distinctive
+	// scalar policy. Prepare independent data sources for negative and zero
+	// auto-lock durations so both default predicates are exercised through the
+	// public constructor before any Wallet receives the policy.
+	params, err := cloneChainParams(chainParams)
+	require.NoError(t, err)
+
+	chainSource := &bwmock.Chain{}
+	cfg := ManagerConfig{
+		Backend:          DBBackendKVDB,
+		DataSource:       testKVDBPath(t),
+		ChainParams:      params,
+		ChainSource:      chainSource,
+		SyncMethod:       SyncMethodFullBlocks,
+		RecoveryWindow:   12,
+		AutoLockDuration: -time.Second,
+		MaxCFilterItems:  50,
+	}
+
+	// Act: Construct Managers with both non-positive auto-lock duration forms.
+	// Mutate the caller-owned input, then create a Wallet so assembly must
+	// consume only the retained immutable snapshot.
+	m, err := NewManager(t.Context(), cfg)
+	require.NoError(t, err)
+
+	zeroCfg := cfg
+	zeroCfg.DataSource = testKVDBPath(t)
+	zeroCfg.AutoLockDuration = 0
+	zeroManager, err := NewManager(t.Context(), zeroCfg)
+	require.NoError(t, err)
+
+	params.Name = "mutated"
+	params.PowLimit.SetInt64(1)
+
+	w, err := m.Create(
+		Config{Name: testWalletName},
+		CreateWalletParams{
+			Mode:          ModeShell,
+			WatchOnly:     true,
+			PubPassphrase: []byte("public"),
+		},
+	)
+	require.NoError(t, err)
+
+	// Assert: Verify constructor copying and both normalization paths first,
+	// then require the assembled Wallet to carry that exact policy and
+	// independent mutable values before releasing each Manager-owned backend.
+	require.NotEqual(t, params.Name, m.config.ChainParams.Name)
+	require.NotEqual(t, params.PowLimit, m.config.ChainParams.PowLimit)
+	require.Equal(t, SyncMethodFullBlocks, m.config.SyncMethod)
+	require.Equal(t, initialBackoff, m.config.WalletSyncRetryInterval)
+	require.Equal(t, uint32(12), m.config.RecoveryWindow)
+	require.Equal(t, defaultLockDuration, m.config.AutoLockDuration)
+	require.Equal(t, defaultLockDuration,
+		zeroManager.config.AutoLockDuration)
+	require.Equal(t, uint32(50), m.config.MaxCFilterItems)
+
+	require.Same(t, chainSource, w.cfg.Chain)
+	require.Equal(t, m.config.ChainParams, *w.cfg.ChainParams)
+	require.Equal(t, m.config.SyncMethod, w.cfg.SyncMethod)
+	require.Equal(t, m.config.WalletSyncRetryInterval,
+		w.cfg.WalletSyncRetryInterval)
+	require.Equal(t, m.config.RecoveryWindow, w.cfg.RecoveryWindow)
+	require.Equal(t, m.config.AutoLockDuration, w.cfg.AutoLockDuration)
+	require.Equal(t, m.config.MaxCFilterItems, w.cfg.MaxCFilterItems)
+	require.NoError(t, m.Close())
+	require.NoError(t, zeroManager.Close())
+}
+
 // TestManagerConfigTimeout verifies that an unset walletdb timeout falls
 // back to the default instead of zero, which walletdb treats as no wait.
 func TestManagerConfigTimeout(t *testing.T) {

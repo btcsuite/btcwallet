@@ -8,10 +8,6 @@ import (
 // newManagedWallet constructs a Wallet from backend-validated storage data.
 // The backend remains the owner of every resource referenced by data.
 func newManagedWallet(cfg Config, data *walletData) *Wallet {
-	if cfg.AutoLockDuration == 0 {
-		cfg.AutoLockDuration = defaultLockDuration
-	}
-
 	lockTimer := time.NewTimer(0)
 	if !lockTimer.Stop() {
 		<-lockTimer.C
