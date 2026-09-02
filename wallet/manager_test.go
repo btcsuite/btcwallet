@@ -443,8 +443,8 @@ func (b *recordingManagerBackend) create(_ context.Context, _ Config,
 }
 
 // load is not used by creation-policy tests.
-func (*recordingManagerBackend) load(context.Context, Config) (*walletData,
-	error) {
+func (*recordingManagerBackend) load(context.Context, LoadWalletParams) (
+	*walletData, error) {
 
 	return nil, ErrInvalidParam
 }
@@ -454,45 +454,51 @@ func (*recordingManagerBackend) close() error {
 	return nil
 }
 
-// TestManagerLoadSuccess verifies that an existing wallet can be successfully
-// loaded from the database. This tests the persistence and restoration flow.
+// TestManagerLoadSuccess verifies that an existing KVDB wallet can be reopened
+// with the empty public passphrase supported by the legacy address manager.
 func TestManagerLoadSuccess(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Use one database path for both Managers and deliberately omit
+	// the public passphrase from both creation carriers. The private
+	// passphrase remains non-empty because spendable wallets require it.
 	dbPath := testKVDBPath(t)
 
 	m := testKVDBManagerAt(t, dbPath)
 	cfg := Config{
-		Chain:         &bwmock.Chain{},
-		ChainParams:   &chainParams,
-		Name:          "test-wallet",
-		PubPassphrase: []byte("public"),
+		Chain:       &bwmock.Chain{},
+		ChainParams: &chainParams,
+		Name:        "test-wallet",
 	}
 	params := CreateWalletParams{
 		Mode:              ModeGenSeed,
-		PubPassphrase:     []byte("public"),
 		PrivatePassphrase: []byte("private"),
 		Birthday:          time.Now(),
 	}
 
+	// Act: Create the wallet through the first Manager using the empty public
+	// credential that the underlying KVDB format accepts.
 	wCreated, err := m.Create(cfg, params)
+
+	// Assert: Creation succeeds and returns the live wallet that will later be
+	// compared with the reopened metadata.
 	require.NoError(t, err)
 	require.NotNil(t, wCreated)
 
-	// Release the database so a second Manager can open the same file: one
-	// bbolt handle per file, and the Manager owns it.
+	// Act: Release the first bbolt handle, then open the same wallet through a
+	// second Manager while again supplying the empty public passphrase.
 	require.NoError(t, m.Close())
-
-	// Open a second Manager over the same database to simulate a fresh start
-	// (e.g. daemon restart) and load the wallet from it.
 	m2 := testKVDBManagerAt(t, dbPath)
-	w, err := m2.Load(cfg)
+	w, err := m2.Load(LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: cfg.PubPassphrase,
+	})
 
-	// Verify that the load operation succeeded and returned a valid wallet.
+	// Assert: Reopening succeeds, registers the Wallet under its durable name,
+	// and restores the same persisted master fingerprint.
 	require.NoError(t, err)
 	require.NotNil(t, w)
 
-	// Ensure the loaded wallet is correctly registered in the new manager.
 	m2.RLock()
 	loadedW, ok := m2.wallets["test-wallet"]
 	m2.RUnlock()
@@ -500,16 +506,13 @@ func TestManagerLoadSuccess(t *testing.T) {
 	require.Same(t, w, loadedW)
 	require.Zero(t, w.ID())
 
-	// The master HD fingerprint is read through the Store during load. A
-	// ModeGenSeed wallet persists a master HD public key, so the cached
-	// fingerprint is non-zero and matches the value resolved at create time.
 	require.NotZero(t, w.masterFingerprint)
 	require.Equal(t, wCreated.masterFingerprint, w.masterFingerprint)
 }
 
-// TestManagerLoad_ExistingWallet verifies that if Load is called for a wallet
+// TestManagerLoadExistingWallet verifies that if Load is called for a wallet
 // that is already managed in memory, the Manager detects this.
-func TestManagerLoad_ExistingWallet(t *testing.T) {
+func TestManagerLoadExistingWallet(t *testing.T) {
 	t.Parallel()
 
 	dbPath := testKVDBPath(t)
@@ -534,7 +537,10 @@ func TestManagerLoad_ExistingWallet(t *testing.T) {
 	// Attempt to load the same wallet again using the same manager instance.
 	// Since it's already loaded in memory, the manager should return the
 	// existing instance rather than reloading from disk.
-	wLoaded, err := m.Load(cfg)
+	wLoaded, err := m.Load(LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: cfg.PubPassphrase,
+	})
 
 	// Verify that we got the same wallet instance back.
 	require.NoError(t, err)
@@ -549,11 +555,18 @@ func TestManagerLoadError(t *testing.T) {
 	t.Run("Invalid Config", func(t *testing.T) {
 		t.Parallel()
 
+		// Arrange: Use a valid kvdb Manager so the empty request name is the
+		// only invalid input observed before cache or backend lookup.
 		m := testKVDBManager(t)
 
-		// Attempt to load with an empty config. This should fail validation.
-		w, err := m.Load(Config{})
+		// Act: Attempt to load without the required durable identity.
+		w, err := m.Load(LoadWalletParams{})
+
+		// Assert: The shared request boundary rejects the call before backend
+		// lookup and does not expose a partial Wallet.
+		require.ErrorIs(t, err, ErrMissingParam)
 		require.ErrorContains(t, err, "missing config parameter")
+		require.ErrorContains(t, err, "Name")
 		require.Nil(t, w)
 	})
 
@@ -564,15 +577,12 @@ func TestManagerLoadError(t *testing.T) {
 		// contained wallet state. This distinguishes absence from a
 		// partially initialized or corrupt wallet.
 		m := testKVDBManager(t)
-		cfg := Config{
-			Chain:       &bwmock.Chain{},
-			ChainParams: &chainParams,
-			Name:        "test",
-		}
-
 		// Act by loading the never-created wallet through the public
 		// Manager boundary.
-		w, err := m.Load(cfg)
+		w, err := m.Load(LoadWalletParams{
+			Name:          "test",
+			PubPassphrase: []byte("public"),
+		})
 
 		// Assert that the Manager replaces the internal database sentinel
 		// with its public missing-wallet contract and returns no partial
@@ -595,10 +605,7 @@ func TestManagerLoadMissingSQLite(t *testing.T) {
 	const walletName = "no-such-wallet"
 
 	// Act by loading the absent wallet through the public Manager method.
-	w, err := m.Load(Config{
-		Chain: &bwmock.Chain{},
-		Name:  walletName,
-	})
+	w, err := m.Load(LoadWalletParams{Name: walletName})
 
 	// Assert that callers receive only the wallet-owned sentinel, retain the
 	// requested name for context, and never receive a partial Wallet.
@@ -804,12 +811,18 @@ func TestManagerKVDBRejectsSecondName(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidParam)
 	require.ErrorContains(t, err, "one wallet per database")
 
-	_, err = m.Load(second)
+	_, err = m.Load(LoadWalletParams{
+		Name:          second.Name,
+		PubPassphrase: second.PubPassphrase,
+	})
 	require.ErrorIs(t, err, ErrInvalidParam)
 
 	// The rejected call did not replace the backend's wallet: the original
 	// name still resolves to the same wallet, and that wallet still works.
-	again, err := m.Load(cfg)
+	again, err := m.Load(LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: cfg.PubPassphrase,
+	})
 	require.NoError(t, err)
 	require.Same(t, first, again)
 
@@ -923,13 +936,17 @@ func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, w)
 	require.NoError(t, m.Close())
+
 	// Assert: a fresh Manager opens the wallet with the passphrase it was
 	// created under.
 	loadCfg := cfg
 	loadCfg.PubPassphrase = createPub
 
 	reopened := testKVDBManagerAt(t, dbPath)
-	loaded, err := reopened.Load(loadCfg)
+	loaded, err := reopened.Load(LoadWalletParams{
+		Name:          loadCfg.Name,
+		PubPassphrase: loadCfg.PubPassphrase,
+	})
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	require.NoError(t, reopened.Close())

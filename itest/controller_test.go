@@ -37,7 +37,10 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 	manager = h.NewWalletManager()
-	reloaded, err := manager.Load(cfg)
+	reloaded, err := manager.Load(wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 	require.NoError(h, err, "failed to reload wallet")
 	h.RegisterWallet(manager, reloaded)
 	require.NoError(

@@ -42,9 +42,9 @@ func (b *sqlManagerBackend) create(ctx context.Context, cfg Config,
 
 // load reads an existing SQL wallet and resolves its runtime dependencies.
 func (b *sqlManagerBackend) load(ctx context.Context,
-	cfg Config) (*walletData, error) {
+	params LoadWalletParams) (*walletData, error) {
 
-	info, err := b.store.GetWallet(ctx, cfg.Name)
+	info, err := b.store.GetWallet(ctx, params.Name)
 	if err != nil {
 		return nil, fmt.Errorf("get runtime wallet: %w", err)
 	}

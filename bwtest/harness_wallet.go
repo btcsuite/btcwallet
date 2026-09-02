@@ -128,7 +128,11 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	// cleanup owner. Registering after Start would leave a wallet whose Start
 	// failed unregistered, and a second direct Stop callback here would stop a
 	// successful one twice, out of order with the Manager close.
-	h.registerWallet(manager, w, &cfg)
+	reloadParams := &wallet.LoadWalletParams{
+		Name:          cfg.Name,
+		PubPassphrase: params.PubPassphrase,
+	}
+	h.registerWallet(manager, w, reloadParams)
 
 	if fixture.Unstarted {
 		require.Empty(
@@ -166,18 +170,18 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 
 	var (
 		manager           *wallet.Manager
-		reloadConfig      *wallet.Config
+		reloadParams      *wallet.LoadWalletParams
 		registeredWallets int
 	)
 
 	for candidate, registration := range h.wallets {
-		config, ok := registration[current]
+		params, ok := registration[current]
 		if !ok {
 			continue
 		}
 
 		manager = candidate
-		reloadConfig = config
+		reloadParams = params
 		registeredWallets = len(registration)
 
 		break
@@ -186,13 +190,11 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 	h.mu.Unlock()
 
 	require.NotNil(h, manager, "wallet is not registered with this harness")
-	require.NotNil(h, reloadConfig, "wallet is not reloadable")
+	require.NotNil(h, reloadParams, "wallet is not reloadable")
 	require.Equal(
 		h, 1, registeredWallets,
 		"wallet manager has sibling registered wallets",
 	)
-
-	cfg := *reloadConfig
 
 	ctx := h.Context()
 	require.NoError(
@@ -209,11 +211,11 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 	)
 
 	manager = h.NewWalletManager()
-	w, err := manager.Load(cfg)
+	w, err := manager.Load(*reloadParams)
 	require.NoError(h, err, "failed to reload wallet")
 	require.NotSame(h, current, w, "reload returned the original wallet")
 
-	h.registerWallet(manager, w, &cfg)
+	h.registerWallet(manager, w, reloadParams)
 	require.NoError(h, w.Start(ctx), "failed to start reloaded wallet")
 
 	return w

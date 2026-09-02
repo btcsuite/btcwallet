@@ -56,19 +56,21 @@ func TestManagerLoadPreservesBackendFailure(t *testing.T) {
 	// backend sentinel instead of the database not-found classification.
 	cfg, _ := sqliteCreateConfig(t)
 	store := &walletmock.Store{}
-	t.Cleanup(func() { store.AssertExpectations(t) })
 
 	store.On("GetWallet", mock.Anything, cfg.Name).
 		Return(nil, errDBMock).Once()
 
-	// Act by loading the wallet through the public Manager boundary.
-	w, err := testSQLManager(t, store).Load(cfg)
+	// Act by loading the wallet identity through the public Manager boundary.
+	w, err := testSQLManager(t, store).Load(LoadWalletParams{
+		Name: cfg.Name,
+	})
 
-	// Assert that the original backend failure remains discoverable and is
-	// not replaced with the public missing-wallet sentinel.
+	// Assert: Verify the original backend failure remains discoverable, no
+	// Wallet escapes, and the one expected Store call was satisfied.
 	require.ErrorIs(t, err, errDBMock)
 	require.NotErrorIs(t, err, ErrWalletNotFound)
 	require.Nil(t, w)
+	store.AssertExpectations(t)
 }
 
 // sqliteCreateConfig returns a SQLite-backed create config and a spendable
@@ -133,7 +135,7 @@ func TestManagerSQLiteCreateLoadCached(t *testing.T) {
 
 	// Create publishes the wallet, so Load returns the same pointer over the
 	// Manager-owned store.
-	loaded, err := m.Load(cfg)
+	loaded, err := m.Load(LoadWalletParams{Name: cfg.Name})
 	require.NoError(t, err)
 	require.Same(t, w, loaded)
 }
@@ -265,7 +267,7 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	m := newManager()
 	t.Cleanup(func() { _ = m.Close() })
 
-	w, err := m.Load(cfg)
+	w, err := m.Load(LoadWalletParams{Name: testWalletName})
 	require.NoError(t, err)
 
 	startLoadedWalletForTest(t, w)
