@@ -23,11 +23,10 @@ import (
 func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	t.Parallel()
 
-	cfg, params := sqliteCreateConfig(t)
-
+	// Arrange: Build one durable create request and require exactly one Store
+	// mutation returning the committed row used for Wallet assembly.
+	params := sqliteCreateParams(t)
 	store := &walletmock.Store{}
-	t.Cleanup(func() { store.AssertExpectations(t) })
-
 	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
 	require.NoError(t, err)
 
@@ -38,13 +37,19 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 		mock.AnythingOfType("db.CreateWalletParams")).
 		Return(&db.WalletInfo{
 			ID:           7,
-			Name:         cfg.Name,
+			Name:         params.Name,
 			MasterPubKey: []byte(masterPubKey.String()),
 		}, nil).Once()
 
-	w, err := testSQLManager(t, store).Create(cfg, params)
+	// Act: Create through Manager so a forbidden readback would reach the
+	// strict Store mock as an unexpected call.
+	w, err := testSQLManager(t, store).Create(params)
+
+	// Assert: Verify the returned Wallet uses the committed row ID and the
+	// required Store call was consumed exactly once.
 	require.NoError(t, err)
 	require.Equal(t, uint32(7), w.ID())
+	store.AssertExpectations(t)
 }
 
 // TestManagerLoadPreservesBackendFailure verifies that a non-not-found SQL
@@ -52,17 +57,17 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 func TestManagerLoadPreservesBackendFailure(t *testing.T) {
 	t.Parallel()
 
-	// Arrange a SQL manager whose wallet lookup returns an unrelated
-	// backend sentinel instead of the database not-found classification.
-	cfg, _ := sqliteCreateConfig(t)
+	// Arrange: Configure a strict SQL Store whose one required lookup returns
+	// an unrelated backend sentinel instead of the not-found classification.
+	params := sqliteCreateParams(t)
 	store := &walletmock.Store{}
 
-	store.On("GetWallet", mock.Anything, cfg.Name).
+	store.On("GetWallet", mock.Anything, params.Name).
 		Return(nil, errDBMock).Once()
 
-	// Act by loading the wallet identity through the public Manager boundary.
+	// Act: Load the durable identity through the maintained Manager boundary.
 	w, err := testSQLManager(t, store).Load(LoadWalletParams{
-		Name: cfg.Name,
+		Name: params.Name,
 	})
 
 	// Assert: Verify the original backend failure remains discoverable, no
@@ -73,28 +78,23 @@ func TestManagerLoadPreservesBackendFailure(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// sqliteCreateConfig returns a SQLite-backed create config and a spendable
-// seed-import params pair sharing fresh temp paths, for tests that exercise
-// the SQL create path end to end.
-func sqliteCreateConfig(t *testing.T) (Config, CreateWalletParams) {
+// sqliteCreateParams returns a spendable seed-import request with a durable
+// identity for tests that exercise the maintained SQL Manager create path.
+func sqliteCreateParams(t *testing.T) CreateWalletParams {
 	t.Helper()
 
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
-	cfg := Config{
-		Chain:       &bwmock.Chain{},
-		ChainParams: &chainParams,
-		Name:        testWalletName,
-	}
 	params := CreateWalletParams{
+		Name:              testWalletName,
 		Mode:              ModeImportSeed,
 		Seed:              seed,
 		PrivatePassphrase: []byte("private"),
 		Birthday:          time.Now(),
 	}
 
-	return cfg, params
+	return params
 }
 
 // TestSQLiteCreateWalletParamsCreatesSpendableSecrets verifies that SQL wallet
@@ -103,13 +103,13 @@ func sqliteCreateConfig(t *testing.T) (Config, CreateWalletParams) {
 func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 	t.Parallel()
 
-	cfg, params := sqliteCreateConfig(t)
+	params := sqliteCreateParams(t)
 
 	rootKey, err := hdkeychain.NewMaster(params.Seed, &chainParams)
 	require.NoError(t, err)
 
 	got, err := sqlCreateWalletParams(
-		cfg, params, rootKey, birthdayWithSafetyMargin(params.Birthday),
+		params, rootKey, birthdayWithSafetyMargin(params.Birthday),
 	)
 	require.NoError(t, err)
 
@@ -126,16 +126,16 @@ func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 func TestManagerSQLiteCreateLoadCached(t *testing.T) {
 	t.Parallel()
 
-	cfg, params := sqliteCreateConfig(t)
+	params := sqliteCreateParams(t)
 	m := testSQLiteManager(t)
 
-	w, err := m.Create(cfg, params)
+	w, err := m.Create(params)
 	require.NoError(t, err)
 	require.NotNil(t, w)
 
 	// Create publishes the wallet, so Load returns the same pointer over the
 	// Manager-owned store.
-	loaded, err := m.Load(LoadWalletParams{Name: cfg.Name})
+	loaded, err := m.Load(LoadWalletParams{Name: params.Name})
 	require.NoError(t, err)
 	require.Same(t, w, loaded)
 }
@@ -184,8 +184,8 @@ func TestSQLiteCreateWalletParamsBirthdayVerbatim(t *testing.T) {
 			// non-empty private passphrase is required because
 			// the store-backed key vault rejects an empty
 			// passphrase for a spendable wallet.
-			cfg := Config{Name: testWalletName}
 			params := CreateWalletParams{
+				Name:              testWalletName,
 				Mode:              ModeImportSeed,
 				PrivatePassphrase: []byte("private"),
 			}
@@ -193,7 +193,7 @@ func TestSQLiteCreateWalletParamsBirthdayVerbatim(t *testing.T) {
 			// Act: build the SQL runtime create params with the
 			// already-resolved birthday.
 			got, err := sqlCreateWalletParams(
-				cfg, params, rootKey, tc.birthday,
+				params, rootKey, tc.birthday,
 			)
 			require.NoError(t, err)
 
@@ -247,13 +247,13 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	require.NoError(t, err)
 
-	cfg := Config{Name: testWalletName}
 	privPass := []byte("private")
 
 	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Once()
 
 	creator := newManager()
-	_, err = creator.Create(cfg, CreateWalletParams{
+	_, err = creator.Create(CreateWalletParams{
+		Name:              testWalletName,
 		Mode:              ModeImportSeed,
 		Seed:              seed,
 		PrivatePassphrase: privPass,

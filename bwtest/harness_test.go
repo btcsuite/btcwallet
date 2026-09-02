@@ -224,14 +224,8 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	// Act: force Create to fail after the Manager has opened its database,
 	// then run centralized teardown through the same path used by the
 	// integration harness.
-	pubPass := []byte("public")
-	cfg := wallet.Config{
-		Name:          "",
-		PubPassphrase: pubPass,
-	}
-	w, err := manager.Create(cfg, wallet.CreateWalletParams{
+	w, err := manager.Create(wallet.CreateWalletParams{
 		Mode:              wallet.ModeGenSeed,
-		PubPassphrase:     pubPass,
 		PrivatePassphrase: []byte("private"),
 	})
 	require.ErrorIs(t, err, wallet.ErrMissingParam)

@@ -174,8 +174,9 @@ const (
 	SyncMethodFullBlocks
 )
 
-// Config holds the configuration options for creating a new
-// WalletController.
+// Config holds Wallet-local runtime policy assembled internally by Manager or
+// supplied to deprecated constructors. Maintained Manager callers configure
+// runtime policy through ManagerConfig instead.
 type Config struct {
 	// DB is the underlying database for the wallet.
 	//
@@ -221,15 +222,15 @@ type Config struct {
 	// request.
 	AutoLockDuration time.Duration
 
-	// Name is the unique identifier for the wallet. It is used to track
-	// active wallet instances within the Manager.
+	// Name is the durable identity attached during internal Wallet assembly.
+	// Maintained callers supply it through CreateWalletParams or
+	// LoadWalletParams.
 	Name string
 
-	// PubPassphrase is the public passphrase for the wallet.
+	// PubPassphrase is the legacy public passphrase.
 	//
-	// Deprecated: only the kvdb backend has a public passphrase. A SQL
-	// wallet seals its metadata under a single passphrase, so this field is
-	// ignored there and goes away with kvdb support.
+	// Deprecated: Manager APIs carry this credential in their narrow request
+	// parameters, and managed Wallets do not retain it.
 	PubPassphrase []byte
 
 	// MaxCFilterItems is the threshold of watched items (addresses +
