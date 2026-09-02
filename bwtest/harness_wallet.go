@@ -33,30 +33,15 @@ const (
 	defaultWalletSyncRetryInterval = 500 * time.Millisecond
 )
 
-// TestWalletConfig builds the standard Config and CreateWalletParams for a
-// harness test wallet. Callers retain ownership of the wallet lifecycle.
-func (h *HarnessTest) TestWalletConfig() (wallet.Config,
-	wallet.CreateWalletParams) {
-
+// TestWalletParams builds the durable initialization request for a harness
+// Wallet. Runtime policy is configured once by NewWalletManager.
+func (h *HarnessTest) TestWalletParams() wallet.CreateWalletParams {
 	h.Helper()
 
-	cfg := wallet.Config{
-		// The chain client is prepared by the harness; the database is
-		// owned by the Manager built below.
-		Chain:       h.ChainClient,
-		ChainParams: h.NetParams(),
-
-		// Keep network and startup behavior deterministic across tests.
-		RecoveryWindow:          defaultWalletRecoveryWindow,
-		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
-
-		// Use a unique wallet name per test to avoid collisions in logs.
-		Name:          "itest-" + strings.ReplaceAll(h.Name(), "/", "_"),
-		PubPassphrase: []byte(defaultPubPass),
-	}
-
 	params := wallet.CreateWalletParams{
-		// Generate a fresh seed for each test wallet.
+		// A unique durable name avoids collisions in logs, while ModeGenSeed
+		// keeps generated key material local to each test Wallet.
+		Name:              "itest-" + strings.ReplaceAll(h.Name(), "/", "_"),
 		Mode:              wallet.ModeGenSeed,
 		PubPassphrase:     []byte(defaultPubPass),
 		PrivatePassphrase: []byte(TestWalletPrivatePassphrase),
@@ -66,7 +51,7 @@ func (h *HarnessTest) TestWalletConfig() (wallet.Config,
 		Birthday: time.Now().Add(-1 * time.Hour),
 	}
 
-	return cfg, params
+	return params
 }
 
 // WalletFixture describes the wallet a test case needs. It is the harness's
@@ -114,14 +99,14 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 
 	h.Helper()
 
-	cfg, params := h.TestWalletConfig()
+	params := h.TestWalletParams()
 	if fixture.WatchOnly || len(fixture.InitialAccounts) != 0 {
 		params.Mode, params.WatchOnly = wallet.ModeShell, true
 		params.InitialAccounts = fixture.InitialAccounts
 	}
 
 	manager := h.NewWalletManager()
-	w, err := manager.Create(cfg, params)
+	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 
 	// Register before Start, and only register: teardownWallets is the single
@@ -129,7 +114,7 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	// failed unregistered, and a second direct Stop callback here would stop a
 	// successful one twice, out of order with the Manager close.
 	reloadParams := &wallet.LoadWalletParams{
-		Name:          cfg.Name,
+		Name:          params.Name,
 		PubPassphrase: params.PubPassphrase,
 	}
 	h.registerWallet(manager, w, reloadParams)
