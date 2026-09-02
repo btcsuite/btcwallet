@@ -964,6 +964,77 @@ func TestFundPsbtInvalidTxIntent(t *testing.T) {
 	require.Equal(t, int64(10_000), packet.UnsignedTx.TxOut[0].Value)
 }
 
+// TestFundPsbtTranslatesAmountError verifies that a checked-arithmetic failure
+// raised inside transaction authoring reaches a FundPsbt caller under the
+// wallet's own error, not the nested module's.
+//
+// The aggregate output total is the one such condition a public wrapper can
+// reach: validateTxIntent bounds each output on its own but never sums them, so
+// two individually payable outputs can still overflow the maximum. Asserting it
+// here rather than only through CreateTransaction is what pins translation to
+// the shared authoring boundary, where both wrappers pick it up.
+func TestFundPsbtTranslatesAmountError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet and a packet whose two outputs are
+	// each below the maximum but together exceed it.
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	tx := wire.NewMsgTx(wire.TxVersion)
+	tx.AddTxOut(&wire.TxOut{
+		Value: btcutil.MaxSatoshi - 1e8, PkScript: script,
+	})
+	tx.AddTxOut(&wire.TxOut{Value: 1e8 + 1, PkScript: script})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	originalTx := packet.UnsignedTx
+
+	// Arrange: Register only the lookups source preparation performs. The
+	// change script is never requested, because authoring rejects the
+	// output set before it reaches the change callback, so registering
+	// NewDerivedAddress would leave an unmet expectation at cleanup.
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	accountInfo := &db.AccountInfo{
+		AccountNumber: &defaultAccountNum,
+		AccountName:   waddrmgr.DefaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[scope],
+	}
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+	}).Return(accountInfo, nil).Once()
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
+	}).Return(accountInfo, nil).Once()
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Once()
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
+	}).Return([]db.UtxoInfo{}, nil).Once()
+
+	// Act: Fund the packet with an otherwise valid intent.
+	funded, changeIndex, err := w.FundPsbt(t.Context(), &FundIntent{
+		Packet:  packet,
+		Policy:  &InputsPolicy{},
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The wallet's own sentinel identifies the violation, the
+	// originating txauthor error stays in the chain, and the caller's packet
+	// is left as it arrived.
+	require.ErrorIs(t, err, ErrOutputTotalExceedsMax)
+	require.ErrorIs(t, err, txauthor.ErrOutputTotalExceedsMax)
+	require.Nil(t, funded)
+	require.Zero(t, changeIndex)
+	require.Same(t, originalTx, packet.UnsignedTx)
+	require.Len(t, packet.UnsignedTx.TxOut, 2)
+}
+
 // TestValidateFundIntentSuccess tests that validateFundIntent returns no error
 // for valid funding intents.
 func TestValidateFundIntentSuccess(t *testing.T) {
