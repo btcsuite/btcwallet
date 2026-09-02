@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"testing"
 
@@ -39,9 +40,9 @@ const (
 )
 
 // walletRegistration tracks every wallet owned by one Manager. Each map value
-// is a copied reload configuration, or nil for wallets registered through
-// RegisterWallet.
-type walletRegistration map[*wallet.Wallet]*wallet.Config
+// is a copied reload request, or nil for wallets registered only for lifecycle
+// ownership.
+type walletRegistration map[*wallet.Wallet]*wallet.LoadWalletParams
 
 // HarnessTest is the integration test harness.
 type HarnessTest struct {
@@ -368,10 +369,10 @@ func (h *HarnessTest) RegisterWallet(manager *wallet.Manager,
 	h.registerWallet(manager, w, nil)
 }
 
-// registerWallet records a wallet under manager and copies reloadConfig when
-// provided.
+// registerWallet records a wallet under manager and owns a copy of optional
+// reloadParams so fixture mutations cannot alter a later reload credential.
 func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
-	reloadConfig *wallet.Config) {
+	reloadParams *wallet.LoadWalletParams) {
 
 	h.Helper()
 
@@ -390,13 +391,16 @@ func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
 		)
 	}
 
-	var config *wallet.Config
-	if reloadConfig != nil {
-		copiedConfig := *reloadConfig
-		config = &copiedConfig
+	var params *wallet.LoadWalletParams
+	if reloadParams != nil {
+		copiedParams := *reloadParams
+		copiedParams.PubPassphrase = slices.Clone(
+			reloadParams.PubPassphrase,
+		)
+		params = &copiedParams
 	}
 
-	registration[w] = config
+	registration[w] = params
 }
 
 // DeregisterWallet releases a wallet from harness ownership.
