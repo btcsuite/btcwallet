@@ -117,7 +117,7 @@ type ManagerConfig struct {
 
 // validate checks Manager-wide ownership and backend consistency before any
 // Store is opened. Safe duration defaults are applied only when the immutable
-// runtime snapshot is built after this validation succeeds.
+// configuration snapshot is built after this validation succeeds.
 func (c ManagerConfig) validate() error {
 	err := c.validateBackend()
 	if err != nil {
@@ -182,6 +182,27 @@ func (c ManagerConfig) validateRuntimePolicy() error {
 	}
 
 	return nil
+}
+
+// walletConfig constructs one Wallet-local policy from the Manager snapshot.
+// It shares the caller-owned chain source and copies mutable values again so
+// sibling Wallets cannot alter each other's runtime configuration.
+func (c ManagerConfig) walletConfig(name string) (Config, error) {
+	chainParams, err := cloneChainParams(c.ChainParams)
+	if err != nil {
+		return Config{}, fmt.Errorf("copy wallet chain parameters: %w", err)
+	}
+
+	return Config{
+		Chain:                   c.ChainSource,
+		ChainParams:             &chainParams,
+		RecoveryWindow:          c.RecoveryWindow,
+		WalletSyncRetryInterval: c.WalletSyncRetryInterval,
+		SyncMethod:              c.SyncMethod,
+		AutoLockDuration:        c.AutoLockDuration,
+		Name:                    name,
+		MaxCFilterItems:         c.MaxCFilterItems,
+	}, nil
 }
 
 // timeout returns the configured walletdb timeout or the default.

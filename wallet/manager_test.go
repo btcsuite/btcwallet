@@ -3,15 +3,16 @@ package wallet
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,6 +23,78 @@ func TestWalletID(t *testing.T) {
 	w := &Wallet{id: 42}
 
 	require.Equal(t, uint32(42), w.ID())
+}
+
+// TestManagerBuildsWalletsFromRuntimePolicy verifies sibling SQL Wallets use
+// identical Manager policy while retaining independent mutable snapshots.
+func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Configure two exact Store creations and a distinctive Manager
+	// snapshot; the caller Config values deliberately conflict with that policy.
+	const secondWalletName = "second"
+
+	store := &walletmock.Store{}
+	for i, name := range []string{"first", secondWalletName} {
+		walletID := uint32(i + 1)
+		store.On(
+			"CreateWallet", mock.Anything,
+			mock.MatchedBy(func(params db.CreateWalletParams) bool {
+				return params.Name == name
+			}),
+		).Return(&db.WalletInfo{
+			ID:          walletID,
+			Name:        name,
+			IsWatchOnly: true,
+		}, nil).Once()
+	}
+
+	chainSource := &bwmock.Chain{}
+	manager := testSQLManager(t, store)
+	manager.config.ChainSource = chainSource
+	manager.config.SyncMethod = SyncMethodFullBlocks
+	manager.config.WalletSyncRetryInterval = 2 * time.Second
+	manager.config.RecoveryWindow = 12
+	manager.config.AutoLockDuration = 3 * time.Minute
+	manager.config.MaxCFilterItems = 50
+	params := CreateWalletParams{
+		Mode:              ModeShell,
+		WatchOnly:         true,
+		PrivatePassphrase: []byte("private"),
+	}
+
+	// Act: Create two Wallets while supplying conflicting per-call policy,
+	// then mutate one Wallet's network snapshot after both are assembled.
+	first, err := manager.Create(Config{
+		Name:           "first",
+		Chain:          &bwmock.Chain{},
+		RecoveryWindow: 99,
+	}, params)
+	require.NoError(t, err)
+	second, err := manager.Create(Config{Name: "second"}, params)
+	require.NoError(t, err)
+
+	first.cfg.ChainParams.Name = "mutated"
+
+	// Assert: Verify the caller-owned source is shared while scalar policy is
+	// identical, network snapshots are independent, and each Store call occurs
+	// exactly once.
+	require.Same(t, chainSource, first.cfg.Chain)
+	require.Same(t, chainSource, second.cfg.Chain)
+	require.Equal(t, SyncMethodFullBlocks, first.cfg.SyncMethod)
+	require.Equal(t, first.cfg.SyncMethod, second.cfg.SyncMethod)
+	require.Equal(t, 2*time.Second, first.cfg.WalletSyncRetryInterval)
+	require.Equal(t, first.cfg.WalletSyncRetryInterval,
+		second.cfg.WalletSyncRetryInterval)
+	require.Equal(t, uint32(12), first.cfg.RecoveryWindow)
+	require.Equal(t, first.cfg.RecoveryWindow, second.cfg.RecoveryWindow)
+	require.Equal(t, 3*time.Minute, first.cfg.AutoLockDuration)
+	require.Equal(t, first.cfg.AutoLockDuration, second.cfg.AutoLockDuration)
+	require.Equal(t, uint32(50), first.cfg.MaxCFilterItems)
+	require.Equal(t, first.cfg.MaxCFilterItems, second.cfg.MaxCFilterItems)
+	require.NotEqual(t, first.cfg.ChainParams.Name,
+		second.cfg.ChainParams.Name)
+	store.AssertExpectations(t)
 }
 
 // TestManagerCreateSuccess verifies that a wallet can be successfully created
@@ -317,9 +390,12 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 
 			backend := &recordingManagerBackend{}
 			m := &Manager{
-				wallets:     make(map[string]*Wallet),
-				backend:     backend,
-				chainParams: &chainParams,
+				wallets: make(map[string]*Wallet),
+				backend: backend,
+				config: ManagerConfig{
+					ChainSource: &bwmock.Chain{},
+					ChainParams: chainParams,
+				},
 			}
 			cfg := Config{
 				Chain: &bwmock.Chain{}, Name: "test-wallet",
@@ -376,53 +452,6 @@ func (*recordingManagerBackend) load(context.Context, Config) (*walletData,
 // close is not used by creation-policy tests.
 func (*recordingManagerBackend) close() error {
 	return nil
-}
-
-// TestManagerCreate_InvalidConfig verifies that the Create method performs
-// configuration validation before proceeding with any operations.
-func TestManagerCreate_InvalidConfig(t *testing.T) {
-	t.Parallel()
-
-	m := testKVDBManager(t)
-
-	// Call Create with an empty Config struct. This should fail because
-	// required fields like Chain and ChainParams are missing.
-	w, err := m.Create(Config{}, CreateWalletParams{})
-
-	require.ErrorIs(t, err, ErrMissingParam)
-	require.ErrorContains(t, err, "Chain")
-	require.Nil(t, w)
-}
-
-// TestManagerCreateExcessRecoveryWindow verifies that a recovery window above
-// the public maximum is rejected on the configuration's own merits, before
-// Create reaches the store or the chain backend that would serve it.
-func TestManagerCreateExcessRecoveryWindow(t *testing.T) {
-	t.Parallel()
-
-	// A chain mock with no registered calls fails the test if the request
-	// reaches the chain backend.
-	chainMock := &bwmock.Chain{}
-	defer chainMock.AssertExpectations(t)
-
-	backend := &recordingManagerBackend{}
-	m := &Manager{
-		wallets:     make(map[string]*Wallet),
-		backend:     backend,
-		chainParams: &chainParams,
-	}
-	cfg := Config{
-		Chain:          chainMock,
-		Name:           "test-wallet",
-		RecoveryWindow: MaxRecoveryWindow + 1,
-	}
-
-	w, err := m.Create(cfg, CreateWalletParams{Mode: ModeGenSeed})
-
-	require.Nil(t, w)
-	require.ErrorIs(t, err, ErrInvalidParam)
-	require.ErrorContains(t, err, "RecoveryWindow")
-	require.False(t, backend.createCalled)
 }
 
 // TestManagerLoadSuccess verifies that an existing wallet can be successfully
@@ -855,91 +884,6 @@ func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 			// Close releases the one database the Manager owns. It is
 			// called once, after quiescence.
 			require.NoError(t, m.Close())
-		})
-	}
-}
-
-// TestManagerIgnoresPerWalletDBAndChainParams verifies that the Manager owns
-// the database and the network for every wallet it serves: a per-wallet Config
-// that leaves both unset still yields a working wallet on the Manager's own
-// database and chain parameters, on both backends.
-// Config.DB is deprecated and Config.ChainParams is overwritten, so neither
-// can steer a wallet somewhere the Manager did not open.
-func TestManagerIgnoresPerWalletDBAndChainParams(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name    string
-		backend DBBackend
-		file    string
-		pubPass []byte
-	}{{
-		name:    "kvdb",
-		backend: DBBackendKVDB,
-		file:    "wallet.db",
-		pubPass: []byte("public"),
-	}, {
-		name:    "sqlite",
-		backend: DBBackendSQLite,
-		file:    "wallet.sqlite",
-	}}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			dbPath := filepath.Join(t.TempDir(), tc.file)
-			open := func() (*Manager, error) {
-				// Populate only inputs owned by the selected backend so SQL
-				// cases cannot accidentally depend on legacy credentials.
-				cfg := ManagerConfig{
-					Backend:     tc.backend,
-					DataSource:  dbPath,
-					ChainParams: chainParams,
-					ChainSource: &bwmock.Chain{},
-				}
-				return NewManager(t.Context(), cfg)
-			}
-
-			seed, err := hdkeychain.GenerateSeed(
-				hdkeychain.RecommendedSeedLen,
-			)
-			require.NoError(t, err)
-
-			m, err := open()
-			require.NoError(t, err)
-
-			// Arrange: no DB and no network at all — the Manager
-			// must supply both.
-			cfg := Config{
-				Chain:         &bwmock.Chain{},
-				ChainParams:   nil,
-				DB:            nil,
-				Name:          testWalletName,
-				PubPassphrase: tc.pubPass,
-			}
-
-			w, err := m.Create(cfg, CreateWalletParams{
-				Mode:              ModeImportSeed,
-				Seed:              seed,
-				PubPassphrase:     tc.pubPass,
-				PrivatePassphrase: []byte("private"),
-				Birthday:          time.Now(),
-			})
-			require.NoError(t, err)
-
-			// Assert: a *fresh* Manager over the same database performs
-			// a real Load with the same nil-field Config, so the
-			// injection is proven off the cached-hit path too.
-			require.NoError(t, m.Close())
-
-			reopened, err := open()
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = reopened.Close() })
-
-			fresh, err := reopened.Load(cfg)
-			require.NoError(t, err)
-			require.NotSame(t, w, fresh)
 		})
 	}
 }
