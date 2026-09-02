@@ -1527,41 +1527,57 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestControllerUnlock_DefaultTimeout verifies default timeout usage.
-func TestControllerUnlock_DefaultTimeout(t *testing.T) {
+// TestControllerUnlockDefaultTimeout verifies an omitted request timeout is
+// replaced with the Manager-normalized Wallet policy before timer handling.
+func TestControllerUnlockDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet with an auto-lock duration and start the
-	// main loop.
-	w, deps := createTestWalletWithMocks(t)
-
-	w.cfg.AutoLockDuration = time.Minute
+	// Arrange: Put a Wallet in the state accepted by Unlock and configure a
+	// distinctive default. Leave its main loop stopped so the test can inspect
+	// the serialized request at the boundary immediately before handleUnlockReq
+	// uses the request timeout to reset the auto-lock timer.
+	w, _ := createTestWalletWithMocks(t)
+	autoLockDuration := time.Minute
+	w.cfg.AutoLockDuration = autoLockDuration
 
 	require.NoError(t, w.state.toStarting())
 	require.NoError(t, w.state.toStarted())
 
-	w.wg.Add(1)
+	// Act: Invoke Unlock asynchronously because it waits for the main loop's
+	// response, then intercept the exact request the main loop would handle.
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.Unlock(t.Context(), UnlockRequest{
+			Passphrase: []byte("pass"),
+		})
+	}()
 
-	go w.mainLoop()
+	var req unlockReq
+	select {
+	case rawReq := <-w.requestChan:
+		var ok bool
 
-	pass := []byte("pass")
-	req := UnlockRequest{Passphrase: pass}
-	deps.vault.On(
-		"Unlock", mock.Anything, pass,
-	).Return(nil).Once()
-	// Auto-lock might trigger if the test runs slowly, but it's not
-	// guaranteed.
-	deps.vault.On("Lock").Return().Maybe()
+		req, ok = rawReq.(unlockReq)
+		require.True(t, ok)
 
-	// Act: Perform Unlock with default timeout.
-	err := w.Unlock(t.Context(), req)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock request")
+	}
 
-	// Assert: Verify success.
-	require.NoError(t, err)
+	// Assert: The serialized request carries the configured default into the
+	// timer handler. Complete the intercepted request and verify Unlock returns
+	// successfully so its caller-facing response path is not left blocked.
+	require.Equal(t, autoLockDuration, req.req.Timeout)
 
-	// Clean up.
-	w.cancel()
-	w.wg.Wait()
+	req.resp <- nil
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock response")
+	}
 }
 
 // TestControllerStart_DeleteExpiredFail verifies Start fails when
