@@ -242,14 +242,12 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	params.Name = "mutated"
 	params.PowLimit.SetInt64(1)
 
-	w, err := m.Create(
-		Config{Name: testWalletName},
-		CreateWalletParams{
-			Mode:          ModeShell,
-			WatchOnly:     true,
-			PubPassphrase: []byte("public"),
-		},
-	)
+	w, err := m.Create(CreateWalletParams{
+		Name:          testWalletName,
+		Mode:          ModeShell,
+		WatchOnly:     true,
+		PubPassphrase: []byte("public"),
+	})
 	require.NoError(t, err)
 
 	// Assert: Verify constructor copying and both normalization paths first,
