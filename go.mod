@@ -156,3 +156,5 @@ replace github.com/golang-migrate/migrate/v4 => github.com/lightninglabs/migrate
 replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
 
 replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
+
+replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor
