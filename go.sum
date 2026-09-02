@@ -30,8 +30,6 @@ github.com/btcsuite/btcd/wire/v2 v2.0.0 h1:mYSKzZZ0a1sK+aMhXzfDSVsSzRkWkU3x2U04T
 github.com/btcsuite/btcd/wire/v2 v2.0.0/go.mod h1:bGxkPkk8IiDvUo1D96wE03llBIk7p2MdWYRyAQwLmqM=
 github.com/btcsuite/btclog v1.0.0 h1:sEkpKJMmfGiyZjADwEIgB1NSwMyfdD1FB8v6+w1T0Ns=
 github.com/btcsuite/btclog v1.0.0/go.mod h1:w7xnGOhwT3lmrS4H3b/D1XAXxvh+tbhUm8xeHN2y3TQ=
-github.com/btcsuite/btcwallet/wallet/txauthor v1.4.0 h1:oIkGj32YK1CvWaJGlVwZA1f+y/KVHkfrd2PoST0ZpQs=
-github.com/btcsuite/btcwallet/wallet/txauthor v1.4.0/go.mod h1:sGrBjcqQ8UPexuRajFs72+o544CJn3Pavv/5H0VAWVk=
 github.com/btcsuite/btcwallet/wallet/txrules v1.3.0 h1:D5aGMwWIxdqek3xEJs4eOdMoh6iga2EI2xSlaXCdnNo=
 github.com/btcsuite/btcwallet/wallet/txrules v1.3.0/go.mod h1:ZzSdn2XrsUDPa193Q/su1sJY+716rlFK2H1mYwbY/18=
 github.com/btcsuite/btcwallet/walletdb v1.6.0 h1:Yund5XbdqFxNW7+R2Sxs02bMC5fMrmORj4GN8MV55no=
