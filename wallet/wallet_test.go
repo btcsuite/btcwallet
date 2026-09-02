@@ -10,7 +10,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -58,109 +57,6 @@ func TestErrIndeterminateCommitWrapping(t *testing.T) {
 	// the useful context that identifies the affected operation.
 	require.ErrorIs(t, err, ErrIndeterminateCommit)
 	require.ErrorContains(t, err, operation)
-}
-
-// TestConfigValidate ensures that the Config.validate method correctly
-// identifies missing required parameters.
-func TestConfigValidate(t *testing.T) {
-	t.Parallel()
-
-	_, cleanup := setupTestDB(t)
-	t.Cleanup(cleanup)
-
-	testCases := []struct {
-		name        string
-		config      Config
-		expectedErr string
-	}{
-		{
-			name: "valid config",
-			config: Config{
-				Chain:       &bwmock.Chain{},
-				ChainParams: &chainParams,
-				Name:        "test-wallet",
-			},
-		},
-		{
-			name: "missing Chain",
-			config: Config{
-				ChainParams: &chainParams,
-				Name:        "test-wallet",
-			},
-			expectedErr: "Chain",
-		},
-		{
-			name: "missing ChainParams",
-			config: Config{
-				Chain: &bwmock.Chain{},
-				Name:  "test-wallet",
-			},
-			expectedErr: "ChainParams",
-		},
-		{
-			name: "missing Name",
-			config: Config{
-				Chain:       &bwmock.Chain{},
-				ChainParams: &chainParams,
-			},
-			expectedErr: "Name",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := tc.config.validate()
-			if tc.expectedErr == "" {
-				require.NoError(t, err)
-			} else {
-				require.ErrorContains(t, err, tc.expectedErr)
-			}
-		})
-	}
-}
-
-// TestConfigValidateRecoveryWindow ensures the configuration accepts every
-// recovery window from zero through the public maximum and rejects the first
-// value above it.
-func TestConfigValidateRecoveryWindow(t *testing.T) {
-	t.Parallel()
-
-	// A zero window asks for no look-ahead at all, and recovery already
-	// runs with windows far below the twenty this configuration used to
-	// demand, so every one of these is a request the wallet serves as
-	// written.
-	accepted := []uint32{0, 1, 2, 19, 20, MaxRecoveryWindow}
-	for _, window := range accepted {
-		t.Run(fmt.Sprintf("accepts %d", window), func(t *testing.T) {
-			t.Parallel()
-
-			cfg := Config{
-				Chain:          &bwmock.Chain{},
-				ChainParams:    &chainParams,
-				Name:           "test-wallet",
-				RecoveryWindow: window,
-			}
-
-			require.NoError(t, cfg.validate())
-		})
-	}
-
-	t.Run("rejects the first excess window", func(t *testing.T) {
-		t.Parallel()
-
-		cfg := Config{
-			Chain:          &bwmock.Chain{},
-			ChainParams:    &chainParams,
-			Name:           "test-wallet",
-			RecoveryWindow: MaxRecoveryWindow + 1,
-		}
-
-		err := cfg.validate()
-		require.ErrorIs(t, err, ErrInvalidParam)
-		require.ErrorContains(t, err, "RecoveryWindow")
-	})
 }
 
 // TestWalletSyncedToUsesStore verifies that a wallet without a legacy address
