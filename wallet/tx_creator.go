@@ -82,6 +82,27 @@ var (
 	// errNegativeHeight is returned when a height expected to be non-negative
 	// is negative.
 	errNegativeHeight = errors.New("negative height")
+
+	// The two errors below name the same conditions as their txauthor
+	// counterparts, deliberately including their names. They exist so a
+	// caller can match an authoring failure without importing the nested
+	// module; the originating txauthor error stays in the chain for anyone
+	// who wants the finer distinction.
+
+	// ErrOutputTotalExceedsMax is returned when a transaction's outputs are
+	// individually valid but sum to more than the maximum representable
+	// amount. Unlike the per-output bounds, this one has no counterpart in
+	// validateTxIntent, so it is reported from the authoring boundary.
+	ErrOutputTotalExceedsMax = errors.New(
+		"total output amount exceeds maximum value",
+	)
+
+	// ErrFeeOutOfRange is returned when the fee a transaction would pay is
+	// not a representable amount. DefaultMaxFeeRate keeps this out of reach
+	// at its default value, but that bound is a mutable package variable
+	// intended to become configurable: raised far enough, an ordinary
+	// multi-input transaction can price a fee above MaxSatoshi.
+	ErrFeeOutOfRange = errors.New("transaction fee out of range")
 )
 
 var (
@@ -677,7 +698,7 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 		txOutputs, feeSatPerKb, inputSource, changeSource,
 	)
 	if err != nil {
-		return nil, err
+		return nil, translateAuthorError(err)
 	}
 
 	// Randomize the position of the change output, if one was created. This
@@ -688,6 +709,80 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 	}
 
 	return tx, nil
+}
+
+// authorError gives an authoring failure a wallet-facing identity without
+// restating it. Its message is the originating error's alone, while errors.Is
+// resolves both the wallet sentinel, through Is, and everything the originating
+// error already matched, through Unwrap. Wrapping with a second %w verb would
+// match both too, but would render the wallet sentinel's text and the txauthor
+// error's text one after the other, and for most of these classes those say the
+// same thing twice.
+//
+// This mirrors AmbiguousTxCommitError in wallet/internal/db/runtime.
+type authorError struct {
+	// sentinel is the wallet-facing identity this failure reports as.
+	sentinel error
+
+	// cause is the originating txauthor error, which supplies the message.
+	cause error
+}
+
+// Error returns the originating error's message.
+func (e *authorError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the originating txauthor error.
+func (e *authorError) Unwrap() error {
+	return e.cause
+}
+
+// Is reports whether target is the wallet sentinel this failure carries.
+func (e *authorError) Is(target error) bool {
+	return errors.Is(e.sentinel, target)
+}
+
+// translateAuthorError maps the checked-arithmetic errors the txauthor module
+// reports onto the wallet's own error vocabulary, so callers of the public
+// wrappers match on one set of sentinels. It is the single translation point
+// for both CreateTransaction and FundPsbt.
+//
+// Conditions validateTxIntent already names keep that identity, which costs no
+// new API and leaves one wallet-level error per condition however it was
+// reached: the txrules errors for an output value, and ErrMissingFeeRate for a
+// rate that is not positive. Only the output total has no intent-level
+// counterpart and needs a sentinel of its own.
+//
+// Everything else is returned untouched: an InputSourceError, so "cannot fund
+// this" stays distinguishable from "will not author this", and the checked
+// arithmetic classes no caller can observe. A nil output cannot occur, because
+// authorTransaction takes its outputs by value; the add and subtract guards
+// cannot fire, because CheckOutputsAmount bounds the target before every
+// addition and the sufficiency checks bound the rest. Naming those in the
+// wallet would be exported API with nothing behind it.
+func translateAuthorError(err error) error {
+	switch {
+	case errors.Is(err, txauthor.ErrOutputValueNegative):
+		return &authorError{txrules.ErrAmountNegative, err}
+
+	case errors.Is(err, txauthor.ErrOutputValueExceedsMax):
+		return &authorError{txrules.ErrAmountExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrOutputTotalExceedsMax):
+		return &authorError{ErrOutputTotalExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrFeeRateNotPositive):
+		return &authorError{ErrMissingFeeRate, err}
+
+	case errors.Is(err, txauthor.ErrFeeOverflow),
+		errors.Is(err, txauthor.ErrFeeOutOfRange):
+
+		return &authorError{ErrFeeOutOfRange, err}
+
+	default:
+		return err
+	}
 }
 
 // determineChangeSource determines the source for the transaction's change
