@@ -148,7 +148,12 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 			store:   store,
 			closeFn: func() error { return nil },
 		},
-		chainParams: &chainParams,
+		config: ManagerConfig{
+			ChainSource:             &bwmock.Chain{},
+			ChainParams:             chainParams,
+			WalletSyncRetryInterval: initialBackoff,
+			AutoLockDuration:        defaultLockDuration,
+		},
 	}
 }
 
