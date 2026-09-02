@@ -923,7 +923,6 @@ func TestManagerCreateHonoursCreatePubPassphrase(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, w)
 	require.NoError(t, m.Close())
-
 	// Assert: a fresh Manager opens the wallet with the passphrase it was
 	// created under.
 	loadCfg := cfg
