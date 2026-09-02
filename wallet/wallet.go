@@ -15,7 +15,6 @@ package wallet
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -239,28 +238,6 @@ type Config struct {
 	// of client-side filter matching for large watchlists. If 0, a default
 	// of 100,000 is used.
 	MaxCFilterItems uint32
-}
-
-// validate checks the configuration for consistency and completeness.
-func (c *Config) validate() error {
-	if c.Chain == nil {
-		return fmt.Errorf("%w: Chain", ErrMissingParam)
-	}
-
-	if c.ChainParams == nil {
-		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
-	}
-
-	if c.Name == "" {
-		return fmt.Errorf("%w: Name", ErrMissingParam)
-	}
-
-	if c.RecoveryWindow > MaxRecoveryWindow {
-		return fmt.Errorf("%w: RecoveryWindow must not exceed %d",
-			ErrInvalidParam, MaxRecoveryWindow)
-	}
-
-	return nil
 }
 
 // locateBirthdayBlock returns a block that meets the given birthday timestamp
