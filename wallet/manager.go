@@ -398,39 +398,47 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 // for tracking. If the named wallet does not exist, Load returns
 // ErrWalletNotFound.
 func (m *Manager) Load(cfg Config) (*Wallet, error) {
-	// The Manager owns the network for every wallet it serves; see Create.
-	cfg.ChainParams = &m.config.ChainParams
-
-	err := cfg.validate()
+	err := validateManagedWalletName(cfg.Name)
 	if err != nil {
 		return nil, err
 	}
 
+	name := cfg.Name
 	m.Lock()
 	defer m.Unlock()
 
 	// A wallet already installed under this name is returned as is. The
 	// Manager lock makes a miss the sole assembly owner until installation.
-	existingW, ok := m.wallets[cfg.Name]
+	existingW, ok := m.wallets[name]
 	if ok {
 		return existingW, nil
 	}
 
+	// A cache miss receives a fresh Wallet-local policy assembled from the
+	// Manager's immutable configuration snapshot.
+	walletCfg, err := m.config.walletConfig(name)
+	if err != nil {
+		return nil, err
+	}
+
+	// The backend still receives the request Config at this compatibility
+	// boundary because kvdb needs its public passphrase. Runtime policy comes
+	// exclusively from walletCfg and is never read from the request.
 	data, err := m.backend.load(context.Background(), cfg)
 	if err != nil {
 		// Hide the database sentinel at the public Manager boundary while
 		// retaining the requested wallet name for caller diagnostics.
 		if errors.Is(err, db.ErrWalletNotFound) {
 			return nil, fmt.Errorf(
-				"wallet %q: %w", cfg.Name, ErrWalletNotFound,
+				"wallet %q: %w", name, ErrWalletNotFound,
 			)
 		}
 
 		return nil, err
 	}
 
-	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	w := newManagedWallet(walletCfg, data)
+	m.wallets[walletCfg.Name] = w
 
 	return w, nil
 }
