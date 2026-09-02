@@ -3297,7 +3297,9 @@ func (w *Wallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 }
 
 // LeaseOutputWithOptions locks an output to the given ID and applies optional
-// transaction-store lock behavior.
+// transaction-store lock behavior. Confirmation-controlled leases ignore the
+// returned wall-clock expiration and require explicit release if no spend
+// reaches their requested depth.
 func (w *Wallet) LeaseOutputWithOptions(id wtxmgr.LockID, op wire.OutPoint,
 	duration time.Duration,
 	optFuncs ...wtxmgr.LockOutputOption) (time.Time, error) {
