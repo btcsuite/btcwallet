@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -707,9 +708,10 @@ func TestAuthorTransaction(t *testing.T) {
 			require.Equal(t, inputScript, authored.PrevScripts[0])
 			require.Equal(t, inputTarget+tc.changeAmount,
 				authored.TotalInput)
-			fee := authored.TotalInput - txauthor.SumOutputValues(
-				authored.Tx.TxOut,
-			)
+			paid, err := txauthor.CheckOutputsAmount(authored.Tx.TxOut)
+			require.NoError(t, err)
+
+			fee := authored.TotalInput - paid
 			require.Equal(t, inputTarget-btcutil.Amount(output.Value), fee)
 
 			if tc.changeAmount == 0 {
@@ -730,6 +732,210 @@ func TestAuthorTransaction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthorTransactionChecksAmounts verifies that an output set which is
+// individually payable but sums above the maximum is refused at the authoring
+// boundary, under the wallet's own error, before either callback is consulted.
+//
+// This is the only amount condition the boundary uniquely owns. Every other one
+// txauthor reports is either screened earlier by validateTxIntent, so it never
+// arrives here, or unreachable through this entry point: the boundary takes its
+// outputs by value, so a nil element is unrepresentable, and the checked add
+// and subtract guards cannot fire behind CheckOutputsAmount. The nested module
+// covers those conditions and TestTranslateAuthorError covers their mappings.
+func TestAuthorTransactionChecksAmounts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Two outputs, each payable on its own, whose total is one
+	// satoshi past the maximum. Count both callbacks so the test can prove
+	// the refusal landed before either was consulted.
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	outputs := []wire.TxOut{{
+		Value: btcutil.MaxSatoshi - 1e8, PkScript: script,
+	}, {
+		Value: 1e8 + 1, PkScript: script,
+	}}
+
+	w, _ := createTestWalletWithMocks(t)
+
+	var inputCalls, changeCalls int
+
+	inputSource := func(target btcutil.Amount) (btcutil.Amount,
+		[]*wire.TxIn, []btcutil.Amount, [][]byte, error) {
+
+		inputCalls++
+
+		return target, []*wire.TxIn{{}}, []btcutil.Amount{target},
+			[][]byte{script}, nil
+	}
+	changeSource := &txauthor.ChangeSource{
+		ScriptSize: len(script),
+		NewScript: func() ([]byte, error) {
+			changeCalls++
+
+			return script, nil
+		},
+	}
+
+	// Act: Author directly, bypassing the intent-level checks the public
+	// wrappers apply.
+	authored, err := w.authorTransaction(
+		outputs, defaultFeeRate, inputSource, changeSource,
+	)
+
+	// Assert: The wallet's own error identifies the violation, the
+	// originating txauthor error stays in the chain, no transaction is
+	// produced, and neither callback ran.
+	require.ErrorIs(t, err, ErrOutputTotalExceedsMax)
+	require.ErrorIs(t, err, txauthor.ErrOutputTotalExceedsMax)
+	require.Nil(t, authored)
+	require.Zero(t, inputCalls)
+	require.Zero(t, changeCalls)
+}
+
+// TestTranslateAuthorError verifies that each txauthor condition the wallet
+// names is given a wallet-facing identity, that the originating error stays in
+// the chain, that translation leaves the message alone, and that everything
+// else passes through untouched.
+func TestTranslateAuthorError(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		err  error
+		want error
+	}{{
+		name: "negative output value",
+		err:  txauthor.ErrOutputValueNegative,
+		want: txrules.ErrAmountNegative,
+	}, {
+		name: "output value above the maximum",
+		err:  txauthor.ErrOutputValueExceedsMax,
+		want: txrules.ErrAmountExceedsMax,
+	}, {
+		name: "output total above the maximum",
+		err:  txauthor.ErrOutputTotalExceedsMax,
+		want: ErrOutputTotalExceedsMax,
+	}, {
+		name: "non-positive fee rate",
+		err:  txauthor.ErrFeeRateNotPositive,
+		want: ErrMissingFeeRate,
+	}, {
+		name: "fee product overflow",
+		err:  txauthor.ErrFeeOverflow,
+		want: ErrFeeOutOfRange,
+	}, {
+		name: "fee out of range",
+		err:  txauthor.ErrFeeOutOfRange,
+		want: ErrFeeOutOfRange,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A wrapped error must translate exactly as the bare
+			// sentinel does, since that is how txauthor reports it.
+			wrapped := fmt.Errorf("authoring: %w", tc.err)
+
+			got := translateAuthorError(wrapped)
+
+			// Both identities resolve: the wallet's, so callers need
+			// not import the nested module, and the originating one,
+			// for anyone who wants the finer distinction.
+			require.ErrorIs(t, got, tc.want)
+			require.ErrorIs(t, got, tc.err)
+
+			// Translation must not restate what the originating error
+			// already says. Several wallet sentinels carry text that
+			// duplicates their txauthor counterpart word for word, so
+			// composing the two would print the same clause twice.
+			require.Equal(t, wrapped.Error(), got.Error())
+		})
+	}
+
+	// Conditions the wallet deliberately does not name arrive unchanged.
+	// A nil output cannot occur through authorTransaction, which takes its
+	// outputs by value, and the checked add and subtract guards cannot fire
+	// behind CheckOutputsAmount and the sufficiency checks.
+	unnamed := []struct {
+		name string
+		err  error
+	}{{
+		name: "nil output",
+		err:  txauthor.ErrNilOutput,
+	}, {
+		name: "amount overflow",
+		err:  txauthor.ErrAmountOverflow,
+	}, {
+		name: "amount underflow",
+		err:  txauthor.ErrAmountUnderflow,
+	}}
+
+	for _, tc := range unnamed {
+		t.Run(tc.name+" passes through", func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("authoring: %w", tc.err)
+
+			got := translateAuthorError(wrapped)
+			require.Equal(t, wrapped, got)
+		})
+	}
+
+	// An error the wallet has no name for is returned as it arrived. An
+	// InputSourceError in particular must keep its type, because callers
+	// distinguish "cannot fund this" from "will not author this".
+	t.Run("unrecognised error passes through", func(t *testing.T) {
+		t.Parallel()
+
+		sourceErr := insufficientFundsError(t)
+
+		got := translateAuthorError(sourceErr)
+		require.Equal(t, sourceErr, got)
+
+		var typed txauthor.InputSourceError
+		require.ErrorAs(t, got, &typed)
+	})
+
+	t.Run("nil error passes through", func(t *testing.T) {
+		t.Parallel()
+
+		require.NoError(t, translateAuthorError(nil))
+	})
+}
+
+// insufficientFundsError returns txauthor's own InputSourceError. The concrete
+// type is unexported, so it is obtained the only way a caller can: by authoring
+// a payment the input source cannot cover.
+func insufficientFundsError(t *testing.T) error {
+	t.Helper()
+
+	emptySource := func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return 0, nil, nil, nil, nil
+	}
+
+	_, err := txauthor.NewUnsignedTransaction(
+		[]*wire.TxOut{{
+			Value:    1e8,
+			PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+		}}, 1e3, emptySource, &txauthor.ChangeSource{
+			ScriptSize: txsizes.P2WPKHPkScriptSize,
+			NewScript: func() ([]byte, error) {
+				return make(
+					[]byte, txsizes.P2WPKHPkScriptSize,
+				), nil
+			},
+		},
+	)
+
+	var sourceErr txauthor.InputSourceError
+	require.ErrorAs(t, err, &sourceErr)
+
+	return err
 }
 
 // TestCreateTransactionDefaultPolicy verifies nil inputs still select from the
