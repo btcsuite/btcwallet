@@ -1915,6 +1915,56 @@ func TestInputYield(t *testing.T) {
 	require.False(t, inputYieldsPositively(credit, 20000))
 }
 
+// TestTxToOutputsRejectsNonPositiveFeeRate verifies that the legacy authoring
+// path refuses a fee rate at or below zero.
+//
+// Nothing between the deprecated wallet interface and txauthor bounds this
+// rate: txToOutputs backs CreateSimpleTx, SendOutputs and SendOutputsWithInput,
+// and it hands whatever the caller passed straight to NewUnsignedTransaction. A
+// zero rate used to author a zero-fee transaction. The in-tree legacy RPC always
+// supplies txrules.DefaultRelayFeePerKb, so it is unaffected, but external
+// callers of the deprecated interface set their own rate and this test records
+// the change for them.
+func TestTxToOutputsRejectsNonPositiveFeeRate(t *testing.T) {
+	t.Parallel()
+
+	w := testWallet(t)
+
+	keyScope := waddrmgr.KeyScopeBIP0049Plus
+	addr, err := w.CurrentAddress(0, keyScope)
+	require.NoError(t, err)
+
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Fund the wallet so the refusal cannot be mistaken for a shortfall.
+	addUtxo(t, w, &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{wire.NewTxOut(100000, p2shAddr)},
+	})
+
+	txOuts := []*wire.TxOut{{PkScript: p2shAddr, Value: 10000}}
+
+	for _, feeRate := range []btcutil.Amount{0, -1000} {
+		tx, err := w.txToOutputs(
+			txOuts, nil, nil, 0, 1, feeRate,
+			CoinSelectionLargest, true, nil, alwaysAllowUtxo,
+		)
+		require.ErrorIs(t, err, txauthor.ErrFeeRateNotPositive,
+			"fee rate %d not rejected", feeRate)
+		require.Nil(t, tx)
+	}
+
+	// A positive rate still authors against the same fixture, so the
+	// rejection above is about the rate and nothing else.
+	tx, err := w.txToOutputs(
+		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true, nil,
+		alwaysAllowUtxo,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, tx)
+}
+
 // TestTxToOutputsRandom tests random coin selection.
 func TestTxToOutputsRandom(t *testing.T) {
 	t.Parallel()
