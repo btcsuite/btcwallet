@@ -21,11 +21,11 @@ type sqlManagerBackend struct {
 var _ managerBackend = (*sqlManagerBackend)(nil)
 
 // create atomically creates a SQL wallet and returns its committed data.
-func (b *sqlManagerBackend) create(ctx context.Context, cfg Config,
+func (b *sqlManagerBackend) create(ctx context.Context,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
-	createParams, err := sqlCreateWalletParams(cfg, params, rootKey,
+	createParams, err := sqlCreateWalletParams(params, rootKey,
 		birthdayWithSafetyMargin(params.Birthday),
 	)
 	if err != nil {
@@ -80,12 +80,12 @@ func (b *sqlManagerBackend) close() error {
 }
 
 // sqlCreateWalletParams converts wallet creation inputs into SQL rows.
-func sqlCreateWalletParams(cfg Config, params CreateWalletParams,
+func sqlCreateWalletParams(params CreateWalletParams,
 	rootKey *hdkeychain.ExtendedKey, birthday time.Time) (
 	db.CreateWalletParams, error) {
 
 	createParams := db.CreateWalletParams{
-		Name: cfg.Name,
+		Name: params.Name,
 		IsImported: params.Mode == ModeImportSeed ||
 			params.Mode == ModeImportExtKey,
 		// LatestMgrVersion is a small constant that fits int32.
