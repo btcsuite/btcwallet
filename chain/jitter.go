@@ -4,11 +4,15 @@ import (
 	"errors"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 )
 
 // JitterTicker is a ticker that adds jitter to the tick duration.
 type JitterTicker struct {
+	// stopOnce ensures the quit channel is closed at most once.
+	stopOnce sync.Once
+
 	// C is a read-only channel that receives ticks.
 	C <-chan time.Time
 
@@ -80,7 +84,9 @@ func calculateMinMax(d time.Duration, scaler float64) (int64, int64) {
 
 // Stop stops the ticker.
 func (jt *JitterTicker) Stop() {
-	close(jt.quit)
+	jt.stopOnce.Do(func() {
+		close(jt.quit)
+	})
 }
 
 // start starts the ticker.
@@ -103,10 +109,9 @@ func (jt *JitterTicker) start() {
 			}
 
 		case <-jt.quit:
-			// Stop the timer and clean the channel when it stops.
-			if !timer.Stop() {
-				<-timer.C
-			}
+			// Stop the timer before exiting the ticker goroutine.
+			timer.Stop()
+			return
 		}
 	}
 }
