@@ -1123,9 +1123,10 @@ func TestUpdateTxRejectsUnsupportedPatches(t *testing.T) {
 	require.ErrorIs(t, err, errNotImplemented)
 }
 
-// TestUpdateTxEmptyLabelPreservesLegacyError verifies that kvdb keeps the
-// legacy empty-label rejection instead of reaching into private buckets.
-func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
+// TestUpdateTxEmptyLabelClears verifies that an empty label removes the label
+// a transaction already had, which is what the Store contract means by an
+// empty label and what the SQL backends do with one.
+func TestUpdateTxEmptyLabelClears(t *testing.T) {
 	t.Parallel()
 
 	dbConn, cleanup := newTestDB(t)
@@ -1162,7 +1163,60 @@ func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 		Txid:     rec.Hash,
 		Label:    &empty,
 	})
-	require.ErrorContains(t, err, "empty transaction label not allowed")
+	require.NoError(t, err)
+
+	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
+		ns := tx.ReadBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		// The label reads back as absent rather than as a stored empty
+		// value, which is the only form this store can report without
+		// erroring.
+		details, err := txStore.TxDetails(ns, &rec.Hash)
+		require.NoError(t, err)
+		require.NotNil(t, details)
+		require.Empty(t, details.Label)
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// TestUpdateTxEmptyLabelWithoutLabel verifies that clearing a label a
+// transaction never had succeeds. The caller asked for a transaction with no
+// label and already has one, so there is nothing to refuse.
+func TestUpdateTxEmptyLabelWithoutLabel(t *testing.T) {
+	t.Parallel()
+
+	dbConn, cleanup := newTestDB(t)
+	t.Cleanup(cleanup)
+
+	txStore := newTxStore(t, dbConn)
+	store := NewStore(dbConn, txStore, nil)
+
+	txMsg := &wire.MsgTx{Version: 1}
+	txMsg.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Hash: chainhash.Hash{13},
+	}})
+	txMsg.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+	rec, err := wtxmgr.NewTxRecordFromMsgTx(txMsg, time.Now())
+	require.NoError(t, err)
+
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		ns := tx.ReadWriteBucket(wtxmgrNamespaceKey)
+		require.NotNil(t, ns)
+
+		return txStore.InsertTx(ns, rec, nil)
+	})
+	require.NoError(t, err)
+
+	empty := ""
+	err = store.UpdateTx(t.Context(), db.UpdateTxParams{
+		WalletID: 0,
+		Txid:     rec.Hash,
+		Label:    &empty,
+	})
+	require.NoError(t, err)
 
 	err = walletdb.View(dbConn, func(tx walletdb.ReadTx) error {
 		ns := tx.ReadBucket(wtxmgrNamespaceKey)
@@ -1171,7 +1225,7 @@ func TestUpdateTxEmptyLabelPreservesLegacyError(t *testing.T) {
 		details, err := txStore.TxDetails(ns, &rec.Hash)
 		require.NoError(t, err)
 		require.NotNil(t, details)
-		require.Equal(t, label, details.Label)
+		require.Empty(t, details.Label)
 
 		return nil
 	})
