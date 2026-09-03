@@ -586,6 +586,22 @@ func (s *NeutrinoClient) NotifyReceived(addrs []address.Address) error {
 	return nil
 }
 
+// WatchAddrsFromTip temporarily routes address registration through the
+// existing Neutrino notification rescan after honoring pre-call cancellation.
+func (s *NeutrinoClient) WatchAddrsFromTip(ctx context.Context,
+	addrs []address.Address) error {
+
+	err := ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	// TODO(yy): NotifyReceived can start a birthday-based scan or widen an
+	// active historical rescan. Replace this compatibility shim after the
+	// Neutrino live-watch lifecycle has a dedicated design.
+	return s.NotifyReceived(addrs)
+}
+
 // Notifications replicates the RPC client's Notifications method.
 func (s *NeutrinoClient) Notifications() <-chan interface{} {
 	return s.dequeueNotification
