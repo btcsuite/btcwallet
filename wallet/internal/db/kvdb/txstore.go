@@ -292,6 +292,20 @@ func (s *Store) UpdateTx(_ context.Context, params db.UpdateTxParams) error {
 			return db.ErrTxNotFound
 		}
 
+		// The empty label is how a caller removes one, and this store
+		// records the absence of a label as a missing entry rather than
+		// as a stored empty value, so clearing is a delete.
+		if len(*label) == 0 {
+			err = s.txStore.DeleteTxLabel(ns, params.Txid)
+			if err != nil {
+				return fmt.Errorf(
+					"delete transaction label: %w", err,
+				)
+			}
+
+			return nil
+		}
+
 		err = s.txStore.PutTxLabel(ns, params.Txid, *label)
 		if err != nil {
 			return fmt.Errorf("put transaction label: %w", err)

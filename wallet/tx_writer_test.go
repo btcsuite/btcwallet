@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -36,8 +35,9 @@ func TestLabelTxSuccess(t *testing.T) {
 	mocks.store.AssertExpectations(t)
 }
 
-// TestLabelTxEmptyLabel tests that an empty label is forwarded to the store and
-// preserves the legacy label error.
+// TestLabelTxEmptyLabel tests that an empty label reaches the store, which is
+// how a caller clears a label. The wallet neither refuses it nor turns it into
+// something else on the way.
 func TestLabelTxEmptyLabel(t *testing.T) {
 	t.Parallel()
 
@@ -48,11 +48,11 @@ func TestLabelTxEmptyLabel(t *testing.T) {
 		WalletID: w.id,
 		Txid:     *TstTxHash,
 		Label:    &empty,
-	}).Return(wtxmgr.ErrEmptyLabel).Once()
+	}).Return(nil).Once()
 
 	err := w.LabelTx(t.Context(), *TstTxHash, empty)
 
-	require.ErrorIs(t, err, wtxmgr.ErrEmptyLabel)
+	require.NoError(t, err)
 	mocks.store.AssertExpectations(t)
 }
 
