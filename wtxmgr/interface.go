@@ -117,6 +117,11 @@ type TxStore interface {
 	PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 		label string) error
 
+	// DeleteTxLabel removes any label recorded for the transaction, which
+	// is how this store records a transaction that has none. A transaction
+	// that already has no label is not an error.
+	DeleteTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash) error
+
 	// RangeTransactions runs the function f on all transaction details
 	// between blocks on the best chain over the height range [begin,end].
 	// The special height -1 may be used to also include unmined

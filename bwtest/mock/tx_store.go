@@ -122,6 +122,14 @@ func (m *TxStore) PutTxLabel(ns walletdb.ReadWriteBucket,
 	return args.Error(0)
 }
 
+// DeleteTxLabel implements the wtxmgr.TxStore interface.
+func (m *TxStore) DeleteTxLabel(ns walletdb.ReadWriteBucket,
+	txid chainhash.Hash) error {
+
+	args := m.Called(ns, txid)
+	return args.Error(0)
+}
+
 // RangeTransactions implements the wtxmgr.TxStore interface.
 func (m *TxStore) RangeTransactions(ns walletdb.ReadBucket, begin,
 	end int32, f func([]wtxmgr.TxDetails) (bool, error)) error {
