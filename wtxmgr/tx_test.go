@@ -2433,6 +2433,86 @@ func TestTxLabel(t *testing.T) {
 	}
 }
 
+// TestDeleteTxLabel tests removing a transaction's label, which is how a
+// transaction with no label is recorded: the entry is absent rather than
+// present and empty, because a stored zero-length label reads back as an
+// error.
+func TestDeleteTxLabel(t *testing.T) {
+	t.Parallel()
+
+	store, db, err := testStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	txid := &chainhash.Hash{3}
+
+	getBucket := func(tx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+		testBucket := tx.ReadWriteBucket(namespaceKey)
+		if testBucket == nil {
+			t.Fatalf("could not get bucket")
+		}
+
+		return testBucket
+	}
+
+	tryDeleteLabel := func() error {
+		return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			return store.DeleteTxLabel(getBucket(tx), *txid)
+		})
+	}
+
+	// Deleting before any label has been written must succeed: the caller
+	// asked for a transaction with no label and already has one.
+	err = tryDeleteLabel()
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+
+	// Write a label, then remove it.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		return store.PutTxLabel(getBucket(tx), *txid, "test label")
+	})
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+
+	err = tryDeleteLabel()
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+
+	// The label is gone rather than empty, so the lookup that reports a
+	// missing label is what answers now.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		testBucket := tx.ReadBucket(namespaceKey)
+		if testBucket == nil {
+			t.Fatalf("could not get bucket")
+		}
+
+		_, err := store.FetchTxLabel(testBucket, *txid)
+		if err != ErrTxLabelNotFound {
+			t.Fatalf("expected: %v, got: %v",
+				ErrTxLabelNotFound, err)
+		}
+
+		// The wallet-facing read reports it as no label at all.
+		label, err := store.TxLabel(testBucket, *txid)
+		if err != nil {
+			t.Fatalf("expected: no error, got: %v", err)
+		}
+		if label != "" {
+			t.Fatalf("expected: empty label, got: %v", label)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected: no error, got: %v", err)
+	}
+}
+
 func assertBalance(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
 	confirmed bool, blockHeight int32, exp btcutil.Amount) {
 
