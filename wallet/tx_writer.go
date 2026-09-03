@@ -30,8 +30,9 @@ var ErrLabelTooLong = errors.New("transaction label exceeds limit")
 // TxWriter provides an interface for updating wallet txns.
 type TxWriter interface {
 	// LabelTx adds a label to a tx. If a label already exists, it will be
-	// overwritten. Labels longer than MaxTxLabelLength bytes are rejected
-	// with ErrLabelTooLong.
+	// overwritten, and an empty label clears any existing one. Labels
+	// longer than MaxTxLabelLength bytes are rejected with
+	// ErrLabelTooLong.
 	LabelTx(ctx context.Context, hash chainhash.Hash, label string) error
 }
 
@@ -39,8 +40,8 @@ type TxWriter interface {
 var _ TxWriter = (*Wallet)(nil)
 
 // LabelTx adds a label to a tx. If a label already exists, it will be
-// overwritten. Labels longer than MaxTxLabelLength bytes are rejected with
-// ErrLabelTooLong.
+// overwritten, and an empty label clears any existing one. Labels longer than
+// MaxTxLabelLength bytes are rejected with ErrLabelTooLong.
 //
 // NOTE: This method is part of the TxWriter interface.
 func (w *Wallet) LabelTx(ctx context.Context,
