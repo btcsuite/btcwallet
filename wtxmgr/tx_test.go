@@ -20,6 +20,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/lightningnetwork/lnd/clock"
+	"github.com/stretchr/testify/require"
 )
 
 // Received transaction output for mainnet outpoint
@@ -2431,6 +2432,65 @@ func TestTxLabel(t *testing.T) {
 	if err != ErrTxLabelNotFound {
 		t.Fatalf("expected: %v, got: %v", ErrTxLabelNotFound, err)
 	}
+}
+
+// TestDeleteTxLabel tests removing a transaction's label, which is how a
+// transaction with no label is recorded: the entry is absent rather than
+// present and empty, because a stored zero-length label reads back as an
+// error.
+func TestDeleteTxLabel(t *testing.T) {
+	t.Parallel()
+
+	store, db, err := testStore(t)
+	require.NoError(t, err)
+	defer db.Close()
+
+	txid := &chainhash.Hash{3}
+
+	getBucket := func(tx walletdb.ReadWriteTx) walletdb.ReadWriteBucket {
+		testBucket := tx.ReadWriteBucket(namespaceKey)
+		require.NotNil(t, testBucket)
+
+		return testBucket
+	}
+
+	tryDeleteLabel := func() error {
+		return walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+			return store.DeleteTxLabel(getBucket(tx), *txid)
+		})
+	}
+
+	// Deleting before any label has been written must succeed: the caller
+	// asked for a transaction with no label and already has one.
+	err = tryDeleteLabel()
+	require.NoError(t, err)
+
+	// Write a label, then remove it.
+	err = walletdb.Update(db, func(tx walletdb.ReadWriteTx) error {
+		return store.PutTxLabel(getBucket(tx), *txid, "test label")
+	})
+	require.NoError(t, err)
+
+	err = tryDeleteLabel()
+	require.NoError(t, err)
+
+	// The label is gone rather than empty, so the lookup that reports a
+	// missing label is what answers now.
+	err = walletdb.View(db, func(tx walletdb.ReadTx) error {
+		testBucket := tx.ReadBucket(namespaceKey)
+		require.NotNil(t, testBucket)
+
+		_, err := store.FetchTxLabel(testBucket, *txid)
+		require.ErrorIs(t, err, ErrTxLabelNotFound)
+
+		// The wallet-facing read reports it as no label at all.
+		label, err := store.TxLabel(testBucket, *txid)
+		require.NoError(t, err)
+		require.Empty(t, label)
+
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 func assertBalance(t *testing.T, s *Store, ns walletdb.ReadWriteBucket,
