@@ -93,6 +93,58 @@ func testLabelTxReplace(h *bwtest.HarnessTest) {
 	)
 }
 
+// testLabelTxClear verifies that an empty label removes the label a
+// transaction already had, that removing a label a transaction never had is
+// not an error, and that a cleared label stays cleared across a reload.
+//
+// The empty label is the only way to remove one through this API, so a wallet
+// that refused it would leave a caller no way to undo a label at all.
+func testLabelTxClear(h *bwtest.HarnessTest) {
+	const label = "rent for march"
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, label)
+	require.NoError(h, err, "failed to label transaction")
+
+	err = w.LabelTx(h.Context(), txHash, "")
+
+	require.NoError(h, err, "clearing a label was refused")
+
+	detail, err := w.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "failed to read the cleared transaction")
+	require.Empty(h, detail.Label, "point read still reports a label")
+
+	details, err := w.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions")
+
+	listed := make(map[chainhash.Hash]string, len(details))
+	for _, detail := range details {
+		listed[detail.Hash] = detail.Label
+	}
+
+	require.Empty(h, listed[txHash], "list read still reports a label")
+
+	// A transaction with no label is what the caller asked for and already
+	// has, so asking again is not an error.
+	err = w.LabelTx(h.Context(), txHash, "")
+	require.NoError(h, err, "clearing an absent label was refused")
+
+	// The removal is durable rather than a property of the running wallet.
+	reloaded := h.ReloadWallet(w)
+
+	detail, err = reloaded.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "reloaded wallet lost the transaction")
+	require.Empty(
+		h, detail.Label, "reloaded wallet restored the cleared label",
+	)
+}
+
 // testLabelTxBoundaries verifies the ends of the label length range the wallet
 // accepts: one byte, and a label of exactly wallet.MaxTxLabelLength bytes.
 //
@@ -103,8 +155,8 @@ func testLabelTxReplace(h *bwtest.HarnessTest) {
 //
 // The first value past the limit is refused rather than accepted, so it is
 // asserted separately in testLabelTxRejectOversize. The empty label below this
-// range still has no single behavior to assert: the SQL backends accept it and
-// clear the label, while kvdb refuses it.
+// range is not a boundary of it at all: it removes a label rather than setting
+// a short one, and testLabelTxClear covers it.
 func testLabelTxBoundaries(h *bwtest.HarnessTest) {
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txWriterFundingType,
