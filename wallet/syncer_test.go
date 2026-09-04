@@ -5808,9 +5808,9 @@ func TestDispatchScanStrategy_AutoError(t *testing.T) {
 func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer for a small gap where silent
-	// sync is preferred. The wallet has no accounts to scan, so the scan
-	// batch only advances the synced tip.
+	// Arrange: Setup a store-backed syncer that is currently ready and one
+	// block behind. The wallet has no accounts to scan, so the scan batch
+	// only advances the synced tip.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 
@@ -5818,8 +5818,9 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		Config{Chain: mockChain}, nil, nil, nil,
 		store, uint32(0),
 	)
+	s.state.Store(uint32(syncStateSynced))
 
-	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(105),
+	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(101),
 		nil).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
@@ -5828,7 +5829,7 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
 		([]db.UtxoInfo)(nil), nil).Once()
-	mockChain.On("GetBlockHashes", int64(101), int64(105)).Return(
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
 		[]chainhash.Hash{{0x01}}, nil).Once()
 	mockChain.On("GetBlockHeaders", mock.Anything).Return(
 		[]*wire.BlockHeader{{}}, nil).Once()
@@ -5838,10 +5839,10 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	// Act: Advance chain sync.
 	finished, err := s.advanceChainSync(t.Context())
 
-	// Assert: Verify state transition to backend-syncing.
+	// Assert: A one-block gap does not revoke operation admission.
 	require.NoError(t, err)
 	require.False(t, finished)
-	require.Equal(t, uint32(syncStateBackendSyncing), s.state.Load())
+	require.Equal(t, syncStateSynced, s.syncState())
 	store.AssertExpectations(t)
 }
 
