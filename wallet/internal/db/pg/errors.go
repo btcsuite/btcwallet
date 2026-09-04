@@ -76,6 +76,15 @@ var reasonByCode = map[string]dberr.Reason{
 	codeExclusionViolation:   dberr.ReasonConstraint,
 }
 
+// IsAccountNameConflict identifies the account-name unique constraint without
+// classifying unrelated uniqueness violations as duplicate accounts.
+func IsAccountNameConflict(err error) bool {
+	var pgErr *pgconn.PgError
+
+	return errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation &&
+		pgErr.ConstraintName == "uidx_accounts_wallet_scope_account_name"
+}
+
 // mapErr maps PostgreSQL driver and transport errors into SQLError.
 func mapErr(err error) *dberr.SQLError {
 	// Prefer SQLSTATE-based mapping first so a completed PostgreSQL statement
