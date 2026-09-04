@@ -170,11 +170,13 @@ func testControllerChangePassphraseLifecycle(h *bwtest.HarnessTest) {
 		PrivateNew:    []byte(nextPassphrase),
 	})
 	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
+		h, err, wallet.ErrWalletStopped,
 		"change passphrase after stop not rejected",
 	)
 
-	require.NoError(h, w.Start(h.Context()), "failed to restart wallet")
+	// Reload through the Manager because a stopped Wallet instance is
+	// terminal; the fresh instance also exposes any persisted mutation.
+	w = h.ReloadWallet(w)
 	requireLocked(h, w, true)
 
 	err = w.Unlock(h.Context(), wallet.UnlockRequest{

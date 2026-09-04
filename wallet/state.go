@@ -15,14 +15,21 @@ var (
 	// due to the current state of the wallet (e.g., locked, not started,
 	// not synced).
 	ErrStateForbidden = errors.New("operation forbidden in current state")
+
+	// ErrWalletStopped is returned when an operation targets a Wallet that
+	// has begun or completed its terminal shutdown. It is independent from
+	// ErrStateForbidden so callers can distinguish terminal shutdown from a
+	// generic state rejection.
+	ErrWalletStopped = errors.New("wallet stopped")
 )
 
 // lifecycle represents the lifecycle state of the wallet's main event loop.
 type lifecycle uint32
 
 const (
-	// lifecycleStopped indicates the wallet is stopped.
-	lifecycleStopped lifecycle = iota
+	// lifecycleInitialized indicates the wallet has not started yet. This is
+	// distinct from lifecycleStopped because a stopped Wallet is terminal.
+	lifecycleInitialized lifecycle = iota
 
 	// lifecycleStarting indicates the wallet is starting up.
 	lifecycleStarting
@@ -32,11 +39,17 @@ const (
 
 	// lifecycleStopping indicates the wallet is currently stopping.
 	lifecycleStopping
+
+	// lifecycleStopped indicates the wallet has completed terminal shutdown.
+	lifecycleStopped
 )
 
 // String returns the string representation of a lifecycle.
 func (l lifecycle) String() string {
 	switch l {
+	case lifecycleInitialized:
+		return "initialized"
+
 	case lifecycleStopped:
 		return "stopped"
 
@@ -95,7 +108,7 @@ type walletState struct {
 
 // newWalletState creates a new walletState initialized with the provided
 // syncer and secure defaults:
-//   - Lifecycle: Stopped (awaiting Start() call).
+//   - Lifecycle: Initialized (awaiting its one permitted Start call).
 //   - Synchronization: BackendSyncing (until syncer is running and connected).
 //   - Authentication: Locked (secure by default).
 func newWalletState(syncer chainSyncer) walletState {
@@ -113,15 +126,19 @@ func (s *walletState) String() string {
 	return fmt.Sprintf("status=%v, sync=%v, locked=%v", lc, sync, !unlocked)
 }
 
-// toStarting transitions the wallet state from Stopped to Starting.
+// toStarting transitions the wallet state from Initialized to Starting.
 // It initializes the synchronization and authentication states to their
-// secure defaults. It returns an error if the wallet is already started or
-// not in the Stopped state.
+// secure defaults. A Wallet that reached Stopped is terminal and cannot start
+// again.
 func (s *walletState) toStarting() error {
-	// 1. Lifecycle (System State): Atomic transition from Stopped to
+	if lifecycle(s.lifecycle.Load()) == lifecycleStopped {
+		return ErrWalletStopped
+	}
+
+	// 1. Lifecycle (System State): Atomic transition from Initialized to
 	// Starting.
 	if !s.lifecycle.CompareAndSwap(
-		uint32(lifecycleStopped), uint32(lifecycleStarting)) {
+		uint32(lifecycleInitialized), uint32(lifecycleStarting)) {
 
 		return fmt.Errorf("%w: current state is %v",
 			ErrWalletAlreadyStarted, lifecycle(s.lifecycle.Load()))
@@ -166,10 +183,11 @@ func (s *walletState) toStopping() error {
 	return nil
 }
 
-// toStopped marks the wallet as fully stopped.
+// toStopped marks the wallet as terminally stopped. An Initialized Wallet can
+// transition directly to Stopped when Stop is called before Start.
 func (s *walletState) toStopped() error {
-	// We allow transition from Stopping (normal shutdown) or Starting
-	// (failure during startup).
+	// We allow transition from Initialized (stop before start), Stopping
+	// (normal shutdown), or Starting (failure during startup).
 	//
 	// We use a CAS loop here to handle potential races where the state
 	// might change between Load and CompareAndSwap.
@@ -184,7 +202,9 @@ func (s *walletState) toStopped() error {
 		current := s.lifecycle.Load()
 		lc := lifecycle(current)
 
-		if lc != lifecycleStopping && lc != lifecycleStarting {
+		if lc != lifecycleInitialized && lc != lifecycleStopping &&
+			lc != lifecycleStarting {
+
 			return fmt.Errorf("%w: cannot transition to stopped "+
 				"from %v", ErrStateForbidden, lc)
 		}
@@ -238,18 +258,19 @@ func (s *walletState) isStarted() bool {
 	return lifecycle(s.lifecycle.Load()) == lifecycleStarted
 }
 
-// isRunning returns true if the wallet is in any active state (not stopped
-// or stopping).
+// isRunning returns true while the wallet is starting or started.
 func (s *walletState) isRunning() bool {
 	lc := lifecycle(s.lifecycle.Load())
-	return lc != lifecycleStopped && lc != lifecycleStopping
+
+	return lc == lifecycleStarting || lc == lifecycleStarted
 }
 
 // canSign checks if the wallet is in a state allowing message/transaction
 // signing. The wallet must be Started and Unlocked.
 func (s *walletState) canSign() error {
-	if !s.isStarted() {
-		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
+	err := s.validateStarted()
+	if err != nil {
+		return err
 	}
 
 	if !s.isUnlocked() {
@@ -263,8 +284,9 @@ func (s *walletState) canSign() error {
 // It returns an error if the wallet is not started or if it is currently
 // syncing/rescanning.
 func (s *walletState) validateSynced() error {
-	if !s.isStarted() {
-		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
+	err := s.validateStarted()
+	if err != nil {
+		return err
 	}
 
 	// TODO(yy): Should we allow creating txs while syncing?
@@ -280,11 +302,20 @@ func (s *walletState) validateSynced() error {
 
 // validateStarted checks if the wallet is currently running.
 func (s *walletState) validateStarted() error {
-	if !s.isStarted() {
-		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
-	}
+	switch lifecycle(s.lifecycle.Load()) {
+	case lifecycleStarted:
+		return nil
 
-	return nil
+	case lifecycleStopping, lifecycleStopped:
+		return ErrWalletStopped
+
+	case lifecycleInitialized, lifecycleStarting:
+		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
+
+	default:
+		return fmt.Errorf("%w: unknown wallet lifecycle",
+			ErrStateForbidden)
+	}
 }
 
 // canUnlock checks if the wallet is in a state that allows unlocking.

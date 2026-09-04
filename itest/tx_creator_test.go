@@ -1022,7 +1022,7 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 
 	_, err = w.CreateTransaction(h.Context(), intent)
 	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
+		h, err, wallet.ErrWalletStopped,
 		"create transaction after stop not rejected",
 	)
 }
