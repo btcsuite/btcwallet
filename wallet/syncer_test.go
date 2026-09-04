@@ -4485,6 +4485,141 @@ func TestFilterBatch_Match(t *testing.T) {
 	require.Equal(t, hash, matched[0])
 }
 
+// TestScanWithTargetsPreservesLiveSyncState verifies that targeted scans leave
+// committed tips unchanged while Info observes any source advancement.
+func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		advanceTip bool
+	}{
+		{name: "unchanged tip"},
+		{name: "source advances during rescan", advanceTip: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start two independent Wallets at the same live
+			// tip.
+			s, _, _ := newStoreScanSyncer(t)
+			other, _, _ := newStoreScanSyncer(t)
+
+			mockChain := &bwmock.Chain{}
+			defer mockChain.AssertExpectations(t)
+
+			s.cfg.Chain = mockChain
+			s.cfg.SyncMethod = SyncMethodAuto
+			s.cfg.MaxCFilterItems = 100
+			s.cfg.RecoveryWindow = testScanRecoveryWindow
+			other.cfg.Chain = mockChain
+
+			syncedToBefore, err := s.syncedTo(t.Context())
+			require.NoError(t, err)
+
+			bestBlock := mockChain.On("GetBestBlock").Return(
+				&syncedToBefore.Hash, syncedToBefore.Height, nil,
+			)
+			mockChain.On("BackEnd").Return("mock")
+
+			wallets := make([]*Wallet, 0, 2)
+			for _, syncer := range []*syncer{s, other} {
+				finished, err := syncer.advanceChainSync(
+					t.Context(),
+				)
+				require.NoError(t, err)
+				require.True(t, finished)
+
+				w, _ := createTestWalletWithMocks(t)
+				w.cfg = syncer.cfg
+				w.store = syncer.store
+				w.sync = syncer
+				w.state = newWalletState(syncer)
+				startLoadedWalletForTest(t, w)
+				wallets = append(wallets, w)
+			}
+
+			assertLiveStatus := func(synced bool) {
+				t.Helper()
+
+				for _, w := range wallets {
+					info, err := w.Info(t.Context())
+					require.NoError(t, err)
+					require.Equal(t, synced, info.Synced)
+					require.Equal(
+						t, syncedToBefore, info.SyncedTo,
+					)
+				}
+			}
+			assertLiveStatus(true)
+
+			req := &scanReq{
+				startBlock: syncedToBefore,
+				targets: []waddrmgr.AccountScope{{
+					Scope:   waddrmgr.KeyScopeBIP0084,
+					Account: waddrmgr.DefaultAccountNum,
+				}},
+			}
+
+			blockHashes := []chainhash.Hash{syncedToBefore.Hash}
+			filter, err := gcs.BuildGCSFilter(
+				builder.DefaultP, builder.DefaultM,
+				[16]byte{}, nil,
+			)
+			require.NoError(t, err)
+
+			height := int64(syncedToBefore.Height)
+			mockChain.On("GetBlockHashes", height, height).Return(
+				blockHashes, nil,
+			).Once()
+			mockChain.On(
+				"GetCFilters", blockHashes, wire.GCSFilterRegular,
+			).Return([]*gcs.Filter{filter}, nil).Run(
+				func(_ mock.Arguments) {
+					require.Equal(t, uint32(syncStateRescanning),
+						s.state.Load())
+					require.Equal(t, uint32(syncStateSynced),
+						other.state.Load())
+
+					if tc.advanceTip {
+						bestBlock.Return(
+							&chainhash.Hash{1},
+							syncedToBefore.Height+1, nil,
+						)
+					}
+
+					assertLiveStatus(!tc.advanceTip)
+				},
+			).Once()
+			mockChain.On("GetBlockHeaders", blockHashes).Return(
+				[]*wire.BlockHeader{
+					&chaincfg.SimNetParams.GenesisBlock.Header,
+				}, nil,
+			).Once()
+			mockChain.On("GetBlocks", blockHashes).Return(
+				[]*wire.MsgBlock{chaincfg.SimNetParams.GenesisBlock},
+				nil,
+			).Once()
+
+			// Act: Complete a targeted scan while the source may
+			// advance independently of either Wallet.
+			err = s.scanWithTargets(t.Context(), req)
+
+			// Assert: Only source advancement changes Info.Synced.
+			require.NoError(t, err)
+
+			syncedToAfter, err := s.syncedTo(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, syncedToBefore, syncedToAfter)
+			require.Equal(t, uint32(syncStateSynced), s.state.Load())
+			require.Equal(t, uint32(syncStateSynced), other.state.Load())
+			assertLiveStatus(!tc.advanceTip)
+		})
+	}
+}
+
 // TestScanWithTargets_Empty verifies handling of empty batch results.
 func TestScanWithTargets_Empty(t *testing.T) {
 	t.Parallel()
@@ -4764,6 +4899,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		// Arrange: a real-backend syncer where GetBestBlock fails after
 		// the targeted scan state has loaded through the Store.
 		s, _, _ := newStoreScanSyncer(t)
+		s.state.Store(uint32(syncStateSynced))
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4778,13 +4914,16 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		}
 
 		mockChain.On("GetBestBlock").Return(nil, int32(0),
-			errBestBlock).Once()
+			errBestBlock).Run(func(_ mock.Arguments) {
+			require.Equal(t, syncStateRescanning, s.syncState())
+		}).Once()
 
 		// Act: Attempt targeted scan.
 		err := s.scanWithTargets(t.Context(), req)
 
 		// Assert: Verify failure.
 		require.ErrorContains(t, err, "best block fail")
+		require.Equal(t, syncStateSynced, s.syncState())
 	})
 
 	t.Run("GetBlockHashes_Failure", func(t *testing.T) {

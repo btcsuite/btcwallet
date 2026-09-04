@@ -1630,6 +1630,28 @@ func TestControllerInfoExactSyncStatus(t *testing.T) {
 			expectSync:  false,
 		},
 		{
+			name:        "targeted rescan at exact live tip",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  true,
+		},
+		{
+			name:        "targeted rescan with height mismatch",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 99},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+		},
+		{
+			name:        "targeted rescan with hash mismatch",
+			syncState:   syncStateRescanning,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   otherHash,
+			chainHeight: 100,
+		},
+		{
 			name:        "live delivery not ready",
 			syncState:   syncStateSyncing,
 			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
