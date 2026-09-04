@@ -353,6 +353,22 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	}
 }
 
+// listAccountsResp lets a list handler finish even if caller cancellation
+// causes the public method to stop receiving its result.
+type listAccountsResp struct {
+	infos []AccountInfo
+	err   error
+}
+
+// listAccountsReq carries one fully formed Store query so every public list
+// variant shares the same admitted handler without losing its filter.
+type listAccountsReq struct {
+	reqCtx
+
+	query db.ListAccountsQuery
+	resp  chan listAccountsResp
+}
+
 // ListAccounts returns every account across all key scopes with its balance.
 func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 	err := w.state.validateStarted()
@@ -360,9 +376,25 @@ func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 		return nil, err
 	}
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
 }
 
 // listAccountInfos converts cache.ListAccounts snapshots into wallet-owned
@@ -392,6 +424,16 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	return results, nil
 }
 
+// handleListAccounts performs the Store read for any admitted list variant;
+// handleReq owns the matching shutdown accounting.
+func (w *Wallet) handleListAccounts(req listAccountsReq) {
+	infos, err := w.listAccountInfos(req.ctx, req.query)
+	req.resp <- listAccountsResp{
+		infos: infos,
+		err:   err,
+	}
+}
+
 // ListAccountsByScope returns all accounts for the given key scope.
 func (w *Wallet) ListAccountsByScope(ctx context.Context,
 	scope waddrmgr.KeyScope) ([]AccountInfo, error) {
@@ -403,10 +445,26 @@ func (w *Wallet) ListAccountsByScope(ctx context.Context,
 
 	dbScope := db.KeyScope(scope)
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-		Scope:    &dbScope,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+			Scope:    &dbScope,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
 }
 
 // ListAccountsByName returns every account matching name across all scopes.
@@ -418,10 +476,26 @@ func (w *Wallet) ListAccountsByName(ctx context.Context,
 		return nil, err
 	}
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-		Name:     &name,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+			Name:     &name,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
 }
 
 // accountResp carries one account snapshot or the lookup error so an accepted
