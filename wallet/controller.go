@@ -53,8 +53,8 @@ var (
 	// match the one guarding the wallet.
 	ErrInvalidPassphrase = keyvault.ErrInvalidPassphrase
 
-	// ErrEmptyPassphrase is returned when a passphrase change selects no
-	// passphrase or omits a required private passphrase.
+	// ErrEmptyPassphrase is returned when wallet creation or a passphrase
+	// change omits a required passphrase.
 	ErrEmptyPassphrase = keyvault.ErrEmptyPassphrase
 )
 

@@ -19,10 +19,10 @@ import (
 // decryptWalletSecrets.
 //
 // A watch-only wallet holds no signing material, so only the script crypto key
-// is produced and hdRootKey is ignored (it may be nil or neutered) and the
-// passphrase may be empty. A spendable wallet requires a non-nil, private
-// hdRootKey and a non-empty privatePassphrase; violations are rejected before
-// any secret material is derived.
+// is produced and hdRootKey is ignored (it may be nil or neutered). Every
+// wallet requires a non-empty privatePassphrase because it protects the script
+// crypto key. A spendable wallet additionally requires a non-nil, private
+// hdRootKey. Violations are rejected before any secret material is derived.
 //
 // The returned secrets contain only ciphertext. Every plaintext buffer this
 // function controls is zeroed before returning; the one copy it cannot wipe is
@@ -47,9 +47,9 @@ func createWalletSecretsWithScrypt(privatePassphrase []byte,
 	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool,
 	scrypt *waddrmgr.ScryptOptions) (*db.WalletSecrets, error) {
 
-	// Validate the spendable inputs up front, before any secret material is
-	// derived or persisted. Watch-only wallets hold no signing material, so
-	// they accept a nil (or neutered) root key and an empty passphrase.
+	// Validate the genesis inputs up front, before any secret material is
+	// derived or persisted. Watch-only wallets accept a nil (or neutered)
+	// root key but still require a passphrase for their script key.
 	err := validateGenesisInputs(privatePassphrase, hdRootKey, watchOnly)
 	if err != nil {
 		return nil, err
@@ -123,12 +123,15 @@ func createWalletSecretsWithScrypt(privatePassphrase []byte,
 	return secrets, nil
 }
 
-// validateGenesisInputs rejects invalid spendable-wallet genesis inputs before
-// any secret material is derived or persisted. Watch-only wallets hold no
-// signing material, so they accept a nil (or neutered) root key and an empty
-// passphrase and always pass.
+// validateGenesisInputs rejects invalid genesis inputs before any secret
+// material is derived or persisted. Watch-only wallets accept a nil or
+// neutered root key, but every wallet requires a non-empty private passphrase.
 func validateGenesisInputs(privatePassphrase []byte,
 	hdRootKey *hdkeychain.ExtendedKey, watchOnly bool) error {
+
+	if len(privatePassphrase) == 0 {
+		return fmt.Errorf("private passphrase: %w", ErrEmptyPassphrase)
+	}
 
 	if watchOnly {
 		return nil
@@ -144,12 +147,6 @@ func validateGenesisInputs(privatePassphrase []byte,
 	// spendable wallet's master private key.
 	if !hdRootKey.IsPrivate() {
 		return errRootKeyNotPrivate
-	}
-
-	// The private passphrase protects the master key, so it may not be
-	// empty. This mirrors waddrmgr.Create's rejection.
-	if len(privatePassphrase) == 0 {
-		return errEmptyPassphrase
 	}
 
 	return nil

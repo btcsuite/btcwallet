@@ -170,6 +170,24 @@ func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
 	require.Nil(t, rejected)
 }
 
+// TestManagerSQLiteCreateWatchOnlyRejectsEmptyPrivatePassphrase verifies the
+// SQL Manager surfaces the public empty-passphrase sentinel and no Wallet when
+// watch-only creation omits the passphrase protecting its script key.
+func TestManagerSQLiteCreateWatchOnlyRejectsEmptyPrivatePassphrase(
+	t *testing.T) {
+
+	t.Parallel()
+
+	m := testSQLiteManager(t)
+	w, err := m.Create(CreateWalletParams{
+		Name:      testWalletName,
+		Mode:      ModeShell,
+		WatchOnly: true,
+	})
+	require.ErrorIs(t, err, ErrEmptyPassphrase)
+	require.Nil(t, w)
+}
+
 // TestSQLiteCreateWalletParamsBirthdayVerbatim verifies that the SQLite
 // create params persist the birthday they are handed verbatim. The caller owns
 // the margin decision — Create applies waddrmgr's safety margin — so this
@@ -210,10 +228,9 @@ func TestSQLiteCreateWalletParamsBirthdayVerbatim(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: a spendable seed-import create. A
-			// non-empty private passphrase is required because
-			// the store-backed key vault rejects an empty
-			// passphrase for a spendable wallet.
+			// Arrange: a spendable seed-import create. The
+			// store-backed key vault requires a non-empty private
+			// passphrase for every wallet.
 			params := CreateWalletParams{
 				Name:              testWalletName,
 				Mode:              ModeImportSeed,
