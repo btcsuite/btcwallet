@@ -1331,7 +1331,7 @@ func TestControllerInfoWaitsForAcceptedResult(t *testing.T) {
 
 			if tc.err == nil {
 				deps.chain.On("BackEnd").Return("mock").Once()
-				deps.syncer.On("syncState").Return(syncStateSynced).Twice()
+				deps.syncer.On("syncState").Return(syncStateSynced).Once()
 			}
 
 			resultChan := make(chan infoResp, 1)
