@@ -108,9 +108,8 @@ const (
 	// chain tip.
 	syncStateSynced
 
-	// syncStateRescanning indicates the wallet is running a historical
-	// scan for specific user-provided targets, such as accounts or
-	// addresses, without rewinding the global synchronization state.
+	// syncStateRescanning indicates a historical scan of user-provided
+	// targets without rewinding the Wallet's live synchronization tip.
 	syncStateRescanning
 )
 
