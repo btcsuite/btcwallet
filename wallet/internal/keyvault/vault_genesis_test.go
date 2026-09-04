@@ -131,8 +131,7 @@ func TestCreateWalletSecretsRoundtrip(t *testing.T) {
 }
 
 // TestCreateWalletSecretsInputGuards verifies that CreateWalletSecrets rejects
-// invalid spendable inputs before deriving secret material, while watch-only
-// wallets keep accepting a neutered xpub and an empty passphrase.
+// invalid genesis inputs before deriving secret material.
 func TestCreateWalletSecretsInputGuards(t *testing.T) {
 	t.Parallel()
 
@@ -180,7 +179,21 @@ func TestCreateWalletSecretsInputGuards(t *testing.T) {
 			passphrase: nil,
 			rootKey:    testGenesisRootKey,
 			watchOnly:  false,
-			wantErr:    errEmptyPassphrase,
+			wantErr:    ErrEmptyPassphrase,
+		},
+		{
+			name:       "watch-only neutered key",
+			passphrase: passphrase,
+			rootKey: func(t *testing.T) *hdkeychain.ExtendedKey {
+				t.Helper()
+
+				neutered, err := testGenesisRootKey(t).Neuter()
+				require.NoError(t, err)
+
+				return neutered
+			},
+			watchOnly: true,
+			wantErr:   nil,
 		},
 		{
 			name:       "watch-only neutered key empty passphrase",
@@ -194,7 +207,7 @@ func TestCreateWalletSecretsInputGuards(t *testing.T) {
 				return neutered
 			},
 			watchOnly: true,
-			wantErr:   nil,
+			wantErr:   ErrEmptyPassphrase,
 		},
 	}
 
