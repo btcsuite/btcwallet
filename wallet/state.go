@@ -302,9 +302,3 @@ func (s *walletState) canLock() error {
 func (s *walletState) canChangePassphrase() error {
 	return s.validateStarted()
 }
-
-// isRecoveryMode returns true if the wallet is currently syncing or rescanning.
-func (s *walletState) isRecoveryMode() bool {
-	sync := s.syncState()
-	return sync == syncStateSyncing || sync == syncStateRescanning
-}

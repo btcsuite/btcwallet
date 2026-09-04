@@ -128,6 +128,12 @@ func (m *mockChainSyncer) syncState() syncState {
 	return args.Get(0).(syncState)
 }
 
+// liveStatus implements the chainSyncer interface.
+func (m *mockChainSyncer) liveStatus() (liveSyncStatus, error) {
+	args := m.Called()
+	return args.Get(0).(liveSyncStatus), args.Error(1)
+}
+
 // mockTxPublisher is a mock implementation of the TxPublisher interface.
 type mockTxPublisher struct {
 	mock.Mock

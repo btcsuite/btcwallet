@@ -67,10 +67,86 @@ func TestSyncerInitialization(t *testing.T) {
 	)
 
 	// Assert: Verify that the syncer is correctly initialized in the
-	// backend syncing state and is not in recovery mode.
+	// backend syncing state.
 	require.NotNil(t, s)
 	require.Equal(t, syncStateBackendSyncing, s.syncState())
-	require.False(t, s.isRecoveryMode())
+}
+
+// TestSyncerLiveStatus verifies that the sync owner returns the observed source
+// tip and raw delivery state in one private snapshot.
+func TestSyncerLiveStatus(t *testing.T) {
+	t.Parallel()
+
+	bestHash := chainhash.Hash{100}
+	testCases := []struct {
+		name       string
+		state      syncState
+		chainErr   error
+		expectErr  error
+		expectHash chainhash.Hash
+	}{
+		{
+			name:       "backend not ready",
+			state:      syncStateBackendSyncing,
+			expectHash: bestHash,
+		},
+		{
+			name:       "delivery not ready",
+			state:      syncStateSyncing,
+			expectHash: bestHash,
+		},
+		{
+			name:       "ready",
+			state:      syncStateSynced,
+			expectHash: bestHash,
+		},
+		{
+			name:      "source error",
+			state:     syncStateSynced,
+			chainErr:  errBestBlock,
+			expectErr: errBestBlock,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Set the independent source and delivery inputs.
+			mockChain := &bwmock.Chain{}
+			defer mockChain.AssertExpectations(t)
+
+			s := newSyncer(
+				Config{Chain: mockChain}, nil, nil, nil,
+				&walletmock.Store{}, 0,
+			)
+			s.state.Store(uint32(testCase.state))
+
+			var hash *chainhash.Hash
+			if testCase.chainErr == nil {
+				hash = &bestHash
+			}
+
+			mockChain.On("GetBestBlock").Return(
+				hash, int32(100), testCase.chainErr,
+			).Once()
+
+			// Act: Read the sync owner's private snapshot.
+			status, err := s.liveStatus()
+
+			// Assert: Source failures remain identifiable; successful
+			// snapshots preserve both raw inputs.
+			if testCase.expectErr != nil {
+				require.ErrorIs(t, err, testCase.expectErr)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, testCase.state, status.state)
+			require.Equal(t, int32(100), status.chainTip.Height)
+			require.Equal(t, testCase.expectHash, status.chainTip.Hash)
+		})
+	}
 }
 
 // TestSyncerRequestScan verifies that scan requests are correctly accepted
@@ -5349,7 +5425,6 @@ func TestSyncStateString(t *testing.T) {
 		{syncStateBackendSyncing, "backend-syncing"},
 		{syncStateSyncing, "syncing"},
 		{syncStateSynced, "synced"},
-		{syncStateRescanning, "rescanning"},
 		{syncState(99), "unknown sync state"},
 	}
 

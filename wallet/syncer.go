@@ -107,11 +107,6 @@ const (
 	// syncStateSynced indicates the wallet is running and synced to the
 	// chain tip.
 	syncStateSynced
-
-	// syncStateRescanning indicates the wallet is running a historical
-	// scan for specific user-provided targets, such as accounts or
-	// addresses, without rewinding the global synchronization state.
-	syncStateRescanning
 )
 
 // String returns the string representation of a syncState.
@@ -125,9 +120,6 @@ func (s syncState) String() string {
 
 	case syncStateSynced:
 		return "synced"
-
-	case syncStateRescanning:
-		return "rescanning"
 
 	default:
 		return "unknown sync state"
@@ -221,6 +213,16 @@ type scanResult struct {
 	meta *wtxmgr.BlockMeta
 }
 
+// liveSyncStatus is the private source and delivery snapshot used to derive
+// the public Wallet synchronization result.
+type liveSyncStatus struct {
+	// state is the wallet's current live-delivery readiness.
+	state syncState
+
+	// chainTip is the tip currently observed from the chain source.
+	chainTip waddrmgr.BlockStamp
+}
+
 // chainSyncer is a private interface that abstracts the chain synchronization
 // logic, allowing it to be mocked for testing the wallet and controller.
 type chainSyncer interface {
@@ -232,6 +234,10 @@ type chainSyncer interface {
 
 	// syncState returns the current synchronization state.
 	syncState() syncState
+
+	// liveStatus returns one snapshot of live delivery readiness and the
+	// observed chain tip.
+	liveStatus() (liveSyncStatus, error)
 }
 
 // syncer is a stateless blocking worker responsible for synchronizing the
@@ -290,11 +296,21 @@ func (s *syncer) syncState() syncState {
 	return syncState(s.state.Load())
 }
 
-// isRecoveryMode returns true if the wallet is currently syncing or
-// rescanning.
-func (s *syncer) isRecoveryMode() bool {
-	status := s.syncState()
-	return status == syncStateSyncing || status == syncStateRescanning
+// liveStatus returns one snapshot of live delivery readiness and the observed
+// chain tip.
+func (s *syncer) liveStatus() (liveSyncStatus, error) {
+	bestHash, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return liveSyncStatus{}, fmt.Errorf("get best block: %w", err)
+	}
+
+	return liveSyncStatus{
+		state: s.syncState(),
+		chainTip: waddrmgr.BlockStamp{
+			Hash:   *bestHash,
+			Height: bestHeight,
+		},
+	}, nil
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.

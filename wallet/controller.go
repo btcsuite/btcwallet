@@ -71,7 +71,8 @@ type UnlockRequest struct {
 }
 
 // Info provides a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. Producing the snapshot reads the observed
+// tip from the chain source and fails if that tip is unavailable.
 type Info struct {
 	// BirthdayBlock is the block from which the wallet started scanning.
 	BirthdayBlock waddrmgr.BlockStamp
@@ -87,18 +88,12 @@ type Info struct {
 	// Locked indicates if the wallet is currently locked.
 	Locked bool
 
-	// Synced indicates if the wallet is synced to the chain tip.
+	// Synced is true only when live delivery is ready and SyncedTo exactly
+	// matches the observed chain tip by height and hash.
 	Synced bool
 
 	// SyncedTo is the block to which the wallet is currently synced.
 	SyncedTo waddrmgr.BlockStamp
-
-	// IsRecoveryMode indicates if the wallet is currently in recovery
-	// mode.
-	IsRecoveryMode bool
-
-	// RecoveryProgress is the progress of the recovery (0.0 - 1.0).
-	RecoveryProgress float64
 }
 
 // ChangePassphraseRequest contains the parameters for changing wallet
@@ -154,7 +149,8 @@ type Controller interface {
 	ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error
 
 	// Info returns a comprehensive snapshot of the wallet's static
-	// configuration and dynamic synchronization state.
+	// configuration and dynamic synchronization state. It returns an error
+	// if the chain source's observed tip cannot be read.
 	Info(ctx context.Context) (*Info, error)
 
 	// Start starts the background processes necessary to manage the wallet.
@@ -482,7 +478,8 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 }
 
 // Info returns a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. It returns an error if the chain source's
+// observed tip cannot be read.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Info(ctx context.Context) (*Info, error) {
@@ -508,15 +505,22 @@ func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("copy chain parameters: %w", err)
 	}
 
+	liveStatus, err := w.sync.liveStatus()
+	if err != nil {
+		return nil, fmt.Errorf("get live sync status: %w", err)
+	}
+
+	synced := liveStatus.state == syncStateSynced &&
+		syncedTo.Height == liveStatus.chainTip.Height &&
+		syncedTo.Hash.IsEqual(&liveStatus.chainTip.Hash)
+
 	info := &Info{
-		BirthdayBlock:    w.birthdayBlock,
-		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      &chainParams,
-		Locked:           !w.state.isUnlocked(),
-		Synced:           w.state.isSynced(),
-		SyncedTo:         syncedTo,
-		IsRecoveryMode:   w.state.isRecoveryMode(),
-		RecoveryProgress: 0,
+		BirthdayBlock: w.birthdayBlock,
+		Backend:       w.cfg.Chain.BackEnd(),
+		ChainParams:   &chainParams,
+		Locked:        !w.state.isUnlocked(),
+		Synced:        synced,
+		SyncedTo:      syncedTo,
 	}
 
 	return info, nil
