@@ -1827,9 +1827,9 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
 
-	// If the wallet is already syncing or rescanning, we can't accept a
-	// full resync request. This prevents conflicting rescan operations.
-	if s.isRecoveryMode() {
+	// A full synchronization pass owns the Wallet's live chain position, so
+	// it cannot accept a historical scan request concurrently.
+	if s.syncState() == syncStateSyncing {
 		return fmt.Errorf("%w: wallet is currently %s",
 			ErrStateForbidden, s.syncState())
 	}
@@ -1905,9 +1905,6 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	if err != nil {
 		return err
 	}
-
-	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
 
 	startHeight := req.startBlock.Height
 

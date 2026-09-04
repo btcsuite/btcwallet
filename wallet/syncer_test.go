@@ -35,6 +35,20 @@ import (
 // that need a recovery horizon beyond the addresses already on record.
 const testScanRecoveryWindow = 20
 
+type scanBatchRecorder struct {
+	db.Store
+
+	batches []db.ScanBatchParams
+}
+
+func (s *scanBatchRecorder) ApplyScanBatch(ctx context.Context,
+	params db.ScanBatchParams) error {
+
+	s.batches = append(s.batches, params)
+
+	return s.Store.ApplyScanBatch(ctx, params)
+}
+
 // TestSyncerInitialization verifies that a new syncer is created with the
 // correct default state.
 func TestSyncerInitialization(t *testing.T) {
@@ -4486,6 +4500,83 @@ func TestFilterBatch_Match(t *testing.T) {
 	require.Equal(t, hash, matched[0])
 }
 
+// TestScanWithTargetsPreservesLiveSyncState verifies that a targeted
+// historical scan does not change either its Wallet's live readiness or a
+// second Wallet's independent readiness.
+func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create two independent Wallet syncers that are both ready at
+	// their live tips. Record writes from a targeted request that scans one
+	// real block through the kvdb-backed Store.
+	s, _, _ := newStoreScanSyncer(t)
+	other, _, _ := newStoreScanSyncer(t)
+	recorder := &scanBatchRecorder{Store: s.store}
+	s.store = recorder
+
+	s.state.Store(uint32(syncStateSynced))
+	other.state.Store(uint32(syncStateSynced))
+
+	mockChain := &bwmock.Chain{}
+	defer mockChain.AssertExpectations(t)
+
+	s.cfg.Chain = mockChain
+	s.cfg.SyncMethod = SyncMethodAuto
+	s.cfg.MaxCFilterItems = 100
+	s.cfg.RecoveryWindow = testScanRecoveryWindow
+
+	syncedToBefore, err := s.syncedTo(t.Context())
+	require.NoError(t, err)
+
+	req := &scanReq{
+		startBlock: waddrmgr.BlockStamp{Height: 100},
+		targets: []waddrmgr.AccountScope{{
+			Scope:   waddrmgr.KeyScopeBIP0084,
+			Account: waddrmgr.DefaultAccountNum,
+		}},
+	}
+
+	blockHashes := []chainhash.Hash{{100}}
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP, builder.DefaultM, [16]byte{}, nil,
+	)
+	require.NoError(t, err)
+
+	mockChain.On("GetBestBlock").Return(
+		&chainhash.Hash{100}, int32(100), nil,
+	).Run(func(_ mock.Arguments) {
+		require.Equal(t, syncStateSynced, s.syncState())
+		require.Equal(t, syncStateSynced, other.syncState())
+	}).Once()
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		blockHashes, nil,
+	).Once()
+	mockChain.On(
+		"GetCFilters", blockHashes, wire.GCSFilterRegular,
+	).Return([]*gcs.Filter{filter}, nil).Once()
+	mockChain.On("GetBlockHeaders", blockHashes).Return(
+		[]*wire.BlockHeader{{}}, nil,
+	).Once()
+	mockChain.On("GetBlocks", blockHashes).Return(
+		[]*wire.MsgBlock{wire.NewMsgBlock(&wire.BlockHeader{})}, nil,
+	).Once()
+
+	// Act: Run and complete the targeted historical scan.
+	err = s.scanWithTargets(t.Context(), req)
+
+	// Assert: The batch was applied without synced blocks, and neither the
+	// durable tip nor either Wallet's live-delivery state changed.
+	require.NoError(t, err)
+	require.Len(t, recorder.batches, 1)
+	require.Empty(t, recorder.batches[0].SyncedBlocks)
+
+	syncedToAfter, err := s.syncedTo(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, syncedToBefore, syncedToAfter)
+	require.Equal(t, syncStateSynced, s.syncState())
+	require.Equal(t, syncStateSynced, other.syncState())
+}
+
 // TestScanWithTargets_Empty verifies handling of empty batch results.
 func TestScanWithTargets_Empty(t *testing.T) {
 	t.Parallel()
@@ -4765,6 +4856,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		// Arrange: a real-backend syncer where GetBestBlock fails after
 		// the targeted scan state has loaded through the Store.
 		s, _, _ := newStoreScanSyncer(t)
+		s.state.Store(uint32(syncStateSynced))
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4779,13 +4871,16 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		}
 
 		mockChain.On("GetBestBlock").Return(nil, int32(0),
-			errBestBlock).Once()
+			errBestBlock).Run(func(_ mock.Arguments) {
+			require.Equal(t, syncStateSynced, s.syncState())
+		}).Once()
 
 		// Act: Attempt targeted scan.
 		err := s.scanWithTargets(t.Context(), req)
 
 		// Assert: Verify failure.
 		require.ErrorContains(t, err, "best block fail")
+		require.Equal(t, syncStateSynced, s.syncState())
 	})
 
 	t.Run("GetBlockHashes_Failure", func(t *testing.T) {
@@ -5809,9 +5904,9 @@ func TestDispatchScanStrategy_AutoError(t *testing.T) {
 func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer for a small gap where silent
-	// sync is preferred. The wallet has no accounts to scan, so the scan
-	// batch only advances the synced tip.
+	// Arrange: Setup a store-backed syncer that is currently ready and one
+	// block behind. The wallet has no accounts to scan, so the scan batch
+	// only advances the synced tip.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 
@@ -5819,8 +5914,9 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		Config{Chain: mockChain}, nil, nil, nil,
 		store, uint32(0),
 	)
+	s.state.Store(uint32(syncStateSynced))
 
-	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(105),
+	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(101),
 		nil).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
@@ -5829,7 +5925,7 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
 		([]db.UtxoInfo)(nil), nil).Once()
-	mockChain.On("GetBlockHashes", int64(101), int64(105)).Return(
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
 		[]chainhash.Hash{{0x01}}, nil).Once()
 	mockChain.On("GetBlockHeaders", mock.Anything).Return(
 		[]*wire.BlockHeader{{}}, nil).Once()
@@ -5839,10 +5935,10 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	// Act: Advance chain sync.
 	finished, err := s.advanceChainSync(t.Context())
 
-	// Assert: Verify state transition to backend-syncing.
+	// Assert: A one-block gap does not revoke operation admission.
 	require.NoError(t, err)
 	require.False(t, finished)
-	require.Equal(t, uint32(syncStateBackendSyncing), s.state.Load())
+	require.Equal(t, syncStateSynced, s.syncState())
 	store.AssertExpectations(t)
 }
 
