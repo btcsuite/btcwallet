@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -642,6 +643,217 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.True(t, account.IsImported)
 	require.Nil(t, account.AccountNumber)
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
+}
+
+// TestGetAccountErrors verifies that request routing preserves both ordinary
+// Store failures and the legacy ManagerError identity expected by callers.
+func TestGetAccountErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		managerCode bool
+	}{
+		{
+			name:     "store error",
+			storeErr: errDBMock,
+		},
+		{
+			name:        "manager error",
+			managerCode: true,
+			storeErr: waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrAccountNotFound,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a Wallet and require the exact account query
+			// to return the error identity under test once.
+			w, deps := createStartedWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			name := testAccountName
+			deps.store.On(
+				"GetAccount", mock.Anything, db.GetAccountQuery{
+					WalletID: 0,
+					Scope:    db.KeyScope(scope),
+					Name:     &name,
+				},
+			).Return((*db.AccountInfo)(nil), test.storeErr).Once()
+
+			// Act: Route the lookup through mainLoop and its concurrent
+			// account handler.
+			_, err := w.GetAccount(t.Context(), scope, name)
+
+			// Assert: The public result preserves the Store error identity
+			// expected by callers.
+			if test.managerCode {
+				require.True(t, waddrmgr.IsError(
+					err, waddrmgr.ErrAccountNotFound))
+			} else {
+				require.ErrorIs(t, err, errDBMock)
+			}
+		})
+	}
+}
+
+// TestGetAccountLifecycle verifies pre-start and terminal calls are rejected
+// before the Store can be reached.
+func TestGetAccountLifecycle(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a fresh Wallet with no GetAccount expectation because
+	// neither lifecycle state should admit Store access.
+	w, _ := createTestWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// Act: Attempt a lookup before Start, then make the Wallet terminal and
+	// attempt the same lookup through the retained pointer.
+	_, initializedErr := w.GetAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, w.Stop(t.Context()))
+	_, stoppedErr := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: Initialized retains the broad state error, terminal access
+	// gains the specific sentinel, and neither attempt reaches Store.
+	require.ErrorIs(t, initializedErr, ErrStateForbidden)
+	require.NotErrorIs(t, initializedErr, ErrWalletStopped)
+	require.ErrorIs(t, stoppedErr, ErrWalletStopped)
+}
+
+// TestGetAccountConcurrentDrain verifies account lookups overlap, accepted
+// work delays Stop, and a late lookup is rejected before Store access.
+func TestGetAccountConcurrentDrain(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block two exact Store calls after they enter. Observing both
+	// entries before release proves mainLoop launched the handlers in
+	// parallel instead of executing either lookup inline.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	name := testAccountName
+	accountNumber := uint32(1)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		Name:     &name,
+	}).Run(func(mock.Arguments) {
+		entered <- struct{}{}
+		<-release
+	}).Return(&db.AccountInfo{
+		AccountNumber: &accountNumber,
+		AccountName:   name,
+		KeyScope:      db.KeyScope(scope),
+	}, nil).Twice()
+
+	results := make(chan accountResp, 2)
+	for range 2 {
+		go func() {
+			info, err := w.GetAccount(t.Context(), scope, name)
+			results <- accountResp{info: info, err: err}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("account lookups did not overlap")
+		}
+	}
+
+	// Act: Begin Stop while both accepted handlers are blocked, then issue
+	// a third lookup after lifetime cancellation has closed admission.
+	stopResult := make(chan error, 1)
+	go func() {
+		stopResult <- w.Stop(t.Context())
+	}()
+
+	<-w.lifetimeCtx.Done()
+	_, lateErr := w.GetAccount(t.Context(), scope, name)
+
+	// Assert: The late call is rejected and Stop remains blocked until both
+	// accepted handlers deliver ordinary results.
+	require.ErrorIs(t, lateErr, ErrWalletStopped)
+
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before account handlers: %v", err)
+	default:
+	}
+
+	close(release)
+
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		require.NotNil(t, result.info)
+	}
+
+	require.NoError(t, <-stopResult)
+}
+
+// TestGetAccountCanceledCallerDrains verifies caller cancellation does not
+// release an accepted lookup from the Wallet's shutdown responsibility.
+func TestGetAccountCanceledCallerDrains(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept one lookup whose Store call ignores caller
+	// cancellation until the test explicitly releases it.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	name := testAccountName
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		Name:     &name,
+	}).Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(&db.AccountInfo{
+		AccountName: name,
+		KeyScope:    db.KeyScope(scope),
+	}, nil).Once()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	callResult := make(chan error, 1)
+
+	go func() {
+		_, err := w.GetAccount(ctx, scope, name)
+		callResult <- err
+	}()
+
+	<-entered
+
+	// Act: Cancel only the caller, wait for its prompt return, then begin
+	// Wallet shutdown while the accepted handler still owns Store work.
+	cancel()
+	require.ErrorIs(t, <-callResult, context.Canceled)
+
+	stopResult := make(chan error, 1)
+	go func() {
+		stopResult <- w.Stop(t.Context())
+	}()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: Stop waits after the caller has gone until Store release lets
+	// the buffered handler response complete without a stranded goroutine.
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before canceled caller's handler: %v", err)
+	default:
+	}
+
+	close(release)
+	require.NoError(t, <-stopResult)
 }
 
 // TestNewAccount verifies NewAccount routes through

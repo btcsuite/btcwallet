@@ -668,12 +668,22 @@ func (w *Wallet) mainLoop() {
 	}
 }
 
+// reqCtx carries caller cancellation and values across the Wallet request
+// boundary. Keeping the context in one embedded type centralizes the bounded
+// retention contract and its lint exemption for every routed request.
+type reqCtx struct {
+	//nolint:containedctx // Store calls must inherit the caller context.
+	ctx context.Context
+}
+
 // handleReq owns completion bookkeeping for requests accepted by mainLoop. Its
 // type switch is the single routing table for concurrent public method work.
 func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
-	switch req.(type) {
+	switch r := req.(type) {
+	case getAccountReq:
+		w.handleGetAccount(r)
 	default:
 		log.Errorf("Wallet received unknown request type: %T", req)
 	}

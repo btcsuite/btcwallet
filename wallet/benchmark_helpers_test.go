@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -326,12 +327,31 @@ func setupBenchmarkWallet(tb testing.TB,
 		}
 	}
 
+	// Legacy benchmark setup lacks the maintained lifetime. Initialize it so
+	// routed calls and mainLoop share production shutdown semantics.
+	if w.lifetimeCtx == nil {
+		w.lifetimeCtx, w.cancel = context.WithCancel(context.Background())
+	}
+
 	// Force state to Started to satisfy validateStarted() in new APIs.
 	err := w.state.toStarting()
 	if err == nil {
 		err = w.state.toStarted()
 		require.NoError(tb, err)
 	}
+
+	// Start mainLoop for routed calls. Cleanup also stops legacy goroutines
+	// whose synthetic testing.T hooks never run because all share w.wg.
+	w.wg.Add(1)
+
+	go w.mainLoop()
+
+	tb.Cleanup(func() {
+		w.cancel()
+		w.StopDeprecated()
+		w.WaitForShutdown()
+	})
+
 	// Transition to Unlocked so signing operations are permitted.
 	w.state.toUnlocked()
 
