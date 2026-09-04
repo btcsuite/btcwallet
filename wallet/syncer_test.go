@@ -216,6 +216,119 @@ func TestSyncerRequestScanBlocked(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// TestSyncerRequestScanRejectsConcurrentRequest verifies that an accepted scan
+// request excludes both targeted rescans and rewind resyncs until it completes.
+func TestSyncerRequestScanRejectsConcurrentRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		typ  scanType
+	}{
+		{
+			name: "targeted rescan",
+			typ:  scanTypeTargeted,
+		},
+		{
+			name: "rewind resync",
+			typ:  scanTypeRewind,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Accept one scan request without processing it.
+			s := newSyncer(
+				Config{}, nil, nil, nil, &walletmock.Store{}, 0,
+			)
+			err := s.requestScan(t.Context(), &scanReq{
+				typ: scanTypeTargeted,
+			})
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			// Act: Submit another scan while the first is pending.
+			err = s.requestScan(ctx, &scanReq{typ: test.typ})
+
+			// Assert: Reject it as a state conflict before considering the
+			// caller's canceled context.
+			require.ErrorIs(t, err, ErrStateForbidden)
+		})
+	}
+}
+
+// TestSyncerRequestScanReleasesAdmission verifies that completing an accepted
+// scan permits the next request.
+func TestSyncerRequestScanReleasesAdmission(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept a rewind request that has no work to perform.
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil, store, 0)
+	s.state.Store(uint32(syncStateSynced))
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+
+	err := s.requestScan(t.Context(), &scanReq{
+		typ:        scanTypeRewind,
+		startBlock: waddrmgr.BlockStamp{Height: 100},
+	})
+	require.NoError(t, err)
+
+	accepted := <-s.scanReqChan
+	err = s.handleScanReq(t.Context(), accepted)
+	require.NoError(t, err)
+
+	// Act: Submit another request after the first completes.
+	err = s.requestScan(t.Context(), &scanReq{typ: scanTypeTargeted})
+
+	// Assert: The completed request released scan admission.
+	require.NoError(t, err)
+}
+
+// TestSyncerRequestScanReleasesAdmissionOnFailure verifies a failed accepted
+// scan permits the next request.
+func TestSyncerRequestScanReleasesAdmissionOnFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept a request before live synchronization begins.
+	s := newSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
+	accepted := <-s.scanReqChan
+	s.state.Store(uint32(syncStateSyncing))
+
+	// Act: Process the request while live synchronization owns the wallet.
+	err := s.handleScanReq(t.Context(), accepted)
+
+	// Assert: The failure releases admission for a later request.
+	require.ErrorIs(t, err, ErrStateForbidden)
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
+}
+
+// TestSyncerRequestScanReleasesAdmissionOnCancellation verifies a canceled
+// mailbox send does not retain scan admission.
+func TestSyncerRequestScanReleasesAdmissionOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fill a new syncer's scan request mailbox.
+	s := newSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
+	s.scanReqChan <- &scanReq{}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Attempt to submit another request with a canceled context.
+	err := s.requestScan(ctx, &scanReq{})
+
+	// Assert: Cancellation releases admission for a later request.
+	require.ErrorIs(t, err, context.Canceled)
+	<-s.scanReqChan
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
+}
+
 // TestSyncerRun verifies the run implementation.
 func TestSyncerRun(t *testing.T) {
 	t.Parallel()

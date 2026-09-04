@@ -262,6 +262,10 @@ type syncer struct {
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
 
+	// scanRequestPending tracks whether a scan request was accepted and has
+	// not completed yet.
+	scanRequestPending atomic.Bool
+
 	// scanReqChan is the internal mailbox used to receive scan requests
 	// from the controller. It is buffered to ensure that submitting a
 	// request does not unnecessarily block the calling goroutine.
@@ -744,11 +748,18 @@ func (s *syncer) runSyncStep(ctx context.Context) error {
 
 // requestScan submits a rescan job to the syncer.
 func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
+	if !s.scanRequestPending.CompareAndSwap(false, true) {
+		return fmt.Errorf("%w: wallet is currently rescanning",
+			ErrStateForbidden)
+	}
+
 	select {
 	case s.scanReqChan <- req:
 		return nil
 
 	case <-ctx.Done():
+		s.scanRequestPending.Store(false)
+
 		return ctx.Err()
 	}
 }
@@ -1842,6 +1853,8 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 // handleScanReq processes a user-initiated rescan request.
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
+
+	defer s.scanRequestPending.Store(false)
 
 	// A full synchronization pass owns the Wallet's live chain position, so
 	// it cannot accept a historical scan request concurrently.

@@ -261,7 +261,7 @@ func (s *walletState) canSign() error {
 
 // validateSynced checks if the wallet is running and fully synchronized.
 // It returns an error if the wallet is not started or if it is currently
-// syncing/rescanning.
+// syncing.
 func (s *walletState) validateSynced() error {
 	if !s.isStarted() {
 		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
