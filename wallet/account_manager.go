@@ -240,6 +240,16 @@ func (w *Wallet) accountInfoFromStore(
 	}, nil
 }
 
+// newAccountReq carries derived-account inputs and a buffered result across
+// the Wallet's terminal admission boundary.
+type newAccountReq struct {
+	reqCtx
+
+	scope waddrmgr.KeyScope
+	name  string
+	resp  chan accountResp
+}
+
 // NewAccount creates the next account and returns its account info. The name
 // must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -253,16 +263,41 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	deriveFn, err := w.buildAccountDeriveFn(ctx)
+	req := newAccountReq{
+		reqCtx: reqCtx{ctx: ctx},
+		scope:  scope,
+		name:   name,
+		resp:   make(chan accountResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := w.store.CreateDerivedAccount(ctx,
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleNewAccount performs derivation and persistence only after mainLoop
+// admits the request; handleReq owns its shutdown completion.
+func (w *Wallet) handleNewAccount(req newAccountReq) {
+	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
+	if err != nil {
+		req.resp <- accountResp{err: err}
+
+		return
+	}
+
+	info, err := w.store.CreateDerivedAccount(req.ctx,
 		db.CreateDerivedAccountParams{
 			WalletID: w.id,
-			Scope:    db.KeyScope(scope),
-			Name:     name,
+			Scope:    db.KeyScope(req.scope),
+			Name:     req.name,
 		}, deriveFn,
 	)
 	if err != nil {
@@ -271,13 +306,21 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		// kvdb wraps the underlying manager error via fmt.Errorf.
 		var mErr waddrmgr.ManagerError
 		if errors.As(err, &mErr) {
-			return nil, mErr
+			req.resp <- accountResp{err: mErr}
+
+			return
 		}
 
-		return nil, err
+		req.resp <- accountResp{err: err}
+
+		return
 	}
 
-	return w.accountInfoFromStore(info)
+	account, err := w.accountInfoFromStore(info)
+	req.resp <- accountResp{
+		info: account,
+		err:  err,
+	}
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
@@ -576,6 +619,17 @@ func (w *Wallet) handleGetAccount(req getAccountReq) {
 	}
 }
 
+// renameAccountReq carries immutable rename inputs and a buffered error result
+// so handler completion never depends on the caller remaining present.
+type renameAccountReq struct {
+	reqCtx
+
+	scope   waddrmgr.KeyScope
+	oldName string
+	newName string
+	resp    chan error
+}
+
 // RenameAccount renames an existing account. The new name must be unique within
 // the same key scope. The reserved "imported" account cannot be renamed.
 func (w *Wallet) RenameAccount(ctx context.Context,
@@ -586,16 +640,42 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		return err
 	}
 
-	err = waddrmgr.ValidateAccountName(newName)
+	req := renameAccountReq{
+		reqCtx:  reqCtx{ctx: ctx},
+		scope:   scope,
+		oldName: oldName,
+		newName: newName,
+		resp:    make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, req)
 	if err != nil {
 		return err
 	}
 
-	err = w.store.RenameAccount(ctx, db.RenameAccountParams{
+	respErr, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return err
+	}
+
+	return respErr
+}
+
+// handleRenameAccount validates and applies an admitted rename while
+// handleReq retains responsibility for releasing the Wallet WaitGroup.
+func (w *Wallet) handleRenameAccount(req renameAccountReq) {
+	err := waddrmgr.ValidateAccountName(req.newName)
+	if err != nil {
+		req.resp <- err
+
+		return
+	}
+
+	err = w.store.RenameAccount(req.ctx, db.RenameAccountParams{
 		WalletID: w.id,
-		Scope:    db.KeyScope(scope),
-		OldName:  oldName,
-		NewName:  newName,
+		Scope:    db.KeyScope(req.scope),
+		OldName:  req.oldName,
+		NewName:  req.newName,
 	})
 	if err != nil {
 		// Preserve waddrmgr.ManagerError semantics so callers using
@@ -603,13 +683,13 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		// underlying manager error via fmt.Errorf.
 		var mErr waddrmgr.ManagerError
 		if errors.As(err, &mErr) {
-			return mErr
-		}
+			req.resp <- mErr
 
-		return err
+			return
+		}
 	}
 
-	return nil
+	req.resp <- err
 }
 
 // ImportAccount imports an account from an extended public key. Private
