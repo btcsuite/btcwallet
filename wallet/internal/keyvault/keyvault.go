@@ -12,8 +12,8 @@ import (
 // ErrInvalidPassphrase reports that the provided vault passphrase is wrong.
 var ErrInvalidPassphrase = errors.New("invalid vault passphrase")
 
-// ErrEmptyPassphrase reports that a passphrase rotation request selected no
-// passphrase or omitted a required private passphrase.
+// ErrEmptyPassphrase reports that wallet creation or passphrase rotation
+// omitted a required passphrase.
 var ErrEmptyPassphrase = errors.New("empty vault passphrase")
 
 // ErrVaultLocked reports that an operation requiring unlocked runtime state

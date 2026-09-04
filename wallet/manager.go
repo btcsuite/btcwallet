@@ -105,7 +105,9 @@ type CreateWalletParams struct {
 	// Remove this field with kvdb support.
 	PubPassphrase []byte
 
-	// PrivatePassphrase is the private passphrase for the wallet.
+	// PrivatePassphrase protects the wallet's secret material. SQL backends
+	// require it for every wallet; legacy kvdb permits it to be empty when
+	// creating a watch-only wallet.
 	PrivatePassphrase []byte
 }
 

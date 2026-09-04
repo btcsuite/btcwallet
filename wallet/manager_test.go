@@ -744,18 +744,17 @@ func TestManagerDeriveRootKey(t *testing.T) {
 }
 
 // TestManagerKVDBCreateWatchOnlyShell verifies that the legacy kvdb backend
-// creates a rootless watch-only wallet, which is the one watch-only shape its
-// format can represent and what the legacy watch-only constructor built.
+// creates a rootless watch-only wallet with an empty private passphrase,
+// preserving the behavior of the legacy watch-only constructor.
 func TestManagerKVDBCreateWatchOnlyShell(t *testing.T) {
 	t.Parallel()
 
 	params := CreateWalletParams{
-		Name:              testWalletName,
-		Mode:              ModeShell,
-		WatchOnly:         true,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
+		Name:          testWalletName,
+		Mode:          ModeShell,
+		WatchOnly:     true,
+		PubPassphrase: []byte("public"),
+		Birthday:      time.Now(),
 	}
 
 	w, err := testKVDBManager(t).Create(params)
