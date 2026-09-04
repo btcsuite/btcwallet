@@ -692,6 +692,19 @@ func (w *Wallet) handleRenameAccount(req renameAccountReq) {
 	req.resp <- err
 }
 
+// importAccountReq carries every import option through Wallet admission while
+// retaining the existing private implementation for pre-start Manager use.
+type importAccountReq struct {
+	reqCtx
+
+	name                 string
+	accountKey           *hdkeychain.ExtendedKey
+	masterKeyFingerprint uint32
+	addrType             waddrmgr.AddressType
+	dryRun               bool
+	resp                 chan accountResp
+}
+
 // ImportAccount imports an account from an extended public key. Private
 // extended keys are rejected. The key scope is derived from the version
 // bytes of the extended key. The account name must be unique within the
@@ -717,9 +730,47 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 		return nil, err
 	}
 
-	return w.importAccountInternal(
-		ctx, name, accountKey, masterKeyFingerprint, addrType, dryRun,
+	accountKeySnapshot, err := snapshotExtendedPubKey(
+		accountKey, true, w.cfg.ChainParams,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	req := importAccountReq{
+		reqCtx:               reqCtx{ctx: ctx},
+		name:                 name,
+		accountKey:           accountKeySnapshot,
+		masterKeyFingerprint: masterKeyFingerprint,
+		addrType:             addrType,
+		dryRun:               dryRun,
+		resp:                 make(chan accountResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleImportAccount invokes the existing non-admitting implementation for
+// a request that mainLoop has already accepted and handleReq will complete.
+func (w *Wallet) handleImportAccount(req importAccountReq) {
+	info, err := w.importAccountInternal(
+		req.ctx, req.name, req.accountKey, req.masterKeyFingerprint,
+		req.addrType, req.dryRun,
+	)
+	req.resp <- accountResp{
+		info: info,
+		err:  err,
+	}
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,
@@ -801,6 +852,28 @@ func dbScopeAddrSchema(
 	return &converted, nil
 }
 
+// snapshotExtendedPubKey validates caller-owned key material before copying
+// it into a request. Validation prevents private key serialization, while the
+// reparse ensures an admitted handler never retains a mutable caller pointer
+// after cancellation returns.
+func snapshotExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
+	isAccountKey bool, chainParams *chaincfg.Params) (
+	*hdkeychain.ExtendedKey, error) {
+
+	err := validateExtendedPubKey(pubKey, isAccountKey, chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot, err := hdkeychain.NewKeyFromString(pubKey.String())
+	if err != nil {
+		return nil, fmt.Errorf("%w: copy extended public key: %s",
+			ErrInvalidAccountKey, err.Error())
+	}
+
+	return snapshot, nil
+}
+
 // validateExtendedPubKey ensures a sane derived public key is provided.
 func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	isAccountKey bool, chainParams *chaincfg.Params) error {
@@ -815,6 +888,13 @@ func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	// Private keys are not allowed.
 	if pubKey.IsPrivate() {
 		return fmt.Errorf("%w: private keys cannot be imported",
+			ErrInvalidAccountKey)
+	}
+
+	// A zeroed or otherwise malformed key has no four-byte network version.
+	// Reject it before isPubKeyForNet decodes the version as a uint32.
+	if len(pubKey.Version()) != binary.Size(waddrmgr.HDVersion(0)) {
+		return fmt.Errorf("%w: invalid extended public key version",
 			ErrInvalidAccountKey)
 	}
 
