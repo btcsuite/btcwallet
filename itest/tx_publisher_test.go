@@ -444,7 +444,7 @@ func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
 
 	err = w.CheckMempoolAcceptance(h.Context(), tx)
 	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
+		h, err, wallet.ErrWalletStopped,
 		"acceptance check after stop not rejected",
 	)
 }
@@ -476,7 +476,7 @@ func testBroadcastWalletState(h *bwtest.HarnessTest) {
 
 	err = w.Broadcast(h.Context(), tx, "")
 	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
+		h, err, wallet.ErrWalletStopped,
 		"broadcast after stop not rejected",
 	)
 }
