@@ -686,6 +686,8 @@ func (w *Wallet) handleReq(req any) {
 		w.handleNewAccount(r)
 	case renameAccountReq:
 		w.handleRenameAccount(r)
+	case importAccountReq:
+		w.handleImportAccount(r)
 	case getAccountReq:
 		w.handleGetAccount(r)
 	case listAccountsReq:
