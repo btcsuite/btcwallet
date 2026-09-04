@@ -8,11 +8,11 @@ import (
 )
 
 // TestStateSecureByDefault verifies that the zero-value of walletState
-// represents a safe, locked condition.
+// represents a safe, locked condition that has not started yet.
 func TestStateSecureByDefault(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a new state in Stopped (default) mode.
+	// Arrange: Create a new state in Initialized (default) mode.
 	syncer := &mockChainSyncer{}
 	s := newWalletState(syncer)
 
@@ -95,8 +95,55 @@ func TestStateAuthentication(t *testing.T) {
 	// Manually unlock while stopped to test canSign check.
 	s.toUnlocked()
 	err = s.canSign()
-	require.ErrorIs(t, err, ErrStateForbidden)
-	require.ErrorContains(t, err, "wallet not started")
+	require.ErrorIs(t, err, ErrWalletStopped)
+	require.ErrorContains(t, err, "wallet stopped")
+}
+
+// TestStateCanSignLifecycle verifies signing preserves the lifecycle error
+// that distinguishes a Wallet which has not started from one that is terminal.
+func TestStateCanSignLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		lifecycle lifecycle
+		expected  error
+	}{
+		{
+			name:      "rejects initialized",
+			lifecycle: lifecycleInitialized,
+			expected:  ErrStateForbidden,
+		},
+		{
+			name:      "rejects stopping",
+			lifecycle: lifecycleStopping,
+			expected:  ErrWalletStopped,
+		},
+		{
+			name:      "rejects stopped",
+			lifecycle: lifecycleStopped,
+			expected:  ErrWalletStopped,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Force the lifecycle under test and unlock the
+			// state so only lifecycle admission can reject signing.
+			state := newWalletState(nil)
+			state.lifecycle.Store(uint32(test.lifecycle))
+			state.toUnlocked()
+
+			// Act: Ask the state boundary whether signing is allowed.
+			err := state.canSign()
+
+			// Assert: The guard preserves the sentinel assigned to the
+			// selected non-running lifecycle.
+			require.ErrorIs(t, err, test.expected)
+		})
+	}
 }
 
 // TestStateSynchronization verifies that the wallet state correctly reflects
@@ -212,6 +259,53 @@ func TestValidateSynced(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestStateValidateSyncedLifecycle verifies synchronization checks preserve
+// the lifecycle error before consulting the chain synchronization state.
+func TestStateValidateSyncedLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		lifecycle lifecycle
+		expected  error
+	}{
+		{
+			name:      "rejects initialized",
+			lifecycle: lifecycleInitialized,
+			expected:  ErrStateForbidden,
+		},
+		{
+			name:      "rejects stopping",
+			lifecycle: lifecycleStopping,
+			expected:  ErrWalletStopped,
+		},
+		{
+			name:      "rejects stopped",
+			lifecycle: lifecycleStopped,
+			expected:  ErrWalletStopped,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Build a state with no syncer and force the
+			// lifecycle under test. A syncer access would therefore
+			// expose a failure to reject at the lifecycle boundary.
+			state := newWalletState(nil)
+			state.lifecycle.Store(uint32(test.lifecycle))
+
+			// Act: Validate an operation that requires synchronization.
+			err := state.validateSynced()
+
+			// Assert: Lifecycle rejection returns the expected sentinel
+			// without attempting to inspect synchronization state.
+			require.ErrorIs(t, err, test.expected)
+		})
+	}
+}
+
 // TestStateLifecycleTransitions verifies valid and invalid lifecycle
 // state transitions.
 func TestStateLifecycleTransitions(t *testing.T) {
@@ -222,6 +316,11 @@ func TestStateLifecycleTransitions(t *testing.T) {
 		lifecycle lifecycle
 		running   bool
 	}{
+		{
+			name:      "initialized is not running",
+			lifecycle: lifecycleInitialized,
+			running:   false,
+		},
 		{
 			name:      "started is running",
 			lifecycle: lifecycleStarted,
@@ -309,6 +408,24 @@ func TestStateStartStop(t *testing.T) {
 		require.ErrorIs(t, err, ErrWalletAlreadyStarted)
 	})
 
+	t.Run("start fail terminally stopped", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Set the lifecycle to its terminal Stopped state to
+		// model a Wallet whose only runtime has already ended.
+		state := newWalletState(nil)
+		state.lifecycle.Store(uint32(lifecycleStopped))
+
+		// Act: Attempt to start the same state instance again.
+		err := state.toStarting()
+
+		// Assert: A terminal Wallet reports only the specific stopped
+		// sentinel so callers can distinguish final shutdown from other
+		// state-based rejections.
+		require.ErrorIs(t, err, ErrWalletStopped)
+		require.NotErrorIs(t, err, ErrStateForbidden)
+	})
+
 	t.Run("stop success", func(t *testing.T) {
 		t.Parallel()
 
@@ -333,6 +450,24 @@ func TestStateStartStop(t *testing.T) {
 		err := state.toStopping()
 		require.ErrorIs(t, err, ErrStateForbidden)
 	})
+
+	t.Run("stop initialized", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Use a fresh state to represent Stop arriving before
+		// the Wallet's first Start.
+		state := newWalletState(nil)
+
+		// Act: Transition directly from Initialized to terminal Stopped.
+		err := state.toStopped()
+
+		// Assert: The direct transition succeeds and prevents a later
+		// Start on the retained state instance.
+		require.NoError(t, err)
+		require.Equal(t, uint32(lifecycleStopped),
+			state.lifecycle.Load())
+		require.ErrorIs(t, state.toStarting(), ErrWalletStopped)
+	})
 }
 
 // TestStateValidateStarted verifies the validateStarted check.
@@ -350,9 +485,31 @@ func TestStateValidateStarted(t *testing.T) {
 	t.Run("fail stopped", func(t *testing.T) {
 		t.Parallel()
 
+		// Arrange: Put the state in its terminal Stopped condition.
 		state := newWalletState(nil)
 		state.lifecycle.Store(uint32(lifecycleStopped))
-		require.ErrorIs(t, state.validateStarted(), ErrStateForbidden)
+
+		// Act: Validate an operation that requires a running Wallet.
+		err := state.validateStarted()
+
+		// Assert: The specific stopped sentinel distinguishes terminal
+		// shutdown from a non-terminal state rejection.
+		require.ErrorIs(t, err, ErrWalletStopped)
+	})
+
+	t.Run("fail initialized", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Leave a fresh state in Initialized to distinguish a
+		// Wallet that has never run from one that has stopped.
+		state := newWalletState(nil)
+
+		// Act: Validate an operation before the first Start.
+		err := state.validateStarted()
+
+		// Assert: Pre-start access retains the original broad state
+		// error and does not claim that the Wallet has stopped.
+		require.ErrorIs(t, err, ErrStateForbidden)
 	})
 }
 
@@ -379,13 +536,25 @@ func TestStateAuthChecks(t *testing.T) {
 	t.Run("stopped forbidden", func(t *testing.T) {
 		t.Parallel()
 
+		// Arrange: Put the state in its terminal Stopped condition so
+		// every authentication check reaches lifecycle validation first.
 		state := newWalletState(nil)
-
 		setState(&state, lifecycleStopped)
-		require.ErrorIs(t, state.canUnlock(), ErrStateForbidden)
-		require.ErrorIs(t, state.canLock(), ErrStateForbidden)
-		require.ErrorIs(t, state.canChangePassphrase(),
-			ErrStateForbidden)
+
+		// Act: Exercise each authentication transition after terminal
+		// shutdown has made the Wallet permanently unavailable.
+		unlockErr := state.canUnlock()
+		lockErr := state.canLock()
+		changeErr := state.canChangePassphrase()
+
+		// Assert: All three operations report the specific terminal
+		// sentinel without also matching the generic state rejection.
+		require.ErrorIs(t, unlockErr, ErrWalletStopped)
+		require.NotErrorIs(t, unlockErr, ErrStateForbidden)
+		require.ErrorIs(t, lockErr, ErrWalletStopped)
+		require.NotErrorIs(t, lockErr, ErrStateForbidden)
+		require.ErrorIs(t, changeErr, ErrWalletStopped)
+		require.NotErrorIs(t, changeErr, ErrStateForbidden)
 	})
 }
 
@@ -425,7 +594,7 @@ func TestStateAuxiliaryMethods(t *testing.T) {
 	syncer := &mockChainSyncer{}
 	s := newWalletState(syncer)
 
-	// Case 1: Stopped -> All forbidden.
+	// Case 1: Initialized -> All forbidden.
 	require.ErrorIs(t, s.canUnlock(), ErrStateForbidden)
 	require.ErrorIs(t, s.canLock(), ErrStateForbidden)
 	require.ErrorIs(t, s.canChangePassphrase(), ErrStateForbidden)
