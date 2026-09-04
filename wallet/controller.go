@@ -684,6 +684,8 @@ func (w *Wallet) handleReq(req any) {
 	switch r := req.(type) {
 	case getAccountReq:
 		w.handleGetAccount(r)
+	case listAccountsReq:
+		w.handleListAccounts(r)
 	default:
 		log.Errorf("Wallet received unknown request type: %T", req)
 	}
