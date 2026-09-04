@@ -21,13 +21,6 @@ var (
 	errRootKeyNotPrivate = errors.New(
 		"spendable wallet requires a private root key",
 	)
-
-	// errEmptyPassphrase reports that an empty private passphrase was
-	// supplied for a spendable wallet, mirroring
-	// waddrmgr.ErrEmptyPassphrase.
-	errEmptyPassphrase = errors.New(
-		"spendable wallet requires a non-empty private passphrase",
-	)
 )
 
 // WalletVault adapts db.Store wallet secret storage to the wallet key-vault
