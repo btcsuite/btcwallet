@@ -18,12 +18,14 @@ const defaultWalletDBDirPerm = 0o700
 // managerBackend owns the database used by a Manager and resolves the storage
 // dependencies needed to assemble a Wallet.
 type managerBackend interface {
-	// create initializes and opens a wallet on the backend.
-	create(ctx context.Context, cfg Config, params CreateWalletParams,
+	// create persists only identity and initialization data; runtime policy
+	// remains outside the backend and is applied by Manager assembly.
+	create(ctx context.Context, params CreateWalletParams,
 		rootKey *hdkeychain.ExtendedKey) (*walletData, error)
 
-	// load opens an existing wallet on the backend.
-	load(ctx context.Context, cfg Config) (*walletData, error)
+	// load opens durable wallet data with a narrow request that cannot alter
+	// the Manager-owned Wallet runtime policy.
+	load(ctx context.Context, params LoadWalletParams) (*walletData, error)
 
 	// close releases the database and any live managers owned by the backend.
 	close() error

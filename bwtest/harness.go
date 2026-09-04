@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"testing"
 
@@ -39,9 +40,9 @@ const (
 )
 
 // walletRegistration tracks every wallet owned by one Manager. Each map value
-// is a copied reload configuration, or nil for wallets registered through
-// RegisterWallet.
-type walletRegistration map[*wallet.Wallet]*wallet.Config
+// is a copied reload request, or nil for wallets registered only for lifecycle
+// ownership.
+type walletRegistration map[*wallet.Wallet]*wallet.LoadWalletParams
 
 // HarnessTest is the integration test harness.
 type HarnessTest struct {
@@ -233,11 +234,18 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 			"kvdb, sqlite, and postgres", h.dbType)
 	}
 
-	manager, err := wallet.NewManager(h.Context(), wallet.ManagerConfig{
-		Backend:     backend,
-		DataSource:  h.WalletDBSource,
-		ChainParams: h.NetParams(),
-	})
+	// The Manager owns one immutable runtime policy. Harness scenarios share
+	// their existing chain client with every Wallet assembled by that Manager.
+	managerCfg := wallet.ManagerConfig{
+		Backend:                 backend,
+		DataSource:              h.WalletDBSource,
+		ChainParams:             *h.NetParams(),
+		ChainSource:             h.ChainClient,
+		RecoveryWindow:          defaultWalletRecoveryWindow,
+		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
+	}
+
+	manager, err := wallet.NewManager(h.Context(), managerCfg)
 	require.NoError(h, err, "failed to create wallet manager")
 
 	h.mu.Lock()
@@ -361,10 +369,10 @@ func (h *HarnessTest) RegisterWallet(manager *wallet.Manager,
 	h.registerWallet(manager, w, nil)
 }
 
-// registerWallet records a wallet under manager and copies reloadConfig when
-// provided.
+// registerWallet records a wallet under manager and owns a copy of optional
+// reloadParams so fixture mutations cannot alter a later reload credential.
 func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
-	reloadConfig *wallet.Config) {
+	reloadParams *wallet.LoadWalletParams) {
 
 	h.Helper()
 
@@ -383,13 +391,16 @@ func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
 		)
 	}
 
-	var config *wallet.Config
-	if reloadConfig != nil {
-		copiedConfig := *reloadConfig
-		config = &copiedConfig
+	var params *wallet.LoadWalletParams
+	if reloadParams != nil {
+		copiedParams := *reloadParams
+		copiedParams.PubPassphrase = slices.Clone(
+			reloadParams.PubPassphrase,
+		)
+		params = &copiedParams
 	}
 
-	registration[w] = config
+	registration[w] = params
 }
 
 // DeregisterWallet releases a wallet from harness ownership.

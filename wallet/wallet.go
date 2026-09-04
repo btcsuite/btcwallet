@@ -15,7 +15,6 @@ package wallet
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -175,8 +174,9 @@ const (
 	SyncMethodFullBlocks
 )
 
-// Config holds the configuration options for creating a new
-// WalletController.
+// Config holds Wallet-local runtime policy assembled internally by Manager or
+// supplied to deprecated constructors. Maintained Manager callers configure
+// runtime policy through ManagerConfig instead.
 type Config struct {
 	// DB is the underlying database for the wallet.
 	//
@@ -222,15 +222,15 @@ type Config struct {
 	// request.
 	AutoLockDuration time.Duration
 
-	// Name is the unique identifier for the wallet. It is used to track
-	// active wallet instances within the Manager.
+	// Name is the durable identity attached during internal Wallet assembly.
+	// Maintained callers supply it through CreateWalletParams or
+	// LoadWalletParams.
 	Name string
 
-	// PubPassphrase is the public passphrase for the wallet.
+	// PubPassphrase is the legacy public passphrase.
 	//
-	// Deprecated: only the kvdb backend has a public passphrase. A SQL
-	// wallet seals its metadata under a single passphrase, so this field is
-	// ignored there and goes away with kvdb support.
+	// Deprecated: Manager APIs carry this credential in their narrow request
+	// parameters, and managed Wallets do not retain it.
 	PubPassphrase []byte
 
 	// MaxCFilterItems is the threshold of watched items (addresses +
@@ -238,29 +238,7 @@ type Config struct {
 	// scanning when SyncMethodAuto is used. This avoids the CPU bottleneck
 	// of client-side filter matching for large watchlists. If 0, a default
 	// of 100,000 is used.
-	MaxCFilterItems int
-}
-
-// validate checks the configuration for consistency and completeness.
-func (c *Config) validate() error {
-	if c.Chain == nil {
-		return fmt.Errorf("%w: Chain", ErrMissingParam)
-	}
-
-	if c.ChainParams == nil {
-		return fmt.Errorf("%w: ChainParams", ErrMissingParam)
-	}
-
-	if c.Name == "" {
-		return fmt.Errorf("%w: Name", ErrMissingParam)
-	}
-
-	if c.RecoveryWindow > MaxRecoveryWindow {
-		return fmt.Errorf("%w: RecoveryWindow must not exceed %d",
-			ErrInvalidParam, MaxRecoveryWindow)
-	}
-
-	return nil
+	MaxCFilterItems uint32
 }
 
 // locateBirthdayBlock returns a block that meets the given birthday timestamp

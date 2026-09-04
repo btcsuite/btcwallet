@@ -63,12 +63,12 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 
 	return &kvdbManagerBackend{
 		db:          dbConn,
-		chainParams: cfg.ChainParams,
+		chainParams: &cfg.ChainParams,
 	}, nil
 }
 
 // create initializes and opens the one legacy wallet served by the backend.
-func (b *kvdbManagerBackend) create(ctx context.Context, cfg Config,
+func (b *kvdbManagerBackend) create(ctx context.Context,
 	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
@@ -93,12 +93,12 @@ func (b *kvdbManagerBackend) create(ctx context.Context, cfg Config,
 		return nil, fmt.Errorf("create legacy wallet: %w", err)
 	}
 
-	return b.open(ctx, cfg.Name, adapterCfg)
+	return b.open(ctx, params.Name, adapterCfg)
 }
 
 // load opens the one existing legacy wallet served by the backend.
 func (b *kvdbManagerBackend) load(ctx context.Context,
-	cfg Config) (*walletData, error) {
+	params LoadWalletParams) (*walletData, error) {
 
 	if b.store != nil {
 		return nil, fmt.Errorf("%w: kvdb serves one wallet per "+
@@ -106,10 +106,10 @@ func (b *kvdbManagerBackend) load(ctx context.Context,
 			b.walletName)
 	}
 
-	return b.open(ctx, cfg.Name, kvdb.Config{
+	return b.open(ctx, params.Name, kvdb.Config{
 		DB:            b.db,
 		ChainParams:   b.chainParams,
-		PubPassphrase: cfg.PubPassphrase,
+		PubPassphrase: params.PubPassphrase,
 	})
 }
 

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
-	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 )
@@ -68,6 +67,9 @@ type WatchOnlyAccount struct {
 // CreateWalletParams holds the parameters required to initialize a new wallet.
 // These are one-time inputs used during the creation process.
 type CreateWalletParams struct {
+	// Name is the durable identity used for Manager cache and Store operations.
+	Name string
+
 	// Mode determines which fields below are required.
 	Mode CreateMode
 
@@ -89,15 +91,29 @@ type CreateWalletParams struct {
 	// Birthday is the wallet's birthday.
 	Birthday time.Time
 
-	// PubPassphrase is the public passphrase for the wallet.
+	// PubPassphrase creates the legacy kvdb wallet. SQL backends ignore it
+	// because they have no public encryption passphrase.
 	//
-	// Deprecated: only the kvdb backend has a public passphrase. A SQL
-	// wallet seals its metadata under a single passphrase, so this field is
-	// ignored there and goes away with kvdb support.
+	// Remove this field with kvdb support.
 	PubPassphrase []byte
 
 	// PrivatePassphrase is the private passphrase for the wallet.
 	PrivatePassphrase []byte
+}
+
+// LoadWalletParams identifies an existing Wallet and carries inputs needed
+// only while its backend opens durable state.
+type LoadWalletParams struct {
+	// Name is the required runtime identity used by the Manager cache and SQL
+	// wallet lookup. The legacy kvdb backend also uses it for the one Wallet
+	// instance it can serve, but does not persist it as an alias.
+	Name string
+
+	// PubPassphrase opens the legacy kvdb wallet. SQL backends ignore it
+	// because they have no public encryption passphrase.
+	//
+	// Remove this field with kvdb support.
+	PubPassphrase []byte
 }
 
 // Manager is a high-level manager that handles the lifecycle of multiple
@@ -111,7 +127,7 @@ type Manager struct {
 	sync.RWMutex
 
 	// wallets holds the active wallets keyed by their unique name. The
-	// Manager lock serializes Create and Load through assembly and cache
+	// Manager lock serializes runtime assembly, Store access, and cache
 	// installation. A ModeShell Create imports its initial accounts after
 	// installation, so a wallet can be observed here before that import
 	// finishes.
@@ -121,8 +137,8 @@ type Manager struct {
 	// every wallet this Manager serves.
 	backend managerBackend
 
-	// chainParams is fixed at construction and shared by every wallet.
-	chainParams *chaincfg.Params
+	// config is the immutable shared policy retained at construction.
+	config ManagerConfig
 }
 
 // NewManager opens the one database described by cfg and returns a Manager that
@@ -135,6 +151,24 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	err := cfg.validate()
 	if err != nil {
 		return nil, err
+	}
+
+	// Clone mutable network state and resolve defaults before the backend is
+	// opened, making the retained configuration the sole runtime authority for
+	// every Wallet assembled by this Manager.
+	chainParams, err := cloneChainParams(cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("copy chain parameters: %w", err)
+	}
+
+	cfg.ChainParams = chainParams
+
+	if cfg.WalletSyncRetryInterval == 0 {
+		cfg.WalletSyncRetryInterval = initialBackoff
+	}
+
+	if cfg.AutoLockDuration <= 0 {
+		cfg.AutoLockDuration = defaultLockDuration
 	}
 
 	var backend managerBackend
@@ -155,9 +189,9 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}
 
 	return &Manager{
-		wallets:     make(map[string]*Wallet),
-		backend:     backend,
-		chainParams: cfg.ChainParams,
+		wallets: make(map[string]*Wallet),
+		backend: backend,
+		config:  cfg,
 	}, nil
 }
 
@@ -184,21 +218,21 @@ func (m *Manager) String() string {
 	return fmt.Sprintf("active_wallets=%v", names)
 }
 
-// Create creates a new wallet based on the provided configuration and
-// initialization parameters. It initializes the database structure and then
-// loads the wallet.
-func (m *Manager) Create(cfg Config,
-	params CreateWalletParams) (*Wallet, error) {
+// validateManagedWalletName rejects an absent durable identity before cache,
+// key-derivation, or Store work can obscure the caller error.
+func validateManagedWalletName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: Name", ErrMissingParam)
+	}
 
-	// The Manager owns the network for every wallet it serves, so overwrite
-	// the caller's copy before validating. A caller that leaves it unset, or
-	// sets a conflicting one, gets the Manager's.
-	cfg.ChainParams = m.chainParams
+	return nil
+}
 
-	// Validate the configuration and parameters before touching the cache
-	// or any store, so a malformed request fails on its own merits rather
-	// than on a name collision or store error.
-	err := cfg.validate()
+// Create persists and assembles a Wallet with Manager-owned runtime policy.
+func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
+	// Validate identity before key derivation or Store work can produce a less
+	// useful error or side effect.
+	err := validateManagedWalletName(params.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -208,24 +242,31 @@ func (m *Manager) Create(cfg Config,
 		return nil, err
 	}
 
-	rootKey, err := m.deriveRootKey(cfg, params)
+	rootKey, err := m.deriveRootKey(params)
 	if err != nil {
 		return nil, err
 	}
 
 	m.Lock()
 
-	data, err := m.backend.create(
-		context.Background(), cfg, params, rootKey,
-	)
+	// The Manager mutex keeps runtime assembly, Store mutation, and cache
+	// publication atomic so no partial Wallet becomes observable.
+	walletCfg, err := m.config.walletConfig(params.Name)
 	if err != nil {
 		m.Unlock()
 
 		return nil, err
 	}
 
-	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	data, err := m.backend.create(context.Background(), params, rootKey)
+	if err != nil {
+		m.Unlock()
+
+		return nil, err
+	}
+
+	w := newManagedWallet(walletCfg, data)
+	m.wallets[walletCfg.Name] = w
 	m.Unlock()
 
 	// If we are in shell mode and have initial accounts, we import them now.
@@ -369,59 +410,67 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 	return nil
 }
 
-// Load loads an existing wallet from the provided configuration. It opens the
-// database, initializes the wallet structure, and registers it with the manager
-// for tracking. If the named wallet does not exist, Load returns
-// ErrWalletNotFound.
-func (m *Manager) Load(cfg Config) (*Wallet, error) {
-	// The Manager owns the network for every wallet it serves; see Create.
-	cfg.ChainParams = m.chainParams
-
-	err := cfg.validate()
+// Load opens the requested durable Wallet and assembles it from Manager-owned
+// runtime policy. If it does not exist, Load returns ErrWalletNotFound.
+func (m *Manager) Load(params LoadWalletParams) (*Wallet, error) {
+	// Validate identity before cache or backend work so every backend reports
+	// the same caller error for an empty name.
+	err := validateManagedWalletName(params.Name)
 	if err != nil {
 		return nil, err
 	}
 
+	name := params.Name
+
 	m.Lock()
 	defer m.Unlock()
 
-	// A wallet already installed under this name is returned as is. The
-	// Manager lock makes a miss the sole assembly owner until installation.
-	existingW, ok := m.wallets[cfg.Name]
+	// Serializing the cache check through installation ensures concurrent cold
+	// Loads share the one Wallet assembled by the first caller.
+	existingW, ok := m.wallets[name]
 	if ok {
 		return existingW, nil
 	}
 
-	data, err := m.backend.load(context.Background(), cfg)
+	// A cache miss receives a fresh Wallet-local policy assembled from the
+	// Manager's immutable configuration snapshot.
+	walletCfg, err := m.config.walletConfig(name)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only the narrow request reaches the backend. The assembled Wallet never
+	// retains a legacy public passphrase.
+	data, err := m.backend.load(context.Background(), params)
 	if err != nil {
 		// Hide the database sentinel at the public Manager boundary while
 		// retaining the requested wallet name for caller diagnostics.
 		if errors.Is(err, db.ErrWalletNotFound) {
 			return nil, fmt.Errorf(
-				"wallet %q: %w", cfg.Name, ErrWalletNotFound,
+				"wallet %q: %w", name, ErrWalletNotFound,
 			)
 		}
 
 		return nil, err
 	}
 
-	w := newManagedWallet(cfg, data)
-	m.wallets[cfg.Name] = w
+	w := newManagedWallet(walletCfg, data)
+	m.wallets[walletCfg.Name] = w
 
 	return w, nil
 }
 
 // deriveRootKey resolves the master extended key after creation parameters have
 // passed validation.
-func (m *Manager) deriveRootKey(cfg Config,
+func (m *Manager) deriveRootKey(
 	params CreateWalletParams) (*hdkeychain.ExtendedKey, error) {
 
 	if params.Mode == ModeGenSeed {
-		return m.genRootKey(cfg)
+		return m.genRootKey()
 	}
 
 	if params.Mode == ModeImportSeed {
-		return m.deriveFromSeed(cfg, params.Seed)
+		return m.deriveFromSeed(params.Seed)
 	}
 
 	if params.Mode == ModeImportExtKey {
@@ -435,18 +484,18 @@ func (m *Manager) deriveRootKey(cfg Config,
 
 // genRootKey generates a fresh random seed and derives its master extended
 // private key.
-func (m *Manager) genRootKey(cfg Config) (*hdkeychain.ExtendedKey, error) {
+func (m *Manager) genRootKey() (*hdkeychain.ExtendedKey, error) {
 	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate seed: %w", err)
 	}
 
-	return m.deriveFromSeed(cfg, seed)
+	return m.deriveFromSeed(seed)
 }
 
 // deriveFromSeed derives the master extended private key from the provided
 // seed.
-func (m *Manager) deriveFromSeed(cfg Config, seed []byte) (
+func (m *Manager) deriveFromSeed(seed []byte) (
 	*hdkeychain.ExtendedKey, error) {
 
 	// Ensure a seed was provided for restoration.
@@ -455,7 +504,7 @@ func (m *Manager) deriveFromSeed(cfg Config, seed []byte) (
 	}
 
 	// Derive the master extended private key from the provided seed.
-	key, err := hdkeychain.NewMaster(seed, cfg.ChainParams)
+	key, err := hdkeychain.NewMaster(seed, &m.config.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive master key: %w", err)
 	}

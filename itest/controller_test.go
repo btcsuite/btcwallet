@@ -12,10 +12,10 @@ import (
 // stops cleanly, Stop is idempotent, a stopped instance restarts cleanly, and
 // a fresh Load yields a working instance.
 func testControllerStartStop(h *bwtest.HarnessTest) {
-	cfg, params := h.TestWalletConfig()
+	params := h.TestWalletParams()
 
 	manager := h.NewWalletManager()
-	w, err := manager.Create(cfg, params)
+	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
@@ -37,7 +37,10 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 	manager = h.NewWalletManager()
-	reloaded, err := manager.Load(cfg)
+	reloaded, err := manager.Load(wallet.LoadWalletParams{
+		Name:          params.Name,
+		PubPassphrase: params.PubPassphrase,
+	})
 	require.NoError(h, err, "failed to reload wallet")
 	h.RegisterWallet(manager, reloaded)
 	require.NoError(
@@ -51,10 +54,10 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 func testControllerUnlockLock(h *bwtest.HarnessTest) {
 	const wrongPassphrase = "wrong-private-passphrase"
 
-	cfg, params := h.TestWalletConfig()
+	params := h.TestWalletParams()
 
 	manager := h.NewWalletManager()
-	w, err := manager.Create(cfg, params)
+	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 
@@ -121,10 +124,10 @@ func testControllerUnlockLock(h *bwtest.HarnessTest) {
 // reports the configured backend and chain params, and tracks synchronization
 // as a block is mined.
 func testControllerInfo(h *bwtest.HarnessTest) {
-	cfg, params := h.TestWalletConfig()
+	params := h.TestWalletParams()
 
 	manager := h.NewWalletManager()
-	w, err := manager.Create(cfg, params)
+	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
 

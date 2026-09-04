@@ -127,7 +127,8 @@ func testSQLiteManager(tb testing.TB) *Manager {
 	m, err := NewManager(context.Background(), ManagerConfig{
 		Backend:     DBBackendSQLite,
 		DataSource:  filepath.Join(tb.TempDir(), "runtime.sqlite"),
-		ChainParams: &chainParams,
+		ChainParams: chainParams,
+		ChainSource: &bwmock.Chain{},
 	})
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = m.Close() })
@@ -147,7 +148,12 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 			store:   store,
 			closeFn: func() error { return nil },
 		},
-		chainParams: &chainParams,
+		config: ManagerConfig{
+			ChainSource:             &bwmock.Chain{},
+			ChainParams:             chainParams,
+			WalletSyncRetryInterval: initialBackoff,
+			AutoLockDuration:        defaultLockDuration,
+		},
 	}
 }
 
@@ -169,7 +175,8 @@ func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 	m, err := NewManager(context.Background(), ManagerConfig{
 		Backend:     DBBackendKVDB,
 		DataSource:  dbPath,
-		ChainParams: &chainParams,
+		ChainParams: chainParams,
+		ChainSource: &bwmock.Chain{},
 	})
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = m.Close() })

@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
@@ -1251,6 +1254,56 @@ func TestControllerInfo(t *testing.T) {
 	w.wg.Wait()
 }
 
+// TestControllerInfoCopiesChainParams verifies the information API never
+// exposes the Wallet's retained network policy through a mutable pointer.
+func TestControllerInfoCopiesChainParams(t *testing.T) {
+	t.Parallel()
+
+	const mutatedName = "mutated"
+
+	// Arrange: Build a started Wallet around strict Store and Chain mocks.
+	// Two calls are expected so a mutation of the first result can be checked
+	// against a separately produced second snapshot.
+	store := &walletmock.Store{}
+	chain := &bwmock.Chain{}
+
+	store.On("GetWallet", mock.Anything, "isolated").Return(
+		&db.WalletInfo{}, nil,
+	).Twice()
+	chain.On("BackEnd").Return("mock").Twice()
+
+	params := chaincfg.MainNetParams
+	w := &Wallet{
+		store: store,
+		cfg: Config{
+			Name:        "isolated",
+			Chain:       chain,
+			ChainParams: &params,
+		},
+		state: newWalletState(nil),
+	}
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	// Act: Mutate nested values in the first Info result, then request a new
+	// snapshot from the same retained Wallet configuration.
+	first, err := w.Info(t.Context())
+	require.NoError(t, err)
+
+	first.ChainParams.Name = mutatedName
+	first.ChainParams.PowLimit.SetInt64(1)
+
+	second, err := w.Info(t.Context())
+
+	// Assert: Verify the second result still matches the Wallet's policy and
+	// every mocked interaction occurred with its exact planned cardinality.
+	require.NoError(t, err)
+	require.Equal(t, params.Name, second.ChainParams.Name)
+	require.Equal(t, params.PowLimit, second.ChainParams.PowLimit)
+	store.AssertExpectations(t)
+	chain.AssertExpectations(t)
+}
+
 // TestControllerInfoSyncTipErrors verifies Info preserves Store errors and
 // represents a wallet without a committed sync tip using the legacy unknown
 // height.
@@ -1474,41 +1527,57 @@ func TestControllerStart_BirthdayNotSet(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestControllerUnlock_DefaultTimeout verifies default timeout usage.
-func TestControllerUnlock_DefaultTimeout(t *testing.T) {
+// TestControllerUnlockDefaultTimeout verifies an omitted request timeout is
+// replaced with the Manager-normalized Wallet policy before timer handling.
+func TestControllerUnlockDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet with an auto-lock duration and start the
-	// main loop.
-	w, deps := createTestWalletWithMocks(t)
-
-	w.cfg.AutoLockDuration = time.Minute
+	// Arrange: Put a Wallet in the state accepted by Unlock and configure a
+	// distinctive default. Leave its main loop stopped so the test can inspect
+	// the serialized request at the boundary immediately before handleUnlockReq
+	// uses the request timeout to reset the auto-lock timer.
+	w, _ := createTestWalletWithMocks(t)
+	autoLockDuration := time.Minute
+	w.cfg.AutoLockDuration = autoLockDuration
 
 	require.NoError(t, w.state.toStarting())
 	require.NoError(t, w.state.toStarted())
 
-	w.wg.Add(1)
+	// Act: Invoke Unlock asynchronously because it waits for the main loop's
+	// response, then intercept the exact request the main loop would handle.
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.Unlock(t.Context(), UnlockRequest{
+			Passphrase: []byte("pass"),
+		})
+	}()
 
-	go w.mainLoop()
+	var req unlockReq
+	select {
+	case rawReq := <-w.requestChan:
+		var ok bool
 
-	pass := []byte("pass")
-	req := UnlockRequest{Passphrase: pass}
-	deps.vault.On(
-		"Unlock", mock.Anything, pass,
-	).Return(nil).Once()
-	// Auto-lock might trigger if the test runs slowly, but it's not
-	// guaranteed.
-	deps.vault.On("Lock").Return().Maybe()
+		req, ok = rawReq.(unlockReq)
+		require.True(t, ok)
 
-	// Act: Perform Unlock with default timeout.
-	err := w.Unlock(t.Context(), req)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock request")
+	}
 
-	// Assert: Verify success.
-	require.NoError(t, err)
+	// Assert: The serialized request carries the configured default into the
+	// timer handler. Complete the intercepted request and verify Unlock returns
+	// successfully so its caller-facing response path is not left blocked.
+	require.Equal(t, autoLockDuration, req.req.Timeout)
 
-	// Clean up.
-	w.cancel()
-	w.wg.Wait()
+	req.resp <- nil
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for unlock response")
+	}
 }
 
 // TestControllerStart_DeleteExpiredFail verifies Start fails when
@@ -1682,24 +1751,24 @@ func TestControllerLock_StateError(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
-// TestWaitForBackoff_StableRun verifies that the backoff is reset to the
-// initial value if the syncer has been running for a stable amount of time.
-func TestWaitForBackoff_StableRun(t *testing.T) {
+// TestWaitForBackoffStableRun verifies a stable sync run resets to the
+// Wallet-local retry policy instead of an independent controller constant.
+func TestWaitForBackoffStableRun(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a wallet with a canceled context to avoid waiting.
+	// Arrange: Give a Wallet a distinctive Manager-owned retry interval and a
+	// timer seam that records the reset value while firing immediately.
+	retryInterval := 3 * time.Second
 	w := &Wallet{
 		lifetimeCtx: context.Background(),
+		cfg: Config{
+			WalletSyncRetryInterval: retryInterval,
+		},
 	}
-
-	// Mock a start time that exceeds the stable run time.
 	startTime := time.Now().Add(-stableRunTime - time.Minute)
 	currentBackoff := maxBackoff
-
-	// Mock the timer function to fire immediately.
 	timerFn := func(d time.Duration) <-chan time.Time {
-		// Verify that the backoff was reset to initial before waiting.
-		require.Equal(t, initialBackoff, d)
+		require.Equal(t, retryInterval, d)
 
 		c := make(chan time.Time, 1)
 		c <- time.Now()
@@ -1707,12 +1776,13 @@ func TestWaitForBackoff_StableRun(t *testing.T) {
 		return c
 	}
 
-	// Act: Wait for backoff.
+	// Act: Apply retry backoff after a run long enough to be stable.
 	nextBackoff, ok := w.waitForBackoff(startTime, currentBackoff, timerFn)
 
-	// Assert: Verify that the operation continued and backoff doubled.
+	// Assert: Verify the configured interval was used and exponential growth
+	// continues from that Manager-owned reset point.
 	require.True(t, ok)
-	require.Equal(t, initialBackoff*2, nextBackoff)
+	require.Equal(t, retryInterval*2, nextBackoff)
 }
 
 // TestWaitForBackoff_UnstableRun verifies that the backoff duration doubles

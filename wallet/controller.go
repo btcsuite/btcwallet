@@ -235,7 +235,7 @@ func (w *Wallet) Start(startCtx context.Context) error {
 // retries and exponential backoff. It ensures the wallet attempts to stay
 // synced even if the backend connection is flaky.
 func (w *Wallet) runSyncLoop() {
-	backoff := initialBackoff
+	backoff := w.initialSyncBackoff()
 
 	for {
 		startTime := time.Now()
@@ -270,6 +270,16 @@ func (w *Wallet) runSyncLoop() {
 	}
 }
 
+// initialSyncBackoff returns the Wallet-local retry policy, preserving the
+// controller default for legacy or test Wallets assembled without Manager.
+func (w *Wallet) initialSyncBackoff() time.Duration {
+	if w.cfg.WalletSyncRetryInterval <= 0 {
+		return initialBackoff
+	}
+
+	return w.cfg.WalletSyncRetryInterval
+}
+
 // waitForBackoff handles the delay between synchronization retry attempts. It
 // resets the backoff if the previous run was stable, waits for the calculated
 // delay, and then returns the updated backoff duration for the next attempt.
@@ -280,7 +290,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 	// If the syncer ran for a significant amount of time, we consider it a
 	// "stable" run and reset the backoff.
 	if time.Since(startTime) > stableRunTime {
-		backoff = initialBackoff
+		backoff = w.initialSyncBackoff()
 	}
 
 	log.Infof("Restarting sync loop in %v...", backoff)
@@ -486,10 +496,17 @@ func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 		return nil, fmt.Errorf("decode wallet sync tip: %w", err)
 	}
 
+	// Info is an ownership boundary, so return a fresh network snapshot
+	// instead of exposing the Wallet's retained mutable configuration.
+	chainParams, err := cloneChainParams(*w.cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("copy chain parameters: %w", err)
+	}
+
 	info := &Info{
 		BirthdayBlock:    w.birthdayBlock,
 		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      w.cfg.ChainParams,
+		ChainParams:      &chainParams,
 		Locked:           !w.state.isUnlocked(),
 		Synced:           w.state.isSynced(),
 		SyncedTo:         syncedTo,
