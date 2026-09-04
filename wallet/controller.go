@@ -92,13 +92,6 @@ type Info struct {
 
 	// SyncedTo is the block to which the wallet is currently synced.
 	SyncedTo waddrmgr.BlockStamp
-
-	// IsRecoveryMode indicates if the wallet is currently in recovery
-	// mode.
-	IsRecoveryMode bool
-
-	// RecoveryProgress is the progress of the recovery (0.0 - 1.0).
-	RecoveryProgress float64
 }
 
 // ChangePassphraseRequest contains the parameters for changing wallet
@@ -593,14 +586,12 @@ func (w *Wallet) handleInfo(r infoReq) {
 	}
 
 	info := &Info{
-		BirthdayBlock:    w.birthdayBlock,
-		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      &chainParams,
-		Locked:           !w.state.isUnlocked(),
-		Synced:           w.state.isSynced(),
-		SyncedTo:         syncedTo,
-		IsRecoveryMode:   w.state.isRecoveryMode(),
-		RecoveryProgress: 0,
+		BirthdayBlock: w.birthdayBlock,
+		Backend:       w.cfg.Chain.BackEnd(),
+		ChainParams:   &chainParams,
+		Locked:        !w.state.isUnlocked(),
+		Synced:        w.state.isSynced(),
+		SyncedTo:      syncedTo,
 	}
 
 	r.respChan <- infoResp{info: info}
