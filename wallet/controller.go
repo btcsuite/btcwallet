@@ -71,7 +71,8 @@ type UnlockRequest struct {
 }
 
 // Info provides a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. Producing the snapshot reads the observed
+// tip from the chain source and fails if that tip is unavailable.
 type Info struct {
 	// BirthdayBlock is the block from which the wallet started scanning.
 	BirthdayBlock waddrmgr.BlockStamp
@@ -87,7 +88,8 @@ type Info struct {
 	// Locked indicates if the wallet is currently locked.
 	Locked bool
 
-	// Synced indicates if the wallet is synced to the chain tip.
+	// Synced is true only when live delivery is ready and SyncedTo exactly
+	// matches the observed chain tip by height and hash.
 	Synced bool
 
 	// SyncedTo is the block to which the wallet is currently synced.
@@ -147,7 +149,8 @@ type Controller interface {
 	ChangePassphrase(ctx context.Context, req ChangePassphraseRequest) error
 
 	// Info returns a comprehensive snapshot of the wallet's static
-	// configuration and dynamic synchronization state.
+	// configuration and dynamic synchronization state. It returns an error
+	// if the chain source's observed tip cannot be read.
 	Info(ctx context.Context) (*Info, error)
 
 	// Start starts the background processes necessary to manage the wallet.
@@ -528,7 +531,8 @@ type rescanReq struct {
 }
 
 // Info returns a comprehensive snapshot of the wallet's static configuration
-// and dynamic synchronization state.
+// and dynamic synchronization state. It returns an error if the chain source's
+// observed tip cannot be read.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Info(ctx context.Context) (*Info, error) {
@@ -585,12 +589,25 @@ func (w *Wallet) handleInfo(r infoReq) {
 		return
 	}
 
+	bestHash, bestHeight, err := w.cfg.Chain.GetBestBlock()
+	if err != nil {
+		r.respChan <- infoResp{err: fmt.Errorf("get chain tip: %w", err)}
+
+		return
+	}
+
+	state := w.sync.syncState()
+	liveReady := state == syncStateSynced
+
+	synced := liveReady &&
+		syncedTo.Height == bestHeight && syncedTo.Hash.IsEqual(bestHash)
+
 	info := &Info{
 		BirthdayBlock: w.birthdayBlock,
 		Backend:       w.cfg.Chain.BackEnd(),
 		ChainParams:   &chainParams,
 		Locked:        !w.state.isUnlocked(),
-		Synced:        w.state.isSynced(),
+		Synced:        synced,
 		SyncedTo:      syncedTo,
 	}
 
