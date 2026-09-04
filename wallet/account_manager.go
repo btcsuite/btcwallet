@@ -424,6 +424,23 @@ func (w *Wallet) ListAccountsByName(ctx context.Context,
 	})
 }
 
+// accountResp carries one account snapshot or the lookup error so an accepted
+// handler can always finish even when its caller stops waiting.
+type accountResp struct {
+	info *AccountInfo
+	err  error
+}
+
+// getAccountReq owns the immutable lookup inputs and buffered response path
+// that cross the Wallet's request boundary.
+type getAccountReq struct {
+	reqCtx
+
+	scope waddrmgr.KeyScope
+	name  string
+	resp  chan accountResp
+}
+
 // GetAccount returns the account for a given account name and key scope.
 // The account snapshot, including the running balance, is fetched in a
 // single Store read.
@@ -435,24 +452,54 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	info, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
-		WalletID: w.id,
-		Scope:    db.KeyScope(scope),
-		Name:     &name,
-	})
-	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers
-		// using waddrmgr.IsError(err, ...) keep working when kvdb
-		// wraps the underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
+	req := getAccountReq{
+		reqCtx: reqCtx{ctx: ctx},
+		scope:  scope,
+		name:   name,
+		resp:   make(chan accountResp, 1),
+	}
 
+	err = w.sendReq(ctx, req)
+	if err != nil {
 		return nil, err
 	}
 
-	return w.accountInfoFromStore(info)
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleGetAccount executes an accepted lookup with its caller context and
+// sends exactly one buffered response so shutdown never depends on a receiver.
+func (w *Wallet) handleGetAccount(req getAccountReq) {
+	info, err := w.cache.GetAccount(req.ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    db.KeyScope(req.scope),
+		Name:     &req.name,
+	})
+	if err != nil {
+		// Preserve waddrmgr.ManagerError semantics so callers using
+		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
+		// underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			req.resp <- accountResp{err: mErr}
+			return
+		}
+
+		req.resp <- accountResp{err: err}
+
+		return
+	}
+
+	account, err := w.accountInfoFromStore(info)
+	req.resp <- accountResp{
+		info: account,
+		err:  err,
+	}
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
