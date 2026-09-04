@@ -597,7 +597,7 @@ func (w *Wallet) handleInfo(r infoReq) {
 	}
 
 	state := w.sync.syncState()
-	liveReady := state == syncStateSynced
+	liveReady := state == syncStateSynced || state == syncStateRescanning
 
 	synced := liveReady &&
 		syncedTo.Height == bestHeight && syncedTo.Hash.IsEqual(bestHash)
