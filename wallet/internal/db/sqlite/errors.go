@@ -3,6 +3,7 @@ package sqlite
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"modernc.org/sqlite"
@@ -34,6 +35,20 @@ var reasonByCode = map[int]dberr.Reason{
 	sqlite3.SQLITE_NOTFOUND:   dberr.ReasonUnknown,
 	sqlite3.SQLITE_SCHEMA:     dberr.ReasonSchemaMismatch,
 	sqlite3.SQLITE_CANTOPEN:   dberr.ReasonUnknown,
+}
+
+// IsAccountNameConflict identifies the account-name unique constraint without
+// classifying unrelated uniqueness violations as duplicate accounts.
+func IsAccountNameConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+
+	return errors.As(err, &sqliteErr) &&
+		sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE &&
+		strings.Contains(
+			sqliteErr.Error(),
+			"UNIQUE constraint failed: accounts.wallet_id, "+
+				"accounts.scope_id, accounts.account_name",
+		)
 }
 
 // mapErr maps SQLite result codes into SQLError.
