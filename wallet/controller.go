@@ -682,6 +682,10 @@ func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
 	switch r := req.(type) {
+	case newAccountReq:
+		w.handleNewAccount(r)
+	case renameAccountReq:
+		w.handleRenameAccount(r)
 	case getAccountReq:
 		w.handleGetAccount(r)
 	case listAccountsReq:

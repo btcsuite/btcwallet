@@ -157,13 +157,27 @@ func testSQLManager(tb testing.TB, store db.Store) *Manager {
 	}
 }
 
-// startLoadedWalletForTest marks a loaded wallet as started without launching
-// chain sync goroutines.
+// startLoadedWalletForTest starts the request loop for a loaded wallet without
+// launching chain sync goroutines. This lets tests exercise maintained public
+// methods without requiring an active chain backend.
 func startLoadedWalletForTest(t *testing.T, w *Wallet) {
 	t.Helper()
 
 	require.NoError(t, w.state.toStarting())
 	require.NoError(t, w.state.toStarted())
+
+	// The request loop is part of the started Wallet contract, so keep it
+	// alive until the test finishes even though chain sync remains disabled.
+	w.wg.Add(1)
+
+	go w.mainLoop()
+
+	t.Cleanup(func() {
+		// Canceling the Wallet releases the request loop before waiting for
+		// its WaitGroup, matching the production shutdown order.
+		w.cancel()
+		w.wg.Wait()
+	})
 }
 
 // testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
