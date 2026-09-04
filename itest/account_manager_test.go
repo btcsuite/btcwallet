@@ -331,7 +331,7 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 
 	_, err = w.NewAccount(ctx, scope, stoppedName)
 
-	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 
 	// An admission rejected before or after the wallet stops must leave no
 	// partial account, so neither name resolves across a reopen and the
@@ -644,7 +644,7 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 
 	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
 
-	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 
 	// The rejected rename must not move the account, so the source keeps
 	// its complete result and the target stays absent across a reopen.
@@ -993,7 +993,7 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 		keys.addrType, false,
 	)
 
-	require.ErrorIs(h, err, wallet.ErrStateForbidden)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
 
 	// A rejected import must leave no partial account, so the target stays
 	// absent across a reopen and the account set is unchanged.
