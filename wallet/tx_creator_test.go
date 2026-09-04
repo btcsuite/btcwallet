@@ -2,6 +2,8 @@ package wallet
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -15,6 +17,7 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
+	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -707,9 +710,10 @@ func TestAuthorTransaction(t *testing.T) {
 			require.Equal(t, inputScript, authored.PrevScripts[0])
 			require.Equal(t, inputTarget+tc.changeAmount,
 				authored.TotalInput)
-			fee := authored.TotalInput - txauthor.SumOutputValues(
-				authored.Tx.TxOut,
-			)
+			paid, err := txauthor.CheckOutputs(authored.Tx.TxOut)
+			require.NoError(t, err)
+
+			fee := authored.TotalInput - paid
 			require.Equal(t, inputTarget-btcutil.Amount(output.Value), fee)
 
 			if tc.changeAmount == 0 {
@@ -730,6 +734,246 @@ func TestAuthorTransaction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthorTransactionChecksAmounts verifies that the authoring boundary
+// refuses an output set or fee rate whose arithmetic is not representable, and
+// that each refusal reaches the caller under the wallet's own error rather than
+// the txauthor error that produced it.
+//
+// The boundary is driven directly because the public wrappers screen most of
+// these at the intent level; the aggregate total has no intent-level check at
+// all. The remaining classes txauthor validates cannot be reached from here:
+// the boundary takes outputs by value, so a nil element is unrepresentable; a
+// running-sum overflow cannot occur once the aggregate bound is enforced; and
+// no SatPerKVByte the wallet can build is large enough to price a fee out of
+// range. Those are covered in the nested module and, for the translation
+// itself, by TestTranslateAuthorError.
+func TestAuthorTransactionChecksAmounts(t *testing.T) {
+	t.Parallel()
+
+	script := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+
+	testCases := []struct {
+		name    string
+		outputs []wire.TxOut
+		feeRate btcunit.SatPerKVByte
+		wantErr error
+	}{{
+		name:    "negative output value",
+		outputs: []wire.TxOut{{Value: -1, PkScript: script}},
+		feeRate: defaultFeeRate,
+		wantErr: txrules.ErrAmountNegative,
+	}, {
+		name: "output value above the maximum",
+		outputs: []wire.TxOut{{
+			Value: btcutil.MaxSatoshi + 1, PkScript: script,
+		}},
+		feeRate: defaultFeeRate,
+		wantErr: txrules.ErrAmountExceedsMax,
+	}, {
+		// Each output is individually payable; only their sum is not.
+		name: "output total above the maximum",
+		outputs: []wire.TxOut{{
+			Value: btcutil.MaxSatoshi - 1e8, PkScript: script,
+		}, {
+			Value: 1e8 + 1, PkScript: script,
+		}},
+		feeRate: defaultFeeRate,
+		wantErr: ErrOutputTotalExceedsMax,
+	}, {
+		name:    "zero fee rate",
+		outputs: []wire.TxOut{{Value: 50_000, PkScript: script}},
+		feeRate: btcunit.NewSatPerKVByte(0),
+		wantErr: ErrInvalidFeeRate,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Count both callbacks so the test can prove the
+			// refusal landed before either was consulted.
+			w, _ := createTestWalletWithMocks(t)
+
+			var inputCalls, changeCalls int
+
+			inputSource := func(target btcutil.Amount) (btcutil.Amount,
+				[]*wire.TxIn, []btcutil.Amount, [][]byte, error) {
+
+				inputCalls++
+
+				return target, []*wire.TxIn{{}},
+					[]btcutil.Amount{target},
+					[][]byte{script}, nil
+			}
+			changeSource := &txauthor.ChangeSource{
+				ScriptSize: len(script),
+				NewScript: func() ([]byte, error) {
+					changeCalls++
+
+					return script, nil
+				},
+			}
+
+			// Act: Author directly, bypassing the intent-level checks the
+			// public wrappers apply.
+			authored, err := w.authorTransaction(
+				tc.outputs, tc.feeRate, inputSource, changeSource,
+			)
+
+			// Assert: The wallet's own error identifies the violation, no
+			// transaction is produced, and neither callback ran.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, authored)
+			require.Zero(t, inputCalls)
+			require.Zero(t, changeCalls)
+		})
+	}
+}
+
+// TestTranslateAuthorError verifies that each txauthor condition the wallet
+// names is given a wallet-facing identity, that the originating error stays in
+// the chain, that translation leaves the message alone, and that everything
+// else passes through untouched.
+func TestTranslateAuthorError(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name string
+		err  error
+		want error
+	}{{
+		name: "negative output value",
+		err:  txauthor.ErrOutputValueNegative,
+		want: txrules.ErrAmountNegative,
+	}, {
+		name: "output value above the maximum",
+		err:  txauthor.ErrOutputValueExceedsMax,
+		want: txrules.ErrAmountExceedsMax,
+	}, {
+		name: "output total above the maximum",
+		err:  txauthor.ErrOutputTotalExceedsMax,
+		want: ErrOutputTotalExceedsMax,
+	}, {
+		name: "non-positive fee rate",
+		err:  txauthor.ErrFeeRateNotPositive,
+		want: ErrInvalidFeeRate,
+	}, {
+		name: "fee product overflow",
+		err:  txauthor.ErrFeeOverflow,
+		want: ErrFeeOutOfRange,
+	}, {
+		name: "fee out of range",
+		err:  txauthor.ErrFeeOutOfRange,
+		want: ErrFeeOutOfRange,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A wrapped error must translate exactly as the bare
+			// sentinel does, since that is how txauthor reports it.
+			wrapped := fmt.Errorf("authoring: %w", tc.err)
+
+			got := translateAuthorError(wrapped)
+
+			// Both identities resolve: the wallet's, so callers need
+			// not import the nested module, and the originating one,
+			// for anyone who wants the finer distinction.
+			require.ErrorIs(t, got, tc.want)
+			require.ErrorIs(t, got, tc.err)
+
+			// Translation must not restate what the originating error
+			// already says. Several wallet sentinels carry text that
+			// duplicates their txauthor counterpart word for word, so
+			// composing the two would print the same clause twice.
+			require.Equal(t, wrapped.Error(), got.Error())
+		})
+	}
+
+	// Conditions the wallet deliberately does not name arrive unchanged.
+	// A nil output cannot occur through authorTransaction, which takes its
+	// outputs by value, and the checked add and subtract guards cannot fire
+	// behind CheckOutputs and the sufficiency checks.
+	unnamed := []struct {
+		name string
+		err  error
+	}{{
+		name: "nil output",
+		err:  txauthor.ErrNilOutput,
+	}, {
+		name: "amount overflow",
+		err:  txauthor.ErrAmountOverflow,
+	}, {
+		name: "amount underflow",
+		err:  txauthor.ErrAmountUnderflow,
+	}}
+
+	for _, tc := range unnamed {
+		t.Run(tc.name+" passes through", func(t *testing.T) {
+			t.Parallel()
+
+			wrapped := fmt.Errorf("authoring: %w", tc.err)
+
+			got := translateAuthorError(wrapped)
+			require.Equal(t, wrapped, got)
+		})
+	}
+
+	// An error the wallet has no name for is returned as it arrived. An
+	// InputSourceError in particular must keep its type, because callers
+	// distinguish "cannot fund this" from "will not author this".
+	t.Run("unrecognised error passes through", func(t *testing.T) {
+		t.Parallel()
+
+		sourceErr := insufficientFundsError(t)
+
+		got := translateAuthorError(sourceErr)
+		require.Equal(t, sourceErr, got)
+
+		var typed txauthor.InputSourceError
+		require.ErrorAs(t, got, &typed)
+	})
+
+	t.Run("nil error passes through", func(t *testing.T) {
+		t.Parallel()
+
+		require.NoError(t, translateAuthorError(nil))
+	})
+}
+
+// insufficientFundsError returns txauthor's own InputSourceError. The concrete
+// type is unexported, so it is obtained the only way a caller can: by authoring
+// a payment the input source cannot cover.
+func insufficientFundsError(t *testing.T) error {
+	t.Helper()
+
+	emptySource := func(btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+		[]btcutil.Amount, [][]byte, error) {
+
+		return 0, nil, nil, nil, nil
+	}
+
+	_, err := txauthor.NewUnsignedTransaction(
+		[]*wire.TxOut{{
+			Value:    1e8,
+			PkScript: make([]byte, txsizes.P2WPKHPkScriptSize),
+		}}, 1e3, emptySource, &txauthor.ChangeSource{
+			ScriptSize: txsizes.P2WPKHPkScriptSize,
+			NewScript: func() ([]byte, error) {
+				return make(
+					[]byte, txsizes.P2WPKHPkScriptSize,
+				), nil
+			},
+		},
+	)
+
+	var sourceErr txauthor.InputSourceError
+	require.ErrorAs(t, err, &sourceErr)
+
+	return err
 }
 
 // TestCreateTransactionDefaultPolicy verifies nil inputs still select from the
@@ -1765,4 +2009,259 @@ func TestFilterEligibleOutputsExcludesImmatureCoinbase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// coinsWithValues builds arranged coins carrying the given values. Each coin
+// spends a distinct outpoint so the inputs a source dispenses stay
+// distinguishable; only the values matter to the amount checks.
+func coinsWithValues(values ...int64) []Coin {
+	coins := make([]Coin, 0, len(values))
+	for i, value := range values {
+		coins = append(coins, Coin{
+			TxOut: wire.TxOut{
+				Value:    value,
+				PkScript: []byte{0x00},
+			},
+			OutPoint: wire.OutPoint{
+				Hash:  [32]byte{byte(i + 1)},
+				Index: uint32(i),
+			},
+		})
+	}
+
+	return coins
+}
+
+// utxosWithAmounts builds static UTXO info carrying the given amounts, for the
+// manually selected input sources.
+func utxosWithAmounts(amounts ...btcutil.Amount) []db.UtxoInfo {
+	utxos := make([]db.UtxoInfo, 0, len(amounts))
+	for i, amount := range amounts {
+		utxos = append(utxos, db.UtxoInfo{
+			OutPoint: wire.OutPoint{
+				Hash:  [32]byte{byte(i + 1)},
+				Index: uint32(i),
+			},
+			Amount:   amount,
+			PkScript: []byte{0x00},
+		})
+	}
+
+	return utxos
+}
+
+// TestMakeInputSourceChecksAmounts verifies that automatic coin selection
+// reports an unrepresentable or inconsistent amount set instead of dispensing
+// it. The wallet builds these coins from stored UTXO amounts, so a violation
+// means the store returned something it could not have written; the source
+// refuses it rather than authoring a transaction whose fee and change rest on
+// a wrapped total.
+func TestMakeInputSourceChecksAmounts(t *testing.T) {
+	t.Parallel()
+
+	// Two coins whose values are individually representable but whose sum
+	// is not, so the accumulator is the only thing that can catch them.
+	const halfOverflow = math.MaxInt64/2 + 1
+
+	tests := []struct {
+		name      string
+		values    []int64
+		target    btcutil.Amount
+		wantTotal btcutil.Amount
+		wantErr   error
+	}{{
+		name:      "a funded selection dispenses its coins",
+		values:    []int64{1e8, 2e8},
+		target:    2.5e8,
+		wantTotal: 3e8,
+	}, {
+		// The source runs out of coins before it reaches the target,
+		// which is a funding outcome rather than a malformed answer:
+		// the caller decides it cannot afford the transaction.
+		name:      "an underfunded selection reports what it has",
+		values:    []int64{1e8},
+		target:    5e8,
+		wantTotal: 1e8,
+	}, {
+		name:    "a negative coin value is rejected",
+		values:  []int64{2e8, -1e8},
+		target:  5e8,
+		wantErr: txauthor.ErrInputValueNegative,
+	}, {
+		// One coin's value is the whole total, so the bound the total
+		// is held to is what names this failure.
+		name:    "a coin above the maximum is rejected",
+		values:  []int64{btcutil.MaxSatoshi + 1},
+		target:  1e8,
+		wantErr: txauthor.ErrInputTotalExceedsMax,
+	}, {
+		name:    "an aggregate above the maximum is rejected",
+		values:  []int64{btcutil.MaxSatoshi, btcutil.MaxSatoshi},
+		target:  math.MaxInt64,
+		wantErr: txauthor.ErrInputTotalExceedsMax,
+	}, {
+		name:    "an overflowing selection is rejected",
+		values:  []int64{halfOverflow, halfOverflow},
+		target:  math.MaxInt64,
+		wantErr: txauthor.ErrAmountOverflow,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Act.
+			source := makeInputSource(coinsWithValues(tc.values...))
+			total, inputs, values, scripts, err := source(tc.target)
+
+			// Assert.
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				require.Zero(t, total)
+				require.Nil(t, inputs)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.wantTotal, total)
+			require.Len(t, inputs, len(values))
+			require.Len(t, scripts, len(values))
+		})
+	}
+}
+
+// TestConstantInputSourceChecksAmounts verifies that a manually selected input
+// set is held to the same amount contract as an automatically selected one. The
+// static source sums its amounts up front, so this also pins that a failure to
+// form that sum is reported when the source is asked rather than lost.
+func TestConstantInputSourceChecksAmounts(t *testing.T) {
+	t.Parallel()
+
+	const halfOverflow = btcutil.Amount(math.MaxInt64/2 + 1)
+
+	tests := []struct {
+		name      string
+		amounts   []btcutil.Amount
+		wantTotal btcutil.Amount
+		wantErr   error
+	}{{
+		name:      "a selected set dispenses its full total",
+		amounts:   []btcutil.Amount{1e8, 2e8},
+		wantTotal: 3e8,
+	}, {
+		name:      "an empty set totals zero",
+		amounts:   nil,
+		wantTotal: 0,
+	}, {
+		name:    "a negative amount is rejected",
+		amounts: []btcutil.Amount{2e8, -1e8},
+		wantErr: txauthor.ErrInputValueNegative,
+	}, {
+		name:    "an amount above the maximum is rejected",
+		amounts: []btcutil.Amount{btcutil.MaxSatoshi + 1},
+		wantErr: txauthor.ErrInputTotalExceedsMax,
+	}, {
+		name: "an aggregate above the maximum is rejected",
+		amounts: []btcutil.Amount{
+			btcutil.MaxSatoshi, btcutil.MaxSatoshi,
+		},
+		wantErr: txauthor.ErrInputTotalExceedsMax,
+	}, {
+		name:    "an overflowing set is rejected",
+		amounts: []btcutil.Amount{halfOverflow, halfOverflow},
+		wantErr: txauthor.ErrAmountOverflow,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The static source ignores its target: a manual
+			// selection always dispenses the full set the user
+			// chose.
+			utxos := utxosWithAmounts(tc.amounts...)
+
+			// Legacy credits reach the same source through a
+			// conversion, so both selected-input paths are asserted
+			// against the same expectation.
+			credits := make([]wtxmgr.Credit, 0, len(tc.amounts))
+			for _, utxo := range utxos {
+				credits = append(credits, wtxmgr.Credit{
+					OutPoint: utxo.OutPoint,
+					Amount:   utxo.Amount,
+					PkScript: utxo.PkScript,
+				})
+			}
+
+			sources := map[string]txauthor.InputSource{
+				"utxos":   constantInputSource(utxos),
+				"credits": constantInputSource(credits),
+			}
+
+			for name, source := range sources {
+				t.Run(name, func(t *testing.T) {
+					total, inputs, values, _, err := source(0)
+
+					if tc.wantErr != nil {
+						require.ErrorIs(
+							t, err, tc.wantErr,
+						)
+						require.Zero(t, total)
+						require.Nil(t, inputs)
+
+						return
+					}
+
+					require.NoError(t, err)
+					require.Equal(t, tc.wantTotal, total)
+					require.Len(t, values, len(tc.amounts))
+				})
+			}
+		})
+	}
+}
+
+// TestCreateManualInputSourceCorruptAmount verifies that the manual selection
+// path refuses a stored UTXO whose amount is not representable. The eligibility
+// gates ahead of it check lock state and coinbase maturity but never the
+// amount, so without the source's own check the value would reach fee and
+// change arithmetic unexamined.
+func TestCreateManualInputSourceCorruptAmount(t *testing.T) {
+	t.Parallel()
+
+	const tipHeight = 100
+
+	outPoint := wire.OutPoint{Hash: [32]byte{1}, Index: 0}
+
+	// Arrange: an otherwise eligible UTXO carrying an amount above the
+	// maximum representable value.
+	w, mocks := createTestWalletWithMocks(t)
+
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: tipHeight}, nil,
+	).Once()
+
+	mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outPoint,
+	}).Return(&db.UtxoInfo{
+		OutPoint: outPoint,
+		Amount:   btcutil.MaxSatoshi + 1,
+		PkScript: singleAddrPkScript(t),
+		Height:   1,
+	}, nil).Once()
+
+	// Act.
+	source, err := w.createManualInputSource(
+		t.Context(), &InputsManual{UTXOs: []wire.OutPoint{outPoint}},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, source)
+
+	// Assert: the source refuses to dispense the corrupt amount.
+	total, inputs, _, _, err := source(0)
+	require.ErrorIs(t, err, txauthor.ErrInputTotalExceedsMax)
+	require.Zero(t, total)
+	require.Nil(t, inputs)
 }

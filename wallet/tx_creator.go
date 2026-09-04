@@ -82,6 +82,32 @@ var (
 	// errNegativeHeight is returned when a height expected to be non-negative
 	// is negative.
 	errNegativeHeight = errors.New("negative height")
+
+	// The two errors below name the same conditions as their txauthor
+	// counterparts, deliberately including their names. They exist so a
+	// caller can match an authoring failure without importing the nested
+	// module; the originating txauthor error stays in the chain for anyone
+	// who wants the finer distinction.
+
+	// ErrOutputTotalExceedsMax is returned when a transaction's outputs are
+	// individually valid but sum to more than the maximum representable
+	// amount. Unlike the per-output bounds, this one has no counterpart in
+	// validateTxIntent, so it is reported from the authoring boundary.
+	ErrOutputTotalExceedsMax = errors.New(
+		"total output amount exceeds maximum value",
+	)
+
+	// ErrFeeOutOfRange is returned when the fee a transaction would pay is
+	// not a representable amount. DefaultMaxFeeRate keeps this out of reach
+	// at its default value, but that bound is a mutable package variable
+	// intended to become configurable: raised far enough, an ordinary
+	// multi-input transaction can price a fee above MaxSatoshi.
+	ErrFeeOutOfRange = errors.New("transaction fee out of range")
+
+	// ErrInvalidFeeRate is returned when a fee rate reaches transaction
+	// authoring at or below zero. This is distinct from ErrMissingFeeRate,
+	// which reports an intent that never carried a usable rate at all.
+	ErrInvalidFeeRate = errors.New("invalid fee rate")
 )
 
 var (
@@ -677,7 +703,7 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 		txOutputs, feeSatPerKb, inputSource, changeSource,
 	)
 	if err != nil {
-		return nil, err
+		return nil, translateAuthorError(err)
 	}
 
 	// Randomize the position of the change output, if one was created. This
@@ -688,6 +714,82 @@ func (w *Wallet) authorTransaction(outputs []wire.TxOut,
 	}
 
 	return tx, nil
+}
+
+// authorError gives an authoring failure a wallet-facing identity without
+// restating it. Its message is the originating error's alone, while errors.Is
+// resolves both the wallet sentinel, through Is, and everything the originating
+// error already matched, through Unwrap. Wrapping with a second %w verb would
+// match both too, but would render the wallet sentinel's text and the txauthor
+// error's text one after the other, and for most of these classes those say the
+// same thing twice.
+//
+// This mirrors AmbiguousTxCommitError in wallet/internal/db/runtime.
+type authorError struct {
+	// sentinel is the wallet-facing identity this failure reports as.
+	sentinel error
+
+	// cause is the originating txauthor error, which supplies the message.
+	cause error
+}
+
+// Error returns the originating error's message.
+func (e *authorError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the originating txauthor error.
+func (e *authorError) Unwrap() error {
+	return e.cause
+}
+
+// Is reports whether target is the wallet sentinel this failure carries.
+func (e *authorError) Is(target error) bool {
+	return errors.Is(e.sentinel, target)
+}
+
+// translateAuthorError maps the checked-arithmetic errors the txauthor module
+// reports onto the wallet's own error vocabulary, so callers of the public
+// wrappers match on one set of sentinels. It is the single translation point
+// for both CreateTransaction and FundPsbt.
+//
+// Output value violations report the same txrules errors validateTxIntent
+// reports, which costs no new API and keeps one identity per condition across
+// both layers. The two conditions validateTxIntent has no counterpart for get a
+// wallet sentinel of their own.
+//
+// Everything else is returned untouched: an InputSourceError, so "cannot fund
+// this" stays distinguishable from "will not author this", and the checked
+// arithmetic classes no caller can observe. A nil output cannot occur, because
+// authorTransaction takes its outputs by value; the add and subtract guards
+// cannot fire, because CheckOutputs bounds the target and the sufficiency
+// checks bound the rest. The input-amount classes belong here too: the wallet's
+// own sources build their results from stored UTXO amounts, so reaching one
+// means the store handed back an amount it could not have written, not that the
+// caller asked for something. Naming those in the wallet would be exported API
+// with nothing behind it.
+func translateAuthorError(err error) error {
+	switch {
+	case errors.Is(err, txauthor.ErrOutputValueNegative):
+		return &authorError{txrules.ErrAmountNegative, err}
+
+	case errors.Is(err, txauthor.ErrOutputValueExceedsMax):
+		return &authorError{txrules.ErrAmountExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrOutputTotalExceedsMax):
+		return &authorError{ErrOutputTotalExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrFeeRateNotPositive):
+		return &authorError{ErrInvalidFeeRate, err}
+
+	case errors.Is(err, txauthor.ErrFeeOverflow),
+		errors.Is(err, txauthor.ErrFeeOutOfRange):
+
+		return &authorError{ErrFeeOutOfRange, err}
+
+	default:
+		return err
+	}
 }
 
 // determineChangeSource determines the source for the transaction's change
@@ -1045,6 +1147,10 @@ func (w *Wallet) getEligibleUTXOsFromList(ctx context.Context,
 
 // makeInputSource creates an input source that spends arranged coins until the
 // requested target amount is reached.
+//
+// The running total is accumulated through the checked add, and the result is
+// validated before it is returned, so the coins this source dispenses can never
+// add up to something the caller cannot represent or reconcile.
 func makeInputSource(eligible []Coin) txauthor.InputSource {
 	// Current inputs and their total value. These are closed over by the
 	// returned input source and reused across multiple calls.
@@ -1053,17 +1159,30 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 	currentScripts := make([][]byte, 0, len(eligible))
 	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
 
-	return func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+	source := func(target btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
 		[]btcutil.Amount, [][]byte, error) {
 
 		for currentTotal < target && len(eligible) != 0 {
 			nextCredit := eligible[0]
 			prevOut := nextCredit.TxOut
 			outpoint := nextCredit.OutPoint
+
+			// Take the coin only once its value is known to be
+			// addable. This state outlives the call, so a failed
+			// add must neither record an input against a total that
+			// never took it, nor drop the offending coin and let a
+			// later call succeed without it.
+			nextTotal, err := txauthor.AddAmounts(
+				currentTotal, btcutil.Amount(prevOut.Value),
+			)
+			if err != nil {
+				return 0, nil, nil, nil, err
+			}
+
 			eligible = eligible[1:]
 
 			nextInput := wire.NewTxIn(&outpoint, nil, nil)
-			currentTotal += btcutil.Amount(prevOut.Value)
+			currentTotal = nextTotal
 
 			currentInputs = append(currentInputs, nextInput)
 			currentScripts = append(
@@ -1078,6 +1197,8 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 		return currentTotal, currentInputs, currentInputValues,
 			currentScripts, nil
 	}
+
+	return txauthor.CheckInputSource(source)
 }
 
 // constantInputCredit is a wallet-owned output usable by constantInputSource.
@@ -1102,6 +1223,11 @@ func constantInputSource[T constantInputCredit](
 }
 
 // constantUtxoInputSource adapts static UTXO info into an input source.
+//
+// The total is accumulated through the checked add, and the result is validated
+// before it is returned. The sum is formed here rather than per call, so a
+// failure to form it is held until the source is asked, which is the first
+// moment there is a caller to report it to.
 func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	// Current inputs and their total value. These won't change over
 	// different invocations as we want our inputs to remain static since
@@ -1111,21 +1237,38 @@ func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	currentScripts := make([][]byte, 0, len(eligible))
 	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
 
+	var sourceErr error
+
 	for _, credit := range eligible {
+		nextTotal, err := txauthor.AddAmounts(
+			currentTotal, credit.Amount,
+		)
+		if err != nil {
+			sourceErr = err
+
+			break
+		}
+
 		nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
-		currentTotal += credit.Amount
+		currentTotal = nextTotal
 
 		currentInputs = append(currentInputs, nextInput)
 		currentScripts = append(currentScripts, credit.PkScript)
 		currentInputValues = append(currentInputValues, credit.Amount)
 	}
 
-	return func(_ btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
+	source := func(_ btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
 		[]btcutil.Amount, [][]byte, error) {
+
+		if sourceErr != nil {
+			return 0, nil, nil, nil, sourceErr
+		}
 
 		return currentTotal, currentInputs, currentInputValues,
 			currentScripts, nil
 	}
+
+	return txauthor.CheckInputSource(source)
 }
 
 // constantCreditInputSource adapts static legacy credits into an input source.

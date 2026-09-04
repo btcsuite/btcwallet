@@ -127,3 +127,5 @@ go 1.25.11
 replace github.com/btcsuite/btcwallet/wtxmgr => ./wtxmgr
 
 replace github.com/btcsuite/btcwallet/wallet/txsizes => ./wallet/txsizes
+
+replace github.com/btcsuite/btcwallet/wallet/txauthor => ./wallet/txauthor

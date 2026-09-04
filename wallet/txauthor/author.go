@@ -18,6 +18,10 @@ import (
 )
 
 // SumOutputValues sums up the list of TxOuts and returns an Amount.
+//
+// Deprecated: this sum is unchecked. It ignores a nil element, admits a
+// negative or over-maximum value, and wraps silently on overflow. Use
+// CheckOutputs, which validates the set and returns the same total.
 func SumOutputValues(outputs []*wire.TxOut) (totalOutput btcutil.Amount) {
 	for _, txOut := range outputs {
 		totalOutput += btcutil.Amount(txOut.Value)
@@ -90,48 +94,91 @@ type ChangeSource struct {
 // enough input value to pay for every output any any necessary fees, an
 // InputSourceError is returned.
 //
+// Every amount this function forms is checked. The output set is validated and
+// the fee rate is rejected at or below zero before the first fetchInputs call,
+// so a malformed request never reaches a callback. The per-iteration fee and
+// change arithmetic depends on the inputs that were selected, so it necessarily
+// follows input selection, but it still completes before changeSource.NewScript
+// is called.
+//
+// Every amount fetchInputs reports is checked too. Its result passes through
+// CheckInputSource, so an out-of-range value, a value set that does not match
+// the inputs, and a total that is not the sum of the values supplied are all
+// refused at the point the source returns them - before the sufficiency test
+// reads that total, and before any change is derived from it.
+//
 // BUGS: Fee estimation may be off when redeeming non-compressed P2PKH outputs.
 func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 	fetchInputs InputSource, changeSource *ChangeSource) (*AuthoredTx, error) {
 
-	targetAmount := SumOutputValues(outputs)
+	targetAmount, err := CheckOutputs(outputs)
+	if err != nil {
+		return nil, err
+	}
+
 	estimatedSize := txsizes.EstimateVirtualSize(
 		0, 0, 1, 0, outputs, changeSource.ScriptSize,
 	)
-	targetFee := txrules.FeeForSerializeSize(feeRatePerKb, estimatedSize)
 
+	targetFee, err := CheckedFeeForSerializeSize(
+		feeRatePerKb, estimatedSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the source once here rather than its result once per
+	// iteration: the loop may ask for coins repeatedly as the fee grows,
+	// and each answer is a fresh set of amounts to be trusted.
+	fetchInputs = CheckInputSource(fetchInputs)
+
+	// The three checked add and subtract calls below cannot currently fail.
+	// CheckOutputs bounds the target and CheckedFeeForSerializeSize bounds
+	// the fee, so their sum stays far inside an int64; each subtraction is
+	// guarded by the comparison immediately above it. They are checked
+	// anyway, so that a later change to either bound cannot reintroduce a
+	// silent wrap, but a reader should not go looking for the input that
+	// trips them.
 	for {
-		inputAmount, inputs, inputValues, scripts, err := fetchInputs(targetAmount + targetFee)
+		// Form the target the inputs must cover once, and hold on to it
+		// so the sufficiency comparison below tests the very same value
+		// the input source was asked for.
+		targetTotal, err := AddAmounts(targetAmount, targetFee)
 		if err != nil {
 			return nil, err
 		}
-		if inputAmount < targetAmount+targetFee {
+
+		inputAmount, inputs, inputValues, scripts, err := fetchInputs(
+			targetTotal,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if inputAmount < targetTotal {
 			return nil, insufficientFundsError{}
 		}
 
 		// We count the types of inputs, which we'll use to estimate
 		// the vsize of the transaction.
-		var nested, p2wpkh, p2tr, p2pkh int
-		for _, pkScript := range scripts {
-			switch {
-			// If this is a p2sh output, we assume this is a
-			// nested P2WKH.
-			case txscript.IsPayToScriptHash(pkScript):
-				nested++
-			case txscript.IsPayToWitnessPubKeyHash(pkScript):
-				p2wpkh++
-			case txscript.IsPayToTaproot(pkScript):
-				p2tr++
-			default:
-				p2pkh++
-			}
-		}
+		p2pkh, p2tr, p2wpkh, nested := countInputTypes(scripts)
 
 		maxSignedSize := txsizes.EstimateVirtualSize(
 			p2pkh, p2tr, p2wpkh, nested, outputs, changeSource.ScriptSize,
 		)
-		maxRequiredFee := txrules.FeeForSerializeSize(feeRatePerKb, maxSignedSize)
-		remainingAmount := inputAmount - targetAmount
+
+		maxRequiredFee, err := CheckedFeeForSerializeSize(
+			feeRatePerKb, maxSignedSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		remainingAmount, err := subAmounts(inputAmount, targetAmount)
+		if err != nil {
+			return nil, err
+		}
+
 		if remainingAmount < maxRequiredFee {
 			targetFee = maxRequiredFee
 			continue
@@ -145,7 +192,14 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 		}
 
 		changeIndex := -1
-		changeAmount := inputAmount - targetAmount - maxRequiredFee
+
+		// Reuse the sufficiency remainder rather than re-deriving the
+		// change from the input total a second time.
+		changeAmount, err := subAmounts(remainingAmount, maxRequiredFee)
+		if err != nil {
+			return nil, err
+		}
+
 		changeScript, err := changeSource.NewScript()
 		if err != nil {
 			return nil, err
@@ -167,6 +221,29 @@ func NewUnsignedTransaction(outputs []*wire.TxOut, feeRatePerKb btcutil.Amount,
 			ChangeIndex:     changeIndex,
 		}, nil
 	}
+}
+
+// countInputTypes classifies the previous output scripts an input set redeems.
+// The counts drive the virtual size estimate, since each script type costs a
+// different amount of witness and signature data to spend. The results are
+// named because they are four values of the same type: transposing any two at
+// the call site would compile and surface only as a slightly wrong fee.
+func countInputTypes(scripts [][]byte) (p2pkh, p2tr, p2wpkh, nested int) {
+	for _, pkScript := range scripts {
+		switch {
+		// If this is a p2sh output, we assume this is a nested P2WKH.
+		case txscript.IsPayToScriptHash(pkScript):
+			nested++
+		case txscript.IsPayToWitnessPubKeyHash(pkScript):
+			p2wpkh++
+		case txscript.IsPayToTaproot(pkScript):
+			p2tr++
+		default:
+			p2pkh++
+		}
+	}
+
+	return p2pkh, p2tr, p2wpkh, nested
 }
 
 // RandomizeOutputPosition randomizes the position of a transaction's output by
