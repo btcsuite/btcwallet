@@ -1332,6 +1332,9 @@ func TestControllerInfoWaitsForAcceptedResult(t *testing.T) {
 			if tc.err == nil {
 				deps.chain.On("BackEnd").Return("mock").Once()
 				deps.syncer.On("syncState").Return(syncStateSynced).Once()
+				deps.chain.On("GetBestBlock").Return(
+					&chainhash.Hash{}, int32(0), nil,
+				).Once()
 			}
 
 			resultChan := make(chan infoResp, 1)
@@ -1451,8 +1454,10 @@ func TestControllerInfo(t *testing.T) {
 	// Mock the chain backend to return a specific name.
 	deps.chain.On("BackEnd").Return("mock")
 
-	// Mock syncState to indicate the wallet is fully synced.
-	deps.syncer.On("syncState").Return(syncStateSynced)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.chain.On("GetBestBlock").Return(
+		&syncedTo.Hash, int32(syncedTo.Height), nil,
+	).Once()
 
 	// Allow Stop to clear secret material.
 	expectStopTeardown(deps)
@@ -1489,16 +1494,22 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 
 	const mutatedName = "mutated"
 
-	// Arrange: Build a started Wallet around strict Store and Chain mocks.
+	// Arrange: Build a started Wallet around strict Store, Chain, and Syncer
+	// mocks.
 	// Two calls are expected so a mutation of the first result can be checked
 	// against a separately produced second snapshot.
 	store := &walletmock.Store{}
 	chain := &bwmock.Chain{}
+	syncer := &mockChainSyncer{}
 
 	store.On("GetWallet", mock.Anything, "isolated").Return(
 		&db.WalletInfo{}, nil,
 	).Twice()
 	chain.On("BackEnd").Return("mock").Twice()
+	syncer.On("syncState").Return(syncStateBackendSyncing).Twice()
+	chain.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(0), nil,
+	).Twice()
 
 	params := chaincfg.MainNetParams
 	// This fixture assembles its own runtime; the shared start helper
@@ -1516,6 +1527,7 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 			Chain:       chain,
 			ChainParams: &params,
 		},
+		sync:  syncer,
 		state: newWalletState(nil),
 	}
 	// Disable auto-lock timing so this fixture exercises only its API call.
@@ -1539,6 +1551,7 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 	require.Equal(t, params.PowLimit, second.ChainParams.PowLimit)
 	store.AssertExpectations(t)
 	chain.AssertExpectations(t)
+	syncer.AssertExpectations(t)
 }
 
 // TestControllerInfoSyncTipErrors verifies Info preserves Store errors and
@@ -1570,13 +1583,164 @@ func TestControllerInfoSyncTipErrors(t *testing.T) {
 		deps.store.On("GetWallet", mock.Anything, "").Return(
 			&db.WalletInfo{}, nil,
 		).Once()
-		deps.syncer.On("syncState").Return(syncStateSynced)
+		deps.syncer.On("syncState").Return(syncStateSynced).Once()
+		deps.chain.On("GetBestBlock").Return(
+			&chainhash.Hash{}, int32(0), nil,
+		).Once()
 		deps.chain.On("BackEnd").Return("mock")
 
 		info, err := w.Info(t.Context())
 		require.NoError(t, err)
 		require.Equal(t, int32(-1), info.SyncedTo.Height)
+		require.False(t, info.Synced)
 	})
+}
+
+// TestControllerInfoExactSyncStatus verifies that Info reports synchronized
+// only when live delivery is ready and the committed Wallet tip exactly matches
+// the observed chain tip.
+func TestControllerInfoExactSyncStatus(t *testing.T) {
+	t.Parallel()
+
+	syncedHash := chainhash.Hash{100}
+	otherHash := chainhash.Hash{101}
+
+	testCases := []struct {
+		name        string
+		syncState   syncState
+		walletTip   *db.Block
+		chainHash   chainhash.Hash
+		chainHeight int32
+		expectSync  bool
+	}{
+		{
+			name:        "exact ready tip",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  true,
+		},
+		{
+			name:        "backend not ready",
+			syncState:   syncStateBackendSyncing,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "live delivery not ready",
+			syncState:   syncStateSyncing,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "height mismatch",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 99},
+			chainHash:   syncedHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+		{
+			name:        "same height hash mismatch",
+			syncState:   syncStateSynced,
+			walletTip:   &db.Block{Hash: syncedHash, Height: 100},
+			chainHash:   otherHash,
+			chainHeight: 100,
+			expectSync:  false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a Wallet with independently controlled
+			// committed, observed, and live-delivery state.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
+			deps.store.On("GetWallet", mock.Anything, "").Return(
+				&db.WalletInfo{SyncedTo: testCase.walletTip}, nil,
+			).Once()
+			deps.syncer.On("syncState").Return(
+				testCase.syncState,
+			).Once()
+			deps.chain.On("GetBestBlock").Return(
+				&testCase.chainHash, testCase.chainHeight, nil,
+			).Once()
+			deps.chain.On("BackEnd").Return("mock")
+
+			// Act: Read the public Wallet snapshot.
+			info, err := w.Info(t.Context())
+
+			// Assert: Readiness alone is insufficient; both tip fields
+			// must identify the same block.
+			require.NoError(t, err)
+			require.Equal(t, testCase.expectSync, info.Synced)
+		})
+	}
+}
+
+// TestControllerInfoChainTipError verifies that Info cannot report a
+// successful snapshot when the observed chain tip is unavailable.
+func TestControllerInfoChainTipError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Start a Wallet with a committed tip while the chain source
+	// fails to provide its observed tip.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	deps.store.On("GetWallet", mock.Anything, "").Return(
+		&db.WalletInfo{SyncedTo: &db.Block{
+			Hash: chainhash.Hash{100}, Height: 100,
+		}}, nil,
+	).Once()
+	deps.chain.On("GetBestBlock").Return(
+		(*chainhash.Hash)(nil), int32(0), errBestBlock,
+	).Once()
+
+	// Act: Read the public Wallet snapshot.
+	_, err := w.Info(t.Context())
+
+	// Assert: The source error remains identifiable through the public call.
+	require.ErrorIs(t, err, errBestBlock)
+}
+
+// TestControllerInfoSmallGapReportsUnsynced verifies that Info remains exact
+// while the wallet's committed tip trails the observed tip by one block.
+func TestControllerInfoSmallGapReportsUnsynced(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Keep the live delivery state ready while the persisted Wallet
+	// tip trails the observed source by one block.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	walletHash := chainhash.Hash{99}
+	bestHash := chainhash.Hash{100}
+	deps.store.On("GetWallet", mock.Anything, "").Return(
+		&db.WalletInfo{SyncedTo: &db.Block{
+			Hash: walletHash, Height: 99,
+		}}, nil,
+	).Once()
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.chain.On("GetBestBlock").Return(
+		&bestHash, int32(100), nil,
+	).Once()
+	deps.chain.On("BackEnd").Return("mock")
+
+	// Act: Read the public snapshot without changing admission state.
+	info, err := w.Info(t.Context())
+
+	// Assert: Info does not conflate admission readiness with exact sync.
+	require.NoError(t, err)
+	require.False(t, info.Synced)
 }
 
 // TestControllerResync verifies the Resync method.
