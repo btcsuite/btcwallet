@@ -290,13 +290,6 @@ func (s *syncer) syncState() syncState {
 	return syncState(s.state.Load())
 }
 
-// isRecoveryMode returns true if the wallet is currently syncing or
-// rescanning.
-func (s *syncer) isRecoveryMode() bool {
-	status := s.syncState()
-	return status == syncStateSyncing || status == syncStateRescanning
-}
-
 // initChainSync performs the initial setup for the chain synchronization loop.
 // This includes waiting for the backend to sync, checking for rollbacks, and
 // enabling block notifications. It returns an error if any of these setup
@@ -1827,11 +1820,11 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
 
-	// If the wallet is already syncing or rescanning, we can't accept a
-	// full resync request. This prevents conflicting rescan operations.
-	if s.isRecoveryMode() {
+	// Existing sync or scan work must finish before another scan can run.
+	state := s.syncState()
+	if state == syncStateSyncing || state == syncStateRescanning {
 		return fmt.Errorf("%w: wallet is currently %s",
-			ErrStateForbidden, s.syncState())
+			ErrStateForbidden, state)
 	}
 
 	if req.typ == scanTypeTargeted {

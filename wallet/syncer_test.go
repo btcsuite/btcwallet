@@ -53,10 +53,9 @@ func TestSyncerInitialization(t *testing.T) {
 	)
 
 	// Assert: Verify that the syncer is correctly initialized in the
-	// backend syncing state and is not in recovery mode.
+	// backend syncing state.
 	require.NotNil(t, s)
 	require.Equal(t, syncStateBackendSyncing, s.syncState())
-	require.False(t, s.isRecoveryMode())
 }
 
 // TestSyncerRequestScan verifies that scan requests are correctly accepted
