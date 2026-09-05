@@ -1523,7 +1523,7 @@ func (w *Wallet) signTaprootPsbtInput(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Compute the raw signature.
-	sig, err := w.ComputeRawSig(ctx, params)
+	sig, err := w.computeRawSig(ctx, params)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errComputeRawSig, err)
 	}
@@ -1596,7 +1596,7 @@ func (w *Wallet) signBip32PsbtInput(ctx context.Context, packet *psbt.Packet,
 	}
 
 	// Compute the raw signature.
-	sig, err := w.ComputeRawSig(ctx, params)
+	sig, err := w.computeRawSig(ctx, params)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errComputeRawSig, err)
 	}
@@ -1704,7 +1704,7 @@ func (w *Wallet) finalizeInput(ctx context.Context, packet *psbt.Packet,
 		HashType:   pInput.SighashType,
 	}
 
-	unlockingScript, err := w.ComputeUnlockingScript(ctx, params)
+	unlockingScript, err := w.computeUnlockingScript(ctx, params)
 	if err != nil {
 		// If we can't generate the script (e.g. we don't own the key,
 		// or it's a type we don't support yet, or the account is

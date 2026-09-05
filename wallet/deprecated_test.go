@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -2397,6 +2398,9 @@ func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 func TestOpenWithRetryRoutedSigning(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Create a spendable legacy database with its own passphrases
+	// and key material so reopening must recover the real signing state.
+
 	var (
 		pubPass  = []byte("public")
 		privPass = []byte("private")
@@ -2420,7 +2424,8 @@ func TestOpenWithRetryRoutedSigning(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Act: reopen through the deprecated constructor.
+	// Act: Reopen through the retained constructor, initialize its request
+	// runtime, and use the recovered vault for the routed signing calls.
 	w, err := OpenWithRetry(
 		dbConn, pubPass, nil, &chainParams, 0,
 		defaultSyncRetryInterval,
@@ -2434,11 +2439,13 @@ func TestOpenWithRetryRoutedSigning(t *testing.T) {
 	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
 	require.False(t, w.keyVault.IsLocked())
 
-	// This constructor cannot Start: it has no chain to verify a birthday
-	// against. Claim the signing-capable state directly so the routed public
-	// call below is reachable.
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	// The legacy constructor does not assemble a request runtime. This
+	// fixture supplies it so signing is admitted without starting chain sync.
+	w.lifetimeCtx, w.cancel = context.WithCancel(t.Context())
+	w.requestChan = make(chan any)
+	w.lockTimer = time.NewTimer(time.Hour)
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
 	w.state.toUnlocked()
 
 	// A wallet that has synced has a birthday block; CreateDeprecated leaves

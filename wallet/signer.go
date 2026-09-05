@@ -481,6 +481,100 @@ var _ SpendDetails = (*LegacySpendDetails)(nil)
 var _ SpendDetails = (*SegwitV0SpendDetails)(nil)
 var _ SpendDetails = (*TaprootSpendDetails)(nil)
 
+// derivePubKeyReq retains account selection until accepted derivation ends.
+type derivePubKeyReq struct {
+	reqCtx
+
+	params   DerivePubKeyParams
+	respChan chan pubKeyResp
+}
+
+// pubKeyResp returns the derived public key after the accepted lookup ends.
+type pubKeyResp struct {
+	key *btcec.PublicKey
+	err error
+}
+
+// ecdhReq borrows the remote key until accepted secret computation ends.
+type ecdhReq struct {
+	reqCtx
+
+	path     BIP32Path
+	pub      *btcec.PublicKey
+	respChan chan ecdhResp
+}
+
+// ecdhResp returns the shared secret after temporary key cleanup.
+type ecdhResp struct {
+	secret [32]byte
+	err    error
+}
+
+// signDigestReq borrows digest and tweak bytes through vault-backed signing.
+type signDigestReq struct {
+	reqCtx
+
+	path     BIP32Path
+	intent   *SignDigestIntent
+	respChan chan signatureResp
+}
+
+// signatureResp delivers the completed signature without retaining its key.
+type signatureResp struct {
+	signature Signature
+	err       error
+}
+
+// unlockingScriptReq borrows transaction data until assembly completes.
+type unlockingScriptReq struct {
+	reqCtx
+
+	params   *UnlockingScriptParams
+	respChan chan unlockingScriptResp
+}
+
+// unlockingScriptResp retains completed unlocking data for its caller.
+type unlockingScriptResp struct {
+	script *UnlockingScript
+	err    error
+}
+
+// rawSigReq borrows signing inputs until its accepted vault operation ends.
+type rawSigReq struct {
+	reqCtx
+
+	params   *RawSigParams
+	respChan chan rawSigResp
+}
+
+// rawSigResp returns the signature after signing and key cleanup complete.
+type rawSigResp struct {
+	signature RawSignature
+	err       error
+}
+
+// derivePrivKeyReq keeps an exported key joined until it can be delivered.
+type derivePrivKeyReq struct {
+	reqCtx
+
+	path     BIP32Path
+	respChan chan privKeyResp
+}
+
+// privKeyForAddressReq borrows the destination through exported-key lookup.
+type privKeyForAddressReq struct {
+	reqCtx
+
+	addr     address.Address
+	respChan chan privKeyResp
+}
+
+// privKeyResp delivers exported key ownership to its noncanceling waiter.
+type privKeyResp struct {
+	key *btcec.PrivateKey
+	err error
+}
+
 // DerivePubKey derives a public child key from a semantically selected
 // account. The account XPub is read from the durable store, then the branch and
 // child index are derived in memory. Public derivation requires a started
@@ -499,7 +593,29 @@ func (w *Wallet) DerivePubKey(ctx context.Context,
 		return nil, err
 	}
 
-	return w.resolveDerivedPubKeyFromStore(ctx, params)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := derivePubKeyReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		params:   params,
+		respChan: make(chan pubKeyResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.key, result.err
+}
+
+// handleDerivePrivKey delivers the result of an accepted component request.
+func (w *Wallet) handleDerivePrivKey(r derivePrivKeyReq) {
+	// Transfer the exported key to its waiting caller, which owns zeroing it.
+	key, err := w.derivePathPrivKey(r.ctx, r.path)
+	r.respChan <- privKeyResp{key: key, err: err}
 }
 
 // derivePathPrivKey resolves the signing private key for a full BIP-32 path.
@@ -537,6 +653,36 @@ func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	if err != nil {
 		return [32]byte{}, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := ecdhReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		path:     path,
+		pub:      pub,
+		respChan: make(chan ecdhResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return [32]byte{}, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.secret, result.err
+}
+
+// handleECDH delivers the result of an accepted component request.
+func (w *Wallet) handleECDH(r ecdhReq) {
+	// The operation zeroes its derived private key before delivery.
+	secret, err := w.ecdh(r.ctx, r.path, r.pub)
+	r.respChan <- ecdhResp{secret: secret, err: err}
+}
+
+// ecdh computes the shared secret within an accepted vault operation.
+func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
+	pub *btcec.PublicKey) ([32]byte, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
@@ -591,6 +737,36 @@ func (w *Wallet) SignDigest(ctx context.Context, path BIP32Path,
 	if err != nil {
 		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := signDigestReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		path:     path,
+		intent:   intent,
+		respChan: make(chan signatureResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.signature, result.err
+}
+
+// handleSignDigest delivers the result of an accepted component request.
+func (w *Wallet) handleSignDigest(r signDigestReq) {
+	// The operation zeroes its derived private key before delivery.
+	signature, err := w.signDigest(r.ctx, r.path, r.intent)
+	r.respChan <- signatureResp{signature: signature, err: err}
+}
+
+// signDigest signs the requested digest and zeroes its key before completion.
+func (w *Wallet) signDigest(ctx context.Context, path BIP32Path,
+	intent *SignDigestIntent) (Signature, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, path)
 	if err != nil {
@@ -653,7 +829,8 @@ func signDigestECDSA(privKey *btcec.PrivateKey,
 }
 
 // ComputeUnlockingScript generates the full sigScript and witness required to
-// spend a UTXO.
+// spend a UTXO. A supplied tweaker finishes before return even if the caller
+// cancels after admission.
 func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	params *UnlockingScriptParams) (*UnlockingScript, error) {
 
@@ -661,6 +838,36 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := unlockingScriptReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		params:   params,
+		respChan: make(chan unlockingScriptResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.script, result.err
+}
+
+// handleComputeUnlockingScript delivers the result of an accepted component
+// request.
+func (w *Wallet) handleComputeUnlockingScript(r unlockingScriptReq) {
+	// Reuse the signing operation also called from admitted PSBT finalization.
+	script, err := w.computeUnlockingScript(r.ctx, r.params)
+	r.respChan <- unlockingScriptResp{script: script, err: err}
+}
+
+// computeUnlockingScript assembles spending data inside its accepted request.
+func (w *Wallet) computeUnlockingScript(ctx context.Context,
+	params *UnlockingScriptParams) (*UnlockingScript, error) {
 
 	// First, we'll fetch the managed address that corresponds to the
 	// output being spent. This will be used to look up the private key
@@ -999,6 +1206,13 @@ func deriveStoredAccountChildKey(vault keyvault.Vault,
 	return privKey, nil
 }
 
+// handleDerivePubKey delivers the result of an accepted component request.
+func (w *Wallet) handleDerivePubKey(r derivePubKeyReq) {
+	// Keep the existing Store-backed key resolver inside accepted work.
+	key, err := w.resolveDerivedPubKeyFromStore(r.ctx, r.params)
+	r.respChan <- pubKeyResp{key: key, err: err}
+}
+
 // resolveDerivedPubKeyFromStore resolves one derived public key from the
 // account-level extended public key stored behind the wallet store. It is the
 // public-key counterpart of resolveDerivedPrivKeyFromStore and, since the
@@ -1160,7 +1374,8 @@ func redeemSigScript(redeemScript []byte) ([]byte, error) {
 }
 
 // ComputeRawSig generates a raw signature for a single transaction input. The
-// caller is responsible for assembling the final witness.
+// caller is responsible for assembling the final witness. A supplied tweaker
+// finishes before return even if the caller cancels after admission.
 func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	RawSignature, error) {
 
@@ -1168,6 +1383,36 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	if err != nil {
 		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := rawSigReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		params:   params,
+		respChan: make(chan rawSigResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.signature, result.err
+}
+
+// handleComputeRawSig delivers the result of an accepted component request.
+func (w *Wallet) handleComputeRawSig(r rawSigReq) {
+	// Reuse raw signing shared with PSBTs and finish key cleanup before
+	// delivery.
+	signature, err := w.computeRawSig(r.ctx, r.params)
+	r.respChan <- rawSigResp{signature: signature, err: err}
+}
+
+// computeRawSig signs and zeroes its key inside the accepted request.
+func (w *Wallet) computeRawSig(ctx context.Context, params *RawSigParams) (
+	RawSignature, error) {
 
 	privKey, err := w.derivePathPrivKey(ctx, params.Path)
 	if err != nil {
@@ -1197,7 +1442,8 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 // DerivePrivKey derives a private key from a full BIP-32 derivation
 // path.
 //
-// DANGER: This method exports sensitive key material.
+// DANGER: This method exports sensitive key material. Once admitted, the call
+// waits for key delivery despite cancellation. The caller must zero the key.
 func (w *Wallet) DerivePrivKey(ctx context.Context, path BIP32Path) (
 	*btcec.PrivateKey, error) {
 
@@ -1206,12 +1452,28 @@ func (w *Wallet) DerivePrivKey(ctx context.Context, path BIP32Path) (
 		return nil, err
 	}
 
-	return w.derivePathPrivKey(ctx, path)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := derivePrivKeyReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		path:     path,
+		respChan: make(chan privKeyResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.key, result.err
 }
 
 // GetPrivKeyForAddress returns the private key for a given address.
 //
-// DANGER: This method exports sensitive key material.
+// DANGER: This method exports sensitive key material. Once admitted, the call
+// waits for key delivery despite cancellation. The caller must zero the key.
 func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 	*btcec.PrivateKey, error) {
 
@@ -1220,7 +1482,22 @@ func (w *Wallet) GetPrivKeyForAddress(ctx context.Context, a address.Address) (
 		return nil, err
 	}
 
-	return w.privKeyForAddress(ctx, a)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := privKeyForAddressReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		addr:     a,
+		respChan: make(chan privKeyResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.key, result.err
 }
 
 // PrivKeyForAddress looks up the associated private key for a wallet address.
@@ -1240,6 +1517,14 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 	}
 
 	return w.privKeyForAddress(context.Background(), a)
+}
+
+// handleGetPrivKeyForAddress delivers the result of an accepted component
+// request.
+func (w *Wallet) handleGetPrivKeyForAddress(r privKeyForAddressReq) {
+	// Reuse address-key lookup and transfer the exported key to its caller.
+	key, err := w.privKeyForAddress(r.ctx, r.addr)
+	r.respChan <- privKeyResp{key: key, err: err}
 }
 
 // privKeyForAddress resolves the private key for a wallet address through the
