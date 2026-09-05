@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -173,6 +174,11 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 
 	cfg.ChainParams = chainParams
 
+	// Startup has no load request from which to recover a legacy public
+	// passphrase, so isolate the configured bytes before the backend retains
+	// them for aggregate startup.
+	cfg.KVDBPubPassphrase = slices.Clone(cfg.KVDBPubPassphrase)
+
 	if cfg.WalletSyncRetryInterval == 0 {
 		cfg.WalletSyncRetryInterval = initialBackoff
 	}
@@ -202,6 +208,10 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	if err != nil {
 		return nil, translateDatabaseIdentityError(err)
 	}
+
+	// The kvdb backend now owns the cloned startup credential. Do not retain
+	// another reference in the Manager's otherwise immutable configuration.
+	cfg.KVDBPubPassphrase = nil
 
 	return &Manager{
 		wallets: make(map[string]*Wallet),
