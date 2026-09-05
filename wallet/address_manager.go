@@ -469,6 +469,106 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	return balances, nil
 }
 
+// newAddressReq retains value parameters until derivation and notification end.
+type newAddressReq struct {
+	reqCtx
+
+	accountName string
+	addrType    waddrmgr.AddressType
+	change      bool
+	respChan    chan addressResp
+}
+
+// getUnusedAddressReq keeps lookup and fallback derivation in one admission.
+type getUnusedAddressReq struct {
+	reqCtx
+
+	accountName string
+	addrType    waddrmgr.AddressType
+	change      bool
+	respChan    chan addressResp
+}
+
+// addressResp carries either address acquisition result to a buffered receiver.
+type addressResp struct {
+	addr address.Address
+	err  error
+}
+
+// getAddressInfoReq borrows the destination until the accepted lookup ends.
+type getAddressInfoReq struct {
+	reqCtx
+
+	addr     address.Address
+	respChan chan addressInfoResp
+}
+
+// addressInfoResp returns metadata once the accepted lookup completes.
+type addressInfoResp struct {
+	info AddressInfo
+	err  error
+}
+
+// listAddressesReq keeps balance and address iteration under one admission.
+type listAddressesReq struct {
+	reqCtx
+
+	accountName string
+	addrType    waddrmgr.AddressType
+	respChan    chan listAddressesResp
+}
+
+// listAddressesResp returns the list after balance and address iteration end.
+type listAddressesResp struct {
+	addresses []AddressProperty
+	err       error
+}
+
+// importPublicKeyReq borrows the key through persistence and registration.
+type importPublicKeyReq struct {
+	reqCtx
+
+	pubKey      *btcec.PublicKey
+	addrType    waddrmgr.AddressType
+	respErrChan chan error
+}
+
+// importTaprootScriptReq retains the supplied script through vault encryption.
+type importTaprootScriptReq struct {
+	reqCtx
+
+	tapscript waddrmgr.Tapscript
+	respChan  chan addressInfoResp
+}
+
+// scriptForOutputReq borrows script bytes until spending lookups complete.
+type scriptForOutputReq struct {
+	reqCtx
+
+	output   wire.TxOut
+	respChan chan outputScriptResp
+}
+
+// outputScriptResp returns spending metadata after dependency access ends.
+type outputScriptResp struct {
+	info OutputScriptInfo
+	err  error
+}
+
+// getDerivationInfoReq borrows its destination until path lookup completes.
+type getDerivationInfoReq struct {
+	reqCtx
+
+	addr     address.Address
+	respChan chan derivationInfoResp
+}
+
+// derivationInfoResp preserves a path result across cancellation and shutdown.
+type derivationInfoResp struct {
+	info *psbt.Bip32Derivation
+	err  error
+}
+
 // NewAddress returns a new address for the given account and address type.
 // This method is a low-level primitive that will always derive a new, unused
 // address from the end of the address chain.
@@ -532,6 +632,39 @@ func (w *Wallet) NewAddress(ctx context.Context, accountName string,
 	if err != nil {
 		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := newAddressReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		accountName: accountName,
+		addrType:    addrType,
+		change:      change,
+		respChan:    make(chan addressResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.addr, result.err
+}
+
+// handleNewAddress delivers the result of an accepted component request.
+func (w *Wallet) handleNewAddress(r newAddressReq) {
+	// Reuse address derivation shared with the unused-address fallback.
+	addr, err := w.newAddress(
+		r.ctx, r.accountName, r.addrType, r.change,
+	)
+	r.respChan <- addressResp{addr: addr, err: err}
+}
+
+// newAddress derives and registers an address inside its accepted request.
+func (w *Wallet) newAddress(ctx context.Context, accountName string,
+	addrType waddrmgr.AddressType, change bool) (address.Address, error) {
 
 	// Addresses cannot be derived from the catch-all imported accounts.
 	if accountName == waddrmgr.ImportedAddrAccountName {
@@ -613,49 +746,90 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	if accountName == waddrmgr.ImportedAddrAccountName {
-		return nil, ErrImportedAccountNoAddrGen
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := getUnusedAddressReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		accountName: accountName,
+		addrType:    addrType,
+		change:      change,
+		respChan:    make(chan addressResp, 1),
 	}
 
-	keyScope, err := addrType.KeyScope()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
-	}
-
-	req, err := addressPageRequest()
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.addr, result.err
+}
+
+// handleGetUnusedAddress reuses or derives an address without a second
+// admission.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
+	if r.accountName == waddrmgr.ImportedAddrAccountName {
+		r.respChan <- addressResp{err: ErrImportedAccountNoAddrGen}
+
+		return
+	}
+
+	keyScope, err := r.addrType.KeyScope()
+	if err != nil {
+		r.respChan <- addressResp{
+			err: fmt.Errorf("%w: %v", ErrUnknownAddrType, r.addrType),
+		}
+
+		return
+	}
+
+	req, err := addressPageRequest()
+	if err != nil {
+		r.respChan <- addressResp{err: err}
+
+		return
+	}
+
 	addresses := w.store.IterAddresses(
-		ctx, db.ListAddressesQuery{
+		r.ctx, db.ListAddressesQuery{
 			WalletID:    w.id,
-			AccountName: &accountName,
+			AccountName: &r.accountName,
 			Scope:       (*db.KeyScope)(&keyScope),
 			Page:        req,
 		},
 	)
 	for storeAddr, err := range addresses {
 		if err != nil {
-			return nil, err
+			r.respChan <- addressResp{err: err}
+
+			return
 		}
 
 		unusedAddr, ok, err := nextUnusedStoreAddress(
-			storeAddr, change, w.cfg.ChainParams,
+			storeAddr, r.change, w.cfg.ChainParams,
 		)
 		if err != nil {
-			return nil, err
+			r.respChan <- addressResp{err: err}
+
+			return
 		}
 
 		if !ok {
 			continue
 		}
 
-		return unusedAddr, nil
+		r.respChan <- addressResp{addr: unusedAddr}
+
+		return
 	}
 
 	// Otherwise, we'll generate a new one.
-	return w.NewAddress(ctx, accountName, addrType, change)
+	responseAddr, responseErr := w.newAddress(
+		r.ctx, r.accountName, r.addrType, r.change,
+	)
+	r.respChan <- addressResp{addr: responseAddr, err: responseErr}
 }
 
 // nextUnusedStoreAddress returns the unused address candidate represented by a
@@ -696,6 +870,35 @@ func (w *Wallet) GetAddressInfo(ctx context.Context, a address.Address) (
 		return AddressInfo{}, err
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := getAddressInfoReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		addr:     a,
+		respChan: make(chan addressInfoResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return AddressInfo{}, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleGetAddressInfo delivers the result of an accepted component request.
+func (w *Wallet) handleGetAddressInfo(r getAddressInfoReq) {
+	// Reuse metadata lookup shared with nested signing and script queries.
+	info, err := w.getAddressInfo(r.ctx, r.addr)
+	r.respChan <- addressInfoResp{info: info, err: err}
+}
+
+// getAddressInfo resolves metadata while its outer request owns Store access.
+func (w *Wallet) getAddressInfo(ctx context.Context, a address.Address) (
+	AddressInfo, error) {
+
 	scriptPubKey, err := txscript.PayToAddrScript(a)
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf("pay to addr script: %w", err)
@@ -732,32 +935,62 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		return nil, err
 	}
 
-	req, err := addressPageRequest()
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := listAddressesReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		accountName: accountName,
+		addrType:    addrType,
+		respChan:    make(chan listAddressesResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.addresses, result.err
+}
+
+// handleListAddresses reads addresses and balances within one accepted request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleListAddresses(r listAddressesReq) {
+	req, err := addressPageRequest()
+	if err != nil {
+		r.respChan <- listAddressesResp{err: err}
+
+		return
 	}
 
 	query, storeAddrType, err := listAddressesQuery(
-		w.id, req, accountName, addrType,
+		w.id, req, r.accountName, r.addrType,
 	)
 	if err != nil {
-		return nil, err
+		r.respChan <- listAddressesResp{err: err}
+
+		return
 	}
 
-	balances, err := w.addrBalances(ctx)
+	balances, err := w.addrBalances(r.ctx)
 	if err != nil {
-		return nil, err
+		r.respChan <- listAddressesResp{err: err}
+
+		return
 	}
 
 	properties := make([]AddressProperty, 0)
 
-	addresses := w.store.IterAddresses(ctx, query)
+	addresses := w.store.IterAddresses(r.ctx, query)
 	for storeAddr, err := range addresses {
 		if err != nil {
-			return nil, err
+			r.respChan <- listAddressesResp{err: err}
+
+			return
 		}
 
-		if accountName == db.DefaultImportedAccountName &&
+		if r.accountName == db.DefaultImportedAccountName &&
 			!walletAddressTypeMatches(storeAddr, storeAddrType) {
 
 			continue
@@ -776,7 +1009,7 @@ func (w *Wallet) ListAddresses(ctx context.Context, accountName string,
 		})
 	}
 
-	return properties, nil
+	r.respChan <- listAddressesResp{addresses: properties}
 }
 
 // walletAddressTypeMatches reports whether a store address row matches a
@@ -837,27 +1070,53 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		return err
 	}
 
-	storeAddrType, err := addresstype.FromWallet(addrType)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := importPublicKeyReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		pubKey:      pubKey,
+		addrType:    addrType,
+		respErrChan: make(chan error, 1),
 	}
 
-	serializedPubKey := pubKey.SerializeCompressed()
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
 
-	addr, err := addrType.AddrFromPubKeyBytes(
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleImportPublicKey persists and registers an accepted public-key import.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleImportPublicKey(r importPublicKeyReq) {
+	storeAddrType, err := addresstype.FromWallet(r.addrType)
+	if err != nil {
+		r.respErrChan <- fmt.Errorf("%w: %v", ErrUnknownAddrType, r.addrType)
+
+		return
+	}
+
+	serializedPubKey := r.pubKey.SerializeCompressed()
+
+	addr, err := r.addrType.AddrFromPubKeyBytes(
 		serializedPubKey, w.cfg.ChainParams,
 	)
 	if err != nil {
-		return fmt.Errorf("derive imported address: %w", err)
+		r.respErrChan <- fmt.Errorf("derive imported address: %w", err)
+
+		return
 	}
 
 	scriptPubKey, err := txscript.PayToAddrScript(addr)
 	if err != nil {
-		return fmt.Errorf("pay to addr script: %w", err)
+		r.respErrChan <- fmt.Errorf("pay to addr script: %w", err)
+
+		return
 	}
 
 	_, err = w.store.NewImportedAddress(
-		ctx, db.NewImportedAddressParams{
+		r.ctx, db.NewImportedAddressParams{
 			WalletID:     w.id,
 			AddressType:  storeAddrType.Type,
 			ScriptPubKey: scriptPubKey,
@@ -865,10 +1124,12 @@ func (w *Wallet) ImportPublicKey(ctx context.Context, pubKey *btcec.PublicKey,
 		},
 	)
 	if err != nil {
-		return err
+		r.respErrChan <- err
+
+		return
 	}
 
-	return w.cfg.Chain.NotifyReceived([]address.Address{addr})
+	r.respErrChan <- w.cfg.Chain.NotifyReceived([]address.Address{addr})
 }
 
 // ImportTaprootScript imports a taproot script for tracking. Script presence
@@ -884,30 +1145,64 @@ func (w *Wallet) ImportTaprootScript(ctx context.Context,
 		return AddressInfo{}, err
 	}
 
-	taprootKey, err := tapscript.TaprootKey()
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := importTaprootScriptReq{
+		reqCtx:    reqCtx{ctx: ctx},
+		tapscript: tapscript,
+		respChan:  make(chan addressInfoResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return AddressInfo{}, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleImportTaprootScript encrypts and registers the accepted script
+// import.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleImportTaprootScript(r importTaprootScriptReq) {
+	taprootKey, err := r.tapscript.TaprootKey()
+	if err != nil {
+		r.respChan <- addressInfoResp{err: err}
+
+		return
 	}
 
 	addr, err := address.NewAddressTaproot(
 		schnorr.SerializePubKey(taprootKey), w.cfg.ChainParams,
 	)
 	if err != nil {
-		return AddressInfo{}, fmt.Errorf("taproot address: %w", err)
+		r.respChan <- addressInfoResp{
+			err: fmt.Errorf("taproot address: %w", err),
+		}
+
+		return
 	}
 
 	scriptPubKey, err := txscript.PayToAddrScript(addr)
 	if err != nil {
-		return AddressInfo{}, fmt.Errorf("pay to addr script: %w", err)
+		r.respChan <- addressInfoResp{
+			err: fmt.Errorf("pay to addr script: %w", err),
+		}
+
+		return
 	}
 
-	encryptedScript, err := encryptTaprootScript(w.keyVault, &tapscript)
+	encryptedScript, err := encryptTaprootScript(w.keyVault, &r.tapscript)
 	if err != nil {
-		return AddressInfo{}, err
+		r.respChan <- addressInfoResp{err: err}
+
+		return
 	}
 
 	storeInfo, err := w.store.NewImportedAddress(
-		ctx, db.NewImportedAddressParams{
+		r.ctx, db.NewImportedAddressParams{
 			WalletID:        w.id,
 			AddressType:     db.TaprootPubKey,
 			ScriptPubKey:    scriptPubKey,
@@ -915,22 +1210,28 @@ func (w *Wallet) ImportTaprootScript(ctx context.Context,
 		},
 	)
 	if err != nil {
-		return AddressInfo{}, err
+		r.respChan <- addressInfoResp{err: err}
+
+		return
 	}
 
 	storeInfo.HasScript = true
 
 	info, err := addressInfoFromStoreAddress(storeInfo, w.cfg.ChainParams)
 	if err != nil {
-		return AddressInfo{}, err
+		r.respChan <- addressInfoResp{err: err}
+
+		return
 	}
 
 	err = w.cfg.Chain.NotifyReceived([]address.Address{addr})
 	if err != nil {
-		return AddressInfo{}, err
+		r.respChan <- addressInfoResp{err: err}
+
+		return
 	}
 
-	return info, nil
+	r.respChan <- addressInfoResp{info: info}
 }
 
 // encryptTaprootScript encodes and encrypts taproot script data before the
@@ -995,6 +1296,35 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 		return OutputScriptInfo{}, err
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := scriptForOutputReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		output:   output,
+		respChan: make(chan outputScriptResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return OutputScriptInfo{}, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleScriptForOutput delivers the result of an accepted component request.
+func (w *Wallet) handleScriptForOutput(r scriptForOutputReq) {
+	// Reuse script lookup without re-entering admission from signing or PSBTs.
+	info, err := w.scriptForOutput(r.ctx, r.output)
+	r.respChan <- outputScriptResp{info: info, err: err}
+}
+
+// scriptForOutput resolves spending data without re-entering admission.
+func (w *Wallet) scriptForOutput(ctx context.Context, output wire.TxOut) (
+	OutputScriptInfo, error) {
+
 	// First, we'll extract the address from the output's pkScript.
 	addr := extractAddrFromPKScript(output.PkScript, w.cfg.ChainParams)
 	if addr == nil {
@@ -1002,7 +1332,7 @@ func (w *Wallet) ScriptForOutput(ctx context.Context, output wire.TxOut) (
 			ErrUnableToExtractAddress, output.PkScript)
 	}
 
-	addressInfo, err := w.GetAddressInfo(ctx, addr)
+	addressInfo, err := w.getAddressInfo(ctx, addr)
 	if err != nil {
 		return OutputScriptInfo{}, fmt.Errorf("unable to get address info "+
 			"for %s: %w", addr.String(), err)
@@ -1102,13 +1432,37 @@ func (w *Wallet) GetDerivationInfo(ctx context.Context,
 		return nil, err
 	}
 
-	// We'll use the address to look up the derivation path.
-	addressInfo, err := w.GetAddressInfo(ctx, addr)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := getDerivationInfoReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		addr:     addr,
+		respChan: make(chan derivationInfoResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 
-	return derivationForAddressInfo(addressInfo)
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleGetDerivationInfo resolves the path under its accepted outer request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleGetDerivationInfo(r getDerivationInfoReq) {
+	// We'll use the address to look up the derivation path.
+	addressInfo, err := w.getAddressInfo(r.ctx, r.addr)
+	if err != nil {
+		r.respChan <- derivationInfoResp{err: err}
+
+		return
+	}
+
+	responseInfo, responseErr := derivationForAddressInfo(addressInfo)
+	r.respChan <- derivationInfoResp{info: responseInfo, err: responseErr}
 }
 
 // derivationForAddressInfo constructs a PSBT Bip32Derivation struct from a
