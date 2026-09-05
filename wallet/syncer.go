@@ -107,11 +107,6 @@ const (
 	// syncStateSynced indicates the wallet is running and synced to the
 	// chain tip.
 	syncStateSynced
-
-	// syncStateRescanning indicates the wallet is running a historical
-	// scan for specific user-provided targets, such as accounts or
-	// addresses, without rewinding the global synchronization state.
-	syncStateRescanning
 )
 
 // String returns the string representation of a syncState.
@@ -125,9 +120,6 @@ func (s syncState) String() string {
 
 	case syncStateSynced:
 		return "synced"
-
-	case syncStateRescanning:
-		return "rescanning"
 
 	default:
 		return "unknown sync state"
@@ -221,6 +213,16 @@ type scanResult struct {
 	meta *wtxmgr.BlockMeta
 }
 
+// liveSyncStatus is the private source and delivery snapshot used to derive
+// the public Wallet synchronization result.
+type liveSyncStatus struct {
+	// state is the wallet's current live-delivery readiness.
+	state syncState
+
+	// chainTip is the tip currently observed from the chain source.
+	chainTip waddrmgr.BlockStamp
+}
+
 // chainSyncer is a private interface that abstracts the chain synchronization
 // logic, allowing it to be mocked for testing the wallet and controller.
 type chainSyncer interface {
@@ -232,6 +234,10 @@ type chainSyncer interface {
 
 	// syncState returns the current synchronization state.
 	syncState() syncState
+
+	// liveStatus returns one snapshot of live delivery readiness and the
+	// observed chain tip.
+	liveStatus() (liveSyncStatus, error)
 }
 
 // syncer is a stateless blocking worker responsible for synchronizing the
@@ -255,6 +261,10 @@ type syncer struct {
 
 	// state tracks the chain synchronization status.
 	state atomic.Uint32
+
+	// scanRequestPending tracks whether a scan request was accepted and has
+	// not completed yet.
+	scanRequestPending atomic.Bool
 
 	// scanReqChan is the internal mailbox used to receive scan requests
 	// from the controller. It is buffered to ensure that submitting a
@@ -290,11 +300,21 @@ func (s *syncer) syncState() syncState {
 	return syncState(s.state.Load())
 }
 
-// isRecoveryMode returns true if the wallet is currently syncing or
-// rescanning.
-func (s *syncer) isRecoveryMode() bool {
-	status := s.syncState()
-	return status == syncStateSyncing || status == syncStateRescanning
+// liveStatus returns one snapshot of live delivery readiness and the observed
+// chain tip.
+func (s *syncer) liveStatus() (liveSyncStatus, error) {
+	bestHash, bestHeight, err := s.cfg.Chain.GetBestBlock()
+	if err != nil {
+		return liveSyncStatus{}, fmt.Errorf("get best block: %w", err)
+	}
+
+	return liveSyncStatus{
+		state: s.syncState(),
+		chainTip: waddrmgr.BlockStamp{
+			Hash:   *bestHash,
+			Height: bestHeight,
+		},
+	}, nil
 }
 
 // initChainSync performs the initial setup for the chain synchronization loop.
@@ -728,11 +748,18 @@ func (s *syncer) runSyncStep(ctx context.Context) error {
 
 // requestScan submits a rescan job to the syncer.
 func (s *syncer) requestScan(ctx context.Context, req *scanReq) error {
+	if !s.scanRequestPending.CompareAndSwap(false, true) {
+		return fmt.Errorf("%w: wallet is currently rescanning",
+			ErrStateForbidden)
+	}
+
 	select {
 	case s.scanReqChan <- req:
 		return nil
 
 	case <-ctx.Done():
+		s.scanRequestPending.Store(false)
+
 		return ctx.Err()
 	}
 }
@@ -1827,9 +1854,11 @@ func (s *syncer) extractAddrEntries(txOuts []*wire.TxOut) []AddrEntry {
 func (s *syncer) handleScanReq(ctx context.Context,
 	req *scanReq) error {
 
-	// If the wallet is already syncing or rescanning, we can't accept a
-	// full resync request. This prevents conflicting rescan operations.
-	if s.isRecoveryMode() {
+	defer s.scanRequestPending.Store(false)
+
+	// A full synchronization pass owns the Wallet's live chain position, so
+	// it cannot accept a historical scan request concurrently.
+	if s.syncState() == syncStateSyncing {
 		return fmt.Errorf("%w: wallet is currently %s",
 			ErrStateForbidden, s.syncState())
 	}
@@ -1905,9 +1934,6 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	if err != nil {
 		return err
 	}
-
-	s.state.Store(uint32(syncStateRescanning))
-	defer s.state.Store(uint32(syncStateSynced))
 
 	startHeight := req.startBlock.Height
 

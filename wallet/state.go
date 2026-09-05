@@ -261,7 +261,7 @@ func (s *walletState) canSign() error {
 
 // validateSynced checks if the wallet is running and fully synchronized.
 // It returns an error if the wallet is not started or if it is currently
-// syncing/rescanning.
+// syncing.
 func (s *walletState) validateSynced() error {
 	if !s.isStarted() {
 		return fmt.Errorf("%w: wallet not started", ErrStateForbidden)
@@ -301,10 +301,4 @@ func (s *walletState) canLock() error {
 // the passphrase.
 func (s *walletState) canChangePassphrase() error {
 	return s.validateStarted()
-}
-
-// isRecoveryMode returns true if the wallet is currently syncing or rescanning.
-func (s *walletState) isRecoveryMode() bool {
-	sync := s.syncState()
-	return sync == syncStateSyncing || sync == syncStateRescanning
 }

@@ -35,6 +35,20 @@ import (
 // that need a recovery horizon beyond the addresses already on record.
 const testScanRecoveryWindow = 20
 
+type scanBatchRecorder struct {
+	db.Store
+
+	batches []db.ScanBatchParams
+}
+
+func (s *scanBatchRecorder) ApplyScanBatch(ctx context.Context,
+	params db.ScanBatchParams) error {
+
+	s.batches = append(s.batches, params)
+
+	return s.Store.ApplyScanBatch(ctx, params)
+}
+
 // TestSyncerInitialization verifies that a new syncer is created with the
 // correct default state.
 func TestSyncerInitialization(t *testing.T) {
@@ -53,10 +67,86 @@ func TestSyncerInitialization(t *testing.T) {
 	)
 
 	// Assert: Verify that the syncer is correctly initialized in the
-	// backend syncing state and is not in recovery mode.
+	// backend syncing state.
 	require.NotNil(t, s)
 	require.Equal(t, syncStateBackendSyncing, s.syncState())
-	require.False(t, s.isRecoveryMode())
+}
+
+// TestSyncerLiveStatus verifies that the sync owner returns the observed source
+// tip and raw delivery state in one private snapshot.
+func TestSyncerLiveStatus(t *testing.T) {
+	t.Parallel()
+
+	bestHash := chainhash.Hash{100}
+	testCases := []struct {
+		name       string
+		state      syncState
+		chainErr   error
+		expectErr  error
+		expectHash chainhash.Hash
+	}{
+		{
+			name:       "backend not ready",
+			state:      syncStateBackendSyncing,
+			expectHash: bestHash,
+		},
+		{
+			name:       "delivery not ready",
+			state:      syncStateSyncing,
+			expectHash: bestHash,
+		},
+		{
+			name:       "ready",
+			state:      syncStateSynced,
+			expectHash: bestHash,
+		},
+		{
+			name:      "source error",
+			state:     syncStateSynced,
+			chainErr:  errBestBlock,
+			expectErr: errBestBlock,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Set the independent source and delivery inputs.
+			mockChain := &bwmock.Chain{}
+			defer mockChain.AssertExpectations(t)
+
+			s := newSyncer(
+				Config{Chain: mockChain}, nil, nil, nil,
+				&walletmock.Store{}, 0,
+			)
+			s.state.Store(uint32(testCase.state))
+
+			var hash *chainhash.Hash
+			if testCase.chainErr == nil {
+				hash = &bestHash
+			}
+
+			mockChain.On("GetBestBlock").Return(
+				hash, int32(100), testCase.chainErr,
+			).Once()
+
+			// Act: Read the sync owner's private snapshot.
+			status, err := s.liveStatus()
+
+			// Assert: Source failures remain identifiable; successful
+			// snapshots preserve both raw inputs.
+			if testCase.expectErr != nil {
+				require.ErrorIs(t, err, testCase.expectErr)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, testCase.state, status.state)
+			require.Equal(t, int32(100), status.chainTip.Height)
+			require.Equal(t, testCase.expectHash, status.chainTip.Hash)
+		})
+	}
 }
 
 // TestSyncerRequestScan verifies that scan requests are correctly accepted
@@ -124,6 +214,119 @@ func TestSyncerRequestScanBlocked(t *testing.T) {
 	// context cancellation.
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestSyncerRequestScanRejectsConcurrentRequest verifies that an accepted scan
+// request excludes both targeted rescans and rewind resyncs until it completes.
+func TestSyncerRequestScanRejectsConcurrentRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		typ  scanType
+	}{
+		{
+			name: "targeted rescan",
+			typ:  scanTypeTargeted,
+		},
+		{
+			name: "rewind resync",
+			typ:  scanTypeRewind,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Accept one scan request without processing it.
+			s := newSyncer(
+				Config{}, nil, nil, nil, &walletmock.Store{}, 0,
+			)
+			err := s.requestScan(t.Context(), &scanReq{
+				typ: scanTypeTargeted,
+			})
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			// Act: Submit another scan while the first is pending.
+			err = s.requestScan(ctx, &scanReq{typ: test.typ})
+
+			// Assert: Reject it as a state conflict before considering the
+			// caller's canceled context.
+			require.ErrorIs(t, err, ErrStateForbidden)
+		})
+	}
+}
+
+// TestSyncerRequestScanReleasesAdmission verifies that completing an accepted
+// scan permits the next request.
+func TestSyncerRequestScanReleasesAdmission(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept a rewind request that has no work to perform.
+	store := &walletmock.Store{}
+	s := newSyncer(Config{}, nil, nil, nil, store, 0)
+	s.state.Store(uint32(syncStateSynced))
+	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
+
+	err := s.requestScan(t.Context(), &scanReq{
+		typ:        scanTypeRewind,
+		startBlock: waddrmgr.BlockStamp{Height: 100},
+	})
+	require.NoError(t, err)
+
+	accepted := <-s.scanReqChan
+	err = s.handleScanReq(t.Context(), accepted)
+	require.NoError(t, err)
+
+	// Act: Submit another request after the first completes.
+	err = s.requestScan(t.Context(), &scanReq{typ: scanTypeTargeted})
+
+	// Assert: The completed request released scan admission.
+	require.NoError(t, err)
+}
+
+// TestSyncerRequestScanReleasesAdmissionOnFailure verifies a failed accepted
+// scan permits the next request.
+func TestSyncerRequestScanReleasesAdmissionOnFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept a request before live synchronization begins.
+	s := newSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
+	accepted := <-s.scanReqChan
+	s.state.Store(uint32(syncStateSyncing))
+
+	// Act: Process the request while live synchronization owns the wallet.
+	err := s.handleScanReq(t.Context(), accepted)
+
+	// Assert: The failure releases admission for a later request.
+	require.ErrorIs(t, err, ErrStateForbidden)
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
+}
+
+// TestSyncerRequestScanReleasesAdmissionOnCancellation verifies a canceled
+// mailbox send does not retain scan admission.
+func TestSyncerRequestScanReleasesAdmissionOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Fill a new syncer's scan request mailbox.
+	s := newSyncer(Config{}, nil, nil, nil, &walletmock.Store{}, 0)
+	s.scanReqChan <- &scanReq{}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Act: Attempt to submit another request with a canceled context.
+	err := s.requestScan(ctx, &scanReq{})
+
+	// Assert: Cancellation releases admission for a later request.
+	require.ErrorIs(t, err, context.Canceled)
+	<-s.scanReqChan
+	require.NoError(t, s.requestScan(t.Context(), &scanReq{}))
 }
 
 // TestSyncerRun verifies the run implementation.
@@ -4486,6 +4689,83 @@ func TestFilterBatch_Match(t *testing.T) {
 	require.Equal(t, hash, matched[0])
 }
 
+// TestScanWithTargetsPreservesLiveSyncState verifies that a targeted
+// historical scan does not change either its Wallet's live readiness or a
+// second Wallet's independent readiness.
+func TestScanWithTargetsPreservesLiveSyncState(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create two independent Wallet syncers that are both ready at
+	// their live tips. Record writes from a targeted request that scans one
+	// real block through the kvdb-backed Store.
+	s, _, _ := newStoreScanSyncer(t)
+	other, _, _ := newStoreScanSyncer(t)
+	recorder := &scanBatchRecorder{Store: s.store}
+	s.store = recorder
+
+	s.state.Store(uint32(syncStateSynced))
+	other.state.Store(uint32(syncStateSynced))
+
+	mockChain := &bwmock.Chain{}
+	defer mockChain.AssertExpectations(t)
+
+	s.cfg.Chain = mockChain
+	s.cfg.SyncMethod = SyncMethodAuto
+	s.cfg.MaxCFilterItems = 100
+	s.cfg.RecoveryWindow = testScanRecoveryWindow
+
+	syncedToBefore, err := s.syncedTo(t.Context())
+	require.NoError(t, err)
+
+	req := &scanReq{
+		startBlock: waddrmgr.BlockStamp{Height: 100},
+		targets: []waddrmgr.AccountScope{{
+			Scope:   waddrmgr.KeyScopeBIP0084,
+			Account: waddrmgr.DefaultAccountNum,
+		}},
+	}
+
+	blockHashes := []chainhash.Hash{{100}}
+	filter, err := gcs.BuildGCSFilter(
+		builder.DefaultP, builder.DefaultM, [16]byte{}, nil,
+	)
+	require.NoError(t, err)
+
+	mockChain.On("GetBestBlock").Return(
+		&chainhash.Hash{100}, int32(100), nil,
+	).Run(func(_ mock.Arguments) {
+		require.Equal(t, syncStateSynced, s.syncState())
+		require.Equal(t, syncStateSynced, other.syncState())
+	}).Once()
+	mockChain.On("GetBlockHashes", int64(100), int64(100)).Return(
+		blockHashes, nil,
+	).Once()
+	mockChain.On(
+		"GetCFilters", blockHashes, wire.GCSFilterRegular,
+	).Return([]*gcs.Filter{filter}, nil).Once()
+	mockChain.On("GetBlockHeaders", blockHashes).Return(
+		[]*wire.BlockHeader{{}}, nil,
+	).Once()
+	mockChain.On("GetBlocks", blockHashes).Return(
+		[]*wire.MsgBlock{wire.NewMsgBlock(&wire.BlockHeader{})}, nil,
+	).Once()
+
+	// Act: Run and complete the targeted historical scan.
+	err = s.scanWithTargets(t.Context(), req)
+
+	// Assert: The batch was applied without synced blocks, and neither the
+	// durable tip nor either Wallet's live-delivery state changed.
+	require.NoError(t, err)
+	require.Len(t, recorder.batches, 1)
+	require.Empty(t, recorder.batches[0].SyncedBlocks)
+
+	syncedToAfter, err := s.syncedTo(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, syncedToBefore, syncedToAfter)
+	require.Equal(t, syncStateSynced, s.syncState())
+	require.Equal(t, syncStateSynced, other.syncState())
+}
+
 // TestScanWithTargets_Empty verifies handling of empty batch results.
 func TestScanWithTargets_Empty(t *testing.T) {
 	t.Parallel()
@@ -4765,6 +5045,7 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		// Arrange: a real-backend syncer where GetBestBlock fails after
 		// the targeted scan state has loaded through the Store.
 		s, _, _ := newStoreScanSyncer(t)
+		s.state.Store(uint32(syncStateSynced))
 
 		mockChain := &bwmock.Chain{}
 		s.cfg.Chain = mockChain
@@ -4779,13 +5060,16 @@ func TestScanWithTargets_Errors(t *testing.T) {
 		}
 
 		mockChain.On("GetBestBlock").Return(nil, int32(0),
-			errBestBlock).Once()
+			errBestBlock).Run(func(_ mock.Arguments) {
+			require.Equal(t, syncStateSynced, s.syncState())
+		}).Once()
 
 		// Act: Attempt targeted scan.
 		err := s.scanWithTargets(t.Context(), req)
 
 		// Assert: Verify failure.
 		require.ErrorContains(t, err, "best block fail")
+		require.Equal(t, syncStateSynced, s.syncState())
 	})
 
 	t.Run("GetBlockHashes_Failure", func(t *testing.T) {
@@ -5254,7 +5538,6 @@ func TestSyncStateString(t *testing.T) {
 		{syncStateBackendSyncing, "backend-syncing"},
 		{syncStateSyncing, "syncing"},
 		{syncStateSynced, "synced"},
-		{syncStateRescanning, "rescanning"},
 		{syncState(99), "unknown sync state"},
 	}
 
@@ -5809,9 +6092,9 @@ func TestDispatchScanStrategy_AutoError(t *testing.T) {
 func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a store-backed syncer for a small gap where silent
-	// sync is preferred. The wallet has no accounts to scan, so the scan
-	// batch only advances the synced tip.
+	// Arrange: Setup a store-backed syncer that is currently ready and one
+	// block behind. The wallet has no accounts to scan, so the scan batch
+	// only advances the synced tip.
 	mockChain := &bwmock.Chain{}
 	store := &walletmock.Store{}
 
@@ -5819,8 +6102,9 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		Config{Chain: mockChain}, nil, nil, nil,
 		store, uint32(0),
 	)
+	s.state.Store(uint32(syncStateSynced))
 
-	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(105),
+	mockChain.On("GetBestBlock").Return(&chainhash.Hash{}, int32(101),
 		nil).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
@@ -5829,7 +6113,7 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
 		([]db.UtxoInfo)(nil), nil).Once()
-	mockChain.On("GetBlockHashes", int64(101), int64(105)).Return(
+	mockChain.On("GetBlockHashes", int64(101), int64(101)).Return(
 		[]chainhash.Hash{{0x01}}, nil).Once()
 	mockChain.On("GetBlockHeaders", mock.Anything).Return(
 		[]*wire.BlockHeader{{}}, nil).Once()
@@ -5839,10 +6123,10 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 	// Act: Advance chain sync.
 	finished, err := s.advanceChainSync(t.Context())
 
-	// Assert: Verify state transition to backend-syncing.
+	// Assert: A one-block gap does not revoke operation admission.
 	require.NoError(t, err)
 	require.False(t, finished)
-	require.Equal(t, uint32(syncStateBackendSyncing), s.state.Load())
+	require.Equal(t, syncStateSynced, s.syncState())
 	store.AssertExpectations(t)
 }
 

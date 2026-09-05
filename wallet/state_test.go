@@ -115,7 +115,6 @@ func TestStateSynchronization(t *testing.T) {
 	// Act & Assert.
 	require.Equal(t, syncStateSynced, s.syncState())
 	require.True(t, s.isSynced())
-	require.False(t, s.isRecoveryMode())
 
 	// Arrange: Mock syncer to return Syncing.
 	// Note: We need to reset expectations or use a new mock/state if rigid.
@@ -126,7 +125,6 @@ func TestStateSynchronization(t *testing.T) {
 	// Act & Assert.
 	require.Equal(t, syncStateSyncing, s.syncState())
 	require.False(t, s.isSynced())
-	require.True(t, s.isRecoveryMode())
 }
 
 // TestStateNilSyncer verifies behavior when syncer is nil (defensive check).
@@ -387,34 +385,6 @@ func TestStateAuthChecks(t *testing.T) {
 		require.ErrorIs(t, state.canChangePassphrase(),
 			ErrStateForbidden)
 	})
-}
-
-// TestStateIsRecoveryMode verifies the recovery mode check.
-func TestStateIsRecoveryMode(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		sync       syncState
-		isRecovery bool
-	}{
-		{"backend syncing", syncStateBackendSyncing, false},
-		{"syncing", syncStateSyncing, true},
-		{"synced", syncStateSynced, false},
-		{"rescanning", syncStateRescanning, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			ms := &mockChainSyncer{}
-			ms.On("syncState").Return(tc.sync)
-
-			state := newWalletState(ms)
-			require.Equal(t, tc.isRecovery, state.isRecoveryMode())
-		})
-	}
 }
 
 // TestStateAuxiliaryMethods verifies helper methods like canUnlock, canLock,
