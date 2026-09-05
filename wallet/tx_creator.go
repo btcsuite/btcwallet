@@ -640,12 +640,28 @@ func normalizeAndValidateTxIntent(intent *TxIntent) error {
 	return validateTxIntent(intent)
 }
 
+// createTransactionReq borrows the intent until authoring and source use end.
+type createTransactionReq struct {
+	reqCtx
+
+	intent   *TxIntent
+	respChan chan authoredTxResp
+}
+
+// authoredTxResp returns the transaction after accepted authoring completes.
+type authoredTxResp struct {
+	tx  *txauthor.AuthoredTx
+	err error
+}
+
 // CreateTransaction creates a new unsigned transaction spending unspent outputs
 // to the given outputs. It is the direct-transaction wrapper around the neutral
 // authoring boundary and the main implementation of the TxCreator interface.
 // Direct-transaction watch delivery belongs to this wrapper; PSBT funding calls
 // the neutral boundary independently so its lease, cleanup, and publication
 // obligations remain in FundPsbt.
+// Accepted authoring and any supplied coin selector finish before return,
+// even if the caller cancels after admission.
 func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
 	*txauthor.AuthoredTx, error) {
 
@@ -654,19 +670,46 @@ func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
 		return nil, err
 	}
 
-	err = normalizeAndValidateTxIntent(intent)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := createTransactionReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		intent:   intent,
+		respChan: make(chan authoredTxResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return nil, err
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(ctx, intent)
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.tx, result.err
+}
+
+// handleCreateTransaction keeps source setup and authoring within one
+// admission.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleCreateTransaction(r createTransactionReq) {
+	err := normalizeAndValidateTxIntent(r.intent)
 	if err != nil {
-		return nil, err
+		r.respChan <- authoredTxResp{err: err}
+
+		return
 	}
 
-	return w.authorTransaction(
-		intent.Outputs, intent.FeeRate, inputSource, changeSource,
+	inputSource, changeSource, err := w.prepareTxAuthSources(r.ctx, r.intent)
+	if err != nil {
+		r.respChan <- authoredTxResp{err: err}
+
+		return
+	}
+
+	responseTx, responseErr := w.authorTransaction(
+		r.intent.Outputs, r.intent.FeeRate, inputSource, changeSource,
 	)
+	r.respChan <- authoredTxResp{tx: responseTx, err: responseErr}
 }
 
 // authorTransaction creates an unsigned transaction from the outputs, fee rate,
