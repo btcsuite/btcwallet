@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -34,6 +35,154 @@ var (
 	errDb           = errors.New("db error")
 	errAddrNotFound = errors.New("addr not found")
 )
+
+// TestDecorateInputsPartialError preserves the first input's enrichment when
+// a later input fails, including nested lookups during graceful shutdown.
+func TestDecorateInputsPartialError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: The first input belongs to the wallet and the second
+	// fails lookup. Pause the first lookup so its nested address
+	// resolution and partial enrichment both happen after Stop begins.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	deps.vault.On("Lock").Return().Once()
+
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	t.Cleanup(key.Zero)
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		address.Hash160(key.PubKey().SerializeCompressed()),
+		&chainParams,
+	)
+	require.NoError(t, err)
+	script, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{1}}
+	other := wire.OutPoint{Hash: chainhash.Hash{2}}
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: outpoint})
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: other})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	output := wire.NewTxOut(1000, script)
+	enteredChan := make(chan struct{})
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+	deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: outpoint,
+	}).Run(func(mock.Arguments) {
+		close(enteredChan)
+		<-releaseChan
+	}).Return(testStoreUtxoInfo(outpoint, output), nil).Once()
+	deps.store.On("GetTxDetail", mock.Anything, db.GetTxDetailQuery{
+		WalletID: w.id,
+		Txid:     outpoint.Hash,
+	}).Return(testStoreTxDetail(outpoint.Hash, output), nil).Once()
+	deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: other,
+	}).Return((*db.UtxoInfo)(nil), errDb).Once()
+	expectSignerDerivedAddressInfo(
+		t, w, deps, addr, db.WitnessPubKey, key.PubKey(),
+	)
+	deps.store.ExpectedCalls[len(deps.store.ExpectedCalls)-1].Once()
+
+	resultChan := make(chan error, 1)
+	go func() {
+		_, err := w.DecorateInputs(t.Context(), packet, false)
+		resultChan <- err
+	}()
+
+	<-enteredChan
+
+	// Act: Begin Stop before releasing the first dependency. The nested
+	// address lookup must finish inside the already admitted operation.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+	unblock()
+
+	// Assert: After completion and joined shutdown, the first input retains
+	// its enrichment and the second reports the original lookup failure.
+	require.ErrorIs(t, <-resultChan, errDb)
+
+	require.NoError(t, <-stoppedChan)
+	require.Same(t, tx, packet.UnsignedTx)
+
+	require.Equal(t, output, packet.Inputs[0].WitnessUtxo)
+	require.Len(t, packet.Inputs[0].Bip32Derivation, 1)
+	require.Nil(t, packet.Inputs[1].WitnessUtxo)
+}
+
+// TestFundPsbtPopulationError verifies that completed funding errors retain
+// partial population in the original packet after the operation completes.
+func TestFundPsbtPopulationError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Reuse the existing authoring fixture, then stop funding
+	// in its first decoration lookup, after it replaces the supplied
+	// transaction and input/output metadata. Return a real Store error.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.vault.On("Lock").Return().Once()
+	fixture := expectDefaultAuthoringSources(t, w, deps)
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&fixture.payment)
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	packet.Outputs[0].RedeemScript = []byte{7}
+	enteredChan := make(chan struct{})
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+	deps.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+		WalletID: w.id,
+		OutPoint: fixture.utxo.OutPoint,
+	}).Run(func(mock.Arguments) {
+		close(enteredChan)
+		<-releaseChan
+	}).Return((*db.UtxoInfo)(nil), errDb).Once()
+
+	resultChan := make(chan error, 1)
+	go func() {
+		_, _, err := w.FundPsbt(t.Context(), &FundIntent{
+			Packet:  packet,
+			Policy:  &InputsPolicy{},
+			FeeRate: defaultFeeRate,
+		})
+		resultChan <- err
+	}()
+
+	<-enteredChan
+
+	// Act: Start shutdown while funding is paused, then let the Store
+	// report its error so accepted work can complete before vault teardown.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+	unblock()
+
+	// Assert: Once funding and Stop complete, the failed packet retains
+	// its populated transaction and reset metadata for caller inspection.
+	require.ErrorIs(t, <-resultChan, errDb)
+
+	require.NoError(t, <-stoppedChan)
+
+	require.NotSame(t, tx, packet.UnsignedTx)
+	require.Len(t, packet.Inputs, 1)
+	require.Equal(t, fixture.utxo.OutPoint,
+		packet.UnsignedTx.TxIn[0].PreviousOutPoint)
+	require.Empty(t, packet.Outputs[0].RedeemScript)
+}
 
 // testStoreTxDetail builds a store transaction detail for a parent tx.
 func testStoreTxDetail(txHash chainhash.Hash,
@@ -3029,6 +3178,7 @@ func TestSignPsbt(t *testing.T) {
 			// Assert: the input is reported signed and the packet
 			// carries the generated signature.
 			require.NoError(t, err)
+			require.Same(t, packet, result.Packet)
 			require.Len(t, result.SignedInputs, 1)
 			require.Equal(t, uint32(0), result.SignedInputs[0])
 			require.Len(t, packet.Inputs[0].PartialSigs, 1)
@@ -3099,7 +3249,6 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 		name      string
 		storeErr  error
 		wantError error
-		cancel    bool
 	}{
 		{
 			name:     "missing account skips input",
@@ -3109,7 +3258,6 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 			name:      "canceled context returns error",
 			storeErr:  context.Canceled,
 			wantError: context.Canceled,
-			cancel:    true,
 		},
 		{
 			name:      "store failure returns error",
@@ -3167,17 +3315,10 @@ func TestSignPsbtClassifiesSignError(t *testing.T) {
 				(*db.AccountSecret)(nil), tc.storeErr,
 			).Once()
 
-			ctx := t.Context()
-			if tc.cancel {
-				var cancel context.CancelFunc
-
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-
-			// Act.
+			// Act: Deliver the Store's error through an admitted public call.
+			// A pre-canceled context could reject before reaching the Store.
 			result, err := w.SignPsbt(
-				ctx, &SignPsbtParams{Packet: packet},
+				t.Context(), &SignPsbtParams{Packet: packet},
 			)
 
 			// Assert: Only explicit ownership failures are skipped.
