@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"errors"
+	"iter"
 	"testing"
 	"time"
 
@@ -481,6 +482,104 @@ func (b *managerBackendMock) load(ctx context.Context,
 func (b *managerBackendMock) close() error {
 	args := b.Called()
 	return args.Error(0)
+}
+
+// TestSQLManagerBackendListsWallets verifies ordered complete listing and
+// all-or-nothing iterator failures.
+func TestSQLManagerBackendListsWallets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		rows      []db.WalletInfo
+		iterErr   error
+		wantIDs   []uint32
+		wantNames []string
+	}{
+		{
+			name:      "empty store",
+			wantIDs:   []uint32{},
+			wantNames: []string{},
+		},
+		{
+			name: "ordered store rows",
+			rows: []db.WalletInfo{
+				{
+					ID:   4,
+					Name: "first",
+				},
+				{
+					ID:   9,
+					Name: "second",
+				},
+			},
+			wantIDs:   []uint32{4, 9},
+			wantNames: []string{"first", "second"},
+		},
+		{
+			name:    "iterator failure",
+			iterErr: errDBMock,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Yield ordered rows and an optional terminal error,
+			// expecting one listing call with the mandatory positive Store
+			// iterator batch request.
+			store := &walletmock.Store{}
+			sequence := iter.Seq2[db.WalletInfo, error](func(
+				yield func(db.WalletInfo, error) bool) {
+
+				for _, row := range test.rows {
+					if !yield(row, nil) {
+						return
+					}
+				}
+
+				if test.iterErr != nil {
+					yield(db.WalletInfo{}, test.iterErr)
+				}
+			})
+			store.On(
+				"IterWallets", mock.Anything,
+				mock.MatchedBy(func(query db.ListWalletsQuery) bool {
+					return query.Page.Limit() == managerWalletBatchSize
+				}),
+			).Return(sequence, nil).Once()
+
+			backend := &sqlManagerBackend{store: store}
+
+			// Act: Resolve the complete startup listing through the SQL
+			// backend boundary rather than calling the Store directly.
+			wallets, err := backend.listWallets(t.Context())
+
+			// Assert: Iterator failure prevents a partial handoff; otherwise
+			// the non-nil result preserves each durable ID and name exactly.
+			if test.iterErr != nil {
+				require.ErrorIs(t, err, test.iterErr)
+				require.Nil(t, wallets)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, wallets)
+
+				ids := make([]uint32, 0, len(wallets))
+				names := make([]string, 0, len(wallets))
+
+				for _, wallet := range wallets {
+					ids = append(ids, wallet.id)
+					names = append(names, wallet.name)
+				}
+
+				require.Equal(t, test.wantIDs, ids)
+				require.Equal(t, test.wantNames, names)
+			}
+
+			store.AssertExpectations(t)
+		})
+	}
 }
 
 // TestManagerCreateRejectsMissingIdentityBeforeAssembly verifies Create
