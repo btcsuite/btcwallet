@@ -855,6 +855,18 @@ func (w *Wallet) handleReq(req any) {
 	case privKeyForAddressReq:
 		w.handleGetPrivKeyForAddress(r)
 
+	case decorateInputsReq:
+		w.handleDecorateInputs(r)
+
+	case fundPsbtReq:
+		w.handleFundPsbt(r)
+
+	case signPsbtReq:
+		w.handleSignPsbt(r)
+
+	case finalizePsbtReq:
+		w.handleFinalizePsbt(r)
+
 	case newAccountReq:
 		w.handleNewAccount(r)
 	case renameAccountReq:
