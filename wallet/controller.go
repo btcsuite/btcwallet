@@ -828,6 +828,12 @@ func (w *Wallet) handleReq(req any) {
 	case createTransactionReq:
 		w.handleCreateTransaction(r)
 
+	case checkMempoolAcceptanceReq:
+		w.handleCheckMempoolAcceptance(r)
+
+	case broadcastReq:
+		w.handleBroadcast(r)
+
 	case newAccountReq:
 		w.handleNewAccount(r)
 	case renameAccountReq:

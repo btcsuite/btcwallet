@@ -57,6 +57,23 @@ type TxPublisher interface {
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxPublisher = (*Wallet)(nil)
 
+// checkMempoolAcceptanceReq borrows the transaction until the chain check ends.
+type checkMempoolAcceptanceReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	respErrChan chan error
+}
+
+// broadcastReq keeps recording, registration and publication in one admission.
+type broadcastReq struct {
+	reqCtx
+
+	tx          *wire.MsgTx
+	label       string
+	respErrChan chan error
+}
+
 // CheckMempoolAcceptance checks if a transaction would be accepted by the
 // mempool without broadcasting.
 //
@@ -66,7 +83,7 @@ var _ TxPublisher = (*Wallet)(nil)
 // rejected.
 //
 // NOTE: This is part of the TxPublisher interface.
-func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
+func (w *Wallet) CheckMempoolAcceptance(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	err := w.state.validateStarted()
@@ -77,6 +94,34 @@ func (w *Wallet) CheckMempoolAcceptance(_ context.Context,
 	if tx == nil {
 		return ErrTxCannotBeNil
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := checkMempoolAcceptanceReq{
+		reqCtx: reqCtx{ctx: ctx},
+		tx:     tx,
+
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleCheckMempoolAcceptance delivers the result of an accepted component
+// request.
+func (w *Wallet) handleCheckMempoolAcceptance(r checkMempoolAcceptanceReq) {
+	// Reuse acceptance checks also performed inside an admitted broadcast.
+	r.respErrChan <- w.checkMempoolAcceptance(r.ctx, r.tx)
+}
+
+// checkMempoolAcceptance queries the chain inside its accepted request.
+func (w *Wallet) checkMempoolAcceptance(_ context.Context,
+	tx *wire.MsgTx) error {
 
 	// TODO(yy): thread context through.
 	// The TestMempoolAccept rpc expects a slice of transactions.
@@ -131,14 +176,38 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 		return ErrTxCannotBeNil
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := broadcastReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		tx:          tx,
+		label:       label,
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleBroadcast records and publishes within the accepted outer request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleBroadcast(r broadcastReq) {
 	// We'll start by checking if the tx is acceptable to the mempool.
-	err = w.checkMempool(ctx, tx)
+	err := w.checkMempool(r.ctx, r.tx)
 	if errors.Is(err, errAlreadyBroadcasted) {
-		return nil
+		r.respErrChan <- nil
+
+		return
 	}
 
 	if err != nil {
-		return err
+		r.respErrChan <- err
+
+		return
 	}
 
 	// First, we'll attempt to add the tx to our wallet's DB. This will
@@ -149,43 +218,51 @@ func (w *Wallet) Broadcast(ctx context.Context, tx *wire.MsgTx,
 	// recorded reports whether a tx row was actually written; it gates the
 	// invalidation below so a wallet-unrelated tx (never recorded) is not
 	// invalidated, which would clobber the publish error with ErrTxNotFound.
-	ourAddrs, recorded, err := w.addTxToWallet(ctx, tx, label)
+	ourAddrs, recorded, err := w.addTxToWallet(r.ctx, r.tx, r.label)
 	if err != nil {
-		return err
+		r.respErrChan <- err
+
+		return
 	}
 
 	// Now, we'll attempt to publish the tx. On successful attempt, we
 	// return immediately. On any failures, we invalidate it in the tx store
 	// to prevent subsequent attempts with stale transaction data.
-	err = w.publishTx(tx, ourAddrs)
+	err = w.publishTx(r.tx, ourAddrs)
 	if err == nil {
-		return nil
+		r.respErrChan <- nil
+
+		return
 	}
 
-	txid := tx.TxHash()
+	txid := r.tx.TxHash()
 	log.Errorf("%v: broadcast failed: %v", txid, err)
 
 	// If we never recorded this tx (it is wallet-unrelated), there is
 	// nothing to invalidate, so we return the original publish error as-is
 	// rather than overwriting it with cleanup context.
 	if !recorded {
-		return err
+		r.respErrChan <- err
+
+		return
 	}
 
 	// If the tx was rejected for any other reason, then we'll invalidate it
 	// from the tx store, as otherwise, we'll attempt to continually
 	// re-broadcast it, and the UTXO state of the wallet won't be accurate.
-	removeErr := w.invalidateUnminedTx(ctx, tx)
+	removeErr := w.invalidateUnminedTx(r.ctx, r.tx)
 	if removeErr != nil {
 		log.Warnf("Unable to invalidate tx %v after broadcast failed: %v",
 			txid, removeErr)
 
 		// Return a wrapped error to give the caller full context.
-		return fmt.Errorf("broadcast failed: %w; and failed to "+
+		r.respErrChan <- fmt.Errorf("broadcast failed: %w; and failed to "+
 			"invalidate in wallet: %v", err, removeErr)
+
+		return
 	}
 
-	return err
+	r.respErrChan <- err
 }
 
 var (
@@ -211,7 +288,7 @@ func (w *Wallet) checkMempool(ctx context.Context,
 	tx *wire.MsgTx) error {
 
 	// We'll start by checking if the tx is acceptable to the mempool.
-	err := w.CheckMempoolAcceptance(ctx, tx)
+	err := w.checkMempoolAcceptance(ctx, tx)
 
 	switch {
 	// If the tx is already in the mempool or confirmed, we can return
