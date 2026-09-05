@@ -381,7 +381,20 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			backend := &recordingManagerBackend{}
+			// Arrange: Install a strict backend expectation only when the
+			// input is valid enough to reach durable creation. Invalid cases
+			// intentionally leave the mock with no accepted calls.
+			backend := &managerBackendMock{}
+			params := tc.params
+			params.Name = testWalletName
+
+			if tc.valid {
+				backend.On(
+					"create", mock.Anything, params,
+					mock.Anything,
+				).Return(nil, errManagerBackendCreate).Once()
+			}
+
 			m := &Manager{
 				wallets: make(map[string]*Wallet),
 				backend: backend,
@@ -390,59 +403,84 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 					ChainParams: chainParams,
 				},
 			}
-			params := tc.params
-			params.Name = testWalletName
+
+			// Act: Ask Manager to create from the selected parameter shape,
+			// allowing validation to decide whether backend mutation begins.
 			wallet, err := m.Create(params)
+
+			// Assert: Valid parameters reach exactly one expected backend
+			// call; invalid parameters stop at validation with no mock call.
 			require.Nil(t, wallet)
 
 			if tc.valid {
-				require.ErrorIs(
-					t, err, errRecordingManagerBackendCreate,
-				)
-				require.True(t, backend.createCalled)
+				require.ErrorIs(t, err, errManagerBackendCreate)
+			} else {
+				require.ErrorIs(t, err, ErrWalletParams)
 
-				return
+				if tc.wantErrMsg != "" {
+					require.ErrorContains(t, err, tc.wantErrMsg)
+				}
 			}
 
-			require.ErrorIs(t, err, ErrWalletParams)
-
-			if tc.wantErrMsg != "" {
-				require.ErrorContains(t, err, tc.wantErrMsg)
-			}
-
-			require.False(t, backend.createCalled)
+			backend.AssertExpectations(t)
 		})
 	}
 }
 
-var errRecordingManagerBackendCreate = errors.New("backend create called")
+var errManagerBackendCreate = errors.New("backend create called")
 
-// recordingManagerBackend records whether Manager.Create reached backend
-// mutation during creation-policy tests.
-type recordingManagerBackend struct{ createCalled bool }
-
-// recordingManagerBackend implements managerBackend.
-var _ managerBackend = (*recordingManagerBackend)(nil)
-
-// create records an unexpected backend creation attempt.
-func (b *recordingManagerBackend) create(_ context.Context,
-	_ CreateWalletParams, _ *hdkeychain.ExtendedKey) (*walletData, error) {
-
-	b.createCalled = true
-
-	return nil, errRecordingManagerBackendCreate
+// managerBackendMock is the strict Manager storage-boundary test double.
+type managerBackendMock struct {
+	mock.Mock
 }
 
-// load is not used by creation-policy tests.
-func (*recordingManagerBackend) load(context.Context, LoadWalletParams) (
+// managerBackendMock implements managerBackend.
+var _ managerBackend = (*managerBackendMock)(nil)
+
+// listWallets returns the durable data configured by the current test.
+func (b *managerBackendMock) listWallets(
+	ctx context.Context) ([]*walletData, error) {
+
+	args := b.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).([]*walletData), args.Error(1)
+}
+
+// create returns the storage result configured by the current test.
+func (b *managerBackendMock) create(ctx context.Context,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
-	return nil, ErrInvalidParam
+	args := b.Called(ctx, params, rootKey)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).(*walletData), args.Error(1)
 }
 
-// close is not used by creation-policy tests.
-func (*recordingManagerBackend) close() error {
-	return nil
+// load returns the identity lookup configured by the current test.
+func (b *managerBackendMock) load(ctx context.Context,
+	params LoadWalletParams) (*walletData, error) {
+
+	args := b.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).(*walletData), args.Error(1)
+}
+
+// close returns the configured backend ownership-release result.
+func (b *managerBackendMock) close() error {
+	args := b.Called()
+	return args.Error(0)
 }
 
 // TestManagerCreateRejectsMissingIdentityBeforeAssembly verifies Create

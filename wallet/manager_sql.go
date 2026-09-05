@@ -9,8 +9,13 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/page"
 	vault "github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
+
+// managerWalletBatchSize supplies the mandatory positive Store iterator batch
+// size; IterWallets remains responsible for exhausting the durable Wallet set.
+const managerWalletBatchSize = 100
 
 // sqlManagerBackend owns the SQL Store shared by a Manager's wallets.
 type sqlManagerBackend struct {
@@ -19,6 +24,34 @@ type sqlManagerBackend struct {
 }
 
 var _ managerBackend = (*sqlManagerBackend)(nil)
+
+// listWallets resolves every SQL Wallet in the Store's durable-ID order.
+func (b *sqlManagerBackend) listWallets(
+	ctx context.Context) ([]*walletData, error) {
+
+	pageReq, err := page.NewRequest[uint32](managerWalletBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("create wallet page request: %w", err)
+	}
+
+	wallets := make([]*walletData, 0)
+	query := db.ListWalletsQuery{Page: pageReq}
+
+	for info, iterErr := range b.store.IterWallets(ctx, query) {
+		if iterErr != nil {
+			return nil, fmt.Errorf("list runtime wallets: %w", iterErr)
+		}
+
+		data, err := b.walletData(&info)
+		if err != nil {
+			return nil, fmt.Errorf("resolve runtime wallet: %w", err)
+		}
+
+		wallets = append(wallets, data)
+	}
+
+	return wallets, nil
+}
 
 // create atomically creates a SQL wallet and returns its committed data.
 func (b *sqlManagerBackend) create(ctx context.Context,
@@ -63,6 +96,7 @@ func (b *sqlManagerBackend) walletData(
 
 	return &walletData{
 		id:                w.ID,
+		name:              w.Name,
 		store:             b.store,
 		vault:             vault.NewWalletVault(b.store, w.ID, w.IsWatchOnly),
 		masterFingerprint: fingerprint,
