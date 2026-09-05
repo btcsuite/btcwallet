@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	kvdb "github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb" // Register bdb.
@@ -98,6 +99,29 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 	return b.open(ctx, params.Name, adapterCfg)
 }
 
+// listWallets loads the sole legacy Wallet once. A pristine database is the
+// only successful empty result because kvdb cannot contain a second identity.
+func (b *kvdbManagerBackend) listWallets(
+	ctx context.Context) ([]*walletData, error) {
+
+	data, err := b.load(ctx, LoadWalletParams{
+		PubPassphrase: b.pubPass,
+	})
+	// Missing durable state is kvdb's only zero-Wallet representation. Every
+	// partial namespace, credential, and storage failure remains visible.
+	switch {
+	case err == nil:
+
+	case errors.Is(err, db.ErrWalletNotFound):
+		return []*walletData{}, nil
+
+	default:
+		return nil, err
+	}
+
+	return []*walletData{data}, nil
+}
+
 // load opens the one existing legacy wallet served by the backend.
 func (b *kvdbManagerBackend) load(ctx context.Context,
 	params LoadWalletParams) (*walletData, error) {
@@ -146,6 +170,7 @@ func (b *kvdbManagerBackend) open(ctx context.Context, walletName string,
 
 	data := &walletData{
 		id:                info.ID,
+		name:              walletName,
 		store:             store,
 		addressStore:      addressMgr,
 		transactionStore:  store.TxStore(),
