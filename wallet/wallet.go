@@ -227,12 +227,6 @@ type Config struct {
 	// LoadWalletParams.
 	Name string
 
-	// PubPassphrase is the legacy public passphrase.
-	//
-	// Deprecated: Manager APIs carry this credential in their narrow request
-	// parameters, and managed Wallets do not retain it.
-	PubPassphrase []byte
-
 	// MaxCFilterItems is the threshold of watched items (addresses +
 	// outpoints) above which the wallet will fallback to full block
 	// scanning when SyncMethodAuto is used. This avoids the CPU bottleneck

@@ -53,6 +53,7 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 //	MaxConnections                     SQL backends
 //	SignetChallengeDigest              SQL backends
 //	NoFreelistSync, Timeout            kvdb only
+//	KVDBPubPassphrase                  kvdb only
 type ManagerConfig struct {
 	// Backend selects the database implementation. Required.
 	Backend DBBackend
@@ -107,6 +108,14 @@ type ManagerConfig struct {
 	// in returned array order. It is nil off signet; its first four bytes,
 	// decoded little-endian, must equal ChainParams.Net.
 	SignetChallengeDigest []byte
+
+	// KVDBPubPassphrase opens the sole legacy Wallet during aggregate
+	// startup. It is an input to Manager rather than retained Wallet policy
+	// because no caller request exists when durable Wallets are assembled.
+	//
+	// TODO(yy): Remove KVDBPubPassphrase once legacy kvdb support is fully
+	// deprecated and removed.
+	KVDBPubPassphrase []byte
 
 	// NoFreelistSync controls bbolt freelist synchronization.
 	//
