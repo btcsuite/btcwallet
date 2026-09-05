@@ -2205,6 +2205,53 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestSyncerRecoveryRejectsNoChainSyncTarget verifies that explicit rejection
+// stops scan initialization before any watch reads or recovery mutations.
+func TestSyncerRecoveryRejectsNoChainSyncTarget(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Admit only the account snapshot and named lookup on the strict
+	// Store mock. Any later watch read or mutation is an unexpected call.
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{RecoveryWindow: testScanRecoveryWindow}, nil, nil,
+		&mockTxPublisher{}, store, 1,
+	)
+	accountNumber := uint32(0)
+	account := db.AccountInfo{
+		AccountNumber: &accountNumber,
+		AccountName:   "key-only",
+		KeyScope:      db.KeyScopeBIP0084,
+		NoChainSync:   true,
+	}
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:    s.walletID,
+		SkipBalance: true,
+	}).Return([]db.AccountInfo{account}, nil).Once()
+	store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:    s.walletID,
+		Scope:       account.KeyScope,
+		Name:        &account.AccountName,
+		SkipBalance: true,
+	}).Return(&account, nil).Once()
+	targets := []waddrmgr.AccountScope{
+		{
+			Scope:   waddrmgr.KeyScopeBIP0084,
+			Account: accountNumber,
+		},
+	}
+
+	// Act: Enter through the targeted loader so the existing initialization
+	// ordering must stop at account admission before constructing scan state.
+	state, err := s.loadTargetedScanState(t.Context(), targets)
+
+	// Assert: Callers receive the wallet sentinel and no partial scan state;
+	// both required reads occurred without advancing to watch loading.
+	require.ErrorIs(t, err, ErrNoChainSyncRecoveryTarget)
+	require.Nil(t, state)
+	store.AssertExpectations(t)
+}
+
 // TestStoreScanHorizonsGetAccount verifies targeted scan horizon reads resolve
 // the account by its durable AccountName, mirroring the ScanHorizon contract:
 // the resolved scanTarget carries a name, so storeScanHorizons must query the
