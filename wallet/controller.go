@@ -646,8 +646,11 @@ func (w *Wallet) mainLoop() {
 				w.handleChangePassphraseReq(r)
 
 			default:
-				log.Errorf("Wallet received unknown request "+
-					"type: %T", req)
+				// Non-control requests run concurrently. Register the handler
+				// before launch so Stop drains every accepted request.
+				w.wg.Add(1)
+
+				go w.handleReq(req)
 			}
 
 		// The auto-lock timer has expired. We trigger a lock with a
@@ -662,6 +665,17 @@ func (w *Wallet) mainLoop() {
 
 			return
 		}
+	}
+}
+
+// handleReq owns completion bookkeeping for requests accepted by mainLoop. Its
+// type switch is the single routing table for concurrent public method work.
+func (w *Wallet) handleReq(req any) {
+	defer w.wg.Done()
+
+	switch req.(type) {
+	default:
+		log.Errorf("Wallet received unknown request type: %T", req)
 	}
 }
 
