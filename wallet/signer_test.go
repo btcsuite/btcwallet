@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,151 @@ func expectStorePubKey(t *testing.T, mocks *mockWalletDeps,
 	_, pubKey := deriveLeafKeys(t, acct, path.Branch, path.Index)
 
 	return pubKey
+}
+
+// TestSignerKeepsTweakerLifetime verifies that cancellation cannot return a
+// callback-backed signing call while the callback still uses its private key.
+func TestSignerKeepsTweakerLifetime(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Resolve a real fixture key, then pause the caller's tweaker.
+	// Returning its error later avoids unrelated signature-assembly setup.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	w.state.toUnlocked()
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	key, _ := expectStoreSignerPrivKey(
+		t, deps, w.id, path.KeyScope, path.DerivationPath,
+	)
+	t.Cleanup(key.Zero)
+	deps.vault.On("Lock").Return().Once()
+
+	enteredChan := make(chan *btcec.PrivateKey, 1)
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	resultChan := make(chan error, 1)
+	go func() {
+		_, err := w.ComputeRawSig(ctx, &RawSigParams{
+			Path:    path,
+			Details: LegacySpendDetails{},
+			Tweaker: func(key *btcec.PrivateKey) (*btcec.PrivateKey, error) {
+				enteredChan <- key
+
+				<-releaseChan
+
+				return nil, errTweakMock
+			},
+		})
+		resultChan <- err
+	}()
+
+	resolvedKey := <-enteredChan
+
+	// Act: Cancel the caller and initiate shutdown while its own callback is
+	// active; both waits must retain the callback's synchronous lifetime.
+	cancel()
+
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: Neither waiter returns early. Once released, the callback error
+	// reaches the caller and its temporary key is zeroed before Stop ends.
+	select {
+	case err := <-resultChan:
+		t.Fatalf("signer returned during its tweaker: %v", err)
+	case err := <-stoppedChan:
+		t.Fatalf("Stop returned during a tweaker: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	unblock()
+	require.ErrorIs(t, <-resultChan, errTweakMock)
+	require.NoError(t, <-stoppedChan)
+	require.True(t, resolvedKey.Key.IsZero())
+}
+
+// TestUnsafeSignerDeliversCanceledKey verifies that accepted key derivation
+// delivers its result to the caller responsible for zeroing it.
+func TestUnsafeSignerDeliversCanceledKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold the existing deterministic key resolver inside the vault
+	// so cancellation and Stop happen before the accepted key can be returned.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	w.state.toUnlocked()
+
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	key, _ := expectStoreSignerPrivKey(
+		t, deps, w.id, path.KeyScope, path.DerivationPath,
+	)
+	t.Cleanup(key.Zero)
+
+	enteredChan := make(chan struct{})
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+
+	for _, call := range deps.vault.ExpectedCalls {
+		call.Run(func(mock.Arguments) {
+			close(enteredChan)
+
+			<-releaseChan
+		})
+	}
+
+	deps.vault.On("Lock").Return().Once()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	resultChan := make(chan privKeyResp, 1)
+	go func() {
+		key, err := w.DerivePrivKey(ctx, path)
+		resultChan <- privKeyResp{key: key, err: err}
+	}()
+
+	<-enteredChan
+
+	// Act: Cancel the caller and begin Stop before resolving the key. The
+	// accepted export must retain its receiver until key delivery completes.
+	cancel()
+
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: Both calls wait for resolution. After release, the caller
+	// receives the expected key and zeros it; Stop joins the accepted work.
+	select {
+	case response := <-resultChan:
+		t.Fatalf("key export returned early: %v", response.err)
+	case err := <-stoppedChan:
+		t.Fatalf("Stop returned before key resolution: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	unblock()
+
+	response := <-resultChan
+	require.NoError(t, response.err)
+
+	require.NotNil(t, response.key)
+	defer response.key.Zero()
+
+	require.Equal(t, key.Serialize(), response.key.Serialize())
+	response.key.Zero()
+	require.True(t, response.key.Key.IsZero())
+	require.NoError(t, <-stoppedChan)
 }
 
 // TestDerivePubKeySuccess tests the successful derivation of a public key
