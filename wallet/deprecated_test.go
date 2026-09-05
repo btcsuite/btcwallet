@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/address/v2"
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -24,6 +26,7 @@ import (
 	"github.com/btcsuite/btcd/psbt/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
@@ -31,6 +34,7 @@ import (
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
@@ -454,6 +458,7 @@ func TestDuplicateAddressDerivation(t *testing.T) {
 	}
 }
 
+// TestEndRecovery verifies that wallet shutdown interrupts recovery cleanly.
 func TestEndRecovery(t *testing.T) {
 	// This is an unconventional unit test, but I'm trying to keep things as
 	// succint as possible so that this test is readable without having to mock
@@ -474,17 +479,21 @@ func TestEndRecovery(t *testing.T) {
 
 	blockHashCalled := make(chan struct{})
 
-	chainClient := &mockChainClient{
-		// Force the loop to iterate about forever.
-		getBestBlockHeight: math.MaxInt32,
-		// Get control of when the loop iterates.
-		getBlockHashFunc: func() (*chainhash.Hash, error) {
+	chainClient := &bwmock.Chain{}
+	// Force the loop to iterate about forever.
+	chainClient.On("GetBestBlock").Return(
+		(*chainhash.Hash)(nil), int32(math.MaxInt32), error(nil),
+	)
+	// Get control of when the loop iterates by signaling on each call.
+	chainClient.On("GetBlockHash", mock.Anything).Run(
+		func(args mock.Arguments) {
 			blockHashCalled <- struct{}{}
-			return &chainhash.Hash{}, nil
 		},
-		// Avoid a panic.
-		getBlockHeader: &wire.BlockHeader{},
-	}
+	).Return(&chainhash.Hash{}, error(nil))
+	// Avoid a panic when the recovery loop inspects the block header.
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, error(nil),
+	)
 
 	recoveryDone := make(chan struct{})
 	go func() {
@@ -879,6 +888,7 @@ func TestImportAccountDeprecated(t *testing.T) {
 	}
 }
 
+// testImportAccount exercises legacy account import behavior for one case.
 func testImportAccount(t *testing.T, w *Wallet, tc *testCase, watchOnly bool,
 	name string) {
 
@@ -1067,7 +1077,19 @@ func testWallet(t *testing.T) *Wallet {
 		t.Fatalf("unable to create wallet: %v", err)
 	}
 
-	chainClient := &mockChainClient{}
+	chainClient := &bwmock.Chain{}
+	chainClient.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: testBlockHeight}, nil,
+	).Maybe()
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+	chainClient.On("Stop").Return().Maybe()
+	chainClient.On("WaitForShutdown").Return().Maybe()
+	chainClient.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(testBlockHeight), nil,
+	).Maybe()
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, nil,
+	).Maybe()
 	w.chainClient = chainClient
 
 	// Start the wallet.
@@ -1102,7 +1124,19 @@ func testWalletWatchingOnly(t *testing.T) *Wallet {
 	if err != nil {
 		t.Fatalf("unable to create wallet: %v", err)
 	}
-	chainClient := &mockChainClient{}
+	chainClient := &bwmock.Chain{}
+	chainClient.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: testBlockHeight}, nil,
+	).Maybe()
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Maybe()
+	chainClient.On("Stop").Return().Maybe()
+	chainClient.On("WaitForShutdown").Return().Maybe()
+	chainClient.On("GetBestBlock").Return(
+		&chainhash.Hash{}, int32(testBlockHeight), nil,
+	).Maybe()
+	chainClient.On("GetBlockHeader", mock.Anything).Return(
+		&wire.BlockHeader{}, nil,
+	).Maybe()
 	w.chainClient = chainClient
 
 	err = walletdb.Update(w.Database(), func(tx walletdb.ReadWriteTx) error {
@@ -1486,6 +1520,7 @@ func TestFundPsbt(t *testing.T) {
 	}
 }
 
+// assertTxInputs verifies that a PSBT contains the expected unsigned inputs.
 func assertTxInputs(t *testing.T, packet *psbt.Packet,
 	expected []wire.OutPoint) {
 
@@ -1527,6 +1562,7 @@ func assertChangeOutputScope(t *testing.T, pkScript []byte,
 	}
 }
 
+// containsUtxo reports whether the candidate outpoint is in the list.
 func containsUtxo(list []wire.OutPoint, candidate wire.OutPoint) bool {
 	for _, utxo := range list {
 		if utxo == candidate {
@@ -1637,7 +1673,7 @@ var (
 	alwaysAllowUtxo = func(utxo wtxmgr.Credit) bool { return true }
 )
 
-// TestTxToOutput checks that no new address is added to he database if we
+// TestTxToOutputsDryRun checks that no new address is added to the database if
 // request a dry run of the txToOutputs call. It also makes sure a subsequent
 // non-dry run call produces a similar transaction to the dry-run.
 func TestTxToOutputsDryRun(t *testing.T) {
@@ -1877,6 +1913,56 @@ func TestInputYield(t *testing.T) {
 
 	// At 20 sat/b this input is yielding negatively.
 	require.False(t, inputYieldsPositively(credit, 20000))
+}
+
+// TestTxToOutputsRejectsNonPositiveFeeRate verifies that the legacy authoring
+// path refuses a fee rate at or below zero.
+//
+// Nothing between the deprecated wallet interface and txauthor bounds this
+// rate: txToOutputs backs CreateSimpleTx, SendOutputs and SendOutputsWithInput,
+// and it hands whatever the caller passed straight to NewUnsignedTransaction. A
+// zero rate used to author a zero-fee transaction. The in-tree legacy RPC always
+// supplies txrules.DefaultRelayFeePerKb, so it is unaffected, but external
+// callers of the deprecated interface set their own rate and this test records
+// the change for them.
+func TestTxToOutputsRejectsNonPositiveFeeRate(t *testing.T) {
+	t.Parallel()
+
+	w := testWallet(t)
+
+	keyScope := waddrmgr.KeyScopeBIP0049Plus
+	addr, err := w.CurrentAddress(0, keyScope)
+	require.NoError(t, err)
+
+	p2shAddr, err := txscript.PayToAddrScript(addr)
+	require.NoError(t, err)
+
+	// Fund the wallet so the refusal cannot be mistaken for a shortfall.
+	addUtxo(t, w, &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{wire.NewTxOut(100000, p2shAddr)},
+	})
+
+	txOuts := []*wire.TxOut{{PkScript: p2shAddr, Value: 10000}}
+
+	for _, feeRate := range []btcutil.Amount{0, -1000} {
+		tx, err := w.txToOutputs(
+			txOuts, nil, nil, 0, 1, feeRate,
+			CoinSelectionLargest, true, nil, alwaysAllowUtxo,
+		)
+		require.ErrorIs(t, err, txauthor.ErrFeeRateNotPositive,
+			"fee rate %d not rejected", feeRate)
+		require.Nil(t, tx)
+	}
+
+	// A positive rate still authors against the same fixture, so the
+	// rejection above is about the rate and nothing else.
+	tx, err := w.txToOutputs(
+		txOuts, nil, nil, 0, 1, 1000, CoinSelectionLargest, true, nil,
+		alwaysAllowUtxo,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, tx)
 }
 
 // TestTxToOutputsRandom tests random coin selection.
@@ -2226,6 +2312,7 @@ func TestComputeInputScript(t *testing.T) {
 	}
 }
 
+// runTestCase verifies input script generation for one address scope.
 func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	scriptLen int) {
 
@@ -2289,4 +2376,120 @@ func runTestCase(t *testing.T, w *Wallet, scope waddrmgr.KeyScope,
 	if err != nil {
 		t.Fatalf("error validating tx: %v", err)
 	}
+}
+
+// TestOpenWithRetryRoutedSigning verifies that a wallet opened through the
+// deprecated OpenWithRetry constructor can resolve signing material for an
+// imported WIF through the routed public API.
+//
+// It pins both pieces of constructor wiring routed signing needs:
+//
+//   - the legacy vault. kvdb has no GetWalletSecrets, so wiring the canonical
+//     WalletVault here compiles but leaves every routed signing call broken.
+//   - the runtime cache. GetPrivKeyForAddress resolves the address secret
+//     through w.cache, so dropping the constructor's cache initialization
+//     nil-panics this test rather than passing silently.
+//
+// The imported key is presented as P2PK, which is the shape that regressed:
+// ScopedKeyManager.Address normalizes P2PK to P2PKH before reading the row but
+// AddrAccount does not, so a secret lookup handed the caller's original
+// address missed every wallet-owned P2PK address.
+func TestOpenWithRetryRoutedSigning(t *testing.T) {
+	t.Parallel()
+
+	var (
+		pubPass  = []byte("public")
+		privPass = []byte("private")
+	)
+
+	dbPath := filepath.Join(t.TempDir(), "wallet.db")
+
+	dbConn, err := walletdb.Create(
+		"bdb", dbPath, true, time.Minute, false,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dbConn.Close() })
+
+	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	require.NoError(t, err)
+	rootKey, err := hdkeychain.NewMaster(seed, &chainParams)
+	require.NoError(t, err)
+
+	err = CreateDeprecated(
+		dbConn, pubPass, privPass, rootKey, &chainParams, time.Now(),
+	)
+	require.NoError(t, err)
+
+	// Act: reopen through the deprecated constructor.
+	w, err := OpenWithRetry(
+		dbConn, pubPass, nil, &chainParams, 0,
+		defaultSyncRetryInterval,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, w.keyVault)
+	require.NotNil(t, w.cache)
+
+	// The vault unlocks with the private passphrase, which is what routed
+	// signing needs. A vault backed by GetWalletSecrets fails here instead.
+	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
+	require.False(t, w.keyVault.IsLocked())
+
+	// This constructor cannot Start: it has no chain to verify a birthday
+	// against. Claim the signing-capable state directly so the routed public
+	// call below is reachable.
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+	w.state.toUnlocked()
+
+	// A wallet that has synced has a birthday block; CreateDeprecated leaves
+	// it unset, and the import path reads it to decide whether to move the
+	// birthday back.
+	err = walletdb.Update(dbConn, func(tx walletdb.ReadWriteTx) error {
+		return w.addrStore.SetBirthdayBlock(
+			tx.ReadWriteBucket(waddrmgrNamespaceKey),
+			waddrmgr.BlockStamp{
+				Hash:   *chainParams.GenesisHash,
+				Height: 0,
+			}, true,
+		)
+	})
+	require.NoError(t, err)
+
+	// The retained import path notifies the chain about the new address.
+	chainClient := &bwmock.Chain{}
+	chainClient.On("NotifyReceived", mock.Anything).Return(nil).Once()
+	w.chainClient = chainClient
+
+	// Import a WIF through the retained deprecated path.
+	privKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	wif, err := btcutil.NewWIF(privKey, &chainParams, true)
+	require.NoError(t, err)
+
+	_, err = w.ImportPrivateKey(
+		waddrmgr.KeyScopeBIP0044, wif, nil, false,
+	)
+	require.NoError(t, err)
+
+	// Assert: the imported key resolves through the routed public API when
+	// presented as P2PK, the shape whose account lookup regressed.
+	p2pk, err := address.NewAddressPubKey(
+		privKey.PubKey().SerializeCompressed(), &chainParams,
+	)
+	require.NoError(t, err)
+
+	got, err := w.GetPrivKeyForAddress(t.Context(), p2pk)
+	require.NoError(t, err)
+	require.Equal(t, privKey.Serialize(), got.Serialize())
+
+	// The same key resolves through its P2PKH form, proving the two spellings
+	// reach one row rather than the normalization masking a miss.
+	gotHash, err := w.GetPrivKeyForAddress(
+		t.Context(), p2pk.AddressPubKeyHash(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, privKey.Serialize(), gotHash.Serialize())
+
+	chainClient.AssertExpectations(t)
 }

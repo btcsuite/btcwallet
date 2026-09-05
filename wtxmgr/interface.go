@@ -152,6 +152,14 @@ type TxStore interface {
 	// The order is undefined.
 	UnspentOutputs(ns walletdb.ReadBucket) ([]Credit, error)
 
+	// UnspentOutputsIncludingLocked returns all unspent received
+	// transaction outputs, including outputs currently held by an
+	// active output lease. Callers reporting a wallet balance to
+	// external consumers use this so the balance reflects the
+	// wallet's total UTXO value independent of leasing state.
+	UnspentOutputsIncludingLocked(
+		ns walletdb.ReadBucket) ([]Credit, error)
+
 	// FetchTxLabel reads a transaction label from the tx labels bucket. If
 	// a label with 0 length was written, we return an error, since this is
 	// unexpected.

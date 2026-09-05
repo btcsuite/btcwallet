@@ -9,6 +9,8 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 const (
@@ -38,6 +40,22 @@ var (
 	// ErrStateChanged is returned when the wallet state changes
 	// unexpectedly during an operation, such as a rescan setup.
 	ErrStateChanged = errors.New("wallet state changed unexpectedly")
+)
+
+// The passphrase sentinels below are part of the wallet's public API: callers
+// match on them with errors.Is. They alias the values used inside the wallet's
+// key vault rather than copying them, so an error raised deep in the vault
+// matches here with no translation step -- which matters because the vault
+// lives under wallet/internal and external callers cannot import it.
+var (
+
+	// ErrInvalidPassphrase is returned when a supplied passphrase does not
+	// match the one guarding the wallet.
+	ErrInvalidPassphrase = keyvault.ErrInvalidPassphrase
+
+	// ErrEmptyPassphrase is returned when wallet creation or a passphrase
+	// change omits a required passphrase.
+	ErrEmptyPassphrase = keyvault.ErrEmptyPassphrase
 )
 
 // UnlockRequest contains the parameters for unlocking the wallet.
@@ -84,20 +102,40 @@ type Info struct {
 }
 
 // ChangePassphraseRequest contains the parameters for changing wallet
-// passphrases. It supports changing the public passphrase, the private
-// passphrase, or both simultaneously.
+// passphrases.
+//
+// The two halves are selected independently. A SQL wallet has only the private
+// passphrase; kvdb additionally protects its public metadata with a separate
+// public passphrase, so a caller on that backend may rotate either half or
+// both. At least one half must be selected. Private rotation requires non-empty
+// old and new passphrases; legacy public passphrases may be empty.
 type ChangePassphraseRequest struct {
 	// ChangePublic indicates whether the public passphrase should be
 	// changed.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. This field will be removed with kvdb
+	// support.
 	ChangePublic bool
-	PublicOld    []byte
-	PublicNew    []byte
+
+	// PublicOld and PublicNew are read only when ChangePublic is set.
+	//
+	// Deprecated: kvdb is a legacy backend and is the only one with a
+	// separate public passphrase. These fields will be removed with kvdb
+	// support.
+	PublicOld []byte
+	PublicNew []byte
 
 	// ChangePrivate indicates whether the private passphrase should be
 	// changed.
 	ChangePrivate bool
-	PrivateOld    []byte
-	PrivateNew    []byte
+
+	// PrivateOld and PrivateNew are read only when ChangePrivate is set.
+	// The old passphrase is required even when the wallet is unlocked,
+	// because the rotation re-derives the old master key to unwrap the
+	// existing key material.
+	PrivateOld []byte
+	PrivateNew []byte
 }
 
 // Controller provides an interface for managing the wallet's lifecycle and
@@ -202,7 +240,7 @@ func (w *Wallet) Start(startCtx context.Context) error {
 // retries and exponential backoff. It ensures the wallet attempts to stay
 // synced even if the backend connection is flaky.
 func (w *Wallet) runSyncLoop() {
-	backoff := initialBackoff
+	backoff := w.initialSyncBackoff()
 
 	for {
 		startTime := time.Now()
@@ -237,6 +275,16 @@ func (w *Wallet) runSyncLoop() {
 	}
 }
 
+// initialSyncBackoff returns the Wallet-local retry policy, preserving the
+// controller default for legacy or test Wallets assembled without Manager.
+func (w *Wallet) initialSyncBackoff() time.Duration {
+	if w.cfg.WalletSyncRetryInterval <= 0 {
+		return initialBackoff
+	}
+
+	return w.cfg.WalletSyncRetryInterval
+}
+
 // waitForBackoff handles the delay between synchronization retry attempts. It
 // resets the backoff if the previous run was stable, waits for the calculated
 // delay, and then returns the updated backoff duration for the next attempt.
@@ -247,7 +295,7 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 	// If the syncer ran for a significant amount of time, we consider it a
 	// "stable" run and reset the backoff.
 	if time.Since(startTime) > stableRunTime {
-		backoff = initialBackoff
+		backoff = w.initialSyncBackoff()
 	}
 
 	log.Infof("Restarting sync loop in %v...", backoff)
@@ -272,7 +320,8 @@ func (w *Wallet) waitForBackoff(startTime time.Time, backoff time.Duration,
 
 // performRuntimeSetup executes the synchronous initialization tasks required
 // before the wallet's main loops can start. This includes sanity checking the
-// birthday block, loading accounts into memory, and cleaning up expired locks.
+// birthday block, fail-fast verifying that the wallet's accounts can be read
+// from the store, and cleaning up expired locks.
 func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	// Perform the birthday sanity check synchronously to ensure we are
 	// connected and our status is valid before starting the main loop.
@@ -284,15 +333,26 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 		return err
 	}
 
-	// Ensure all accounts are loaded into memory so we can efficiently
-	// access them during the scan loop without database lookups.
-	err = w.DBGetAllAccounts(startCtx)
+	// Fail fast on store connectivity by reading the wallet's accounts
+	// before entering the main loop. The result is intentionally discarded:
+	// the read itself surfaces a broken or unreachable store as a startup
+	// error rather than a mid-scan failure.
+	_, err = w.cache.ListAccounts(
+		startCtx, db.ListAccountsQuery{
+			WalletID: w.id,
+		},
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("list accounts: %w", err)
 	}
 
 	// Cleanup any expired output locks.
-	return w.DBDeleteExpiredLockedOutputs(startCtx)
+	err = w.store.DeleteExpiredLeases(startCtx, w.id)
+	if err != nil {
+		return fmt.Errorf("delete expired leases: %w", err)
+	}
+
+	return nil
 }
 
 // Stop signals all wallet background processes to shutdown and blocks until
@@ -333,6 +393,13 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 	case <-stopCtx.Done():
 		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
 	}
+
+	// Lock the key vault so no decrypted signing keys outlive the shutdown.
+	// The background goroutines have exited, so no signer is running.
+	// Unconditional rather than gated on the unlocked state bit: Lock is
+	// void and idempotent, so a never-unlocked vault is a no-op, and gating
+	// would only add a way to skip it.
+	w.keyVault.Lock()
 
 	// Mark the wallet as stopped.
 	err = w.state.toStopped()
@@ -411,7 +478,6 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 		return err
 	}
 
-	// Wait for the result.
 	return w.waitForResp(ctx, r.resp)
 }
 
@@ -419,19 +485,36 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 // and dynamic synchronization state.
 //
 // This is part of the Controller interface.
-func (w *Wallet) Info(_ context.Context) (*Info, error) {
+func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 	err := w.state.validateStarted()
 	if err != nil {
 		return nil, err
 	}
 
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
+	if err != nil {
+		return nil, fmt.Errorf("get wallet info: %w", err)
+	}
+
+	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
+	if err != nil {
+		return nil, fmt.Errorf("decode wallet sync tip: %w", err)
+	}
+
+	// Info is an ownership boundary, so return a fresh network snapshot
+	// instead of exposing the Wallet's retained mutable configuration.
+	chainParams, err := cloneChainParams(*w.cfg.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("copy chain parameters: %w", err)
+	}
+
 	info := &Info{
 		BirthdayBlock:    w.birthdayBlock,
 		Backend:          w.cfg.Chain.BackEnd(),
-		ChainParams:      w.cfg.ChainParams,
+		ChainParams:      &chainParams,
 		Locked:           !w.state.isUnlocked(),
 		Synced:           w.state.isSynced(),
-		SyncedTo:         w.SyncedTo(),
+		SyncedTo:         syncedTo,
 		IsRecoveryMode:   w.state.isRecoveryMode(),
 		RecoveryProgress: 0,
 	}
@@ -567,24 +650,23 @@ func (w *Wallet) mainLoop() {
 //     wallet's sync tip to this point to ensure a clean rescan range.
 //  6. Update the memory cache.
 func (w *Wallet) verifyBirthday(ctx context.Context) error {
-	// We'll start by fetching our wallet's birthday block.
-	birthdayBlock, verified, err := w.DBGetBirthdayBlock(ctx)
+	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
 	if err != nil {
-		var mgrErr waddrmgr.ManagerError
-		if !errors.As(err, &mgrErr) ||
-			mgrErr.ErrorCode != waddrmgr.ErrBirthdayBlockNotSet {
+		log.Errorf("Unable to sanity check wallet birthday block: %v", err)
 
-			log.Errorf("Unable to sanity check wallet birthday "+
-				"block: %v", err)
-
-			return err
-		}
-		// If not set, we proceed to locate it.
+		return fmt.Errorf("get wallet birthday: %w", err)
 	}
 
 	// If the birthday block has already been verified, we initialize the
 	// cache and exit our sanity check to avoid redundant lookups.
-	if verified {
+	if walletInfo.BirthdayBlock != nil {
+		birthdayBlock, err := db.BlockStampFromBlock(
+			walletInfo.BirthdayBlock,
+		)
+		if err != nil {
+			return fmt.Errorf("decode birthday block: %w", err)
+		}
+
 		log.Infof("Birthday block verified: height=%d, hash=%v",
 			birthdayBlock.Height, birthdayBlock.Hash)
 		w.birthdayBlock = birthdayBlock
@@ -593,22 +675,36 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 	}
 	// Otherwise, we'll attempt to locate a better one now that we have
 	// access to the chain.
-	timestamp := w.addrStore.Birthday()
+	timestamp := walletInfo.Birthday
 
 	newBirthdayBlock, err := locateBirthdayBlock(w.cfg.Chain, timestamp)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("locate birthday block: %w", err)
 	}
 
-	err = w.DBPutBirthdayBlock(ctx, *newBirthdayBlock)
+	storeBlock, err := db.BlockFromBlockStamp(*newBirthdayBlock)
+	if err != nil {
+		return fmt.Errorf("block from stamp: %w", err)
+	}
+
+	// Use walletInfo.ID instead of w.cfg's cached value: Manager.Load
+	// currently initializes the in-memory id to zero, but the store row
+	// we just read carries the authoritative wallet ID.
+	err = w.store.UpdateWallet(
+		ctx, db.UpdateWalletParams{
+			WalletID:      walletInfo.ID,
+			BirthdayBlock: storeBlock,
+			SyncedTo:      storeBlock,
+		},
+	)
 	if err != nil {
 		log.Errorf("Unable to sanity check wallet birthday "+
 			"block: %v", err)
 
-		return err
+		return fmt.Errorf("update birthday block: %w", err)
 	}
 
 	w.birthdayBlock = *newBirthdayBlock
@@ -674,8 +770,10 @@ func (w *Wallet) handleUnlockReq(req unlockReq) {
 		return
 	}
 
-	// Attempt to unlock the underlying address manager.
-	err = w.DBUnlock(w.lifetimeCtx, req.req.Passphrase)
+	// Attempt to unlock the key vault. The vault has no auto-lock of its
+	// own; the controller keeps owning the auto-lock schedule through its
+	// lockTimer below.
+	err = w.keyVault.Unlock(w.lifetimeCtx, req.req.Passphrase)
 	if err != nil {
 		req.resp <- err
 		return
@@ -726,22 +824,12 @@ func (w *Wallet) handleLockReq(req lockReq) {
 		}
 	}
 
-	// Signal the address manager to lock, clearing sensitive data.
-	err = w.addrStore.Lock()
-	if err != nil {
-		log.Errorf("Could not lock wallet: %v", err)
+	// Signal the key vault to lock, clearing sensitive data. Lock is void
+	// and idempotent: the vault swallows an already-locked condition and
+	// logs any other failure internally.
+	w.keyVault.Lock()
 
-		// If the wallet is already locked, we consider this a success
-		// (idempotency) and proceed to ensure our state is consistent.
-		if !waddrmgr.IsError(err, waddrmgr.ErrLocked) {
-			req.resp <- err
-
-			return
-		}
-	}
-
-	// Even if an error occurred (e.g. already locked), we ensure the
-	// wallet's high-level state is synchronized to 'locked'.
+	// Synchronize the wallet's high-level state to 'locked'.
 	w.state.toLocked()
 
 	// Report the result back to the caller.
@@ -749,8 +837,9 @@ func (w *Wallet) handleLockReq(req lockReq) {
 }
 
 // handleChangePassphraseReq processes a request to rotate the wallet's
-// passphrases. It can change either the public passphrase, the private
-// passphrase, or both in a single atomic database update.
+// passphrase, re-wrapping the persisted key material under the new one.
+//
+//nolint:staticcheck // Bridges the legacy kvdb public-passphrase fields.
 func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 	// First, validate that the wallet is in a state that allows changing
 	// the passphrase.
@@ -760,8 +849,34 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 		return
 	}
 
-	// Delegate the cryptographic rotation to the database layer.
-	err = w.DBPutPassphrase(w.lifetimeCtx, req.req)
+	// The vault owns the encryption boundary, so it performs the rotation.
+	// Both halves travel together: kvdb applies them in one transaction,
+	// and SQL refuses a request naming the public half before touching
+	// anything.
+	params := keyvault.ChangePassphraseParams{}
+	if req.req.ChangePublic {
+		params.PublicOld = req.req.PublicOld
+		if params.PublicOld == nil {
+			params.PublicOld = []byte{}
+		}
+
+		params.PublicNew = req.req.PublicNew
+	}
+
+	if req.req.ChangePrivate {
+		params.PrivateOld = req.req.PrivateOld
+		if params.PrivateOld == nil {
+			params.PrivateOld = []byte{}
+		}
+
+		params.PrivateNew = req.req.PrivateNew
+	}
+
+	err = w.keyVault.ChangePassphrase(w.lifetimeCtx, params)
+	if err != nil {
+		req.resp <- err
+		return
+	}
 
 	// Report the result back to the caller.
 	req.resp <- err

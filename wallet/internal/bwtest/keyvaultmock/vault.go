@@ -1,0 +1,100 @@
+// Copyright (c) 2026 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+// Package keyvaultmock contains a testify-based mock for the wallet key-vault
+// interface. It lives in its own package because it imports keyvault, and the
+// keyvault package's own tests depend on the shared mock package; keeping the
+// vault mock separate avoids an import cycle in the keyvault test build.
+package keyvaultmock
+
+import (
+	"context"
+
+	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/stretchr/testify/mock"
+)
+
+// Vault is a testify-based mock for the wallet key-vault interface.
+type Vault struct {
+	mock.Mock
+}
+
+// Encrypt forwards to the configured testify expectations.
+func (m *Vault) Encrypt(keyType waddrmgr.CryptoKeyType,
+	plaintext []byte) ([]byte, error) {
+
+	args := m.Called(keyType, plaintext)
+
+	return returnBytes(args, keyType, plaintext), args.Error(1)
+}
+
+// Decrypt forwards to the configured testify expectations.
+func (m *Vault) Decrypt(keyType waddrmgr.CryptoKeyType,
+	ciphertext []byte) ([]byte, error) {
+
+	args := m.Called(keyType, ciphertext)
+
+	return returnBytes(args, keyType, ciphertext), args.Error(1)
+}
+
+// Unlock forwards to the configured testify expectations.
+func (m *Vault) Unlock(ctx context.Context, passphrase []byte) error {
+	args := m.Called(ctx, passphrase)
+
+	return args.Error(0)
+}
+
+// Lock forwards to the configured testify expectations.
+func (m *Vault) Lock() {
+	m.Called()
+}
+
+// IsLocked forwards to the configured testify expectations.
+func (m *Vault) IsLocked() bool {
+	args := m.Called()
+
+	return args.Bool(0)
+}
+
+// ChangePassphrase forwards to the configured testify expectations.
+func (m *Vault) ChangePassphrase(ctx context.Context,
+	params keyvault.ChangePassphraseParams) error {
+
+	args := m.Called(ctx, params)
+
+	return args.Error(0)
+}
+
+// returnBytes resolves the first programmed Return arg into a byte slice. A
+// programmed func lets a test transform its input, which is how the identity
+// vault echoes plaintext back through the cipher methods.
+func returnBytes(args mock.Arguments, keyType waddrmgr.CryptoKeyType,
+	input []byte) []byte {
+
+	// Both shapes are accepted: a stub that cares about the key class takes
+	// it, one that only transforms bytes does not.
+	cryptFn, ok := args.Get(0).(func(waddrmgr.CryptoKeyType, []byte) []byte)
+	if ok {
+		return cryptFn(keyType, input)
+	}
+
+	if fn, ok := args.Get(0).(func([]byte) []byte); ok {
+		return fn(input)
+	}
+
+	if args.Get(0) == nil {
+		return nil
+	}
+
+	b, ok := args.Get(0).([]byte)
+	if !ok {
+		return nil
+	}
+
+	return b
+}
+
+// A compile-time check that the mock satisfies the interface it stands in for.
+var _ keyvault.Vault = (*Vault)(nil)

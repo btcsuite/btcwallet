@@ -4,10 +4,12 @@
 
 package wallet
 
+//nolint:staticcheck // Required by the temporary kvdb compatibility path.
 import (
 	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcwallet/build"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/kvdb"
 	"github.com/btcsuite/btcwallet/walletdb/migration"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
@@ -36,6 +38,7 @@ func UseLogger(logger btclog.Logger) {
 
 	migration.UseLogger(logger)
 	waddrmgr.UseLogger(logger)
+	kvdb.UseLogger(logger)
 	wtxmgr.UseLogger(logger)
 }
 

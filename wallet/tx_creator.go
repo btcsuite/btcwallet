@@ -14,19 +14,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 
-	"github.com/btcsuite/btcd/address/v2"
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/pkg/btcunit"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/txauthor"
 	"github.com/btcsuite/btcwallet/wallet/txrules"
 	"github.com/btcsuite/btcwallet/wallet/txsizes"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 )
 
@@ -77,6 +78,31 @@ var (
 
 	// ErrNilTxIntent is returned when a nil `TxIntent` is provided.
 	ErrNilTxIntent = errors.New("nil TxIntent")
+
+	// errNegativeHeight is returned when a height expected to be non-negative
+	// is negative.
+	errNegativeHeight = errors.New("negative height")
+
+	// The two errors below name the same conditions as their txauthor
+	// counterparts, deliberately including their names. They exist so a
+	// caller can match an authoring failure without importing the nested
+	// module; the originating txauthor error stays in the chain for anyone
+	// who wants the finer distinction.
+
+	// ErrOutputTotalExceedsMax is returned when a transaction's outputs are
+	// individually valid but sum to more than the maximum representable
+	// amount. Unlike the per-output bounds, this one has no counterpart in
+	// validateTxIntent, so it is reported from the authoring boundary.
+	ErrOutputTotalExceedsMax = errors.New(
+		"total output amount exceeds maximum value",
+	)
+
+	// ErrFeeOutOfRange is returned when the fee a transaction would pay is
+	// not a representable amount. DefaultMaxFeeRate keeps this out of reach
+	// at its default value, but that bound is a mutable package variable
+	// intended to become configurable: raised far enough, an ordinary
+	// multi-input transaction can price a fee above MaxSatoshi.
+	ErrFeeOutOfRange = errors.New("transaction fee out of range")
 )
 
 var (
@@ -304,6 +330,11 @@ func (i *InputsPolicy) validate() error {
 	switch source := i.Source.(type) {
 	// If the source is a scoped account, it must have a non-empty account
 	// name.
+	case ScopedAccount:
+		if source.AccountName == "" {
+			return ErrMissingAccountName
+		}
+
 	case *ScopedAccount:
 		if source.AccountName == "" {
 			return ErrMissingAccountName
@@ -311,6 +342,9 @@ func (i *InputsPolicy) validate() error {
 
 	// If the source is a list of UTXOs, it must not be empty and must not
 	// contain duplicates.
+	case CoinSourceUTXOs:
+		return validateOutPoints(source.UTXOs)
+
 	case *CoinSourceUTXOs:
 		return validateOutPoints(source.UTXOs)
 
@@ -454,69 +488,19 @@ func validateTxIntent(intent *TxIntent) error {
 
 // prepareTxAuthSources creates the input and change sources required to
 // author a transaction.
-func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
+func (w *Wallet) prepareTxAuthSources(ctx context.Context, intent *TxIntent) (
 	txauthor.InputSource, *txauthor.ChangeSource, error) {
+
 	// Determine the change source. If not specified, a default will be
 	// used.
 	changeAccount := w.determineChangeSource(intent)
 
-	manager, err := w.addrStore.FetchScopedKeyManager(
-		changeAccount.KeyScope,
-	)
+	changeSource, err := w.createChangeSource(ctx, changeAccount)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			changeAccount.AccountName)
+		return nil, nil, err
 	}
 
-	var (
-		changeSource *txauthor.ChangeSource
-		inputSource  txauthor.InputSource
-	)
-	// We perform the core logic of creating the input and change sources
-	// within a single database transaction to ensure atomicity.
-	err = walletdb.Update(w.cfg.DB, func(dbtx walletdb.ReadWriteTx) error {
-		changeKeyScope := &changeAccount.KeyScope
-		accountName := changeAccount.AccountName
-
-		addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
-
-		// Query the account's number using the account name.
-		//
-		// TODO(yy): Remove this query in upcoming SQL.
-		account, err := manager.LookupAccount(addrmgrNs, accountName)
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrAccountNotFound,
-				accountName)
-		}
-
-		// Create the change source, which is a closure that the
-		// txauthor package will use to generate a new change address
-		// when needed.
-		//
-		// TODO(yy): Refactor to ensure atomicity. The underlying
-		// `GetUnusedAddress` call creates its own database
-		// transaction, breaking the atomicity of this
-		// `walletdb.Update` block. A new method should be added to
-		// `AccountStore` that accepts an active database transaction
-		// and returns an unused address. This will allow the address
-		// derivation to occur within the same atomic transaction as
-		// the rest of the tx creation logic.
-		_, changeSource, err = w.addrMgrWithChangeSource(
-			dbtx, changeKeyScope, account,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Create the input source, which is a closure that the
-		// txauthor package will use to select coins.
-		inputSource, err = w.createInputSource(dbtx, intent)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
+	inputSource, err := w.createInputSource(ctx, intent)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -524,21 +508,124 @@ func (w *Wallet) prepareTxAuthSources(intent *TxIntent) (
 	return inputSource, changeSource, nil
 }
 
-// CreateTransaction creates a new unsigned transaction spending unspent outputs
-// to the given outputs. It is the main implementation of the TxCreator
-// interface. The method will produce a valid, unsigned transaction, which can
-// then be passed to the Signer interface to be signed.
-func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
-	*txauthor.AuthoredTx, error) {
+// createChangeSource creates a store-backed change source for transaction
+// authoring.
+func (w *Wallet) createChangeSource(ctx context.Context,
+	changeAccount *ScopedAccount) (*txauthor.ChangeSource, error) {
 
-	err := w.state.validateSynced()
+	accountName := changeAccount.AccountName
+
+	// storeAddrType is the effective internal (change branch) address type
+	// used to build the change script; derivationAccount is the account the
+	// change address is derived under. Both are resolved per branch below.
+	var (
+		storeAddrType     db.AddressType
+		derivationAccount string
+	)
+
+	switch accountName {
+	// The reserved imported alias cannot derive its own change and, unlike
+	// kvdb, has no account row on the SQL/runtime store, so a by-name
+	// lookup here would always fail with ErrAccountNotFound. Skip it and
+	// redirect change to derived account 0 in the same scope, matching the
+	// legacy behaviour. Account 0 may have been renamed, so we resolve it
+	// by number rather than assuming the literal "default" name; looking it
+	// up by name would break change derivation after a rename. Account 0's
+	// effective AddrSchema then drives the change script, which is what the
+	// post-redirect change script derived under it would use anyway.
+	case db.DefaultImportedAccountName:
+		derivedAccount := uint32(waddrmgr.DefaultAccountNum)
+
+		derivedInfo, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID:      w.id,
+				Scope:         db.KeyScope(changeAccount.KeyScope),
+				AccountNumber: &derivedAccount,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: account %d",
+				ErrAccountNotFound, derivedAccount)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("get account %d: %w",
+				derivedAccount, err)
+		}
+
+		storeAddrType = derivedInfo.AddrSchema.InternalAddrType
+		derivationAccount = derivedInfo.AccountName
+
+	// For a named account (including non-default imported xpub accounts) the
+	// by-name lookup both rejects an unknown account up front and supplies
+	// the account's effective AddrSchema. Use that schema instead of the
+	// scope default so strict BIP49 imports (and any other per-account
+	// override carried by kvdb's waddrmgr.AccountProperties.AddrSchema)
+	// produce change scripts the external signer expects. SQL backends
+	// currently store schema at the key-scope level only and surface the
+	// effective scope schema here; per-account-only overrides under a shared
+	// scope still fall through to the scope default and are tracked as a
+	// known limitation in the AddrSchema docstring.
+	default:
+		accountInfo, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(changeAccount.KeyScope),
+				Name:     &accountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				accountName)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w",
+				accountName, err)
+		}
+
+		storeAddrType = accountInfo.AddrSchema.InternalAddrType
+		derivationAccount = accountName
+	}
+
+	addrType, err := addresstype.ToWallet(storeAddrType, false)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check that the intent is not nil.
+	scriptSize, err := addrType.ScriptPubKeySize()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
+			addrType)
+	}
+
+	newChangeScript := func() ([]byte, error) {
+		addrInfo, err := w.store.NewDerivedAddress(
+			ctx, db.NewDerivedAddressParams{
+				WalletID:    w.id,
+				AccountName: derivationAccount,
+				Scope:       db.KeyScope(changeAccount.KeyScope),
+				Change:      true,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return addrInfo.ScriptPubKey, nil
+	}
+
+	return &txauthor.ChangeSource{
+		ScriptSize: scriptSize,
+		NewScript:  newChangeScript,
+	}, nil
+}
+
+// normalizeAndValidateTxIntent applies the default input policy and validates
+// a transaction intent before source preparation.
+func normalizeAndValidateTxIntent(intent *TxIntent) error {
 	if intent == nil {
-		return nil, ErrNilTxIntent
+		return ErrNilTxIntent
 	}
 
 	// If no input source is specified, an auto coin selection with the
@@ -550,15 +637,46 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 		intent.Inputs = &InputsPolicy{}
 	}
 
-	err = validateTxIntent(intent)
+	return validateTxIntent(intent)
+}
+
+// CreateTransaction creates a new unsigned transaction spending unspent outputs
+// to the given outputs. It is the direct-transaction wrapper around the neutral
+// authoring boundary and the main implementation of the TxCreator interface.
+// Direct-transaction watch delivery belongs to this wrapper; PSBT funding calls
+// the neutral boundary independently so its lease, cleanup, and publication
+// obligations remain in FundPsbt.
+func (w *Wallet) CreateTransaction(ctx context.Context, intent *TxIntent) (
+	*txauthor.AuthoredTx, error) {
+
+	err := w.state.validateSynced()
 	if err != nil {
 		return nil, err
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(intent)
+	err = normalizeAndValidateTxIntent(intent)
 	if err != nil {
 		return nil, err
 	}
+
+	inputSource, changeSource, err := w.prepareTxAuthSources(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.authorTransaction(
+		intent.Outputs, intent.FeeRate, inputSource, changeSource,
+	)
+}
+
+// authorTransaction creates an unsigned transaction from the outputs, fee rate,
+// and precomputed input and change sources shared by both public wrappers. Its
+// narrow request keeps wrapper-owned input policies, change accounts, labels,
+// and lifecycle effects outside the neutral boundary.
+func (w *Wallet) authorTransaction(outputs []wire.TxOut,
+	feeRate btcunit.SatPerKVByte,
+	inputSource txauthor.InputSource,
+	changeSource *txauthor.ChangeSource) (*txauthor.AuthoredTx, error) {
 
 	// The txauthor.NewUnsignedTransaction function expects a slice of
 	// *wire.TxOut, but our intent has a slice of wire.TxOut. We perform
@@ -566,21 +684,21 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	//
 	// TODO(yy): change the signature of `NewUnsignedTransaction` to take a
 	// list of `wire.TxOut`.
-	outputs := make([]*wire.TxOut, 0, len(intent.Outputs))
-	for _, output := range intent.Outputs {
-		outputs = append(outputs, &output)
+	txOutputs := make([]*wire.TxOut, 0, len(outputs))
+	for _, output := range outputs {
+		txOutputs = append(txOutputs, &output)
 	}
 
 	// With the input source and change source prepared, we can now call the
 	// txauthor package to perform the actual coin selection and create the
 	// unsigned transaction.
-	feeSatPerKb := intent.FeeRate.Val()
+	feeSatPerKb := feeRate.Val()
 
 	tx, err := txauthor.NewUnsignedTransaction(
-		outputs, feeSatPerKb, inputSource, changeSource,
+		txOutputs, feeSatPerKb, inputSource, changeSource,
 	)
 	if err != nil {
-		return nil, err
+		return nil, translateAuthorError(err)
 	}
 
 	// Randomize the position of the change output, if one was created. This
@@ -591,6 +709,80 @@ func (w *Wallet) CreateTransaction(_ context.Context, intent *TxIntent) (
 	}
 
 	return tx, nil
+}
+
+// authorError gives an authoring failure a wallet-facing identity without
+// restating it. Its message is the originating error's alone, while errors.Is
+// resolves both the wallet sentinel, through Is, and everything the originating
+// error already matched, through Unwrap. Wrapping with a second %w verb would
+// match both too, but would render the wallet sentinel's text and the txauthor
+// error's text one after the other, and for most of these classes those say the
+// same thing twice.
+//
+// This mirrors AmbiguousTxCommitError in wallet/internal/db/runtime.
+type authorError struct {
+	// sentinel is the wallet-facing identity this failure reports as.
+	sentinel error
+
+	// cause is the originating txauthor error, which supplies the message.
+	cause error
+}
+
+// Error returns the originating error's message.
+func (e *authorError) Error() string {
+	return e.cause.Error()
+}
+
+// Unwrap returns the originating txauthor error.
+func (e *authorError) Unwrap() error {
+	return e.cause
+}
+
+// Is reports whether target is the wallet sentinel this failure carries.
+func (e *authorError) Is(target error) bool {
+	return errors.Is(e.sentinel, target)
+}
+
+// translateAuthorError maps the checked-arithmetic errors the txauthor module
+// reports onto the wallet's own error vocabulary, so callers of the public
+// wrappers match on one set of sentinels. It is the single translation point
+// for both CreateTransaction and FundPsbt.
+//
+// Conditions validateTxIntent already names keep that identity, which costs no
+// new API and leaves one wallet-level error per condition however it was
+// reached: the txrules errors for an output value, and ErrMissingFeeRate for a
+// rate that is not positive. Only the output total has no intent-level
+// counterpart and needs a sentinel of its own.
+//
+// Everything else is returned untouched: an InputSourceError, so "cannot fund
+// this" stays distinguishable from "will not author this", and the checked
+// arithmetic classes no caller can observe. A nil output cannot occur, because
+// authorTransaction takes its outputs by value; the add and subtract guards
+// cannot fire, because CheckOutputsAmount bounds the target before every
+// addition and the sufficiency checks bound the rest. Naming those in the
+// wallet would be exported API with nothing behind it.
+func translateAuthorError(err error) error {
+	switch {
+	case errors.Is(err, txauthor.ErrOutputValueNegative):
+		return &authorError{txrules.ErrAmountNegative, err}
+
+	case errors.Is(err, txauthor.ErrOutputValueExceedsMax):
+		return &authorError{txrules.ErrAmountExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrOutputTotalExceedsMax):
+		return &authorError{ErrOutputTotalExceedsMax, err}
+
+	case errors.Is(err, txauthor.ErrFeeRateNotPositive):
+		return &authorError{ErrMissingFeeRate, err}
+
+	case errors.Is(err, txauthor.ErrFeeOverflow),
+		errors.Is(err, txauthor.ErrFeeOutOfRange):
+
+		return &authorError{ErrFeeOutOfRange, err}
+
+	default:
+		return err
+	}
 }
 
 // determineChangeSource determines the source for the transaction's change
@@ -606,7 +798,11 @@ func (w *Wallet) determineChangeSource(intent *TxIntent) *ScopedAccount {
 
 	// If the inputs are from a specific account, use that for change.
 	if policy, ok := intent.Inputs.(*InputsPolicy); ok {
-		if account, ok := policy.Source.(*ScopedAccount); ok {
+		switch account := policy.Source.(type) {
+		case ScopedAccount:
+			return &account
+
+		case *ScopedAccount:
 			return account
 		}
 	}
@@ -630,19 +826,19 @@ func (w *Wallet) determineChangeSource(intent *TxIntent) *ScopedAccount {
 // instead have methods made on the `txStore`, which takes a db tx and use them
 // here, as the logic will be largely overlapped with the interface methods used
 // in `wallet/utxo_manager.go`.
-func (w *Wallet) createInputSource(dbtx walletdb.ReadTx, intent *TxIntent) (
+func (w *Wallet) createInputSource(ctx context.Context, intent *TxIntent) (
 	txauthor.InputSource, error) {
 
 	switch inputs := intent.Inputs.(type) {
 	// If the inputs are manually specified, we create a "constant" input
 	// source that will only ever return the specified UTXOs.
 	case *InputsManual:
-		return w.createManualInputSource(dbtx, inputs)
+		return w.createManualInputSource(ctx, inputs)
 
 	// If the inputs are policy-based, we create an input source that will
 	// perform coin selection.
 	case *InputsPolicy:
-		return w.createPolicyInputSource(dbtx, inputs, intent.FeeRate)
+		return w.createPolicyInputSource(ctx, inputs, intent.FeeRate)
 
 	// Any other type is unsupported.
 	default:
@@ -653,28 +849,55 @@ func (w *Wallet) createInputSource(dbtx walletdb.ReadTx, intent *TxIntent) (
 // createManualInputSource creates an input source from a list of manually
 // specified UTXOs. It fetches the UTXOs directly from the database and ensures
 // that they are eligible for spending.
-func (w *Wallet) createManualInputSource(dbtx walletdb.ReadTx,
+func (w *Wallet) createManualInputSource(ctx context.Context,
 	inputs *InputsManual) (
 	txauthor.InputSource, error) {
 
-	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+	// Coinbase maturity is measured against the current chain tip, so we
+	// resolve the block stamp once for all selected UTXOs.
+	//
+	// TODO(yy): remove this block stamp check. The block stamp should be
+	// passed in as a parameter.
+	bs, err := w.cfg.Chain.BlockStamp()
+	if err != nil {
+		return nil, err
+	}
 
 	// Create a slice to hold the eligible UTXOs.
 	eligibleSelectedUtxo := make(
-		[]wtxmgr.Credit, 0, len(inputs.UTXOs),
+		[]db.UtxoInfo, 0, len(inputs.UTXOs),
 	)
 
 	// Iterate through the manually specified UTXOs and ensure that each
 	// one is eligible for spending.
 	for _, outpoint := range inputs.UTXOs {
 		// Fetch the UTXO from the database.
-		credit, err := w.txStore.GetUtxo(txmgrNs, outpoint)
+		credit, err := w.store.GetUtxo(
+			ctx, db.GetUtxoQuery{
+				WalletID: w.id,
+				OutPoint: outpoint,
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
 				outpoint)
 		}
 
-		// TODO(yy): check for locked utxos and log a warning.
+		// Trust the store's enriched lock state rather than scanning
+		// the full lease set ourselves.
+		if credit.IsLocked {
+			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
+				outpoint)
+		}
+
+		// Reject an immature coinbase, matching account-based
+		// selection: spending it before maturity would produce an
+		// invalid transaction.
+		if !w.txCreatorCoinbaseMature(credit, bs.Height) {
+			return nil, fmt.Errorf("%w: %v", ErrUtxoNotEligible,
+				outpoint)
+		}
+
 		eligibleSelectedUtxo = append(eligibleSelectedUtxo, *credit)
 	}
 
@@ -685,7 +908,7 @@ func (w *Wallet) createManualInputSource(dbtx walletdb.ReadTx,
 
 // createPolicyInputSource creates an input source that will perform automatic
 // coin selection based on the provided policy.
-func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
+func (w *Wallet) createPolicyInputSource(ctx context.Context,
 	policy *InputsPolicy, feeRate btcunit.SatPerKVByte) (
 	txauthor.InputSource, error) {
 
@@ -698,7 +921,7 @@ func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
 	// Get the full set of eligible UTXOs based on the policy's source
 	// and confirmation requirements.
 	eligible, err := w.getEligibleUTXOs(
-		dbtx, policy.Source, policy.MinConfs,
+		ctx, policy.Source, policy.MinConfs,
 	)
 	if err != nil {
 		return nil, err
@@ -744,8 +967,8 @@ func (w *Wallet) createPolicyInputSource(dbtx walletdb.ReadTx,
 // requirements. A UTXO is considered ineligible if it is not found in the
 // wallet's transaction store or if it does not meet the minimum confirmation
 // requirements.
-func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
-	source CoinSource, minconf uint32) ([]wtxmgr.Credit, error) {
+func (w *Wallet) getEligibleUTXOs(ctx context.Context,
+	source CoinSource, minconf uint32) ([]db.UtxoInfo, error) {
 
 	// TODO(yy): remove this block stamp check. The block stamp should be
 	// passed in as a parameter.
@@ -758,20 +981,23 @@ func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
 	switch source := source.(type) {
 	// If the source is nil, we'll use the default account.
 	case nil:
-		return w.filterEligibleOutputs(
-			dbtx, &waddrmgr.KeyScopeBIP0086,
-			waddrmgr.DefaultAccountNum, minconf, bs,
-		)
+		return w.getEligibleUTXOsFromDefaultAccount(ctx, minconf, bs)
 
 	// If the source is a scoped account, we find all eligible outputs for
 	// that specific account and key scope.
+	case ScopedAccount:
+		return w.getEligibleUTXOsFromAccount(ctx, &source, minconf, bs)
+
 	case *ScopedAccount:
-		return w.getEligibleUTXOsFromAccount(dbtx, source, minconf, bs)
+		return w.getEligibleUTXOsFromAccount(ctx, source, minconf, bs)
 
 	// If the source is a list of UTXOs, we validate and fetch each UTXO
 	// from the provided list.
+	case CoinSourceUTXOs:
+		return w.getEligibleUTXOsFromList(ctx, &source, minconf, bs)
+
 	case *CoinSourceUTXOs:
-		return w.getEligibleUTXOsFromList(dbtx, source, minconf, bs)
+		return w.getEligibleUTXOsFromList(ctx, source, minconf, bs)
 
 	// Any other source type is unsupported.
 	default:
@@ -779,63 +1005,128 @@ func (w *Wallet) getEligibleUTXOs(dbtx walletdb.ReadTx,
 	}
 }
 
+// getEligibleUTXOsFromDefaultAccount returns the eligible UTXOs of the BIP86
+// default account for implicit coin selection (a nil coin source). The default
+// account may be renamed, so we resolve account number 0 to its current name
+// through the store before filtering ListUTXOs by name; filtering by the
+// literal "default" name would miss account-0 UTXOs after a rename.
+func (w *Wallet) getEligibleUTXOsFromDefaultAccount(ctx context.Context,
+	minconf uint32, bs *waddrmgr.BlockStamp) ([]db.UtxoInfo, error) {
+
+	account := uint32(waddrmgr.DefaultAccountNum)
+
+	info, err := w.cache.GetAccount(
+		ctx, db.GetAccountQuery{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(waddrmgr.KeyScopeBIP0086),
+			AccountNumber: &account,
+		},
+	)
+	if errors.Is(err, db.ErrAccountNotFound) {
+		return nil, fmt.Errorf("%w: account %d", ErrAccountNotFound,
+			account)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("get account %d: %w", account, err)
+	}
+
+	return w.filterEligibleOutputs(
+		ctx, &waddrmgr.KeyScopeBIP0086, info.AccountName,
+		account, minconf, bs,
+	)
+}
+
 // getEligibleUTXOsFromAccount returns a slice of eligible UTXOs for a specific
 // account and key scope.
-func (w *Wallet) getEligibleUTXOsFromAccount(dbtx walletdb.ReadTx,
+func (w *Wallet) getEligibleUTXOsFromAccount(ctx context.Context,
 	source *ScopedAccount, minconf uint32, bs *waddrmgr.BlockStamp) (
-	[]wtxmgr.Credit, error) {
+	[]db.UtxoInfo, error) {
 
-	keyScope := &source.KeyScope
+	// The GetAccount call below exists only to reject an unknown account
+	// name up front; for the reserved imported alias it would always fail.
+	// Raw imported addresses deliberately use this alias with no account
+	// row (db.DefaultImportedAccountName), so skip the existence check for
+	// the alias. filterEligibleOutputs will select raw imports by their
+	// accountless enriched metadata instead of a SQL account alias.
+	if source.AccountName != db.DefaultImportedAccountName {
+		_, err := w.cache.GetAccount(
+			ctx, db.GetAccountQuery{
+				WalletID: w.id,
+				Scope:    db.KeyScope(source.KeyScope),
+				Name:     &source.AccountName,
+			},
+		)
+		if errors.Is(err, db.ErrAccountNotFound) {
+			return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
+				source.AccountName)
+		}
 
-	manager, err := w.addrStore.FetchScopedKeyManager(*keyScope)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			source.AccountName)
+		if err != nil {
+			return nil, fmt.Errorf("get account %q: %w",
+				source.AccountName, err)
+		}
 	}
 
-	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
-
-	account, err := manager.LookupAccount(addrmgrNs, source.AccountName)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrAccountNotFound,
-			source.AccountName)
-	}
-
-	return w.filterEligibleOutputs(dbtx, keyScope, account, minconf, bs)
+	return w.filterEligibleOutputs(
+		ctx, &source.KeyScope, source.AccountName, 0,
+		minconf, bs,
+	)
 }
 
 // getEligibleUTXOsFromList returns a slice of eligible UTXOs from a specified
 // list of outpoints.
-func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
+func (w *Wallet) getEligibleUTXOsFromList(ctx context.Context,
 	source *CoinSourceUTXOs, minconf uint32, bs *waddrmgr.BlockStamp) (
-	[]wtxmgr.Credit, error) {
+	[]db.UtxoInfo, error) {
 
 	// Create a slice to hold the eligible UTXOs.
-	eligible := make([]wtxmgr.Credit, 0, len(source.UTXOs))
-
-	// Get the transaction manager's namespace.
-	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+	eligible := make([]db.UtxoInfo, 0, len(source.UTXOs))
 
 	// Iterate through the manually specified UTXOs and ensure that each
 	// one is eligible for spending.
 	for _, outpoint := range source.UTXOs {
 		// Fetch the UTXO from the database.
-		credit, err := w.txStore.GetUtxo(txmgrNs, outpoint)
+		credit, err := w.store.GetUtxo(
+			ctx, db.GetUtxoQuery{
+				WalletID: w.id,
+				OutPoint: outpoint,
+			},
+		)
 		if err != nil {
+			return nil, fmt.Errorf("%w: %v",
+				ErrUtxoNotEligible, outpoint)
+		}
+
+		// Trust the store's enriched lock state rather than scanning
+		// the full lease set ourselves.
+		if credit.IsLocked {
 			return nil, fmt.Errorf("%w: %v",
 				ErrUtxoNotEligible, outpoint)
 		}
 
 		// A UTXO is only eligible if it has reached the required
 		// number of confirmations.
-		if !hasMinConfs(minconf, credit.Height, bs.Height) {
+		if !txCreatorHasMinConfs(minconf, credit.Height, bs.Height) {
 			// Calculate the number of confirmations for the
 			// warning message.
-			confs := calcConf(credit.Height, bs.Height)
+			confs := txCreatorConf(credit.Height, bs.Height)
 
 			log.Warnf("Skipping user-specified UTXO %v "+
 				"because it has %d confs but needs %d",
 				credit.OutPoint, confs, minconf)
+
+			continue
+		}
+
+		// Coinbase outputs are only spendable once they reach maturity,
+		// matching account-based selection; skip an immature coinbase
+		// even when MinConfs is otherwise satisfied.
+		if !w.txCreatorCoinbaseMature(credit, bs.Height) {
+			log.Warnf("Skipping user-specified coinbase UTXO %v "+
+				"because it has not reached maturity (%d)",
+				credit.OutPoint,
+				w.cfg.ChainParams.CoinbaseMaturity)
 
 			continue
 		}
@@ -847,6 +1138,8 @@ func (w *Wallet) getEligibleUTXOsFromList(dbtx walletdb.ReadTx,
 	return eligible, nil
 }
 
+// makeInputSource creates an input source that spends arranged coins until the
+// requested target amount is reached.
 func makeInputSource(eligible []Coin) txauthor.InputSource {
 	// Current inputs and their total value. These are closed over by the
 	// returned input source and reused across multiple calls.
@@ -882,9 +1175,29 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 	}
 }
 
+// constantInputCredit is a wallet-owned output usable by constantInputSource.
+type constantInputCredit interface {
+	db.UtxoInfo | wtxmgr.Credit
+}
+
 // constantInputSource creates an input source function that always returns the
 // static set of user-selected UTXOs.
-func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+func constantInputSource[T constantInputCredit](
+	eligible []T) txauthor.InputSource {
+
+	switch eligible := any(eligible).(type) {
+	case []db.UtxoInfo:
+		return constantUtxoInputSource(eligible)
+
+	case []wtxmgr.Credit:
+		return constantCreditInputSource(eligible)
+	}
+
+	return constantUtxoInputSource(nil)
+}
+
+// constantUtxoInputSource adapts static UTXO info into an input source.
+func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	// Current inputs and their total value. These won't change over
 	// different invocations as we want our inputs to remain static since
 	// they're selected by the user.
@@ -910,79 +1223,80 @@ func constantInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
 	}
 }
 
+// constantCreditInputSource adapts static legacy credits into an input source.
+func constantCreditInputSource(eligible []wtxmgr.Credit) txauthor.InputSource {
+	utxos := make([]db.UtxoInfo, len(eligible))
+	for i := range eligible {
+		height := db.UnminedHeight
+		if eligible[i].Height >= 0 {
+			confirmedHeight, err := nonNegativeHeightToUint32(
+				eligible[i].Height,
+			)
+			if err != nil {
+				continue
+			}
+
+			height = confirmedHeight
+		}
+
+		utxos[i] = db.UtxoInfo{
+			OutPoint:     eligible[i].OutPoint,
+			Amount:       eligible[i].Amount,
+			PkScript:     eligible[i].PkScript,
+			Received:     eligible[i].Received,
+			FromCoinBase: eligible[i].FromCoinBase,
+			Height:       height,
+		}
+	}
+
+	return constantUtxoInputSource(utxos)
+}
+
+// nonNegativeHeightToUint32 converts a non-negative block height to uint32.
+func nonNegativeHeightToUint32(height int32) (uint32, error) {
+	if height < 0 {
+		return 0, fmt.Errorf("%w: %d", errNegativeHeight, height)
+	}
+
+	return uint32(height), nil
+}
+
 // filterEligibleOutputs finds eligible outputs for the given key scope and
-// account.
-//
-// We will build a single query for this operation, so skip the linter for now.
-//
-//nolint:cyclop
-func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
-	keyScope *waddrmgr.KeyScope, account uint32, minconf uint32,
-	bs *waddrmgr.BlockStamp) ([]wtxmgr.Credit, error) {
+// account name. The numeric account argument is retained for caller-side
+// symmetry. Real accounts use the store's (Scope, AccountName) filter, while
+// the reserved imported alias is filtered locally by accountless raw-import
+// metadata because raw imports have no SQL account identity.
+func (w *Wallet) filterEligibleOutputs(ctx context.Context,
+	keyScope *waddrmgr.KeyScope, accountName string, _ uint32,
+	minconf uint32, bs *waddrmgr.BlockStamp) ([]db.UtxoInfo, error) {
 
-	addrmgrNs := dbtx.ReadBucket(waddrmgrNamespaceKey)
-	txmgrNs := dbtx.ReadBucket(wtxmgrNamespaceKey)
+	rawImported := accountName == db.DefaultImportedAccountName
+	query := db.ListUtxosQuery{WalletID: w.id}
 
-	unspent, err := w.txStore.UnspentOutputs(txmgrNs)
+	if !rawImported {
+		scope := db.KeyScope(*keyScope)
+		query.Scope = &scope
+		query.AccountName = &accountName
+	}
+
+	unspent, err := w.store.ListUTXOs(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: Eventually all of these filters (except perhaps output locking)
-	// should be handled by the call to UnspentOutputs (or similar).
-	// Because one of these filters requires matching the output script to
-	// the desired account, this change depends on making wtxmgr a waddrmgr
-	// dependency and requesting unspent outputs for a single account.
-	eligible := make([]wtxmgr.Credit, 0, len(unspent))
+	// For real accounts, the ListUTXOs query above already narrows results to
+	// the requested (Scope, AccountName), and the store enriches each UTXO
+	// with its authoritative KeyScope and lock state. For raw imports, the
+	// wallet-wide query is narrowed below using the accountless metadata that
+	// SQL exposes for raw imported addresses.
+	eligible := make([]db.UtxoInfo, 0, len(unspent))
 	for i := range unspent {
 		output := &unspent[i]
 
-		// Only include this output if it meets the required number of
-		// confirmations. Coinbase transactions must have reached
-		// maturity before their outputs may be spent.
-		if !hasMinConfs(minconf, output.Height, bs.Height) {
-			continue
-		}
-
-		if output.FromCoinBase {
-			target := w.cfg.ChainParams.CoinbaseMaturity
-			if !hasMinConfs(
-				uint32(target), output.Height, bs.Height,
-			) {
-
-				continue
-			}
-		}
-
-		// Locked unspent outputs are skipped.
-		if output.Locked {
-			continue
-		}
-
-		// Only include the output if it is associated with the passed
-		// account.
-		//
-		// TODO: Handle multisig outputs by determining if enough of the
-		// addresses are controlled.
-		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
-			output.PkScript, w.cfg.ChainParams,
+		eligibleOutput := w.outputEligibleForSelection(
+			rawImported, keyScope, output, minconf, bs.Height,
 		)
-		if err != nil || len(addrs) != 1 {
-			continue
-		}
-
-		scopedMgr, addrAcct, err := w.addrStore.AddrAccount(
-			addrmgrNs, addrs[0],
-		)
-		if err != nil {
-			continue
-		}
-
-		if keyScope != nil && scopedMgr.Scope() != *keyScope {
-			continue
-		}
-
-		if addrAcct != account {
+		if !eligibleOutput {
 			continue
 		}
 
@@ -990,6 +1304,104 @@ func (w *Wallet) filterEligibleOutputs(dbtx walletdb.ReadTx,
 	}
 
 	return eligible, nil
+}
+
+// outputEligibleForSelection reports whether one wallet UTXO may be used by
+// automatic coin selection for the requested source.
+func (w *Wallet) outputEligibleForSelection(rawImported bool,
+	keyScope *waddrmgr.KeyScope, output *db.UtxoInfo, minconf uint32,
+	currentHeight int32) bool {
+
+	if rawImported && !outputMatchesImportedAlias(output, keyScope) {
+		return false
+	}
+
+	// Only include this output if it meets the required number of
+	// confirmations. Coinbase transactions must have reached maturity before
+	// their outputs may be spent.
+	if !txCreatorHasMinConfs(minconf, output.Height, currentHeight) {
+		return false
+	}
+
+	if !w.txCreatorCoinbaseMature(output, currentHeight) {
+		return false
+	}
+
+	// Locked unspent outputs are skipped.
+	if output.IsLocked {
+		return false
+	}
+
+	// ListUTXOs reports outputs the wallet *owns* (it resolves a script through
+	// its first extracted address), but ownership of one member key is not the
+	// same as being able to *spend* the output. For a bare multisig script the
+	// wallet may hold only one of several required pubkeys, yet ListUTXOs would
+	// still surface it. Automatic coin selection must only draw on outputs the
+	// wallet can actually sign, so we restrict it to single-address scripts:
+	// ExtractPkScriptAddrs returning exactly one address covers the standard
+	// P2PKH/P2WPKH/P2SH/P2WSH cases and excludes multi-address / bare-multisig
+	// scripts whose spendability this path cannot guarantee.
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		output.PkScript, w.cfg.ChainParams,
+	)
+
+	return err == nil && len(addrs) == 1
+}
+
+// outputMatchesImportedAlias reports whether one enriched UTXO row belongs to
+// the wallet-facing imported alias. SQL raw imports are accountless and
+// scopeless; kvdb's legacy raw imports still carry the reserved imported
+// account name and their owning key scope.
+func outputMatchesImportedAlias(output *db.UtxoInfo,
+	keyScope *waddrmgr.KeyScope) bool {
+
+	if output.AccountName == "" && output.KeyScope == (db.KeyScope{}) {
+		return true
+	}
+
+	if output.AccountName != db.DefaultImportedAccountName {
+		return false
+	}
+
+	if keyScope == nil {
+		return true
+	}
+
+	return output.KeyScope == db.KeyScope(*keyScope)
+}
+
+// txCreatorHasMinConfs reports whether an output height satisfies a minimum
+// confirmation requirement at the current chain height.
+func txCreatorHasMinConfs(minconf uint32, height uint32,
+	currentHeight int32) bool {
+
+	return int64(txCreatorConf(height, currentHeight)) >= int64(minconf)
+}
+
+// txCreatorCoinbaseMature reports whether a coinbase output has reached the
+// network's coinbase maturity at the current chain height. Non-coinbase
+// outputs are always mature. This is the same gate account-based selection
+// applies, shared so the selected/manual UTXO paths reject an immature
+// coinbase rather than producing an invalid spend.
+func (w *Wallet) txCreatorCoinbaseMature(utxo *db.UtxoInfo,
+	currentHeight int32) bool {
+
+	if !utxo.FromCoinBase {
+		return true
+	}
+
+	maturity := uint32(w.cfg.ChainParams.CoinbaseMaturity)
+
+	return txCreatorHasMinConfs(maturity, utxo.Height, currentHeight)
+}
+
+// txCreatorConf returns the number of confirmations for an output height.
+func txCreatorConf(height uint32, currentHeight int32) int32 {
+	if height == db.UnminedHeight || height > uint32(math.MaxInt32) {
+		return 0
+	}
+
+	return calcConf(int32(height), currentHeight)
 }
 
 // inputYieldsPositively returns a boolean indicating whether this input yields
@@ -1007,110 +1419,18 @@ func inputYieldsPositively(credit *wire.TxOut,
 	return inputFee < btcutil.Amount(credit.Value)
 }
 
-func getScriptSize(addrType waddrmgr.AddressType) (int, error) {
-	switch addrType {
-	case waddrmgr.PubKeyHash:
-		return txsizes.P2PKHPkScriptSize, nil
-
-	case waddrmgr.NestedWitnessPubKey:
-		return txsizes.NestedP2WPKHPkScriptSize, nil
-
-	case waddrmgr.WitnessPubKey:
-		return txsizes.P2WPKHPkScriptSize, nil
-
-	case waddrmgr.TaprootPubKey:
-		return txsizes.P2TRPkScriptSize, nil
-
-	case waddrmgr.Script, waddrmgr.RawPubKey, waddrmgr.WitnessScript,
-		waddrmgr.TaprootScript:
-		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-
-	default:
-		return 0, fmt.Errorf("%w: %v", ErrUnsupportedAddressType,
-			addrType)
-	}
-}
-
-// addrMgrWithChangeSource returns the address manager bucket and a change
-// source that returns change addresses from said address manager. The change
-// addresses will come from the specified key scope and account, unless a key
-// scope is not specified. In that case, change addresses will always come from
-// the P2WKH key scope.
-func (w *Wallet) addrMgrWithChangeSource(dbtx walletdb.ReadWriteTx,
-	changeKeyScope *waddrmgr.KeyScope, account uint32) (
-	walletdb.ReadWriteBucket, *txauthor.ChangeSource, error) {
-
-	// Determine the address type for change addresses of the given
-	// account.
-	if changeKeyScope == nil {
-		changeKeyScope = &waddrmgr.KeyScopeBIP0086
-	}
-
-	addrType := waddrmgr.ScopeAddrMap[*changeKeyScope].InternalAddrType
-
-	// It's possible for the account to have an address schema override, so
-	// prefer that if it exists.
-	addrmgrNs := dbtx.ReadWriteBucket(waddrmgrNamespaceKey)
-
-	scopeMgr, err := w.addrStore.FetchScopedKeyManager(*changeKeyScope)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	accountInfo, err := scopeMgr.AccountProperties(addrmgrNs, account)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if accountInfo.AddrSchema != nil {
-		addrType = accountInfo.AddrSchema.InternalAddrType
-	}
-
-	// Compute the expected size of the script for the change address type.
-	scriptSize, err := getScriptSize(addrType)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	newChangeScript := func() ([]byte, error) {
-		// Derive the change output script. As a hack to allow spending
-		// from the imported account, change addresses are created from
-		// account 0.
-		var (
-			changeAddr address.Address
-			err        error
-		)
-		if account == waddrmgr.ImportedAddrAccount {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, 0, *changeKeyScope,
-			)
-		} else {
-			changeAddr, err = w.newChangeAddress(
-				addrmgrNs, account, *changeKeyScope,
-			)
-		}
-
-		if err != nil {
-			return nil, err
-		}
-
-		return txscript.PayToAddrScript(changeAddr)
-	}
-
-	return addrmgrNs, &txauthor.ChangeSource{
-		ScriptSize: scriptSize,
-		NewScript:  newChangeScript,
-	}, nil
-}
-
 // sortByAmount is a generic sortable type for sorting coins by their amount.
 type sortByAmount []Coin
 
+// Len returns the number of sortable coins.
 func (s sortByAmount) Len() int { return len(s) }
+
+// Less reports whether one coin has a smaller value than another.
 func (s sortByAmount) Less(i, j int) bool {
 	return s[i].Value < s[j].Value
 }
+
+// Swap exchanges two coins in the sortable slice.
 func (s sortByAmount) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 // LargestFirstCoinSelector is an implementation of the CoinSelectionStrategy

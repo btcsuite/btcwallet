@@ -4,45 +4,55 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg/v2"
+	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/bwtest/keyvaultmock"
+	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/walletdb"
 	_ "github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
+// testWalletName is the wallet name shared by Store-backed wallet tests.
+const testWalletName = "test-wallet"
+
+// fixedTestSeed returns a deterministic HD seed for tests that assert on
+// derived key material.
+func fixedTestSeed() []byte {
+	seed := make([]byte, hdkeychain.RecommendedSeedLen)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+
+	return seed
+}
+
 var (
 	errDBMock         = errors.New("db error")
-	errMock           = errors.New("mock error")
 	errChainMock      = errors.New("chain error")
 	errPutMock        = errors.New("put error")
-	errLockMock       = errors.New("lock fail")
 	errDBFail         = errors.New("db fail")
 	errDeriveFail     = errors.New("derive fail")
 	errLoadStateFail  = errors.New("load state fail")
 	errRollbackFail   = errors.New("rollback fail")
-	errFetchFail      = errors.New("fetch fail")
 	errCFilterFail    = errors.New("cfilter fail")
 	errActiveMgrsFail = errors.New("active managers fail")
 
-	errSetFail   = errors.New("set fail")
 	errOther     = errors.New("other error")
 	errBroadcast = errors.New("broadcast fail")
 	errScan      = errors.New("scan fail")
 	errBlocks    = errors.New("blocks fail")
-	errDBInsert  = errors.New("db insert fail")
 	errBestBlock = errors.New("best block fail")
-	errAddr      = errors.New("addr fail")
-	errInsert    = errors.New("insert fail")
-	errManager   = errors.New("manager fail")
-	errUtxo      = errors.New("utxo fail")
 	errGetBlocks = errors.New("get blocks fail")
 	errBlockHash = errors.New("block hash fail")
-	errSetSync   = errors.New("set sync fail")
 	errRemote    = errors.New("remote fail")
 	errNotify    = errors.New("notify fail")
 	errHashes    = errors.New("hashes fail")
@@ -91,16 +101,101 @@ func setupTestDB(t *testing.T) (walletdb.DB, func()) {
 	return db, cleanup
 }
 
+// testKVDBPath returns an unused test walletdb path. The file lives under
+// tb.TempDir, which the test framework removes, so no cleanup is returned.
+func testKVDBPath(tb testing.TB) string {
+	tb.Helper()
+
+	return filepath.Join(tb.TempDir(), "wallet.db")
+}
+
+// testKVDBManager opens a Manager over a fresh temp-file kvdb database. It
+// names the kvdb backend explicitly because ManagerConfig.Backend is required
+// and has no default, and because these tests assert kvdb runtime behavior.
+func testKVDBManager(tb testing.TB) *Manager {
+	tb.Helper()
+
+	return testKVDBManagerAt(tb, testKVDBPath(tb))
+}
+
+// testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
+// path, for tests that exercise the SQL path end to end rather than against a
+// mock store.
+func testSQLiteManager(tb testing.TB) *Manager {
+	tb.Helper()
+
+	m, err := NewManager(context.Background(), ManagerConfig{
+		Backend:     DBBackendSQLite,
+		DataSource:  filepath.Join(tb.TempDir(), "runtime.sqlite"),
+		ChainParams: chainParams,
+		ChainSource: &bwmock.Chain{},
+	})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = m.Close() })
+
+	return m
+}
+
+// testSQLManager builds a Manager whose SQL store is the supplied one, so a
+// test can drive the SQL path against a mock without a package-level injection
+// point. The Manager does not own the store, so Close releases nothing.
+func testSQLManager(tb testing.TB, store db.Store) *Manager {
+	tb.Helper()
+
+	return &Manager{
+		wallets: make(map[string]*Wallet),
+		backend: &sqlManagerBackend{
+			store:   store,
+			closeFn: func() error { return nil },
+		},
+		config: ManagerConfig{
+			ChainSource:             &bwmock.Chain{},
+			ChainParams:             chainParams,
+			WalletSyncRetryInterval: initialBackoff,
+			AutoLockDuration:        defaultLockDuration,
+		},
+	}
+}
+
+// startLoadedWalletForTest marks a loaded wallet as started without launching
+// chain sync goroutines.
+func startLoadedWalletForTest(t *testing.T, w *Wallet) {
+	t.Helper()
+
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+}
+
+// testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
+// simulate a restart by closing one Manager and opening another over the same
+// database.
+func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
+	tb.Helper()
+
+	m, err := NewManager(context.Background(), ManagerConfig{
+		Backend:     DBBackendKVDB,
+		DataSource:  dbPath,
+		ChainParams: chainParams,
+		ChainSource: &bwmock.Chain{},
+	})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = m.Close() })
+
+	return m
+}
+
 // mockWalletDeps holds the mocked dependencies for the Wallet.
 type mockWalletDeps struct {
-	addrStore      *mockAddrStore
-	txStore        *mockTxStore
+	addrStore      *bwmock.AddrStore
+	vault          *keyvaultmock.Vault
+	store          *walletmock.Store
+	txStore        *bwmock.TxStore
 	syncer         *mockChainSyncer
-	chain          *mockChain
-	addr           *mockManagedAddress
-	accountManager *mockAccountStore
-	pubKeyAddr     *mockManagedPubKeyAddr
-	taprootAddr    *mockManagedTaprootScriptAddress
+	chain          *bwmock.Chain
+	addr           *bwmock.ManagedAddress
+	accountManager *bwmock.AccountStore
+	pubKeyAddr     *bwmock.ManagedPubKeyAddr
+	taprootAddr    *bwmock.ManagedTaprootScriptAddress
 }
 
 // createTestWalletWithMocks creates a Wallet instance with mocked
@@ -112,25 +207,31 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	db, cleanup := setupTestDB(t)
 	t.Cleanup(cleanup)
 
-	mockAddrStore := &mockAddrStore{}
-	mockTxStore := &mockTxStore{}
+	mockAddrStore := &bwmock.AddrStore{}
+	mockVault := &keyvaultmock.Vault{}
+	mockStore := &walletmock.Store{}
+	mockTxStore := &bwmock.TxStore{}
 	mockSyncer := &mockChainSyncer{}
-	mockChain := &mockChain{}
-	mockAddr := &mockManagedAddress{}
-	mockAccountManager := &mockAccountStore{}
-	mockPubKeyAddr := &mockManagedPubKeyAddr{}
-	mockTaprootAddr := &mockManagedTaprootScriptAddress{}
+	mockChain := &bwmock.Chain{}
+	mockAddr := &bwmock.ManagedAddress{}
+	mockAccountManager := &bwmock.AccountStore{}
+	mockPubKeyAddr := &bwmock.ManagedPubKeyAddr{}
+	mockTaprootAddr := &bwmock.ManagedTaprootScriptAddress{}
 
 	ctx, cancel := context.WithCancel(t.Context())
 
 	w := &Wallet{
 		addrStore:   mockAddrStore,
+		store:       mockStore,
 		txStore:     mockTxStore,
+		keyVault:    mockVault,
 		sync:        mockSyncer,
 		state:       newWalletState(mockSyncer),
 		lifetimeCtx: ctx,
 		cancel:      cancel,
-		requestChan: make(chan any, 1),
+		// Unbuffered, matching production: a buffered channel here would
+		// let a send succeed without the main loop taking the request.
+		requestChan: make(chan any),
 		lockTimer:   time.NewTimer(time.Hour),
 		birthdayBlock: waddrmgr.BlockStamp{
 			Height: 100,
@@ -141,12 +242,15 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 			ChainParams: &chainParams,
 		},
 	}
+	w.cache = newStoreRuntimeCache(mockStore)
 
 	// Stop the timer immediately to avoid leaks.
 	w.lockTimer.Stop()
 
 	deps := &mockWalletDeps{
 		addrStore:      mockAddrStore,
+		vault:          mockVault,
+		store:          mockStore,
 		txStore:        mockTxStore,
 		syncer:         mockSyncer,
 		chain:          mockChain,
@@ -158,10 +262,13 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 
 	t.Cleanup(func() {
 		mockAddrStore.AssertExpectations(t)
+		mockVault.AssertExpectations(t)
+		mockStore.AssertExpectations(t)
 		mockTxStore.AssertExpectations(t)
 		mockSyncer.AssertExpectations(t)
 		mockChain.AssertExpectations(t)
 		mockAddr.AssertExpectations(t)
+		mockVault.AssertExpectations(t)
 		mockAccountManager.AssertExpectations(t)
 		mockPubKeyAddr.AssertExpectations(t)
 		mockTaprootAddr.AssertExpectations(t)
@@ -170,46 +277,65 @@ func createTestWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	return w, deps
 }
 
+// expectStopTeardown registers the one mock call Stop makes to clear in-memory
+// secret material: it locks the key vault. The expectation is optional so a
+// test that never stops the wallet is unaffected, and registered so a test that
+// does call Stop does not trip the strict mocks. It must be called after any
+// operation-specific Lock().Once() expectation so that expectation is matched
+// first and this pass-through absorbs only the extra stop-time Lock.
+func expectStopTeardown(deps *mockWalletDeps) {
+	deps.vault.On("Lock").Return().Maybe()
+}
+
 // createStartedWalletWithMocks creates a fully started and unlocked Wallet
 // instance with mocked dependencies.
 func createStartedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	t.Helper()
 
-	w, deps := createTestWalletWithMocks(t)
+	return createStartedWalletWithID(t, 0)
+}
 
-	// Mock the birthday block to be present.
-	deps.addrStore.On("BirthdayBlock", mock.Anything).
-		Return(waddrmgr.BlockStamp{}, true, nil).
+// createStartedWalletWithID creates a fully started Wallet instance whose
+// runtime wallet ID is set before startup.
+func createStartedWalletWithID(t *testing.T, walletID uint32) (*Wallet,
+	*mockWalletDeps) {
+
+	t.Helper()
+
+	w, deps := createTestWalletWithMocks(t)
+	w.id = walletID
+
+	// Mock the wallet metadata read — verifyBirthday calls
+	// store.GetWallet on startup. Returning a non-nil
+	// BirthdayBlock makes verifyBirthday take the verified
+	// short-circuit branch.
+	deps.store.On("GetWallet", mock.Anything, mock.Anything).
+		Return(&db.WalletInfo{
+			BirthdayBlock: &db.Block{},
+		}, nil).
 		Once()
 
 	// Allow SyncedTo to be called any number of times (background sync).
 	deps.addrStore.On("SyncedTo").
 		Return(waddrmgr.BlockStamp{Height: 1}).
 		Maybe()
+	deps.addrStore.On("WatchOnly").Return(false).Maybe()
 
-	// Mock account loading.
-	deps.addrStore.On("ActiveScopedKeyManagers").
-		Return([]waddrmgr.AccountStore{deps.accountManager}).
+	// Mock account loading through the store (runtime startup).
+	deps.store.On("ListAccounts", mock.Anything,
+		mock.AnythingOfType("db.ListAccountsQuery")).
+		Return([]db.AccountInfo(nil), nil).
 		Once()
 
-	deps.accountManager.On("LastAccount", mock.Anything).
-		Return(uint32(0), nil).
-		Once()
-
-	deps.accountManager.On("AccountProperties", mock.Anything, uint32(0)).
-		Return(&waddrmgr.AccountProperties{
-			AccountNumber: 0,
-			AccountName:   "default",
-		}, nil).
-		Once()
-
-	// Mock expired lock deletion.
-	deps.txStore.On("DeleteExpiredLockedOutputs", mock.Anything).
+	// Mock expired-lease cleanup (runtime startup).
+	deps.store.On("DeleteExpiredLeases", mock.Anything, mock.Anything).
 		Return(nil).
 		Once()
 
 	// Mock the syncer run.
 	deps.syncer.On("run", mock.Anything).Return(nil).Once()
+
+	expectStopTeardown(deps)
 
 	// Start the wallet.
 	require.NoError(t, w.Start(t.Context()))
@@ -239,6 +365,7 @@ func createUnlockedWalletWithMocks(t *testing.T) (*Wallet, *mockWalletDeps) {
 	return w, deps
 }
 
+// init configures package-level test defaults before tests run.
 func init() {
 	// Use fast scrypt options for tests to avoid CPU exhaustion and
 	// timeouts, especially when running with -race.
