@@ -732,6 +732,36 @@ func TestNewAccount(t *testing.T) {
 	deps.vault.AssertExpectations(t)
 }
 
+// TestNewAccountNoChainSyncUnsupported verifies the common Wallet boundary
+// refuses exclusion before any backend can prepare secrets or mutate accounts.
+func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: allow the existing admission checks on an unlocked wallet
+	// with an available name. Strict mocks have no secret or write
+	// expectations, so crossing into creation would fail this test.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	deps.vault.On("IsLocked").Return(false).Once()
+	expectAccountNameAvailable(deps, scope, testAccountName)
+
+	// Act: request exclusion through the public API while its receiving and
+	// recovery support is unavailable.
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope:       scope,
+		Name:        testAccountName,
+		NoChainSync: true,
+	})
+
+	// Assert: the stable unsupported error returns no account, and only the
+	// required read-only admission calls reach the Store and Vault.
+	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+	require.Nil(t, account)
+	deps.store.AssertExpectations(t)
+	deps.vault.AssertExpectations(t)
+}
+
 // TestNewAccountMissingHDSeedDefersToStore verifies that neutered-root kvdb
 // wallets can let the store fall back to scoped coin-type key derivation.
 func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
