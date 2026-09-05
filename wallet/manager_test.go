@@ -578,6 +578,78 @@ func TestSQLManagerBackendListsWallets(t *testing.T) {
 	}
 }
 
+// TestKVDBManagerBackendListsZeroOrOneWallet verifies legacy startup listing
+// treats an uninitialized database as empty and an initialized database as the
+// backend's sole anonymous Wallet, without inventing another identity.
+func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Open a fresh legacy database whose address and transaction
+		// namespaces have never been created.
+		manager := testKVDBManager(t)
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List startup data through the backend's zero-or-one boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: Absence is a successful, initialized empty result rather
+		// than an attempted load or a missing-Wallet error.
+		require.NoError(t, err)
+		require.NotNil(t, wallets)
+		require.Empty(t, wallets)
+	})
+
+	t.Run("initialized database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create and close the sole legacy Wallet with a non-empty
+		// public passphrase, then configure a new Manager with the same bytes.
+		// Mutating the caller slice after construction proves listing uses the
+		// Manager's immutable copy through the existing load path.
+		dbPath := testKVDBPath(t)
+		pubPassphrase := []byte("startup-public")
+		creator := testKVDBManagerAt(t, dbPath)
+		_, err := creator.Create(CreateWalletParams{
+			Name:              testWalletName,
+			Mode:              ModeShell,
+			WatchOnly:         true,
+			PubPassphrase:     pubPassphrase,
+			PrivatePassphrase: []byte("private"),
+			Birthday:          time.Now(),
+		})
+		require.NoError(t, err)
+		require.NoError(t, creator.Close())
+
+		manager, err := NewManager(t.Context(), ManagerConfig{
+			Backend:           DBBackendKVDB,
+			DataSource:        dbPath,
+			ChainParams:       chainParams,
+			ChainSource:       &bwmock.Chain{},
+			KVDBPubPassphrase: pubPassphrase,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = manager.Close() })
+
+		pubPassphrase[0] ^= 0xff
+
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List the occupied database through the backend boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: The existing loader returns one Wallet under kvdb's absent
+		// durable name rather than inventing an alias or a second identity.
+		require.NoError(t, err)
+		require.Len(t, wallets, 1)
+		require.Empty(t, wallets[0].name)
+	})
+}
+
 // TestManagerCreateRejectsMissingIdentityBeforeAssembly verifies Create
 // rejects an absent durable key before Store work.
 func TestManagerCreateRejectsMissingIdentityBeforeAssembly(t *testing.T) {
