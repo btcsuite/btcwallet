@@ -135,6 +135,72 @@ type UtxoManager interface {
 	ListLeasedOutputs(ctx context.Context) ([]*LeasedOutput, error)
 }
 
+// listUnspentReq keeps query and tip reads inside one accepted operation.
+type listUnspentReq struct {
+	reqCtx
+
+	query    UtxoQuery
+	respChan chan utxosResp
+}
+
+// utxosResp returns the selected outputs after accepted Store access ends.
+type utxosResp struct {
+	utxos []*Utxo
+	err   error
+}
+
+// getUtxoReq carries a value outpoint without retaining caller-owned data.
+type getUtxoReq struct {
+	reqCtx
+
+	prevOut  wire.OutPoint
+	respChan chan utxoResp
+}
+
+// utxoResp preserves the accepted lookup result across shutdown.
+type utxoResp struct {
+	utxo *Utxo
+	err  error
+}
+
+// leaseOutputReq owns the value parameters until Store records the lease.
+type leaseOutputReq struct {
+	reqCtx
+
+	id       wtxmgr.LockID
+	op       wire.OutPoint
+	duration time.Duration
+	respChan chan leaseOutputResp
+}
+
+// leaseOutputResp returns the expiration after Store records the lease.
+type leaseOutputResp struct {
+	expiration time.Time
+	err        error
+}
+
+// releaseOutputReq keeps the Store mutation joined until it completes.
+type releaseOutputReq struct {
+	reqCtx
+
+	id          wtxmgr.LockID
+	op          wire.OutPoint
+	respErrChan chan error
+}
+
+// listLeasedOutputsReq keeps lease iteration within Wallet admission.
+type listLeasedOutputsReq struct {
+	reqCtx
+
+	respChan chan leasedOutputsResp
+}
+
+// leasedOutputsResp returns the list after accepted lease iteration ends.
+type leasedOutputsResp struct {
+	outputs []*LeasedOutput
+	err     error
+}
+
 // ListUnspent returns the wallet-owned UTXOs that match the provided query.
 //
 // NOTE: This is part of the UtxoManager interface implementation.
@@ -146,22 +212,44 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 		return nil, err
 	}
 
-	log.Debugf("ListUnspent using query: %v", query)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := listUnspentReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		query:    query,
+		respChan: make(chan utxosResp, 1),
+	}
 
-	//nolint:contextcheck // SyncedTo takes no context.
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.utxos, result.err
+}
+
+// handleListUnspent reads and maps UTXOs under its accepted request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleListUnspent(r listUnspentReq) {
+	log.Debugf("ListUnspent using query: %v", r.query)
+
 	currentHeight := w.SyncedTo().Height
-	minConfs := query.MinConfs
-	maxConfs := query.MaxConfs
+	minConfs := r.query.MinConfs
+	maxConfs := r.query.MaxConfs
 
 	infos, err := w.store.ListUTXOs(
-		ctx, db.ListUtxosQuery{
+		r.ctx, db.ListUtxosQuery{
 			WalletID: w.id,
 			MinConfs: &minConfs,
 			MaxConfs: &maxConfs,
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list utxos: %w", err)
+		r.respChan <- utxosResp{err: fmt.Errorf("list utxos: %w", err)}
+
+		return
 	}
 
 	utxos := make([]*Utxo, 0, len(infos))
@@ -171,7 +259,7 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 		// The store has no scope to disambiguate a bare account name,
 		// so the wallet applies the account-name filter here rather
 		// than in the ListUTXOs query.
-		if query.Account != "" && accountName != query.Account {
+		if r.query.Account != "" && accountName != r.query.Account {
 			continue
 		}
 
@@ -179,7 +267,9 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 			&infos[i], accountName, currentHeight,
 		)
 		if err != nil {
-			return nil, err
+			r.respChan <- utxosResp{err: err}
+
+			return
 		}
 
 		utxos = append(utxos, utxo)
@@ -192,7 +282,7 @@ func (w *Wallet) ListUnspent(ctx context.Context,
 		return utxos[i].Amount < utxos[j].Amount
 	})
 
-	return utxos, nil
+	r.respChan <- utxosResp{utxos: utxos}
 }
 
 // walletUtxoAccountName returns the wallet-facing account name for a store UTXO
@@ -294,32 +384,58 @@ func (w *Wallet) GetUtxo(ctx context.Context,
 		return nil, err
 	}
 
-	//nolint:contextcheck // SyncedTo takes no context.
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := getUtxoReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		prevOut:  prevOut,
+		respChan: make(chan utxoResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.utxo, result.err
+}
+
+// handleGetUtxo resolves the output and tip within its accepted request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleGetUtxo(r getUtxoReq) {
 	currentHeight := w.SyncedTo().Height
 
-	info, err := w.store.GetUtxo(ctx, db.GetUtxoQuery{
+	info, err := w.store.GetUtxo(r.ctx, db.GetUtxoQuery{
 		WalletID: w.id,
-		OutPoint: prevOut,
+		OutPoint: r.prevOut,
 	})
 	if err != nil {
 		// Translate the internal store sentinel into the public,
 		// wallet-owned error so callers do not couple to the internal
 		// db package.
 		if errors.Is(err, db.ErrUtxoNotFound) {
-			return nil, ErrUnknownOutput
+			r.respChan <- utxoResp{err: ErrUnknownOutput}
+
+			return
 		}
 
-		return nil, fmt.Errorf("get utxo: %w", err)
+		r.respChan <- utxoResp{err: fmt.Errorf("get utxo: %w", err)}
+
+		return
 	}
 
 	utxo, err := w.buildWalletUtxoFromStore(
 		info, walletUtxoAccountName(info), currentHeight,
 	)
 	if err != nil {
-		return nil, err
+		r.respChan <- utxoResp{err: err}
+
+		return
 	}
 
-	return utxo, nil
+	r.respChan <- utxoResp{utxo: utxo}
 }
 
 // LeaseOutput locks an output for a given duration, reserving it so that it is
@@ -341,12 +457,35 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 		return time.Time{}, err
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := leaseOutputReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		id:       id,
+		op:       op,
+		duration: duration,
+		respChan: make(chan leaseOutputResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.expiration, result.err
+}
+
+// handleLeaseOutput records the lease while Wallet owns the Store call.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleLeaseOutput(r leaseOutputReq) {
 	lease, err := w.store.LeaseOutput(
-		ctx, db.LeaseOutputParams{
+		r.ctx, db.LeaseOutputParams{
 			WalletID: w.id,
-			ID:       db.LockID(id),
-			OutPoint: op,
-			Duration: duration,
+			ID:       db.LockID(r.id),
+			OutPoint: r.op,
+			Duration: r.duration,
 		},
 	)
 	if err != nil {
@@ -355,16 +494,28 @@ func (w *Wallet) LeaseOutput(ctx context.Context, id wtxmgr.LockID,
 		// db package.
 		switch {
 		case errors.Is(err, db.ErrUtxoNotFound):
-			return time.Time{}, ErrUnknownOutput
+			r.respChan <- leaseOutputResp{err: ErrUnknownOutput}
+
+			return
 
 		case errors.Is(err, db.ErrOutputAlreadyLeased):
-			return time.Time{}, ErrOutputAlreadyLocked
+			r.respChan <- leaseOutputResp{
+				expiration: time.Time{},
+				err:        ErrOutputAlreadyLocked,
+			}
+
+			return
 		}
 
-		return time.Time{}, fmt.Errorf("lease output: %w", err)
+		r.respChan <- leaseOutputResp{
+			expiration: time.Time{},
+			err:        fmt.Errorf("lease output: %w", err),
+		}
+
+		return
 	}
 
-	return lease.Expiration, nil
+	r.respChan <- leaseOutputResp{expiration: lease.Expiration}
 }
 
 // ReleaseOutput unlocks a previously leased output, making it available for
@@ -381,29 +532,55 @@ func (w *Wallet) ReleaseOutput(ctx context.Context, id wtxmgr.LockID,
 		return err
 	}
 
-	params := db.ReleaseOutputParams{
-		WalletID: w.id,
-		ID:       [32]byte(id),
-		OutPoint: op,
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := releaseOutputReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		id:          id,
+		op:          op,
+		respErrChan: make(chan error, 1),
 	}
 
-	err = w.store.ReleaseOutput(ctx, params)
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleReleaseOutput releases the lease while Wallet owns the Store call.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleReleaseOutput(r releaseOutputReq) {
+	params := db.ReleaseOutputParams{
+		WalletID: w.id,
+		ID:       [32]byte(r.id),
+		OutPoint: r.op,
+	}
+
+	err := w.store.ReleaseOutput(r.ctx, params)
 	if err != nil {
 		// Translate the internal store sentinels into the public,
 		// wallet-owned errors so callers do not couple to the internal
 		// db package.
 		switch {
 		case errors.Is(err, db.ErrUtxoNotFound):
-			return ErrUnknownOutput
+			r.respErrChan <- ErrUnknownOutput
+
+			return
 
 		case errors.Is(err, db.ErrOutputUnlockNotAllowed):
-			return ErrOutputUnlockNotAllowed
+			r.respErrChan <- ErrOutputUnlockNotAllowed
+
+			return
 		}
 
-		return fmt.Errorf("release output: %w", err)
+		r.respErrChan <- fmt.Errorf("release output: %w", err)
+
+		return
 	}
 
-	return nil
+	r.respErrChan <- nil
 }
 
 // ListLeasedOutputs returns the wallet-owned outputs that currently have active
@@ -418,9 +595,34 @@ func (w *Wallet) ListLeasedOutputs(
 		return nil, err
 	}
 
-	leases, err := w.store.ListLeasedOutputs(ctx, w.id)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := listLeasedOutputsReq{
+		reqCtx: reqCtx{ctx: ctx},
+
+		respChan: make(chan leasedOutputsResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
-		return nil, fmt.Errorf("list leased outputs: %w", err)
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.outputs, result.err
+}
+
+// handleListLeasedOutputs maps leases within its accepted request.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleListLeasedOutputs(r listLeasedOutputsReq) {
+	leases, err := w.store.ListLeasedOutputs(r.ctx, w.id)
+	if err != nil {
+		r.respChan <- leasedOutputsResp{
+			err: fmt.Errorf("list leased outputs: %w", err),
+		}
+
+		return
 	}
 
 	outputs := make([]*LeasedOutput, len(leases))
@@ -432,5 +634,5 @@ func (w *Wallet) ListLeasedOutputs(
 		}
 	}
 
-	return outputs, nil
+	r.respChan <- leasedOutputsResp{outputs: outputs}
 }

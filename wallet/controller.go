@@ -219,6 +219,9 @@ func (w *Wallet) Start(startCtx context.Context) error {
 	// 4. Start background goroutines.
 	w.wg.Add(1)
 
+	// Requests retain their own contexts; the routed legacy tip accessor still
+	// has no context parameter. Its existing exemption follows the call path.
+	//nolint:contextcheck // SyncedTo takes no context.
 	go w.mainLoop()
 
 	w.wg.Add(1)
@@ -797,6 +800,21 @@ func (w *Wallet) handleReq(req any) {
 
 	case getDerivationInfoReq:
 		w.handleGetDerivationInfo(r)
+
+	case listUnspentReq:
+		w.handleListUnspent(r)
+
+	case getUtxoReq:
+		w.handleGetUtxo(r)
+
+	case leaseOutputReq:
+		w.handleLeaseOutput(r)
+
+	case releaseOutputReq:
+		w.handleReleaseOutput(r)
+
+	case listLeasedOutputsReq:
+		w.handleListLeasedOutputs(r)
 
 	case newAccountReq:
 		w.handleNewAccount(r)
