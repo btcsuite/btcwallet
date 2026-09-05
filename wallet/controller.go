@@ -762,6 +762,8 @@ type reqCtx struct {
 // type switch is the single routing table for concurrent public method work.
 // Component responses have capacity one and each handler sends exactly once,
 // so delivery cannot block even before the admitted caller receives its result.
+//
+//nolint:cyclop // Enumerate all request routes in one table.
 func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
@@ -771,6 +773,30 @@ func (w *Wallet) handleReq(req any) {
 
 	case rescanReq:
 		w.handleRescanReq(r)
+
+	case newAddressReq:
+		w.handleNewAddress(r)
+
+	case getUnusedAddressReq:
+		w.handleGetUnusedAddress(r)
+
+	case getAddressInfoReq:
+		w.handleGetAddressInfo(r)
+
+	case listAddressesReq:
+		w.handleListAddresses(r)
+
+	case importPublicKeyReq:
+		w.handleImportPublicKey(r)
+
+	case importTaprootScriptReq:
+		w.handleImportTaprootScript(r)
+
+	case scriptForOutputReq:
+		w.handleScriptForOutput(r)
+
+	case getDerivationInfoReq:
+		w.handleGetDerivationInfo(r)
 
 	case newAccountReq:
 		w.handleNewAccount(r)

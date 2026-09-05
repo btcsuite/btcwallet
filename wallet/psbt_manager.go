@@ -430,7 +430,7 @@ func (w *Wallet) decorateInput(ctx context.Context, pInput *psbt.PInput,
 
 	// Reuse the same wallet lookup and script-construction path as the signer,
 	// so PSBT decoration and spending metadata stay in sync.
-	scriptInfo, err := w.ScriptForOutput(ctx, *utxo)
+	scriptInfo, err := w.scriptForOutput(ctx, *utxo)
 	if err != nil {
 		return err
 	}
@@ -701,7 +701,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 func (w *Wallet) addChangeOutputInfo(ctx context.Context, packet *psbt.Packet,
 	authoredTx *txauthor.AuthoredTx) error {
 	// First, we'll get the script information for the change output.
-	changeScriptInfo, err := w.ScriptForOutput(
+	changeScriptInfo, err := w.scriptForOutput(
 		ctx, *authoredTx.Tx.TxOut[authoredTx.ChangeIndex],
 	)
 	if err != nil {
