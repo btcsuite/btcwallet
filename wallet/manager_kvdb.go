@@ -24,6 +24,7 @@ import (
 type kvdbManagerBackend struct {
 	db          walletdb.DB
 	chainParams *chaincfg.Params
+	pubPass     []byte
 	store       *kvdb.Store //nolint:staticcheck // Remove with kvdb support.
 	addressMgr  *waddrmgr.Manager
 	walletName  string
@@ -64,6 +65,7 @@ func newKVDBManagerBackend(cfg ManagerConfig) (*kvdbManagerBackend, error) {
 	return &kvdbManagerBackend{
 		db:          dbConn,
 		chainParams: &cfg.ChainParams,
+		pubPass:     cfg.KVDBPubPassphrase,
 	}, nil
 }
 
