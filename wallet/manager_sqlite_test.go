@@ -321,10 +321,10 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
 	w.state.toUnlocked()
 
-	_, err = w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084,
-		waddrmgr.DefaultAccountName,
-	)
+	_, err = w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  waddrmgr.DefaultAccountName,
+	})
 	require.NoError(t, err)
 
 	addr, err := w.NewAddress(

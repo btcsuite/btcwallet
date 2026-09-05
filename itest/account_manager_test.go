@@ -110,7 +110,10 @@ func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
-	created, err := w.NewAccount(ctx, scope, accountName)
+	created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  accountName,
+	})
 
 	require.NoError(h, err, "failed to create derived account")
 	require.Equal(h, accountName, created.AccountName)
@@ -185,7 +188,10 @@ func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
 
 	numbers := make([]wallet.AccountNumber, 0, len(names))
 	for _, name := range names {
-		created, err := w.NewAccount(ctx, scope, name)
+		created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope: scope,
+			Name:  name,
+		})
 		require.NoError(h, err, "failed to create %q", name)
 		require.NotNil(h, created.AccountNumber, "%q has no number", name)
 
@@ -201,7 +207,10 @@ func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
 
 	// A second scope allocates from its own counter, so its first
 	// user-created account repeats the first scope's starting number.
-	other, err := w.NewAccount(ctx, waddrmgr.KeyScopeBIP0044, otherScopeName)
+	other, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0044,
+		Name:  otherScopeName,
+	})
 	require.NoError(h, err, "failed to create other scope account")
 	require.NotNil(h, other.AccountNumber, "other scope has no number")
 
@@ -215,7 +224,10 @@ func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
 	w = h.ReloadWallet(w)
 	h.UnlockWallet(w)
 
-	resumed, err := w.NewAccount(ctx, scope, resumedName)
+	resumed, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  resumedName,
+	})
 	require.NoError(h, err, "failed to create account after reload")
 	require.NotNil(
 		h, resumed.AccountNumber, "resumed account has no number",
@@ -238,7 +250,10 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
-	_, err := w.NewAccount(ctx, scope, sourceName)
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
 	require.NoError(h, err, "failed to create rejection source")
 
 	existing, err := w.GetAccount(ctx, scope, sourceName)
@@ -268,7 +283,10 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 	}
 
 	for _, tc := range testCases {
-		_, err := w.NewAccount(ctx, scope, tc.accountName)
+		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+			Scope: scope,
+			Name:  tc.accountName,
+		})
 
 		require.Error(h, err, "%s was accepted", tc.name)
 
@@ -294,7 +312,10 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 
 	// The account number is allocated before the insert, so only the
 	// rolled-back transaction keeps a rejected call from consuming one.
-	next, err := w.NewAccount(ctx, scope, afterRejectionName)
+	next, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  afterRejectionName,
+	})
 	require.NoError(h, err, "failed to create account after rejections")
 	require.NotNil(
 		h, next.AccountNumber, "account after rejections has no number",
@@ -324,12 +345,18 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 
 	require.NoError(h, w.Lock(ctx), "failed to lock wallet")
 
-	_, err = w.NewAccount(ctx, scope, lockedName)
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  lockedName,
+	})
 
 	require.Error(h, err, "locked wallet created an account")
 	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
 
-	_, err = w.NewAccount(ctx, scope, stoppedName)
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  stoppedName,
+	})
 
 	require.ErrorIs(h, err, wallet.ErrStateForbidden)
 
@@ -356,7 +383,10 @@ func testAccountManagerRejectWatchOnlyAccountCreation(h *bwtest.HarnessTest) {
 	w, _ := h.NewWallet(bwtest.WalletFixture{WatchOnly: true})
 	require.True(h, w.IsWatchOnly(), "watch-only fixture is not watch-only")
 
-	_, err := w.NewAccount(ctx, waddrmgr.KeyScopeBIP0084, accountName)
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  accountName,
+	})
 
 	require.Error(h, err, "watch-only wallet created an account")
 	_, err = w.GetAccount(ctx, waddrmgr.KeyScopeBIP0084, accountName)
@@ -374,7 +404,10 @@ func testAccountManagerRenameDerivedAccount(h *bwtest.HarnessTest) {
 	scope := waddrmgr.KeyScopeBIP0084
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
-	_, err := w.NewAccount(ctx, scope, sourceName)
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
 	require.NoError(h, err, "failed to create derived rename source")
 
 	source, err := w.GetAccount(ctx, scope, sourceName)
@@ -535,9 +568,15 @@ func testAccountManagerRejectAccountRename(h *bwtest.HarnessTest) {
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
-	_, err := w.NewAccount(ctx, scope, sourceName)
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
 	require.NoError(h, err, "failed to create rename source")
-	_, err = w.NewAccount(ctx, scope, duplicateTarget)
+	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  duplicateTarget,
+	})
 	require.NoError(h, err, "failed to create duplicate rename target")
 
 	wantAccounts, err := w.ListAccounts(ctx)
@@ -604,7 +643,10 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	scope := waddrmgr.KeyScopeBIP0084
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
-	_, err := w.NewAccount(ctx, scope, sourceName)
+	_, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope: scope,
+		Name:  sourceName,
+	})
 	require.NoError(h, err, "failed to create lifecycle source")
 
 	// Reload to reach the started but locked state this rename must be
