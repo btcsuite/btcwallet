@@ -766,7 +766,7 @@ type reqCtx struct {
 // Component responses have capacity one and each handler sends exactly once,
 // so delivery cannot block even before the admitted caller receives its result.
 //
-//nolint:cyclop // Enumerate all request routes in one table.
+//nolint:cyclop,funlen // Enumerate all request routes in one table.
 func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
@@ -824,6 +824,9 @@ func (w *Wallet) handleReq(req any) {
 
 	case labelTxReq:
 		w.handleLabelTx(r)
+
+	case createTransactionReq:
+		w.handleCreateTransaction(r)
 
 	case newAccountReq:
 		w.handleNewAccount(r)

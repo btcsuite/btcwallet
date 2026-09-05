@@ -950,12 +950,14 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 	w, mocks := createStartedWalletWithMocks(t)
 	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
 	fixture := expectDefaultAuthoringSources(t, w, mocks)
+	intent := &TxIntent{
+		Outputs: []wire.TxOut{fixture.payment},
+		FeeRate: defaultFeeRate,
+	}
 
 	// Act: Omit Inputs so CreateTransaction must install the default
 	// automatic-selection policy before preparing its sources.
-	authored, err := w.CreateTransaction(t.Context(), &TxIntent{
-		Outputs: []wire.TxOut{fixture.payment}, FeeRate: defaultFeeRate,
-	})
+	authored, err := w.CreateTransaction(t.Context(), intent)
 
 	// Assert: The wrapper must select the fixture's sole UTXO, publish the
 	// exact 99,700-sat payment, and report -1 because no change survived.
@@ -966,6 +968,9 @@ func TestCreateTransactionDefaultPolicy(t *testing.T) {
 		authored.Tx.TxIn[0].PreviousOutPoint)
 	require.Len(t, authored.Tx.TxOut, 1)
 	require.Equal(t, fixture.payment, *authored.Tx.TxOut[0])
+
+	// Default normalization remains visible on the supplied intent.
+	require.IsType(t, &InputsPolicy{}, intent.Inputs)
 }
 
 // TestCreateTransactionInvalidIntent tests that an error is returned when an
