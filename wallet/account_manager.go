@@ -27,7 +27,146 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
+
+var (
+	// ErrAccountAlreadyExists is returned when an account operation would
+	// take a name that is already used within the same key scope. Renaming
+	// an account to its current name reports the same outcome.
+	ErrAccountAlreadyExists = errors.New("account already exists")
+
+	// ErrAccountOperationUnsupported is returned when the requested account
+	// operation cannot be served by the wallet in its current mode, such as
+	// deriving a new account on a watch-only wallet or importing an
+	// XPub-only account into a spendable SQL wallet.
+	ErrAccountOperationUnsupported = errors.New(
+		"account operation unsupported by this wallet",
+	)
+
+	// ErrAccountDerivationExhausted is returned when a key scope has no
+	// account number left to allocate.
+	ErrAccountDerivationExhausted = errors.New(
+		"account derivation range exhausted",
+	)
+)
+
+// accountManagerErr preserves diagnostic text while exposing only the wallet
+// identity for a supported outcome. Unclassified errors retain no identity;
+// cancellation and deadlines retain their caller-owned identities.
+func accountManagerErr(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	contextErr := accountManagerContextErr(err)
+	if contextErr != nil {
+		return contextErr
+	}
+
+	switch {
+	case errors.Is(err, db.ErrAccountNotFound),
+		errors.Is(err, db.ErrKeyScopeNotFound),
+		isManagerErr(err, waddrmgr.ErrAccountNotFound),
+		isManagerErr(err, waddrmgr.ErrScopeNotFound):
+
+		return accountErr(ErrAccountNotFound, err.Error())
+
+	case dberr.IsAccountNameConflict(err),
+		isManagerErr(err, waddrmgr.ErrDuplicateAccount),
+		isManagerErr(err, waddrmgr.ErrAlreadyExists):
+
+		return accountErr(ErrAccountAlreadyExists, err.Error())
+
+	case errors.Is(err, errWatchOnlyAccountDerivation),
+		errors.Is(err, db.ErrWatchOnlyViolation),
+		errors.Is(err, db.ErrSpendableWalletNeedsAccountPrivKey),
+		isManagerErr(err, waddrmgr.ErrWatchingOnly):
+
+		return accountErr(ErrAccountOperationUnsupported, err.Error())
+
+	case errors.Is(err, db.ErrMaxAccountNumberReached),
+		isManagerErr(err, waddrmgr.ErrAccountNumTooHigh):
+
+		return accountErr(ErrAccountDerivationExhausted, err.Error())
+
+	case errors.Is(err, keyvault.ErrVaultLocked),
+		isManagerErr(err, waddrmgr.ErrLocked):
+
+		return accountErr(ErrStateForbidden, err.Error())
+
+	case isInvalidAccountRequest(err):
+		return accountErr(ErrInvalidParam, err.Error())
+
+	default:
+		return errors.New(err.Error())
+	}
+}
+
+// accountManagerContextErr preserves a caller's cancellation identity while
+// scrubbing any backend identity that may have been joined to it.
+func accountManagerContextErr(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return accountErr(context.Canceled, err.Error())
+
+	case errors.Is(err, context.DeadlineExceeded):
+		return accountErr(context.DeadlineExceeded, err.Error())
+
+	default:
+		return nil
+	}
+}
+
+// isManagerErr reports whether err carries a waddrmgr.ManagerError with the
+// given code. waddrmgr.IsError is a bare type assertion, so it cannot see a
+// manager error that a store wrapped for context — which is how the legacy
+// backend returns every one of them.
+func isManagerErr(err error, code waddrmgr.ErrorCode) bool {
+	var mErr waddrmgr.ManagerError
+	if !errors.As(err, &mErr) {
+		return false
+	}
+
+	return mErr.ErrorCode == code
+}
+
+// isInvalidAccountRequest reports whether err describes a request the store
+// refused to even attempt: a missing, reserved, or malformed field, or a
+// selector combination that identifies no single account.
+func isInvalidAccountRequest(err error) bool {
+	switch {
+	case errors.Is(err, db.ErrMissingAccountName),
+		errors.Is(err, db.ErrMissingAccountPublicKey),
+		errors.Is(err, db.ErrMissingField),
+		errors.Is(err, db.ErrInvalidParam),
+		errors.Is(err, db.ErrReservedAccountName),
+		errors.Is(err, db.ErrInvalidAccountQuery),
+		errors.Is(err, db.ErrUnknownKeyScope):
+
+		return true
+
+	// waddrmgr reports every account-name rule violation, including the
+	// reserved and empty-name cases, under this one code.
+	case isManagerErr(err, waddrmgr.ErrInvalidAccount):
+		return true
+
+	default:
+		return false
+	}
+}
+
+// accountErr joins a public identity with diagnostic text. Accepting text
+// rather than the source error prevents an internal identity from being
+// wrapped across the AccountManager boundary.
+func accountErr(identity error, diagnostic string) error {
+	if diagnostic == identity.Error() {
+		return identity
+	}
+
+	return fmt.Errorf("%w: %s", identity, diagnostic)
+}
 
 // buildAccountDeriveFn returns an AccountDerivationFunc closure. Spendable
 // wallets normally preload the master HD private key before the store opens
@@ -113,6 +252,18 @@ func (w *Wallet) buildAccountDeriveFn(
 //     account is created for each of the default key scopes and CAN be renamed.
 //   - "imported": A special account that holds all individually imported keys.
 //     This account is global and CANNOT be renamed.
+//
+// # Errors
+//
+// Named failures are reported through wallet-owned sentinels —
+// ErrAccountNotFound, ErrAccountAlreadyExists,
+// ErrAccountOperationUnsupported, ErrAccountDerivationExhausted,
+// ErrInvalidParam and ErrStateForbidden — so callers match on the wallet
+// contract rather than on whichever store backend happens to be mounted. An
+// outcome the contract does not name matches no stable sentinel and carries
+// its diagnostic text alone. Either way no store or waddrmgr error identity
+// crosses this surface, context cancellation excepted, since that identity
+// belongs to the caller.
 type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
@@ -140,8 +291,8 @@ type AccountManager interface {
 
 	// RenameAccount renames an existing account. To uniquely identify the
 	// account, the key scope must be provided. The new name must be unique
-	// within that same key scope. The reserved "imported" account cannot
-	// be renamed.
+	// within that same key scope, including against the account's own
+	// current name. The reserved "imported" account cannot be renamed.
 	RenameAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		oldName string, newName string) error
 
@@ -183,6 +334,10 @@ func (w *Wallet) canonicalStoreAccountInfo(
 // wallet-owned result. Every pointer and byte slice in the result is copied so
 // callers cannot mutate Store-owned data or another independently converted
 // result.
+//
+// Its failures are internal identities such as addresstype.ErrUnknown, so
+// public callers route the result through accountManagerErr rather than
+// returning it directly.
 func (w *Wallet) accountInfoFromStore(
 	storeInfo *db.AccountInfo) (*AccountInfo, error) {
 
@@ -248,14 +403,14 @@ func (w *Wallet) accountInfoFromStore(
 func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	name string) (*AccountInfo, error) {
 
-	err := w.state.validateStarted()
+	err := w.validateNewAccountRequest(ctx, scope, name)
 	if err != nil {
 		return nil, err
 	}
 
 	deriveFn, err := w.buildAccountDeriveFn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, accountManagerErr(err)
 	}
 
 	info, err := w.store.CreateDerivedAccount(ctx,
@@ -266,18 +421,66 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		}, deriveFn,
 	)
 	if err != nil {
-		// Preserve the legacy waddrmgr.ManagerError contract so that
-		// callers using waddrmgr.IsError(err, ...) keep working after
-		// kvdb wraps the underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
-
-		return nil, err
+		return nil, accountManagerErr(err)
 	}
 
-	return w.accountInfoFromStore(info)
+	result, err := w.accountInfoFromStore(info)
+	if err != nil {
+		return nil, accountManagerErr(err)
+	}
+
+	return result, nil
+}
+
+// validateNewAccountRequest fixes admission precedence before derivation or
+// mutation: caller and request errors win first, followed by lock state, name
+// collisions, and finally the watch-only restriction.
+func (w *Wallet) validateNewAccountRequest(ctx context.Context,
+	scope waddrmgr.KeyScope, name string) error {
+
+	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
+	// The watch-only refusal below short-circuits every ctx-aware and
+	// request-shape step the store would otherwise run, so both are
+	// answered first: a caller that cancelled must hear about the
+	// cancellation, and a malformed request is malformed whether or not
+	// the wallet could have served a well-formed one.
+	err = ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	err = waddrmgr.ValidateAccountName(name)
+	if err != nil {
+		return accountManagerErr(err)
+	}
+
+	// A spendable wallet must reject its already-locked state before reading
+	// encrypted seed material. If it locks after this check, NewAccount still
+	// translates a Vault preparation failure.
+	if !w.IsWatchOnly() && w.keyVault.IsLocked() {
+		return fmt.Errorf("%w: wallet is locked", ErrStateForbidden)
+	}
+
+	err = w.ensureAccountNameAvailable(ctx, scope, name)
+	if err != nil {
+		return err
+	}
+
+	// Refuse before the store is touched. Hardened derivation along
+	// m/purpose'/coin'/account' needs the master HD private key, which a
+	// watch-only wallet does not hold, and the backends otherwise refuse at
+	// different points: the SQL stores reach the derivation callback while a
+	// rootless legacy wallet fails its scope lookup first and would report a
+	// missing account instead.
+	if w.IsWatchOnly() {
+		return accountManagerErr(errWatchOnlyAccountDerivation)
+	}
+
+	return nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
@@ -372,7 +575,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 
 	infos, err := w.cache.ListAccounts(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, accountManagerErr(err)
 	}
 
 	if infos == nil {
@@ -383,7 +586,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	for i := range infos {
 		result, err := w.accountInfoFromStore(&infos[i])
 		if err != nil {
-			return nil, err
+			return nil, accountManagerErr(err)
 		}
 
 		results[i] = *result
@@ -441,22 +644,72 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		Name:     &name,
 	})
 	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers
-		// using waddrmgr.IsError(err, ...) keep working when kvdb
-		// wraps the underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
-
-		return nil, err
+		return nil, accountManagerErr(err)
 	}
 
-	return w.accountInfoFromStore(info)
+	result, err := w.accountInfoFromStore(info)
+	if err != nil {
+		return nil, accountManagerErr(err)
+	}
+
+	return result, nil
+}
+
+// selfRenameErr reports the outcome of a rename whose old and new names match.
+// A name conflict presumes the account exists, so an absent account is still
+// reported as missing rather than being masked by the conflict.
+func (w *Wallet) selfRenameErr(ctx context.Context, scope waddrmgr.KeyScope,
+	name string) error {
+
+	// SkipBalance keeps this to the single existence check the conflict
+	// answer depends on; no balance is read and nothing is mutated.
+	_, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(scope),
+		Name:        &name,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return accountManagerErr(err)
+	}
+
+	return fmt.Errorf("%w: %q in scope %d/%d", ErrAccountAlreadyExists,
+		name, scope.Purpose, scope.Coin)
+}
+
+// ensureAccountNameAvailable resolves occupied names before mutation. A racing
+// writer can still cause a constraint error, translated at the public exit.
+// A missing scope is available because creation may establish it later.
+func (w *Wallet) ensureAccountNameAvailable(ctx context.Context,
+	scope waddrmgr.KeyScope, name string) error {
+
+	_, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(scope),
+		Name:        &name,
+		SkipBalance: true,
+	})
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: %q in scope %d/%d",
+			ErrAccountAlreadyExists, name, scope.Purpose, scope.Coin)
+
+	case errors.Is(err, db.ErrAccountNotFound),
+		errors.Is(err, db.ErrKeyScopeNotFound),
+		isManagerErr(err, waddrmgr.ErrAccountNotFound),
+		isManagerErr(err, waddrmgr.ErrScopeNotFound):
+
+		return nil
+
+	default:
+		return accountManagerErr(err)
+	}
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
-// the same key scope. The reserved "imported" account cannot be renamed.
+// the same key scope, so renaming an account to the name it already holds
+// returns ErrAccountAlreadyExists. The reserved "imported" account cannot be
+// renamed.
 func (w *Wallet) RenameAccount(ctx context.Context,
 	scope waddrmgr.KeyScope, oldName, newName string) error {
 
@@ -465,7 +718,31 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		return err
 	}
 
+	err = ctx.Err()
+	if err != nil {
+		return err
+	}
+
+	err = waddrmgr.ValidateAccountName(oldName)
+	if err != nil {
+		return accountManagerErr(err)
+	}
+
 	err = waddrmgr.ValidateAccountName(newName)
+	if err != nil {
+		return accountManagerErr(err)
+	}
+
+	// Renaming an account to the name it already holds is a name conflict
+	// with itself. The backends disagree on this shape: the legacy store
+	// rejects it as a duplicate while the SQL stores update the row to its
+	// current value and report success. Settle it here so the answer no
+	// longer depends on which backend is mounted.
+	if oldName == newName {
+		return w.selfRenameErr(ctx, scope, newName)
+	}
+
+	err = w.ensureAccountNameAvailable(ctx, scope, newName)
 	if err != nil {
 		return err
 	}
@@ -477,15 +754,7 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		NewName:  newName,
 	})
 	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers using
-		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
-		// underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return mErr
-		}
-
-		return err
+		return accountManagerErr(err)
 	}
 
 	return nil
@@ -516,9 +785,41 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 		return nil, err
 	}
 
-	return w.importAccountInternal(
-		ctx, name, accountKey, masterKeyFingerprint, addrType, dryRun,
+	err = ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	err = waddrmgr.ValidateAccountName(name)
+	if err != nil {
+		return nil, accountManagerErr(err)
+	}
+
+	keyScope, dbAddrSchema, err := w.prepareImportedAccount(
+		accountKey, addrType,
 	)
+	if err != nil {
+		if errors.Is(err, ErrInvalidAccountKey) {
+			return nil, err
+		}
+
+		return nil, accountErr(ErrInvalidParam, err.Error())
+	}
+
+	err = w.ensureAccountNameAvailable(ctx, keyScope, name)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := w.persistImportedAccount(
+		ctx, name, accountKey, masterKeyFingerprint, keyScope, dbAddrSchema,
+		dryRun,
+	)
+	if err != nil {
+		return nil, accountManagerErr(err)
+	}
+
+	return result, nil
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,
@@ -528,24 +829,54 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
 	dryRun bool) (*AccountInfo, error) {
 
+	keyScope, dbAddrSchema, err := w.prepareImportedAccount(
+		accountKey, addrType,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.persistImportedAccount(
+		ctx, name, accountKey, masterKeyFingerprint, keyScope, dbAddrSchema,
+		dryRun,
+	)
+}
+
+// prepareImportedAccount validates an imported account key and converts its
+// derived scope schema before either the public preflight or Store write runs.
+func (w *Wallet) prepareImportedAccount(accountKey *hdkeychain.ExtendedKey,
+	addrType waddrmgr.AddressType) (waddrmgr.KeyScope,
+	*db.ScopeAddrSchema, error) {
+
 	err := validateExtendedPubKey(
 		accountKey, true, w.cfg.ChainParams,
 	)
 	if err != nil {
-		return nil, err
+		return waddrmgr.KeyScope{}, nil, err
 	}
 
 	keyScope, addrSchema, err := keyScopeFromPubKey(
 		accountKey, &addrType,
 	)
 	if err != nil {
-		return nil, err
+		return waddrmgr.KeyScope{}, nil, err
 	}
 
 	dbAddrSchema, err := dbScopeAddrSchema(addrSchema)
 	if err != nil {
-		return nil, err
+		return waddrmgr.KeyScope{}, nil, err
 	}
+
+	return keyScope, dbAddrSchema, nil
+}
+
+// persistImportedAccount performs the Store write shared by public imports and
+// Manager initialization. It leaves Store and conversion errors untranslated
+// so only the public AccountManager method applies its error contract.
+func (w *Wallet) persistImportedAccount(ctx context.Context, name string,
+	accountKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	keyScope waddrmgr.KeyScope, dbAddrSchema *db.ScopeAddrSchema,
+	dryRun bool) (*AccountInfo, error) {
 
 	info, err := w.store.CreateImportedAccount(ctx,
 		db.CreateImportedAccountParams{
@@ -559,18 +890,15 @@ func (w *Wallet) importAccountInternal(ctx context.Context,
 		},
 	)
 	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers using
-		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
-		// underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
-
 		return nil, err
 	}
 
-	return w.accountInfoFromStore(info)
+	result, err := w.accountInfoFromStore(info)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // dbScopeAddrSchema converts a waddrmgr per-account address schema override
