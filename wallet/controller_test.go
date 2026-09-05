@@ -651,8 +651,7 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 
 		// Arrange: Setup a started wallet where best block lookup fails.
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -1289,6 +1288,142 @@ func TestHandleChangePassphraseReq_Errors(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
 
+// TestControllerInfoWaitsForAcceptedResult verifies that caller cancellation
+// cannot discard an accepted result or let Stop pass unfinished Store work.
+func TestControllerInfoWaitsForAcceptedResult(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "Success",
+		},
+		{
+			name: "Dependency error",
+			err:  errDBMock,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Hold an accepted Store read that ignores cancellation.
+			// Its release determines when both Info and shutdown can finish.
+			w, deps := createTestWalletWithMocks(t)
+			startLoadedWalletForTest(t, w)
+
+			enteredChan := make(chan struct{})
+			releaseChan := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(releaseChan) })
+			t.Cleanup(unblock)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			deps.store.On("GetWallet", ctx, "").Run(
+				func(mock.Arguments) {
+					close(enteredChan)
+					<-releaseChan
+				},
+			).Return(&db.WalletInfo{}, tc.err).Once()
+			deps.vault.On("Lock").Return().Once()
+
+			if tc.err == nil {
+				deps.chain.On("BackEnd").Return("mock").Once()
+				deps.syncer.On("syncState").Return(syncStateSynced).Twice()
+			}
+
+			resultChan := make(chan infoResp, 1)
+			go func() {
+				info, err := w.Info(ctx)
+				resultChan <- infoResp{info: info, err: err}
+			}()
+
+			<-enteredChan
+
+			// Act: Cancel after admission and begin shutdown while Store is
+			// held. Neither path may abandon the accepted operation.
+			cancel()
+
+			stoppedChan := make(chan error, 1)
+			go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+			<-w.lifetimeCtx.Done()
+
+			// Assert: Both calls stay joined until release, then Info returns
+			// the ordinary result and Stop completes its vault teardown.
+			select {
+			case result := <-resultChan:
+				t.Fatalf("Info returned before Store completion: %v",
+					result.err)
+			case err := <-stoppedChan:
+				t.Fatalf("Stop returned before Store completion: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+
+			unblock()
+
+			result := <-resultChan
+			require.ErrorIs(t, result.err, tc.err)
+
+			if tc.err == nil {
+				require.Equal(t, "mock", result.info.Backend)
+			} else {
+				require.Nil(t, result.info)
+			}
+
+			require.NoError(t, <-stoppedChan)
+		})
+	}
+}
+
+// TestControllerRescanFullMailboxStops prevents an accepted scan from
+// stranding Stop when the syncer stops consuming its already-full mailbox.
+func TestControllerRescanFullMailboxStops(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use the real mailboxChan transfer with a queued scan and no
+	// consumer, matching the syncer's shutdown state. Chain entry proves the
+	// new request is accepted before shutdown begins.
+	w, deps := createTestWalletWithMocks(t)
+
+	mailboxChan := make(chan *scanReq, 1)
+	mailboxChan <- &scanReq{}
+
+	w.sync = &syncer{scanReqChan: mailboxChan}
+	startLoadedWalletForTest(t, w)
+	deps.syncer.On("syncState").Return(syncStateSynced).Once()
+	deps.vault.On("Lock").Return().Once()
+
+	enteredChan := make(chan struct{})
+	deps.chain.On("GetBestBlock").Run(func(mock.Arguments) {
+		close(enteredChan)
+	}).Return(&chainhash.Hash{}, int32(100), nil).Once()
+
+	resultChan := make(chan error, 1)
+	go func() { resultChan <- w.Resync(t.Context(), 10) }()
+
+	<-enteredChan
+
+	// Act: Stop while the accepted transfer cannot enqueue another scan.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	// Assert: Wallet cancellation releases the mailbox send and its handler;
+	// the original queued scan stays intact and the new caller gets the
+	// transfer's cancellation error rather than a substituted shutdown error.
+	select {
+	case err := <-stoppedChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("full scan mailboxChan stranded Stop")
+	}
+
+	require.ErrorIs(t, <-resultChan, context.Canceled)
+	require.Len(t, mailboxChan, 1)
+}
+
 // TestControllerInfo verifies the Info method. It checks that the wallet
 // correctly aggregates information from its subsystems (chain backend,
 // address manager, and syncer).
@@ -1366,8 +1501,16 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 	chain.On("BackEnd").Return("mock").Twice()
 
 	params := chaincfg.MainNetParams
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
 	w := &Wallet{
-		store: store,
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
+		store:       store,
 		cfg: Config{
 			Name:        "isolated",
 			Chain:       chain,
@@ -1375,8 +1518,9 @@ func TestControllerInfoCopiesChainParams(t *testing.T) {
 		},
 		state: newWalletState(nil),
 	}
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
 
 	// Act: Mutate nested values in the first Info result, then request a new
 	// snapshot from the same retained Wallet configuration.
@@ -1443,8 +1587,7 @@ func TestControllerResync(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -1459,8 +1602,7 @@ func TestControllerResync(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 		deps.chain.On("GetBestBlock").Return(
@@ -1486,8 +1628,7 @@ func TestControllerRescan(t *testing.T) {
 		t.Parallel()
 
 		w, _ := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		err := w.Rescan(t.Context(), 50, nil)
 		require.ErrorIs(t, err, ErrNoScanTargets)
@@ -1497,8 +1638,7 @@ func TestControllerRescan(t *testing.T) {
 		t.Parallel()
 
 		w, deps := createTestWalletWithMocks(t)
-		require.NoError(t, w.state.toStarting())
-		require.NoError(t, w.state.toStarted())
+		startLoadedWalletForTest(t, w)
 
 		deps.syncer.On("syncState").Return(syncStateSynced)
 
@@ -1775,8 +1915,7 @@ func TestSubmitRescanRequest_HeightOverflow(t *testing.T) {
 	// Arrange: Setup a wallet and attempt a rescan with an invalid height.
 	w, deps := createTestWalletWithMocks(t)
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	startLoadedWalletForTest(t, w)
 
 	deps.syncer.On("syncState").Return(syncStateSynced).Maybe()
 
