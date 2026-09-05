@@ -32,6 +32,25 @@ func (s *Store) PutTxLabel(ns walletdb.ReadWriteBucket, txid chainhash.Hash,
 	return PutTxLabel(labelBucket, txid, label)
 }
 
+// DeleteTxLabel removes any label recorded for the transaction. A transaction
+// with no label is not an error: the result of this call is that the
+// transaction has none either way.
+//
+// Removing the entry is what "no label" looks like in this store. A zero-length
+// label cannot be written in its place, because FetchTxLabel reports a stored
+// label of zero length as ErrEmptyLabel rather than as the absence of one.
+func (s *Store) DeleteTxLabel(ns walletdb.ReadWriteBucket,
+	txid chainhash.Hash) error {
+
+	labelBucket := ns.NestedReadWriteBucket(bucketTxLabels)
+	if labelBucket == nil {
+		// No label has ever been written, so there is none to remove.
+		return nil
+	}
+
+	return labelBucket.Delete(txid[:])
+}
+
 // TxDetails looks up all recorded details regarding a transaction with some
 // hash.  In case of a hash collision, the most recent transaction with a
 // matching hash is returned.

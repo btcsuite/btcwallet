@@ -10,7 +10,6 @@ import (
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet"
-	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,21 +93,70 @@ func testLabelTxReplace(h *bwtest.HarnessTest) {
 	)
 }
 
-// testLabelTxBoundaries verifies the ends of the label length range every
-// backend accepts: one character, and the longest label the wallet stores.
+// testLabelTxClear verifies that an empty label removes the label a
+// transaction already had, that removing a label a transaction never had is
+// not an error, and that a cleared label stays cleared across a reload.
 //
-// The upper limit is wtxmgr.TxLabelLimit, which is the only exported name for
-// it; the SQL schemas restate the same number as a column constraint. Labels
-// are built from ASCII deliberately, because kvdb counts the limit in bytes
-// while the SQL schemas count it in characters, and only ASCII makes the one
-// number mean the same thing on all three backends.
+// The empty label is the only way to remove one through this API, so a wallet
+// that refused it would leave a caller no way to undo a label at all.
+func testLabelTxClear(h *bwtest.HarnessTest) {
+	const label = "rent for march"
+
+	w, funding := h.NewWallet(bwtest.WalletFixture{
+		AddrType: txWriterFundingType,
+		Amounts:  []btcutil.Amount{oneBTC},
+	})
+
+	txHash := funding.WalletOutpoints[0].Hash
+
+	err := w.LabelTx(h.Context(), txHash, label)
+	require.NoError(h, err, "failed to label transaction")
+
+	err = w.LabelTx(h.Context(), txHash, "")
+
+	require.NoError(h, err, "clearing a label was refused")
+
+	detail, err := w.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "failed to read the cleared transaction")
+	require.Empty(h, detail.Label, "point read still reports a label")
+
+	details, err := w.ListTxns(h.Context(), unminedHeight, 0)
+	require.NoError(h, err, "failed to list transactions")
+
+	listed := make(map[chainhash.Hash]string, len(details))
+	for _, detail := range details {
+		listed[detail.Hash] = detail.Label
+	}
+
+	require.Empty(h, listed[txHash], "list read still reports a label")
+
+	// A transaction with no label is what the caller asked for and already
+	// has, so asking again is not an error.
+	err = w.LabelTx(h.Context(), txHash, "")
+	require.NoError(h, err, "clearing an absent label was refused")
+
+	// The removal is durable rather than a property of the running wallet.
+	reloaded := h.ReloadWallet(w)
+
+	detail, err = reloaded.GetTx(h.Context(), txHash)
+	require.NoError(h, err, "reloaded wallet lost the transaction")
+	require.Empty(
+		h, detail.Label, "reloaded wallet restored the cleared label",
+	)
+}
+
+// testLabelTxBoundaries verifies the ends of the label length range the wallet
+// accepts: one byte, and a label of exactly wallet.MaxTxLabelLength bytes.
 //
-// The values just outside this range are not rows here. One character above it
-// is refused by every backend, but with a backend-specific error rather than a
-// wallet error identity, so it is asserted separately in
-// testLabelTxRejectOversize. The empty label below it has no single behavior to
-// assert at all: the SQL backends accept it and clear the label, while kvdb
-// refuses it.
+// The limit is stated in bytes, so a label of multi-byte runes reaches it in
+// fewer characters. Both spellings of the longest accepted label are rows here,
+// because the stores under this API do not agree on the unit and the wallet's
+// own limit is what settles it.
+//
+// The first value past the limit is refused rather than accepted, so it is
+// asserted separately in testLabelTxRejectOversize. The empty label below this
+// range is not a boundary of it at all: it removes a label rather than setting
+// a short one, and testLabelTxClear covers it.
 func testLabelTxBoundaries(h *bwtest.HarnessTest) {
 	w, funding := h.NewWallet(bwtest.WalletFixture{
 		AddrType: txWriterFundingType,
@@ -127,7 +175,17 @@ func testLabelTxBoundaries(h *bwtest.HarnessTest) {
 		},
 		{
 			name:  "longest label",
-			label: strings.Repeat("x", wtxmgr.TxLabelLimit),
+			label: strings.Repeat("x", wallet.MaxTxLabelLength),
+		},
+		{
+			// Three bytes per rune, so a third of the limit in
+			// characters already spends nearly all of it in bytes.
+			// A character limit of the same size would leave room
+			// for three times as many.
+			name: "multi-byte label near the limit",
+			label: strings.Repeat(
+				"€", wallet.MaxTxLabelLength/3,
+			),
 		},
 	}
 
@@ -192,21 +250,14 @@ func testLabelTxRejectUnknown(h *bwtest.HarnessTest) {
 	)
 }
 
-// testLabelTxRejectOversize verifies that the first label longer than the
-// wallet stores is refused by every backend, and that the refusal leaves the
-// transaction's existing label in place rather than truncating it to fit.
+// testLabelTxRejectOversize verifies that the first label past the limit is
+// refused with the wallet's own identity on every backend, and that the refusal
+// leaves the transaction's existing label in place rather than truncating it to
+// fit.
 //
-// The rejection is asserted only as an error. Every backend enforces the limit
-// itself, so the caller receives whichever of three unrelated values that
-// backend produces: kvdb reports wtxmgr.ErrLabelTooLong, SQLite a violated
-// CHECK constraint, and PostgreSQL an overlong value for its column type. There
-// is no wallet error identity to match on, and matching any one backend's text
-// would tie this case to a detail no contract promises. That missing identity
-// is a gap in LabelTx, not in this case.
-//
-// The identities LabelTx does publish are ruled out instead, so the case still
-// fails if the write is ever refused for a reason other than the label it was
-// given.
+// One identity is the point of the case. Each store also enforces a limit and
+// reports its own violation, and before the wallet published a limit of its own
+// a caller met whichever of those three the backend happened to produce.
 func testLabelTxRejectOversize(h *bwtest.HarnessTest) {
 	const kept = "rent for march"
 
@@ -220,20 +271,15 @@ func testLabelTxRejectOversize(h *bwtest.HarnessTest) {
 	err := w.LabelTx(h.Context(), txHash, kept)
 	require.NoError(h, err, "failed to label the funding transaction")
 
-	// One character past the longest label testLabelTxBoundaries stores, so
+	// One byte past the longest label testLabelTxBoundaries stores, so
 	// length is the only thing wrong with it.
-	oversize := strings.Repeat("x", wtxmgr.TxLabelLimit+1)
+	oversize := strings.Repeat("x", wallet.MaxTxLabelLength+1)
 
 	err = w.LabelTx(h.Context(), txHash, oversize)
 
-	require.Error(h, err, "label longer than the limit was accepted")
-	require.NotErrorIs(
-		h, err, wallet.ErrTxNotFound,
-		"label was refused for a transaction the wallet holds",
-	)
-	require.NotErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"label was refused by the lifecycle gate on a running wallet",
+	require.ErrorIs(
+		h, err, wallet.ErrLabelTooLong,
+		"label longer than the limit was not refused as too long",
 	)
 
 	detail, err := w.GetTx(h.Context(), txHash)
