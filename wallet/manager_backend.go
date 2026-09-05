@@ -18,6 +18,10 @@ const defaultWalletDBDirPerm = 0o700
 // managerBackend owns the database used by a Manager and resolves the storage
 // dependencies needed to assemble a Wallet.
 type managerBackend interface {
+	// listWallets returns all durable Wallet data owned by this backend. SQL
+	// backends may return many entries, while kvdb returns at most one.
+	listWallets(ctx context.Context) ([]*walletData, error)
+
 	// create persists only identity and initialization data; runtime policy
 	// remains outside the backend and is applied by Manager assembly.
 	create(ctx context.Context, params CreateWalletParams,
@@ -35,6 +39,7 @@ type managerBackend interface {
 // owns no resources; the managerBackend that returned it remains their owner.
 type walletData struct {
 	id                uint32
+	name              string
 	store             db.Store
 	addressStore      waddrmgr.AddrStore
 	transactionStore  wtxmgr.TxStore
