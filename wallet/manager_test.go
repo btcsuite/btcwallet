@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"errors"
+	"iter"
 	"testing"
 	"time"
 
@@ -381,7 +382,20 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			backend := &recordingManagerBackend{}
+			// Arrange: Install a strict backend expectation only when the
+			// input is valid enough to reach durable creation. Invalid cases
+			// intentionally leave the mock with no accepted calls.
+			backend := &managerBackendMock{}
+			params := tc.params
+			params.Name = testWalletName
+
+			if tc.valid {
+				backend.On(
+					"create", mock.Anything, params,
+					mock.Anything,
+				).Return(nil, errManagerBackendCreate).Once()
+			}
+
 			m := &Manager{
 				wallets: make(map[string]*Wallet),
 				backend: backend,
@@ -390,59 +404,276 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 					ChainParams: chainParams,
 				},
 			}
-			params := tc.params
-			params.Name = testWalletName
+
+			// Act: Ask Manager to create from the selected parameter shape,
+			// allowing validation to decide whether backend mutation begins.
 			wallet, err := m.Create(params)
+
+			// Assert: Valid parameters reach exactly one expected backend
+			// call; invalid parameters stop at validation with no mock call.
 			require.Nil(t, wallet)
 
 			if tc.valid {
-				require.ErrorIs(
-					t, err, errRecordingManagerBackendCreate,
-				)
-				require.True(t, backend.createCalled)
+				require.ErrorIs(t, err, errManagerBackendCreate)
+			} else {
+				require.ErrorIs(t, err, ErrWalletParams)
 
-				return
+				if tc.wantErrMsg != "" {
+					require.ErrorContains(t, err, tc.wantErrMsg)
+				}
 			}
 
-			require.ErrorIs(t, err, ErrWalletParams)
-
-			if tc.wantErrMsg != "" {
-				require.ErrorContains(t, err, tc.wantErrMsg)
-			}
-
-			require.False(t, backend.createCalled)
+			backend.AssertExpectations(t)
 		})
 	}
 }
 
-var errRecordingManagerBackendCreate = errors.New("backend create called")
+var errManagerBackendCreate = errors.New("backend create called")
 
-// recordingManagerBackend records whether Manager.Create reached backend
-// mutation during creation-policy tests.
-type recordingManagerBackend struct{ createCalled bool }
-
-// recordingManagerBackend implements managerBackend.
-var _ managerBackend = (*recordingManagerBackend)(nil)
-
-// create records an unexpected backend creation attempt.
-func (b *recordingManagerBackend) create(_ context.Context,
-	_ CreateWalletParams, _ *hdkeychain.ExtendedKey) (*walletData, error) {
-
-	b.createCalled = true
-
-	return nil, errRecordingManagerBackendCreate
+// managerBackendMock is the strict Manager storage-boundary test double.
+type managerBackendMock struct {
+	mock.Mock
 }
 
-// load is not used by creation-policy tests.
-func (*recordingManagerBackend) load(context.Context, LoadWalletParams) (
+// managerBackendMock implements managerBackend.
+var _ managerBackend = (*managerBackendMock)(nil)
+
+// listWallets returns the durable data configured by the current test.
+func (b *managerBackendMock) listWallets(
+	ctx context.Context) ([]*walletData, error) {
+
+	args := b.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).([]*walletData), args.Error(1)
+}
+
+// create returns the storage result configured by the current test.
+func (b *managerBackendMock) create(ctx context.Context,
+	params CreateWalletParams, rootKey *hdkeychain.ExtendedKey) (
 	*walletData, error) {
 
-	return nil, ErrInvalidParam
+	args := b.Called(ctx, params, rootKey)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).(*walletData), args.Error(1)
 }
 
-// close is not used by creation-policy tests.
-func (*recordingManagerBackend) close() error {
-	return nil
+// load returns the identity lookup configured by the current test.
+func (b *managerBackendMock) load(ctx context.Context,
+	params LoadWalletParams) (*walletData, error) {
+
+	args := b.Called(ctx, params)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	//nolint:forcetypeassert // The strict expectation owns this return type.
+	return args.Get(0).(*walletData), args.Error(1)
+}
+
+// close returns the configured backend ownership-release result.
+func (b *managerBackendMock) close() error {
+	args := b.Called()
+	return args.Error(0)
+}
+
+// TestSQLManagerBackendListsWallets verifies ordered complete listing and
+// all-or-nothing iterator failures.
+func TestSQLManagerBackendListsWallets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		rows      []db.WalletInfo
+		iterErr   error
+		wantIDs   []uint32
+		wantNames []string
+	}{
+		{
+			name:      "empty store",
+			wantIDs:   []uint32{},
+			wantNames: []string{},
+		},
+		{
+			name: "ordered store rows",
+			rows: []db.WalletInfo{
+				{
+					ID:   4,
+					Name: "first",
+				},
+				{
+					ID:   9,
+					Name: "second",
+				},
+			},
+			wantIDs:   []uint32{4, 9},
+			wantNames: []string{"first", "second"},
+		},
+		{
+			name:    "iterator failure",
+			iterErr: errDBMock,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Yield ordered rows and an optional terminal error,
+			// expecting one listing call with the mandatory positive Store
+			// iterator batch request.
+			store := &walletmock.Store{}
+			sequence := iter.Seq2[db.WalletInfo, error](func(
+				yield func(db.WalletInfo, error) bool) {
+
+				for _, row := range test.rows {
+					if !yield(row, nil) {
+						return
+					}
+				}
+
+				if test.iterErr != nil {
+					yield(db.WalletInfo{}, test.iterErr)
+				}
+			})
+			store.On(
+				"IterWallets", mock.Anything,
+				mock.MatchedBy(func(query db.ListWalletsQuery) bool {
+					return query.Page.Limit() == managerWalletBatchSize
+				}),
+			).Return(sequence, nil).Once()
+
+			backend := &sqlManagerBackend{store: store}
+
+			// Act: Resolve the complete startup listing through the SQL
+			// backend boundary rather than calling the Store directly.
+			wallets, err := backend.listWallets(t.Context())
+
+			// Assert: Iterator failure prevents a partial handoff; otherwise
+			// the non-nil result preserves each durable ID and name exactly.
+			if test.iterErr != nil {
+				require.ErrorIs(t, err, test.iterErr)
+				require.Nil(t, wallets)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, wallets)
+
+				ids := make([]uint32, 0, len(wallets))
+				names := make([]string, 0, len(wallets))
+
+				for _, wallet := range wallets {
+					ids = append(ids, wallet.id)
+					names = append(names, wallet.name)
+				}
+
+				require.Equal(t, test.wantIDs, ids)
+				require.Equal(t, test.wantNames, names)
+			}
+
+			store.AssertExpectations(t)
+		})
+	}
+}
+
+// TestKVDBManagerBackendListsZeroOrOneWallet verifies legacy startup listing
+// treats an uninitialized database as empty and an initialized database as the
+// backend's sole anonymous Wallet, without inventing another identity.
+func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Open a fresh legacy database whose address and transaction
+		// namespaces have never been created.
+		manager := testKVDBManager(t)
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List startup data through the backend's zero-or-one boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: Absence is a successful, initialized empty result rather
+		// than an attempted load or a missing-Wallet error.
+		require.NoError(t, err)
+		require.NotNil(t, wallets)
+		require.Empty(t, wallets)
+	})
+
+	t.Run("canceled discovery", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Cancel discovery before the legacy loader can acquire the
+		// address manager from a fresh database.
+		manager := testKVDBManager(t)
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act: Ask the one-load listing path to honor the canceled owner.
+		wallets, err := backend.listWallets(ctx)
+
+		// Assert: Cancellation remains discoverable and no partial Wallet
+		// data is returned or retained by the backend.
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, wallets)
+		require.Nil(t, backend.store)
+	})
+
+	t.Run("initialized database", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: Create and close the sole legacy Wallet with a non-empty
+		// public passphrase, then configure a new Manager with the same bytes.
+		// Mutating the caller slice after construction proves listing uses the
+		// Manager's immutable copy through the existing load path.
+		dbPath := testKVDBPath(t)
+		pubPassphrase := []byte("startup-public")
+		creator := testKVDBManagerAt(t, dbPath)
+		_, err := creator.Create(CreateWalletParams{
+			Name:              testWalletName,
+			Mode:              ModeShell,
+			WatchOnly:         true,
+			PubPassphrase:     pubPassphrase,
+			PrivatePassphrase: []byte("private"),
+			Birthday:          time.Now(),
+		})
+		require.NoError(t, err)
+		require.NoError(t, creator.Close())
+
+		manager, err := NewManager(t.Context(), ManagerConfig{
+			Backend:           DBBackendKVDB,
+			DataSource:        dbPath,
+			ChainParams:       chainParams,
+			ChainSource:       &bwmock.Chain{},
+			KVDBPubPassphrase: pubPassphrase,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = manager.Close() })
+
+		pubPassphrase[0] ^= 0xff
+
+		backend, ok := manager.backend.(*kvdbManagerBackend)
+		require.True(t, ok)
+
+		// Act: List the occupied database through the backend boundary.
+		wallets, err := backend.listWallets(t.Context())
+
+		// Assert: The existing loader returns one Wallet under kvdb's absent
+		// durable name rather than inventing an alias or a second identity.
+		require.NoError(t, err)
+		require.Len(t, wallets, 1)
+		require.Empty(t, wallets[0].name)
+	})
 }
 
 // TestManagerCreateRejectsMissingIdentityBeforeAssembly verifies Create
