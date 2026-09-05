@@ -367,6 +367,58 @@ type PsbtManager interface {
 		*psbt.Packet, error)
 }
 
+// decorateInputsReq borrows the packet until accepted enrichment completes.
+type decorateInputsReq struct {
+	reqCtx
+
+	packet      *psbt.Packet
+	skipUnknown bool
+	respChan    chan psbtPacketResp
+}
+
+// psbtPacketResp returns the operation result after in-place input updates.
+type psbtPacketResp struct {
+	packet *psbt.Packet
+	err    error
+}
+
+// fundPsbtReq borrows funding data through authoring and packet population.
+type fundPsbtReq struct {
+	reqCtx
+
+	intent   *FundIntent
+	respChan chan fundPsbtResp
+}
+
+// fundPsbtResp delivers funding results only after packet mutation ends.
+type fundPsbtResp struct {
+	packet      *psbt.Packet
+	changeIndex int32
+	err         error
+}
+
+// signPsbtReq borrows signing metadata until signing and callbacks complete.
+type signPsbtReq struct {
+	reqCtx
+
+	params   *SignPsbtParams
+	respChan chan signPsbtResp
+}
+
+// signPsbtResp returns signed indices with the original packet.
+type signPsbtResp struct {
+	result *SignPsbtResult
+	err    error
+}
+
+// finalizePsbtReq keeps final witness assembly joined through completion.
+type finalizePsbtReq struct {
+	reqCtx
+
+	packet      *psbt.Packet
+	respErrChan chan error
+}
+
 // DecorateInputs enriches a PSBT's inputs with UTXO and derivation information.
 //
 // It iterates through all inputs in the PSBT and:
@@ -383,6 +435,36 @@ func (w *Wallet) DecorateInputs(ctx context.Context, packet *psbt.Packet,
 	if err != nil {
 		return nil, err
 	}
+
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := decorateInputsReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		packet:      packet,
+		skipUnknown: skipUnknown,
+		respChan:    make(chan psbtPacketResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.packet, result.err
+}
+
+// handleDecorateInputs delivers the result of an accepted component request.
+func (w *Wallet) handleDecorateInputs(r decorateInputsReq) {
+	// Reuse decoration shared with funding without a second admission.
+	packet, err := w.decorateInputs(r.ctx, r.packet, r.skipUnknown)
+	r.respChan <- psbtPacketResp{packet: packet, err: err}
+}
+
+// decorateInputs completes its accepted operation with the caller's packet.
+func (w *Wallet) decorateInputs(ctx context.Context, packet *psbt.Packet,
+	skipUnknown bool) (*psbt.Packet, error) {
 
 	// We'll iterate through all the inputs of the PSBT and decorate them
 	// if they are owned by the wallet. The `skipUnknown` parameter
@@ -589,6 +671,8 @@ func validatePsbtParentOutput(outPoint wire.OutPoint,
 // public CreateTransaction wrapper. Their construction flow is identical
 // today, but keeping the wrappers independent prevents direct-transaction watch
 // delivery from leaking into PSBT-specific lease, cleanup, and publication.
+// Accepted funding finishes before return, including packet updates and any
+// supplied coin selector, even if the caller cancels after admission.
 func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 	*psbt.Packet, int32, error) {
 
@@ -597,23 +681,48 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 		return nil, 0, err
 	}
 
-	// Validate the funding intent before proceeding.
+	// Validate the packet shape before admitting funding work.
 	err = w.validateFundIntent(intent)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// Create a TxIntent from the FundIntent.
-	txIntent := w.createTxIntent(intent)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := fundPsbtReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		intent:   intent,
+		respChan: make(chan fundPsbtResp, 1),
+	}
 
-	err = normalizeAndValidateTxIntent(txIntent)
+	err = w.sendReq(ctx, r)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	inputSource, changeSource, err := w.prepareTxAuthSources(ctx, txIntent)
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.packet, result.changeIndex, result.err
+}
+
+// handleFundPsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleFundPsbt(r fundPsbtReq) {
+	// Create a TxIntent from the FundIntent.
+	txIntent := w.createTxIntent(r.intent)
+
+	err := normalizeAndValidateTxIntent(txIntent)
 	if err != nil {
-		return nil, 0, err
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
+	}
+
+	inputSource, changeSource, err := w.prepareTxAuthSources(r.ctx, txIntent)
+	if err != nil {
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
 	}
 
 	// Create the transaction through the shared authoring boundary.
@@ -621,18 +730,22 @@ func (w *Wallet) FundPsbt(ctx context.Context, intent *FundIntent) (
 		txIntent.Outputs, txIntent.FeeRate, inputSource, changeSource,
 	)
 	if err != nil {
-		return nil, 0, err
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
 	}
 
 	// Populate the PSBT packet with the new transaction details.
 	packet, changeIndex, err := w.populatePsbtPacket(
-		ctx, intent.Packet, authoredTx,
+		r.ctx, r.intent.Packet, authoredTx,
 	)
 	if err != nil {
-		return nil, 0, err
+		r.respChan <- fundPsbtResp{err: err}
+
+		return
 	}
 
-	return packet, changeIndex, nil
+	r.respChan <- fundPsbtResp{packet: packet, changeIndex: changeIndex}
 }
 
 // populatePsbtPacket updates the PSBT packet with the new transaction details,
@@ -660,7 +773,7 @@ func (w *Wallet) populatePsbtPacket(ctx context.Context, packet *psbt.Packet,
 	// derivation information from the wallet. We set `skipUnknown` to
 	// false because all inputs in the `authoredTx` must be known to the
 	// wallet.
-	_, err := w.DecorateInputs(ctx, packet, false)
+	_, err := w.decorateInputs(ctx, packet, false)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -872,6 +985,9 @@ func (w *Wallet) createTxIntent(intent *FundIntent) *TxIntent {
 //  4. Signing: dispatching to `signTaprootPsbtInput` or `signBip32PsbtInput` to
 //     generate the raw ECDSA or Schnorr signature using the underlying
 //     `Signer`.
+//
+// Accepted signing finishes before return, including partial signatures and
+// supplied input tweakers, even if the caller cancels after admission.
 func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	*SignPsbtResult, error) {
 
@@ -884,7 +1000,28 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 		return nil, ErrNilArguments
 	}
 
-	packet := params.Packet
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := signPsbtReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		params:   params,
+		respChan: make(chan signPsbtResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.result, result.err
+}
+
+// handleSignPsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleSignPsbt(r signPsbtReq) {
+	packet := r.params.Packet
 
 	// signedInputs will track the indices of all inputs that we
 	// successfully sign during this operation. This is useful for callers
@@ -897,9 +1034,13 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// has at least a WitnessUtxo or NonWitnessUtxo, which is crucial for
 	// signature generation. If this check fails, it indicates a malformed
 	// or incomplete PSBT that cannot be signed.
-	err = psbt.InputsReadyToSign(packet)
+	err := psbt.InputsReadyToSign(packet)
 	if err != nil {
-		return nil, fmt.Errorf("psbt inputs not ready: %w", err)
+		r.respChan <- signPsbtResp{
+			err: fmt.Errorf("psbt inputs not ready: %w", err),
+		}
+
+		return
 	}
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
@@ -910,7 +1051,11 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// signatures for each input.
 	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
 	if err != nil {
-		return nil, fmt.Errorf("error creating prevOutFetcher: %w", err)
+		r.respChan <- signPsbtResp{
+			err: fmt.Errorf("error creating prevOutFetcher: %w", err),
+		}
+
+		return
 	}
 
 	sigHashes := txscript.NewTxSigHashes(
@@ -924,10 +1069,12 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// signing process accordingly.
 	for i := range packet.Inputs {
 		signed, err := w.signPsbtInput(
-			ctx, packet, i, sigHashes, params.InputTweakers,
+			r.ctx, packet, i, sigHashes, r.params.InputTweakers,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("input %d: %w", i, err)
+			r.respChan <- signPsbtResp{err: fmt.Errorf("input %d: %w", i, err)}
+
+			return
 		}
 
 		if signed {
@@ -946,10 +1093,12 @@ func (w *Wallet) SignPsbt(ctx context.Context, params *SignPsbtParams) (
 	// Finally, return the result, which includes the list of inputs that
 	// were successfully signed and the modified (partially) signed PSBT
 	// packet.
-	return &SignPsbtResult{
-		SignedInputs: signedInputs,
-		Packet:       packet,
-	}, nil
+	r.respChan <- signPsbtResp{
+		result: &SignPsbtResult{
+			SignedInputs: signedInputs,
+			Packet:       packet,
+		},
+	}
 }
 
 // signPsbtInput attempts to sign a single input of the PSBT. It returns true
@@ -1623,21 +1772,44 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 		return err
 	}
 
-	// Check that the PSBT is structurally ready to be signed/finalized.
-	err = psbt.InputsReadyToSign(packet)
-	if err != nil {
-		return fmt.Errorf("psbt inputs not ready: %w", err)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := finalizePsbtReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		packet:      packet,
+		respErrChan: make(chan error, 1),
 	}
 
-	tx := packet.UnsignedTx
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleFinalizePsbt completes its accepted operation with the caller's packet.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleFinalizePsbt(r finalizePsbtReq) {
+	// Check that the PSBT is structurally ready to be signed/finalized.
+	err := psbt.InputsReadyToSign(r.packet)
+	if err != nil {
+		r.respErrChan <- fmt.Errorf("psbt inputs not ready: %w", err)
+
+		return
+	}
+
+	tx := r.packet.UnsignedTx
 
 	// We create a `PrevOutputFetcher` to allow `txscript` to retrieve the
 	// previous transaction outputs needed for sighash generation. This is
 	// required for generating valid signatures, as the value and script of
 	// the UTXO being spent are part of the signed digest.
-	prevOutFetcher, err := PsbtPrevOutputFetcher(packet)
+	prevOutFetcher, err := PsbtPrevOutputFetcher(r.packet)
 	if err != nil {
-		return fmt.Errorf("error creating prevOutFetcher: %w", err)
+		r.respErrChan <- fmt.Errorf("error creating prevOutFetcher: %w", err)
+
+		return
 	}
 
 	// Compute the transaction's sighashes. This is an optimization to
@@ -1649,22 +1821,26 @@ func (w *Wallet) FinalizePsbt(ctx context.Context, packet *psbt.Packet) error {
 	// Iterate through each input in the PSBT. For each input, we will
 	// check if we can sign and finalize it (i.e., if we own the UTXO and
 	// have the private key).
-	for i := range packet.Inputs {
-		err := w.finalizeInput(ctx, packet, i, sigHashes)
+	for i := range r.packet.Inputs {
+		err := w.finalizeInput(r.ctx, r.packet, i, sigHashes)
 		if err != nil {
-			return err
+			r.respErrChan <- err
+
+			return
 		}
 	}
 
 	// Finally, attempt to finalize the entire PSBT. This will check if all
 	// inputs have final scripts (either added by us above or constructed
 	// from PartialSigs by the psbt library) and strip the partial data.
-	err = psbt.MaybeFinalizeAll(packet)
+	err = psbt.MaybeFinalizeAll(r.packet)
 	if err != nil {
-		return fmt.Errorf("error finalizing PSBT: %w", err)
+		r.respErrChan <- fmt.Errorf("error finalizing PSBT: %w", err)
+
+		return
 	}
 
-	return nil
+	r.respErrChan <- nil
 }
 
 // finalizeInput attempts to finalize a single input of the PSBT.
