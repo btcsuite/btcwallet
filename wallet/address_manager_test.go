@@ -7,6 +7,7 @@ package wallet
 import (
 	"bytes"
 	"iter"
+	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -22,6 +23,78 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+// TestAddressManagerFallbackDuringStop keeps nested address derivation and
+// notification inside the accepted unused-address request during shutdown.
+func TestAddressManagerFallbackDuringStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Pause an unused-address scan until shutdown closes admission.
+	// An empty result then forces derivation through the accepted request.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+
+	enteredChan := make(chan struct{})
+	releaseChan := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseChan) })
+	t.Cleanup(unblock)
+
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0084)
+	name := "fallback"
+	page, err := addressPageRequest()
+	require.NoError(t, err)
+	deps.store.On("IterAddresses", mock.Anything, db.ListAddressesQuery{
+		WalletID:    w.id,
+		AccountName: &name,
+		Scope:       &scope,
+		Page:        page,
+	}).Run(func(mock.Arguments) {
+		close(enteredChan)
+
+		<-releaseChan
+	}).Return(addressIter()).Once()
+
+	addr, err := address.NewAddressWitnessPubKeyHash(
+		make([]byte, 20), w.cfg.ChainParams,
+	)
+	require.NoError(t, err)
+	expectStoreNewAddress(
+		t, w, deps, name, waddrmgr.KeyScopeBIP0084, false, addr,
+	)
+	deps.vault.On("Lock").Return().Once()
+
+	resultChan := make(chan addressResp, 1)
+	go func() {
+		addr, err := w.GetUnusedAddress(
+			t.Context(), name, waddrmgr.WitnessPubKey, false,
+		)
+		resultChan <- addressResp{addr: addr, err: err}
+	}()
+
+	<-enteredChan
+
+	// Act: Begin shutdown while the accepted scan is paused. Its fallback
+	// must still derive and register an address without another admission.
+	stoppedChan := make(chan error, 1)
+	go func() { stoppedChan <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: Stop waits for accepted work, and release permits the fallback
+	// to return its address. Fixture cleanup verifies chain registration.
+	select {
+	case err := <-stoppedChan:
+		t.Fatalf("Stop returned before address work: %v", err)
+	default:
+	}
+
+	unblock()
+
+	result := <-resultChan
+	require.NoError(t, result.err)
+	require.Equal(t, addr, result.addr)
+	require.NoError(t, <-stoppedChan)
+}
 
 // storeDerivationAccountPubKey returns a deterministic account-level public key
 // for store-native address derivation tests.
