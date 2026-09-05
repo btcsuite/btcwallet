@@ -9,8 +9,8 @@ import (
 )
 
 // testControllerStartStop verifies the wallet lifecycle: a wallet starts and
-// stops cleanly, Stop is idempotent, a stopped instance restarts cleanly, and
-// a fresh Load yields a working instance.
+// stops cleanly, Stop is idempotent, the stopped instance is terminal, and a
+// fresh Load yields a working instance.
 func testControllerStartStop(h *bwtest.HarnessTest) {
 	params := h.TestWalletParams()
 
@@ -26,11 +26,19 @@ func testControllerStartStop(h *bwtest.HarnessTest) {
 	// A second Stop is a no-op.
 	require.NoError(h, w.Stop(h.Context()), "second stop should be a no-op")
 
-	require.NoError(h, w.Start(h.Context()), "failed to restart stopped wallet")
+	// A stopped Wallet is terminal. Both lifecycle restart and maintained
+	// access must fail on the retained pointer before any backend work begins.
+	require.ErrorIs(
+		h, w.Start(h.Context()), wallet.ErrWalletStopped,
+		"stopped wallet restarted",
+	)
+	_, err = w.Info(h.Context())
+	require.ErrorIs(
+		h, err, wallet.ErrWalletStopped,
+		"stopped wallet accepted maintained access",
+	)
 
-	// Keep the original wallet registered until Stop succeeds. Then remove it
-	// so MineBlocks cannot poll a stopped wallet during reload.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop restarted wallet")
+	// Remove the terminal Wallet so MineBlocks cannot poll it during reload.
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
 	// Keep the Manager registered until Close succeeds, then reload from disk.
