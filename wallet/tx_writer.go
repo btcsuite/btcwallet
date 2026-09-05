@@ -39,6 +39,15 @@ type TxWriter interface {
 // A compile time check to ensure that Wallet implements the interface.
 var _ TxWriter = (*Wallet)(nil)
 
+// labelTxReq keeps the value label and hash joined through Store completion.
+type labelTxReq struct {
+	reqCtx
+
+	hash        chainhash.Hash
+	label       string
+	respErrChan chan error
+}
+
 // LabelTx adds a label to a tx. If a label already exists, it will be
 // overwritten, and an empty label clears any existing one. Labels longer than
 // MaxTxLabelLength bytes are rejected with ErrLabelTooLong.
@@ -60,18 +69,43 @@ func (w *Wallet) LabelTx(ctx context.Context,
 			len(label), MaxTxLabelLength)
 	}
 
-	err = w.store.UpdateTx(ctx, db.UpdateTxParams{
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := labelTxReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		hash:        hash,
+		label:       label,
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleLabelTx updates the label under an already accepted request's
+// ownership.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleLabelTx(r labelTxReq) {
+	err := w.store.UpdateTx(r.ctx, db.UpdateTxParams{
 		WalletID: w.id,
-		Txid:     hash,
-		Label:    &label,
+		Txid:     r.hash,
+		Label:    &r.label,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTxNotFound) {
-			return fmt.Errorf("update tx label: %w", ErrTxNotFound)
+			r.respErrChan <- fmt.Errorf("update tx label: %w", ErrTxNotFound)
+
+			return
 		}
 
-		return fmt.Errorf("update tx label: %w", err)
+		r.respErrChan <- fmt.Errorf("update tx label: %w", err)
+
+		return
 	}
 
-	return nil
+	r.respErrChan <- nil
 }
