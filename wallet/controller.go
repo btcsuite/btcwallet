@@ -510,6 +510,27 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 	return reqErr
 }
 
+// infoReq keeps metadata work inside the accepted handler's Wallet lifetime.
+type infoReq struct {
+	reqCtx
+
+	respChan chan infoResp
+}
+
+// infoResp lets an accepted metadata read finish after its caller cancels.
+type infoResp struct {
+	info *Info
+	err  error
+}
+
+// rescanReq transfers the target list to the existing joined syncer.
+type rescanReq struct {
+	typ         scanType
+	startHeight uint32
+	targets     []waddrmgr.AccountScope
+	respErrChan chan error
+}
+
 // Info returns a comprehensive snapshot of the wallet's static configuration
 // and dynamic synchronization state.
 //
@@ -520,21 +541,52 @@ func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 		return nil, err
 	}
 
-	walletInfo, err := w.store.GetWallet(ctx, w.cfg.Name)
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := infoReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		respChan: make(chan infoResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
 	if err != nil {
-		return nil, fmt.Errorf("get wallet info: %w", err)
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.info, result.err
+}
+
+// handleInfo assembles an accepted snapshot without checking admission again.
+// The admitted caller waits for this result before reusing its inputs.
+func (w *Wallet) handleInfo(r infoReq) {
+	// The outer request owns dependency access until this snapshot completes.
+	walletInfo, err := w.store.GetWallet(r.ctx, w.cfg.Name)
+	if err != nil {
+		r.respChan <- infoResp{err: fmt.Errorf("get wallet info: %w", err)}
+
+		return
 	}
 
 	syncedTo, err := db.OptionalBlockStampFromBlock(walletInfo.SyncedTo)
 	if err != nil {
-		return nil, fmt.Errorf("decode wallet sync tip: %w", err)
+		r.respChan <- infoResp{
+			err: fmt.Errorf("decode wallet sync tip: %w", err),
+		}
+
+		return
 	}
 
 	// Info is an ownership boundary, so return a fresh network snapshot
 	// instead of exposing the Wallet's retained mutable configuration.
 	chainParams, err := cloneChainParams(*w.cfg.ChainParams)
 	if err != nil {
-		return nil, fmt.Errorf("copy chain parameters: %w", err)
+		r.respChan <- infoResp{
+			err: fmt.Errorf("copy chain parameters: %w", err),
+		}
+
+		return
 	}
 
 	info := &Info{
@@ -548,7 +600,7 @@ func (w *Wallet) Info(ctx context.Context) (*Info, error) {
 		RecoveryProgress: 0,
 	}
 
-	return info, nil
+	r.respChan <- infoResp{info: info}
 }
 
 // Resync rewinds the wallet's synchronization state to a specific block
@@ -577,8 +629,7 @@ func (w *Wallet) Rescan(ctx context.Context, startHeight uint32,
 	)
 }
 
-// submitRescanRequest validates the rescan request and submits it to the
-// syncer.
+// submitRescanRequest admits a scan description before chain access.
 func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 	startHeight uint32, targets []waddrmgr.AccountScope) error {
 
@@ -588,10 +639,36 @@ func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 		return err
 	}
 
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := rescanReq{
+		typ:         typ,
+		startHeight: startHeight,
+		targets:     targets,
+		respErrChan: make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	return <-r.respErrChan
+}
+
+// handleRescanReq validates an accepted scan and transfers it to the syncer.
+// The response acknowledges transfer, preserving asynchronous scan semantics.
+func (w *Wallet) handleRescanReq(r rescanReq) {
+	startHeight := r.startHeight
+
 	// BlockStamp.Height is int32, so we need to ensure the requested
 	// startHeight does not exceed math.MaxInt32.
 	if startHeight > math.MaxInt32 {
-		return fmt.Errorf("%w: %d", ErrStartHeightTooLarge, startHeight)
+		r.respErrChan <- fmt.Errorf(
+			"%w: %d", ErrStartHeightTooLarge, startHeight,
+		)
+
+		return
 	}
 
 	startHeightInt32 := int32(startHeight)
@@ -599,25 +676,31 @@ func (w *Wallet) submitRescanRequest(ctx context.Context, typ scanType,
 	// Fetch the current best block to ensure we don't resync past the tip.
 	_, bestHeightInt32, err := w.cfg.Chain.GetBestBlock()
 	if err != nil {
-		return fmt.Errorf("unable to get chain tip: %w", err)
+		r.respErrChan <- fmt.Errorf("unable to get chain tip: %w", err)
+
+		return
 	}
 
 	if startHeightInt32 > bestHeightInt32 {
-		return fmt.Errorf("%w: start height %d is greater than "+
+		r.respErrChan <- fmt.Errorf("%w: start height %d is greater than "+
 			"current chain tip %d", ErrStartHeightTooHigh,
 			startHeight, bestHeightInt32)
+
+		return
 	}
 
 	// Submit the rescan request to the syncer.
 	req := &scanReq{
-		typ: typ,
+		typ: r.typ,
 		startBlock: waddrmgr.BlockStamp{
 			Height: startHeightInt32,
 		},
-		targets: targets,
+		targets: r.targets,
 	}
 
-	return w.sync.requestScan(ctx, req)
+	// The existing joined worker owns scans after transfer. Its lifetime must
+	// also cancel a full mailbox send when shutdown stops consuming scans.
+	r.respErrChan <- w.sync.requestScan(w.lifetimeCtx, req)
 }
 
 // mainLoop is the central event loop for the wallet, responsible for
@@ -677,10 +760,18 @@ type reqCtx struct {
 
 // handleReq owns completion bookkeeping for requests accepted by mainLoop. Its
 // type switch is the single routing table for concurrent public method work.
+// Component responses have capacity one and each handler sends exactly once,
+// so delivery cannot block even before the admitted caller receives its result.
 func (w *Wallet) handleReq(req any) {
 	defer w.wg.Done()
 
 	switch r := req.(type) {
+	case infoReq:
+		w.handleInfo(r)
+
+	case rescanReq:
+		w.handleRescanReq(r)
+
 	case newAccountReq:
 		w.handleNewAccount(r)
 	case renameAccountReq:
