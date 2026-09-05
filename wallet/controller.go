@@ -822,6 +822,9 @@ func (w *Wallet) handleReq(req any) {
 	case listTxnsReq:
 		w.handleListTxns(r)
 
+	case labelTxReq:
+		w.handleLabelTx(r)
+
 	case newAccountReq:
 		w.handleNewAccount(r)
 	case renameAccountReq:
