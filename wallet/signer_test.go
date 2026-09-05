@@ -1693,7 +1693,15 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 	t.Cleanup(vault.Lock)
 
 	chain := &bwmock.Chain{}
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
 	w := &Wallet{
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
 		store:       store,
 		keyVault:    vault,
 		cache:       newStoreRuntimeCache(store),
@@ -1705,8 +1713,9 @@ func TestScriptForOutputWatchOnlyTaprootSQL(t *testing.T) {
 		},
 		id: walletInfo.ID,
 	}
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
 
 	tapscript := newTestTapscript(t)
 	leafScript := tapscript.Leaves[0].Script
@@ -2033,12 +2042,20 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 		identityDecrypt, nil,
 	).Maybe()
 
+	// This fixture assembles its own runtime; the shared start helper
+	// only starts the request loop and joins it before storage cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+
 	w = &Wallet{
-		addrStore: addrStore,
-		store:     store,
-		keyVault:  vault,
-		cache:     newStoreRuntimeCache(store),
-		state:     newWalletState(nil),
+		lifetimeCtx: ctx,
+		cancel:      cancel,
+		requestChan: make(chan any),
+		lockTimer:   time.NewTimer(time.Hour),
+		addrStore:   addrStore,
+		store:       store,
+		keyVault:    vault,
+		cache:       newStoreRuntimeCache(store),
+		state:       newWalletState(nil),
 		cfg: Config{
 			DB:          legacyDB,
 			Chain:       chain,
@@ -2047,8 +2064,9 @@ func newSQLAddressSigningWallet(t *testing.T) (*Wallet, *bwmock.Chain,
 		id: walletInfo.ID,
 	}
 
-	require.NoError(t, w.state.toStarting())
-	require.NoError(t, w.state.toStarted())
+	// Disable auto-lock timing so this fixture exercises only its API call.
+	w.lockTimer.Stop()
+	startLoadedWalletForTest(t, w)
 	w.state.toUnlocked()
 
 	t.Cleanup(func() {

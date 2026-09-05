@@ -665,7 +665,7 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	// First, we'll fetch the managed address that corresponds to the
 	// output being spent. This will be used to look up the private key
 	// required for signing.
-	scriptInfo, err := w.ScriptForOutput(ctx, *params.Output)
+	scriptInfo, err := w.scriptForOutput(ctx, *params.Output)
 	if err != nil {
 		return nil, err
 	}
@@ -1250,7 +1250,7 @@ func (w *Wallet) PrivKeyForAddress(a address.Address) (
 func (w *Wallet) privKeyForAddress(ctx context.Context,
 	a address.Address) (*btcec.PrivateKey, error) {
 
-	info, err := w.GetAddressInfo(ctx, a)
+	info, err := w.getAddressInfo(ctx, a)
 	switch {
 	case err == nil && canUseAddressInfoDerivation(info):
 		return w.privKeyForAddressInfo(ctx, info)
