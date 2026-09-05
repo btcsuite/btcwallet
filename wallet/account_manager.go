@@ -240,6 +240,16 @@ func (w *Wallet) accountInfoFromStore(
 	}, nil
 }
 
+// newAccountReq carries derived-account inputs and a buffered result across
+// the Wallet's terminal admission boundary.
+type newAccountReq struct {
+	reqCtx
+
+	scope waddrmgr.KeyScope
+	name  string
+	resp  chan accountResp
+}
+
 // NewAccount creates the next account and returns its account info. The name
 // must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -253,16 +263,41 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	deriveFn, err := w.buildAccountDeriveFn(ctx)
+	req := newAccountReq{
+		reqCtx: reqCtx{ctx: ctx},
+		scope:  scope,
+		name:   name,
+		resp:   make(chan accountResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	info, err := w.store.CreateDerivedAccount(ctx,
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleNewAccount performs derivation and persistence only after mainLoop
+// admits the request; handleReq owns its shutdown completion.
+func (w *Wallet) handleNewAccount(req newAccountReq) {
+	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
+	if err != nil {
+		req.resp <- accountResp{err: err}
+
+		return
+	}
+
+	info, err := w.store.CreateDerivedAccount(req.ctx,
 		db.CreateDerivedAccountParams{
 			WalletID: w.id,
-			Scope:    db.KeyScope(scope),
-			Name:     name,
+			Scope:    db.KeyScope(req.scope),
+			Name:     req.name,
 		}, deriveFn,
 	)
 	if err != nil {
@@ -271,13 +306,21 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		// kvdb wraps the underlying manager error via fmt.Errorf.
 		var mErr waddrmgr.ManagerError
 		if errors.As(err, &mErr) {
-			return nil, mErr
+			req.resp <- accountResp{err: mErr}
+
+			return
 		}
 
-		return nil, err
+		req.resp <- accountResp{err: err}
+
+		return
 	}
 
-	return w.accountInfoFromStore(info)
+	account, err := w.accountInfoFromStore(info)
+	req.resp <- accountResp{
+		info: account,
+		err:  err,
+	}
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
@@ -353,6 +396,22 @@ func propertiesToAccountInfo(props *waddrmgr.AccountProperties,
 	}
 }
 
+// listAccountsResp lets a list handler finish even if caller cancellation
+// causes the public method to stop receiving its result.
+type listAccountsResp struct {
+	infos []AccountInfo
+	err   error
+}
+
+// listAccountsReq carries one fully formed Store query so every public list
+// variant shares the same admitted handler without losing its filter.
+type listAccountsReq struct {
+	reqCtx
+
+	query db.ListAccountsQuery
+	resp  chan listAccountsResp
+}
+
 // ListAccounts returns every account across all key scopes with its balance.
 func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 	err := w.state.validateStarted()
@@ -360,9 +419,25 @@ func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 		return nil, err
 	}
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
 }
 
 // listAccountInfos converts cache.ListAccounts snapshots into wallet-owned
@@ -392,6 +467,16 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	return results, nil
 }
 
+// handleListAccounts performs the Store read for any admitted list variant;
+// handleReq owns the matching shutdown accounting.
+func (w *Wallet) handleListAccounts(req listAccountsReq) {
+	infos, err := w.listAccountInfos(req.ctx, req.query)
+	req.resp <- listAccountsResp{
+		infos: infos,
+		err:   err,
+	}
+}
+
 // ListAccountsByScope returns all accounts for the given key scope.
 func (w *Wallet) ListAccountsByScope(ctx context.Context,
 	scope waddrmgr.KeyScope) ([]AccountInfo, error) {
@@ -403,10 +488,26 @@ func (w *Wallet) ListAccountsByScope(ctx context.Context,
 
 	dbScope := db.KeyScope(scope)
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-		Scope:    &dbScope,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+			Scope:    &dbScope,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
 }
 
 // ListAccountsByName returns every account matching name across all scopes.
@@ -418,10 +519,43 @@ func (w *Wallet) ListAccountsByName(ctx context.Context,
 		return nil, err
 	}
 
-	return w.listAccountInfos(ctx, db.ListAccountsQuery{
-		WalletID: w.id,
-		Name:     &name,
-	})
+	req := listAccountsReq{
+		reqCtx: reqCtx{ctx: ctx},
+		query: db.ListAccountsQuery{
+			WalletID: w.id,
+			Name:     &name,
+		},
+		resp: make(chan listAccountsResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.infos, resp.err
+}
+
+// accountResp carries one account snapshot or the lookup error so an accepted
+// handler can always finish even when its caller stops waiting.
+type accountResp struct {
+	info *AccountInfo
+	err  error
+}
+
+// getAccountReq owns the immutable lookup inputs and buffered response path
+// that cross the Wallet's request boundary.
+type getAccountReq struct {
+	reqCtx
+
+	scope waddrmgr.KeyScope
+	name  string
+	resp  chan accountResp
 }
 
 // GetAccount returns the account for a given account name and key scope.
@@ -435,24 +569,65 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	info, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
-		WalletID: w.id,
-		Scope:    db.KeyScope(scope),
-		Name:     &name,
-	})
-	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers
-		// using waddrmgr.IsError(err, ...) keep working when kvdb
-		// wraps the underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
+	req := getAccountReq{
+		reqCtx: reqCtx{ctx: ctx},
+		scope:  scope,
+		name:   name,
+		resp:   make(chan accountResp, 1),
+	}
 
+	err = w.sendReq(ctx, req)
+	if err != nil {
 		return nil, err
 	}
 
-	return w.accountInfoFromStore(info)
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleGetAccount executes an accepted lookup with its caller context and
+// sends exactly one buffered response so shutdown never depends on a receiver.
+func (w *Wallet) handleGetAccount(req getAccountReq) {
+	info, err := w.cache.GetAccount(req.ctx, db.GetAccountQuery{
+		WalletID: w.id,
+		Scope:    db.KeyScope(req.scope),
+		Name:     &req.name,
+	})
+	if err != nil {
+		// Preserve waddrmgr.ManagerError semantics so callers using
+		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
+		// underlying manager error via fmt.Errorf.
+		var mErr waddrmgr.ManagerError
+		if errors.As(err, &mErr) {
+			req.resp <- accountResp{err: mErr}
+			return
+		}
+
+		req.resp <- accountResp{err: err}
+
+		return
+	}
+
+	account, err := w.accountInfoFromStore(info)
+	req.resp <- accountResp{
+		info: account,
+		err:  err,
+	}
+}
+
+// renameAccountReq carries immutable rename inputs and a buffered error result
+// so handler completion never depends on the caller remaining present.
+type renameAccountReq struct {
+	reqCtx
+
+	scope   waddrmgr.KeyScope
+	oldName string
+	newName string
+	resp    chan error
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
@@ -465,16 +640,42 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		return err
 	}
 
-	err = waddrmgr.ValidateAccountName(newName)
+	req := renameAccountReq{
+		reqCtx:  reqCtx{ctx: ctx},
+		scope:   scope,
+		oldName: oldName,
+		newName: newName,
+		resp:    make(chan error, 1),
+	}
+
+	err = w.sendReq(ctx, req)
 	if err != nil {
 		return err
 	}
 
-	err = w.store.RenameAccount(ctx, db.RenameAccountParams{
+	respErr, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return err
+	}
+
+	return respErr
+}
+
+// handleRenameAccount validates and applies an admitted rename while
+// handleReq retains responsibility for releasing the Wallet WaitGroup.
+func (w *Wallet) handleRenameAccount(req renameAccountReq) {
+	err := waddrmgr.ValidateAccountName(req.newName)
+	if err != nil {
+		req.resp <- err
+
+		return
+	}
+
+	err = w.store.RenameAccount(req.ctx, db.RenameAccountParams{
 		WalletID: w.id,
-		Scope:    db.KeyScope(scope),
-		OldName:  oldName,
-		NewName:  newName,
+		Scope:    db.KeyScope(req.scope),
+		OldName:  req.oldName,
+		NewName:  req.newName,
 	})
 	if err != nil {
 		// Preserve waddrmgr.ManagerError semantics so callers using
@@ -482,13 +683,26 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 		// underlying manager error via fmt.Errorf.
 		var mErr waddrmgr.ManagerError
 		if errors.As(err, &mErr) {
-			return mErr
-		}
+			req.resp <- mErr
 
-		return err
+			return
+		}
 	}
 
-	return nil
+	req.resp <- err
+}
+
+// importAccountReq carries every import option through Wallet admission while
+// retaining the existing private implementation for pre-start Manager use.
+type importAccountReq struct {
+	reqCtx
+
+	name                 string
+	accountKey           *hdkeychain.ExtendedKey
+	masterKeyFingerprint uint32
+	addrType             waddrmgr.AddressType
+	dryRun               bool
+	resp                 chan accountResp
 }
 
 // ImportAccount imports an account from an extended public key. Private
@@ -516,9 +730,47 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 		return nil, err
 	}
 
-	return w.importAccountInternal(
-		ctx, name, accountKey, masterKeyFingerprint, addrType, dryRun,
+	accountKeySnapshot, err := snapshotExtendedPubKey(
+		accountKey, true, w.cfg.ChainParams,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	req := importAccountReq{
+		reqCtx:               reqCtx{ctx: ctx},
+		name:                 name,
+		accountKey:           accountKeySnapshot,
+		masterKeyFingerprint: masterKeyFingerprint,
+		addrType:             addrType,
+		dryRun:               dryRun,
+		resp:                 make(chan accountResp, 1),
+	}
+
+	err = w.sendReq(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := waitForReq(ctx, req.resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.info, resp.err
+}
+
+// handleImportAccount invokes the existing non-admitting implementation for
+// a request that mainLoop has already accepted and handleReq will complete.
+func (w *Wallet) handleImportAccount(req importAccountReq) {
+	info, err := w.importAccountInternal(
+		req.ctx, req.name, req.accountKey, req.masterKeyFingerprint,
+		req.addrType, req.dryRun,
+	)
+	req.resp <- accountResp{
+		info: info,
+		err:  err,
+	}
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,
@@ -600,6 +852,28 @@ func dbScopeAddrSchema(
 	return &converted, nil
 }
 
+// snapshotExtendedPubKey validates caller-owned key material before copying
+// it into a request. Validation prevents private key serialization, while the
+// reparse ensures an admitted handler never retains a mutable caller pointer
+// after cancellation returns.
+func snapshotExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
+	isAccountKey bool, chainParams *chaincfg.Params) (
+	*hdkeychain.ExtendedKey, error) {
+
+	err := validateExtendedPubKey(pubKey, isAccountKey, chainParams)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot, err := hdkeychain.NewKeyFromString(pubKey.String())
+	if err != nil {
+		return nil, fmt.Errorf("%w: copy extended public key: %s",
+			ErrInvalidAccountKey, err.Error())
+	}
+
+	return snapshot, nil
+}
+
 // validateExtendedPubKey ensures a sane derived public key is provided.
 func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	isAccountKey bool, chainParams *chaincfg.Params) error {
@@ -614,6 +888,13 @@ func validateExtendedPubKey(pubKey *hdkeychain.ExtendedKey,
 	// Private keys are not allowed.
 	if pubKey.IsPrivate() {
 		return fmt.Errorf("%w: private keys cannot be imported",
+			ErrInvalidAccountKey)
+	}
+
+	// A zeroed or otherwise malformed key has no four-byte network version.
+	// Reject it before isPubKeyForNet decodes the version as a uint32.
+	if len(pubKey.Version()) != binary.Size(waddrmgr.HDVersion(0)) {
+		return fmt.Errorf("%w: invalid extended public key version",
 			ErrInvalidAccountKey)
 	}
 

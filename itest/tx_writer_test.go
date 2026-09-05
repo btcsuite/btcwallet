@@ -315,7 +315,7 @@ func testLabelTxWalletState(h *bwtest.HarnessTest) {
 
 	err = w.LabelTx(h.Context(), txHash, label)
 	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
+		h, err, wallet.ErrWalletStopped,
 		"labeling after stop not rejected",
 	)
 }

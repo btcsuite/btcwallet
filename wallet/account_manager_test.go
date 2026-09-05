@@ -5,6 +5,7 @@
 package wallet
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -644,6 +645,217 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
 
+// TestGetAccountErrors verifies that request routing preserves both ordinary
+// Store failures and the legacy ManagerError identity expected by callers.
+func TestGetAccountErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		storeErr    error
+		managerCode bool
+	}{
+		{
+			name:     "store error",
+			storeErr: errDBMock,
+		},
+		{
+			name:        "manager error",
+			managerCode: true,
+			storeErr: waddrmgr.ManagerError{
+				ErrorCode: waddrmgr.ErrAccountNotFound,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a Wallet and require the exact account query
+			// to return the error identity under test once.
+			w, deps := createStartedWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			name := testAccountName
+			deps.store.On(
+				"GetAccount", mock.Anything, db.GetAccountQuery{
+					WalletID: 0,
+					Scope:    db.KeyScope(scope),
+					Name:     &name,
+				},
+			).Return((*db.AccountInfo)(nil), test.storeErr).Once()
+
+			// Act: Route the lookup through mainLoop and its concurrent
+			// account handler.
+			_, err := w.GetAccount(t.Context(), scope, name)
+
+			// Assert: The public result preserves the Store error identity
+			// expected by callers.
+			if test.managerCode {
+				require.True(t, waddrmgr.IsError(
+					err, waddrmgr.ErrAccountNotFound))
+			} else {
+				require.ErrorIs(t, err, errDBMock)
+			}
+		})
+	}
+}
+
+// TestGetAccountLifecycle verifies pre-start and terminal calls are rejected
+// before the Store can be reached.
+func TestGetAccountLifecycle(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a fresh Wallet with no GetAccount expectation because
+	// neither lifecycle state should admit Store access.
+	w, _ := createTestWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	// Act: Attempt a lookup before Start, then make the Wallet terminal and
+	// attempt the same lookup through the retained pointer.
+	_, initializedErr := w.GetAccount(t.Context(), scope, testAccountName)
+	require.NoError(t, w.Stop(t.Context()))
+	_, stoppedErr := w.GetAccount(t.Context(), scope, testAccountName)
+
+	// Assert: Initialized retains the broad state error, terminal access
+	// gains the specific sentinel, and neither attempt reaches Store.
+	require.ErrorIs(t, initializedErr, ErrStateForbidden)
+	require.NotErrorIs(t, initializedErr, ErrWalletStopped)
+	require.ErrorIs(t, stoppedErr, ErrWalletStopped)
+}
+
+// TestGetAccountConcurrentDrain verifies account lookups overlap, accepted
+// work delays Stop, and a late lookup is rejected before Store access.
+func TestGetAccountConcurrentDrain(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block two exact Store calls after they enter. Observing both
+	// entries before release proves mainLoop launched the handlers in
+	// parallel instead of executing either lookup inline.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	name := testAccountName
+	accountNumber := uint32(1)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		Name:     &name,
+	}).Run(func(mock.Arguments) {
+		entered <- struct{}{}
+		<-release
+	}).Return(&db.AccountInfo{
+		AccountNumber: &accountNumber,
+		AccountName:   name,
+		KeyScope:      db.KeyScope(scope),
+	}, nil).Twice()
+
+	results := make(chan accountResp, 2)
+	for range 2 {
+		go func() {
+			info, err := w.GetAccount(t.Context(), scope, name)
+			results <- accountResp{info: info, err: err}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("account lookups did not overlap")
+		}
+	}
+
+	// Act: Begin Stop while both accepted handlers are blocked, then issue
+	// a third lookup after lifetime cancellation has closed admission.
+	stopResult := make(chan error, 1)
+	go func() {
+		stopResult <- w.Stop(t.Context())
+	}()
+
+	<-w.lifetimeCtx.Done()
+	_, lateErr := w.GetAccount(t.Context(), scope, name)
+
+	// Assert: The late call is rejected and Stop remains blocked until both
+	// accepted handlers deliver ordinary results.
+	require.ErrorIs(t, lateErr, ErrWalletStopped)
+
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before account handlers: %v", err)
+	default:
+	}
+
+	close(release)
+
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		require.NotNil(t, result.info)
+	}
+
+	require.NoError(t, <-stopResult)
+}
+
+// TestGetAccountCanceledCallerDrains verifies caller cancellation does not
+// release an accepted lookup from the Wallet's shutdown responsibility.
+func TestGetAccountCanceledCallerDrains(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Accept one lookup whose Store call ignores caller
+	// cancellation until the test explicitly releases it.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	name := testAccountName
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		Name:     &name,
+	}).Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(&db.AccountInfo{
+		AccountName: name,
+		KeyScope:    db.KeyScope(scope),
+	}, nil).Once()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	callResult := make(chan error, 1)
+
+	go func() {
+		_, err := w.GetAccount(ctx, scope, name)
+		callResult <- err
+	}()
+
+	<-entered
+
+	// Act: Cancel only the caller, wait for its prompt return, then begin
+	// Wallet shutdown while the accepted handler still owns Store work.
+	cancel()
+	require.ErrorIs(t, <-callResult, context.Canceled)
+
+	stopResult := make(chan error, 1)
+	go func() {
+		stopResult <- w.Stop(t.Context())
+	}()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: Stop waits after the caller has gone until Store release lets
+	// the buffered handler response complete without a stranded goroutine.
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before canceled caller's handler: %v", err)
+	default:
+	}
+
+	close(release)
+	require.NoError(t, <-stopResult)
+}
+
 // TestNewAccount verifies NewAccount routes through
 // w.store.CreateDerivedAccount.
 func TestNewAccount(t *testing.T) {
@@ -897,6 +1109,221 @@ func TestImportAccountAddrSchema(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
+}
+
+// TestImportAccountCanceledCallerKeepsKeySnapshot verifies an accepted import
+// owns its extended key after caller cancellation permits the caller to zero
+// the original key.
+func TestImportAccountCanceledCallerKeepsKeySnapshot(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Mark a fixture Wallet started without launching mainLoop so the
+	// test can receive the submitted request before any handler consumes it.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.state.toStarting())
+	require.NoError(t, w.state.toStarted())
+
+	accountKey, masterFP := importAccountTestKey(t, 84)
+	wantKey := accountKey.String()
+	ctx, cancel := context.WithCancel(t.Context())
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := w.ImportAccount(
+			ctx, testAccountName, accountKey, masterFP,
+			waddrmgr.WitnessPubKey, false,
+		)
+		result <- err
+	}()
+
+	// Act: Accept the request, let the public call return on cancellation,
+	// then zero the original key as its caller is now entitled to do.
+	rawReq := <-w.requestChan
+
+	cancel()
+
+	callErr := <-result
+
+	accountKey.Zero()
+
+	// Assert: Cancellation reaches the caller while the accepted request owns
+	// an independent key that retains the original serialized account data.
+	require.ErrorIs(t, callErr, context.Canceled)
+
+	req, ok := rawReq.(importAccountReq)
+	require.True(t, ok)
+	require.NotSame(t, accountKey, req.accountKey)
+	require.Equal(t, wantKey, req.accountKey.String())
+}
+
+// TestImportAccountRejectsInvalidKeyBeforeAdmission verifies invalid key
+// material is classified before request submission could retain it.
+func TestImportAccountRejectsInvalidKeyBeforeAdmission(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Build private and malformed public key inputs that must share
+	// the same pre-admission error contract without entering mainLoop.
+	privateKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	zeroedKey, err := privateKey.Neuter()
+	require.NoError(t, err)
+	zeroedKey.Zero()
+
+	tests := []struct {
+		name string
+		key  *hdkeychain.ExtendedKey
+	}{
+		{
+			name: "private key",
+			key:  privateKey,
+		},
+		{
+			name: "zeroed public key",
+			key:  zeroedKey,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Mark a fixture Wallet started without a mainLoop
+			// receiver, then cancel its caller context so any submission
+			// attempt returns cancellation instead of the key sentinel.
+			w, _ := createTestWalletWithMocks(t)
+			require.NoError(t, w.state.toStarting())
+			require.NoError(t, w.state.toStarted())
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			// Act: Attempt to import the invalid key through the public API.
+			_, err := w.ImportAccount(
+				ctx, testAccountName, test.key, 0,
+				waddrmgr.WitnessPubKey, false,
+			)
+
+			// Assert: The account-key sentinel, rather than caller
+			// cancellation, proves rejection preceded request submission.
+			require.ErrorIs(t, err, ErrInvalidAccountKey)
+			require.NotErrorIs(t, err, context.Canceled)
+		})
+	}
+}
+
+// TestNewAccountRejectsStopped verifies account creation does not cross a
+// terminal Wallet's request boundary.
+func TestNewAccountRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet before startup so no request handler or
+	// Store expectation exists for the attempted account creation.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt to create an account through the terminal Wallet.
+	_, err := w.NewAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+
+	// Assert: The terminal sentinel proves the request was rejected before
+	// account derivation or Store access began.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestListAccountsRejectsStopped verifies an unfiltered account listing does
+// not cross a terminal Wallet's request boundary.
+func TestListAccountsRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet with no Store expectations because the
+	// list request must be rejected before reaching the cache.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt to list every account through the terminal Wallet.
+	_, err := w.ListAccounts(t.Context())
+
+	// Assert: The terminal sentinel confirms no list request was admitted.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestListAccountsByScopeRejectsStopped verifies a scope-filtered account
+// listing does not cross a terminal Wallet's request boundary.
+func TestListAccountsByScopeRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet without Store expectations so any admitted
+	// scope query would fail the fixture's mock verification.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt the filtered listing through the terminal Wallet.
+	_, err := w.ListAccountsByScope(
+		t.Context(), waddrmgr.KeyScopeBIP0084,
+	)
+
+	// Assert: The terminal sentinel confirms the scope query was not admitted.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestListAccountsByNameRejectsStopped verifies a name-filtered account
+// listing does not cross a terminal Wallet's request boundary.
+func TestListAccountsByNameRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet without Store expectations so the name
+	// filter cannot reach the account cache after shutdown.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt the name-filtered listing through the terminal Wallet.
+	_, err := w.ListAccountsByName(t.Context(), testAccountName)
+
+	// Assert: The terminal sentinel confirms the name query was not admitted.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestRenameAccountRejectsStopped verifies an account rename does not cross a
+// terminal Wallet's request boundary.
+func TestRenameAccountRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet without Store expectations so validation
+	// and persistence remain behind the terminal request boundary.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt to rename an account through the terminal Wallet.
+	err := w.RenameAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName, "renamed",
+	)
+
+	// Assert: The terminal sentinel confirms validation and Store mutation
+	// were both bypassed.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestImportAccountRejectsStopped verifies an account import does not cross a
+// terminal Wallet's request boundary.
+func TestImportAccountRejectsStopped(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Stop a fresh Wallet and intentionally provide no key or Store
+	// expectation so lifecycle rejection must precede argument validation.
+	w, _ := createTestWalletWithMocks(t)
+	require.NoError(t, w.Stop(t.Context()))
+
+	// Act: Attempt to import the invalid key through the terminal Wallet.
+	_, err := w.ImportAccount(
+		t.Context(), testAccountName, nil, 0,
+		waddrmgr.WitnessPubKey, false,
+	)
+
+	// Assert: The terminal sentinel proves shutdown wins before key validation
+	// or Store access.
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestDBScopeAddrSchemaMapsTypes verifies dbScopeAddrSchema converts a

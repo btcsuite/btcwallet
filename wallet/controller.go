@@ -179,6 +179,8 @@ type Controller interface {
 }
 
 // Start starts the background processes necessary to manage the wallet.
+// The Manager owns lifecycle sequencing and calls Start at most once for a
+// Wallet instance; a stopped Wallet must be loaded as a new instance.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Start(startCtx context.Context) error {
@@ -358,9 +360,18 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 // Stop signals all wallet background processes to shutdown and blocks until
 // they have all exited. It returns an error if the context is canceled before
 // the shutdown is complete.
+// The Manager serializes Stop with Start, so Stop can transition an
+// Initialized Wallet directly to its terminal Stopped state.
 //
 // This is part of the Controller interface.
 func (w *Wallet) Stop(stopCtx context.Context) error {
+	// A Wallet stopped before its first Start has no workers to cancel or
+	// join, but it must still become terminal so a retained pointer cannot
+	// start a new runtime later.
+	if lifecycle(w.state.lifecycle.Load()) == lifecycleInitialized {
+		return w.state.toStopped()
+	}
+
 	// Attempt to transition from Started to Stopping.
 	err := w.state.toStopping()
 	if err != nil {
@@ -434,8 +445,14 @@ func (w *Wallet) Unlock(ctx context.Context, req UnlockRequest) error {
 		return err
 	}
 
-	// Wait for the result from the mainLoop.
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
 }
 
 // Lock locks the wallet.
@@ -455,8 +472,14 @@ func (w *Wallet) Lock(ctx context.Context) error {
 		return err
 	}
 
-	// Wait for the result.
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
 }
 
 // ChangePassphrase changes the wallet's passphrases according to the request.
@@ -478,7 +501,14 @@ func (w *Wallet) ChangePassphrase(ctx context.Context,
 		return err
 	}
 
-	return w.waitForResp(ctx, r.resp)
+	// Wait for the accepted request's result even if wallet shutdown begins.
+	// The caller context remains the only way to stop waiting early.
+	reqErr, err := waitForReq(ctx, r.resp)
+	if err != nil {
+		return err
+	}
+
+	return reqErr
 }
 
 // Info returns a comprehensive snapshot of the wallet's static configuration
@@ -616,8 +646,11 @@ func (w *Wallet) mainLoop() {
 				w.handleChangePassphraseReq(r)
 
 			default:
-				log.Errorf("Wallet received unknown request "+
-					"type: %T", req)
+				// Non-control requests run concurrently. Register the handler
+				// before launch so Stop drains every accepted request.
+				w.wg.Add(1)
+
+				go w.handleReq(req)
 			}
 
 		// The auto-lock timer has expired. We trigger a lock with a
@@ -632,6 +665,35 @@ func (w *Wallet) mainLoop() {
 
 			return
 		}
+	}
+}
+
+// reqCtx carries caller cancellation and values across the Wallet request
+// boundary. Keeping the context in one embedded type centralizes the bounded
+// retention contract and its lint exemption for every routed request.
+type reqCtx struct {
+	//nolint:containedctx // Store calls must inherit the caller context.
+	ctx context.Context
+}
+
+// handleReq owns completion bookkeeping for requests accepted by mainLoop. Its
+// type switch is the single routing table for concurrent public method work.
+func (w *Wallet) handleReq(req any) {
+	defer w.wg.Done()
+
+	switch r := req.(type) {
+	case newAccountReq:
+		w.handleNewAccount(r)
+	case renameAccountReq:
+		w.handleRenameAccount(r)
+	case importAccountReq:
+		w.handleImportAccount(r)
+	case getAccountReq:
+		w.handleGetAccount(r)
+	case listAccountsReq:
+		w.handleListAccounts(r)
+	default:
+		log.Errorf("Wallet received unknown request type: %T", req)
 	}
 }
 
@@ -882,31 +944,34 @@ func (w *Wallet) handleChangePassphraseReq(req changePassphraseReq) {
 	req.resp <- err
 }
 
-// sendReq sends an operation request to the main loop or handles cancellation.
+// sendReq transfers an operation request to mainLoop, which makes receipt the
+// Wallet-owned admission point. A successful send means shutdown must drain
+// the accepted handler; cancellation before receipt leaves no admitted work.
 func (w *Wallet) sendReq(ctx context.Context, req any) error {
 	select {
 	case w.requestChan <- req:
 		return nil
 
 	case <-w.lifetimeCtx.Done():
-		return ErrWalletShuttingDown
+		return ErrWalletStopped
 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// waitForResp waits for the response from an operation request or handles
-// cancellation.
-func (w *Wallet) waitForResp(ctx context.Context, resp <-chan error) error {
+// waitForReq waits for a typed result after sendReq has transferred ownership
+// to mainLoop. It intentionally observes only caller cancellation: Wallet
+// shutdown must continue draining the accepted handler, whose response channel
+// is buffered so completion never depends on the caller remaining present.
+func waitForReq[T any](ctx context.Context, respChan <-chan T) (T, error) {
 	select {
-	case err := <-resp:
-		return err
-
-	case <-w.lifetimeCtx.Done():
-		return ErrWalletShuttingDown
+	case result := <-respChan:
+		return result, nil
 
 	case <-ctx.Done():
-		return ctx.Err()
+		var zero T
+
+		return zero, ctx.Err()
 	}
 }

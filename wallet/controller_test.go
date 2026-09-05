@@ -164,12 +164,15 @@ func TestControllerChangePassphrase_Interrupted_WaitCancelled(t *testing.T) {
 	}
 }
 
-// TestControllerChangePassphrase_Interrupted_WaitShutdown verifies
-// ChangePassphrase when response wait is interrupted by wallet shutdown.
-func TestControllerChangePassphrase_Interrupted_WaitShutdown(t *testing.T) {
+// TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown verifies
+// that shutdown does not hide the result of an accepted passphrase change.
+func TestControllerChangePassphraseWaitsForAcceptedResultDuringShutdown(
+	t *testing.T) {
+
 	t.Parallel()
 
-	// Arrange: Block during response wait and trigger shutdown.
+	// Arrange: Start a wallet and call ChangePassphrase asynchronously so the
+	// test can capture the request after the wallet has accepted ownership.
 	w, _ := createTestWalletWithMocks(t)
 
 	require.NoError(t, w.state.toStarting())
@@ -181,19 +184,31 @@ func TestControllerChangePassphrase_Interrupted_WaitShutdown(t *testing.T) {
 			ChangePassphraseRequest{})
 	}()
 
+	var accepted changePassphraseReq
 	select {
-	case <-w.requestChan:
+	case rawReq := <-w.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(changePassphraseReq)
+		require.True(t, ok, "expected a change passphrase request")
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for request")
 	}
 
-	// Act: Stop wallet.
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
 	w.cancel()
 
-	// Assert: Verify error.
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
 	select {
 	case err := <-errChan:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, errDBMock)
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -452,7 +467,7 @@ func TestControllerUnlock_Interrupted_SendShutdown(t *testing.T) {
 	// Assert: Verify shutdown error.
 	select {
 	case err := <-errChan2:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, ErrWalletStopped)
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -496,12 +511,13 @@ func TestControllerUnlock_Interrupted_WaitCancelled(t *testing.T) {
 	}
 }
 
-// TestControllerUnlock_Interrupted_WaitShutdown verifies Unlock when the
-// response wait is interrupted by wallet shutdown.
-func TestControllerUnlock_Interrupted_WaitShutdown(t *testing.T) {
+// TestControllerUnlockWaitsForAcceptedResultDuringShutdown verifies that
+// shutdown does not hide the result of an accepted unlock request.
+func TestControllerUnlockWaitsForAcceptedResultDuringShutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Setup a wallet and trigger shutdown during response wait.
+	// Arrange: Start a wallet and call Unlock asynchronously so the test can
+	// capture the request after the wallet has accepted ownership.
 	w4, _ := createTestWalletWithMocks(t)
 	require.NoError(t, w4.state.toStarting())
 	require.NoError(t, w4.state.toStarted())
@@ -512,19 +528,31 @@ func TestControllerUnlock_Interrupted_WaitShutdown(t *testing.T) {
 			UnlockRequest{Passphrase: []byte("pw")})
 	}()
 
+	var accepted unlockReq
 	select {
-	case <-w4.requestChan:
+	case rawReq := <-w4.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(unlockReq)
+		require.True(t, ok, "expected an unlock request")
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for request")
 	}
 
-	// Act: Stop wallet.
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
 	w4.cancel()
 
-	// Assert: Verify shutdown error.
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
 	select {
 	case err := <-errChan4:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, errDBMock)
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -694,6 +722,33 @@ func TestControllerStop(t *testing.T) {
 	// Assert: Verify that subsequent Stop calls are safe and return no
 	// error.
 	require.NoError(t, err)
+
+	// Act: Attempt to restart the terminal Wallet after both Stop calls
+	// have completed.
+	err = w.Start(t.Context())
+
+	// Assert: A stopped Wallet cannot create a second runtime and returns
+	// the stable terminal sentinel.
+	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestControllerStopBeforeStart verifies that Stop makes an Initialized
+// Wallet terminal without attempting to cancel workers that do not exist.
+func TestControllerStopBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Create a Wallet whose maintained runtime has never started,
+	// so no startup dependency or background-worker expectation is needed.
+	w, _ := createTestWalletWithMocks(t)
+
+	// Act: Stop the fresh Wallet and then attempt its first Start.
+	stopErr := w.Stop(t.Context())
+	startErr := w.Start(t.Context())
+
+	// Assert: Stop succeeds directly and permanently prevents the retained
+	// Wallet instance from starting later.
+	require.NoError(t, stopErr)
+	require.ErrorIs(t, startErr, ErrWalletStopped)
 }
 
 // TestControllerLock verifies the Lock method. It ensures that the wallet
@@ -1042,7 +1097,7 @@ func TestControllerLock_Interrupted_SendShutdown(t *testing.T) {
 	err := w.Lock(t.Context())
 
 	// Assert: Verify error.
-	require.ErrorIs(t, err, ErrWalletShuttingDown)
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestControllerLock_Interrupted_WaitCancelled verifies Lock when response
@@ -1082,12 +1137,13 @@ func TestControllerLock_Interrupted_WaitCancelled(t *testing.T) {
 	}
 }
 
-// TestControllerLock_Interrupted_WaitShutdown verifies Lock when response
-// wait is interrupted by wallet shutdown.
-func TestControllerLock_Interrupted_WaitShutdown(t *testing.T) {
+// TestControllerLockWaitsForAcceptedResultDuringShutdown verifies that
+// shutdown does not hide the result of an accepted lock request.
+func TestControllerLockWaitsForAcceptedResultDuringShutdown(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Block during response wait and trigger shutdown.
+	// Arrange: Start a wallet and call Lock asynchronously so the test can
+	// capture the request after the wallet has accepted ownership.
 	w, _ := createTestWalletWithMocks(t)
 
 	require.NoError(t, w.state.toStarting())
@@ -1098,19 +1154,31 @@ func TestControllerLock_Interrupted_WaitShutdown(t *testing.T) {
 		errChan <- w.Lock(t.Context())
 	}()
 
+	var accepted lockReq
 	select {
-	case <-w.requestChan:
+	case rawReq := <-w.requestChan:
+		var ok bool
+
+		accepted, ok = rawReq.(lockReq)
+		require.True(t, ok, "expected a lock request")
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for request")
 	}
 
-	// Act: Stop wallet.
+	// Act: Begin shutdown after admission, then deliver the handler result.
+	// This ordering reproduces the race where shutdown previously preempted
+	// the response even though the accepted operation could still complete.
 	w.cancel()
 
-	// Assert: Verify error.
+	accepted.resp <- errDBMock
+
+	// Assert: The caller receives the accepted request's exact result instead
+	// of a lifecycle error produced solely because shutdown began.
 	select {
 	case err := <-errChan:
-		require.ErrorIs(t, err, ErrWalletShuttingDown)
+		require.ErrorIs(t, err, errDBMock)
+
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for response")
 	}
@@ -1172,7 +1240,7 @@ func TestControllerChangePassphrase_Interrupted_SendShutdown(t *testing.T) {
 		ChangePassphraseRequest{})
 
 	// Assert: Verify error.
-	require.ErrorIs(t, err, ErrWalletShuttingDown)
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestHandleChangePassphraseReq_Errors verifies error handling for the
@@ -1445,6 +1513,13 @@ func TestControllerStart_VerifyBirthdayFail(t *testing.T) {
 	// Assert: Verify failure.
 	require.ErrorIs(t, err, errDBMock)
 	require.False(t, w.state.isStarted())
+
+	// Act: Attempt to start again after setup canceled the Wallet-owned
+	// runtime and moved the lifecycle to terminal Stopped.
+	err = w.Start(t.Context())
+
+	// Assert: Startup failure is terminal for this Wallet instance.
+	require.ErrorIs(t, err, ErrWalletStopped)
 }
 
 // TestControllerStart_DBGetAllAccountsFail verifies Start fails when
