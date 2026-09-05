@@ -215,6 +215,35 @@ type TxDetail struct {
 	Label string
 }
 
+// getTxReq owns the value hash until the accepted detail lookup finishes.
+type getTxReq struct {
+	reqCtx
+
+	txHash   chainhash.Hash
+	respChan chan txDetailResp
+}
+
+// txDetailResp retains a completed detail independently of its waiting caller.
+type txDetailResp struct {
+	detail *TxDetail
+	err    error
+}
+
+// listTxnsReq keeps range and tip reads within the same accepted request.
+type listTxnsReq struct {
+	reqCtx
+
+	startHeight int32
+	endHeight   int32
+	respChan    chan txDetailsResp
+}
+
+// txDetailsResp delivers a complete history result after cancellation or Stop.
+type txDetailsResp struct {
+	details []*TxDetail
+	err     error
+}
+
 // GetTx returns a detailed description of a tx given its tx hash.
 //
 // NOTE: This method is part of the TxReader interface.
@@ -226,10 +255,22 @@ func (w *Wallet) GetTx(ctx context.Context, txHash chainhash.Hash) (
 		return nil, err
 	}
 
-	//nolint:contextcheck // SyncedTo takes no context.
-	currentHeight := w.SyncedTo().Height
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := getTxReq{
+		reqCtx:   reqCtx{ctx: ctx},
+		txHash:   txHash,
+		respChan: make(chan txDetailResp, 1),
+	}
 
-	return w.getTxDetail(ctx, txHash, currentHeight)
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.detail, result.err
 }
 
 // ListTxns returns detailed transaction views over a block range.
@@ -243,10 +284,33 @@ func (w *Wallet) ListTxns(ctx context.Context, startHeight, endHeight int32) (
 		return nil, err
 	}
 
-	//nolint:contextcheck // SyncedTo takes no context.
+	// Admission keeps dependency access joined through concurrent Stop.
+	r := listTxnsReq{
+		reqCtx:      reqCtx{ctx: ctx},
+		startHeight: startHeight,
+		endHeight:   endHeight,
+		respChan:    make(chan txDetailsResp, 1),
+	}
+
+	err = w.sendReq(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	// Once admitted, wait for the result even if cancellation arrives.
+	result := <-r.respChan
+
+	return result.details, result.err
+}
+
+// handleGetTx delivers the result of an accepted component request.
+func (w *Wallet) handleGetTx(r getTxReq) {
+	// Keep the accepted tip read with the existing transaction-detail mapper.
+	// The legacy tip accessor is joined by this accepted outer read.
 	currentHeight := w.SyncedTo().Height
 
-	return w.listTxDetails(ctx, startHeight, endHeight, currentHeight)
+	detail, err := w.getTxDetail(r.ctx, r.txHash, currentHeight)
+	r.respChan <- txDetailResp{detail: detail, err: err}
 }
 
 // getTxDetail loads one transaction through the detailed store path and builds
@@ -267,6 +331,18 @@ func (w *Wallet) getTxDetail(ctx context.Context, txHash chainhash.Hash,
 	}
 
 	return w.buildTxDetailFromStore(txDetails, currentHeight)
+}
+
+// handleListTxns delivers the result of an accepted component request.
+func (w *Wallet) handleListTxns(r listTxnsReq) {
+	// Keep the accepted tip read with the existing transaction-list mapper.
+	// Reuse the existing detailed mapper with the accepted tip snapshot.
+	currentHeight := w.SyncedTo().Height
+
+	details, err := w.listTxDetails(
+		r.ctx, r.startHeight, r.endHeight, currentHeight,
+	)
+	r.respChan <- txDetailsResp{details: details, err: err}
 }
 
 // listTxDetails loads detailed transactions over the requested wallet range and
