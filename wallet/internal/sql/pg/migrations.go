@@ -53,6 +53,22 @@ func ApplyMigrations(db *sql.DB) error {
 	return nil
 }
 
+// RollbackMigration reverts exactly the latest PostgreSQL migration so
+// migration tests can seed and reopen the immediately preceding durable schema.
+func RollbackMigration(db *sql.DB) error {
+	m, err := newMigrationInstance(db)
+	if err != nil {
+		return err
+	}
+
+	err = m.Steps(-1)
+	if err != nil && !errors.Is(err, gomigrate.ErrNoChange) {
+		return fmt.Errorf("rollback migration: %w", err)
+	}
+
+	return nil
+}
+
 // RollbackMigrations rolls back all PostgreSQL migrations from the database.
 func RollbackMigrations(db *sql.DB) error {
 	m, err := newMigrationInstance(db)

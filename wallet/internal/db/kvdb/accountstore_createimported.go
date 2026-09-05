@@ -18,6 +18,14 @@ import (
 func (s *Store) CreateImportedAccount(_ context.Context,
 	params db.CreateImportedAccountParams) (*db.AccountInfo, error) {
 
+	// The legacy bucket format cannot persist this SQL account policy. Reject
+	// true before validation or a transaction so a successful import can never
+	// lose the requested value when it is read back.
+	if params.NoChainSync {
+		return nil, fmt.Errorf("kvdb no-chain-sync account: %w",
+			db.ErrInvalidParam)
+	}
+
 	mgr := s.addrStore
 	walletIsWatchOnly := mgr.WatchOnly()
 

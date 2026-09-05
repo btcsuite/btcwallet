@@ -115,6 +115,46 @@ func TestGetAccountByName(t *testing.T) {
 	require.False(t, parsed.IsPrivate())
 }
 
+// TestAccountReadsReportChainSync verifies kvdb account reads explicitly expose
+// the historical synchronized policy because its legacy rows cannot store the
+// SQL-only per-account flag.
+func TestAccountReadsReportChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a normal derived kvdb account and prepare name-based get
+	// and list selectors that resolve the same legacy account row.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	const accountName = "chain-synchronized"
+	createDerivedAccount(
+		t, store.db, mgr, waddrmgr.KeyScopeBIP0084, accountName,
+	)
+	name := accountName
+	query := db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	}
+
+	// Act: load the account through both kvdb read surfaces that materialize
+	// AccountInfo values.
+	info, getErr := store.GetAccount(t.Context(), query)
+	infos, listErr := store.ListAccounts(t.Context(), db.ListAccountsQuery{
+		Name: &name,
+	})
+
+	// Assert: both reads succeed, select exactly the intended row, and report
+	// false rather than implying the unsupported policy was persisted.
+	require.NoError(t, getErr)
+	require.NoError(t, listErr)
+	require.False(t, info.NoChainSync)
+	require.Len(t, infos, 1)
+	require.False(t, infos[0].NoChainSync)
+}
+
 // TestGetAccountByNumber verifies the AccountNumber-keyed lookup branch.
 func TestGetAccountByNumber(t *testing.T) {
 	t.Parallel()
@@ -484,6 +524,56 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.Equal(t, savingsAccountName, read.AccountName)
 }
 
+// TestCreateDerivedAccountRejectsNoChainSync verifies kvdb refuses a policy it
+// cannot persist before derivation or account mutation begins.
+func TestCreateDerivedAccountRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: prepare a valid account request whose only unsupported input is
+	// the SQL-only synchronization policy, and record whether derivation runs.
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	const accountName = "no-chain-sync"
+
+	deriveCalled := false
+	deriveFn := func(context.Context, db.KeyScope, uint32,
+		bool) (*db.DerivedAccountData, error) {
+
+		deriveCalled = true
+
+		return &db.DerivedAccountData{}, nil
+	}
+
+	// Act: request the unsupported policy through the kvdb Store and then try
+	// to resolve the same account name from the legacy data model.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			Scope: db.KeyScope{
+				Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+				Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+			},
+			Name:        accountName,
+			NoChainSync: true,
+		}, deriveFn,
+	)
+	name := accountName
+	_, readErr := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name: &name,
+	})
+
+	// Assert: the unsupported request fails as an invalid parameter before the
+	// callback runs, returns no result, and leaves no account row behind.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Nil(t, info)
+	require.False(t, deriveCalled)
+	require.ErrorIs(t, readErr, db.ErrAccountNotFound)
+}
+
 // TestCreateDerivedAccountRollsBackOnDeriveError verifies that when the
 // derivation callback fails after the account number has been allocated,
 // the underlying walletdb transaction rolls back so the lastAccount counter
@@ -641,6 +731,51 @@ func TestCreateImportedAccount(t *testing.T) {
 	require.Nil(t, info.AccountNumber)
 	require.NotNil(t, info.AccountID)
 	require.NotEqual(t, uint32(waddrmgr.DefaultAccountNum), *info.AccountID)
+}
+
+// TestCreateImportedAccountRejectsNoChainSync verifies kvdb refuses imported
+// account policy that its legacy watch-only row cannot persist.
+func TestCreateImportedAccountRejectsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create valid deterministic public account material so the
+	// synchronization policy is the request's only unsupported field.
+	store, _, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	seed := bytes.Repeat([]byte{0xBC}, hdkeychain.RecommendedSeedLen)
+	master, err := hdkeychain.NewMaster(seed, &chaincfg.SimNetParams)
+	require.NoError(t, err)
+	masterPub, err := master.Neuter()
+	require.NoError(t, err)
+
+	const accountName = "imported-no-chain-sync"
+
+	params := db.CreateImportedAccountParams{
+		Scope: db.KeyScope{
+			Purpose: waddrmgr.KeyScopeBIP0084.Purpose,
+			Coin:    waddrmgr.KeyScopeBIP0084.Coin,
+		},
+		Name:              accountName,
+		MasterFingerprint: 0xDEADBEEF,
+		PublicKey:         []byte(masterPub.String()),
+		NoChainSync:       true,
+	}
+
+	// Act: request the unsupported policy through the kvdb Store and then try
+	// to load the same name from the legacy account data.
+	info, createErr := store.CreateImportedAccount(t.Context(), params)
+	name := accountName
+	_, readErr := store.GetAccount(t.Context(), db.GetAccountQuery{
+		Scope: params.Scope,
+		Name:  &name,
+	})
+
+	// Assert: rejection occurs before mutation, returning no snapshot and
+	// leaving no imported account for the follow-up read to discover.
+	require.ErrorIs(t, createErr, db.ErrInvalidParam)
+	require.Nil(t, info)
+	require.ErrorIs(t, readErr, db.ErrAccountNotFound)
 }
 
 // TestCreateImportedAccountRejectsPrivateKey verifies that the kvdb

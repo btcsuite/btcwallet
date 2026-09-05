@@ -1,10 +1,13 @@
 -- name: CreateDerivedAccount :one
 -- Creates the parent row for a wallet-derived account under the given scope.
+-- The synchronization policy is bound verbatim as immutable account metadata;
+-- recording it here deliberately performs no chain operation.
 INSERT INTO accounts (
     wallet_id,
     scope_id,
     account_name,
     is_derived,
+    no_chain_sync,
     account_number,
     public_key,
     master_fingerprint
@@ -14,6 +17,7 @@ SELECT
     ks.id AS scope_id,
     sqlc.arg('account_name') AS account_name,
     TRUE AS is_derived,
+    sqlc.arg('no_chain_sync') AS no_chain_sync,
     sqlc.arg('account_number') AS account_number,
     sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
@@ -24,11 +28,14 @@ RETURNING id, account_number, created_at;
 -- name: CreateImportedAccount :one
 -- Creates a new imported xpub account under the given scope. Imported xpub
 -- accounts are HD account-like rows but do not have BIP44 account numbers.
+-- The synchronization policy is bound verbatim as immutable account metadata;
+-- recording it here deliberately performs no chain operation.
 INSERT INTO accounts (
     wallet_id,
     scope_id,
     account_name,
     is_derived,
+    no_chain_sync,
     public_key,
     master_fingerprint
 )
@@ -37,6 +44,7 @@ SELECT
     ks.id AS scope_id,
     sqlc.arg('account_name') AS account_name,
     FALSE AS is_derived,
+    sqlc.arg('no_chain_sync') AS no_chain_sync,
     sqlc.arg('public_key') AS public_key,
     sqlc.arg('master_fingerprint') AS master_fingerprint
 FROM key_scopes AS ks
@@ -73,6 +81,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -95,6 +104,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -117,6 +127,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -143,6 +154,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -169,6 +181,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -190,6 +203,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.public_key,
     a.master_fingerprint,
     a.created_at,
@@ -212,6 +226,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -235,6 +250,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -261,6 +277,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,
@@ -284,6 +301,7 @@ SELECT
     a.account_number,
     a.account_name,
     a.is_derived,
+    a.no_chain_sync,
     a.created_at,
     ks.purpose,
     ks.coin_type,

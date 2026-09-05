@@ -20,6 +20,14 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
+	// The legacy bucket format cannot persist this SQL account policy. Reject
+	// true before opening a transaction so the caller never receives a value
+	// that would be lost on the next read.
+	if params.NoChainSync {
+		return nil, fmt.Errorf("kvdb no-chain-sync account: %w",
+			db.ErrInvalidParam)
+	}
+
 	mgr := s.addrStore
 
 	var info *db.AccountInfo
@@ -129,7 +137,7 @@ func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
 // public key is encrypted via waddrmgr cryptoKeyPub inside
 // PutDerivedAccountWithKeys.
 func (o *createDerivedAccountOps) CreateDerivedAccount(_ context.Context,
-	_ int64, accountNumber int64, name string,
+	_ int64, accountNumber int64, name string, _ bool,
 	derived *db.DerivedAccountData) (db.CreateDerivedAccountRow, error) {
 
 	if o.scopedMgr == nil {

@@ -26,6 +26,12 @@ func testBackend() dberr.Backend {
 	return dberr.BackendPostgres
 }
 
+// testQueryParam returns PostgreSQL's numbered marker so shared raw-SQL tests
+// bind values safely without duplicating their dialect-neutral assertions.
+func testQueryParam(position int) string {
+	return fmt.Sprintf("$%d", position)
+}
+
 // requireConstraintSQLError verifies that a real PostgreSQL constraint failure
 // reaches callers as the shared SQL error wrapper.
 func requireConstraintSQLError(t *testing.T, err error) {

@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	sqliteschema "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
 )
@@ -161,6 +162,198 @@ func TestSQLiteDatabaseIdentityRejectsPopulatedFile(t *testing.T) {
 	require.NoError(t, inspectErr)
 	require.Equal(t, 1, objectCount)
 	require.Equal(t, "delete", journalMode)
+}
+
+// TestSQLiteAccountNoChainSyncMigration verifies the latest migration
+// backfills pre-existing account rows and retains a required false default.
+func TestSQLiteAccountNoChainSyncMigration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create current true and false rows, close the Store, roll back
+	// one version, and insert a third row using the prior schema shape.
+	dbPath := filepath.Join(t.TempDir(), "account-policy.db")
+	identity, err := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	cfg := sqlite.Config{
+		DBPath:         dbPath,
+		MaxConnections: 1,
+		Identity:       identity,
+	}
+	initial, err := sqlite.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	walletID := newWallet(t, initial, "sqlite-policy-migration")
+	scope := db.KeyScopeBIP0084
+	_, err = initial.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       scope,
+			Name:        "preexisting-true",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	scopeID := GetKeyScopeID(t, initial.Queries(), walletID, scope)
+	require.NoError(t, initial.Close())
+
+	raw, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys=on")
+	require.NoError(t, err)
+	require.NoError(t, sqliteschema.RollbackMigration(raw))
+
+	var oldColumnCount int
+
+	err = raw.QueryRowContext(t.Context(), `
+		SELECT count(*) FROM pragma_table_info('accounts')
+		WHERE name = 'no_chain_sync'`).Scan(&oldColumnCount)
+	require.NoError(t, err)
+	_, oldInsertErr := raw.ExecContext(t.Context(), `
+		INSERT INTO accounts (
+			wallet_id, scope_id, account_name, is_derived,
+			account_number, public_key
+		) VALUES (?, ?, ?, TRUE, ?, ?)`, walletID, scopeID,
+		"old-shape", 99, RandomBytes(33))
+	require.NoError(t, raw.Close())
+
+	// Act: reopen through production startup, which reapplies the migration,
+	// and attempt an explicit NULL insert against the migrated schema.
+	reopened, reopenErr := sqlite.NewStore(t.Context(), cfg)
+
+	var nullErr error
+
+	if reopened != nil {
+		t.Cleanup(func() { _ = reopened.Close() })
+		_, nullErr = reopened.DB().ExecContext(t.Context(), `
+			INSERT INTO accounts (
+				wallet_id, scope_id, account_name, is_derived,
+				no_chain_sync, public_key
+			) VALUES (?, ?, ?, FALSE, NULL, ?)`, walletID, scopeID,
+			"migrated-null", RandomBytes(33))
+	}
+
+	// Assert: rollback exposed the old shape, forward migration preserved all
+	// rows as synchronized accounts, and the migrated column rejects NULL.
+	require.Zero(t, oldColumnCount)
+	require.NoError(t, oldInsertErr)
+	require.NoError(t, reopenErr)
+	require.NotNil(t, reopened)
+
+	for _, name := range []string{"preexisting-true", "old-shape"} {
+		info, readErr := reopened.GetAccount(
+			t.Context(), getAccountQueryByName(walletID, scope, name),
+		)
+		require.NoError(t, readErr)
+		require.False(t, info.NoChainSync)
+	}
+
+	require.Error(t, nullErr)
+	requireDriverConstraintError(t, nullErr)
+}
+
+// TestSQLiteAccountNoChainSyncReopen verifies current false and true values
+// survive a complete Store close and production reopen.
+func TestSQLiteAccountNoChainSyncReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create both values in one file, then close the only Store so the
+	// later reads cannot observe in-memory account state.
+	dbPath := filepath.Join(t.TempDir(), "account-policy.db")
+	identity, err := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	cfg := sqlite.Config{
+		DBPath:         dbPath,
+		MaxConnections: 1,
+		Identity:       identity,
+	}
+	initial, err := sqlite.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	walletID := newWallet(t, initial, "sqlite-policy-reopen")
+	scope := db.KeyScopeBIP0084
+
+	expected := map[string]bool{
+		"reopen-false": false,
+		"reopen-true":  true,
+	}
+	for name, noChainSync := range expected {
+		_, err = initial.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:    walletID,
+				Scope:       scope,
+				Name:        name,
+				NoChainSync: noChainSync,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, initial.Close())
+
+	// Act: reopen the same physical file and load both accounts by durable
+	// wallet, scope, and name identity.
+	reopened, reopenErr := sqlite.NewStore(t.Context(), cfg)
+	if reopened != nil {
+		t.Cleanup(func() { _ = reopened.Close() })
+	}
+
+	// Assert: startup succeeds and every account retains its exact stored bit
+	// rather than collapsing true to the database default.
+	require.NoError(t, reopenErr)
+
+	for name, noChainSync := range expected {
+		info, readErr := reopened.GetAccount(
+			t.Context(), getAccountQueryByName(walletID, scope, name),
+		)
+		require.NoError(t, readErr)
+		require.Equal(t, noChainSync, info.NoChainSync)
+	}
+}
+
+// TestSQLiteAccountNoChainSyncRejectsMalformedStorage verifies a corrupted
+// flexible-typed value fails at the Store read boundary instead of becoming
+// true through boolean coercion.
+func TestSQLiteAccountNoChainSyncRejectsMalformedStorage(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a valid wallet and scope, then temporarily bypass SQLite
+	// checks to model external corruption with the integer value two.
+	store := NewTestStore(t)
+	store.DB().SetMaxOpenConns(1)
+	walletID := newWallet(t, store, "sqlite-malformed-policy")
+	scope := db.KeyScopeBIP0084
+	createDerivedAccount(t, store, walletID, scope, "scope-seed")
+	scopeID := GetKeyScopeID(t, store.Queries(), walletID, scope)
+	_, err := store.DB().ExecContext(
+		t.Context(), "PRAGMA ignore_check_constraints = ON",
+	)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(), `
+		INSERT INTO accounts (
+			wallet_id, scope_id, account_name, is_derived,
+			no_chain_sync, public_key
+		) VALUES (?, ?, ?, FALSE, 2, ?)`, walletID, scopeID,
+		"malformed-policy", RandomBytes(33))
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(
+		t.Context(), "PRAGMA ignore_check_constraints = OFF",
+	)
+	require.NoError(t, err)
+
+	// Act: read the corrupted row through the normal Store conversion.
+	info, readErr := store.GetAccount(
+		t.Context(), getAccountQueryByName(
+			walletID, scope, "malformed-policy",
+		),
+	)
+
+	// Assert: sql scanning rejects the non-boolean representation and returns
+	// no AccountInfo that could misstate the stored policy.
+	require.Error(t, readErr)
+	require.ErrorContains(t, readErr, "couldn't convert 2 into type bool")
+	require.Nil(t, info)
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the

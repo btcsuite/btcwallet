@@ -25,6 +25,7 @@ import (
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	pgschema "github.com/btcsuite/btcwallet/wallet/internal/sql/pg"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
 	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
@@ -410,6 +411,155 @@ func TestPostgresDatabaseIdentityRejectsPopulatedSchema(t *testing.T) {
 	require.NoError(t, errors.Join(inspectErr, closeErr))
 	require.True(t, functionPresent)
 	require.True(t, relationsAbsent)
+}
+
+// TestPostgresAccountNoChainSyncMigration verifies the latest migration
+// backfills pre-existing account rows and retains a required false default.
+func TestPostgresAccountNoChainSyncMigration(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create a current true row, close the Store, roll back one
+	// version, and insert another account through the prior schema shape.
+	dsn := newPostgresIdentityDSN(t)
+	identity, err := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	cfg := pg.Config{
+		Dsn:      dsn,
+		Identity: identity,
+	}
+	initial, err := pg.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	walletID := newWallet(t, initial, "postgres-policy-migration")
+	scope := db.KeyScopeBIP0084
+	_, err = initial.CreateDerivedAccount(
+		t.Context(), db.CreateDerivedAccountParams{
+			WalletID:    walletID,
+			Scope:       scope,
+			Name:        "preexisting-true",
+			NoChainSync: true,
+		}, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	scopeID := GetKeyScopeID(t, initial.Queries(), walletID, scope)
+	require.NoError(t, initial.Close())
+
+	rollbackDSN := dsn + "&search_path=btcwallet%2Cpg_temp"
+	raw, err := sql.Open("pgx", rollbackDSN)
+	require.NoError(t, err)
+	require.NoError(t, pgschema.RollbackMigration(raw))
+
+	var oldColumnCount int
+
+	err = raw.QueryRowContext(t.Context(), `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'btcwallet' AND table_name = 'accounts'
+		AND column_name = 'no_chain_sync'`).Scan(&oldColumnCount)
+	require.NoError(t, err)
+	_, oldInsertErr := raw.ExecContext(t.Context(), `
+		INSERT INTO accounts (
+			wallet_id, scope_id, account_name, is_derived,
+			account_number, public_key
+		) VALUES ($1, $2, $3, TRUE, $4, $5)`, walletID, scopeID,
+		"old-shape", 99, RandomBytes(33))
+	require.NoError(t, raw.Close())
+
+	// Act: reopen through production startup, which reapplies the migration,
+	// and attempt an explicit NULL insert against the migrated schema.
+	reopened, reopenErr := pg.NewStore(t.Context(), cfg)
+
+	var nullErr error
+
+	if reopened != nil {
+		t.Cleanup(func() { _ = reopened.Close() })
+		_, nullErr = reopened.DB().ExecContext(t.Context(), `
+			INSERT INTO accounts (
+				wallet_id, scope_id, account_name, is_derived,
+				no_chain_sync, public_key
+			) VALUES ($1, $2, $3, FALSE, NULL, $4)`, walletID,
+			scopeID, "migrated-null", RandomBytes(33))
+	}
+
+	// Assert: rollback exposed the old shape, forward migration preserved both
+	// old rows as synchronized accounts, and the migrated column rejects NULL.
+	require.Zero(t, oldColumnCount)
+	require.NoError(t, oldInsertErr)
+	require.NoError(t, reopenErr)
+	require.NotNil(t, reopened)
+
+	for _, name := range []string{"preexisting-true", "old-shape"} {
+		info, readErr := reopened.GetAccount(
+			t.Context(), getAccountQueryByName(walletID, scope, name),
+		)
+		require.NoError(t, readErr)
+		require.False(t, info.NoChainSync)
+	}
+
+	require.Error(t, nullErr)
+	require.ErrorContains(t, nullErr, "SQLSTATE 23502")
+}
+
+// TestPostgresAccountNoChainSyncReopen verifies current false and true values
+// survive a complete Store close and production reopen.
+func TestPostgresAccountNoChainSyncReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create both values in one database, then close the only Store so
+	// subsequent reads cannot observe in-memory account state.
+	dsn := newPostgresIdentityDSN(t)
+	identity, err := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	cfg := pg.Config{
+		Dsn:      dsn,
+		Identity: identity,
+	}
+	initial, err := pg.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	walletID := newWallet(t, initial, "postgres-policy-reopen")
+	scope := db.KeyScopeBIP0084
+
+	expected := map[string]bool{
+		"reopen-false": false,
+		"reopen-true":  true,
+	}
+	for name, noChainSync := range expected {
+		_, err = initial.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:    walletID,
+				Scope:       scope,
+				Name:        name,
+				NoChainSync: noChainSync,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, initial.Close())
+
+	// Act: reopen the same physical database and load both accounts by durable
+	// wallet, scope, and name identity.
+	reopened, reopenErr := pg.NewStore(t.Context(), cfg)
+	if reopened != nil {
+		t.Cleanup(func() { _ = reopened.Close() })
+	}
+
+	// Assert: startup succeeds and every account retains its exact stored bit
+	// rather than collapsing true to the database default.
+	require.NoError(t, reopenErr)
+	require.NotNil(t, reopened)
+
+	for name, noChainSync := range expected {
+		info, readErr := reopened.GetAccount(
+			t.Context(), getAccountQueryByName(walletID, scope, name),
+		)
+		require.NoError(t, readErr)
+		require.Equal(t, noChainSync, info.NoChainSync)
+	}
 }
 
 // childSpendingTxIDs returns the direct child transaction IDs recorded for the

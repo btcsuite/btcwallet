@@ -19,6 +19,10 @@ type CreateImportedAccountInsertRequest struct {
 
 	// MasterFingerprint is the master key fingerprint for the imported account.
 	MasterFingerprint uint32
+
+	// NoChainSync is the immutable automatic synchronization policy to store
+	// with this account row.
+	NoChainSync bool
 }
 
 // Validate validates required fields for creating an imported account.
@@ -76,7 +80,8 @@ func requireAccountPrivKeyOnSpendable(walletID uint32, name string,
 //   - validate the public request before any backend step runs
 //   - load the wallet watch-only mode before enforcing wallet-mode invariants
 //   - ensure the requested key scope exists before inserting the account
-//   - insert the imported account row and return only its created row ID
+//   - insert the imported account row with the requested synchronization
+//     policy and return only its created row ID
 //   - optionally persist encrypted private material for spendable wallets
 //   - reload the final AccountInfo from backend-specific account-property rows
 //
@@ -94,8 +99,9 @@ type CreateImportedAccountOps interface {
 	EnsureKeyScope(ctx context.Context, walletID uint32, scope KeyScope,
 		addrSchema *ScopeAddrSchema) (int64, error)
 
-	// CreateImportedAccount inserts the imported account row for the provided
-	// insert request and returns the created account row ID.
+	// CreateImportedAccount inserts the imported account row for the
+	// provided request and returns its row ID. The adapter stores NoChainSync
+	// verbatim as immutable metadata and does not apply chain behavior.
 	CreateImportedAccount(ctx context.Context,
 		req CreateImportedAccountInsertRequest) (int64, error)
 
@@ -177,6 +183,7 @@ func CreateImportedAccountWithOps(ctx context.Context,
 		Name:              params.Name,
 		PublicKey:         params.PublicKey,
 		MasterFingerprint: params.MasterFingerprint,
+		NoChainSync:       params.NoChainSync,
 	}
 
 	accountID, err := ops.CreateImportedAccount(ctx, insertReq)

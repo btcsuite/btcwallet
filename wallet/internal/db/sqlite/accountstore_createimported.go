@@ -73,7 +73,9 @@ func (o createImportedAccountOps) EnsureKeyScope(ctx context.Context,
 	)
 }
 
-// CreateImportedAccount implements db.CreateImportedAccountOps.
+// CreateImportedAccount implements db.CreateImportedAccountOps. It binds the
+// requested synchronization policy verbatim as immutable account metadata and
+// deliberately performs no chain operation.
 func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 	req db.CreateImportedAccountInsertRequest) (int64, error) {
 
@@ -81,6 +83,7 @@ func (o createImportedAccountOps) CreateImportedAccount(ctx context.Context,
 		ctx, sqlc.CreateImportedAccountParams{
 			ScopeID:     req.ScopeID,
 			AccountName: req.Name,
+			NoChainSync: req.NoChainSync,
 			PublicKey:   req.PublicKey,
 			MasterFingerprint: sql.NullInt64{
 				Int64: int64(req.MasterFingerprint),
@@ -148,6 +151,7 @@ func getAccountProps(ctx context.Context, qtx *sqlc.Queries,
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,
 		IsDerived:         row.IsDerived,
+		NoChainSync:       row.NoChainSync,
 		ExternalKeyCount:  row.ExternalKeyCount,
 		InternalKeyCount:  row.InternalKeyCount,
 		PublicKey:         row.PublicKey,

@@ -106,6 +106,80 @@ func TestCreateImportedAccountWithOps(t *testing.T) {
 		*info.MasterKeyFingerprint)
 }
 
+// TestCreateImportedAccountWithOpsPreservesNoChainSync verifies each policy
+// value reaches the backend insert once and survives the workflow's final
+// account reload.
+func TestCreateImportedAccountWithOpsPreservesNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain synchronized",
+			noChainSync: false,
+		},
+		{
+			name:        "automatic sync disabled",
+			noChainSync: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: configure one complete imported-account workflow. The
+			// insert expectation includes the exact policy, and the reload
+			// returns the value that a SQL row conversion would expose.
+			params := testCreateImportedAccountParams()
+			params.NoChainSync = test.noChainSync
+			expected := &AccountInfo{
+				AccountName: params.Name,
+				IsImported:  true,
+				NoChainSync: test.noChainSync,
+			}
+			ops := &mockCreateImportedAccountOps{}
+			ops.On(
+				"IsWalletWatchOnly", mock.Anything, params.WalletID,
+			).Return(false, nil).Once()
+			ops.On(
+				"EnsureKeyScope", mock.Anything, params.WalletID,
+				params.Scope, params.AddrSchema,
+			).Return(int64(11), nil).Once()
+			ops.On(
+				"CreateImportedAccount", mock.Anything,
+				CreateImportedAccountInsertRequest{
+					ScopeID:           11,
+					Name:              params.Name,
+					PublicKey:         params.PublicKey,
+					MasterFingerprint: params.MasterFingerprint,
+					NoChainSync:       test.noChainSync,
+				},
+			).Return(int64(22), nil).Once()
+			ops.On(
+				"CreateAccountSecret", mock.Anything, int64(22),
+				params.EncryptedPrivateKey,
+			).Return(nil).Once()
+			ops.On(
+				"GetAccountInfoByID", mock.Anything, int64(22),
+			).Return(expected, nil).Once()
+
+			// Act: run the shared SQL workflow with the selected policy.
+			info, err := CreateImportedAccountWithOps(
+				t.Context(), params, ops,
+			)
+
+			// Assert: the final snapshot preserves the policy and every
+			// narrowly declared backend stage ran exactly once.
+			require.NoError(t, err)
+			require.Equal(t, test.noChainSync, info.NoChainSync)
+			ops.AssertExpectations(t)
+		})
+	}
+}
+
 // TestCreateImportedAccountWithOpsRejectsInvalidParams verifies the shared
 // helper validates the request before any backend step runs.
 func TestCreateImportedAccountWithOpsRejectsInvalidParams(t *testing.T) {

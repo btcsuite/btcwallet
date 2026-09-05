@@ -94,6 +94,66 @@ func TestCreateImportedAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateImportedAccountPersistsNoChainSync verifies each boolean value is
+// stored by the real SQL imported-account path and survives its final reload.
+func TestCreateImportedAccountPersistsNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		accountName string
+		noChainSync bool
+	}{
+		{
+			name:        "chain synchronized",
+			accountName: "imported-chain-sync",
+			noChainSync: false,
+		},
+		{
+			name:        "automatic sync disabled",
+			accountName: "imported-no-chain-sync",
+			noChainSync: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: create an isolated spendable wallet and imported
+			// account input with private material plus the selected policy.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, test.accountName+"-wallet")
+			params := db.CreateImportedAccountParams{
+				WalletID:            walletID,
+				Name:                test.accountName,
+				Scope:               db.KeyScopeBIP0084,
+				PublicKey:           RandomBytes(32),
+				EncryptedPrivateKey: RandomBytes(32),
+				NoChainSync:         test.noChainSync,
+			}
+
+			// Act: create the imported account and independently reload its
+			// normalized account row by scope and name.
+			created, createErr := store.CreateImportedAccount(
+				t.Context(), params,
+			)
+			loaded, loadErr := store.GetAccount(
+				t.Context(), getAccountQueryByName(
+					walletID, params.Scope, params.Name,
+				),
+			)
+
+			// Assert: both Store paths succeed and preserve the selected bit,
+			// including true rather than a false zero-value fallback.
+			require.NoError(t, createErr)
+			require.NoError(t, loadErr)
+			require.Equal(t, test.noChainSync, created.NoChainSync)
+			require.Equal(t, test.noChainSync, loaded.NoChainSync)
+		})
+	}
+}
+
 // TestCreateImportedAccountMissingWallet verifies that CreateImportedAccount
 // returns ErrWalletNotFound when the wallet does not exist.
 func TestCreateImportedAccountMissingWallet(t *testing.T) {

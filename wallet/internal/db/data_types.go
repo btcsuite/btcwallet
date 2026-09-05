@@ -438,6 +438,12 @@ type AccountInfo struct {
 	// may be removed in a future cleanup task.
 	IsWatchOnly bool
 
+	// NoChainSync reports the account's durable automatic synchronization
+	// policy. It is independent of wallet custody and does not change key
+	// derivation, signing ability, transaction ownership, or chain behavior by
+	// itself; consumers decide how to apply the stored value.
+	NoChainSync bool
+
 	// CreatedAt is the timestamp when the account was created in the database.
 	CreatedAt time.Time
 
@@ -532,6 +538,11 @@ type CreateDerivedAccountParams struct {
 
 	// Name is the name of the new account.
 	Name string
+
+	// NoChainSync records whether automatic chain synchronization should omit
+	// this account. Persisting the policy does not itself change derivation,
+	// custody, signing, or chain behavior.
+	NoChainSync bool
 }
 
 // CreateImportedAccountParams contains the data required to store an imported
@@ -564,6 +575,11 @@ type CreateImportedAccountParams struct {
 
 	// DryRun simulates the import without committing any database writes.
 	DryRun bool
+
+	// NoChainSync records whether automatic chain synchronization should omit
+	// this account. It is account metadata only and does not change imported
+	// key custody, ownership, signing, or chain behavior by itself.
+	NoChainSync bool
 
 	// AddrSchema optionally overrides the scope's default address schema for
 	// this imported account.

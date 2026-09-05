@@ -72,7 +72,7 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	).Return(int64(12), nil).Once()
 	createCall := ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
-		"savings", mock.Anything,
+		"savings", false, mock.Anything,
 	).Return(expectedRow, nil).Once()
 
 	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
@@ -91,6 +91,79 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	require.Equal(t, createdAt, info.CreatedAt)
 	require.Equal(t, params.Scope, info.KeyScope)
 	require.Equal(t, ScopeAddrMap[params.Scope], info.AddrSchema)
+}
+
+// TestCreateDerivedAccountWithOpsPreservesNoChainSync verifies the shared
+// workflow passes each policy value to the backend once and returns that same
+// value without applying chain behavior.
+func TestCreateDerivedAccountWithOpsPreservesNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain synchronized",
+			noChainSync: false,
+		},
+		{
+			name:        "automatic sync disabled",
+			noChainSync: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: configure every backend stage for one successful
+			// creation. The insert expectation includes the exact requested
+			// policy and Once makes duplicate persistence calls fail the test.
+			params := testCreateDerivedAccountParams()
+			params.NoChainSync = test.noChainSync
+			derived := newSpendableDerivedAccountData()
+			ops := &mockCreateDerivedAccountOps{}
+			ops.On(
+				"WalletWatchOnly", mock.Anything, params.WalletID,
+			).Return(false, nil).Once()
+			ops.On(
+				"EnsureScope", mock.Anything, params.WalletID,
+				params.Scope,
+			).Return(
+				int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
+			).Once()
+			ops.On(
+				"AllocateAccountNumber", mock.Anything, int64(8),
+			).Return(int64(9), nil).Once()
+			ops.On(
+				"CreateDerivedAccount", mock.Anything, int64(8),
+				int64(9), params.Name, test.noChainSync, derived,
+			).Return(CreateDerivedAccountRow{
+				AccountNumber: sql.NullInt64{
+					Int64: 9,
+					Valid: true,
+				},
+			}, nil).Once()
+
+			// Act: run the backend-independent workflow with the selected
+			// creation policy.
+			info, err := CreateDerivedAccountWithOps(
+				t.Context(), params, ops, func(
+					context.Context, KeyScope, uint32, bool,
+				) (*DerivedAccountData, error) {
+
+					return derived, nil
+				},
+			)
+
+			// Assert: creation succeeds, returns the exact requested policy,
+			// and satisfies each narrowly declared backend expectation.
+			require.NoError(t, err)
+			require.Equal(t, test.noChainSync, info.NoChainSync)
+			ops.AssertExpectations(t)
+		})
+	}
 }
 
 // TestCreateDerivedAccountWithOpsRejectsInvalidParams verifies that the shared
@@ -142,7 +215,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 	).Once()
 	ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
-		mock.Anything,
+		false, mock.Anything,
 	).Return(
 		CreateDerivedAccountRow{
 			CreatedAt: time.Unix(456, 0),
@@ -275,7 +348,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 					int64(9), nil,
 				).Once()
 				ops.On("CreateDerivedAccount", mock.Anything, int64(8),
-					int64(9), "savings", mock.Anything,
+					int64(9), "savings", false, mock.Anything,
 				).Return(
 					CreateDerivedAccountRow{}, errTestBoom,
 				).Once()
@@ -341,7 +414,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 	).Once()
 	ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(8), int64(9), "savings",
-		derived,
+		false, derived,
 	).Return(
 		CreateDerivedAccountRow{
 			AccountNumber: sql.NullInt64{Int64: 9, Valid: true},
@@ -644,10 +717,12 @@ func (m *mockCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 
 // CreateDerivedAccount implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) CreateDerivedAccount(ctx context.Context,
-	scopeID int64, accountNumber int64, name string,
+	scopeID int64, accountNumber int64, name string, noChainSync bool,
 	derived *DerivedAccountData) (CreateDerivedAccountRow, error) {
 
-	args := m.Called(ctx, scopeID, accountNumber, name, derived)
+	args := m.Called(
+		ctx, scopeID, accountNumber, name, noChainSync, derived,
+	)
 
 	row, ok := args.Get(0).(CreateDerivedAccountRow)
 	if !ok {
