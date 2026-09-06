@@ -507,3 +507,112 @@ func clearUtxosSpentByTxID(t *testing.T, store *sqlite.Store,
 	require.NoError(t, err)
 	require.EqualValues(t, 1, rows)
 }
+
+// TestSQLiteExactAccountReopen verifies sparse accounts and key facts survive
+// reopening, with lower holes available and the sequential cursor preserved.
+func TestSQLiteExactAccountReopen(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: create sequential and sparse accounts in a private database
+	// file using the production identity and Store initialization path.
+	identity, err := db.NewDatabaseIdentity(
+		&chaincfg.RegressionNetParams, nil,
+	)
+	require.NoError(t, err)
+
+	cfg := sqlite.Config{
+		DBPath:         filepath.Join(t.TempDir(), "exact-accounts.db"),
+		MaxConnections: 1,
+		Identity:       identity,
+	}
+	initial, err := sqlite.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = initial.Close() })
+
+	walletID := newWallet(t, initial, "exact-reopen")
+	scope := db.KeyScopeBIP0084
+	exact := uint32(7)
+
+	// Capture complete persisted snapshots, including encrypted account keys,
+	// so reopening must recover durable rows rather than cached create results.
+	var (
+		accounts [2]*db.AccountInfo
+		secrets  [2]*db.AccountSecret
+	)
+
+	for i, number := range []*uint32{nil, &exact} {
+		created, err := initial.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:      walletID,
+				Scope:         scope,
+				Name:          []string{"sequential", "sparse"}[i],
+				AccountNumber: number,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+		require.Equal(t, []uint32{0, 7}[i], *created.AccountNumber)
+
+		stored, err := initial.GetAccount(
+			t.Context(), getAccountQueryByName(
+				walletID, scope, created.AccountName,
+			),
+		)
+		require.NoError(t, err)
+
+		accounts[i] = stored
+
+		secret, err := initial.GetAccountSecret(
+			t.Context(), db.GetAccountSecretQuery{
+				WalletID:      walletID,
+				Scope:         scope,
+				AccountNumber: *created.AccountNumber,
+			},
+		)
+		require.NoError(t, err)
+		require.NotEmpty(t, secret.EncryptedPrivateKey)
+		secrets[i] = secret
+	}
+
+	require.NoError(t, initial.Close())
+
+	// Act: open the same database through the production Store constructor.
+	reopened, err := sqlite.NewStore(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	// Assert: full account/key snapshots survive, including fingerprint, public
+	// key, schema, and policy; filling a lower hole cannot rewind the cursor.
+	for i, expected := range accounts {
+		loaded, err := reopened.GetAccount(
+			t.Context(), getAccountQueryByName(
+				walletID, scope, expected.AccountName,
+			),
+		)
+		require.NoError(t, err)
+		require.Equal(t, expected, loaded)
+
+		secret, err := reopened.GetAccountSecret(
+			t.Context(), db.GetAccountSecretQuery{
+				WalletID:      walletID,
+				Scope:         scope,
+				AccountNumber: *expected.AccountNumber,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, secrets[i], secret)
+	}
+
+	hole := uint32(2)
+	for i, number := range []*uint32{&hole, nil} {
+		created, err := reopened.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:      walletID,
+				Scope:         scope,
+				Name:          []string{"hole", "next"}[i],
+				AccountNumber: number,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+		require.Equal(t, []uint32{2, 8}[i], *created.AccountNumber)
+	}
+}
