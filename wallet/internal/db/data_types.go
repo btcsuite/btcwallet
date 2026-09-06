@@ -826,6 +826,12 @@ type AddressSecret struct {
 // NewDerivedAddressParams contains the parameters for creating a new derived
 // address.
 type NewDerivedAddressParams struct {
+	// RequireChainSync requests receiving-policy enforcement during account
+	// selection. Receiving callers set this even for internal addresses;
+	// transaction-change allocation leaves it false to retain key derivation
+	// independently of automatic chain synchronization.
+	RequireChainSync bool
+
 	// WalletID is the ID of the wallet to create the address in.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL

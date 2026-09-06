@@ -168,7 +168,8 @@ type OutputScriptInfo struct {
 // addresses and scripts.
 type AddressManager interface {
 	// NewAddress returns a new address for the given account and address
-	// type.
+	// type. NoChainSync accounts return ErrAccountOperationUnsupported
+	// because receiving addresses require automatic chain tracking.
 	//
 	// NOTE: This method should be used with caution. Unlike
 	// GetUnusedAddress, it does not scan for previously derived but unused
@@ -185,6 +186,8 @@ type AddressManager interface {
 	// is the recommended default for obtaining a new receiving address, as
 	// it prevents address reuse and avoids creating gaps in the address
 	// chain that could impact wallet recovery.
+	// NoChainSync accounts return ErrAccountOperationUnsupported because
+	// their address use is not tracked.
 	GetUnusedAddress(ctx context.Context, accountName string,
 		addrType waddrmgr.AddressType, change bool) (
 		address.Address, error)
@@ -469,9 +472,36 @@ func (w *Wallet) addrBalances(ctx context.Context) (map[string]btcutil.Amount,
 	return balances, nil
 }
 
+// checkReceivingAccount rejects accounts whose persisted policy cannot support
+// receiving based on observed address use, before scanning for unused children.
+func (w *Wallet) checkReceivingAccount(ctx context.Context, accountName string,
+	keyScope waddrmgr.KeyScope) error {
+
+	// Policy is immutable account metadata; the existing account read supplies
+	// it without fetching balances or entering address allocation or scanning.
+	account, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(keyScope),
+		Name:        &accountName,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return fmt.Errorf("get receiving account: %w", err)
+	}
+
+	if account.NoChainSync {
+		return fmt.Errorf("receiving account %q: %w", accountName,
+			ErrAccountOperationUnsupported)
+	}
+
+	return nil
+}
+
 // NewAddress returns a new address for the given account and address type.
 // This method is a low-level primitive that will always derive a new, unused
 // address from the end of the address chain.
+// NoChainSync accounts return ErrAccountOperationUnsupported before derivation
+// or side effects because receiving requires automatic chain tracking.
 //
 // It returns the next external or internal address for the wallet dictated by
 // the value of the `change` parameter. If change is true, then an internal
@@ -543,14 +573,23 @@ func (w *Wallet) NewAddress(ctx context.Context, accountName string,
 		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
+	// Receiving requires automatic tracking; the Store checks persisted
+	// policy during its existing account read before allocating a child.
 	addrInfo, err := w.store.NewDerivedAddress(
 		ctx, db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: accountName,
-			Scope:       db.KeyScope(keyScope),
-			Change:      change,
+			WalletID:         w.id,
+			AccountName:      accountName,
+			Scope:            db.KeyScope(keyScope),
+			Change:           change,
+			RequireChainSync: true,
 		},
 	)
+	if errors.Is(err, db.ErrAccountOperationUnsupported) {
+		// Expose the existing wallet identity while retaining the Store's
+		// diagnostic text without leaking its internal error identity.
+		return nil, accountErr(ErrAccountOperationUnsupported, err.Error())
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -579,6 +618,8 @@ func (w *Wallet) NewAddress(ctx context.Context, accountName string,
 // enforce a gap limit of 20 unused addresses. If all previously derived
 // addresses have been used, this method will delegate to NewAddress to
 // generate a new one.
+// NoChainSync accounts return ErrAccountOperationUnsupported before scanning
+// because their observed address use cannot support receiving decisions.
 //
 // TODO(yy): The current implementation of GetUnusedAddress is inefficient for
 // wallets with a large number of used addresses. It iterates from the first
@@ -620,6 +661,12 @@ func (w *Wallet) GetUnusedAddress(ctx context.Context, accountName string,
 	keyScope, err := addrType.KeyScope()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
+	}
+
+	// Reusing an address bypasses allocation, so check policy before scanning.
+	err = w.checkReceivingAccount(ctx, accountName, keyScope)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := addressPageRequest()

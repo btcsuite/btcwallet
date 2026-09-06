@@ -68,7 +68,10 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 		return db.DerivedAddressAccount{}, err
 	}
 
+	// Carry the stored policy into the shared allocation guard without
+	// performing another lookup or applying dialect-specific policy.
 	return db.DerivedAddressAccount{
+		NoChainSync:       row.NoChainSync,
 		AccountID:         row.ID,
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,

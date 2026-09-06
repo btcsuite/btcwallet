@@ -26,6 +26,10 @@ var (
 // and maps it onto this struct, so the workflow stays free of backend row
 // types and generics.
 type DerivedAddressAccount struct {
+	// NoChainSync is the stored policy used to decide whether this account
+	// can satisfy a receiving allocation's chain-synchronization requirement.
+	NoChainSync bool
+
 	// AccountID is the backend account row ID.
 	AccountID int64
 
@@ -84,6 +88,7 @@ type CreateDerivedAddressRow struct {
 // The shared derived-address algorithm is intentionally ordered:
 //   - reject a nil derivation callback before any backend step runs
 //   - load the owning account, mapping a miss to ErrAccountNotFound
+//   - reject a receiving request when the account disables chain sync
 //   - resolve the optional BIP44 account number, enforcing the
 //     derived/imported account shape invariant
 //   - select the branch and address type from the account schema, allocate
@@ -116,7 +121,8 @@ type NewDerivedAddressOps interface {
 // workflow once the caller has opened a backend-specific write transaction.
 //
 // The helper owns the end-to-end sequencing so postgres and sqlite both:
-// reject a nil callback first, load and shape-check the owning account,
+// reject a nil callback first, load the owning account and check receiving
+// policy when requested, then shape-check the account,
 // resolve the account number, select the branch/type and allocate the next
 // index before invoking the derivation callback, insert the address and its
 // path, and finally assemble the AddressInfo with its account metadata.
@@ -139,6 +145,13 @@ func NewDerivedAddressWithOps(ctx context.Context,
 		}
 
 		return nil, fmt.Errorf("get account: %w", err)
+	}
+
+	// Receiving promises chain tracking, unlike internal transaction change.
+	// Refuse from the account row already loaded before touching counters.
+	if params.RequireChainSync && account.NoChainSync {
+		return nil, fmt.Errorf("receiving account %q: %w",
+			key.AccountName, ErrAccountOperationUnsupported)
 	}
 
 	// Non-derived accounts have a NULL account_number; their derivation uses

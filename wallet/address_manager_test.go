@@ -6,6 +6,7 @@ package wallet
 
 import (
 	"bytes"
+	"fmt"
 	"iter"
 	"testing"
 
@@ -280,13 +281,16 @@ func expectStoreNewAddress(t *testing.T, w *Wallet, deps *mockWalletDeps,
 
 	t.Helper()
 
+	// Receiving allocations carry their tracking requirement into the Store;
+	// successful creation is followed by the existing chain notification.
 	deps.store.On(
 		"NewDerivedAddress", mock.Anything,
 		db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: accountName,
-			Scope:       db.KeyScope(scope),
-			Change:      change,
+			WalletID:         w.id,
+			AccountName:      accountName,
+			Scope:            db.KeyScope(scope),
+			Change:           change,
+			RequireChainSync: true,
 		},
 	).Return(addressInfoFromAddr(t, addr), nil).Once()
 	deps.chain.On("NotifyReceived", []address.Address{addr}).Return(nil).Once()
@@ -468,13 +472,20 @@ func TestNewAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Arrange: use a started wallet and configure each ordinary
+			// account's receiving allocation and chain notification below.
 			w, deps := createStartedWalletWithMocks(t)
 
 			if tc.expectErr {
+				// Act: submit an invalid receiving selector before any
+				// account lookup or allocation expectations are declared.
 				_, err := w.NewAddress(
 					t.Context(), tc.accountName,
 					tc.addrType, tc.change,
 				)
+
+				// Assert: validation returns an error while strict Store
+				// mocks forbid policy reads or address allocation.
 				require.Error(t, err)
 
 				return
@@ -520,10 +531,15 @@ func TestNewAddress(t *testing.T) {
 				),
 			)
 
+			// Act: allocate through the receiving API, which asks the Store
+			// to enforce account policy within its derivation workflow.
 			addr, err = w.NewAddress(
 				t.Context(), tc.accountName,
 				tc.addrType, tc.change,
 			)
+
+			// Assert: the address and its stored derivation metadata retain
+			// the requested type and external/change branch.
 			require.NoError(t, err)
 			require.NotNil(t, addr)
 
@@ -536,6 +552,121 @@ func TestNewAddress(t *testing.T) {
 	}
 }
 
+// TestNewAddressNoChainSyncUnsupported verifies that receiving allocation
+// refuses excluded accounts before any derivation, write, or chain work.
+func TestNewAddressNoChainSyncUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Both branches allocate receiving addresses and must honor the same
+	// persisted policy, regardless of which child counter they would use.
+	tests := []struct {
+		name   string
+		change bool
+	}{
+		{
+			name:   "external address",
+			change: false,
+		},
+		{
+			name:   "change address",
+			change: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: the Store refuses a receiving allocation using its
+			// persisted policy. Strict mocks allow that request only, so a
+			// redundant account lookup or chain notification fails the test.
+			w, deps := createStartedWalletWithMocks(t)
+			name := "key-only"
+			deps.store.On("NewDerivedAddress", t.Context(),
+				db.NewDerivedAddressParams{
+					WalletID:         w.id,
+					Scope:            db.KeyScopeBIP0084,
+					AccountName:      name,
+					Change:           test.change,
+					RequireChainSync: true,
+				},
+			).Return((*db.AddressInfo)(nil), fmt.Errorf(
+				"get account: %w", db.ErrAccountOperationUnsupported,
+			)).Once()
+
+			// Act: request a receiving address through the public API
+			// while its owning account excludes automatic chain tracking.
+			addr, err := w.NewAddress(
+				t.Context(), name, waddrmgr.WitnessPubKey, test.change,
+			)
+
+			// Assert: wrapped Store refusal retains the public error and
+			// returns no address without reading again or notifying the chain.
+			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+			require.Nil(t, addr)
+			deps.store.AssertExpectations(t)
+			deps.chain.AssertExpectations(t)
+			deps.vault.AssertExpectations(t)
+		})
+	}
+}
+
+// TestGetUnusedAddressNoChainSyncUnsupported verifies excluded accounts are
+// refused before scanning existing addresses or falling back to allocation.
+func TestGetUnusedAddressNoChainSyncUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Neither branch can rely on observed use when automatic chain tracking
+	// is disabled, even if an existing unused address could be returned.
+	tests := []struct {
+		name   string
+		change bool
+	}{
+		{
+			name:   "external address",
+			change: false,
+		},
+		{
+			name:   "change address",
+			change: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: permit only the stored policy read. Omitting scan,
+			// derivation, write, and chain expectations makes any attempt
+			// to enter the receiving workflow fail through strict mocks.
+			w, deps := createStartedWalletWithMocks(t)
+			name := "key-only"
+			deps.store.On("GetAccount", t.Context(), db.GetAccountQuery{
+				WalletID:    w.id,
+				Scope:       db.KeyScopeBIP0084,
+				Name:        &name,
+				SkipBalance: true,
+			}).Return(&db.AccountInfo{
+				NoChainSync: true,
+			}, nil).Once()
+
+			// Act: ask the public API for an unused receiving address
+			// from an account whose address use is not tracked.
+			addr, err := w.GetUnusedAddress(
+				t.Context(), name, waddrmgr.WitnessPubKey, test.change,
+			)
+
+			// Assert: no address escapes the public unsupported outcome,
+			// and only the required account read reaches the dependencies.
+			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+			require.Nil(t, addr)
+			deps.store.AssertExpectations(t)
+			deps.chain.AssertExpectations(t)
+			deps.vault.AssertExpectations(t)
+		})
+	}
+}
+
 // TestGetUnusedAddress tests the GetUnusedAddress method to ensure it
 // correctly returns the earliest unused address.
 func TestGetUnusedAddress(t *testing.T) {
@@ -543,6 +674,9 @@ func TestGetUnusedAddress(t *testing.T) {
 
 	const importedXpubName = "imported-xpub"
 
+	// Arrange: ordinary account reads allow the existing scan scenarios. The
+	// default account is selected by three unused-address requests. Fallback
+	// allocation enforces policy in the Store without an additional read here.
 	w, deps := createStartedWalletWithMocks(t)
 
 	firstAddr, _ := address.NewAddressWitnessPubKeyHash(
@@ -553,6 +687,13 @@ func TestGetUnusedAddress(t *testing.T) {
 	defaultName := waddrmgr.DefaultAccountName
 	req, err := addressPageRequest()
 	require.NoError(t, err)
+
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       dbScope,
+		Name:        &defaultName,
+		SkipBalance: true,
+	}).Return(&db.AccountInfo{}, nil).Times(3)
 
 	deps.store.On(
 		"IterAddresses", mock.Anything,
@@ -567,12 +708,17 @@ func TestGetUnusedAddress(t *testing.T) {
 		nil,
 	))).Once()
 
+	// Act: ask for the oldest unused external address after policy admission.
 	unusedAddr, err := w.GetUnusedAddress(
 		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
 	)
+
+	// Assert: receiving keeps the first unused address instead of allocating.
 	require.NoError(t, err)
 	require.Equal(t, firstAddr.String(), unusedAddr.String())
 
+	// Arrange: an imported xpub account still tracks its address use, so its
+	// existing unused derived child remains a valid receiving address.
 	importedXpubAddr, _ := address.NewAddressWitnessPubKeyHash(
 		[]byte{
 			31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
@@ -587,6 +733,13 @@ func TestGetUnusedAddress(t *testing.T) {
 	importedXpubInfo.AccountNumber = nil
 	importedXpubQueryName := importedXpubName
 
+	deps.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       dbScope,
+		Name:        &importedXpubQueryName,
+		SkipBalance: true,
+	}).Return(&db.AccountInfo{}, nil).Once()
+
 	deps.store.On(
 		"IterAddresses", mock.Anything,
 		db.ListAddressesQuery{
@@ -596,12 +749,18 @@ func TestGetUnusedAddress(t *testing.T) {
 			Page:        req,
 		},
 	).Return(addressIter(*importedXpubInfo)).Once()
+
+	// Act: select a receiving address from the imported xpub account.
 	unusedImportedAddr, err := w.GetUnusedAddress(
 		t.Context(), importedXpubName, waddrmgr.WitnessPubKey, false,
 	)
+
+	// Assert: the existing unused xpub child remains usable without allocation.
 	require.NoError(t, err)
 	require.Equal(t, importedXpubAddr.String(), unusedImportedAddr.String())
 
+	// Arrange: mark the only external address used and permit one fallback
+	// allocation carrying the receiving-policy requirement.
 	usedFirstAddr := derivedAddressInfoFromAddr(
 		t, firstAddr, db.WitnessPubKey, defaultName, scope, false,
 		0, 0, nil,
@@ -626,14 +785,18 @@ func TestGetUnusedAddress(t *testing.T) {
 	)
 	expectStoreNewAddress(t, w, deps, defaultName, scope, false, nextAddrVal)
 
+	// Act: exhaust the scan so the public receiving call allocates a new child.
 	nextAddr, err := w.GetUnusedAddress(
 		t.Context(), defaultName, waddrmgr.WitnessPubKey, false,
 	)
+
+	// Assert: the fallback returns a fresh address rather than reusing one.
 	require.NoError(t, err)
 
 	// The next unused address should not be the same as the first one.
 	require.NotEqual(t, firstAddr.String(), nextAddr.String())
 
+	// Arrange: provide an unused internal child to preserve change selection.
 	changeAddrVal, _ := address.NewAddressWitnessPubKeyHash(
 		[]byte{
 			21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
@@ -654,11 +817,17 @@ func TestGetUnusedAddress(t *testing.T) {
 		0, nil,
 	))).Once()
 
+	// Act: request the unused child on the change branch of the same account.
 	unusedChangeAddr, err := w.GetUnusedAddress(
 		t.Context(), defaultName, waddrmgr.WitnessPubKey, true,
 	)
+
+	// Assert: the requested internal address survives the receiving guard, and
+	// every expected policy read, scan, allocation, and notification occurred.
 	require.NoError(t, err)
 	require.Equal(t, changeAddrVal.String(), unusedChangeAddr.String())
+	deps.store.AssertExpectations(t)
+	deps.chain.AssertExpectations(t)
 }
 
 // TestGetAddressInfo tests the GetAddressInfo method to ensure it returns

@@ -53,6 +53,12 @@ var (
 	// database.
 	ErrAccountNotFound = errors.New("account not found")
 
+	// ErrAccountOperationUnsupported reports that persisted account policy
+	// cannot satisfy the requested operation's chain-synchronization needs.
+	ErrAccountOperationUnsupported = errors.New(
+		"account operation unsupported by stored policy",
+	)
+
 	// ErrAddressNotFound is returned when an address is not found in the
 	// database.
 	ErrAddressNotFound = errors.New("address not found")
@@ -325,6 +331,8 @@ type AddressStore interface {
 	// account and key scope. The concrete backend owns address derivation:
 	// SQL backends use their configured AddressDerivationFunc, while kvdb
 	// preserves legacy waddrmgr derivation semantics.
+	// When RequireChainSync is set, a NoChainSync account is rejected with
+	// ErrAccountOperationUnsupported before index allocation or derivation.
 	NewDerivedAddress(ctx context.Context,
 		params NewDerivedAddressParams) (*AddressInfo, error)
 
