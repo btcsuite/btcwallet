@@ -44,6 +44,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerCreateAccount,
 	},
 	{
+		Name:     "account manager activate no chain sync account",
+		TestFunc: testAccountManagerActivateNoChainSyncAccount,
+	},
+	{
 		Name:     "account manager create account sequence",
 		TestFunc: testAccountManagerCreateAccountSequence,
 	},

@@ -167,6 +167,89 @@ func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
 	require.Equal(h, want, durableInfo)
 }
 
+// testAccountManagerActivateNoChainSyncAccount verifies exact SQL activation
+// persists across reload without enabling receiving, while kvdb fails closed.
+func testAccountManagerActivateNoChainSyncAccount(h *bwtest.HarnessTest) {
+	// Arrange: use the harness-owned lifecycle and a sparse exact number in
+	// an existing supported scope. Snapshot accounts for the kvdb refusal.
+	const accountName = "excluded account"
+
+	ctx := h.Context()
+	scope := waddrmgr.KeyScopeBIP0084
+	number := wallet.AccountNumber(7)
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	before, err := w.ListAccountsByScope(ctx, scope)
+	require.NoError(h, err)
+
+	// Act: request exclusion through the same public account operation for
+	// each database; only the documented SQL exact subset admits this value.
+	created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+		Scope:         scope,
+		Name:          accountName,
+		AccountNumber: &number,
+		NoChainSync:   true,
+	})
+
+	// Assert: the configured database determines the expected contract, not
+	// the operation result. A kvdb refusal must leave the account set intact.
+	if *dbBackend == "kvdb" {
+		require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
+		require.Nil(h, created)
+
+		after, err := w.ListAccountsByScope(ctx, scope)
+		require.NoError(h, err)
+		require.Equal(h, before, after)
+
+		return
+	}
+
+	// SQL returns the exact identity and policy without allocating any child
+	// address. An immediate read must agree with the atomic creation result.
+	require.NoError(h, err)
+	require.Equal(h, number, *created.AccountNumber)
+	require.True(h, created.NoChainSync)
+	require.Zero(h, created.ExternalKeyCount)
+	require.Zero(h, created.InternalKeyCount)
+
+	addresses, err := w.ListAddresses(ctx, accountName, waddrmgr.WitnessPubKey)
+	require.NoError(h, err)
+	require.Empty(h, addresses)
+
+	got, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, created, got)
+
+	// Receiving remains forbidden even for a newly admitted account. These
+	// narrow postconditions ensure activation did not bypass either guard.
+	addr, err := w.NewAddress(
+		ctx, accountName, waddrmgr.WitnessPubKey, false,
+	)
+	require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
+	require.Nil(h, addr)
+	addr, err = w.GetUnusedAddress(
+		ctx, accountName, waddrmgr.WitnessPubKey, false,
+	)
+	require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
+	require.Nil(h, addr)
+
+	after, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, created, after)
+
+	addresses, err = w.ListAddresses(
+		ctx, accountName, waddrmgr.WitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Empty(h, addresses)
+
+	// A fresh Manager reads the policy from durable storage; comparing the
+	// complete account also detects any receiving counter mutation on reload.
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(ctx, scope, accountName)
+	require.NoError(h, err)
+	require.Equal(h, created, durable)
+}
+
 // testAccountManagerCreateAccountSequence verifies that derived account numbers
 // are allocated contiguously within a key scope, that each scope allocates from
 // its own counter, and that the counter survives a wallet reload.
