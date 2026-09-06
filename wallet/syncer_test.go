@@ -2258,16 +2258,15 @@ func TestSyncerRecoveryRejectsNoChainSyncTarget(t *testing.T) {
 func newSQLRecoverySyncer(t *testing.T) (*syncer, []db.AccountInfo, [][]byte) {
 	t.Helper()
 
-	// Reuse the SQL Manager's real vault and derivation callbacks so the
-	// persisted account keys and scripts exercise the normal recovery path.
+	// Use public account creation with the real SQL vault, admitting the
+	// Wallet without background synchronization so recovery remains observable.
 	m := testSQLiteManager(t)
 	params := sqliteCreateParams(t)
 	params.Name = t.Name()
 	w, err := m.Create(params)
 	require.NoError(t, err)
+	startLoadedWalletForTest(t, w)
 	require.NoError(t, w.keyVault.Unlock(t.Context(), params.PrivatePassphrase))
-	derive, err := w.buildAccountDeriveFn(t.Context())
-	require.NoError(t, err)
 
 	// Both accounts have identical setup except for the persisted policy;
 	// materializing an address also tests the non-lookahead watch source.
@@ -2288,16 +2287,20 @@ func newSQLRecoverySyncer(t *testing.T) (*syncer, []db.AccountInfo, [][]byte) {
 	accounts := make([]db.AccountInfo, 0, len(configs))
 	scripts := make([][]byte, 0, len(configs))
 
-	for _, config := range configs {
-		_, err := w.store.CreateDerivedAccount(
-			t.Context(), db.CreateDerivedAccountParams{
-				WalletID:    w.id,
-				Scope:       db.KeyScopeBIP0084,
-				Name:        config.name,
-				NoChainSync: config.noChainSync,
-			}, derive,
-		)
+	for i, config := range configs {
+		// Exact creation carries the policy without deriving child addresses;
+		// the existing address fixture below is a separate deliberate write.
+		number := AccountNumber(i)
+		created, err := w.NewAccount(t.Context(), NewAccountParams{
+			Scope:         waddrmgr.KeyScopeBIP0084,
+			Name:          config.name,
+			AccountNumber: &number,
+			NoChainSync:   config.noChainSync,
+		})
 		require.NoError(t, err)
+		require.Equal(t, config.noChainSync, created.NoChainSync)
+		require.Zero(t, created.ExternalKeyCount)
+		require.Zero(t, created.InternalKeyCount)
 		addr, err := w.store.NewDerivedAddress(
 			t.Context(), db.NewDerivedAddressParams{
 				WalletID:    w.id,

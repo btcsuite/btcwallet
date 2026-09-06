@@ -734,30 +734,31 @@ func TestNewAccount(t *testing.T) {
 	deps.vault.AssertExpectations(t)
 }
 
-// TestNewAccountNoChainSyncUnsupported verifies the common Wallet boundary
-// refuses exclusion before any backend can prepare secrets or mutate accounts.
+// TestNewAccountNoChainSyncUnsupported verifies sequential creation refuses
+// exclusion before preparing secrets or mutating accounts.
 func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: allow the existing admission checks on an unlocked wallet
-	// with an available name. Strict mocks have no secret or write
-	// expectations, so crossing into creation would fail this test.
+	// Arrange: use the SQL backend marker and allow only admission reads.
+	// Strict mocks reject secret preparation or account mutation so a missing
+	// policy check cannot silently admit sequential creation.
 	w, deps := createStartedWalletWithMocks(t)
+	w.addrStore = nil
 	scope := waddrmgr.KeyScopeBIP0084
 
 	deps.vault.On("IsLocked").Return(false).Once()
 	expectAccountNameAvailable(deps, scope, testAccountName)
 
-	// Act: request exclusion through the public API while its receiving and
-	// recovery support is unavailable.
+	// Act: request no chain synchronization without specifying an account
+	// number, which would otherwise select sequential allocation.
 	account, err := w.NewAccount(t.Context(), NewAccountParams{
 		Scope:       scope,
 		Name:        testAccountName,
 		NoChainSync: true,
 	})
 
-	// Assert: the stable unsupported error returns no account, and only the
-	// required read-only admission calls reach the Store and Vault.
+	// Assert: the public unsupported error returns no account, and only
+	// admission reads occurred before the sequential request was refused.
 	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
 	require.Nil(t, account)
 	deps.store.AssertExpectations(t)
@@ -2211,47 +2212,71 @@ func TestNewAccountSQLFailureIdentity(t *testing.T) {
 	}
 }
 
-// TestNewAccountExact forwards an explicit account number through the existing
-// public operation and returns the exact identity with chain sync enabled.
+// TestNewAccountExact verifies exact SQL creation carries either sync policy
+// through the atomic Store request and public result without chain work.
 func TestNewAccountExact(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: model SQL assembly and expect the exact request after normal
-	// name admission and root preparation, using the existing Store interface.
-	w, deps := createStartedWalletWithMocks(t)
-	w.addrStore = nil
-	scope := waddrmgr.KeyScopeBIP0084
-	number := AccountNumber(7)
-	storeNumber := uint32(number)
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name: "ordinary account",
+		},
+		{
+			name:        "excluded account",
+			noChainSync: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	expectAccountNameAvailable(deps, scope, testAccountName)
-	expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
-	deps.store.On("CreateDerivedAccount", mock.Anything,
-		db.CreateDerivedAccountParams{
-			WalletID:      w.id,
-			Scope:         db.KeyScope(scope),
-			Name:          testAccountName,
-			AccountNumber: &storeNumber,
-		}, mock.Anything).Return(&db.AccountInfo{
-		AccountNumber: &storeNumber,
-		AccountName:   testAccountName,
-		KeyScope:      db.KeyScope(scope),
-	}, nil).Once()
+			// Arrange: model SQL assembly and expect only admission,
+			// root preparation, and one atomic account creation. Any
+			// address or chain operation fails the strict mocks.
+			w, deps := createStartedWalletWithMocks(t)
+			w.addrStore = nil
+			scope := waddrmgr.KeyScopeBIP0084
+			number := AccountNumber(7)
+			storeNumber := uint32(number)
 
-	// Act: request a sparse exact account through NewAccountParams.
-	info, err := w.NewAccount(t.Context(), NewAccountParams{
-		Scope:         scope,
-		Name:          testAccountName,
-		AccountNumber: &number,
-	})
+			expectAccountNameAvailable(deps, scope, testAccountName)
+			expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
+			deps.store.On("CreateDerivedAccount", mock.Anything,
+				db.CreateDerivedAccountParams{
+					WalletID:      w.id,
+					Scope:         db.KeyScope(scope),
+					Name:          testAccountName,
+					AccountNumber: &storeNumber,
+					NoChainSync:   test.noChainSync,
+				}, mock.Anything).Return(&db.AccountInfo{
+				AccountNumber: &storeNumber,
+				AccountName:   testAccountName,
+				KeyScope:      db.KeyScope(scope),
+				NoChainSync:   test.noChainSync,
+			}, nil).Once()
 
-	// Assert: the requested number survives public conversion, chain sync
-	// remains enabled, and all required preparation/store calls occurred.
-	require.NoError(t, err)
-	require.Equal(t, number, *info.AccountNumber)
-	require.False(t, info.NoChainSync)
-	deps.store.AssertExpectations(t)
-	deps.vault.AssertExpectations(t)
+			// Act: request a sparse exact account with the selected
+			// policy through the maintained public operation.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:         scope,
+				Name:          testAccountName,
+				AccountNumber: &number,
+				NoChainSync:   test.noChainSync,
+			})
+
+			// Assert: both the exact number and persisted policy survive
+			// conversion, with all required calls and no chain work.
+			require.NoError(t, err)
+			require.Equal(t, number, *info.AccountNumber)
+			require.Equal(t, test.noChainSync, info.NoChainSync)
+			deps.store.AssertExpectations(t)
+			deps.vault.AssertExpectations(t)
+			deps.chain.AssertExpectations(t)
+		})
+	}
 }
 
 // TestNewAccountInvalidPath verifies the public boundary refuses malformed
@@ -2305,8 +2330,8 @@ func TestNewAccountInvalidPath(t *testing.T) {
 	}
 }
 
-// TestNewAccountExactUnsupported verifies both kvdb and disabled chain sync
-// reject exact creation after admission and before root or Store mutation.
+// TestNewAccountExactUnsupported verifies kvdb rejects exact creation with
+// either policy after admission and before root preparation or Store mutation.
 func TestNewAccountExactUnsupported(t *testing.T) {
 	t.Parallel()
 
@@ -2320,7 +2345,7 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 			name: "kvdb exact",
 		},
 		{
-			name:        "sql no chain sync",
+			name:        "kvdb no chain sync",
 			noChainSync: true,
 		},
 	}
@@ -2329,10 +2354,6 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 			t.Parallel()
 
 			w, deps := createStartedWalletWithMocks(t)
-			if test.noChainSync {
-				w.addrStore = nil
-			}
-
 			scope := waddrmgr.KeyScopeBIP0084
 			number := AccountNumber(7)
 

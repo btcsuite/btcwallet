@@ -243,7 +243,8 @@ type NewAccountParams struct {
 	AccountNumber *AccountNumber
 
 	// NoChainSync requests exclusion from automatic chain synchronization.
-	// True is currently rejected with ErrAccountOperationUnsupported.
+	// True requires exact SQL selection; other requests return
+	// ErrAccountOperationUnsupported.
 	NoChainSync bool
 }
 
@@ -294,7 +295,8 @@ type NewAccountParams struct {
 type AccountManager interface {
 	// NewAccount creates the next or requested exact root-derived account. The
 	// provided name must be unique within that key scope. NoChainSync=true
-	// is currently rejected with ErrAccountOperationUnsupported.
+	// is supported only for exact SQL selection; other requests return
+	// ErrAccountOperationUnsupported.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
 		error)
 
@@ -428,8 +430,9 @@ func (w *Wallet) accountInfoFromStore(
 // NewAccount creates the next or requested exact root-derived account and
 // returns its persisted info. The name and number must be unused in the scope.
 // Exact selection supports canonical SQL scopes and leaves lower holes free.
-// Exact kvdb requests and NoChainSync=true return
-// ErrAccountOperationUnsupported after admission and before secret preparation.
+// NoChainSync=true persists exclusion from receiving and positive-lookahead
+// recovery only with exact SQL selection. Sequential exclusion and exact kvdb
+// requests return ErrAccountOperationUnsupported before secret preparation.
 // Failures return no account; ErrIndeterminateCommit means persistence may
 // have succeeded.
 func (w *Wallet) NewAccount(ctx context.Context,
@@ -448,13 +451,6 @@ func (w *Wallet) NewAccount(ctx context.Context,
 	err := w.validateNewAccountRequest(ctx, storeParams)
 	if err != nil {
 		return nil, err
-	}
-
-	// Keep exclusion unavailable until receiving and recovery honor it.
-	// Refuse here so no backend prepares secrets or mutates account state.
-	if params.NoChainSync {
-		return nil, fmt.Errorf("no-chain-sync account creation: %w",
-			ErrAccountOperationUnsupported)
 	}
 
 	// Wallet assembly supplies addrStore only for kvdb, whose allocator is
@@ -484,7 +480,7 @@ func (w *Wallet) NewAccount(ctx context.Context,
 
 // validateNewAccountRequest fixes admission precedence before derivation or
 // mutation: caller and request errors win first, followed by lock state, name
-// collisions, and finally the watch-only restriction.
+// collisions, the watch-only restriction, and the chain-sync policy.
 func (w *Wallet) validateNewAccountRequest(ctx context.Context,
 	params db.CreateDerivedAccountParams) error {
 
@@ -539,7 +535,15 @@ func (w *Wallet) validateNewAccountRequest(ctx context.Context,
 		return accountManagerErr(errWatchOnlyAccountDerivation)
 	}
 
-	return nil
+	// When an account does not watch for on-chain synchronization, its
+	// account number must be specified; sequential allocation is unsupported.
+	switch {
+	case !params.NoChainSync, params.AccountNumber != nil:
+		return nil
+	}
+
+	return fmt.Errorf("no-chain-sync account creation: %w",
+		ErrAccountOperationUnsupported)
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
