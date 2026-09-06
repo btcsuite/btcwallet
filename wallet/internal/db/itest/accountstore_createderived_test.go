@@ -4,13 +4,16 @@ package itest
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/stretchr/testify/require"
 )
 
@@ -500,4 +503,199 @@ func TestCreateDerivedAccountConcurrent(t *testing.T) {
 	for i := range workers {
 		require.Equal(t, uint32(i), results[i])
 	}
+}
+
+// TestCreateDerivedAccountExactConcurrent verifies a sparse first account and
+// competing exact/sequential requests share one monotonic allocation cursor.
+func TestCreateDerivedAccountExactConcurrent(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a new scope to prove sparse creation needs no fillers.
+	store := NewTestStore(t)
+	number := uint32(7)
+	params := db.CreateDerivedAccountParams{
+		WalletID:      newWallet(t, store, "exact-race"),
+		Scope:         db.KeyScopeBIP0084,
+		Name:          "sparse",
+		AccountNumber: &number,
+	}
+	first, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, number, *first.AccountNumber)
+
+	var count int
+
+	err = store.DB().QueryRowContext(
+		t.Context(), "SELECT count(*) FROM accounts",
+	).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	type result struct {
+		info  *db.AccountInfo
+		err   error
+		exact bool
+	}
+
+	results := make(chan result, 2)
+	start := make(chan struct{})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// Act: release both bounded requests together. Buffered results let both
+	// workers exit before the owner asserts outcomes; no worker calls FailNow.
+	number++
+
+	for i := range 2 {
+		request := params
+
+		request.Name = "racer-" + strconv.Itoa(i)
+		if i == 1 {
+			request.AccountNumber = nil
+		}
+
+		go func() {
+			<-start
+
+			info, err := store.CreateDerivedAccount(
+				ctx, request, SpendableDeriveFn(),
+			)
+			results <- result{info, err, request.AccountNumber != nil}
+		}()
+	}
+
+	close(start)
+
+	outcomes := []result{<-results, <-results}
+
+	// Assert: only exact allocation may lose to a number conflict. Every
+	// success is unique and the next sequential allocation follows their max.
+	seen := map[uint32]bool{7: true}
+
+	largest := uint32(7)
+	for _, outcome := range outcomes {
+		if outcome.err != nil {
+			require.True(t, outcome.exact)
+			require.True(t, dberr.IsAccountNumberConflict(outcome.err))
+			require.Nil(t, outcome.info)
+
+			continue
+		}
+
+		n := *outcome.info.AccountNumber
+		require.False(t, seen[n])
+		seen[n] = true
+		largest = max(largest, n)
+	}
+
+	params.AccountNumber = nil
+	params.Name = "next"
+	next, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, largest+1, *next.AccountNumber)
+}
+
+// TestCreateDerivedAccountExactRollback verifies definite failures leave
+// account/key rows and the cursor unchanged, including invalid children.
+func TestCreateDerivedAccountExactRollback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: occupy zero, then attempt failures that either advance the
+	// cursor speculatively or collide with an existing account identity.
+	store := NewTestStore(t)
+	params := db.CreateDerivedAccountParams{
+		WalletID: newWallet(t, store, "exact-rollback"),
+		Scope:    db.KeyScopeBIP0084,
+		Name:     "taken",
+	}
+	_, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		number uint32
+		want   error
+	}{
+		{
+			name:   "taken",
+			number: 7,
+		},
+		{
+			name: "occupied number",
+		},
+		{
+			name:   "invalid child",
+			number: 7,
+			want:   hdkeychain.ErrInvalidChild,
+		},
+		{
+			name:   "invalid boundary",
+			number: db.MaxAccountNumber + 1,
+			want:   db.ErrInvalidParam,
+		},
+	}
+	for _, test := range tests {
+		params.Name = test.name
+		params.AccountNumber = &test.number
+
+		deriveFn := SpendableDeriveFn()
+		if errors.Is(test.want, hdkeychain.ErrInvalidChild) {
+			deriveFn = func(context.Context, db.KeyScope, uint32,
+				bool) (*db.DerivedAccountData, error) {
+
+				return nil, hdkeychain.ErrInvalidChild
+			}
+		}
+
+		// Act: force failure through the real account write transaction.
+		info, createErr := store.CreateDerivedAccount(
+			t.Context(), params, deriveFn,
+		)
+
+		// Assert: failures leave no result, extra key rows, or address/scripts.
+		require.Nil(t, info)
+
+		if test.want != nil {
+			require.ErrorIs(t, createErr, test.want)
+		} else {
+			requireConstraintSQLError(t, createErr)
+		}
+
+		var accounts, secrets, addresses int
+
+		err = store.DB().QueryRowContext(t.Context(), `
+			SELECT (SELECT count(*) FROM accounts),
+			       (SELECT count(*) FROM account_secrets),
+			       (SELECT count(*) FROM addresses)
+		`).Scan(&accounts, &secrets, &addresses)
+		require.NoError(t, err)
+		require.Equal(t, 1, accounts)
+		require.Equal(t, 1, secrets)
+		require.Zero(t, addresses)
+	}
+
+	// Prove cursor rollback, then create the last valid exact account.
+	params.Name = "after-rollback"
+	params.AccountNumber = nil
+	next, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), *next.AccountNumber)
+
+	last := db.MaxAccountNumber
+	params.Name = "last"
+	params.AccountNumber = &last
+	info, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, last, *info.AccountNumber)
 }
