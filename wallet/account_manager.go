@@ -228,7 +228,7 @@ func (w *Wallet) buildAccountDeriveFn(
 	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
 }
 
-// NewAccountParams selects the next sequential account to create. The zero
+// NewAccountParams selects the next or an exact account to create. The zero
 // NoChainSync value preserves automatic chain synchronization.
 type NewAccountParams struct {
 	// Scope identifies the purpose and coin type used for derivation.
@@ -236,6 +236,11 @@ type NewAccountParams struct {
 
 	// Name must be valid and unique within Scope.
 	Name string
+
+	// AccountNumber requests this exact root-derived account in a canonical
+	// SQL scope, leaving lower holes available. Nil selects the next account.
+	// Modern kvdb rejects exact selection with ErrAccountOperationUnsupported.
+	AccountNumber *AccountNumber
 
 	// NoChainSync requests exclusion from automatic chain synchronization.
 	// True is currently rejected with ErrAccountOperationUnsupported.
@@ -287,7 +292,7 @@ type NewAccountParams struct {
 // crosses this surface, context cancellation excepted, since that identity
 // belongs to the caller.
 type AccountManager interface {
-	// NewAccount creates a new account for a given key scope and name. The
+	// NewAccount creates the next or requested exact root-derived account. The
 	// provided name must be unique within that key scope. NoChainSync=true
 	// is currently rejected with ErrAccountOperationUnsupported.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
@@ -420,17 +425,27 @@ func (w *Wallet) accountInfoFromStore(
 	}, nil
 }
 
-// NewAccount creates the next account and returns its account info. The name
-// must be unique under the key scope. In order to support automatic seed
-// restoring, new accounts may not be created when all of the previous 100
-// accounts have no transaction history (this is a deviation from the BIP0044
-// spec, which allows no unused account gaps).
-// NoChainSync=true is currently rejected with ErrAccountOperationUnsupported
-// after the existing admission checks and before secret preparation.
+// NewAccount creates the next or requested exact root-derived account and
+// returns its persisted info. The name and number must be unused in the scope.
+// Exact selection supports canonical SQL scopes and leaves lower holes free.
+// Exact kvdb requests and NoChainSync=true return
+// ErrAccountOperationUnsupported after admission and before secret preparation.
+// Failures return no account; ErrIndeterminateCommit means persistence may
+// have succeeded.
 func (w *Wallet) NewAccount(ctx context.Context,
 	params NewAccountParams) (*AccountInfo, error) {
 
-	err := w.validateNewAccountRequest(ctx, params.Scope, params.Name)
+	// Build one request for admission and persistence so path validation uses
+	// the same scope and optional number that the Store will allocate.
+	storeParams := db.CreateDerivedAccountParams{
+		WalletID:      w.id,
+		Scope:         db.KeyScope(params.Scope),
+		Name:          params.Name,
+		AccountNumber: (*uint32)(params.AccountNumber),
+		NoChainSync:   params.NoChainSync,
+	}
+
+	err := w.validateNewAccountRequest(ctx, storeParams)
 	if err != nil {
 		return nil, err
 	}
@@ -442,19 +457,19 @@ func (w *Wallet) NewAccount(ctx context.Context,
 			ErrAccountOperationUnsupported)
 	}
 
+	// Wallet assembly supplies addrStore only for kvdb, whose allocator is
+	// sequential. Reject exact selection before loading or decrypting the root.
+	if params.AccountNumber != nil && w.addrStore != nil {
+		return nil, fmt.Errorf("kvdb exact account creation: %w",
+			ErrAccountOperationUnsupported)
+	}
+
 	deriveFn, err := w.buildAccountDeriveFn(ctx)
 	if err != nil {
 		return nil, accountManagerErr(err)
 	}
 
-	info, err := w.store.CreateDerivedAccount(ctx,
-		db.CreateDerivedAccountParams{
-			WalletID:    w.id,
-			Scope:       db.KeyScope(params.Scope),
-			Name:        params.Name,
-			NoChainSync: params.NoChainSync,
-		}, deriveFn,
-	)
+	info, err := w.store.CreateDerivedAccount(ctx, storeParams, deriveFn)
 	if err != nil {
 		return nil, accountManagerErr(err)
 	}
@@ -471,7 +486,7 @@ func (w *Wallet) NewAccount(ctx context.Context,
 // mutation: caller and request errors win first, followed by lock state, name
 // collisions, and finally the watch-only restriction.
 func (w *Wallet) validateNewAccountRequest(ctx context.Context,
-	scope waddrmgr.KeyScope, name string) error {
+	params db.CreateDerivedAccountParams) error {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -488,7 +503,14 @@ func (w *Wallet) validateNewAccountRequest(ctx context.Context,
 		return err
 	}
 
-	err = waddrmgr.ValidateAccountName(name)
+	err = waddrmgr.ValidateAccountName(params.Name)
+	if err != nil {
+		return accountManagerErr(err)
+	}
+
+	// Reject the complete hardened path before any secret preparation; reuse
+	// Store validation so the public and persistence boundaries agree.
+	err = params.Validate()
 	if err != nil {
 		return accountManagerErr(err)
 	}
@@ -500,7 +522,9 @@ func (w *Wallet) validateNewAccountRequest(ctx context.Context,
 		return fmt.Errorf("%w: wallet is locked", ErrStateForbidden)
 	}
 
-	err = w.ensureAccountNameAvailable(ctx, scope, name)
+	err = w.ensureAccountNameAvailable(
+		ctx, waddrmgr.KeyScope(params.Scope), params.Name,
+	)
 	if err != nil {
 		return err
 	}
