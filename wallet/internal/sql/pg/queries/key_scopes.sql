@@ -58,6 +58,17 @@ SET next_account_number = next_account_number + 1
 WHERE id = $1
 RETURNING (next_account_number - 1)::BIGINT AS account_number;
 
+-- name: AdvanceNextAccountNumber :exec
+-- Reserves the cursor past an exact account without consuming lower holes.
+-- Updating this row serializes exact and sequential allocation in the caller's
+-- account transaction, including when the cursor already exceeds the minimum.
+UPDATE key_scopes
+SET
+    next_account_number = greatest(
+        next_account_number, sqlc.arg(minimum_next_account)::BIGINT
+    )
+WHERE id = sqlc.arg(scope_id);
+
 -- name: ListKeyScopesByWallet :many
 -- Lists all key scopes for a wallet, ordered by ID.
 SELECT
