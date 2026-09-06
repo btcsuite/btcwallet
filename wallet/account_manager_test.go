@@ -21,7 +21,9 @@ import (
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -2139,6 +2141,66 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 			} else {
 				require.Equal(t, testCase.addr, addr.String())
 			}
+		})
+	}
+}
+
+// TestNewAccountSQLFailureIdentity verifies occupied numbers and uncertain
+// commits retain only Wallet identities and never expose a partial result.
+func TestNewAccountSQLFailureIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: model each Store failure after normal admission and derivation
+	// setup. Even a populated Store result cannot imply success after an error.
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{
+			name: "occupied number",
+			err: &pgconn.PgError{
+				Code:           "23505",
+				ConstraintName: "uidx_accounts_scope_account_number",
+			},
+			want: ErrAccountAlreadyExists,
+		},
+		{
+			name: "indeterminate cancellation",
+			err: &dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			},
+			want: ErrIndeterminateCommit,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, deps := createStartedWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			expectAccountNameAvailable(deps, scope, testAccountName)
+			expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
+			deps.store.On("CreateDerivedAccount", mock.Anything,
+				mock.Anything, mock.Anything).Return(
+				&db.AccountInfo{}, test.err,
+			).Once()
+
+			// Act: create through the public operation and error boundary.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope: scope,
+				Name:  testAccountName,
+			})
+
+			// Assert: a failed call exposes no account or backend identity;
+			// uncertain commit must not claim definite cancellation.
+			require.Nil(t, info)
+			require.ErrorIs(t, err, test.want)
+			require.NotErrorIs(t, err, test.err)
+			require.NotErrorIs(t, err, context.Canceled)
+			require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+			deps.store.AssertExpectations(t)
+			deps.vault.AssertExpectations(t)
 		})
 	}
 }

@@ -28,12 +28,13 @@ import (
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
 var (
 	// ErrAccountAlreadyExists is returned when an account operation would
-	// take a name that is already used within the same key scope. Renaming
+	// take a name or account number already used in the same scope. Renaming
 	// an account to its current name reports the same outcome.
 	ErrAccountAlreadyExists = errors.New("account already exists")
 
@@ -54,7 +55,8 @@ var (
 
 // accountManagerErr preserves diagnostic text while exposing only the wallet
 // identity for a supported outcome. Unclassified errors retain no identity;
-// cancellation and deadlines retain their caller-owned identities.
+// cancellation and deadlines retain their caller-owned identities unless the
+// commit outcome is indeterminate.
 func accountManagerErr(err error) error {
 	if err == nil {
 		return nil
@@ -74,6 +76,7 @@ func accountManagerErr(err error) error {
 		return accountErr(ErrAccountNotFound, err.Error())
 
 	case dberr.IsAccountNameConflict(err),
+		dberr.IsAccountNumberConflict(err),
 		isManagerErr(err, waddrmgr.ErrDuplicateAccount),
 		isManagerErr(err, waddrmgr.ErrAlreadyExists):
 
@@ -104,10 +107,15 @@ func accountManagerErr(err error) error {
 	}
 }
 
-// accountManagerContextErr preserves a caller's cancellation identity while
-// scrubbing any backend identity that may have been joined to it.
+// accountManagerContextErr gives an indeterminate commit precedence over caller
+// cancellation, scrubbing any backend identity joined to either outcome.
 func accountManagerContextErr(err error) error {
 	switch {
+	// A commit transport failure may wrap cancellation even after persistence.
+	// Preserve uncertainty before classifying definite caller cancellation.
+	case errors.Is(err, dbruntime.ErrAmbiguousTxCommit):
+		return accountErr(ErrIndeterminateCommit, err.Error())
+
 	case errors.Is(err, context.Canceled):
 		return accountErr(context.Canceled, err.Error())
 
