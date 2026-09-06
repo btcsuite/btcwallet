@@ -35,6 +35,60 @@ func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 	require.ErrorIs(t, err, ErrReservedAccountName)
 }
 
+// TestCreateDerivedAccountRejectsInvalidPath verifies malformed derivation
+// components and unsupported exact scopes fail before backend operations.
+func TestCreateDerivedAccountRejectsInvalidPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: isolate each invalid path component with no expected backend
+	// calls, so entering the allocation stages fails the test.
+	tests := []struct {
+		name   string
+		scope  KeyScope
+		number uint32
+	}{
+		{
+			name:  "hardened purpose",
+			scope: KeyScope{Purpose: 1 << 31},
+		},
+		{
+			name:  "hardened coin",
+			scope: KeyScope{Purpose: 84, Coin: 1 << 31},
+		},
+		{
+			name:   "reserved number",
+			scope:  KeyScopeBIP0084,
+			number: MaxAccountNumber + 1,
+		},
+		{
+			name:  "custom scope",
+			scope: KeyScope{Purpose: 1017},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ops := &mockCreateDerivedAccountOps{}
+			params := CreateDerivedAccountParams{
+				Scope:         test.scope,
+				Name:          "invalid-path",
+				AccountNumber: &test.number,
+			}
+
+			// Act: enter the same validation path SQL transactions use.
+			info, err := CreateDerivedAccountWithOps(
+				t.Context(), params, ops, testValidDeriveFn(),
+			)
+
+			// Assert: no backend stage ran and no partial result escaped.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+			ops.AssertExpectations(t)
+		})
+	}
+}
+
 // TestCreateDerivedAccountWithOps verifies that the shared helper owns the
 // common derived-account workflow and returns the normalized AccountInfo.
 func TestCreateDerivedAccountWithOps(t *testing.T) {

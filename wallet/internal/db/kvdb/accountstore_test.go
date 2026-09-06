@@ -524,6 +524,48 @@ func TestCreateDerivedAccount(t *testing.T) {
 	require.Equal(t, savingsAccountName, read.AccountName)
 }
 
+// TestCreateDerivedAccountRejectsExact verifies an unsupported exact request
+// neither derives material nor consumes the next legacy account number.
+func TestCreateDerivedAccountRejectsExact(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use a real legacy store and a callback that records invocation
+	// to prove rejection precedes key preparation as well as persistence.
+	store, mgr, cleanup := newAccountStoreFixture(t)
+	t.Cleanup(cleanup)
+
+	number := uint32(7)
+	params := db.CreateDerivedAccountParams{
+		Scope:         db.KeyScopeBIP0084,
+		Name:          savingsAccountName,
+		AccountNumber: &number,
+	}
+	called := false
+	deriveFn := func(context.Context, db.KeyScope, uint32,
+		bool) (*db.DerivedAccountData, error) {
+
+		called = true
+
+		return &db.DerivedAccountData{}, nil
+	}
+
+	// Act: reject exact creation, then retry the same name sequentially to
+	// expose either an accidentally persisted account or an advanced cursor.
+	info, err := store.CreateDerivedAccount(t.Context(), params, deriveFn)
+	params.AccountNumber = nil
+	next, nextErr := store.CreateDerivedAccount(
+		t.Context(), params, kvdbDeriveFnFixture(t, mgr),
+	)
+
+	// Assert: no exact result or derivation occurred, and the first available
+	// legacy number remains one because the default account already exists.
+	require.ErrorIs(t, err, db.ErrInvalidParam)
+	require.Nil(t, info)
+	require.False(t, called)
+	require.NoError(t, nextErr)
+	require.Equal(t, uint32(1), *next.AccountNumber)
+}
+
 // TestCreateDerivedAccountRejectsNoChainSync verifies kvdb refuses a policy it
 // cannot persist before derivation or account mutation begins.
 func TestCreateDerivedAccountRejectsNoChainSync(t *testing.T) {

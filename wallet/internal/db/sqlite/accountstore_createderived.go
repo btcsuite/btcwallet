@@ -26,7 +26,10 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 		var err error
 
 		info, err = db.CreateDerivedAccountWithOps(
-			ctx, params, createDerivedAccountOps{q: qtx}, deriveFn,
+			ctx, params, createDerivedAccountOps{
+				q:             qtx,
+				accountNumber: params.AccountNumber,
+			}, deriveFn,
 		)
 
 		return err
@@ -42,6 +45,10 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 // CreateDerivedAccount workflow.
 type createDerivedAccountOps struct {
 	q *sqlc.Queries
+
+	// accountNumber carries this request's selection into the allocator;
+	// the persisted scope cursor remains the sole allocation authority.
+	accountNumber *uint32
 }
 
 // WalletWatchOnly implements db.CreateDerivedAccountOps.
@@ -62,6 +69,20 @@ func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
 func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
 	scopeID int64) (int64, error) {
+
+	// Both request forms update the same scope row in the account write
+	// transaction, serializing allocation and rolling it back on failure.
+	if o.accountNumber != nil {
+		number := int64(*o.accountNumber)
+		err := o.q.AdvanceNextAccountNumber(
+			ctx, sqlc.AdvanceNextAccountNumberParams{
+				MinimumNextAccount: number + 1,
+				ScopeID:            scopeID,
+			},
+		)
+
+		return number, err
+	}
 
 	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
 }

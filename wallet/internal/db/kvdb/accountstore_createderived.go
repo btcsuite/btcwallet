@@ -20,6 +20,12 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
+	// waddrmgr owns sequential allocation in the legacy store. Refuse exact
+	// selection before a transaction can allocate or derive any account.
+	if params.AccountNumber != nil {
+		return nil, fmt.Errorf("kvdb exact account: %w", db.ErrInvalidParam)
+	}
+
 	// The legacy bucket format cannot persist this SQL account policy. Reject
 	// true before opening a transaction so the caller never receives a value
 	// that would be lost on the next read.
