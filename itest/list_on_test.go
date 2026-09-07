@@ -162,6 +162,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerDerivePubKeyWatchOnly,
 	},
 	{
+		Name:     "signer ecdh agreement",
+		TestFunc: testSignerECDHAgreement,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},

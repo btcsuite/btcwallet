@@ -7,6 +7,7 @@
 package itest
 
 import (
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/bwtest"
 	"github.com/btcsuite/btcwallet/waddrmgr"
@@ -336,5 +337,85 @@ func testSignerDerivePubKeyWatchOnly(h *bwtest.HarnessTest) {
 	require.True(
 		h, want.IsEqual(got),
 		"watch-only derivation is not the account's child",
+	)
+}
+
+// testSignerECDHAgreement verifies that the shared secret the wallet computes
+// is the one an independent peer computes from the wallet's public key, and
+// that it is bound to both the peer key and the derivation path.
+func testSignerECDHAgreement(h *bwtest.HarnessTest) {
+	// Arrange: A started, unlocked wallet and a peer key generated here, so
+	// the peer half of the exchange is never known to the wallet.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	peerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the peer key")
+
+	path := wallet.BIP32Path{
+		KeyScope: signerScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           3,
+		},
+	}
+
+	// The wallet's half of the exchange is public. Take it from the public
+	// derivation request, which also proves the numbered selector and the
+	// BIP32 path name the same account.
+	walletPub, err := w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByNumber(
+			signerScope, wallet.AccountNumber(
+				path.DerivationPath.InternalAccount,
+			),
+		),
+		Branch: path.DerivationPath.Branch,
+		Index:  path.DerivationPath.Index,
+	})
+	require.NoError(h, err, "failed to derive the wallet's public key")
+
+	var want [32]byte
+	copy(want[:], btcec.GenerateSharedSecret(peerKey, walletPub))
+
+	// Act: Compute the same secret from the wallet's side.
+	secret, err := w.ECDH(ctx, path, peerKey.PubKey())
+
+	// Assert: Both sides of the exchange reach the same secret, and it is not
+	// the degenerate value they would share if neither had computed anything.
+	require.NoError(h, err, "failed to compute the shared secret")
+	require.Equal(
+		h, want, secret, "wallet and peer disagree on the shared secret",
+	)
+	require.NotEqual(
+		h, [32]byte{}, secret, "the shared secret is the zero value",
+	)
+
+	otherPeerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the second peer key")
+
+	// Act: Exchange with a different peer over the same wallet key.
+	otherPeerSecret, err := w.ECDH(ctx, path, otherPeerKey.PubKey())
+
+	// Assert: The secret is bound to the peer key.
+	require.NoError(h, err, "failed to compute the second peer's secret")
+	require.NotEqual(
+		h, secret, otherPeerSecret,
+		"a different peer key produced the same secret",
+	)
+
+	internalPath := path
+	internalPath.DerivationPath.Branch = 1
+
+	// Act: Exchange with the original peer over the account's internal branch.
+	internalSecret, err := w.ECDH(ctx, internalPath, peerKey.PubKey())
+
+	// Assert: The secret is bound to the derivation path as well, so the
+	// wallet is not answering from one fixed key.
+	require.NoError(h, err, "failed to compute the internal branch secret")
+	require.NotEqual(
+		h, secret, internalSecret,
+		"a different branch produced the same secret",
 	)
 }
