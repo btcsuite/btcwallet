@@ -171,6 +171,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerDerivePubKeyWalletState,
 	},
 	{
+		Name:     "signer derive pubkey reject request",
+		TestFunc: testSignerDerivePubKeyRejectRequest,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
