@@ -419,3 +419,64 @@ func testSignerECDHAgreement(h *bwtest.HarnessTest) {
 		"a different branch produced the same secret",
 	)
 }
+
+// testSignerECDHWalletState verifies that the shared secret is gated on a
+// running and unlocked wallet, and that a refused request returns no secret
+// material.
+func testSignerECDHWalletState(h *bwtest.HarnessTest) {
+	// Arrange: A wallet that has been created but not started, and a peer to
+	// exchange with.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+
+	peerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the peer key")
+
+	path := wallet.BIP32Path{KeyScope: signerScope}
+
+	// Act: Exchange before the wallet runs.
+	secret, err := w.ECDH(ctx, path, peerKey.PubKey())
+
+	// Assert: The state gate refuses, and hands back nothing.
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"ECDH before start not rejected",
+	)
+	require.Equal(
+		h, [32]byte{}, secret, "a refused ECDH returned secret material",
+	)
+
+	require.NoError(h, w.Start(ctx), "failed to start wallet")
+
+	// The account must exist before the path can resolve. Deriving an address
+	// materializes it and restores the wallet's locked state.
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	info, err := w.Info(ctx)
+	require.NoError(h, err, "failed to query wallet info")
+	require.True(h, info.Locked, "wallet is not locked")
+
+	// Act: Exchange while the wallet is locked.
+	secret, err = w.ECDH(ctx, path, peerKey.PubKey())
+
+	// Assert: Unlike public derivation, the shared secret needs the private
+	// key, so a locked wallet refuses before reaching the store.
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"ECDH while locked not rejected",
+	)
+	require.Equal(
+		h, [32]byte{}, secret, "a refused ECDH returned secret material",
+	)
+
+	h.UnlockWallet(w)
+
+	// Act: Exchange once the wallet can sign.
+	secret, err = w.ECDH(ctx, path, peerKey.PubKey())
+
+	// Assert: Unlocking is the whole difference.
+	require.NoError(h, err, "unlocked wallet refused ECDH")
+	require.NotEqual(
+		h, [32]byte{}, secret, "unlocked ECDH returned no secret",
+	)
+}
