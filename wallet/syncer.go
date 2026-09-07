@@ -58,6 +58,13 @@ var (
 	// ErrNoScanTargets is returned when a targeted rescan is requested with
 	// no targets.
 	ErrNoScanTargets = errors.New("at least one target must be specified")
+
+	// ErrNoChainSyncRecoveryTarget rejects a target whose persisted policy
+	// forbids account discovery, regardless of recovery lookahead.
+	// Callers can check this wallet-owned identity with errors.Is.
+	ErrNoChainSyncRecoveryTarget = errors.New(
+		"recovery target excludes chain synchronization",
+	)
 )
 
 const (
@@ -1959,36 +1966,27 @@ func (s *syncer) scanWithTargets(ctx context.Context, req *scanReq) error {
 	return nil
 }
 
-// storeScanHorizons loads account horizon data through the store. Targets are
-// the identity-aware scanTargets produced by resolveScanTargets, so each one
-// already carries the durable AccountName that lets the Store resolve an
-// imported account without colliding with the default derived account at the
+// storeScanHorizons loads horizons for accounts admitted by loadStoreScanData.
+// Targets come from resolveScanTargets with a durable AccountName, so imported
+// accounts resolve without colliding with the default derived account at the
 // masked number 0.
 func (s *syncer) storeScanHorizons(ctx context.Context,
+	accounts []db.AccountInfo,
 	targets []scanTarget) ([]storeScanAccount, error) {
 
 	if len(targets) == 0 {
-		return s.storeFullScanHorizons(ctx)
+		return s.storeFullScanHorizons(accounts)
 	}
 
 	return s.storeTargetedScanHorizons(ctx, targets)
 }
 
-// storeFullScanHorizons loads full recovery horizon accounts from the Store,
-// skipping only the keyless raw-import bucket. The scan selects no account by
-// number here, so each one is keyed on its durable store row ID and an imported
-// account cannot overwrite a derived account owning the same BIP44 number in
-// the same scope.
+// storeFullScanHorizons converts admitted accounts into full recovery horizons,
+// skipping the keyless raw-import bucket. Each horizon is keyed on the durable
+// store row ID, so imported and derived accounts sharing a BIP44 number cannot
+// overwrite each other's recovery state.
 func (s *syncer) storeFullScanHorizons(
-	ctx context.Context) ([]storeScanAccount, error) {
-
-	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
-		WalletID:    s.walletID,
-		SkipBalance: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list scan accounts: %w", err)
-	}
+	accounts []db.AccountInfo) ([]storeScanAccount, error) {
 
 	scanAccounts := make([]storeScanAccount, 0, len(accounts))
 	for i := range accounts {
@@ -2017,8 +2015,8 @@ func (s *syncer) storeFullScanHorizons(
 	return scanAccounts, nil
 }
 
-// storeTargetedScanHorizons loads recovery horizon accounts for already
-// resolved scan targets. Each target keeps the account number the caller named
+// storeTargetedScanHorizons loads horizons for targets already admitted by
+// loadStoreScanData. Each target keeps the account number the caller named
 // as its recovery key, while the Store lookup itself prefers the durable name.
 func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 	targets []scanTarget) ([]storeScanAccount, error) {
@@ -2178,8 +2176,9 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 	return info.IsImported && len(info.PublicKey) == 0
 }
 
-// storeScanAddresses loads active scan addresses through the store, paging per
+// storeScanAddresses loads active addresses for admitted accounts, paging per
 // (key scope, account) pair because ListAddresses is scoped to a single pair.
+// It shares the eligible account snapshot used to construct scan horizons.
 //
 // This reproduces the legacy ForEachRelevantActiveAddress filtering used by
 // the old scan-data reader: for default key scopes every active address is
@@ -2187,16 +2186,8 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 // addresses are watched. The non-default external branches are intentionally
 // skipped because they only ever existed due to a since-fixed bug, and
 // watching them would diverge from the legacy recovery set.
-func (s *syncer) storeScanAddresses(
-	ctx context.Context) ([]address.Address, error) {
-
-	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
-		WalletID:    s.walletID,
-		SkipBalance: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list scan accounts: %w", err)
-	}
+func (s *syncer) storeScanAddresses(ctx context.Context,
+	accounts []db.AccountInfo) ([]address.Address, error) {
 
 	var addrs []address.Address
 	for i := range accounts {
@@ -2368,19 +2359,52 @@ func storeScanCredit(utxo db.UtxoInfo) (wtxmgr.Credit, error) {
 	}, nil
 }
 
-// loadStoreScanData retrieves recovery scan initialization data through the
-// store. Targets are the identity-aware scanTargets resolved up front; an
-// empty slice loads horizons for every account (the untargeted path).
+// loadStoreScanData admits accounts before loading recovery initialization.
+// NoChainSync accounts are excluded regardless of lookahead, and a matching
+// resolved target returns ErrNoChainSyncRecoveryTarget before any horizon or
+// watch loading. Empty targets select all eligible accounts for a full scan.
 func (s *syncer) loadStoreScanData(ctx context.Context,
 	targets []scanTarget) ([]storeScanAccount, []address.Address,
 	[]wtxmgr.Credit, error) {
 
-	horizons, err := s.storeScanHorizons(ctx, targets)
+	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
+		WalletID:    s.walletID,
+		SkipBalance: true,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list scan accounts: %w", err)
+	}
+
+	// Select scan inputs once so neither horizon derivation nor persisted
+	// address watches can reintroduce an account excluded by its policy.
+	scanAccounts := make([]db.AccountInfo, 0, len(accounts))
+	for _, info := range accounts {
+		if !info.NoChainSync {
+			scanAccounts = append(scanAccounts, info)
+			continue
+		}
+
+		// Reject explicit requests using the resolved scope/name identity.
+		// The immutable policy still holds for later named horizon reads.
+		for _, target := range targets {
+			if target.Scope != waddrmgr.KeyScope(info.KeyScope) ||
+				target.AccountName != info.AccountName {
+
+				continue
+			}
+
+			return nil, nil, nil, ErrNoChainSyncRecoveryTarget
+		}
+	}
+
+	// Both loaders consume the admitted inputs; eligibility is independent
+	// of the lookahead depth used when the recovery state is initialized.
+	horizons, err := s.storeScanHorizons(ctx, scanAccounts, targets)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	addrs, err := s.storeScanAddresses(ctx)
+	addrs, err := s.storeScanAddresses(ctx, scanAccounts)
 	if err != nil {
 		return nil, nil, nil, err
 	}
