@@ -363,6 +363,11 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
+	err = ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	req := newAccountReq{
 		reqCtx: reqCtx{ctx: ctx},
 		scope:  scope,
@@ -519,6 +524,11 @@ func (w *Wallet) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 		return nil, err
 	}
 
+	err = ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	req := listAccountsReq{
 		reqCtx: reqCtx{ctx: ctx},
 		query: db.ListAccountsQuery{
@@ -586,6 +596,11 @@ func (w *Wallet) ListAccountsByScope(ctx context.Context,
 		return nil, err
 	}
 
+	err = ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
 	dbScope := db.KeyScope(scope)
 
 	req := listAccountsReq{
@@ -615,6 +630,11 @@ func (w *Wallet) ListAccountsByName(ctx context.Context,
 	name string) ([]AccountInfo, error) {
 
 	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	err = ctx.Err()
 	if err != nil {
 		return nil, err
 	}
@@ -665,6 +685,11 @@ func (w *Wallet) GetAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	name string) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
+	if err != nil {
+		return nil, err
+	}
+
+	err = ctx.Err()
 	if err != nil {
 		return nil, err
 	}
@@ -726,6 +751,11 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 	scope waddrmgr.KeyScope, oldName, newName string) error {
 
 	err := w.state.validateStarted()
+	if err != nil {
+		return err
+	}
+
+	err = ctx.Err()
 	if err != nil {
 		return err
 	}
@@ -823,6 +853,11 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	accountKeySnapshot, err := snapshotExtendedPubKey(
 		accountKey, true, w.cfg.ChainParams,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	err = ctx.Err()
 	if err != nil {
 		return nil, err
 	}
