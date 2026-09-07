@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -250,10 +251,8 @@ func newStubAccountDeriveFn(t *testing.T) stubAccountDeriveFn {
 	}
 }
 
-// expectAccountDeriveSetup wires the mock expectations the new wallet
-// NewAccount path performs before invoking w.store.CreateDerivedAccount.
-// Decrypt returns a fresh copy so the wallet's post-parse zero.Bytes call
-// does not corrupt the shared stub across multiple invocations.
+// expectAccountDeriveSetup supplies the encrypted bytes required before the
+// Store transaction, without expecting key decryption.
 func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
 	stub stubAccountDeriveFn) {
 
@@ -261,10 +260,6 @@ func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
 
 	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
 		Return(append([]byte(nil), stub.encryptedSeed...), nil).Once()
-	deps.vault.On("Decrypt", waddrmgr.CKTPrivate,
-		mock.Anything).Return(
-		append([]byte(nil), stub.plaintextMasterKey...), nil,
-	).Once()
 }
 
 // hardenedKey converts a plain BIP32 child index to its hardened
@@ -952,6 +947,15 @@ func TestNewAccount(t *testing.T) {
 
 	expectAccountNameAvailable(deps, scope, testAccountName)
 	expectAccountDeriveSetup(t, deps, stub)
+	// The Store callback owns decryption. Return a fresh plaintext copy so
+	// its post-parse zeroing cannot alter the shared derivation fixture.
+	deps.vault.On("Decrypt", waddrmgr.CKTPrivate, stub.encryptedSeed).
+		Return(append([]byte(nil), stub.plaintextMasterKey...), nil).Once()
+	deps.vault.On("Encrypt", waddrmgr.CKTPrivate, mock.Anything).
+		Return([]byte("encrypted account"), nil).Once()
+	// NewAccount waits for the handler result before these values are asserted.
+	var deriveErr error
+
 	deps.store.On("CreateDerivedAccount", mock.Anything,
 		db.CreateDerivedAccountParams{
 			WalletID:    0,
@@ -964,7 +968,15 @@ func TestNewAccount(t *testing.T) {
 			AccountName:   testAccountName,
 			KeyScope:      dbScope,
 		}, nil,
-	).Once()
+	).Once().Run(func(args mock.Arguments) {
+		// Model the Store invoking derivation only after admission succeeds.
+		deriveFn, ok := args.Get(2).(db.AccountDerivationFunc)
+		if ok {
+			_, deriveErr = deriveFn(
+				t.Context(), dbScope, accountNumber, false,
+			)
+		}
+	})
 
 	// Act: Create the account through the public request path.
 	account, err := w.NewAccount(t.Context(), NewAccountParams{
@@ -974,6 +986,7 @@ func TestNewAccount(t *testing.T) {
 
 	// Assert: The public result reports the number and default sync policy.
 	require.NoError(t, err)
+	require.NoError(t, deriveErr)
 	require.False(t, account.NoChainSync)
 	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 
@@ -1143,6 +1156,22 @@ func TestNewAccountLocked(t *testing.T) {
 	deps.vault.On("Decrypt", waddrmgr.CKTPrivate, mock.Anything).
 		Return(nil, keyvault.ErrVaultLocked).Once()
 
+	// The Store invokes derivation after its scope check. Record the callback
+	// error for assertions after the admitted handler returns.
+	var deriveErr error
+
+	deps.store.On("CreateDerivedAccount", mock.Anything, mock.Anything,
+		mock.Anything).Return(nil, keyvault.ErrVaultLocked).Once().Run(
+		func(args mock.Arguments) {
+			deriveFn, ok := args.Get(2).(db.AccountDerivationFunc)
+			if ok {
+				_, deriveErr = deriveFn(
+					t.Context(), db.KeyScope(scope), 1, false,
+				)
+			}
+		},
+	)
+
 	// Act: Reach the Vault through account creation after admission.
 	_, err := w.NewAccount(t.Context(), NewAccountParams{
 		Scope: scope,
@@ -1150,6 +1179,7 @@ func TestNewAccountLocked(t *testing.T) {
 	})
 
 	// Assert: A later Vault failure has the same wallet-owned state identity.
+	require.ErrorIs(t, deriveErr, keyvault.ErrVaultLocked)
 	require.ErrorIs(t, err, ErrStateForbidden)
 	require.NotErrorIs(t, err, keyvault.ErrVaultLocked)
 }
@@ -2154,4 +2184,119 @@ func TestNewAccountCancellationPreservesCommitError(t *testing.T) {
 	require.NotErrorIs(t, err, context.Canceled)
 	require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
 	require.Nil(t, <-infos)
+}
+
+// TestNewAccountScopeReadDrains verifies shutdown waits for persisted scope
+// validation before releasing the Wallet's Store and key material.
+func TestNewAccountScopeReadDrains(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: pause the scope read before it reports a missing custom scope.
+	// Strict mocks forbid secrets or mutation; fixture cleanup checks calls.
+	w, deps := createTestWalletWithMocks(t)
+	startLoadedWalletForTest(t, w)
+	w.state.toUnlocked()
+
+	scope := waddrmgr.KeyScope{
+		Purpose: 1017,
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(resume)
+	deps.store.On("GetKeyScopeSchema", mock.Anything, w.id,
+		db.KeyScope(scope)).Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(db.ScopeAddrSchema{}, db.ErrKeyScopeNotFound).Once()
+	deps.vault.On("Lock").Return().Once()
+
+	result := make(chan accountResp, 1)
+	go func() {
+		info, err := w.NewAccount(t.Context(), NewAccountParams{
+			Scope: scope,
+			Name:  testAccountName,
+		})
+		result <- accountResp{info: info, err: err}
+	}()
+
+	<-entered
+
+	// Act: close admission while the scope read remains blocked. Stop must
+	// retain this request even though it has not prepared secrets or written.
+	stopped := make(chan error, 1)
+	go func() { stopped <- w.Stop(t.Context()) }()
+
+	<-w.lifetimeCtx.Done()
+
+	// Assert: observe that Stop cannot finish before the read returns, then
+	// release it and check the admitted request's ordinary missing-input error.
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned before scope validation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	resume()
+
+	response := <-result
+	require.ErrorIs(t, response.err, ErrInvalidParam)
+	require.Nil(t, response.info)
+	require.NoError(t, <-stopped)
+}
+
+// TestNewAccountCustomScopeMissingFields verifies an unknown scope cannot be
+// established without both its branch schema and exact account selection.
+func TestNewAccountCustomScopeMissingFields(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: vary only the missing input; scope lookup is the sole expected
+	// dependency call, so any secret preparation or mutation fails the mocks.
+	number := AccountNumber(7)
+
+	tests := []struct {
+		name   string
+		number *AccountNumber
+		schema *waddrmgr.ScopeAddrSchema
+	}{
+		{
+			name:   "missing schema",
+			number: &number,
+		},
+		{
+			name: "missing number",
+			schema: &waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, deps := createUnlockedWalletWithMocks(t)
+			w.addrStore = nil
+			scope := waddrmgr.KeyScope{
+				Purpose: 1017,
+			}
+			deps.store.On("GetKeyScopeSchema", mock.Anything, w.id,
+				db.KeyScope(scope)).Return(
+				db.ScopeAddrSchema{}, db.ErrKeyScopeNotFound,
+			).Once()
+
+			// Act: request an account in a scope with no persisted schema.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:         scope,
+				Name:          testAccountName,
+				AccountNumber: test.number,
+				AddrSchema:    test.schema,
+			})
+
+			// Assert: the missing input is a public request error, and
+			// neither a partial result nor any secret or write call occurs.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+		})
+	}
 }
