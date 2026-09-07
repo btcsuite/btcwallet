@@ -370,9 +370,10 @@ func BenchmarkNewAccountAPI(b *testing.B) {
 				accountName := fmt.Sprintf("new-account-%d",
 					count)
 
-				_, err := w.NewAccount(
-					b.Context(), scopes[0], accountName,
-				)
+				_, err := w.NewAccount(b.Context(), NewAccountParams{
+					Scope: scopes[0],
+					Name:  accountName,
+				})
 				require.NoError(b, err)
 
 				count++

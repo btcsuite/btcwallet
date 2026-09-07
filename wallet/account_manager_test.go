@@ -1095,7 +1095,10 @@ func TestNewAccount(t *testing.T) {
 	).Once()
 
 	// Act: create the next account in the scope.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the account result contains the allocated number and canonical
 	// master fingerprint, and every required dependency call occurred.
@@ -1146,7 +1149,10 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	}, nil).Once()
 
 	// Act: create an account through the deferred derivation path.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the Store-provided result is returned and all expected admission
 	// and derivation calls occurred.
@@ -1257,15 +1263,18 @@ func TestNewAccountAdmission(t *testing.T) {
 	t.Run("not started", func(t *testing.T) {
 		t.Parallel()
 
-		// Arrange.
+		// Arrange: leave the wallet unstarted so lifecycle rejection
+		// must happen before account lookup or creation.
 		w, deps := createTestWalletWithMocks(t)
 
-		// Act.
-		account, err := w.NewAccount(
-			t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-		)
+		// Act: submit a valid account request before wallet startup.
+		account, err := w.NewAccount(t.Context(), NewAccountParams{
+			Scope: waddrmgr.KeyScopeBIP0084,
+			Name:  testAccountName,
+		})
 
-		// Assert.
+		// Assert: lifecycle refusal returns no account or backend identity
+		// and never reaches the account lookup.
 		require.Nil(t, account)
 		require.ErrorIs(t, err, ErrStateForbidden)
 		requireNoInternalIdentity(t, err)
@@ -1283,12 +1292,14 @@ func TestNewAccountAdmission(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 
-		// Act.
-		account, err := w.NewAccount(
-			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
-		)
+		// Act: submit a valid request after its caller has cancelled.
+		account, err := w.NewAccount(ctx, NewAccountParams{
+			Scope: waddrmgr.KeyScopeBIP0084,
+			Name:  testAccountName,
+		})
 
-		// Assert.
+		// Assert: cancellation wins over watch-only admission and no
+		// account lookup runs for the cancelled request.
 		require.Nil(t, account)
 		require.Equal(t, context.Canceled, err)
 		require.Empty(t, reportedIdentities(err))
@@ -1309,12 +1320,14 @@ func TestNewAccountAdmission(t *testing.T) {
 		)
 		t.Cleanup(cancel)
 
-		// Act.
-		account, err := w.NewAccount(
-			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
-		)
+		// Act: submit a valid request after its caller deadline expired.
+		account, err := w.NewAccount(ctx, NewAccountParams{
+			Scope: waddrmgr.KeyScopeBIP0084,
+			Name:  testAccountName,
+		})
 
-		// Assert.
+		// Assert: the deadline wins over watch-only admission and no
+		// account lookup runs for the expired request.
 		require.Nil(t, account)
 		require.Equal(t, context.DeadlineExceeded, err)
 		require.Empty(t, reportedIdentities(err))
@@ -2112,7 +2125,10 @@ func TestNewAccountVaultLockedForbidden(t *testing.T) {
 		Return([]byte(nil), keyvault.ErrVaultLocked).Once()
 
 	// Act: create an account while the vault is locked.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the lock is reported as a forbidden state, the vault
 	// identity does not escape, and no account row was attempted.
@@ -2139,7 +2155,10 @@ func TestNewAccountWatchOnlyUnsupported(t *testing.T) {
 	expectAccountNameFree(t, deps, scope, testAccountName)
 
 	// Act: create a derived account on the watch-only wallet.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the refusal is reported as unsupported, the internal
 	// derivation sentinel does not escape, and the only Store call was the
@@ -2162,9 +2181,10 @@ func TestNewAccountLocked(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 
 	// Act: create an account while the wallet is locked.
-	account, err := w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-	)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  testAccountName,
+	})
 
 	// Assert: the wallet reports its own forbidden state and performs
 	// neither the name lookup nor the account write.
@@ -2211,9 +2231,10 @@ func TestNewAccountOccupiedName(t *testing.T) {
 			expectAccountNameTaken(t, deps, scope, testAccountName)
 
 			// Act: create an account under the occupied name.
-			account, err := w.NewAccount(
-				t.Context(), scope, testAccountName,
-			)
+			account, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope: scope,
+				Name:  testAccountName,
+			})
 
 			// Assert: the conflict is the only outcome reported, and
 			// nothing was derived or written.
@@ -2292,9 +2313,10 @@ func TestNewAccountTranslatesStoreError(t *testing.T) {
 				Return((*db.AccountInfo)(nil), tc.inject).Once()
 
 			// Act: create the next account in the scope.
-			account, err := w.NewAccount(
-				t.Context(), tc.scope, testAccountName,
-			)
+			account, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope: tc.scope,
+				Name:  testAccountName,
+			})
 
 			// Assert: only the expected error identity is reported.
 			require.Nil(t, account)
@@ -2321,14 +2343,16 @@ func TestNewAccountInvalidName(t *testing.T) {
 		t.Run("invalid name "+name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange.
+			// Arrange: use a watch-only wallet to prove invalid names
+			// are rejected before the custody restriction.
 			w, _ := createStartedWalletWithMocks(t)
 			w.isWatchOnly = true
 
-			// Act.
-			account, err := w.NewAccount(
-				t.Context(), waddrmgr.KeyScopeBIP0084, name,
-			)
+			// Act: request creation with an empty or reserved name.
+			account, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope: waddrmgr.KeyScopeBIP0084,
+				Name:  name,
+			})
 
 			// Assert: validation outranks the watch-only refusal.
 			require.Nil(t, account)
@@ -2722,9 +2746,10 @@ func TestNewAccountRejectsStopped(t *testing.T) {
 	require.NoError(t, w.Stop(t.Context()))
 
 	// Act: Attempt to create an account through the terminal Wallet.
-	_, err := w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-	)
+	_, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  testAccountName,
+	})
 
 	// Assert: The terminal sentinel proves the request was rejected before
 	// account derivation or Store access began.
