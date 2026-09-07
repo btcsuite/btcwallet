@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -481,7 +482,7 @@ func TestSyncerLoadScanState(t *testing.T) {
 		AccountID:     &accountNumber0,
 		AccountNumber: &accountNumber0,
 		KeyScope:      db.KeyScopeBIP0084,
-	}}, nil).Twice()
+	}}, nil).Once()
 
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
@@ -711,7 +712,7 @@ func TestScanBatch(t *testing.T) {
 			AccountID: &scanAccountID,
 			KeyScope:  db.KeyScopeBIP0084,
 		}}, nil,
-	).Twice()
+	).Once()
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
 	).Maybe()
@@ -834,7 +835,7 @@ func TestAdvanceChainSync(t *testing.T) {
 			AccountNumber: &accountNumber0,
 			KeyScope:      db.KeyScopeBIP0084,
 		}}, nil,
-	).Twice()
+	).Once()
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
 	).Maybe()
@@ -2049,6 +2050,8 @@ func TestScanHorizonParamsStampsAccountIdentity(t *testing.T) {
 func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: Supply admitted imported and derived account snapshots whose
+	// numeric identifiers collide, with valid public derivation material.
 	const walletID uint32 = 71
 
 	store := &walletmock.Store{}
@@ -2096,16 +2099,10 @@ func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
 		},
 	}
 
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return(accounts, nil).Once()
-
 	// Act: build the recovery horizon snapshot and load it into a fresh
 	// recovery state. addrMgr is nil so accounts derive through their
 	// store-native public material.
-	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), accounts, nil)
 	require.NoError(t, err)
 
 	props := scanAccountProps(scanAccounts)
@@ -2158,7 +2155,8 @@ func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
 func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a store-backed syncer with two scan accounts.
+	// Arrange: Supply an admitted Store snapshot with nonzero branch counts
+	// so conversion preserves account identity and recovery horizons.
 	const walletID uint32 = 13
 
 	store := &walletmock.Store{}
@@ -2182,14 +2180,8 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 		IsWatchOnly:          true,
 	}}
 
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return(accounts, nil).Once()
-
-	// Act: Load all scan horizons from the store.
-	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
+	// Act: Convert the admitted account snapshot into recovery horizons.
+	scanAccounts, err := s.storeScanHorizons(t.Context(), accounts, nil)
 
 	// Assert: The store account row was converted for RecoveryState, keyed on
 	// the stable store AccountID rather than the BIP44 account number.
@@ -2203,6 +2195,64 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	require.Equal(t, waddrmgr.KeyScopeBIP0084, props[0].KeyScope)
 	require.True(t, props[0].IsWatchOnly)
 	store.AssertExpectations(t)
+}
+
+// TestSyncerRecoveryRejectsNoChainSyncTarget verifies that explicit rejection
+// stops scan initialization before any watch reads or recovery mutations.
+func TestSyncerRecoveryRejectsNoChainSyncTarget(t *testing.T) {
+	t.Parallel()
+
+	// Check the same admission policy at both lookahead depths, using a
+	// separate fixture so each subtest starts from independent account
+	// data.
+	for _, window := range []uint32{0, testScanRecoveryWindow} {
+		t.Run(fmt.Sprintf("window %d", window), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: The strict Store permits only identity
+			// resolution and admission snapshots; horizon lookups
+			// or watch reads fail immediately.
+			store := &walletmock.Store{}
+			s := newSyncer(
+				Config{RecoveryWindow: window}, nil, nil,
+				&mockTxPublisher{}, store, 1,
+			)
+			accountNumber := uint32(0)
+			account := db.AccountInfo{
+				AccountNumber: &accountNumber,
+				AccountName:   "key-only",
+				KeyScope:      db.KeyScopeBIP0084,
+				NoChainSync:   true,
+			}
+			store.On(
+				"ListAccounts", mock.Anything, db.ListAccountsQuery{
+					WalletID:    s.walletID,
+					SkipBalance: true,
+				},
+			).Return([]db.AccountInfo{account}, nil).Twice()
+
+			targets := []waddrmgr.AccountScope{
+				{
+					Scope:   waddrmgr.KeyScopeBIP0084,
+					Account: accountNumber,
+				},
+			}
+
+			// Act: Enter through the targeted loader so the
+			// existing initialization ordering must stop at account
+			// admission before constructing scan state.
+			state, err := s.loadTargetedScanState(
+				t.Context(), targets,
+			)
+
+			// Assert: Callers receive the wallet sentinel and no
+			// partial scan state; both snapshots were read without
+			// reaching a per-account horizon lookup.
+			require.ErrorIs(t, err, ErrNoChainSyncRecoveryTarget)
+			require.Nil(t, state)
+			store.AssertExpectations(t)
+		})
+	}
 }
 
 // TestStoreScanHorizonsGetAccount verifies targeted scan horizon reads resolve
@@ -2250,7 +2300,7 @@ func TestStoreScanHorizonsGetAccount(t *testing.T) {
 
 	// Act: Load targeted scan horizons from the store.
 	scanAccounts, err := s.storeScanHorizons(
-		t.Context(), []scanTarget{target},
+		t.Context(), nil, []scanTarget{target},
 	)
 
 	// Assert: The targeted account row was converted for RecoveryState.
@@ -2347,7 +2397,7 @@ func TestStoreScanHorizonsGetAccountKeepsImportedXpub(t *testing.T) {
 		Return(&importedXpubInfo, nil).Once()
 
 	// Act: load targeted scan horizons.
-	scanAccounts, err := s.storeScanHorizons(t.Context(), []scanTarget{
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil, []scanTarget{
 		{
 			Scope:       derived.Scope,
 			Account:     derived.Account,
@@ -2413,7 +2463,7 @@ func TestStoreScanHorizonsListAccountsKeepsImportedXpub(t *testing.T) {
 	)
 
 	// Act: load all scan horizons from the store.
-	scanAccounts, err := s.storeScanHorizons(t.Context(), nil)
+	scanAccounts, _, _, err := s.loadWalletScanData(t.Context())
 
 	// Assert: the imported xpub is preserved with its non-masked derivation
 	// number rather than colliding with the default account at number 0.
@@ -2591,7 +2641,7 @@ func TestStoreScanHorizonsTargetedImportedBucketSkipped(t *testing.T) {
 	resolved, err := s.resolveScanTargets(t.Context(), targets)
 	require.NoError(t, err)
 
-	scanAccounts, err := s.storeScanHorizons(t.Context(), resolved)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil, resolved)
 
 	// Assert: the keyless bucket produced no horizon and no error.
 	require.NoError(t, err)
@@ -2640,7 +2690,7 @@ func TestStoreScanHorizonsTargetedImportedNotResolvedAsDerived(t *testing.T) {
 	require.Equal(t, waddrmgr.DefaultAccountName, resolved[0].AccountName)
 	require.Equal(t, "imported-xpub", resolved[1].AccountName)
 
-	scanAccounts, err := s.storeScanHorizons(t.Context(), resolved)
+	scanAccounts, err := s.storeScanHorizons(t.Context(), nil, resolved)
 	require.NoError(t, err)
 
 	props := scanAccountProps(scanAccounts)
@@ -2810,11 +2860,6 @@ func TestStoreScanAddresses(t *testing.T) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return(accounts, nil).Once()
 
 	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
 		func(query db.ListAddressesQuery) bool {
@@ -2833,7 +2878,7 @@ func TestStoreScanAddresses(t *testing.T) {
 	)
 
 	// Act: Load scan addresses from the store.
-	addrs, err := s.storeScanAddresses(t.Context())
+	addrs, err := s.storeScanAddresses(t.Context(), accounts)
 
 	// Assert: The stored script was converted into a scan address.
 	require.NoError(t, err)
@@ -2870,11 +2915,6 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return(accounts, nil).Once()
 
 	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
 		func(query db.ListAddressesQuery) bool {
@@ -2892,7 +2932,7 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 	)
 
 	// Act: Load scan addresses from the store.
-	addrs, err := s.storeScanAddresses(t.Context())
+	addrs, err := s.storeScanAddresses(t.Context(), accounts)
 
 	// Assert: The raw imported address was included in the scan set.
 	require.NoError(t, err)
@@ -2906,8 +2946,8 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create a store-backed syncer where ListAccounts returns no
-	// account rows, but the default BIP84 raw-import alias has one address.
+	// Arrange: Supply no admitted account rows, while the default BIP84
+	// raw-import alias still exposes one independently owned address.
 	const walletID uint32 = 25
 
 	store := &walletmock.Store{}
@@ -2924,12 +2964,6 @@ func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return([]db.AccountInfo(nil), nil).Once()
-
 	expectImportedScanAddressPage(
 		store, walletID, page.Result[db.AddressInfo, uint32]{
 			Items: []db.AddressInfo{{ScriptPubKey: pkScript}},
@@ -2937,7 +2971,7 @@ func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
 	)
 
 	// Act: Load scan addresses from the store.
-	addrs, err := s.storeScanAddresses(t.Context())
+	addrs, err := s.storeScanAddresses(t.Context(), nil)
 
 	// Assert: The raw imported-only scope was probed and included.
 	require.NoError(t, err)
@@ -2983,11 +3017,6 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 		AccountName: "custom",
 		KeyScope:    nonDefault,
 	}}
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
-		},
-	)).Return(accounts, nil).Once()
 
 	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
 		func(query db.ListAddressesQuery) bool {
@@ -3014,7 +3043,7 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 	)
 
 	// Act: load scan addresses from the store.
-	addrs, err := s.storeScanAddresses(t.Context())
+	addrs, err := s.storeScanAddresses(t.Context(), accounts)
 
 	// Assert: only the internal-branch address survived the filter.
 	require.NoError(t, err)
@@ -3103,7 +3132,7 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 		func(query db.ListAccountsQuery) bool {
 			return query.WalletID == walletID && query.SkipBalance
 		},
-	)).Return(accounts, nil).Twice()
+	)).Return(accounts, nil).Once()
 
 	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
 		func(query db.ListAddressesQuery) bool {
@@ -5824,7 +5853,7 @@ func TestAdvanceChainSync_SmallGap(t *testing.T) {
 		nil).Once()
 	expectSyncedTip(store, waddrmgr.BlockStamp{Height: 100})
 	store.On("ListAccounts", mock.Anything, mock.Anything).Return(
-		([]db.AccountInfo)(nil), nil).Twice()
+		([]db.AccountInfo)(nil), nil).Once()
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil).Maybe()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
