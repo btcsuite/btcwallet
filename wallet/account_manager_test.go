@@ -21,7 +21,9 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1154,11 +1156,12 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 }
 
 // TestRenameAccount verifies RenameAccount routes through
-// w.store.RenameAccount with the correct params and preserves
-// db.ErrAccountNotFound passthrough.
+// w.store.RenameAccount with the correct params and reports a missing
+// account through the wallet-owned ErrAccountNotFound.
 func TestRenameAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a started wallet whose store accepts the rename.
 	w, deps := createStartedWalletWithMocks(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
@@ -1167,6 +1170,7 @@ func TestRenameAccount(t *testing.T) {
 		Coin:    scope.Coin,
 	}
 
+	expectAccountNameFree(t, deps, scope, "renamed")
 	deps.store.On("RenameAccount", mock.Anything, db.RenameAccountParams{
 		WalletID: 0,
 		Scope:    dbScope,
@@ -1174,20 +1178,11 @@ func TestRenameAccount(t *testing.T) {
 		NewName:  "renamed",
 	}).Return(nil).Once()
 
+	// Act: rename the account to the available name.
 	err := w.RenameAccount(t.Context(), scope, testAccountName, "renamed")
+
+	// Assert: the Store accepted the exact rename request.
 	require.NoError(t, err)
-
-	// Invalid new name path (validated locally before the store call).
-	err = w.RenameAccount(t.Context(), scope, testAccountName, "")
-	require.Error(t, err)
-
-	// Not-found path.
-	deps.store.On("RenameAccount", mock.Anything, mock.Anything).Return(
-		db.ErrAccountNotFound,
-	).Once()
-
-	err = w.RenameAccount(t.Context(), scope, "missing", "x")
-	require.ErrorIs(t, err, db.ErrAccountNotFound)
 }
 
 // accountManagerIdentities lists every wallet-owned identity the
@@ -1860,8 +1855,85 @@ func TestAccountManagerErrKeepsCallerIdentity(t *testing.T) {
 	}
 }
 
-// TestListAccountsTranslatesStoreError verifies the query surface crosses the
-// same boundary as the mutations.
+// TestRenameAccountTranslatesStoreError verifies RenameAccount reports an
+// absent source through the wallet-owned identity.
+func TestRenameAccountTranslatesStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started wallet whose source account does not exist.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	expectAccountNameFree(t, deps, scope, "renamed")
+	deps.store.On("RenameAccount", mock.Anything, db.RenameAccountParams{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		OldName:  "missing",
+		NewName:  "renamed",
+	}).Return(db.ErrAccountNotFound).Once()
+
+	// Act: rename the missing account.
+	err := w.RenameAccount(t.Context(), scope, "missing", "renamed")
+
+	// Assert: the wallet identity is public, the Store identity is scrubbed,
+	// and both expected Store calls occurred.
+	require.ErrorContains(t, err, db.ErrAccountNotFound.Error())
+	require.Equal(
+		t, []string{ErrAccountNotFound.Error()}, reportedIdentities(err),
+	)
+	require.NotErrorIs(t, err, db.ErrAccountNotFound)
+	requireNoInternalIdentity(t, err)
+}
+
+// TestRenameAccountTranslatesPostgresNameConflict verifies a SQL name conflict
+// returns only the wallet-owned error through the public rename method.
+func TestRenameAccountTranslatesPostgresNameConflict(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the target becomes occupied after the initial name lookup.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+	driverErr := &pgconn.PgError{
+		Code:           "23505",
+		ConstraintName: "uidx_accounts_wallet_scope_account_name",
+		Message:        "duplicate key value violates unique constraint",
+	}
+	sqlErr := dberr.NewSQLError(
+		dberr.BackendPostgres, dberr.ReasonConstraint,
+		driverErr.Code, driverErr,
+	)
+	storeErr := fmt.Errorf("rename account: %w", sqlErr)
+
+	expectAccountNameFree(t, deps, scope, "renamed")
+	deps.store.On("RenameAccount", mock.Anything, db.RenameAccountParams{
+		WalletID: 0,
+		Scope:    db.KeyScope(scope),
+		OldName:  testAccountName,
+		NewName:  "renamed",
+	}).Return(storeErr).Once()
+
+	// Act.
+	err := w.RenameAccount(t.Context(), scope, testAccountName, "renamed")
+
+	// Assert.
+	require.ErrorIs(t, err, ErrAccountAlreadyExists)
+	require.ErrorContains(t, err, storeErr.Error())
+	require.Equal(
+		t, []string{ErrAccountAlreadyExists.Error()}, reportedIdentities(err),
+	)
+	require.NotErrorIs(t, err, storeErr)
+	require.NotErrorIs(t, err, driverErr)
+	requireNoInternalIdentity(t, err)
+
+	var leakedSQL *dberr.SQLError
+	require.NotErrorAs(t, err, &leakedSQL)
+
+	var leakedDriver *pgconn.PgError
+	require.NotErrorAs(t, err, &leakedDriver)
+}
+
+// TestListAccountsTranslatesStoreError verifies unexpected Store validation
+// errors do not blame the caller of an unfiltered listing.
 func TestListAccountsTranslatesStoreError(t *testing.T) {
 	t.Parallel()
 
@@ -2142,6 +2214,139 @@ func TestNewAccountInvalidName(t *testing.T) {
 			require.NotErrorIs(t, err, ErrAccountOperationUnsupported)
 		})
 	}
+}
+
+// TestRenameAccountInvalidName verifies that the locally validated name rules
+// also cross the boundary as a wallet-owned error rather than as the
+// waddrmgr.ManagerError that waddrmgr.ValidateAccountName returns.
+func TestRenameAccountInvalidName(t *testing.T) {
+	t.Parallel()
+
+	names := []struct {
+		name    string
+		oldName string
+		newName string
+	}{
+		{
+			name:    "empty source before occupied target",
+			oldName: "",
+			newName: "occupied",
+		},
+		{
+			name:    "empty target",
+			oldName: testAccountName,
+			newName: "",
+		},
+		{
+			name:    "reserved",
+			oldName: testAccountName,
+			newName: waddrmgr.ImportedAddrAccountName,
+		},
+	}
+
+	for _, tc := range names {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a started wallet and a target name the
+			// account-name rules reject.
+			w, deps := createStartedWalletWithMocks(t)
+
+			// Act: rename an account to that target.
+			err := w.RenameAccount(
+				t.Context(), waddrmgr.KeyScopeBIP0084,
+				tc.oldName, tc.newName,
+			)
+
+			// Assert: the rejection is a wallet-owned invalid
+			// parameter, carries no legacy identity, and never
+			// reached the store.
+			require.ErrorIs(t, err, ErrInvalidParam)
+
+			var mErr waddrmgr.ManagerError
+			require.NotErrorAs(t, err, &mErr)
+
+			deps.store.AssertNotCalled(t, "RenameAccount",
+				mock.Anything, mock.Anything)
+		})
+	}
+}
+
+// TestRenameAccountSelfRename verifies that renaming an account to the name it
+// already holds is settled at the wallet boundary, rather than being handed to
+// a store that answers it differently, and that a self-rename of an account
+// that does not exist reports the absence instead of the conflict.
+func TestRenameAccountSelfRename(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		exists bool
+		want   error
+	}{{
+		name:   "existing account",
+		exists: true,
+		want:   ErrAccountAlreadyExists,
+	}, {
+		name:   "missing account",
+		exists: false,
+		want:   ErrAccountNotFound,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a started wallet that holds the name, or not.
+			w, deps := createStartedWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+
+			if tc.exists {
+				expectAccountNameTaken(
+					t, deps, scope, testAccountName,
+				)
+			} else {
+				expectAccountNameFree(
+					t, deps, scope, testAccountName,
+				)
+			}
+
+			// Act: rename the account to the name it already holds.
+			err := w.RenameAccount(
+				t.Context(), scope, testAccountName,
+				testAccountName,
+			)
+
+			// Assert: the wallet-owned outcome is the only identity
+			// reported and no write is attempted.
+			require.Equal(t, []string{tc.want.Error()},
+				reportedIdentities(err))
+			requireNoInternalIdentity(t, err)
+			deps.store.AssertNotCalled(t, "RenameAccount",
+				mock.Anything, mock.Anything)
+		})
+	}
+}
+
+// TestRenameAccountOccupiedTarget verifies the target name is resolved before
+// the write, so a conflict cannot move the source account.
+func TestRenameAccountOccupiedTarget(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started wallet whose scope already holds the target name.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	expectAccountNameTaken(t, deps, scope, "occupied")
+
+	// Act: rename the source account onto the occupied name.
+	err := w.RenameAccount(t.Context(), scope, testAccountName, "occupied")
+
+	// Assert: the conflict names the target and no write is attempted.
+	require.ErrorIs(t, err, ErrAccountAlreadyExists)
+	require.ErrorContains(t, err, "occupied")
+	deps.store.AssertNotCalled(t, "RenameAccount", mock.Anything,
+		mock.Anything)
 }
 
 // TestImportAccount verifies the normal import path routes through
