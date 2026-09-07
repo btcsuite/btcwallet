@@ -667,15 +667,18 @@ func TestSubmitRescanRequest_Errors(t *testing.T) {
 	})
 }
 
-// TestControllerStop verifies that the Stop method correctly shuts down the
-// wallet, waiting for the syncer and other background processes to exit.
+// TestControllerStop verifies that Stop completes terminal teardown even when
+// its compatibility context is already canceled, and remains safe to repeat.
 func TestControllerStop(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Create and start a test wallet.
+	// Arrange: Start a Wallet whose sync worker observes shutdown but cannot
+	// return until released. A pre-canceled Stop context proves terminal
+	// cleanup is owned by the Wallet rather than by that caller's deadline.
 	w, deps := createTestWalletWithMocks(t)
+	draining := make(chan struct{})
+	release := make(chan struct{})
 
-	// Setup mocks for the startup sequence.
 	deps.store.On("GetWallet", mock.Anything, mock.Anything).Return(
 		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
 	deps.store.On("ListAccounts", mock.Anything,
@@ -684,8 +687,8 @@ func TestControllerStop(t *testing.T) {
 	deps.store.On("DeleteExpiredLeases", mock.Anything,
 		mock.Anything).Return(nil).Once()
 
-	// Mock syncer.run to simulate a long-running process that exits when
-	// the context is cancelled.
+	// Keep the worker alive after it observes Wallet cancellation so the test
+	// can distinguish shutdown initiation from complete teardown.
 	deps.syncer.On("run", mock.Anything).Run(func(args mock.Arguments) {
 		ctx, ok := args.Get(0).(context.Context)
 		if !ok {
@@ -693,6 +696,8 @@ func TestControllerStop(t *testing.T) {
 		}
 
 		<-ctx.Done()
+		close(draining)
+		<-release
 	}).Return(nil).Once()
 
 	require.NoError(t, w.Start(t.Context()))
@@ -707,20 +712,40 @@ func TestControllerStop(t *testing.T) {
 
 	deps.vault.On("Lock").Return().Once()
 
-	// Act: Stop the wallet.
-	err := w.Stop(t.Context())
+	stopCtx, cancelStop := context.WithCancel(t.Context())
+	cancelStop()
 
-	// Assert: Verify that Stop returned no error and the wallet state is
-	// no longer 'Started'.
-	require.NoError(t, err)
+	stopResult := make(chan error, 1)
+
+	// Act: Invoke Stop with the canceled compatibility context, wait until
+	// its worker begins draining, and keep teardown blocked until the test
+	// has observed that Stop did not return early.
+	go func() {
+		stopResult <- w.Stop(stopCtx)
+	}()
+
+	<-draining
+
+	// Assert: Cancellation cannot abandon teardown while the Wallet worker
+	// remains active; after release, Stop locks the Vault and records the
+	// terminal state before returning its ordinary result.
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before worker drain: %v", err)
+	default:
+	}
+
+	close(release)
+	require.NoError(t, <-stopResult)
 	require.False(t, w.state.isStarted())
+	require.Equal(t, uint32(lifecycleStopped), w.state.lifecycle.Load())
 	deps.vault.AssertExpectations(t)
 
-	// Act: Call Stop again to verify idempotency.
-	err = w.Stop(t.Context())
+	// Act: Call Stop again after the serialized teardown has completed.
+	err := w.Stop(t.Context())
 
-	// Assert: Verify that subsequent Stop calls are safe and return no
-	// error.
+	// Assert: A sequential repeated Stop returns the same successful terminal
+	// outcome without running Vault cleanup again.
 	require.NoError(t, err)
 
 	// Act: Attempt to restart the terminal Wallet after both Stop calls
