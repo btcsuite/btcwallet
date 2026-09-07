@@ -16,19 +16,6 @@ import (
 // every backend.
 const accountManagerFundingType = waddrmgr.WitnessPubKey
 
-// importedAccountKeys holds deterministic public and private account material
-// used to exercise imported-account contracts without sharing wallet state.
-// accountPrivateKey is present only so a case can assert private keys are
-// refused.
-type importedAccountKeys struct {
-	scope                waddrmgr.KeyScope
-	addrType             waddrmgr.AddressType
-	accountKey           *hdkeychain.ExtendedKey
-	otherAccountKey      *hdkeychain.ExtendedKey
-	accountPrivateKey    *hdkeychain.ExtendedKey
-	masterKeyFingerprint uint32
-}
-
 // canonicalAccountKey returns a derived account key under the network default
 // public version so backend-specific serialized versions compare consistently.
 func canonicalAccountKey(h *bwtest.HarnessTest, key []byte) []byte {
@@ -44,61 +31,6 @@ func canonicalAccountKey(h *bwtest.HarnessTest, key []byte) []byte {
 	)
 
 	return []byte(normalized.String())
-}
-
-// deterministicImportedAccountKeys derives distinct BIP84 account XPubs from a
-// fixed root so imported-account cases are reproducible.
-func deterministicImportedAccountKeys(
-	h *bwtest.HarnessTest) importedAccountKeys {
-
-	h.Helper()
-
-	scope := waddrmgr.KeyScopeBIP0084
-	root, err := hdkeychain.NewMaster(
-		[]byte{
-			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-			0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-		},
-		h.NetParams(),
-	)
-	require.NoError(h, err, "failed to derive deterministic root key")
-
-	defer root.Zero()
-
-	purpose, err := root.Derive(hdkeychain.HardenedKeyStart + scope.Purpose)
-	require.NoError(h, err, "failed to derive BIP84 purpose key")
-
-	defer purpose.Zero()
-
-	coinType, err := purpose.Derive(
-		hdkeychain.HardenedKeyStart + h.NetParams().HDCoinType,
-	)
-	require.NoError(h, err, "failed to derive BIP84 coin type key")
-
-	defer coinType.Zero()
-
-	// Neuter hands the public key the same chain code and parent
-	// fingerprint slices the private key holds, so the two account private
-	// keys below must outlive this call. Zeroing either one rewrites the
-	// XPub being returned.
-	accountPrivateKey, err := coinType.Derive(hdkeychain.HardenedKeyStart)
-	require.NoError(h, err, "failed to derive imported account private key")
-	accountKey, err := accountPrivateKey.Neuter()
-	require.NoError(h, err, "failed to derive imported account public key")
-
-	otherPrivateKey, err := coinType.Derive(hdkeychain.HardenedKeyStart + 1)
-	require.NoError(h, err, "failed to derive second imported private key")
-	otherAccountKey, err := otherPrivateKey.Neuter()
-	require.NoError(h, err, "failed to derive second imported public key")
-
-	return importedAccountKeys{
-		scope:                scope,
-		addrType:             waddrmgr.WitnessPubKey,
-		accountKey:           accountKey,
-		otherAccountKey:      otherAccountKey,
-		accountPrivateKey:    accountPrivateKey,
-		masterKeyFingerprint: purpose.ParentFingerprint(),
-	}
 }
 
 // testAccountManagerCreateAccount verifies that a new derived account's
