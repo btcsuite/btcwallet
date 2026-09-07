@@ -137,7 +137,9 @@ func newAccountErr(err error) error {
 		isAddrMgrErr(err, waddrmgr.ErrLocked):
 		publicErr = ErrStateForbidden
 
-	case errors.Is(err, db.ErrUnknownKeyScope):
+	// A transactional scope-schema conflict is also invalid creation input.
+	case errors.Is(err, db.ErrUnknownKeyScope),
+		errors.Is(err, db.ErrInvalidParam):
 		publicErr = ErrInvalidParam
 
 	case isAccountMissing(err):
@@ -193,11 +195,10 @@ func validateAccountName(name string) error {
 	return publicAccountErr(waddrmgr.ValidateAccountName(name), ErrInvalidParam)
 }
 
-// buildAccountDeriveFn returns an AccountDerivationFunc closure. Spendable
-// wallets normally preload the master HD private key before the store opens
-// its write transaction. Neutered-root kvdb wallets are the exception: they
-// need to defer a missing-root-key error to the store callback so kvdb can
-// derive from the scoped coin-type key inside its walletdb transaction.
+// buildAccountDeriveFn preloads encrypted root bytes without reentering the
+// Store's write transaction. Its callback decrypts only after transactional
+// scope checks pass. A missing root stays deferred so neutered-root kvdb
+// wallets can derive from their scoped coin-type key inside walletdb.
 func (w *Wallet) buildAccountDeriveFn(
 	ctx context.Context) (db.AccountDerivationFunc, error) {
 
@@ -225,24 +226,32 @@ func (w *Wallet) buildAccountDeriveFn(
 		return nil, fmt.Errorf("load encrypted master HD priv: %w", err)
 	}
 
-	plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt master HD priv: %w", err)
-	}
+	// Capture ciphertext only: a scope established by another writer can
+	// conflict after admission, and its transaction must refuse before crypto.
+	return func(ctx context.Context, scope db.KeyScope, accountNumber uint32,
+		walletIsWatchOnly bool) (*db.DerivedAccountData, error) {
 
-	masterKey, err := hdkeychain.NewKeyFromString(string(plaintext))
-	zero.Bytes(plaintext)
+		plaintext, err := w.keyVault.Decrypt(waddrmgr.CKTPrivate, encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt master HD priv: %w", err)
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("parse master HD priv: %w", err)
-	}
+		masterKey, err := hdkeychain.NewKeyFromString(string(plaintext))
+		zero.Bytes(plaintext)
 
-	fingerprint, err := masterKeyFingerprint(masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("master key fingerprint: %w", err)
-	}
+		if err != nil {
+			return nil, fmt.Errorf("parse master HD priv: %w", err)
+		}
 
-	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
+		fingerprint, err := masterKeyFingerprint(masterKey)
+		if err != nil {
+			return nil, fmt.Errorf("master key fingerprint: %w", err)
+		}
+
+		return newAccountDeriveFn(masterKey, w.keyVault, fingerprint)(
+			ctx, scope, accountNumber, walletIsWatchOnly,
+		)
+	}, nil
 }
 
 // NewAccountParams selects the next or an exact account to create. The zero
@@ -251,11 +260,18 @@ type NewAccountParams struct {
 	// Scope identifies the purpose and coin type used for derivation.
 	Scope waddrmgr.KeyScope
 
+	// AddrSchema specifies both account-key branch types. A new custom scope
+	// requires it and AccountNumber; an existing scope requires a match.
+	// Nil reuses persisted schema or a canonical scope's default. Invalid or
+	// conflicting schemas return ErrInvalidParam before secret preparation.
+	AddrSchema *waddrmgr.ScopeAddrSchema
+
 	// Name must be valid and unique within Scope.
 	Name string
 
-	// AccountNumber requests this exact root-derived account in a canonical
-	// SQL scope, leaving lower holes available. Nil selects the next account.
+	// AccountNumber requests this exact root-derived SQL account, leaving
+	// lower holes available. Nil selects the next account in an existing or
+	// canonical scope.
 	// Modern kvdb rejects exact selection with ErrAccountOperationUnsupported.
 	AccountNumber *AccountNumber
 
@@ -302,7 +318,8 @@ type NewAccountParams struct {
 // and internal failures retained only as diagnostic text.
 type AccountManager interface {
 	// NewAccount creates the next or requested exact root-derived account. The
-	// provided name must be unique within that key scope. NoChainSync=true
+	// provided name must be unique within that key scope. A new custom scope
+	// requires AddrSchema and AccountNumber. NoChainSync=true
 	// is supported only for exact SQL selection; other requests return
 	// ErrAccountOperationUnsupported.
 	// ErrIndeterminateCommit means persistence may have succeeded; callers
@@ -470,7 +487,8 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 
 // NewAccount creates the next or requested exact root-derived account and
 // returns its persisted info. The name and number must be unused in the scope.
-// Exact selection supports canonical SQL scopes and leaves lower holes free.
+// A new custom SQL scope requires AddrSchema and an exact AccountNumber.
+// Exact selection leaves lower holes free; existing schemas must match.
 // NoChainSync=true excludes automatic synchronization and recovery only with
 // exact SQL selection. Sequential exclusion and exact kvdb requests return
 // ErrAccountOperationUnsupported before preparing secrets.
@@ -513,9 +531,9 @@ func (w *Wallet) NewAccount(ctx context.Context,
 		NoChainSync:   params.NoChainSync,
 	}
 
-	err = dbParams.Validate()
+	err = validateNewAccountSchema(&dbParams, params.AddrSchema)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+		return nil, err
 	}
 
 	// Spendable derivation requires an unlocked wallet; watch-only wallets
@@ -548,8 +566,17 @@ func (w *Wallet) NewAccount(ctx context.Context,
 // handleNewAccount performs derivation and persistence only after mainLoop
 // admits the request; handleReq owns its shutdown completion.
 func (w *Wallet) handleNewAccount(req newAccountReq) {
+	// Admission makes Stop drain the persisted-scope read together with the
+	// write. Reject scope conflicts before preparing secrets or mutating Store.
+	err := w.validateNewAccountScope(req.ctx, &req.params)
+	if err != nil {
+		req.resp <- accountResp{err: err}
+
+		return
+	}
+
 	// An occupied name takes precedence over mode or derivation refusals.
-	err := w.requireAccountNameAvailable(
+	err = w.requireAccountNameAvailable(
 		req.ctx, waddrmgr.KeyScope(req.params.Scope), req.params.Name,
 	)
 	if err != nil {
@@ -607,6 +634,76 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		info: account,
 		err:  err,
 	}
+}
+
+// validateNewAccountSchema checks branch types and the complete path without
+// Store access, so NewAccount can reject malformed input before admission.
+func validateNewAccountSchema(params *db.CreateDerivedAccountParams,
+	schema *waddrmgr.ScopeAddrSchema) error {
+
+	// The legacy conversion folds script-path taproot into its key-path
+	// counterpart. Reject it before that information is lost; Store validation
+	// rejects the remaining non-account branch types after conversion.
+	if schema != nil && (schema.ExternalAddrType == waddrmgr.TaprootScript ||
+		schema.InternalAddrType == waddrmgr.TaprootScript) {
+
+		return fmt.Errorf("script-path account schema: %w", ErrInvalidParam)
+	}
+
+	converted, err := dbScopeAddrSchema(schema)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+	}
+
+	params.AddrSchema = converted
+
+	// Reject the complete hardened path before any secret preparation; reuse
+	// Store validation so the public and persistence boundaries agree.
+	err = params.Validate()
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+	}
+
+	return nil
+}
+
+// validateNewAccountScope checks persisted scope metadata rather than account
+// overrides and requires enough information to establish a new custom scope.
+func (w *Wallet) validateNewAccountScope(ctx context.Context,
+	params *db.CreateDerivedAccountParams) error {
+
+	// Omission preserves lazy canonical creation without an extra read.
+	defaultSchema, canonical := db.ScopeAddrMap[params.Scope]
+	if canonical && params.AddrSchema == nil {
+		return nil
+	}
+
+	schema, err := w.store.GetKeyScopeSchema(ctx, w.id, params.Scope)
+	switch {
+	case errors.Is(err, db.ErrKeyScopeNotFound):
+		if !canonical {
+			if params.AddrSchema == nil || params.AccountNumber == nil {
+				return fmt.Errorf("new scope needs schema and number: %w",
+					db.ErrInvalidParam)
+			}
+
+			return nil
+		}
+
+		// Receiving APIs map address types to canonical scopes. A newly
+		// created scope must retain that mapping; an existing scope below
+		// remains governed by its persisted schema, including overrides.
+		schema = defaultSchema
+
+	case err != nil:
+		return err
+	}
+
+	if params.AddrSchema != nil && *params.AddrSchema != schema {
+		return fmt.Errorf("conflicting scope schema: %w", db.ErrInvalidParam)
+	}
+
+	return nil
 }
 
 // propertiesToAccountInfo wraps a waddrmgr.AccountProperties + total balance
