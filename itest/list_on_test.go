@@ -150,6 +150,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerDerivePubKeyPaths,
 	},
 	{
+		Name:     "signer derive pubkey wallet state",
+		TestFunc: testSignerDerivePubKeyWalletState,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},

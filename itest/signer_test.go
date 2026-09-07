@@ -141,3 +141,58 @@ func testSignerDerivePubKeyPaths(h *bwtest.HarnessTest) {
 		"the first external child does not back the first address",
 	)
 }
+
+// testSignerDerivePubKeyWalletState verifies that public derivation is gated
+// on a running wallet alone, and that unlocking does not change its answer.
+func testSignerDerivePubKeyWalletState(h *bwtest.HarnessTest) {
+	// Arrange: A wallet that has been created but not started.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+
+	params := wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(
+			signerScope, waddrmgr.DefaultAccountName,
+		),
+		Branch: 0,
+		Index:  5,
+	}
+
+	// Act: Derive before the wallet runs.
+	_, err := w.DerivePubKey(ctx, params)
+
+	// Assert: The request is refused by the state gate.
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"derivation before start not rejected",
+	)
+
+	require.NoError(h, w.Start(ctx), "failed to start wallet")
+
+	// The account must exist before it can be selected. Deriving an address
+	// materializes it and restores the wallet's locked state.
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	info, err := w.Info(ctx)
+	require.NoError(h, err, "failed to query wallet info")
+	require.True(h, info.Locked, "wallet is not locked")
+
+	// Act: Derive while the wallet is locked. The account extended public key
+	// is stored in the clear, so no private material is needed.
+	locked, err := w.DerivePubKey(ctx, params)
+
+	// Assert: A started wallet serves the request whether or not it is locked.
+	require.NoError(h, err, "locked wallet refused public derivation")
+
+	h.UnlockWallet(w)
+
+	// Act: Derive the same child from the now unlocked wallet.
+	unlocked, err := w.DerivePubKey(ctx, params)
+
+	// Assert: Unlocking grants no additional public derivation, so the two
+	// answers are the same key.
+	require.NoError(h, err, "unlocked wallet refused public derivation")
+	require.True(
+		h, locked.IsEqual(unlocked),
+		"unlocking changed the derived public key",
+	)
+}
