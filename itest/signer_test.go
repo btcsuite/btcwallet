@@ -480,3 +480,51 @@ func testSignerECDHWalletState(h *bwtest.HarnessTest) {
 		h, [32]byte{}, secret, "unlocked ECDH returned no secret",
 	)
 }
+
+// testSignerECDHRejectAccount verifies that an unlocked wallet still refuses
+// an exchange it holds no signing key for, without returning secret material
+// or falling back to another account.
+func testSignerECDHRejectAccount(h *bwtest.HarnessTest) {
+	// absentAccountNumber is a BIP44 account number no test wallet creates.
+	const absentAccountNumber = 4242
+
+	// Arrange: A started, unlocked wallet holding only its default account.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	peerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the peer key")
+
+	// Act: Exchange over an account number the wallet does not hold.
+	secret, err := w.ECDH(ctx, wallet.BIP32Path{
+		KeyScope: signerScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: absentAccountNumber,
+		},
+	}, peerKey.PubKey())
+
+	// Assert: The missing account is reported, never replaced by account zero.
+	require.ErrorIs(
+		h, err, wallet.ErrAccountNotInStore,
+		"ECDH over an unknown account not rejected",
+	)
+	require.Equal(
+		h, [32]byte{}, secret, "a refused ECDH returned secret material",
+	)
+
+	// Act: Exchange over a key scope the wallet has no manager for.
+	secret, err = w.ECDH(ctx, wallet.BIP32Path{
+		KeyScope: waddrmgr.KeyScope{Purpose: 9999, Coin: 9999},
+	}, peerKey.PubKey())
+
+	// Assert: The path is scoped, so an unknown scope cannot reach the
+	// account the wallet does hold.
+	require.ErrorIs(
+		h, err, wallet.ErrAccountNotInStore,
+		"ECDH under an unknown key scope not rejected",
+	)
+	require.Equal(
+		h, [32]byte{}, secret, "a refused ECDH returned secret material",
+	)
+}
