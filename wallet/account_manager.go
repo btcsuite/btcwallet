@@ -236,8 +236,8 @@ type AccountManager interface {
 
 	// RenameAccount renames an existing account. To uniquely identify the
 	// account, the key scope must be provided. The new name must be unique
-	// within that same key scope. The reserved "imported" account cannot
-	// be renamed.
+	// within that same key scope, including against the account's own
+	// current name. The reserved "imported" account cannot be renamed.
 	RenameAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		oldName string, newName string) error
 
@@ -809,7 +809,9 @@ type renameAccountReq struct {
 }
 
 // RenameAccount renames an existing account. The new name must be unique within
-// the same key scope. The reserved "imported" account cannot be renamed.
+// the same key scope, so renaming an account to the name it already holds
+// returns ErrAccountAlreadyExists. The reserved "imported" account cannot be
+// renamed.
 func (w *Wallet) RenameAccount(ctx context.Context,
 	scope waddrmgr.KeyScope, oldName, newName string) error {
 
@@ -847,9 +849,32 @@ func (w *Wallet) RenameAccount(ctx context.Context,
 // handleRenameAccount validates and applies an admitted rename while
 // handleReq retains responsibility for releasing the Wallet WaitGroup.
 func (w *Wallet) handleRenameAccount(req renameAccountReq) {
-	err := waddrmgr.ValidateAccountName(req.newName)
+	err := waddrmgr.ValidateAccountName(req.oldName)
+	if err != nil {
+		req.resp <- fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+		return
+	}
+
+	err = waddrmgr.ValidateAccountName(req.newName)
+	if err != nil {
+		req.resp <- fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+		return
+	}
+
+	err = w.requireAccountNameAvailable(req.ctx, req.scope, req.newName)
 	if err != nil {
 		req.resp <- err
+		return
+	}
+
+	// The backends disagree on a self-rename: the legacy store rejects it as
+	// a duplicate while the SQL stores update the row to its current value
+	// and report success. Settle it here so the answer does not depend on
+	// which backend is mounted. The name being free means the account this
+	// call names does not exist, which outranks the naming conflict.
+	if req.oldName == req.newName {
+		req.resp <- fmt.Errorf("%w: %q in scope %d/%d",
+			ErrAccountNotFound, req.oldName, req.scope.Purpose, req.scope.Coin)
 
 		return
 	}
@@ -860,19 +885,7 @@ func (w *Wallet) handleRenameAccount(req renameAccountReq) {
 		OldName:  req.oldName,
 		NewName:  req.newName,
 	})
-	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers using
-		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
-		// underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			req.resp <- mErr
-
-			return
-		}
-	}
-
-	req.resp <- err
+	req.resp <- accountManagerErr(err)
 }
 
 // importAccountReq carries every import option through Wallet admission while
