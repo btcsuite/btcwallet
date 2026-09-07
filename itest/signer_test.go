@@ -284,3 +284,57 @@ func testSignerDerivePubKeyRejectRequest(h *bwtest.HarnessTest) {
 		)
 	}
 }
+
+// testSignerDerivePubKeyWatchOnly verifies that a wallet holding only public
+// account material still serves public derivation, and returns the children
+// the imported extended public key defines.
+func testSignerDerivePubKeyWatchOnly(h *bwtest.HarnessTest) {
+	const (
+		accountName = "signer watchonly account"
+		branch      = 1
+		index       = 4
+	)
+
+	// Arrange: A watch-only shell wallet seeded with one account whose
+	// extended public key the case also holds, so the expected child can be
+	// derived without the wallet.
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.WatchOnlyAccount{{
+			Scope:                keys.scope,
+			XPub:                 keys.accountKey,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			Name:                 accountName,
+			AddrType:             keys.addrType,
+		}},
+	})
+
+	account, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read the watch-only account")
+	require.True(h, account.IsWatchOnly, "account is not watch-only")
+
+	branchKey, err := keys.accountKey.Derive(branch)
+	require.NoError(h, err, "failed to derive the expected branch")
+
+	childKey, err := branchKey.Derive(index)
+	require.NoError(h, err, "failed to derive the expected index")
+
+	want, err := childKey.ECPubKey()
+	require.NoError(h, err, "failed to convert the expected child")
+
+	// Act: Derive the child through the public Signer request.
+	got, err := w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(keys.scope, accountName),
+		Branch:  branch,
+		Index:   index,
+	})
+
+	// Assert: A wallet with no private material at all resolves the account
+	// and returns that account's child.
+	require.NoError(h, err, "watch-only wallet refused public derivation")
+	require.True(
+		h, want.IsEqual(got),
+		"watch-only derivation is not the account's child",
+	)
+}
