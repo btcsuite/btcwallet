@@ -14,6 +14,7 @@ import (
 // a uniqueness code or contain the same words in their diagnostic message.
 func TestIsAccountNameConflict(t *testing.T) {
 	t.Parallel()
+
 	conn, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	conn.SetMaxOpenConns(1)
@@ -36,6 +37,7 @@ func TestIsAccountNameConflict(t *testing.T) {
 		t.Context(), "INSERT INTO accounts VALUES (1, 1, 'fresh', 7)",
 	)
 	require.Error(t, numberErr)
+
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -61,6 +63,7 @@ func TestIsAccountNameConflict(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, IsAccountNameConflict(tc.err))
+
 			if tc.err != nil {
 				wrapped := fmt.Errorf("insert account: %w", tc.err)
 				require.Equal(t, tc.want, IsAccountNameConflict(wrapped))

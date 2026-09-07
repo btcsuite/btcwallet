@@ -1031,6 +1031,7 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 			injected := tc.inject
 			w, deps := createStartedWalletWithMocks(t)
 			scope := waddrmgr.KeyScopeBIP0084
+
 			var err error
 			switch {
 			case errors.Is(tc.want, ErrAccountNotFound):
@@ -1038,17 +1039,20 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 					mock.Anything).Return(
 					(*db.AccountInfo)(nil), injected,
 				).Once()
+
 				_, err = w.GetAccount(t.Context(), scope, testAccountName)
 
 			case errors.Is(tc.want, ErrInvalidParam),
 				errors.Is(tc.want, ErrAccountOperationUnsupported):
 
 				key, fp := importAccountTestKey(t, 84)
+
 				expectAccountNameAvailable(deps, scope, testAccountName)
 				deps.store.On("CreateImportedAccount", mock.Anything,
 					mock.Anything).Return(
 					(*db.AccountInfo)(nil), injected,
 				).Once()
+
 				_, err = w.ImportAccount(
 					t.Context(), testAccountName, key, fp,
 					waddrmgr.WitnessPubKey, false,
@@ -1059,6 +1063,7 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 				// creation returns the injected Store error.
 				stub := newStubAccountDeriveFn(t)
 				w.masterFingerprint = stub.masterKeyFingerprint
+
 				expectAccountNameAvailable(deps, scope, testAccountName)
 				expectAccountDeriveSetup(t, deps, stub)
 				deps.store.On("CreateDerivedAccount", mock.Anything,
@@ -1073,6 +1078,7 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 					Name:  testAccountName,
 				})
 			}
+
 			deps.store.AssertExpectations(t)
 			deps.vault.AssertExpectations(t)
 
