@@ -350,6 +350,33 @@ type newAccountReq struct {
 	resp  chan accountResp
 }
 
+// requireAccountNameAvailable reports a name already taken within scope as
+// ErrAccountAlreadyExists. The lookup is read-only and skips the balance query
+// because only the name matters here. An absent account leaves the name
+// available, a missing scope included, so the first account of a scope can
+// still be created.
+func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
+	scope waddrmgr.KeyScope, name string) error {
+
+	_, err := w.cache.GetAccount(ctx, db.GetAccountQuery{
+		WalletID:    w.id,
+		Scope:       db.KeyScope(scope),
+		Name:        &name,
+		SkipBalance: true,
+	})
+	if err == nil {
+		return fmt.Errorf("%w: %q in scope %d/%d",
+			ErrAccountAlreadyExists, name, scope.Purpose, scope.Coin)
+	}
+
+	translated := accountManagerErr(err)
+	if errors.Is(translated, ErrAccountNotFound) {
+		return nil
+	}
+
+	return translated
+}
+
 // NewAccount creates the next account and returns its account info. The name
 // must be unique under the key scope. In order to support automatic seed
 // restoring, new accounts may not be created when all of the previous 100
@@ -366,6 +393,22 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 	err = ctx.Err()
 	if err != nil {
 		return nil, err
+	}
+
+	err = waddrmgr.ValidateAccountName(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
+	}
+
+	// Hardened derivation needs the master HD private key, which stays sealed
+	// while the wallet is locked. A watch-only wallet holds no such key at
+	// all, so it is refused as unsupported below instead of being reported as
+	// locked.
+	if !w.IsWatchOnly() {
+		err = w.state.canSign()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	req := newAccountReq{
@@ -391,10 +434,31 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 // handleNewAccount performs derivation and persistence only after mainLoop
 // admits the request; handleReq owns its shutdown completion.
 func (w *Wallet) handleNewAccount(req newAccountReq) {
-	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
+	// An occupied name is reported ahead of the watch-only refusal and ahead
+	// of an exhausted derivation range, so the caller hears about the part of
+	// the request it can restate.
+	err := w.requireAccountNameAvailable(req.ctx, req.scope, req.name)
 	if err != nil {
 		req.resp <- accountResp{err: err}
+		return
+	}
 
+	// Refuse before any write is attempted. Hardened account derivation needs
+	// the master HD private key, which a watch-only wallet does not hold, and
+	// the backends otherwise refuse at different points: the SQL stores reach
+	// the derivation callback while a rootless legacy wallet fails its scope
+	// lookup first and would report a missing account instead.
+	if w.IsWatchOnly() {
+		req.resp <- accountResp{
+			err: accountManagerErr(errWatchOnlyAccountDerivation),
+		}
+
+		return
+	}
+
+	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
+	if err != nil {
+		req.resp <- accountResp{err: accountManagerErr(err)}
 		return
 	}
 
@@ -406,17 +470,16 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		}, deriveFn,
 	)
 	if err != nil {
-		// Preserve the legacy waddrmgr.ManagerError contract so that
-		// callers using waddrmgr.IsError(err, ...) keep working after
-		// kvdb wraps the underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			req.resp <- accountResp{err: mErr}
+		mappedErr := accountManagerErr(err)
+		if errors.Is(err, db.ErrUnknownKeyScope) &&
+			!errors.Is(mappedErr, context.Canceled) &&
+			!errors.Is(mappedErr, context.DeadlineExceeded) {
 
-			return
+			mappedErr = fmt.Errorf("%w: %s", ErrInvalidParam,
+				err.Error())
 		}
 
-		req.resp <- accountResp{err: err}
+		req.resp <- accountResp{err: mappedErr}
 
 		return
 	}
@@ -424,7 +487,7 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 	account, err := w.accountInfoFromStore(info)
 	req.resp <- accountResp{
 		info: account,
-		err:  err,
+		err:  accountManagerErr(err),
 	}
 }
 
