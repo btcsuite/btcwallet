@@ -195,6 +195,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerECDHWatchOnly,
 	},
 	{
+		Name:     "signer derivation durable reopen",
+		TestFunc: testSignerDerivationDurableReopen,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
