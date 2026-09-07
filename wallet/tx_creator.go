@@ -829,21 +829,39 @@ func (w *Wallet) determineChangeSource(intent *TxIntent) *ScopedAccount {
 func (w *Wallet) createInputSource(ctx context.Context, intent *TxIntent) (
 	txauthor.InputSource, error) {
 
+	var (
+		source txauthor.InputSource
+		err    error
+	)
+
 	switch inputs := intent.Inputs.(type) {
 	// If the inputs are manually specified, we create a "constant" input
 	// source that will only ever return the specified UTXOs.
 	case *InputsManual:
-		return w.createManualInputSource(ctx, inputs)
+		source, err = w.createManualInputSource(ctx, inputs)
 
 	// If the inputs are policy-based, we create an input source that will
 	// perform coin selection.
 	case *InputsPolicy:
-		return w.createPolicyInputSource(ctx, inputs, intent.FeeRate)
+		source, err = w.createPolicyInputSource(
+			ctx, inputs, intent.FeeRate,
+		)
 
 	// Any other type is unsupported.
 	default:
 		return nil, ErrUnsupportedTxInputs
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate whichever source was built before handing it to authoring.
+	// This is the one boundary every maintained caller crosses -
+	// CreateTransaction and FundPsbt both prepare their sources here - so
+	// wrapping it once covers automatic, manual, and selected results
+	// without each adapter having to remember to.
+	return checkInputSource(source), nil
 }
 
 // createManualInputSource creates an input source from a list of manually
@@ -1140,6 +1158,10 @@ func (w *Wallet) getEligibleUTXOsFromList(ctx context.Context,
 
 // makeInputSource creates an input source that spends arranged coins until the
 // requested target amount is reached.
+//
+// The running total is accumulated through the checked add, so a coin whose
+// stored value cannot be added is reported rather than wrapping the total it
+// would have funded.
 func makeInputSource(eligible []Coin) txauthor.InputSource {
 	// Current inputs and their total value. These are closed over by the
 	// returned input source and reused across multiple calls.
@@ -1155,10 +1177,23 @@ func makeInputSource(eligible []Coin) txauthor.InputSource {
 			nextCredit := eligible[0]
 			prevOut := nextCredit.TxOut
 			outpoint := nextCredit.OutPoint
+
+			// Take the coin only once its value is known to be
+			// addable. This state outlives the call, so a failed
+			// add must neither record an input against a total that
+			// never took it, nor drop the offending coin and let a
+			// later call succeed without it.
+			nextTotal, err := addInputAmounts(
+				currentTotal, btcutil.Amount(prevOut.Value),
+			)
+			if err != nil {
+				return 0, nil, nil, nil, err
+			}
+
 			eligible = eligible[1:]
 
 			nextInput := wire.NewTxIn(&outpoint, nil, nil)
-			currentTotal += btcutil.Amount(prevOut.Value)
+			currentTotal = nextTotal
 
 			currentInputs = append(currentInputs, nextInput)
 			currentScripts = append(
@@ -1197,6 +1232,10 @@ func constantInputSource[T constantInputCredit](
 }
 
 // constantUtxoInputSource adapts static UTXO info into an input source.
+//
+// The total is accumulated through the checked add. The sum is formed once
+// here rather than per call, so a failure to form it is held until the source
+// is asked, which is the first moment there is a caller to report it to.
 func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	// Current inputs and their total value. These won't change over
 	// different invocations as we want our inputs to remain static since
@@ -1206,9 +1245,18 @@ func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 	currentScripts := make([][]byte, 0, len(eligible))
 	currentInputValues := make([]btcutil.Amount, 0, len(eligible))
 
+	var sourceErr error
+
 	for _, credit := range eligible {
+		nextTotal, err := addInputAmounts(currentTotal, credit.Amount)
+		if err != nil {
+			sourceErr = err
+
+			break
+		}
+
 		nextInput := wire.NewTxIn(&credit.OutPoint, nil, nil)
-		currentTotal += credit.Amount
+		currentTotal = nextTotal
 
 		currentInputs = append(currentInputs, nextInput)
 		currentScripts = append(currentScripts, credit.PkScript)
@@ -1217,6 +1265,13 @@ func constantUtxoInputSource(eligible []db.UtxoInfo) txauthor.InputSource {
 
 	return func(_ btcutil.Amount) (btcutil.Amount, []*wire.TxIn,
 		[]btcutil.Amount, [][]byte, error) {
+
+		// The selection is fixed, so a partial one is never offered:
+		// the failure is reported instead of the coins that preceded
+		// it.
+		if sourceErr != nil {
+			return 0, nil, nil, nil, sourceErr
+		}
 
 		return currentTotal, currentInputs, currentInputValues,
 			currentScripts, nil
