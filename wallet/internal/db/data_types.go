@@ -534,10 +534,14 @@ type CreateDerivedAccountParams struct {
 	// Scope is the key scope for the new account.
 	Scope KeyScope
 
+	// AddrSchema selects a new scope's schema or asserts equality with an
+	// existing scope. Nil reuses persisted metadata or the canonical default.
+	AddrSchema *ScopeAddrSchema
+
 	// Name is the name of the new account.
 	Name string
 
-	// AccountNumber selects an exact canonical-scope account on SQL stores.
+	// AccountNumber selects an exact account on SQL stores.
 	// Nil allocates the next account; exact creation leaves lower holes free.
 	// The legacy kvdb store does not support exact selection.
 	AccountNumber *uint32
