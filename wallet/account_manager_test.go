@@ -704,7 +704,10 @@ func TestNewAccount(t *testing.T) {
 	).Once()
 
 	// Act: create the next account in the scope.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the account result contains the allocated number and canonical
 	// master fingerprint, and every required dependency call occurred.
@@ -758,7 +761,10 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	}, nil).Once()
 
 	// Act: create an account through the deferred derivation path.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the Store-provided result is returned and all expected admission
 	// and derivation calls occurred.
@@ -982,6 +988,7 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 			injected := tc.inject
 			w, deps := createStartedWalletWithMocks(t)
 			scope := waddrmgr.KeyScopeBIP0084
+
 			var err error
 			switch {
 			case errors.Is(tc.want, ErrAccountNotFound):
@@ -989,33 +996,46 @@ func TestAccountManagerErrTranslation(t *testing.T) {
 					mock.Anything).Return(
 					(*db.AccountInfo)(nil), injected,
 				).Once()
+
 				_, err = w.GetAccount(t.Context(), scope, testAccountName)
 
 			case errors.Is(tc.want, ErrInvalidParam),
 				errors.Is(tc.want, ErrAccountOperationUnsupported):
 
 				key, fp := importAccountTestKey(t, 84)
+
 				expectAccountNameAvailable(deps, scope, testAccountName)
 				deps.store.On("CreateImportedAccount", mock.Anything,
 					mock.Anything).Return(
 					(*db.AccountInfo)(nil), injected,
 				).Once()
+
 				_, err = w.ImportAccount(
 					t.Context(), testAccountName, key, fp,
 					waddrmgr.WitnessPubKey, false,
 				)
 
 			default:
+				// Arrange: allow admission and secret preparation so
+				// creation returns the injected Store error.
 				stub := newStubAccountDeriveFn(t)
 				w.masterFingerprint = stub.masterKeyFingerprint
+
 				expectAccountNameAvailable(deps, scope, testAccountName)
 				expectAccountDeriveSetup(t, deps, stub)
 				deps.store.On("CreateDerivedAccount", mock.Anything,
 					mock.Anything, mock.Anything).Return(
 					(*db.AccountInfo)(nil), injected,
 				).Once()
-				_, err = w.NewAccount(t.Context(), scope, testAccountName)
+
+				// Act: exercise the public creation error boundary
+				// using the default synchronization policy.
+				_, err = w.NewAccount(t.Context(), NewAccountParams{
+					Scope: scope,
+					Name:  testAccountName,
+				})
 			}
+
 			deps.store.AssertExpectations(t)
 			deps.vault.AssertExpectations(t)
 
@@ -1116,9 +1136,10 @@ func TestNewAccountTranslatesStoreError(t *testing.T) {
 		}).Once()
 
 	// Act: create an account whose name is already taken.
-	account, err := w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-	)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  testAccountName,
+	})
 
 	// Assert: the wallet sentinel is reported, the legacy identity is not,
 	// and the store saw exactly the calls set up above.
@@ -1320,9 +1341,10 @@ func TestNewAccountAlreadyLockedForbidden(t *testing.T) {
 	deps.vault.On("IsLocked").Return(true).Once()
 
 	// Act: create an account while the Wallet is already locked.
-	account, err := w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-	)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  testAccountName,
+	})
 
 	// Assert: admission fails before encrypted seed, Vault, or account Store
 	// preparation begins.
@@ -1358,9 +1380,10 @@ func TestNewAccountVaultLockedForbidden(t *testing.T) {
 		Return([]byte(nil), keyvault.ErrVaultLocked).Once()
 
 	// Act: create an account while the vault is locked.
-	account, err := w.NewAccount(
-		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
-	)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: waddrmgr.KeyScopeBIP0084,
+		Name:  testAccountName,
+	})
 
 	// Assert: the lock is reported as a forbidden state, the vault
 	// identity does not escape, and no account row was attempted.
@@ -1388,7 +1411,10 @@ func TestNewAccountWatchOnlyUnsupported(t *testing.T) {
 	expectAccountNameAvailable(deps, scope, testAccountName)
 
 	// Act: create a derived account on the watch-only wallet.
-	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope: scope,
+		Name:  testAccountName,
+	})
 
 	// Assert: the refusal is reported as unsupported, the internal
 	// derivation sentinel does not escape, and the store is never asked.
@@ -1422,7 +1448,10 @@ func TestNewAccountWatchOnlyPrecedence(t *testing.T) {
 		cancel()
 
 		// Act: create an account with the cancelled context.
-		account, err := w.NewAccount(ctx, scope, testAccountName)
+		account, err := w.NewAccount(ctx, NewAccountParams{
+			Scope: scope,
+			Name:  testAccountName,
+		})
 
 		// Assert: the caller hears about its own cancellation rather
 		// than about the wallet's mode, and nothing was attempted.
@@ -1440,7 +1469,10 @@ func TestNewAccountWatchOnlyPrecedence(t *testing.T) {
 			name        string
 			accountName string
 		}{
-			{name: "empty", accountName: ""},
+			{
+				name:        "empty",
+				accountName: "",
+			},
 			{
 				name:        "reserved",
 				accountName: waddrmgr.ImportedAddrAccountName,
@@ -1457,9 +1489,10 @@ func TestNewAccountWatchOnlyPrecedence(t *testing.T) {
 				w.isWatchOnly = true
 
 				// Act: create an account under that name.
-				account, err := w.NewAccount(
-					t.Context(), scope, tc.accountName,
-				)
+				account, err := w.NewAccount(t.Context(), NewAccountParams{
+					Scope: scope,
+					Name:  tc.accountName,
+				})
 
 				// Assert: the malformed request is reported as
 				// such, not as a mode refusal, and nothing was
@@ -1491,7 +1524,10 @@ func TestNewAccountWatchOnlyPrecedence(t *testing.T) {
 		}).Return(&db.AccountInfo{AccountName: testAccountName}, nil).Once()
 
 		// Act: request a watch-only account under the occupied name.
-		account, err := w.NewAccount(t.Context(), scope, testAccountName)
+		account, err := w.NewAccount(t.Context(), NewAccountParams{
+			Scope: scope,
+			Name:  testAccountName,
+		})
 
 		// Assert: the stable name conflict wins and no mutation is attempted.
 		require.Nil(t, account)
@@ -1527,7 +1563,10 @@ func TestAccountManagerOccupiedNamePrecedesMutation(t *testing.T) {
 		}).Return(&db.AccountInfo{AccountName: testAccountName}, nil).Once()
 
 		// Act: create an account under the occupied name.
-		account, err := w.NewAccount(t.Context(), scope, testAccountName)
+		account, err := w.NewAccount(t.Context(), NewAccountParams{
+			Scope: scope,
+			Name:  testAccountName,
+		})
 
 		// Assert: the conflict is stable and no preparation or write begins.
 		require.Nil(t, account)
