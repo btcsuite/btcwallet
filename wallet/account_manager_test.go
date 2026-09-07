@@ -2065,6 +2065,10 @@ func TestNewAccountInvalidPath(t *testing.T) {
 		Scope:         waddrmgr.KeyScopeBIP0084,
 		Name:          testAccountName,
 		AccountNumber: &number,
+		AddrSchema: &waddrmgr.ScopeAddrSchema{
+			ExternalAddrType: waddrmgr.WitnessPubKey,
+			InternalAddrType: waddrmgr.WitnessPubKey,
+		},
 	})
 
 	// Assert: validation exposes only the public identity and no account,
@@ -2098,7 +2102,18 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 			t.Parallel()
 
 			w, deps := createUnlockedWalletWithMocks(t)
-			scope := waddrmgr.KeyScopeBIP0084
+			scope := waddrmgr.KeyScope{
+				Purpose: 1017,
+			}
+			schema := waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			}
+			deps.store.On("GetKeyScopeSchema", mock.Anything, w.id,
+				db.KeyScope(scope)).Return(
+				db.ScopeAddrSchema{}, db.ErrKeyScopeNotFound,
+			).Once()
+
 			number := AccountNumber(7)
 
 			expectAccountNameAvailable(deps, scope, testAccountName)
@@ -2108,6 +2123,7 @@ func TestNewAccountExactUnsupported(t *testing.T) {
 				Scope:         scope,
 				Name:          testAccountName,
 				AccountNumber: &number,
+				AddrSchema:    &schema,
 				NoChainSync:   test.noChainSync,
 			})
 
@@ -2297,6 +2313,233 @@ func TestNewAccountCustomScopeMissingFields(t *testing.T) {
 			// neither a partial result nor any secret or write call occurs.
 			require.ErrorIs(t, err, ErrInvalidParam)
 			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewAccountInvalidSchema verifies non-account branch types are rejected
+// before any scope read, secret preparation, or account mutation.
+func TestNewAccountInvalidSchema(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: zero branch values are valid P2PKH, so each row changes only
+	// the invalid branch. Cover lossy taproot conversion on both branches.
+	tests := []struct {
+		name     string
+		external waddrmgr.AddressType
+		internal waddrmgr.AddressType
+	}{
+		{
+			name:     "raw key",
+			external: waddrmgr.RawPubKey,
+		},
+		{
+			name:     "script hash",
+			external: waddrmgr.Script,
+		},
+		{
+			name:     "witness script",
+			external: waddrmgr.WitnessScript,
+		},
+		{
+			name:     "external taproot script",
+			external: waddrmgr.TaprootScript,
+		},
+		{
+			name:     "internal taproot script",
+			internal: waddrmgr.TaprootScript,
+		},
+		{
+			name:     "unknown external type",
+			external: waddrmgr.AddressType(255),
+		},
+		{
+			name:     "unknown internal type",
+			internal: waddrmgr.AddressType(255),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, _ := createUnlockedWalletWithMocks(t)
+			w.addrStore = nil
+			number := AccountNumber(7)
+
+			// Act: submit the malformed schema through the public request.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope: waddrmgr.KeyScope{
+					Purpose: 1017,
+				},
+				Name:          testAccountName,
+				AccountNumber: &number,
+				AddrSchema: &waddrmgr.ScopeAddrSchema{
+					ExternalAddrType: test.external,
+					InternalAddrType: test.internal,
+				},
+			})
+
+			// Assert: no backend identity or partial account escapes, and
+			// the strict mocks allow no secret, read, or mutation calls.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.NotErrorIs(t, err, db.ErrInvalidParam)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewAccountScopeSchemaConflict verifies scope assertions fail before
+// secrets, including a new canonical scope that would change receiving types.
+func TestNewAccountScopeSchemaConflict(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: each scope read yields a witness schema or reports an absent
+	// BIP84 scope. The supplied P2PKH branch conflicts with either authority.
+	tests := []struct {
+		name     string
+		purpose  uint32
+		external waddrmgr.AddressType
+		internal waddrmgr.AddressType
+		readErr  error
+	}{
+		{
+			name:     "external mismatch",
+			purpose:  1017,
+			external: waddrmgr.PubKeyHash,
+			internal: waddrmgr.WitnessPubKey,
+		},
+		{
+			name:     "internal mismatch",
+			purpose:  1017,
+			external: waddrmgr.WitnessPubKey,
+			internal: waddrmgr.PubKeyHash,
+		},
+		{
+			name:     "absent canonical mismatch",
+			purpose:  84,
+			external: waddrmgr.PubKeyHash,
+			internal: waddrmgr.PubKeyHash,
+			readErr:  db.ErrKeyScopeNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, deps := createUnlockedWalletWithMocks(t)
+			w.addrStore = nil
+			scope := waddrmgr.KeyScope{
+				Purpose: test.purpose,
+			}
+			number := AccountNumber(7)
+
+			deps.store.On("GetKeyScopeSchema", mock.Anything, w.id,
+				db.KeyScope(scope)).Return(
+				db.ScopeAddrMap[db.KeyScopeBIP0084], test.readErr,
+			).Once()
+
+			// Act: try to create an account with an incompatible schema.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:         scope,
+				Name:          testAccountName,
+				AccountNumber: &number,
+				AddrSchema: &waddrmgr.ScopeAddrSchema{
+					ExternalAddrType: test.external,
+					InternalAddrType: test.internal,
+				},
+			})
+
+			// Assert: only the scope read occurs; no root preparation or
+			// mutation can establish the incompatible account.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewAccountExistingScopeSchema verifies omission and equality reuse the
+// persisted schema, even when a canonical scope differs from its default map.
+func TestNewAccountExistingScopeSchema(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use all four supported key-derived branch forms across two
+	// persisted schemas. Every row has the same read, derivation, and write.
+	legacy := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.PubKeyHash,
+		InternalAddrType: waddrmgr.NestedWitnessPubKey,
+	}
+	witness := waddrmgr.ScopeAddrSchema{
+		ExternalAddrType: waddrmgr.WitnessPubKey,
+		InternalAddrType: waddrmgr.TaprootPubKey,
+	}
+
+	tests := []struct {
+		name      string
+		purpose   uint32
+		supplied  *waddrmgr.ScopeAddrSchema
+		persisted waddrmgr.ScopeAddrSchema
+	}{
+		{
+			name:      "custom matching schema",
+			purpose:   1017,
+			supplied:  &witness,
+			persisted: witness,
+		},
+		{
+			name:      "custom omitted schema",
+			purpose:   1017,
+			persisted: witness,
+		},
+		{
+			name:      "canonical persisted override",
+			purpose:   84,
+			supplied:  &legacy,
+			persisted: legacy,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, deps := createUnlockedWalletWithMocks(t)
+			w.addrStore = nil
+			scope := waddrmgr.KeyScope{
+				Purpose: test.purpose,
+			}
+			number := AccountNumber(7)
+			supplied, err := dbScopeAddrSchema(test.supplied)
+			require.NoError(t, err)
+			persisted, err := dbScopeAddrSchema(&test.persisted)
+			require.NoError(t, err)
+			deps.store.On("GetKeyScopeSchema", mock.Anything, w.id,
+				db.KeyScope(scope)).Return(*persisted, nil).Once()
+			expectAccountNameAvailable(deps, scope, testAccountName)
+			expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
+			deps.store.On("CreateDerivedAccount", mock.Anything,
+				db.CreateDerivedAccountParams{
+					WalletID:      w.id,
+					Scope:         db.KeyScope(scope),
+					Name:          testAccountName,
+					AccountNumber: (*uint32)(&number),
+					AddrSchema:    supplied,
+				}, mock.Anything).Return(&db.AccountInfo{
+				AccountNumber: (*uint32)(&number),
+				AddrSchema:    *persisted,
+			}, nil).Once()
+
+			// Act: create through the same public operation regardless of
+			// whether the request supplies or omits the persisted schema.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:         scope,
+				Name:          testAccountName,
+				AccountNumber: &number,
+				AddrSchema:    test.supplied,
+			})
+
+			// Assert: the result reports persisted branch types, with one
+			// creation and no additional source of scope metadata.
+			require.NoError(t, err)
+			require.Equal(t, test.persisted, info.AddrSchema)
 		})
 	}
 }
