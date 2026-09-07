@@ -591,6 +591,8 @@ func TestListAccountsByNameNoMatch(t *testing.T) {
 func TestGetAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: return a stored exclusion policy on a spendable account so
+	// the public snapshot must use persisted data, not custody or a default.
 	w, deps := createStartedWalletWithMocks(t)
 
 	// Seed a non-zero cached master fingerprint so the
@@ -620,10 +622,16 @@ func TestGetAccount(t *testing.T) {
 		KeyScope:           dbScope,
 		ConfirmedBalance:   100,
 		UnconfirmedBalance: 23,
+		NoChainSync:        true,
 	}, nil).Once()
 
+	// Act: read the account through the public API and its Store snapshot.
 	info, err := w.GetAccount(t.Context(), scope, name)
+
+	// Assert: policy, identity, and balances survive the Wallet conversion,
+	// and the single expected Store read supplies the complete result.
 	require.NoError(t, err)
+	require.True(t, info.NoChainSync)
 	require.NotNil(t, info.AccountNumber)
 	require.Equal(t, AccountNumber(1), *info.AccountNumber)
 	require.Equal(t, name, info.AccountName)
@@ -632,6 +640,7 @@ func TestGetAccount(t *testing.T) {
 	require.NotNil(t, info.MasterKeyFingerprint)
 	require.Equal(t, MasterFingerprint(masterFP),
 		*info.MasterKeyFingerprint)
+	deps.store.AssertExpectations(t)
 }
 
 // TestGetAccountIncludesImportedPseudoAccount verifies that the AccountInfo
@@ -676,7 +685,7 @@ func TestNewAccount(t *testing.T) {
 	t.Parallel()
 
 	// Arrange: an unlocked wallet with an available account name and valid
-	// derivation material.
+	// derivation material; the exact Store request retains chain sync.
 	w, deps := createStartedWalletWithMocks(t)
 	stub := newStubAccountDeriveFn(t)
 	w.masterFingerprint = stub.masterKeyFingerprint
@@ -692,9 +701,10 @@ func TestNewAccount(t *testing.T) {
 	expectAccountDeriveSetup(t, deps, stub)
 	deps.store.On("CreateDerivedAccount", mock.Anything,
 		db.CreateDerivedAccountParams{
-			WalletID: 0,
-			Scope:    dbScope,
-			Name:     testAccountName,
+			WalletID:    0,
+			Scope:       dbScope,
+			Name:        testAccountName,
+			NoChainSync: false,
 		}, mock.Anything).Return(
 		&db.AccountInfo{
 			AccountNumber: &accountNumber,
@@ -703,20 +713,51 @@ func TestNewAccount(t *testing.T) {
 		}, nil,
 	).Once()
 
-	// Act: create the next account in the scope.
+	// Act: create the next account with the default synchronization policy.
 	account, err := w.NewAccount(t.Context(), NewAccountParams{
 		Scope: scope,
 		Name:  testAccountName,
 	})
 
 	// Assert: the account result contains the allocated number and canonical
-	// master fingerprint, and every required dependency call occurred.
+	// master fingerprint, retains chain sync, and fulfills the required calls.
 	require.NoError(t, err)
+	require.False(t, account.NoChainSync)
 	require.NotNil(t, account.AccountNumber)
 	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 	require.NotNil(t, account.MasterKeyFingerprint)
 	require.Equal(t, MasterFingerprint(stub.masterKeyFingerprint),
 		*account.MasterKeyFingerprint)
+	deps.store.AssertExpectations(t)
+	deps.vault.AssertExpectations(t)
+}
+
+// TestNewAccountNoChainSyncUnsupported verifies the common Wallet boundary
+// refuses exclusion before any backend can prepare secrets or mutate accounts.
+func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: allow the existing admission checks on an unlocked wallet
+	// with an available name. Strict mocks have no secret or write
+	// expectations, so crossing into creation would fail this test.
+	w, deps := createStartedWalletWithMocks(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	deps.vault.On("IsLocked").Return(false).Once()
+	expectAccountNameAvailable(deps, scope, testAccountName)
+
+	// Act: request exclusion through the public API while its receiving and
+	// recovery support is unavailable.
+	account, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope:       scope,
+		Name:        testAccountName,
+		NoChainSync: true,
+	})
+
+	// Assert: the stable unsupported error returns no account, and only the
+	// required read-only admission calls reach the Store and Vault.
+	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+	require.Nil(t, account)
 	deps.store.AssertExpectations(t)
 	deps.vault.AssertExpectations(t)
 }
@@ -1792,8 +1833,10 @@ func TestImportAccount(t *testing.T) {
 		masterFP, addrType, false,
 	)
 
-	// Assert: the imported account is returned and all Store calls occurred.
+	// Assert: the unchanged import request retains chain sync, returns the
+	// imported account, and fulfills all required Store calls.
 	require.NoError(t, err)
+	require.False(t, props.NoChainSync)
 	require.Equal(t, testAccountName, props.AccountName)
 	deps.store.AssertExpectations(t)
 }
