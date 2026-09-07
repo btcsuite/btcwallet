@@ -1216,6 +1216,532 @@ func requireNoInternalIdentity(t *testing.T, got error) {
 	require.NotErrorAs(t, got, &mgrErr)
 }
 
+// TestNewAccountAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestNewAccountAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		account, err := w.NewAccount(
+			t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: cancellation must precede the watch-only refusal.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		account, err := w.NewAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: the deadline must precede the watch-only refusal.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		account, err := w.NewAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestListAccountsAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestListAccountsAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		accounts, err := w.ListAccounts(t.Context())
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		accounts, err := w.ListAccounts(ctx)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		accounts, err := w.ListAccounts(ctx)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestListAccountsByScopeAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestListAccountsByScopeAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		accounts, err := w.ListAccountsByScope(
+			t.Context(), waddrmgr.KeyScopeBIP0084,
+		)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		accounts, err := w.ListAccountsByScope(
+			ctx, waddrmgr.KeyScopeBIP0084,
+		)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		accounts, err := w.ListAccountsByScope(
+			ctx, waddrmgr.KeyScopeBIP0084,
+		)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestListAccountsByNameAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestListAccountsByNameAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		accounts, err := w.ListAccountsByName(t.Context(), testAccountName)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		accounts, err := w.ListAccountsByName(ctx, testAccountName)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		accounts, err := w.ListAccountsByName(ctx, testAccountName)
+
+		// Assert.
+		require.Nil(t, accounts)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestGetAccountAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestGetAccountAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		account, err := w.GetAccount(
+			t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		account, err := w.GetAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		account, err := w.GetAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestRenameAccountAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestRenameAccountAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		// Act.
+		err := w.RenameAccount(
+			t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName, "renamed",
+		)
+
+		// Assert.
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// Act.
+		err := w.RenameAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName, "renamed",
+		)
+
+		// Assert.
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		// Act.
+		err := w.RenameAccount(
+			ctx, waddrmgr.KeyScopeBIP0084, testAccountName, "renamed",
+		)
+
+		// Assert.
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
+// TestImportAccountAdmission verifies lifecycle and context errors are
+// returned before Store access.
+func TestImportAccountAdmission(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not started", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createTestWalletWithMocks(t)
+
+		acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+		// Act.
+		account, err := w.ImportAccount(
+			t.Context(), testAccountName, acctPubKey, masterFP,
+			waddrmgr.WitnessPubKey, false,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.ErrorIs(t, err, ErrStateForbidden)
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+		// Act.
+		account, err := w.ImportAccount(
+			ctx, testAccountName, acctPubKey, masterFP,
+			waddrmgr.WitnessPubKey, false,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.Canceled, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange.
+		w, deps := createStartedWalletWithMocks(t)
+		w.isWatchOnly = true
+		ctx, cancel := context.WithDeadline(
+			t.Context(), time.Now().Add(-time.Second),
+		)
+		t.Cleanup(cancel)
+
+		acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+		// Act.
+		account, err := w.ImportAccount(
+			ctx, testAccountName, acctPubKey, masterFP,
+			waddrmgr.WitnessPubKey, false,
+		)
+
+		// Assert.
+		require.Nil(t, account)
+		require.Equal(t, context.DeadlineExceeded, err)
+		require.Empty(t, reportedIdentities(err))
+		requireNoInternalIdentity(t, err)
+		deps.store.AssertNotCalled(
+			t, "GetAccount", mock.Anything, mock.Anything,
+		)
+	})
+}
+
 // TestAccountManagerErrTranslatesIdentities verifies the classifications no
 // public method exercises directly: each store or legacy waddrmgr failure is
 // reported as its wallet-owned identity and as no other, with the source text
