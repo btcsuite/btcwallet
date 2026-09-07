@@ -1989,6 +1989,112 @@ func TestNewDerivedAddress(t *testing.T) {
 	}
 }
 
+// TestNewDerivedAddressNoChainSyncUnsupported verifies receiving allocation
+// rejects excluded accounts while internal transaction-change allocation keeps
+// its existing behavior independently of chain-synchronization policy.
+func TestNewDerivedAddressNoChainSyncUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Receiving includes both branches; transaction change uses the same
+	// allocator but makes no receiving promise to the caller.
+	tests := []struct {
+		name             string
+		change           bool
+		requireChainSync bool
+	}{
+		{
+			name:             "external receiving",
+			change:           false,
+			requireChainSync: true,
+		},
+		{
+			name:             "change receiving",
+			change:           true,
+			requireChainSync: true,
+		},
+		{
+			name:             "transaction change",
+			change:           true,
+			requireChainSync: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: persist the excluded policy in a real SQL account.
+			// Observe callback invocation to distinguish rejection before
+			// derivation from an allocation rolled back after derivation.
+			deriveCalled := false
+			store := NewTestStoreWithDerive(t, func(ctx context.Context,
+				params db.AddressDerivationParams) (
+				*db.DerivedAddressData, error) {
+
+				deriveCalled = true
+
+				return mockDeriveFunc()(ctx, params)
+			})
+			walletID := newWallet(t, store, "excluded-account")
+			name := "key-only"
+			scope := db.KeyScopeBIP0084
+			before, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					WalletID:    walletID,
+					Scope:       scope,
+					Name:        name,
+					NoChainSync: true,
+				}, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			// Act: ask the existing allocator for the selected operation,
+			// then reload durable counters and address rows to see whether
+			// it allocated anything before returning its result.
+			info, allocationErr := store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					WalletID:         walletID,
+					AccountName:      name,
+					Scope:            scope,
+					Change:           test.change,
+					RequireChainSync: test.requireChainSync,
+				},
+			)
+			after := getAccountByName(t, store, walletID, scope, name)
+			addresses, err := store.ListAddresses(
+				t.Context(), listAccountAddressesQuery(
+					t, walletID, scope, name, 10,
+				),
+			)
+
+			// Assert: receiving fails without derivation or durable change.
+			// Internal transaction change still creates one child and only
+			// advances its internal branch, preserving the spending path.
+			require.NoError(t, err)
+			require.Equal(t, before.ExternalKeyCount, after.ExternalKeyCount)
+
+			if test.requireChainSync {
+				require.ErrorIs(t, allocationErr,
+					db.ErrAccountOperationUnsupported)
+				require.Nil(t, info)
+				require.False(t, deriveCalled)
+				require.Equal(t, before.InternalKeyCount,
+					after.InternalKeyCount)
+				require.Empty(t, addresses.Items)
+
+				return
+			}
+
+			require.NoError(t, allocationErr)
+			require.NotNil(t, info)
+			require.True(t, deriveCalled)
+			require.Equal(t, before.InternalKeyCount+1, after.InternalKeyCount)
+			require.Len(t, addresses.Items, 1)
+			require.Equal(t, info.ID, addresses.Items[0].ID)
+		})
+	}
+}
+
 // TestNewDerivedAddressUsesStoredScopeSchema verifies that derived addresses
 // use the address schema persisted on the key scope instead of recomputing the
 // default schema from the scope tuple.
