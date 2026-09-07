@@ -43,6 +43,11 @@ var allTestCases = []*testCase{
 		Name:     "account manager create account",
 		TestFunc: testAccountManagerCreateAccount,
 	},
+	// Custom scopes must persist their schema together with the account.
+	{
+		Name:     "account manager create custom scope account",
+		TestFunc: testAccountManagerCreateCustomScopeAccount,
+	},
 	{
 		Name:     "account manager create exact account",
 		TestFunc: testAccountManagerCreateExactAccount,

@@ -3,6 +3,8 @@
 package itest
 
 import (
+	"testing"
+
 	"github.com/btcsuite/btcd/btcutil/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/bwtest"
@@ -298,6 +300,93 @@ func testAccountManagerAdvanceAccountCursor(h *bwtest.HarnessTest) {
 	// Assert: the cursor advanced past seven and did not retreat for two.
 	require.NoError(h, err)
 	require.Equal(h, wallet.AccountNumber(8), *next.AccountNumber)
+}
+
+// testAccountManagerCreateCustomScopeAccount verifies that exact root-derived
+// creation persists a new scope and either sync policy across wallet reload.
+func testAccountManagerCreateCustomScopeAccount(h *bwtest.HarnessTest) {
+	// Harness subtests own distinct wallet names and databases, so each policy
+	// must establish its scope without reusing the other policy's metadata.
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "chain sync enabled",
+			noChainSync: false,
+		},
+		{
+			name:        "chain sync excluded",
+			noChainSync: true,
+		},
+	}
+
+	for _, tc := range tests {
+		h.Run(tc.name, func(t *testing.T) {
+			h := h.Subtest(t)
+
+			// Arrange: use a fresh unlocked wallet so each policy must
+			// establish the custom scope without previously stored metadata.
+			// Snapshot accounts to detect mutation on kvdb's refusal path.
+			const accountName = "custom scope account"
+
+			ctx := h.Context()
+			scope := waddrmgr.KeyScope{
+				Purpose: 1017,
+				Coin:    h.NetParams().HDCoinType,
+			}
+			schema := waddrmgr.ScopeAddrSchema{
+				ExternalAddrType: waddrmgr.WitnessPubKey,
+				InternalAddrType: waddrmgr.WitnessPubKey,
+			}
+			number := wallet.AccountNumber(7)
+			w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+			before, err := w.ListAccounts(ctx)
+			require.NoError(h, err)
+
+			// Act: supply both required new-scope inputs through the public
+			// creation operation, varying only the requested sync policy.
+			created, err := w.NewAccount(ctx, wallet.NewAccountParams{
+				Scope:         scope,
+				Name:          accountName,
+				AddrSchema:    &schema,
+				AccountNumber: &number,
+				NoChainSync:   tc.noChainSync,
+			})
+
+			// Assert: backend configuration selects kvdb's documented
+			// refusal; SQL below must persist the custom scope and policy.
+			if *dbBackend != string(wallet.DBBackendSQLite) &&
+				*dbBackend != string(wallet.DBBackendPostgres) {
+
+				require.ErrorIs(h, err, wallet.ErrAccountOperationUnsupported)
+				require.Nil(h, created)
+
+				after, err := w.ListAccounts(ctx)
+				require.NoError(h, err)
+				// Scope traversal order does not change the account set.
+				require.ElementsMatch(h, before, after)
+
+				return
+			}
+
+			// Check the requested custom-scope identity and policy before
+			// comparing the full snapshot across the persistence boundary.
+			require.NoError(h, err)
+			require.Equal(h, number, *created.AccountNumber)
+			require.Equal(h, scope, created.KeyScope)
+			require.Equal(h, schema, created.AddrSchema)
+			require.Equal(h, tc.noChainSync, created.NoChainSync)
+			require.False(h, created.IsImported)
+
+			// Reopen through the harness to expose lost scope or account
+			// metadata rather than repeating an immediate account read.
+			w = h.ReloadWallet(w)
+			durable, err := w.GetAccount(ctx, scope, accountName)
+			require.NoError(h, err)
+			require.Equal(h, created, durable)
+		})
+	}
 }
 
 // testAccountManagerCreateAccountSequence verifies that derived account numbers
