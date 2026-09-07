@@ -196,3 +196,91 @@ func testSignerDerivePubKeyWalletState(h *bwtest.HarnessTest) {
 		"unlocking changed the derived public key",
 	)
 }
+
+// testSignerDerivePubKeyRejectRequest verifies that a malformed selector, an
+// account the wallet does not hold, and a hardened path are each refused with
+// a stable error identity rather than resolving to some other account or
+// child.
+func testSignerDerivePubKeyRejectRequest(h *bwtest.HarnessTest) {
+	// absentAccountNumber is a BIP44 account number no test wallet creates.
+	const absentAccountNumber = 4242
+
+	// Arrange: A started wallet holding only its default account.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	defaultAccount := wallet.NewAccountSelectorByName(
+		signerScope, waddrmgr.DefaultAccountName,
+	)
+
+	testCases := []struct {
+		name        string
+		params      wallet.DerivePubKeyParams
+		expectedErr error
+	}{{
+		// A selector must name exactly one account identity, and the
+		// zero value names none.
+		name:        "selector names no account",
+		params:      wallet.DerivePubKeyParams{},
+		expectedErr: wallet.ErrInvalidAccountSelector,
+	}, {
+		// A missing name is a not-found, never a fallback to the
+		// default account.
+		name: "unknown account name",
+		params: wallet.DerivePubKeyParams{
+			Account: wallet.NewAccountSelectorByName(
+				signerScope, "signer absent account",
+			),
+		},
+		expectedErr: wallet.ErrAccountNotInStore,
+	}, {
+		// A missing number is the same not-found, never account zero.
+		name: "unknown account number",
+		params: wallet.DerivePubKeyParams{
+			Account: wallet.NewAccountSelectorByNumber(
+				signerScope, absentAccountNumber,
+			),
+		},
+		expectedErr: wallet.ErrAccountNotInStore,
+	}, {
+		// An account is scoped, so the name the wallet does hold must
+		// not resolve under a scope it has no manager for.
+		name: "unknown key scope",
+		params: wallet.DerivePubKeyParams{
+			Account: wallet.NewAccountSelectorByName(
+				waddrmgr.KeyScope{Purpose: 9999, Coin: 9999},
+				waddrmgr.DefaultAccountName,
+			),
+		},
+		expectedErr: wallet.ErrAccountNotInStore,
+	}, {
+		// The first hardened branch, one above the largest branch
+		// testSignerDerivePubKeyPaths derives successfully.
+		name: "hardened branch",
+		params: wallet.DerivePubKeyParams{
+			Account: defaultAccount,
+			Branch:  hdkeychain.HardenedKeyStart,
+		},
+		expectedErr: hdkeychain.ErrDeriveHardFromPublic,
+	}, {
+		// The index is bounded the same way the branch is.
+		name: "hardened index",
+		params: wallet.DerivePubKeyParams{
+			Account: defaultAccount,
+			Index:   hdkeychain.HardenedKeyStart,
+		},
+		expectedErr: hdkeychain.ErrDeriveHardFromPublic,
+	}}
+
+	for _, testCase := range testCases {
+		// Act: Send the rejected request.
+		_, err := w.DerivePubKey(ctx, testCase.params)
+
+		// Assert: The wallet refuses it by a stable identity.
+		require.ErrorIs(
+			h, err, testCase.expectedErr, "%s not rejected",
+			testCase.name,
+		)
+	}
+}
