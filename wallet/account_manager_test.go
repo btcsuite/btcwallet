@@ -282,6 +282,45 @@ func expectAccountDeriveSetup(t *testing.T, deps *mockWalletDeps,
 	).Once()
 }
 
+// accountNameQuery is the read-only lookup the account mutations perform to
+// learn whether a name is already taken within a key scope.
+func accountNameQuery(scope waddrmgr.KeyScope,
+	name string) db.GetAccountQuery {
+
+	return db.GetAccountQuery{
+		WalletID:    0,
+		Scope:       db.KeyScope(scope),
+		Name:        &name,
+		SkipBalance: true,
+	}
+}
+
+// expectAccountNameFree answers the name lookup with an absent account, which
+// lets the mutation proceed.
+func expectAccountNameFree(t *testing.T, deps *mockWalletDeps,
+	scope waddrmgr.KeyScope, name string) {
+
+	t.Helper()
+
+	deps.store.On("GetAccount", mock.Anything,
+		accountNameQuery(scope, name)).
+		Return((*db.AccountInfo)(nil), db.ErrAccountNotFound).Once()
+}
+
+// expectAccountNameTaken answers the same lookup with an existing account.
+func expectAccountNameTaken(t *testing.T, deps *mockWalletDeps,
+	scope waddrmgr.KeyScope, name string) {
+
+	t.Helper()
+
+	deps.store.On("GetAccount", mock.Anything,
+		accountNameQuery(scope, name)).
+		Return(&db.AccountInfo{
+			AccountName: name,
+			KeyScope:    db.KeyScope(scope),
+		}, nil).Once()
+}
+
 // hardenedKey converts a plain BIP32 child index to its hardened
 // counterpart by adding hdkeychain.HardenedKeyStart.
 func hardenedKey(key uint32) uint32 {
@@ -1025,7 +1064,9 @@ func TestGetAccountConversionFailure(t *testing.T) {
 func TestNewAccount(t *testing.T) {
 	t.Parallel()
 
-	w, deps := createStartedWalletWithMocks(t)
+	// Arrange: an unlocked wallet with an available account name and valid
+	// derivation material.
+	w, deps := createUnlockedWalletWithMocks(t)
 	stub := newStubAccountDeriveFn(t)
 	w.masterFingerprint = stub.masterKeyFingerprint
 
@@ -1036,7 +1077,7 @@ func TestNewAccount(t *testing.T) {
 	}
 	accountNumber := uint32(1)
 
-	// Success path.
+	expectAccountNameFree(t, deps, scope, testAccountName)
 	expectAccountDeriveSetup(t, deps, stub)
 	deps.store.On("CreateDerivedAccount", mock.Anything,
 		db.CreateDerivedAccountParams{
@@ -1051,27 +1092,17 @@ func TestNewAccount(t *testing.T) {
 		}, nil,
 	).Once()
 
+	// Act: create the next account in the scope.
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+
+	// Assert: the account result contains the allocated number and canonical
+	// master fingerprint, and every required dependency call occurred.
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
 	require.Equal(t, AccountNumber(1), *account.AccountNumber)
 	require.NotNil(t, account.MasterKeyFingerprint)
 	require.Equal(t, MasterFingerprint(stub.masterKeyFingerprint),
 		*account.MasterKeyFingerprint)
-
-	// Duplicate-name path.
-	expectAccountDeriveSetup(t, deps, stub)
-	deps.store.On("CreateDerivedAccount", mock.Anything, mock.Anything,
-		mock.Anything).Return((*db.AccountInfo)(nil),
-		waddrmgr.ManagerError{
-			ErrorCode: waddrmgr.ErrDuplicateAccount,
-		}).Once()
-
-	_, err = w.NewAccount(t.Context(), scope, testAccountName)
-	require.Error(t, err)
-	require.True(t,
-		waddrmgr.IsError(err, waddrmgr.ErrDuplicateAccount),
-	)
 }
 
 // TestNewAccountMissingHDSeedDefersToStore verifies that neutered-root kvdb
@@ -1079,7 +1110,9 @@ func TestNewAccount(t *testing.T) {
 func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	t.Parallel()
 
-	w, deps := createStartedWalletWithMocks(t)
+	// Arrange: an unlocked wallet whose root seed is absent, allowing the
+	// legacy Store callback to derive from its scoped key instead.
+	w, deps := createUnlockedWalletWithMocks(t)
 
 	scope := waddrmgr.KeyScopeBIP0084
 	dbScope := db.KeyScope{
@@ -1088,6 +1121,7 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 	}
 	accountNumber := uint32(1)
 
+	expectAccountNameFree(t, deps, scope, testAccountName)
 	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
 		Return(nil, db.ErrSecretNotFound).Once()
 	deps.store.On("CreateDerivedAccount", mock.Anything,
@@ -1109,7 +1143,11 @@ func TestNewAccountMissingHDSeedDefersToStore(t *testing.T) {
 		KeyScope:      dbScope,
 	}, nil).Once()
 
+	// Act: create an account through the deferred derivation path.
 	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+
+	// Assert: the Store-provided result is returned and all expected admission
+	// and derivation calls occurred.
 	require.NoError(t, err)
 	require.NotNil(t, account.AccountNumber)
 	require.Equal(t, AccountNumber(1), *account.AccountNumber)
@@ -1857,6 +1895,251 @@ func TestListAccountsTranslatesStoreError(t *testing.T) {
 			require.Empty(t, reportedIdentities(err))
 			require.NotErrorIs(t, err, storeErr)
 			requireNoInternalIdentity(t, err)
+		})
+	}
+}
+
+// TestNewAccountVaultLockedForbidden verifies a Vault that locks after the
+// wallet admitted the request surfaces as ErrStateForbidden without leaking
+// the Vault sentinel.
+func TestNewAccountVaultLockedForbidden(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an unlocked wallet whose vault locks again between the
+	// wallet's own lock check and the master-key read.
+	w, deps := createUnlockedWalletWithMocks(t)
+	stub := newStubAccountDeriveFn(t)
+	scope := waddrmgr.KeyScopeBIP0084
+
+	expectAccountNameFree(t, deps, scope, testAccountName)
+	deps.store.On("GetEncryptedHDSeed", mock.Anything, uint32(0)).
+		Return(append([]byte(nil), stub.encryptedSeed...), nil).Once()
+	deps.vault.On("Decrypt", waddrmgr.CKTPrivate, mock.Anything).
+		Return([]byte(nil), keyvault.ErrVaultLocked).Once()
+
+	// Act: create an account while the vault is locked.
+	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+
+	// Assert: the lock is reported as a forbidden state, the vault
+	// identity does not escape, and no account row was attempted.
+	require.Nil(t, account)
+	require.ErrorIs(t, err, ErrStateForbidden)
+	require.NotErrorIs(t, err, keyvault.ErrVaultLocked)
+
+	deps.store.AssertNotCalled(t, "CreateDerivedAccount", mock.Anything,
+		mock.Anything, mock.Anything)
+}
+
+// TestNewAccountWatchOnlyUnsupported verifies that a watch-only wallet is
+// refused before any write is attempted, as an unsupported operation rather
+// than as the locked wallet it also is, since it holds no signing material.
+func TestNewAccountWatchOnlyUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started wallet holding no master HD private key.
+	w, deps := createStartedWalletWithMocks(t)
+	w.isWatchOnly = true
+
+	scope := waddrmgr.KeyScopeBIP0084
+
+	expectAccountNameFree(t, deps, scope, testAccountName)
+
+	// Act: create a derived account on the watch-only wallet.
+	account, err := w.NewAccount(t.Context(), scope, testAccountName)
+
+	// Assert: the refusal is reported as unsupported, the internal
+	// derivation sentinel does not escape, and the only Store call was the
+	// read-only name lookup.
+	require.Nil(t, account)
+	require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+	require.NotErrorIs(t, err, ErrStateForbidden)
+	require.NotErrorIs(t, err, errWatchOnlyAccountDerivation)
+
+	deps.store.AssertNotCalled(t, "CreateDerivedAccount", mock.Anything,
+		mock.Anything, mock.Anything)
+}
+
+// TestNewAccountLocked verifies a spendable wallet refuses derivation while it
+// is locked, before it reads or writes anything.
+func TestNewAccountLocked(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started but still locked spendable wallet.
+	w, deps := createStartedWalletWithMocks(t)
+
+	// Act: create an account while the wallet is locked.
+	account, err := w.NewAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+
+	// Assert: the wallet reports its own forbidden state and performs
+	// neither the name lookup nor the account write.
+	require.Nil(t, account)
+	require.ErrorIs(t, err, ErrStateForbidden)
+	requireNoInternalIdentity(t, err)
+
+	deps.store.AssertNotCalled(t, "GetAccount", mock.Anything, mock.Anything)
+	deps.store.AssertNotCalled(t, "CreateDerivedAccount", mock.Anything,
+		mock.Anything, mock.Anything)
+}
+
+// TestNewAccountOccupiedName verifies a taken name is settled by the read-only
+// preflight in every wallet mode, before any derivation material is touched
+// and ahead of the watch-only refusal.
+func TestNewAccountOccupiedName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		watchOnly bool
+	}{{
+		name: "spendable unlocked wallet",
+	}, {
+		name:      "watch-only locked wallet",
+		watchOnly: true,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a wallet whose scope already holds the name.
+			// A watch-only wallet holds no signing material, so it
+			// stays locked and its own refusal would answer first
+			// if the occupied name did not outrank it.
+			w, deps := createUnlockedWalletWithMocks(t)
+			if tc.watchOnly {
+				w.isWatchOnly = true
+				w.state.toLocked()
+			}
+
+			scope := waddrmgr.KeyScopeBIP0084
+			expectAccountNameTaken(t, deps, scope, testAccountName)
+
+			// Act: create an account under the occupied name.
+			account, err := w.NewAccount(
+				t.Context(), scope, testAccountName,
+			)
+
+			// Assert: the conflict is the only outcome reported, and
+			// nothing was derived or written.
+			require.Nil(t, account)
+			require.ErrorContains(t, err, testAccountName)
+			require.Equal(t,
+				[]string{ErrAccountAlreadyExists.Error()},
+				reportedIdentities(err))
+
+			deps.store.AssertNotCalled(t, "GetEncryptedHDSeed",
+				mock.Anything, mock.Anything)
+			deps.store.AssertNotCalled(t, "CreateDerivedAccount",
+				mock.Anything, mock.Anything, mock.Anything)
+		})
+	}
+}
+
+// TestNewAccountTranslatesStoreError verifies account write failures use the
+// expected public identities without exposing Store errors.
+func TestNewAccountTranslatesStoreError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		scope  waddrmgr.KeyScope
+		inject error
+		want   error
+	}{{
+		name:   "sql derivation range exhausted",
+		scope:  waddrmgr.KeyScopeBIP0084,
+		inject: db.ErrMaxAccountNumberReached,
+		want:   ErrAccountDerivationExhausted,
+	}, {
+		name:   "kvdb derivation range exhausted",
+		scope:  waddrmgr.KeyScopeBIP0084,
+		inject: wrapped(legacyErr(waddrmgr.ErrAccountNumTooHigh)),
+		want:   ErrAccountDerivationExhausted,
+	}, {
+		name:   "kvdb duplicate account",
+		scope:  waddrmgr.KeyScopeBIP0084,
+		inject: wrapped(legacyErr(waddrmgr.ErrDuplicateAccount)),
+		want:   ErrAccountAlreadyExists,
+	}, {
+		name:   "scope cannot be created",
+		scope:  waddrmgr.KeyScope{Purpose: 123, Coin: 456},
+		inject: wrapped(db.ErrUnknownKeyScope),
+		want:   ErrInvalidParam,
+	}, {
+		name:  "cancellation before scope validation",
+		scope: waddrmgr.KeyScope{Purpose: 123, Coin: 456},
+		inject: errors.Join(
+			context.Canceled, db.ErrUnknownKeyScope,
+		),
+		want: context.Canceled,
+	}, {
+		name:  "deadline before scope validation",
+		scope: waddrmgr.KeyScope{Purpose: 123, Coin: 456},
+		inject: errors.Join(
+			context.DeadlineExceeded, db.ErrUnknownKeyScope,
+		),
+		want: context.DeadlineExceeded,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an unlocked wallet whose write fails.
+			w, deps := createUnlockedWalletWithMocks(t)
+			stub := newStubAccountDeriveFn(t)
+
+			expectAccountNameFree(t, deps, tc.scope, testAccountName)
+			expectAccountDeriveSetup(t, deps, stub)
+			deps.store.On("CreateDerivedAccount", mock.Anything,
+				mock.Anything, mock.Anything).
+				Return((*db.AccountInfo)(nil), tc.inject).Once()
+
+			// Act: create the next account in the scope.
+			account, err := w.NewAccount(
+				t.Context(), tc.scope, testAccountName,
+			)
+
+			// Assert: only the expected error identity is reported.
+			require.Nil(t, account)
+			require.ErrorIs(t, err, tc.want)
+			require.ErrorContains(t, err, tc.inject.Error())
+			require.NotErrorIs(t, err, tc.inject)
+			requireNoInternalIdentity(t, err)
+
+			for _, sentinel := range accountManagerIdentities {
+				if !errors.Is(tc.want, sentinel) {
+					require.NotErrorIs(t, err, sentinel)
+				}
+			}
+		})
+	}
+}
+
+// TestNewAccountInvalidName verifies name validation outranks the watch-only
+// refusal, which would otherwise short-circuit the store's own name checks.
+func TestNewAccountInvalidName(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"", waddrmgr.ImportedAddrAccountName} {
+		t.Run("invalid name "+name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			w, _ := createStartedWalletWithMocks(t)
+			w.isWatchOnly = true
+
+			// Act.
+			account, err := w.NewAccount(
+				t.Context(), waddrmgr.KeyScopeBIP0084, name,
+			)
+
+			// Assert: validation outranks the watch-only refusal.
+			require.Nil(t, account)
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.NotErrorIs(t, err, ErrAccountOperationUnsupported)
 		})
 	}
 }
