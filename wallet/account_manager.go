@@ -176,13 +176,18 @@ func (w *Wallet) buildAccountDeriveFn(
 	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
 }
 
-// NewAccountParams selects the next sequential account to create.
+// NewAccountParams selects the next sequential account to create. The zero
+// NoChainSync value preserves automatic chain synchronization.
 type NewAccountParams struct {
 	// Scope identifies the purpose and coin type used for derivation.
 	Scope waddrmgr.KeyScope
 
 	// Name must be valid and unique within Scope.
 	Name string
+
+	// NoChainSync requests exclusion from automatic chain synchronization.
+	// True is currently rejected with ErrAccountOperationUnsupported.
+	NoChainSync bool
 }
 
 // AccountManager provides a high-level interface for managing wallet
@@ -222,7 +227,8 @@ type NewAccountParams struct {
 // Context cancellation and deadlines are preserved.
 type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
-	// provided name must be unique within that key scope.
+	// provided name must be unique within that key scope. NoChainSync=true
+	// is currently rejected with ErrAccountOperationUnsupported.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
 		error)
 
@@ -330,6 +336,7 @@ func (w *Wallet) accountInfoFromStore(
 		masterFingerprint = &fingerprint
 	}
 
+	// Report the stored sync policy independently of signing custody.
 	return &AccountInfo{
 		AccountNumber:      accountNumber,
 		AccountName:        storeInfo.AccountName,
@@ -340,6 +347,7 @@ func (w *Wallet) accountInfoFromStore(
 		ConfirmedBalance:   storeInfo.ConfirmedBalance,
 		UnconfirmedBalance: storeInfo.UnconfirmedBalance,
 		IsWatchOnly:        storeInfo.IsWatchOnly,
+		NoChainSync:        storeInfo.NoChainSync,
 		CreatedAt:          storeInfo.CreatedAt,
 		KeyScope:           waddrmgr.KeyScope(storeInfo.KeyScope),
 		AddrSchema: waddrmgr.ScopeAddrSchema{
@@ -393,6 +401,8 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 // restoring, new accounts may not be created when all of the previous 100
 // accounts have no transaction history (this is a deviation from the BIP0044
 // spec, which allows no unused account gaps).
+// NoChainSync=true is currently rejected with ErrAccountOperationUnsupported
+// after the existing admission checks and before secret preparation.
 func (w *Wallet) NewAccount(ctx context.Context,
 	params NewAccountParams) (*AccountInfo, error) {
 
@@ -468,6 +478,17 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		return
 	}
 
+	// Keep exclusion unavailable until receiving and recovery honor it.
+	// Refuse after admission so no backend prepares secrets or mutates state.
+	if req.params.NoChainSync {
+		req.resp <- accountResp{
+			err: fmt.Errorf("no-chain-sync account creation: %w",
+				ErrAccountOperationUnsupported),
+		}
+
+		return
+	}
+
 	deriveFn, err := w.buildAccountDeriveFn(req.ctx)
 	if err != nil {
 		req.resp <- accountResp{err: accountManagerErr(err)}
@@ -476,9 +497,10 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 
 	info, err := w.store.CreateDerivedAccount(req.ctx,
 		db.CreateDerivedAccountParams{
-			WalletID: w.id,
-			Scope:    db.KeyScope(req.params.Scope),
-			Name:     req.params.Name,
+			WalletID:    w.id,
+			Scope:       db.KeyScope(req.params.Scope),
+			Name:        req.params.Name,
+			NoChainSync: req.params.NoChainSync,
 		}, deriveFn,
 	)
 	if err != nil {
