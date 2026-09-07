@@ -586,3 +586,71 @@ func testSignerECDHWatchOnly(h *bwtest.HarnessTest) {
 		h, [32]byte{}, secret, "a refused ECDH returned secret material",
 	)
 }
+
+// testSignerDerivationDurableReopen verifies that public derivation and the
+// shared secret follow the wallet's durable identity rather than the process
+// that happened to be holding it open.
+func testSignerDerivationDurableReopen(h *bwtest.HarnessTest) {
+	// Arrange: A started, unlocked wallet and a peer that outlives the reopen.
+	ctx := h.Context()
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	h.NewWalletAddressOfType(w, signerAddrType)
+
+	peerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the peer key")
+
+	path := wallet.BIP32Path{
+		KeyScope: signerScope,
+		DerivationPath: waddrmgr.DerivationPath{
+			InternalAccount: 0,
+			Branch:          0,
+			Index:           9,
+		},
+	}
+	params := wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(
+			signerScope, waddrmgr.DefaultAccountName,
+		),
+		Branch: path.DerivationPath.Branch,
+		Index:  path.DerivationPath.Index,
+	}
+
+	// Act: Take both answers from the original wallet.
+	before, err := w.DerivePubKey(ctx, params)
+	require.NoError(h, err, "failed to derive before the reopen")
+
+	beforeSecret, err := w.ECDH(ctx, path, peerKey.PubKey())
+	require.NoError(h, err, "failed to compute the secret before the reopen")
+	require.NotEqual(
+		h, [32]byte{}, beforeSecret, "the shared secret is the zero value",
+	)
+
+	// Stop the wallet, close its Manager, and load the same store again.
+	w = h.ReloadWallet(w)
+
+	info, err := w.Info(ctx)
+	require.NoError(h, err, "failed to query wallet info")
+	require.True(h, info.Locked, "the reopened wallet is not locked")
+
+	// Act: Derive from the reopened wallet while it is still locked.
+	after, err := w.DerivePubKey(ctx, params)
+
+	// Assert: The durable identity, not the live wallet, defines the key.
+	require.NoError(h, err, "failed to derive after the reopen")
+	require.True(
+		h, before.IsEqual(after),
+		"the reopened wallet derived a different public key",
+	)
+
+	h.UnlockWallet(w)
+
+	// Act: Repeat the exchange with the same peer.
+	afterSecret, err := w.ECDH(ctx, path, peerKey.PubKey())
+
+	// Assert: The signing key survived the reopen with the public key.
+	require.NoError(h, err, "failed to compute the secret after the reopen")
+	require.Equal(
+		h, beforeSecret, afterSecret,
+		"the reopened wallet computed a different shared secret",
+	)
+}
