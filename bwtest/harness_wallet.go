@@ -543,7 +543,10 @@ func (h *HarnessTest) ensureAccount(w *wallet.Wallet,
 		}()
 	}
 
-	_, err = w.NewAccount(h.Context(), scope, name)
+	_, err = w.NewAccount(h.Context(), wallet.NewAccountParams{
+		Scope: scope,
+		Name:  name,
+	})
 	require.NoError(h, err, "failed to create account %q", name)
 }
 

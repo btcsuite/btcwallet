@@ -176,6 +176,15 @@ func (w *Wallet) buildAccountDeriveFn(
 	return newAccountDeriveFn(masterKey, w.keyVault, fingerprint), nil
 }
 
+// NewAccountParams selects the next sequential account to create.
+type NewAccountParams struct {
+	// Scope identifies the purpose and coin type used for derivation.
+	Scope waddrmgr.KeyScope
+
+	// Name must be valid and unique within Scope.
+	Name string
+}
+
 // AccountManager provides a high-level interface for managing wallet
 // accounts.
 //
@@ -214,8 +223,8 @@ func (w *Wallet) buildAccountDeriveFn(
 type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
-	NewAccount(ctx context.Context, scope waddrmgr.KeyScope, name string) (
-		*AccountInfo, error)
+	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
+		error)
 
 	// ListAccounts returns a list of all accounts managed by the wallet.
 	ListAccounts(ctx context.Context) ([]AccountInfo, error)
@@ -347,9 +356,9 @@ func (w *Wallet) accountInfoFromStore(
 type newAccountReq struct {
 	reqCtx
 
-	scope waddrmgr.KeyScope
-	name  string
-	resp  chan accountResp
+	// params carries the caller inputs through the existing admission path.
+	params NewAccountParams
+	resp   chan accountResp
 }
 
 // requireAccountNameAvailable reports a name already taken within scope as
@@ -384,8 +393,8 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 // restoring, new accounts may not be created when all of the previous 100
 // accounts have no transaction history (this is a deviation from the BIP0044
 // spec, which allows no unused account gaps).
-func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
-	name string) (*AccountInfo, error) {
+func (w *Wallet) NewAccount(ctx context.Context,
+	params NewAccountParams) (*AccountInfo, error) {
 
 	err := w.state.validateStarted()
 	if err != nil {
@@ -397,7 +406,7 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 		return nil, err
 	}
 
-	err = waddrmgr.ValidateAccountName(name)
+	err = waddrmgr.ValidateAccountName(params.Name)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidParam, err.Error())
 	}
@@ -415,8 +424,7 @@ func (w *Wallet) NewAccount(ctx context.Context, scope waddrmgr.KeyScope,
 
 	req := newAccountReq{
 		reqCtx: reqCtx{ctx: ctx},
-		scope:  scope,
-		name:   name,
+		params: params,
 		resp:   make(chan accountResp, 1),
 	}
 
@@ -439,7 +447,9 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 	// An occupied name is reported ahead of the watch-only refusal and ahead
 	// of an exhausted derivation range, so the caller hears about the part of
 	// the request it can restate.
-	err := w.requireAccountNameAvailable(req.ctx, req.scope, req.name)
+	err := w.requireAccountNameAvailable(
+		req.ctx, req.params.Scope, req.params.Name,
+	)
 	if err != nil {
 		req.resp <- accountResp{err: err}
 		return
@@ -467,8 +477,8 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 	info, err := w.store.CreateDerivedAccount(req.ctx,
 		db.CreateDerivedAccountParams{
 			WalletID: w.id,
-			Scope:    db.KeyScope(req.scope),
-			Name:     req.name,
+			Scope:    db.KeyScope(req.params.Scope),
+			Name:     req.params.Name,
 		}, deriveFn,
 	)
 	if err != nil {
