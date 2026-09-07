@@ -166,6 +166,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerECDHAgreement,
 	},
 	{
+		Name:     "signer ecdh wallet state",
+		TestFunc: testSignerECDHWalletState,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
