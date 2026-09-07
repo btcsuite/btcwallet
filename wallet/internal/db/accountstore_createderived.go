@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -61,15 +62,28 @@ func (params *CreateDerivedAccountParams) Validate() error {
 		return fmt.Errorf("hardened scope component: %w", ErrInvalidParam)
 	}
 
-	// Exact selection is restricted to canonical scopes and excludes the
-	// imported-account sentinel; nil retains the existing sequential subset.
+	// Exact selection excludes the imported-account sentinel; nil retains
+	// the existing sequential subset.
 	if params.AccountNumber != nil {
 		if *params.AccountNumber > MaxAccountNumber {
 			return fmt.Errorf("exact account number: %w", ErrInvalidParam)
 		}
+	}
 
-		if _, ok := ScopeAddrMap[params.Scope]; !ok {
-			return fmt.Errorf("exact account scope: %w", ErrInvalidParam)
+	// Account branches must be derivable from one key; script-bearing and
+	// raw-key forms cannot serve as account address schemas.
+	if params.AddrSchema != nil {
+		allowed := []AddressType{
+			PubKeyHash, NestedWitnessPubKey, WitnessPubKey, TaprootPubKey,
+		}
+		for _, addrType := range []AddressType{
+			params.AddrSchema.ExternalAddrType,
+			params.AddrSchema.InternalAddrType,
+		} {
+			if !slices.Contains(allowed, addrType) {
+				return fmt.Errorf("account branch schema: %w",
+					ErrInvalidParam)
+			}
 		}
 	}
 
@@ -110,9 +124,11 @@ type CreateDerivedAccountOps interface {
 	// scope. The persisted schema may differ from ScopeAddrMap when the
 	// scope was originally created with a non-default override (e.g. an
 	// imported account that overrode the BIP44 / BIP49 / BIP84 / BIP86
-	// defaults).
+	// defaults). schema supplies creation metadata for an absent scope;
+	// existing scopes return their persisted schema for comparison.
 	EnsureScope(ctx context.Context, walletID uint32,
-		scope KeyScope) (int64, ScopeAddrSchema, error)
+		scope KeyScope, schema *ScopeAddrSchema) (int64, ScopeAddrSchema,
+		error)
 
 	// AllocateAccountNumber reserves the next or requested account number
 	// and advances the scope cursor without consuming lower holes. A nil
@@ -251,11 +267,9 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		return nil, fmt.Errorf("wallet watch only: %w", err)
 	}
 
-	scopeID, addrSchema, err := ops.EnsureScope(
-		ctx, params.WalletID, params.Scope,
-	)
+	scopeID, addrSchema, err := ensureDerivedAccountScope(ctx, params, ops)
 	if err != nil {
-		return nil, fmt.Errorf("ensure scope: %w", err)
+		return nil, err
 	}
 
 	allocated, accNumPreview, err := allocateAndPreviewAccountNumber(
@@ -298,4 +312,27 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 		derived.PublicKey, &masterFingerprint,
 		0, 0,
 	), nil
+}
+
+// ensureDerivedAccountScope checks the persisted schema in the creation
+// transaction before allocation, since another creator may have established
+// the scope after public admission.
+func ensureDerivedAccountScope(ctx context.Context,
+	params CreateDerivedAccountParams,
+	ops CreateDerivedAccountOps) (int64, ScopeAddrSchema, error) {
+
+	scopeID, schema, err := ops.EnsureScope(
+		ctx, params.WalletID, params.Scope, params.AddrSchema,
+	)
+	if err != nil {
+		return 0, ScopeAddrSchema{}, fmt.Errorf("ensure scope: %w", err)
+	}
+
+	if params.AddrSchema != nil && *params.AddrSchema != schema {
+		return 0, ScopeAddrSchema{}, fmt.Errorf(
+			"conflicting scope schema: %w", ErrInvalidParam,
+		)
+	}
+
+	return scopeID, schema, nil
 }

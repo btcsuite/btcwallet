@@ -36,7 +36,7 @@ func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 }
 
 // TestCreateDerivedAccountRejectsInvalidPath verifies malformed derivation
-// components and unsupported exact scopes fail before backend operations.
+// components fail before backend operations.
 func TestCreateDerivedAccountRejectsInvalidPath(t *testing.T) {
 	t.Parallel()
 
@@ -59,10 +59,6 @@ func TestCreateDerivedAccountRejectsInvalidPath(t *testing.T) {
 			name:   "reserved number",
 			scope:  KeyScopeBIP0084,
 			number: MaxAccountNumber + 1,
-		},
-		{
-			name:  "custom scope",
-			scope: KeyScope{Purpose: 1017},
 		},
 	}
 	for _, test := range tests {
@@ -122,6 +118,7 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	).Once()
 	ensureScopeCall := ops.On(
 		"EnsureScope", mock.Anything, uint32(7), params.Scope,
+		params.AddrSchema,
 	).Return(int64(11), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	allocateCall := ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(11),
@@ -199,6 +196,7 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -242,6 +240,7 @@ func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -297,6 +296,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 						Purpose: 49,
 						Coin:    0,
 					},
+					(*ScopeAddrSchema)(nil),
 				).Return(int64(0), ScopeAddrSchema{}, errTestScope).Once()
 
 				return ops
@@ -315,6 +315,7 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 						Purpose: 49,
 						Coin:    0,
 					},
+					(*ScopeAddrSchema)(nil),
 				).Return(
 					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
 				).Once()
@@ -340,7 +341,9 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 				ops.On("EnsureScope", mock.Anything, uint32(7), KeyScope{
 					Purpose: 49,
 					Coin:    0,
-				}).Return(
+				},
+					(*ScopeAddrSchema)(nil),
+				).Return(
 					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
 				).Once()
 				ops.On(
@@ -410,6 +413,7 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -460,6 +464,7 @@ func TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -521,6 +526,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -563,6 +569,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey(
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -605,6 +612,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey(
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -647,6 +655,7 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv(
 			Purpose: 49,
 			Coin:    0,
 		},
+		(*ScopeAddrSchema)(nil),
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(8),
@@ -702,9 +711,10 @@ func (m *mockCreateDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 // EnsureScope implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) EnsureScope(ctx context.Context,
 	walletID uint32,
-	scope KeyScope) (int64, ScopeAddrSchema, error) {
+	scope KeyScope, addrSchema *ScopeAddrSchema) (int64, ScopeAddrSchema,
+	error) {
 
-	args := m.Called(ctx, walletID, scope)
+	args := m.Called(ctx, walletID, scope, addrSchema)
 
 	scopeID, ok := args.Get(0).(int64)
 	if !ok {
@@ -821,4 +831,43 @@ func testValidWatchOnlyDeriveFn() AccountDerivationFunc {
 	return (&deriveFnRecorder{
 		returnData: newWatchOnlyDerivedAccountData(),
 	}).fn()
+}
+
+// TestCreateDerivedAccountRejectsScopeConflict verifies that a scope created
+// with a different schema after admission cannot allocate or derive an account.
+func TestCreateDerivedAccountRejectsScopeConflict(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the transaction sees a scope whose persisted branch differs
+	// from the caller's assertion. No allocation or insert is expected.
+	params := testCreateDerivedAccountParams()
+	params.AddrSchema = &ScopeAddrSchema{
+		ExternalAddrType: PubKeyHash,
+		InternalAddrType: PubKeyHash,
+	}
+	ops := &mockCreateDerivedAccountOps{}
+	ops.On("WalletWatchOnly", mock.Anything, params.WalletID).
+		Return(false, nil).Once()
+	ops.On("EnsureScope", mock.Anything, params.WalletID, params.Scope,
+		params.AddrSchema).Return(
+		int64(1), ScopeAddrMap[KeyScopeBIP0084], nil,
+	).Once()
+
+	// Retain the callback recorder so an early derivation cannot be hidden
+	// by the later schema error returned from the transaction.
+	derive := &deriveFnRecorder{
+		returnData: newSpendableDerivedAccountData(),
+	}
+
+	// Act: attempt creation using the same transaction workflow as SQL.
+	info, err := CreateDerivedAccountWithOps(
+		t.Context(), params, ops, derive.fn(),
+	)
+
+	// Assert: the conflicting request exposes no account and stops before
+	// allocation, key derivation, or insertion can modify account state.
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.Nil(t, info)
+	require.Empty(t, derive.calls)
+	ops.AssertExpectations(t)
 }

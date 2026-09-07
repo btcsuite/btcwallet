@@ -244,6 +244,11 @@ type WalletStore interface {
 
 // AccountStore defines the database actions for managing accounts.
 type AccountStore interface {
+	// GetKeyScopeSchema reads the persisted scope schema, independently of
+	// account overrides, or returns ErrKeyScopeNotFound when absent.
+	GetKeyScopeSchema(ctx context.Context, walletID uint32,
+		scope KeyScope) (ScopeAddrSchema, error)
+
 	// CreateDerivedAccount creates a new derived account with the given
 	// name and scope. SQL stores honor an optional exact AccountNumber and
 	// advance the cursor without consuming lower holes; kvdb rejects exact
@@ -252,7 +257,7 @@ type AccountStore interface {
 	// and persists it with the row.
 	//
 	// If the key scope does not exist, it will be automatically created
-	// using the address schema from ScopeAddrMap with no coin public/private
+	// using AddrSchema or the ScopeAddrMap default with no coin public/private
 	// key material. Spendable scopes may later gain a key_scope_secrets row;
 	// watch-only scopes remain absent from that table.
 	CreateDerivedAccount(ctx context.Context,

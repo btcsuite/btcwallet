@@ -531,3 +531,13 @@ func (m *Store) RollbackToBlock(ctx context.Context, height uint32) error {
 
 	return args.Error(0)
 }
+
+// GetKeyScopeSchema records the admission read so tests can forbid secret
+// preparation and mutation when a scope assertion fails.
+func (m *Store) GetKeyScopeSchema(ctx context.Context, walletID uint32,
+	scope db.KeyScope) (db.ScopeAddrSchema, error) {
+
+	args := m.Called(ctx, walletID, scope)
+
+	return args.Get(0).(db.ScopeAddrSchema), args.Error(1)
+}

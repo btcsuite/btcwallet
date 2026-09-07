@@ -84,10 +84,13 @@ func (o *createDerivedAccountOps) WalletWatchOnly(
 	return o.mgr.WatchOnly(), nil
 }
 
-// EnsureScope implements db.CreateDerivedAccountOps. waddrmgr scopes are
+// EnsureScope implements db.CreateDerivedAccountOps. The schema input is
+// unused because kvdb only loads existing scopes; the shared workflow checks
+// their persisted schema against the caller's assertion. waddrmgr scopes are
 // pre-registered; the call only fetches and caches the scoped manager.
 func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
-	scope db.KeyScope) (int64, db.ScopeAddrSchema, error) {
+	scope db.KeyScope, _ *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema,
+	error) {
 
 	waddrScope := waddrmgr.KeyScope{
 		Purpose: scope.Purpose,
