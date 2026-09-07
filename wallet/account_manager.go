@@ -27,7 +27,103 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
+	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
+
+var (
+	// ErrAccountAlreadyExists is returned when an account operation would
+	// take a name that is already used within the same key scope. Renaming
+	// an account to its current name reports the same outcome.
+	ErrAccountAlreadyExists = errors.New("account already exists")
+
+	// ErrAccountOperationUnsupported is returned when the requested account
+	// operation cannot be served by the wallet in its current mode, such as
+	// deriving a new account on a watch-only wallet or importing an
+	// XPub-only account into a spendable SQL wallet.
+	ErrAccountOperationUnsupported = errors.New(
+		"account operation unsupported by this wallet",
+	)
+
+	// ErrAccountDerivationExhausted is returned when a key scope has no
+	// account number left to allocate.
+	ErrAccountDerivationExhausted = errors.New(
+		"account derivation range exhausted",
+	)
+)
+
+// accountManagerErr translates a store, legacy manager, or Vault failure into
+// the wallet-owned identity for that outcome. Only the source text is kept so
+// no internal identity crosses the boundary; unclassified errors keep only
+// their text, and caller-owned cancellation keeps its identity.
+//
+//nolint:cyclop // One explicit mapping switch is the clearest form here.
+func accountManagerErr(err error) error {
+	var mappedErr error
+	switch {
+	case err == nil:
+		return nil
+
+	case errors.Is(err, context.Canceled):
+		mappedErr = context.Canceled
+
+	case errors.Is(err, context.DeadlineExceeded):
+		mappedErr = context.DeadlineExceeded
+
+	// Key validation is already wallet-owned and wraps nothing internal.
+	case errors.Is(err, ErrInvalidAccountKey):
+		return err
+
+	case errors.Is(err, db.ErrAccountNotFound),
+		errors.Is(err, db.ErrKeyScopeNotFound),
+		isAddrMgrErr(err, waddrmgr.ErrAccountNotFound),
+		isAddrMgrErr(err, waddrmgr.ErrScopeNotFound):
+
+		mappedErr = ErrAccountNotFound
+
+	case pg.IsAccountNameConflict(err), sqlite.IsAccountNameConflict(err),
+		isAddrMgrErr(err, waddrmgr.ErrDuplicateAccount):
+
+		mappedErr = ErrAccountAlreadyExists
+
+	case errors.Is(err, errWatchOnlyAccountDerivation),
+		errors.Is(err, db.ErrWatchOnlyViolation),
+		errors.Is(err, db.ErrSpendableWalletNeedsAccountPrivKey),
+		isAddrMgrErr(err, waddrmgr.ErrWatchingOnly):
+
+		mappedErr = ErrAccountOperationUnsupported
+
+	case errors.Is(err, db.ErrMaxAccountNumberReached),
+		isAddrMgrErr(err, waddrmgr.ErrAccountNumTooHigh):
+
+		mappedErr = ErrAccountDerivationExhausted
+
+	case errors.Is(err, keyvault.ErrVaultLocked),
+		isAddrMgrErr(err, waddrmgr.ErrLocked):
+
+		mappedErr = ErrStateForbidden
+
+	default:
+		return errors.New(err.Error())
+	}
+
+	if err.Error() == mappedErr.Error() {
+		return mappedErr
+	}
+
+	return fmt.Errorf("%w: %s", mappedErr, err.Error())
+}
+
+// isAddrMgrErr reports whether err carries a waddrmgr.ManagerError with the
+// given code. waddrmgr.IsError is a bare type assertion, so it cannot see a
+// manager error that a store wrapped for context, which is how the legacy
+// backend returns every one of them.
+func isAddrMgrErr(err error, code waddrmgr.ErrorCode) bool {
+	var mErr waddrmgr.ManagerError
+
+	return errors.As(err, &mErr) && mErr.ErrorCode == code
+}
 
 // buildAccountDeriveFn returns an AccountDerivationFunc closure. Spendable
 // wallets normally preload the master HD private key before the store opens
@@ -183,6 +279,10 @@ func (w *Wallet) canonicalStoreAccountInfo(
 // wallet-owned result. Every pointer and byte slice in the result is copied so
 // callers cannot mutate Store-owned data or another independently converted
 // result.
+//
+// Its failures are internal identities such as addresstype.ErrUnknown, so
+// public callers route the result through accountManagerErr rather than
+// returning it directly.
 func (w *Wallet) accountInfoFromStore(
 	storeInfo *db.AccountInfo) (*AccountInfo, error) {
 
@@ -447,7 +547,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 
 	infos, err := w.cache.ListAccounts(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, accountManagerErr(err)
 	}
 
 	if infos == nil {
@@ -458,7 +558,7 @@ func (w *Wallet) listAccountInfos(ctx context.Context,
 	for i := range infos {
 		result, err := w.accountInfoFromStore(&infos[i])
 		if err != nil {
-			return nil, err
+			return nil, accountManagerErr(err)
 		}
 
 		results[i] = *result
@@ -598,24 +698,14 @@ func (w *Wallet) handleGetAccount(req getAccountReq) {
 		Name:     &req.name,
 	})
 	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers using
-		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
-		// underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			req.resp <- accountResp{err: mErr}
-			return
-		}
-
-		req.resp <- accountResp{err: err}
-
+		req.resp <- accountResp{err: accountManagerErr(err)}
 		return
 	}
 
 	account, err := w.accountInfoFromStore(info)
 	req.resp <- accountResp{
 		info: account,
-		err:  err,
+		err:  accountManagerErr(err),
 	}
 }
 

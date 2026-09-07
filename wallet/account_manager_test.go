@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,9 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcwallet/waddrmgr"
+	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -459,10 +462,12 @@ func TestListAccountsByScope(t *testing.T) {
 	require.Len(t, accounts, 1)
 }
 
-// TestListAccountsByScopeUnknownScope verifies backend errors are propagated.
+// TestListAccountsByScopeUnknownScope verifies an unexpected scope error from
+// a read does not become a caller-validation error.
 func TestListAccountsByScopeUnknownScope(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a started wallet whose Store rejects an unknown scope.
 	w, deps := createStartedWalletWithMocks(t)
 
 	scope := waddrmgr.KeyScope{Purpose: 123, Coin: 456}
@@ -472,8 +477,13 @@ func TestListAccountsByScopeUnknownScope(t *testing.T) {
 		Scope:    &dbScope,
 	}).Return(nil, db.ErrUnknownKeyScope).Once()
 
+	// Act: list accounts under the unknown scope.
 	_, err := w.ListAccountsByScope(t.Context(), scope)
-	require.ErrorIs(t, err, db.ErrUnknownKeyScope)
+
+	// Assert: only the diagnostic crosses the boundary.
+	require.EqualError(t, err, db.ErrUnknownKeyScope.Error())
+	require.Empty(t, reportedIdentities(err))
+	require.NotErrorIs(t, err, db.ErrUnknownKeyScope)
 }
 
 // TestListAccountsByName verifies the name filter narrows the query.
@@ -645,26 +655,24 @@ func TestGetAccountIncludesImportedPseudoAccount(t *testing.T) {
 	require.Equal(t, uint32(3), account.ImportedKeyCount)
 }
 
-// TestGetAccountErrors verifies that request routing preserves both ordinary
-// Store failures and the legacy ManagerError identity expected by callers.
+// TestGetAccountErrors verifies that routed lookups apply the public error
+// contract to ordinary Store failures and legacy ManagerError values.
 func TestGetAccountErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		storeErr    error
-		managerCode bool
+		name     string
+		storeErr error
+		want     error
 	}{
 		{
 			name:     "store error",
 			storeErr: errDBMock,
 		},
 		{
-			name:        "manager error",
-			managerCode: true,
-			storeErr: waddrmgr.ManagerError{
-				ErrorCode: waddrmgr.ErrAccountNotFound,
-			},
+			name:     "manager error",
+			storeErr: legacyErr(waddrmgr.ErrAccountNotFound),
+			want:     ErrAccountNotFound,
 		},
 	}
 
@@ -689,14 +697,16 @@ func TestGetAccountErrors(t *testing.T) {
 			// account handler.
 			_, err := w.GetAccount(t.Context(), scope, name)
 
-			// Assert: The public result preserves the Store error identity
-			// expected by callers.
-			if test.managerCode {
-				require.True(t, waddrmgr.IsError(
-					err, waddrmgr.ErrAccountNotFound))
+			// Assert: Only the wallet-owned identity reaches callers.
+			if test.want != nil {
+				require.ErrorIs(t, err, test.want)
 			} else {
-				require.ErrorIs(t, err, errDBMock)
+				require.EqualError(t, err, test.storeErr.Error())
+				require.Empty(t, reportedIdentities(err))
 			}
+
+			require.NotErrorIs(t, err, test.storeErr)
+			requireNoInternalIdentity(t, err)
 		})
 	}
 }
@@ -856,6 +866,160 @@ func TestGetAccountCanceledCallerDrains(t *testing.T) {
 	require.NoError(t, <-stopResult)
 }
 
+// TestGetAccountTranslatesStoreError verifies an account either backend cannot
+// resolve is reported as the wallet-owned absence.
+func TestGetAccountTranslatesStoreError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		inject error
+		want   error
+	}{{
+		name:   "account absent",
+		inject: db.ErrAccountNotFound,
+		want:   ErrAccountNotFound,
+	}, {
+		name:   "key scope absent",
+		inject: db.ErrKeyScopeNotFound,
+		want:   ErrAccountNotFound,
+	}, {
+		name:   "legacy account absent",
+		inject: wrapped(legacyErr(waddrmgr.ErrAccountNotFound)),
+		want:   ErrAccountNotFound,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a started wallet whose account read fails.
+			w, deps := createStartedWalletWithMocks(t)
+			deps.store.On("GetAccount", mock.Anything,
+				mock.Anything).
+				Return((*db.AccountInfo)(nil), tc.inject).Once()
+
+			// Act: read the account by name.
+			account, err := w.GetAccount(
+				t.Context(), waddrmgr.KeyScopeBIP0084,
+				testAccountName,
+			)
+
+			// Assert: only the wallet-owned identity is reported.
+			require.Nil(t, account)
+			require.ErrorContains(t, err, tc.inject.Error())
+			require.Equal(
+				t, []string{tc.want.Error()}, reportedIdentities(err),
+			)
+			require.NotErrorIs(t, err, tc.inject)
+			requireNoInternalIdentity(t, err)
+		})
+	}
+}
+
+// TestGetAccountKeepsCallerCancellation verifies a cancellation or deadline the
+// backend reports keeps the caller-owned identity, while a store identity
+// joined to it stops at the boundary.
+func TestGetAccountKeepsCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		inject error
+		want   error
+	}{{
+		name:   "cancelled with joined store failure",
+		inject: errors.Join(context.Canceled, db.ErrAccountNotFound),
+		want:   context.Canceled,
+	}, {
+		name:   "deadline exceeded",
+		inject: context.DeadlineExceeded,
+		want:   context.DeadlineExceeded,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a started wallet whose read is abandoned.
+			w, deps := createStartedWalletWithMocks(t)
+			deps.store.On("GetAccount", mock.Anything,
+				mock.Anything).
+				Return((*db.AccountInfo)(nil), tc.inject).Once()
+
+			// Act: read the account by name.
+			account, err := w.GetAccount(
+				t.Context(), waddrmgr.KeyScopeBIP0084,
+				testAccountName,
+			)
+
+			// Assert: the caller keeps its identity and no account
+			// outcome is claimed.
+			require.Nil(t, account)
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, reportedIdentities(err))
+			requireNoInternalIdentity(t, err)
+		})
+	}
+}
+
+// TestGetAccountDropsUnknownIdentity verifies a failure the contract does not
+// name reaches the caller as diagnostic text alone, so no unmapped outcome can
+// be matched by accident.
+func TestGetAccountDropsUnknownIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started wallet whose account read fails unexpectedly.
+	w, deps := createStartedWalletWithMocks(t)
+	injected := wrapped(errors.New("backend exploded"))
+
+	deps.store.On("GetAccount", mock.Anything, mock.Anything).
+		Return((*db.AccountInfo)(nil), injected).Once()
+
+	// Act: read the account by name.
+	account, err := w.GetAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+
+	// Assert: the text survives, the identity does not.
+	require.Nil(t, account)
+	require.EqualError(t, err, injected.Error())
+	require.NotErrorIs(t, err, injected)
+	require.Empty(t, reportedIdentities(err))
+	requireNoInternalIdentity(t, err)
+}
+
+// TestGetAccountConversionFailure verifies a Store snapshot the wallet cannot
+// convert fails the read instead of returning a partial account, and that the
+// internal conversion identity does not escape either.
+func TestGetAccountConversionFailure(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a started wallet whose Store reports an address schema the
+	// public result cannot represent.
+	w, deps := createStartedWalletWithMocks(t)
+	deps.store.On("GetAccount", mock.Anything, mock.Anything).
+		Return(&db.AccountInfo{
+			AccountName: testAccountName,
+			AddrSchema: db.ScopeAddrSchema{
+				ExternalAddrType: db.Anchor,
+				InternalAddrType: db.WitnessPubKey,
+			},
+		}, nil).Once()
+
+	// Act: read the account by name.
+	account, err := w.GetAccount(
+		t.Context(), waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+
+	// Assert: the read fails with the conversion diagnostic only.
+	require.Nil(t, account)
+	require.ErrorContains(t, err, "external account address schema")
+	require.Empty(t, reportedIdentities(err))
+	require.NotErrorIs(t, err, addresstype.ErrUnknown)
+	requireNoInternalIdentity(t, err)
+}
+
 // TestNewAccount verifies NewAccount routes through
 // w.store.CreateDerivedAccount.
 func TestNewAccount(t *testing.T) {
@@ -986,6 +1150,189 @@ func TestRenameAccount(t *testing.T) {
 
 	err = w.RenameAccount(t.Context(), scope, "missing", "x")
 	require.ErrorIs(t, err, db.ErrAccountNotFound)
+}
+
+// accountManagerIdentities lists every wallet-owned identity the
+// AccountManager boundary may report. Assertions compare against the whole
+// set so a translation that reports the wrong outcome fails on the identity it
+// leaked, not only on the one it missed.
+var accountManagerIdentities = []error{
+	ErrAccountNotFound, ErrAccountAlreadyExists,
+	ErrAccountOperationUnsupported, ErrAccountDerivationExhausted,
+	ErrInvalidParam, ErrInvalidAccountKey, ErrStateForbidden,
+}
+
+// internalIdentities lists the Store, vault, and wallet-internal identities
+// that must never reach a caller of a public AccountManager method.
+var internalIdentities = []error{
+	db.ErrAccountNotFound, db.ErrKeyScopeNotFound,
+	db.ErrWatchOnlyViolation, db.ErrSpendableWalletNeedsAccountPrivKey,
+	db.ErrMaxAccountNumberReached, db.ErrMissingAccountName,
+	db.ErrMissingAccountPublicKey, db.ErrMissingField, db.ErrInvalidParam,
+	db.ErrReservedAccountName, db.ErrInvalidAccountQuery,
+	db.ErrUnknownKeyScope, keyvault.ErrVaultLocked, addresstype.ErrUnknown,
+	errWatchOnlyAccountDerivation,
+}
+
+// reportedIdentities names the wallet-owned identities err reports, ordered as
+// accountManagerIdentities lists them. Naming them lets a case state its whole
+// expectation as one equality instead of an assertion per identity.
+func reportedIdentities(err error) []string {
+	var reported []string
+	for _, identity := range accountManagerIdentities {
+		if errors.Is(err, identity) {
+			reported = append(reported, identity.Error())
+		}
+	}
+
+	return reported
+}
+
+// legacyErr builds the error the legacy waddrmgr backend reports for code.
+func legacyErr(code waddrmgr.ErrorCode) error {
+	return waddrmgr.ManagerError{
+		ErrorCode:   code,
+		Description: "address manager operation failed",
+	}
+}
+
+// wrapped restates err the way the legacy backend and the SQL stores do, which
+// is why the boundary has to unwrap rather than type-assert.
+func wrapped(err error) error {
+	return fmt.Errorf("create account: %w", err)
+}
+
+// requireNoInternalIdentity asserts no Store, vault, or legacy manager
+// identity survived the boundary. The diagnostic text may still name the
+// source failure; only the identity has to be gone.
+func requireNoInternalIdentity(t *testing.T, got error) {
+	t.Helper()
+
+	for _, internal := range internalIdentities {
+		require.NotErrorIs(t, got, internal)
+	}
+
+	var mgrErr waddrmgr.ManagerError
+	require.NotErrorAs(t, got, &mgrErr)
+}
+
+// TestAccountManagerErrTranslatesIdentities verifies the classifications no
+// public method exercises directly: each store or legacy waddrmgr failure is
+// reported as its wallet-owned identity and as no other, with the source text
+// preserved and the source identity dropped.
+func TestAccountManagerErrTranslatesIdentities(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		inject error
+		want   error
+	}{{
+		name:   "legacy scope not found",
+		inject: legacyErr(waddrmgr.ErrScopeNotFound),
+		want:   ErrAccountNotFound,
+	}, {
+		name:   "watch-only import violation",
+		inject: db.ErrWatchOnlyViolation,
+		want:   ErrAccountOperationUnsupported,
+	}, {
+		name:   "legacy watching only",
+		inject: legacyErr(waddrmgr.ErrWatchingOnly),
+		want:   ErrAccountOperationUnsupported,
+	}, {
+		name:   "legacy locked",
+		inject: legacyErr(waddrmgr.ErrLocked),
+		want:   ErrStateForbidden,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := accountManagerErr(tc.inject)
+
+			require.ErrorContains(t, err, tc.inject.Error())
+			require.Equal(
+				t, []string{tc.want.Error()}, reportedIdentities(err),
+			)
+			require.NotErrorIs(t, err, tc.inject)
+			requireNoInternalIdentity(t, err)
+		})
+	}
+}
+
+// TestAccountManagerErrKeepsCallerIdentity verifies a cancellation or deadline
+// belongs to the caller, so its identity survives the restatement a backend
+// wraps it in. Neither is an account outcome, so they must claim no
+// wallet-owned identity.
+func TestAccountManagerErrKeepsCallerIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		inject error
+		want   error
+	}{{
+		name:   "wrapped cancelled",
+		inject: wrapped(context.Canceled),
+		want:   context.Canceled,
+	}, {
+		name:   "wrapped deadline exceeded",
+		inject: wrapped(context.DeadlineExceeded),
+		want:   context.DeadlineExceeded,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := accountManagerErr(tc.inject)
+
+			require.ErrorIs(t, err, tc.want)
+			require.ErrorContains(t, err, tc.inject.Error())
+			require.Empty(t, reportedIdentities(err))
+			requireNoInternalIdentity(t, err)
+		})
+	}
+}
+
+// TestListAccountsTranslatesStoreError verifies the query surface crosses the
+// same boundary as the mutations.
+func TestListAccountsTranslatesStoreError(t *testing.T) {
+	t.Parallel()
+
+	for _, storeErr := range []error{
+		db.ErrUnknownKeyScope,
+		db.ErrMissingAccountName,
+		db.ErrMissingAccountPublicKey,
+		db.ErrMissingField,
+		db.ErrInvalidParam,
+		db.ErrReservedAccountName,
+		db.ErrInvalidAccountQuery,
+		legacyErr(waddrmgr.ErrInvalidAccount),
+	} {
+		t.Run(storeErr.Error(), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: an unfiltered query fails inside the Store.
+			w, deps := createStartedWalletWithMocks(t)
+			injected := fmt.Errorf("list accounts: %w", storeErr)
+			deps.store.On(
+				"ListAccounts", mock.Anything,
+				db.ListAccountsQuery{WalletID: w.id},
+			).Return([]db.AccountInfo(nil), injected).Once()
+
+			// Act: list every account without caller-supplied filters.
+			accounts, err := w.ListAccounts(t.Context())
+
+			// Assert: preserve diagnostics without a public outcome.
+			require.Nil(t, accounts)
+			require.EqualError(t, err, injected.Error())
+			require.Empty(t, reportedIdentities(err))
+			require.NotErrorIs(t, err, storeErr)
+			requireNoInternalIdentity(t, err)
+		})
+	}
 }
 
 // TestImportAccount verifies the normal import path routes through
