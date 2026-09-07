@@ -50,6 +50,10 @@ type AccountInfo struct {
 	// the account snapshot.
 	IsWatchOnly bool
 
+	// NoChainSync is the stored, immutable policy excluding the account from
+	// automatic chain synchronization; it does not change signing custody.
+	NoChainSync bool
+
 	// CreatedAt is the time the account was created. A zero time means the
 	// backing Store does not know the creation time.
 	CreatedAt time.Time

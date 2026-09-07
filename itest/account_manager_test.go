@@ -238,14 +238,16 @@ func testAccountManagerCreateAccountSequence(h *bwtest.HarnessTest) {
 	)
 }
 
-// testAccountManagerRejectAccountCreation verifies rejected names cannot alter
-// an existing account or its scope's account count.
+// testAccountManagerRejectAccountCreation verifies invalid, occupied, and
+// unsupported requests preserve public error identities and account state.
 func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 	const (
 		sourceName         = "account manager rejection source"
 		afterRejectionName = "account manager after rejection"
 	)
 
+	// Arrange: snapshot one existing account and its scope count so a
+	// rejected request cannot silently alter either observable value.
 	scope := waddrmgr.KeyScopeBIP0084
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
@@ -266,29 +268,44 @@ func testAccountManagerRejectAccountCreation(h *bwtest.HarnessTest) {
 
 	wantCount := len(accounts)
 
-	// These rejections have no stable public error identity yet, so the
-	// rows assert rejection and unchanged state only.
+	// Each request has one refusal reason; the backend must preserve its
+	// public identity without changing account state.
 	testCases := []struct {
 		name        string
 		accountName string
+		noChainSync bool
+		wantErr     error
 	}{
 		{
 			name:        "duplicate source name",
 			accountName: sourceName,
+			wantErr:     wallet.ErrAccountAlreadyExists,
 		},
 		{
 			name:        "empty name",
 			accountName: "",
+			wantErr:     wallet.ErrInvalidParam,
+		},
+		{
+			name:        "unsupported chain-sync exclusion",
+			accountName: "excluded account",
+			noChainSync: true,
+			wantErr:     wallet.ErrAccountOperationUnsupported,
 		},
 	}
 
 	for _, tc := range testCases {
+		// Act: submit the rejected request through the same public
+		// Wallet method for every maintained backend.
 		_, err := w.NewAccount(ctx, wallet.NewAccountParams{
-			Scope: scope,
-			Name:  tc.accountName,
+			Scope:       scope,
+			Name:        tc.accountName,
+			NoChainSync: tc.noChainSync,
 		})
 
-		require.Error(h, err, "%s was accepted", tc.name)
+		// Assert: check the public refusal and compare the pre-existing
+		// account and count to their pre-call snapshots.
+		require.ErrorIs(h, err, tc.wantErr, tc.name)
 
 		current, err := w.GetAccount(ctx, scope, sourceName)
 		require.NoError(
