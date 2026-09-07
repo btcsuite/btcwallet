@@ -146,8 +146,8 @@ var allTestCases = []*testCase{
 	// Keep the public Signer request in the integration matrix so callers
 	// cannot accidentally depend on wallet-internal database types.
 	{
-		Name:     "signer derive pubkey",
-		TestFunc: testSignerDerivePubKey,
+		Name:     "signer derive pubkey paths",
+		TestFunc: testSignerDerivePubKeyPaths,
 	},
 	{
 		Name:     "utxomanager list unspent",
