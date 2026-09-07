@@ -1971,6 +1971,128 @@ func TestListAccountsTranslatesStoreError(t *testing.T) {
 	}
 }
 
+// TestImportAccountInternalPreservesStoreError verifies the Manager-owned
+// initial-account path does not inherit the public AccountManager translation.
+func TestImportAccountInternalPreservesStoreError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an internal import whose Store write returns a db identity.
+	w, deps := createStartedWalletWithMocks(t)
+	acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+	deps.store.On("CreateImportedAccount", mock.Anything, mock.Anything).
+		Return((*db.AccountInfo)(nil), db.ErrWatchOnlyViolation).Once()
+
+	// Act: import through the Manager-owned initialization path.
+	account, err := w.importAccountInternal(
+		t.Context(), testAccountName, acctPubKey, masterFP,
+		waddrmgr.WitnessPubKey, false,
+	)
+
+	// Assert: the internal call retains the Store identity for its caller.
+	require.Nil(t, account)
+	require.ErrorIs(t, err, db.ErrWatchOnlyViolation)
+	require.NotErrorIs(t, err, ErrAccountOperationUnsupported)
+
+	// The public name preflight belongs to the public contract only.
+	deps.store.AssertNotCalled(t, "GetAccount", mock.Anything, mock.Anything)
+}
+
+// TestImportAccountInvalidRequest verifies the request shape is settled before
+// any name lookup or Store work, with unusable key material keeping its own
+// identity and invalid names or unsupported address types reported as invalid
+// parameters.
+func TestImportAccountInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	acctPubKey, masterFP := importAccountTestKey(t, 44)
+
+	privKey, err := hdkeychain.NewMaster(fixedTestSeed(), &chainParams)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		acctName string
+		key      *hdkeychain.ExtendedKey
+		addrType waddrmgr.AddressType
+		want     error
+	}{{
+		name:     "missing key material",
+		acctName: testAccountName,
+		addrType: waddrmgr.WitnessPubKey,
+		want:     ErrInvalidAccountKey,
+	}, {
+		name:     "private key material",
+		acctName: testAccountName,
+		key:      privKey,
+		addrType: waddrmgr.WitnessPubKey,
+		want:     ErrInvalidAccountKey,
+	}, {
+		name:     "address type the key version cannot serve",
+		acctName: testAccountName,
+		key:      acctPubKey,
+		addrType: waddrmgr.PubKeyHash,
+		want:     ErrInvalidParam,
+	}, {
+		name:     "empty account name",
+		acctName: "",
+		key:      acctPubKey,
+		addrType: waddrmgr.WitnessPubKey,
+		want:     ErrInvalidParam,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: a started wallet awaiting the import.
+			w, deps := createStartedWalletWithMocks(t)
+
+			// Act: import the unusable request.
+			account, err := w.ImportAccount(
+				t.Context(), tc.acctName, tc.key, masterFP,
+				tc.addrType, false,
+			)
+
+			// Assert: the wallet-owned identity is the only one
+			// reported, and neither the name lookup nor the write
+			// happened.
+			require.Nil(t, account)
+			require.Equal(t, []string{tc.want.Error()},
+				reportedIdentities(err))
+			requireNoInternalIdentity(t, err)
+			deps.store.AssertNotCalled(t, "GetAccount",
+				mock.Anything, mock.Anything)
+			deps.store.AssertNotCalled(t, "CreateImportedAccount",
+				mock.Anything, mock.Anything)
+		})
+	}
+}
+
+// TestImportAccountInternalPreservesRequestError verifies the Manager-owned
+// initialization path keeps its raw request failure, so an unusable initial
+// account is not restated through the public contract.
+func TestImportAccountInternalPreservesRequestError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: an internal import whose address type serves no key scope.
+	w, deps := createStartedWalletWithMocks(t)
+	acctPubKey, masterFP := importAccountTestKey(t, 44)
+
+	// Act: import through the Manager-owned initialization path.
+	account, err := w.importAccountInternal(
+		t.Context(), testAccountName, acctPubKey, masterFP,
+		waddrmgr.PubKeyHash, false,
+	)
+
+	// Assert: the raw diagnostic survives with no public identity attached.
+	require.Nil(t, account)
+	require.ErrorContains(t, err, "unsupported address type")
+	require.Empty(t, reportedIdentities(err))
+	deps.store.AssertNotCalled(t, "CreateImportedAccount", mock.Anything,
+		mock.Anything)
+}
+
 // TestNewAccountVaultLockedForbidden verifies a Vault that locks after the
 // wallet admitted the request surfaces as ErrStateForbidden without leaking
 // the Vault sentinel.
@@ -2354,6 +2476,7 @@ func TestRenameAccountOccupiedTarget(t *testing.T) {
 func TestImportAccount(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a valid account key and an available name in its derived scope.
 	w, deps := createStartedWalletWithMocks(t)
 
 	acctPubKey, masterFP := importAccountTestKey(t, 84)
@@ -2365,6 +2488,7 @@ func TestImportAccount(t *testing.T) {
 		Coin:    scope.Coin,
 	}
 
+	expectAccountNameFree(t, deps, scope, testAccountName)
 	deps.store.On("CreateImportedAccount", mock.Anything,
 		db.CreateImportedAccountParams{
 			WalletID:          0,
@@ -2380,10 +2504,13 @@ func TestImportAccount(t *testing.T) {
 		PublicKey:   []byte(acctPubKey.String()),
 	}, nil).Once()
 
+	// Act: import the account through the public boundary.
 	props, err := w.ImportAccount(
 		t.Context(), testAccountName, acctPubKey,
 		masterFP, addrType, false,
 	)
+
+	// Assert: the imported account is returned and all Store calls occurred.
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
 }
@@ -2393,6 +2520,7 @@ func TestImportAccount(t *testing.T) {
 func TestImportAccountDryRun(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a valid dry-run import under an available account name.
 	w, deps := createStartedWalletWithMocks(t)
 
 	acctPubKey, masterFP := importAccountTestKey(t, 84)
@@ -2404,6 +2532,7 @@ func TestImportAccountDryRun(t *testing.T) {
 		Coin:    scope.Coin,
 	}
 
+	expectAccountNameFree(t, deps, scope, testAccountName)
 	deps.store.On("CreateImportedAccount", mock.Anything,
 		db.CreateImportedAccountParams{
 			WalletID:          0,
@@ -2420,10 +2549,13 @@ func TestImportAccountDryRun(t *testing.T) {
 		PublicKey:   []byte(acctPubKey.String()),
 	}, nil).Once()
 
+	// Act: validate the import without persisting it.
 	props, err := w.ImportAccount(
 		t.Context(), testAccountName, acctPubKey,
 		masterFP, addrType, true,
 	)
+
+	// Assert: the Store receives the dry-run flag and returns the account view.
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
 }
@@ -2433,6 +2565,8 @@ func TestImportAccountDryRun(t *testing.T) {
 func TestImportAccountAddrSchema(t *testing.T) {
 	t.Parallel()
 
+	// Arrange: a BIP49 account key whose derived scope requires a nested
+	// witness address-schema override.
 	w, deps := createStartedWalletWithMocks(t)
 
 	acctPubKey, masterFP := importAccountTestKey(t, 49)
@@ -2448,6 +2582,7 @@ func TestImportAccountAddrSchema(t *testing.T) {
 		InternalAddrType: db.NestedWitnessPubKey,
 	}
 
+	expectAccountNameFree(t, deps, scope, testAccountName)
 	deps.store.On("CreateImportedAccount", mock.Anything,
 		db.CreateImportedAccountParams{
 			WalletID:          0,
@@ -2464,10 +2599,13 @@ func TestImportAccountAddrSchema(t *testing.T) {
 		PublicKey:   []byte(acctPubKey.String()),
 	}, nil).Once()
 
+	// Act: import the account with the matching public address type.
 	props, err := w.ImportAccount(
 		t.Context(), testAccountName, acctPubKey,
 		masterFP, addrType, false,
 	)
+
+	// Assert: the Store receives the converted schema and returns the account.
 	require.NoError(t, err)
 	require.Equal(t, testAccountName, props.AccountName)
 }
@@ -2685,6 +2823,69 @@ func TestImportAccountRejectsStopped(t *testing.T) {
 	// Assert: The terminal sentinel proves shutdown wins before key validation
 	// or Store access.
 	require.ErrorIs(t, err, ErrWalletStopped)
+}
+
+// TestImportAccountOccupiedName verifies the name is resolved in the scope the
+// key version selects, before the account is written.
+func TestImportAccountOccupiedName(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a valid key whose derived scope already holds the name.
+	w, deps := createStartedWalletWithMocks(t)
+	acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+	expectAccountNameTaken(
+		t, deps, waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+
+	// Act: import the account under the occupied name.
+	account, err := w.ImportAccount(
+		t.Context(), testAccountName, acctPubKey, masterFP,
+		waddrmgr.WitnessPubKey, false,
+	)
+
+	// Assert: the conflict is reported and nothing is written.
+	require.Nil(t, account)
+	require.ErrorIs(t, err, ErrAccountAlreadyExists)
+	require.ErrorContains(t, err, testAccountName)
+	deps.store.AssertNotCalled(t, "CreateImportedAccount", mock.Anything,
+		mock.Anything)
+}
+
+// TestImportAccountSpendableWalletUnsupported verifies a store that demands
+// account signing material from a spendable wallet, as ADR 0012 requires,
+// reports an unsupported operation without leaking its own sentinel.
+func TestImportAccountSpendableWalletUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a spendable wallet importing XPub-only material.
+	w, deps := createStartedWalletWithMocks(t)
+	acctPubKey, masterFP := importAccountTestKey(t, 84)
+
+	expectAccountNameFree(
+		t, deps, waddrmgr.KeyScopeBIP0084, testAccountName,
+	)
+	deps.store.On("CreateImportedAccount", mock.Anything, mock.Anything).
+		Return((*db.AccountInfo)(nil),
+			db.ErrSpendableWalletNeedsAccountPrivKey).Once()
+
+	// Act: import the watch-only account key.
+	account, err := w.ImportAccount(
+		t.Context(), testAccountName, acctPubKey, masterFP,
+		waddrmgr.WitnessPubKey, false,
+	)
+
+	// Assert: the refusal is reported as unsupported by this wallet.
+	require.Nil(t, account)
+	require.ErrorContains(
+		t, err, db.ErrSpendableWalletNeedsAccountPrivKey.Error(),
+	)
+	require.Equal(
+		t, []string{ErrAccountOperationUnsupported.Error()},
+		reportedIdentities(err),
+	)
+	require.NotErrorIs(t, err, db.ErrSpendableWalletNeedsAccountPrivKey)
+	requireNoInternalIdentity(t, err)
 }
 
 // TestDBScopeAddrSchemaMapsTypes verifies dbScopeAddrSchema converts a
