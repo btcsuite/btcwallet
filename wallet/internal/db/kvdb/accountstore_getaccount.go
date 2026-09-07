@@ -337,3 +337,23 @@ func translateAccountErr(err error, notFound error) error {
 
 	return fmt.Errorf("waddrmgr: %w", err)
 }
+
+// GetKeyScopeSchema reads the legacy scoped manager's authoritative schema;
+// the single-wallet adapter does not use the SQL wallet identifier.
+func (s *Store) GetKeyScopeSchema(ctx context.Context, _ uint32,
+	scope db.KeyScope) (db.ScopeAddrSchema, error) {
+
+	err := ctx.Err()
+	if err != nil {
+		return db.ScopeAddrSchema{}, err
+	}
+
+	mgr, err := s.addrStore.FetchScopedKeyManager(waddrmgr.KeyScope(scope))
+	if err != nil {
+		return db.ScopeAddrSchema{}, translateAccountErr(
+			err, db.ErrKeyScopeNotFound,
+		)
+	}
+
+	return db.ScopeAddrSchemaFromWaddrmgr(mgr.AddrSchema())
+}

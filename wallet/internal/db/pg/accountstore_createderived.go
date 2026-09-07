@@ -53,10 +53,10 @@ func (o createDerivedAccountOps) WalletWatchOnly(ctx context.Context,
 
 // EnsureScope implements db.CreateDerivedAccountOps.
 func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
-	walletID uint32,
-	scope db.KeyScope) (int64, db.ScopeAddrSchema, error) {
+	walletID uint32, scope db.KeyScope,
+	schema *db.ScopeAddrSchema) (int64, db.ScopeAddrSchema, error) {
 
-	return ensureKeyScope(ctx, o.q, walletID, scope, nil)
+	return ensureKeyScope(ctx, o.q, walletID, scope, schema)
 }
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
