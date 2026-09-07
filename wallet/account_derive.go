@@ -31,10 +31,9 @@ var errWatchOnlyAccountDerivation = errors.New(
 // encrypts the resulting private key via vault, and returns the
 // DerivedAccountData that the backend persists alongside the row.
 //
-// masterPrivKey must be the wallet's decrypted master HD private key,
-// loaded by Wallet.NewAccount before opening the store transaction. The
+// masterPrivKey must be the wallet's decrypted master HD private key. The
 // closure does not access w.store or open any database transaction, so it
-// is safe for the backend to invoke from inside its write tx.
+// is safe to construct and invoke after the store's transactional checks.
 //
 // The fingerprint argument is the BIP32 master-key fingerprint corresponding
 // to masterPrivKey (computed once by Wallet.NewAccount via
