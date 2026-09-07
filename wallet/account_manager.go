@@ -209,6 +209,9 @@ func (w *Wallet) buildAccountDeriveFn(
 //     account is created for each of the default key scopes and CAN be renamed.
 //   - "imported": A special account that holds all individually imported keys.
 //     This account is global and CANNOT be renamed.
+//
+// Errors use wallet-owned sentinels without exposing backend error identities.
+// Context cancellation and deadlines are preserved.
 type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope.
@@ -242,10 +245,10 @@ type AccountManager interface {
 		oldName string, newName string) error
 
 	// ImportAccount imports an account from an extended public key.
-	// Private extended keys are rejected. The key scope is derived from
-	// the version bytes of the extended key. The account name must be
-	// unique within the derived scope. If dryRun is true, the import is
-	// validated but not persisted. SQL wallets accept this XPub-only
+	// Invalid or private keys return ErrInvalidAccountKey. The key scope is
+	// derived from the version bytes of the extended key. The account name
+	// must be unique within the derived scope. If dryRun is true, the import
+	// is validated but not persisted. SQL wallets accept this XPub-only
 	// material only when the wallet is watch-only under ADR 0012. The
 	// legacy kvdb backend retains its grandfathered mixed-mode import
 	// behavior until migration; neither path imports signing material.
@@ -904,7 +907,7 @@ type importAccountReq struct {
 // ImportAccount imports an account from an extended public key. Private
 // extended keys are rejected. The key scope is derived from the version
 // bytes of the extended key. The account name must be unique within the
-// derived scope.
+// derived scope. Invalid account keys return ErrInvalidAccountKey.
 //
 // SQL wallets accept this XPub-only material only when the wallet is
 // watch-only under ADR 0012. The legacy kvdb backend retains its grandfathered
@@ -961,65 +964,115 @@ func (w *Wallet) ImportAccount(ctx context.Context,
 	return resp.info, resp.err
 }
 
-// handleImportAccount invokes the existing non-admitting implementation for
-// a request that mainLoop has already accepted and handleReq will complete.
+// handleImportAccount validates and persists an admitted import while keeping
+// public error translation separate from pre-start Manager imports.
 func (w *Wallet) handleImportAccount(req importAccountReq) {
-	info, err := w.importAccountInternal(
-		req.ctx, req.name, req.accountKey, req.masterKeyFingerprint,
+	err := waddrmgr.ValidateAccountName(req.name)
+	if err != nil {
+		req.resp <- accountResp{
+			err: fmt.Errorf("%w: %s", ErrInvalidParam, err.Error()),
+		}
+
+		return
+	}
+
+	// The key's version bytes select the scope the name has to be unique in,
+	// so the request is built before that name can be looked up.
+	params, err := w.importAccountParams(
+		req.name, req.accountKey, req.masterKeyFingerprint,
 		req.addrType, req.dryRun,
 	)
+	if err != nil {
+		if errors.Is(err, ErrInvalidAccountKey) {
+			req.resp <- accountResp{err: err}
+			return
+		}
+
+		req.resp <- accountResp{
+			err: fmt.Errorf("%w: %s", ErrInvalidParam, err.Error()),
+		}
+
+		return
+	}
+
+	err = w.requireAccountNameAvailable(
+		req.ctx, waddrmgr.KeyScope(params.Scope), req.name,
+	)
+	if err != nil {
+		req.resp <- accountResp{err: err}
+		return
+	}
+
+	info, err := w.persistImportedAccount(req.ctx, params)
 	req.resp <- accountResp{
 		info: info,
-		err:  err,
+		err:  accountManagerErr(err),
 	}
 }
 
 // importAccountInternal is the internal implementation of ImportAccount,
-// allowing Manager.Create to bypass the started check.
+// allowing Manager.Create to bypass the started check. It leaves request
+// validation and Store errors untranslated so only the public method applies
+// the AccountManager contract.
 func (w *Wallet) importAccountInternal(ctx context.Context,
 	name string, accountKey *hdkeychain.ExtendedKey,
 	masterKeyFingerprint uint32, addrType waddrmgr.AddressType,
 	dryRun bool) (*AccountInfo, error) {
 
-	err := validateExtendedPubKey(
-		accountKey, true, w.cfg.ChainParams,
+	params, err := w.importAccountParams(
+		name, accountKey, masterKeyFingerprint, addrType, dryRun,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	keyScope, addrSchema, err := keyScopeFromPubKey(
-		accountKey, &addrType,
-	)
+	return w.persistImportedAccount(ctx, params)
+}
+
+// importAccountParams validates the supplied key material and builds the Store
+// request for an XPub import, resolving the key scope and the per-account
+// address schema that the key version and requested address type select.
+func (w *Wallet) importAccountParams(name string,
+	accountKey *hdkeychain.ExtendedKey, masterKeyFingerprint uint32,
+	addrType waddrmgr.AddressType, dryRun bool) (
+	db.CreateImportedAccountParams, error) {
+
+	var params db.CreateImportedAccountParams
+
+	err := validateExtendedPubKey(accountKey, true, w.cfg.ChainParams)
 	if err != nil {
-		return nil, err
+		return params, err
+	}
+
+	keyScope, addrSchema, err := keyScopeFromPubKey(accountKey, &addrType)
+	if err != nil {
+		return params, err
 	}
 
 	dbAddrSchema, err := dbScopeAddrSchema(addrSchema)
 	if err != nil {
-		return nil, err
+		return params, err
 	}
 
-	info, err := w.store.CreateImportedAccount(ctx,
-		db.CreateImportedAccountParams{
-			WalletID:          w.id,
-			Name:              name,
-			Scope:             db.KeyScope(keyScope),
-			MasterFingerprint: masterKeyFingerprint,
-			PublicKey:         []byte(accountKey.String()),
-			DryRun:            dryRun,
-			AddrSchema:        dbAddrSchema,
-		},
-	)
-	if err != nil {
-		// Preserve waddrmgr.ManagerError semantics so callers using
-		// waddrmgr.IsError(err, ...) keep working when kvdb wraps the
-		// underlying manager error via fmt.Errorf.
-		var mErr waddrmgr.ManagerError
-		if errors.As(err, &mErr) {
-			return nil, mErr
-		}
+	return db.CreateImportedAccountParams{
+		WalletID:          w.id,
+		Name:              name,
+		Scope:             db.KeyScope(keyScope),
+		MasterFingerprint: masterKeyFingerprint,
+		PublicKey:         []byte(accountKey.String()),
+		DryRun:            dryRun,
+		AddrSchema:        dbAddrSchema,
+	}, nil
+}
 
+// persistImportedAccount writes a prepared import request and converts the
+// resulting Store snapshot. Its errors stay internal, so each caller applies
+// its own contract.
+func (w *Wallet) persistImportedAccount(ctx context.Context,
+	params db.CreateImportedAccountParams) (*AccountInfo, error) {
+
+	info, err := w.store.CreateImportedAccount(ctx, params)
+	if err != nil {
 		return nil, err
 	}
 
