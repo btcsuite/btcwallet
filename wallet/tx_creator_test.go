@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/btcsuite/btcd/address/v2"
@@ -1971,4 +1972,296 @@ func TestFilterEligibleOutputsExcludesImmatureCoinbase(t *testing.T) {
 			}
 		})
 	}
+}
+
+// corruptAmountPkScript returns the P2WPKH script the corrupt-amount fixtures
+// pay to. Its contents are irrelevant to amount validation; it only has to be
+// a spendable script shape so nothing rejects the set before the amounts are
+// read.
+func corruptAmountPkScript() []byte {
+	return append([]byte{0x00, 0x14}, make([]byte, 20)...)
+}
+
+// expectCorruptAmountSources stands the store up to return one default-account
+// UTXO per given amount and registers the account and chain lookups an input
+// source performs on the way. It serves both selection paths: automatic
+// selection lists the account's UTXOs, while manual selection fetches each of
+// the returned outpoints by name.
+//
+// No change-script derivation is registered. A refusal that arrived late enough
+// to allocate change would call NewDerivedAddress, and the mock fails an
+// unexpected call, so the omission is what pins every rejection ahead of change
+// allocation. Nothing leases either: authoring fails inside the input source,
+// which is before any wrapper reaches its lease obligations.
+func expectCorruptAmountSources(t *testing.T, w *Wallet,
+	mocks *mockWalletDeps, amounts []btcutil.Amount) []wire.OutPoint {
+
+	t.Helper()
+
+	defaultAccountNum := uint32(waddrmgr.DefaultAccountNum)
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	accountInfo := &db.AccountInfo{
+		AccountNumber: &defaultAccountNum,
+		AccountName:   waddrmgr.DefaultAccountName,
+		AddrSchema:    db.ScopeAddrMap[scope],
+	}
+
+	// The account and chain reads differ in number between the two paths
+	// and are only scaffolding for the amounts under test, so they are not
+	// pinned to a count.
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, Name: &defaultAccountName,
+	}).Return(accountInfo, nil).Maybe()
+	mocks.store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID: w.id, Scope: scope, AccountNumber: &defaultAccountNum,
+	}).Return(accountInfo, nil).Maybe()
+	mocks.chain.On("BlockStamp").Return(
+		&waddrmgr.BlockStamp{Height: 100}, nil,
+	).Maybe()
+
+	script := corruptAmountPkScript()
+	utxos := make([]db.UtxoInfo, len(amounts))
+	outpoints := make([]wire.OutPoint, len(amounts))
+
+	for i, amount := range amounts {
+		outpoints[i] = wire.OutPoint{
+			Hash: [32]byte{byte(i + 1)}, Index: 0,
+		}
+		utxos[i] = db.UtxoInfo{
+			OutPoint: outpoints[i], Amount: amount,
+			PkScript: script, Height: 1,
+		}
+
+		mocks.store.On("GetUtxo", mock.Anything, db.GetUtxoQuery{
+			WalletID: w.id, OutPoint: outpoints[i],
+		}).Return(&utxos[i], nil).Maybe()
+	}
+
+	mocks.store.On("ListUTXOs", mock.Anything, db.ListUtxosQuery{
+		WalletID: w.id, Scope: &scope, AccountName: &defaultAccountName,
+	}).Return(utxos, nil).Maybe()
+
+	return outpoints
+}
+
+// corruptAmountCase is one set of store amounts a wallet input source must
+// refuse, together with the violation it must be refused under.
+type corruptAmountCase struct {
+	name    string
+	amounts []btcutil.Amount
+	wantErr error
+}
+
+// automaticCorruptAmountCases enumerates the corrupt store amounts automatic
+// selection must refuse.
+//
+// The amounts are shaped around how that source consumes coins: it takes them
+// largest first and stops as soon as the running total reaches the target, so a
+// set whose first coin already funds the payment never reveals what follows it.
+// The sets below therefore keep the total below the 99,700-sat payment until
+// the offending coin has been taken.
+var automaticCorruptAmountCases = []corruptAmountCase{{
+	// Both coins are consumed because neither funds the payment, so the
+	// negative one reaches the check with the total still non-negative.
+	name:    "a negative amount is rejected",
+	amounts: []btcutil.Amount{50_000, -10_000},
+	wantErr: errInputValueNegative,
+}, {
+	name:    "an amount below the negative total is rejected",
+	amounts: []btcutil.Amount{-1e8, -2e8},
+	wantErr: errInputTotalNegative,
+}, {
+	name:    "an amount above the maximum is rejected",
+	amounts: []btcutil.Amount{btcutil.MaxSatoshi + 1},
+	wantErr: errInputTotalExceedsMax,
+}, {
+	// Accumulating downwards is the only way this source can climb to the
+	// overflow point: the loop stops once the total reaches the target, so
+	// a rising total can never get there.
+	name: "an overflowing accumulation is rejected",
+	amounts: []btcutil.Amount{
+		math.MinInt64 / 2, math.MinInt64 / 2, -1,
+	},
+	wantErr: errInputAmountOverflow,
+}}
+
+// manualCorruptAmountCases enumerates the corrupt store amounts manual
+// selection must refuse.
+//
+// This source sums every selected coin regardless of the target, so it reaches
+// aggregate violations an automatic selection stops short of.
+var manualCorruptAmountCases = []corruptAmountCase{{
+	name:    "a negative amount is rejected",
+	amounts: []btcutil.Amount{2e8, -1e8},
+	wantErr: errInputValueNegative,
+}, {
+	name:    "a negative total is rejected",
+	amounts: []btcutil.Amount{-1e8},
+	wantErr: errInputTotalNegative,
+}, {
+	name:    "an amount above the maximum is rejected",
+	amounts: []btcutil.Amount{btcutil.MaxSatoshi + 1},
+	wantErr: errInputTotalExceedsMax,
+}, {
+	// Each coin is individually payable; only the set is not.
+	name: "individually valid amounts summing above the maximum " +
+		"are rejected",
+	amounts: []btcutil.Amount{btcutil.MaxSatoshi - 1e8, 1e8 + 1},
+	wantErr: errInputTotalExceedsMax,
+}, {
+	name:    "an overflowing accumulation is rejected",
+	amounts: []btcutil.Amount{math.MaxInt64, math.MaxInt64},
+	wantErr: errInputAmountOverflow,
+}}
+
+// requireCorruptAmountRejected drives fund with a wallet whose store returns
+// tc's amounts and asserts the call was refused under tc's violation before any
+// change script was derived.
+func requireCorruptAmountRejected(t *testing.T, tc corruptAmountCase,
+	fund func(t *testing.T, w *Wallet, outpoints []wire.OutPoint) error) {
+
+	t.Helper()
+
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outpoints := expectCorruptAmountSources(t, w, mocks, tc.amounts)
+
+	err := fund(t, w, outpoints)
+
+	require.ErrorIs(t, err, tc.wantErr)
+	mocks.store.AssertNotCalled(
+		t, "NewDerivedAddress", mock.Anything, mock.Anything,
+	)
+}
+
+// TestCreateTransactionRejectsCorruptInputAmounts verifies that a store result
+// carrying an unrepresentable or inconsistent amount is refused by
+// CreateTransaction, on both the automatic and the manual selection path,
+// before any change is allocated against it.
+//
+// The two violations no store result can produce - a value count unequal to the
+// inputs, and a total that is not the sum of the values - are covered by
+// TestCheckInputResult, which reaches the validator directly. Both wallet
+// sources report the total they actually accumulated, so neither can be driven
+// into those classes from here.
+func TestCreateTransactionRejectsCorruptInputAmounts(t *testing.T) {
+	t.Parallel()
+
+	payment := wire.TxOut{
+		Value: 99_700, PkScript: corruptAmountPkScript(),
+	}
+
+	t.Run("automatic selection", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range automaticCorruptAmountCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				requireCorruptAmountRejected(t, tc, func(
+					t *testing.T, w *Wallet,
+					_ []wire.OutPoint) error {
+
+					t.Helper()
+
+					authored, err := w.CreateTransaction(
+						t.Context(), &TxIntent{
+							Outputs: []wire.TxOut{
+								payment,
+							},
+							Inputs:  &InputsPolicy{},
+							FeeRate: defaultFeeRate,
+						},
+					)
+					require.Nil(t, authored)
+
+					return err
+				})
+			})
+		}
+	})
+
+	t.Run("manual selection", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range manualCorruptAmountCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				requireCorruptAmountRejected(t, tc, func(
+					t *testing.T, w *Wallet,
+					outpoints []wire.OutPoint) error {
+
+					t.Helper()
+
+					authored, err := w.CreateTransaction(
+						t.Context(), &TxIntent{
+							Outputs: []wire.TxOut{
+								payment,
+							},
+							Inputs: &InputsManual{
+								UTXOs: outpoints,
+							},
+							FeeRate: defaultFeeRate,
+						},
+					)
+					require.Nil(t, authored)
+
+					return err
+				})
+			})
+		}
+	})
+}
+
+// TestCreateTransactionManualSelectionAccepted verifies that a sound manual
+// selection still authors once every input result is validated. It is the
+// positive counterpart to TestCreateTransactionRejectsCorruptInputAmounts on
+// the path automatic selection does not cover.
+// TestCreateTransactionDefaultPolicy already proves the same for an automatic
+// one.
+func TestCreateTransactionManualSelectionAccepted(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Prepare a synced wallet whose store holds one mature
+	// 100,000-sat UTXO, and select it by outpoint. The 99,700-sat payment
+	// leaves only a sub-dust remainder after fees, so no change output
+	// survives.
+	w, mocks := createStartedWalletWithMocks(t)
+	mocks.syncer.On("syncState").Return(syncStateSynced).Once()
+
+	outpoints := expectCorruptAmountSources(
+		t, w, mocks, []btcutil.Amount{100_000},
+	)
+
+	scope := db.KeyScope(waddrmgr.KeyScopeBIP0086)
+	mocks.store.On("NewDerivedAddress", mock.Anything,
+		db.NewDerivedAddressParams{
+			WalletID: w.id, AccountName: defaultAccountName,
+			Scope: scope, Change: true,
+		},
+	).Return(&db.AddressInfo{
+		ScriptPubKey: make([]byte, txsizes.P2TRPkScriptSize),
+	}, nil).Once()
+
+	payment := wire.TxOut{
+		Value: 99_700, PkScript: corruptAmountPkScript(),
+	}
+
+	// Act: Author the payment from the manually selected UTXO.
+	authored, err := w.CreateTransaction(t.Context(), &TxIntent{
+		Outputs: []wire.TxOut{payment},
+		Inputs:  &InputsManual{UTXOs: outpoints},
+		FeeRate: defaultFeeRate,
+	})
+
+	// Assert: The validated source dispensed its coin unchanged, so the
+	// selection is spent, the payment is preserved, and no change survived.
+	require.NoError(t, err)
+	require.Equal(t, -1, authored.ChangeIndex)
+	require.Len(t, authored.Tx.TxIn, 1)
+	require.Equal(t, outpoints[0], authored.Tx.TxIn[0].PreviousOutPoint)
+	require.Len(t, authored.Tx.TxOut, 1)
+	require.Equal(t, payment, *authored.Tx.TxOut[0])
 }

@@ -4711,3 +4711,104 @@ func TestFinalizePsbtLocked(t *testing.T) {
 	err := w.FinalizePsbt(t.Context(), packet)
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
+
+// TestFundPsbtRejectsCorruptInputAmounts verifies that a store result carrying
+// an unrepresentable or inconsistent amount is refused by FundPsbt too, on both
+// the automatic and the manual selection path, without mutating the caller's
+// packet.
+//
+// Both public wrappers prepare their sources at the same boundary, so asserting
+// it here rather than only through CreateTransaction is what pins the check to
+// that boundary instead of to one wrapper. The amount sets and the violations
+// they must be refused under are shared with
+// TestCreateTransactionRejectsCorruptInputAmounts.
+func TestFundPsbtRejectsCorruptInputAmounts(t *testing.T) {
+	t.Parallel()
+
+	// fundPacket builds a packet requesting one 99,700-sat payment and
+	// funds it. A packet carrying no inputs asks the wallet to select
+	// automatically; one carrying the fixture outpoints selects those
+	// exact coins instead, which is how FundPsbt expresses a manual
+	// selection.
+	fundPacket := func(manual bool) func(*testing.T, *Wallet,
+		[]wire.OutPoint) error {
+
+		return func(t *testing.T, w *Wallet,
+			outpoints []wire.OutPoint) error {
+
+			t.Helper()
+
+			tx := wire.NewMsgTx(wire.TxVersion)
+			tx.AddTxOut(&wire.TxOut{
+				Value: 99_700, PkScript: corruptAmountPkScript(),
+			})
+
+			if manual {
+				for i := range outpoints {
+					tx.AddTxIn(wire.NewTxIn(
+						&outpoints[i], nil, nil,
+					))
+				}
+			}
+
+			packet, err := psbt.NewFromUnsignedTx(tx)
+			require.NoError(t, err)
+
+			originalTx := packet.UnsignedTx
+			originalInputs := len(packet.UnsignedTx.TxIn)
+
+			// A packet that already carries inputs may not also
+			// carry a selection policy, so the policy is supplied
+			// only for the automatic case.
+			fundIntent := &FundIntent{
+				Packet: packet, FeeRate: defaultFeeRate,
+			}
+			if !manual {
+				fundIntent.Policy = &InputsPolicy{}
+			}
+
+			funded, changeIndex, err := w.FundPsbt(
+				t.Context(), fundIntent,
+			)
+
+			// The refusal must leave the caller's packet as it was
+			// found: the same transaction object, the inputs it
+			// arrived with, and its sole payment output.
+			require.Nil(t, funded)
+			require.Zero(t, changeIndex)
+			require.Same(t, originalTx, packet.UnsignedTx)
+			require.Len(t, packet.UnsignedTx.TxIn, originalInputs)
+			require.Len(t, packet.UnsignedTx.TxOut, 1)
+
+			return err
+		}
+	}
+
+	t.Run("automatic selection", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range automaticCorruptAmountCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				requireCorruptAmountRejected(
+					t, tc, fundPacket(false),
+				)
+			})
+		}
+	})
+
+	t.Run("manual selection", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range manualCorruptAmountCases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				requireCorruptAmountRejected(
+					t, tc, fundPacket(true),
+				)
+			})
+		}
+	})
+}
