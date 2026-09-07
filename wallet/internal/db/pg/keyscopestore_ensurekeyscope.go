@@ -2,6 +2,9 @@ package pg
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/pg/sqlc"
@@ -97,4 +100,29 @@ func (o pgEnsureKeyScopeOps) CreateKeyScope(ctx context.Context,
 			),
 		},
 	)
+}
+
+// GetKeyScopeSchema reads scope metadata before account secret preparation,
+// without inferring it from an account's possibly overridden schema.
+func (s *Store) GetKeyScopeSchema(ctx context.Context, walletID uint32,
+	scope db.KeyScope) (db.ScopeAddrSchema, error) {
+
+	var schema db.ScopeAddrSchema
+
+	err := s.execRead(ctx, func(q *sqlc.Queries) error {
+		var err error
+
+		schema, err = getPersistedKeyScopeSchema(ctx, q, walletID, scope)
+
+		return err
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ScopeAddrSchema{}, db.ErrKeyScopeNotFound
+	}
+
+	if err != nil {
+		return db.ScopeAddrSchema{}, fmt.Errorf("get scope schema: %w", err)
+	}
+
+	return schema, nil
 }
