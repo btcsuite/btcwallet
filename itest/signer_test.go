@@ -654,3 +654,92 @@ func testSignerDerivationDurableReopen(h *bwtest.HarnessTest) {
 		"the reopened wallet computed a different shared secret",
 	)
 }
+
+// testSignerDeriveImportedXPub verifies that an account seeded from an
+// extended public key carries no BIP44 number, is reachable for public
+// derivation by name alone, and keeps that identity across a reopen.
+func testSignerDeriveImportedXPub(h *bwtest.HarnessTest) {
+	const (
+		accountName = "signer imported xpub"
+		branch      = 0
+		index       = 7
+	)
+
+	// Arrange: A started, locked wallet whose only account was imported from
+	// an extended public key the case also holds. A spendable wallet cannot
+	// hold such an account on the SQL backends, so the import arrives through
+	// the wallet's initial accounts.
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.WatchOnlyAccount{{
+			Scope:                keys.scope,
+			XPub:                 keys.accountKey,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			Name:                 accountName,
+			AddrType:             keys.addrType,
+		}},
+	})
+
+	account, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read the imported account")
+	require.True(h, account.IsImported, "the account is not imported")
+	require.Nil(
+		h, account.AccountNumber,
+		"the imported account exposes a BIP44 number",
+	)
+
+	branchKey, err := keys.accountKey.Derive(branch)
+	require.NoError(h, err, "failed to derive the expected branch")
+
+	childKey, err := branchKey.Derive(index)
+	require.NoError(h, err, "failed to derive the expected index")
+
+	want, err := childKey.ECPubKey()
+	require.NoError(h, err, "failed to convert the expected child")
+
+	// Act: Select the account by the only identity it has.
+	byName, err := w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(keys.scope, accountName),
+		Branch:  branch,
+		Index:   index,
+	})
+
+	// Assert: A locked wallet derives the imported XPub's own child.
+	require.NoError(h, err, "failed to derive the imported child")
+	require.True(
+		h, want.IsEqual(byName),
+		"the name selector did not reach the imported account",
+	)
+
+	// Act: Select the same account by the BIP44 number zero a derived account
+	// would hold.
+	_, err = w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByNumber(keys.scope, 0),
+		Branch:  branch,
+		Index:   index,
+	})
+
+	// Assert: The account has no portable number, so numeric selection reaches
+	// nothing rather than exposing the backend's own account identity.
+	require.ErrorIs(
+		h, err, wallet.ErrAccountNotInStore,
+		"a numbered selector reached the imported account",
+	)
+
+	// Act: Derive the same child from the reopened, locked wallet.
+	w = h.ReloadWallet(w)
+	durable, err := w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(keys.scope, accountName),
+		Branch:  branch,
+		Index:   index,
+	})
+
+	// Assert: The name is the account's durable identity, not a handle that
+	// only the process holding the wallet open could resolve.
+	require.NoError(h, err, "failed to derive after the reopen")
+	require.True(
+		h, want.IsEqual(durable),
+		"the reopened wallet derived a different imported child",
+	)
+}

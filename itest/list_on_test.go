@@ -182,6 +182,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerDerivationDurableReopen,
 	},
 	{
+		Name:     "signer derive imported xpub",
+		TestFunc: testSignerDeriveImportedXPub,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
