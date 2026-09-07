@@ -161,9 +161,9 @@ type Controller interface {
 	// It returns an error if the wallet is already started.
 	Start(ctx context.Context) error
 
-	// Stop signals all wallet background processes to shutdown and blocks
-	// until they have all exited. It returns an error if the context is
-	// canceled before the shutdown is complete.
+	// Stop synchronously shuts down the wallet. The context remains in this
+	// temporary public interface for compatibility but is not consulted,
+	// because terminal teardown cannot be abandoned after it begins.
 	Stop(ctx context.Context) error
 
 	// Resync rewinds the wallet's synchronization state to a specific
@@ -357,14 +357,21 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return nil
 }
 
-// Stop signals all wallet background processes to shutdown and blocks until
-// they have all exited. It returns an error if the context is canceled before
-// the shutdown is complete.
+// Stop synchronously shuts down the Wallet through its private lifecycle
+// operation. The context remains only for Controller compatibility and is not
+// consulted, because terminal teardown cannot be abandoned after it begins.
 // The Manager serializes Stop with Start, so Stop can transition an
 // Initialized Wallet directly to its terminal Stopped state.
 //
 // This is part of the Controller interface.
-func (w *Wallet) Stop(stopCtx context.Context) error {
+func (w *Wallet) Stop(_ context.Context) error {
+	return w.stop()
+}
+
+// stop performs the Wallet's complete terminal teardown synchronously. The
+// Manager serializes lifecycle operations, so this method never runs alongside
+// Start or another stop and needs no additional synchronization primitive.
+func (w *Wallet) stop() error {
 	// A Wallet stopped before its first Start has no workers to cancel or
 	// join, but it must still become terminal so a retained pointer cannot
 	// start a new runtime later.
@@ -392,18 +399,10 @@ func (w *Wallet) Stop(stopCtx context.Context) error {
 	// guarantees we only reach this point once).
 	w.cancel()
 
-	// Wait for all goroutines to finish.
-	done := make(chan struct{})
-	go func() {
-		w.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-stopCtx.Done():
-		return fmt.Errorf("stop request cancelled: %w", stopCtx.Err())
-	}
+	// Terminal teardown cannot be abandoned by a caller deadline. Draining
+	// here ensures no accepted request or Wallet worker can retain Store or
+	// key material after stop returns.
+	w.wg.Wait()
 
 	// Lock the key vault so no decrypted signing keys outlive the shutdown.
 	// The background goroutines have exited, so no signer is running.
