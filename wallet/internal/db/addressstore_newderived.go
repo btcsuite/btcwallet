@@ -26,6 +26,10 @@ var (
 // and maps it onto this struct, so the workflow stays free of backend row
 // types and generics.
 type DerivedAddressAccount struct {
+	// NoChainSync lets receiving admission use the account already loaded
+	// for allocation, before consuming a child or invoking derivation.
+	NoChainSync bool
+
 	// AccountID is the backend account row ID.
 	AccountID int64
 
@@ -139,6 +143,13 @@ func NewDerivedAddressWithOps(ctx context.Context,
 		}
 
 		return nil, fmt.Errorf("get account: %w", err)
+	}
+
+	// A receiving request needs chain tracking. Enforce it using the account
+	// already loaded, while leaving internal allocation free of this promise.
+	if params.RequireChainSync && account.NoChainSync {
+		return nil, fmt.Errorf("%w: account %q has chain synchronization "+
+			"disabled", ErrAccountOperationUnsupported, key.AccountName)
 	}
 
 	// Non-derived accounts have a NULL account_number; their derivation uses
