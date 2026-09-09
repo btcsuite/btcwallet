@@ -653,6 +653,11 @@ type ListAccountsQuery struct {
 	// name.
 	Name *string
 
+	// ChainSyncOnly excludes accounts with disabled chain synchronization
+	// before returning scan inputs. The default keeps ordinary listings
+	// inclusive, including accounts used only for key derivation.
+	ChainSyncOnly bool
+
 	// SkipBalance, when true, skips the dedicated AccountBalances query
 	// that the adapter normally runs alongside the list fetch. Each
 	// returned AccountInfo reports ConfirmedBalance and
