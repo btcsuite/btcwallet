@@ -1931,20 +1931,12 @@ func TestListAddressesWatchOnlyWallet(t *testing.T) {
 }
 
 // TestNewDerivedAddress verifies that NewDerivedAddress correctly creates
-// derived addresses with proper AddressInfo fields for both external and
-// change addresses.
+// derived receiving addresses with proper AddressInfo fields on both branches.
 func TestNewDerivedAddress(t *testing.T) {
 	t.Parallel()
 
 	store := NewTestStore(t)
 	walletID := newWallet(t, store, "wallet-derived")
-
-	// Create account in BIP44 scope.
-	accountName := "derived-test"
-	createDerivedAccount(t, store, walletID, db.KeyScopeBIP0044, accountName)
-	account := getAccountByName(
-		t, store, walletID, db.KeyScopeBIP0044, accountName,
-	)
 
 	testCases := []struct {
 		name           string
@@ -1965,11 +1957,38 @@ func TestNewDerivedAddress(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			info := newDerivedAddress(
-				t, store, walletID, db.KeyScopeBIP0044, accountName, tc.change,
+			// Arrange: create a separate ordinary account so each branch
+			// starts at index zero and supplies its own expected identity.
+			accountName := tc.name
+			account, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					WalletID: walletID,
+					Scope:    db.KeyScopeBIP0044,
+					Name:     accountName,
+				}, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			query := listAccountAddressesQuery(
+				t, walletID, db.KeyScopeBIP0044, accountName, 10,
 			)
 
-			// Verify AddressInfo fields.
+			// Act: require a receiving address on the selected branch so the
+			// Store must enforce the policy loaded with its owning account.
+			info, err := store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					WalletID:         walletID,
+					Scope:            db.KeyScopeBIP0044,
+					AccountName:      accountName,
+					Change:           tc.change,
+					RequireChainSync: true,
+				},
+			)
+
+			// Assert: successful receiving allocation produces the first child
+			// with the identity and derivation metadata of its owning account.
+			require.NoError(t, err)
+			require.Zero(t, info.Index)
 			require.NotZero(t, info.ID)
 			require.NotZero(t, info.AccountID)
 			require.False(t, info.IsImported)
@@ -1985,6 +2004,107 @@ func TestNewDerivedAddress(t *testing.T) {
 				t, *account.MasterKeyFingerprint,
 				info.MasterKeyFingerprint,
 			)
+
+			// Act: use ordinary account listing to read the persisted child.
+			listed, err := store.ListAddresses(t.Context(), query)
+
+			// Assert: the existing join supplies the policy needed for
+			// receiving rejection while retaining ordinary lookup visibility.
+			require.NoError(t, err)
+			require.Len(t, listed.Items, 1)
+			require.Equal(t, info.ID, listed.Items[0].ID)
+			require.False(t, listed.Items[0].NoChainSync)
+		})
+	}
+}
+
+// TestNewDerivedAddressNoChainSync verifies that receiving rejection performs
+// no derivation, persists no child, and leaves the branch index intact.
+func TestNewDerivedAddressNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// The same refusal contract applies to each independently allocated branch.
+	testCases := []struct {
+		name   string
+		change bool
+	}{
+		{
+			name:   "external",
+			change: false,
+		},
+		{
+			name:   "internal",
+			change: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: use a real Store with an observed derivation callback
+			// so a rollback cannot hide derivation performed before refusal.
+			deriveCalls := 0
+			derive := mockDeriveFunc()
+			store := NewTestStoreWithDerive(t, func(ctx context.Context,
+				params db.AddressDerivationParams) (*db.DerivedAddressData,
+				error) {
+
+				deriveCalls++
+
+				return derive(ctx, params)
+			})
+			walletID := newWallet(t, store, "wallet-untracked-receiving")
+			accountName := "key-only"
+			_, err := store.CreateDerivedAccount(
+				t.Context(), db.CreateDerivedAccountParams{
+					WalletID:    walletID,
+					Scope:       db.KeyScopeBIP0044,
+					Name:        accountName,
+					NoChainSync: true,
+				}, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			callsBefore := deriveCalls
+			query := listAccountAddressesQuery(
+				t, walletID, db.KeyScopeBIP0044, accountName, 10,
+			)
+
+			// Act: request receiving allocation on the excluded account;
+			// stored policy must reject before deriving or consuming a child.
+			info, err := store.NewDerivedAddress(
+				t.Context(), db.NewDerivedAddressParams{
+					WalletID:         walletID,
+					Scope:            db.KeyScopeBIP0044,
+					AccountName:      accountName,
+					Change:           tc.change,
+					RequireChainSync: true,
+				},
+			)
+
+			// Assert: refusal never invokes derivation or persists a child.
+			require.ErrorIs(t, err, db.ErrAccountOperationUnsupported)
+			require.Nil(t, info)
+			require.Equal(t, callsBefore, deriveCalls)
+			listed, err := store.ListAddresses(t.Context(), query)
+			require.NoError(t, err)
+			require.Empty(t, listed.Items)
+
+			// Probe the next raw allocation to prove refusal left this branch
+			// at index zero; raw allocation has no receiving requirement.
+			next := newDerivedAddress(
+				t, store, walletID, db.KeyScopeBIP0044,
+				accountName, tc.change,
+			)
+			require.Zero(t, next.Index)
+
+			// The existing account join must still expose the excluded policy
+			// on that child, allowing receiving reuse to reject it as well.
+			listed, err = store.ListAddresses(t.Context(), query)
+			require.NoError(t, err)
+			require.Len(t, listed.Items, 1)
+			require.Equal(t, next.ID, listed.Items[0].ID)
+			require.True(t, listed.Items[0].NoChainSync)
 		})
 	}
 }
