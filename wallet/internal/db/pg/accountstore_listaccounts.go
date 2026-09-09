@@ -45,9 +45,10 @@ func (p accountListQueries) ListByScope(ctx context.Context,
 
 	rows, err := p.q.ListAccountsByWalletScope(
 		ctx, sqlc.ListAccountsByWalletScopeParams{
-			WalletID: int64(query.WalletID),
-			Purpose:  int64(query.Scope.Purpose),
-			CoinType: int64(query.Scope.Coin),
+			ChainSyncOnly: query.ChainSyncOnly,
+			WalletID:      int64(query.WalletID),
+			Purpose:       int64(query.Scope.Purpose),
+			CoinType:      int64(query.Scope.Coin),
 		},
 	)
 	if err != nil {
@@ -71,8 +72,9 @@ func (p accountListQueries) ListByName(ctx context.Context,
 
 	rows, err := p.q.ListAccountsByWalletAndName(
 		ctx, sqlc.ListAccountsByWalletAndNameParams{
-			WalletID:    int64(query.WalletID),
-			AccountName: *query.Name,
+			ChainSyncOnly: query.ChainSyncOnly,
+			WalletID:      int64(query.WalletID),
+			AccountName:   *query.Name,
 		},
 	)
 	if err != nil {
@@ -94,7 +96,14 @@ func (p accountListQueries) ListByName(ctx context.Context,
 func (p accountListQueries) ListAll(ctx context.Context,
 	query db.ListAccountsQuery) ([]db.AccountInfo, error) {
 
-	rows, err := p.q.ListAccountsByWallet(ctx, int64(query.WalletID))
+	// Forward the opt-in predicate to SQL so excluded scan accounts never
+	// reach row conversion, while ordinary account listing stays inclusive.
+	rows, err := p.q.ListAccountsByWallet(
+		ctx, sqlc.ListAccountsByWalletParams{
+			WalletID:      int64(query.WalletID),
+			ChainSyncOnly: query.ChainSyncOnly,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}

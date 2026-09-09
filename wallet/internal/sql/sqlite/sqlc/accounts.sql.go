@@ -946,9 +946,19 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE ks.wallet_id = ?
+WHERE
+    ks.wallet_id = ?1
+    AND (
+        cast(?2 AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name
 `
+
+type ListAccountsByWalletParams struct {
+	WalletID      int64
+	ChainSyncOnly bool
+}
 
 type ListAccountsByWalletRow struct {
 	ID                int64
@@ -969,8 +979,9 @@ type ListAccountsByWalletRow struct {
 }
 
 // Lists all accounts for a wallet.
-func (q *Queries) ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletStmt, ListAccountsByWallet, walletID)
+// Scan callers opt in so ordinary account listing keeps key-only accounts.
+func (q *Queries) ListAccountsByWallet(ctx context.Context, arg ListAccountsByWalletParams) ([]ListAccountsByWalletRow, error) {
+	rows, err := q.query(ctx, q.listAccountsByWalletStmt, ListAccountsByWallet, arg.WalletID, arg.ChainSyncOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -1028,13 +1039,19 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE ks.wallet_id = ? AND a.account_name = ?
+WHERE
+    ks.wallet_id = ?1 AND a.account_name = ?2
+    AND (
+        cast(?3 AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name
 `
 
 type ListAccountsByWalletAndNameParams struct {
-	WalletID    int64
-	AccountName string
+	WalletID      int64
+	AccountName   string
+	ChainSyncOnly bool
 }
 
 type ListAccountsByWalletAndNameRow struct {
@@ -1056,8 +1073,9 @@ type ListAccountsByWalletAndNameRow struct {
 }
 
 // Lists all accounts for a wallet filtered by account name.
+// Scan callers opt in so ordinary account listing keeps key-only accounts.
 func (q *Queries) ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletAndNameStmt, ListAccountsByWalletAndName, arg.WalletID, arg.AccountName)
+	rows, err := q.query(ctx, q.listAccountsByWalletAndNameStmt, ListAccountsByWalletAndName, arg.WalletID, arg.AccountName, arg.ChainSyncOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,16 +1134,21 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE
-    ks.wallet_id = ?
-    AND ks.purpose = ?
-    AND ks.coin_type = ?
+    ks.wallet_id = ?1
+    AND ks.purpose = ?2
+    AND ks.coin_type = ?3
+    AND (
+        cast(?4 AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name
 `
 
 type ListAccountsByWalletScopeParams struct {
-	WalletID int64
-	Purpose  int64
-	CoinType int64
+	WalletID      int64
+	Purpose       int64
+	CoinType      int64
+	ChainSyncOnly bool
 }
 
 type ListAccountsByWalletScopeRow struct {
@@ -1147,8 +1170,14 @@ type ListAccountsByWalletScopeRow struct {
 }
 
 // Lists all accounts for a wallet and scope tuple.
+// Scan callers opt in so ordinary account listing keeps key-only accounts.
 func (q *Queries) ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error) {
-	rows, err := q.query(ctx, q.listAccountsByWalletScopeStmt, ListAccountsByWalletScope, arg.WalletID, arg.Purpose, arg.CoinType)
+	rows, err := q.query(ctx, q.listAccountsByWalletScopeStmt, ListAccountsByWalletScope,
+		arg.WalletID,
+		arg.Purpose,
+		arg.CoinType,
+		arg.ChainSyncOnly,
+	)
 	if err != nil {
 		return nil, err
 	}
