@@ -322,6 +322,8 @@ SELECT
     da.account_id,
     acc.account_number,
     acc.account_name,
+    -- Receiving admission uses the account already joined by this query.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,
@@ -378,6 +380,7 @@ type ListAddressesByAccountRow struct {
 	AccountID         int64
 	AccountNumber     sql.NullInt64
 	AccountName       string
+	NoChainSync       bool
 	Purpose           int64
 	CoinType          int64
 	ScriptTypeID      int16
@@ -418,6 +421,7 @@ func (q *Queries) ListAddressesByAccount(ctx context.Context, arg ListAddressesB
 			&i.AccountID,
 			&i.AccountNumber,
 			&i.AccountName,
+			&i.NoChainSync,
 			&i.Purpose,
 			&i.CoinType,
 			&i.ScriptTypeID,
