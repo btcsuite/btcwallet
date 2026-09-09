@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	sqliteschema "github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite"
 	"github.com/btcsuite/btcwallet/wallet/internal/sql/sqlite/sqlc"
 	"github.com/stretchr/testify/require"
@@ -77,9 +78,13 @@ func TestIsAccountNameConflictMatchesNameColumns(t *testing.T) {
 
 	conflicts := provokeAccountConflicts(t)
 
-	require.True(t, IsAccountNameConflict(conflicts.name))
-	require.True(t, IsAccountNameConflict(
-		fmt.Errorf("insert account: %w", conflicts.name),
+	store := &Store{}
+	classified := store.ClassifyError(conflicts.name)
+
+	require.True(t, dberr.IsAccountNameConflict(classified))
+	require.ErrorIs(t, classified, conflicts.name)
+	require.True(t, dberr.IsAccountNameConflict(
+		store.ClassifyError(fmt.Errorf("insert account: %w", conflicts.name)),
 	))
 }
 
@@ -108,9 +113,13 @@ func TestIsAccountNameConflictRejectsOtherFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.False(t, IsAccountNameConflict(tc.err))
-			require.False(t, IsAccountNameConflict(
-				fmt.Errorf("insert account: %w", tc.err),
+			store := &Store{}
+
+			require.False(t, dberr.IsAccountNameConflict(
+				store.ClassifyError(tc.err),
+			))
+			require.False(t, dberr.IsAccountNameConflict(
+				store.ClassifyError(fmt.Errorf("insert account: %w", tc.err)),
 			))
 		})
 	}
@@ -121,5 +130,7 @@ func TestIsAccountNameConflictRejectsOtherFailures(t *testing.T) {
 func TestIsAccountNameConflictRejectsNil(t *testing.T) {
 	t.Parallel()
 
-	require.False(t, IsAccountNameConflict(nil))
+	store := &Store{}
+
+	require.False(t, dberr.IsAccountNameConflict(store.ClassifyError(nil)))
 }

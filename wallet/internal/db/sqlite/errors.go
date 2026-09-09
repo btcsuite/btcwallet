@@ -37,9 +37,9 @@ var reasonByCode = map[int]dberr.Reason{
 	sqlite3.SQLITE_CANTOPEN:   dberr.ReasonUnknown,
 }
 
-// IsAccountNameConflict identifies the account-name unique constraint without
+// isAccountNameConflict identifies the account-name unique constraint without
 // classifying unrelated uniqueness violations as duplicate accounts.
-func IsAccountNameConflict(err error) bool {
+func isAccountNameConflict(err error) bool {
 	var sqliteErr *sqlite.Error
 
 	return errors.As(err, &sqliteErr) &&
@@ -72,7 +72,12 @@ func mapErr(err error) *dberr.SQLError {
 		reason = dberr.ReasonUnknown
 	}
 
-	return dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
+	sqlErr := dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
+	if isAccountNameConflict(err) {
+		sqlErr.Constraint = dberr.ConstraintAccountName
+	}
+
+	return sqlErr
 }
 
 // codeString formats a SQLite numeric result code for logs and stats.
