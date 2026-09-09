@@ -1894,14 +1894,14 @@ func TestRenameAccountTranslatesPostgresNameConflict(t *testing.T) {
 	w, deps := createStartedWalletWithMocks(t)
 	scope := waddrmgr.KeyScopeBIP0084
 	driverErr := &pgconn.PgError{
-		Code:           "23505",
-		ConstraintName: "uidx_accounts_wallet_scope_account_name",
-		Message:        "duplicate key value violates unique constraint",
+		Code:    "23505",
+		Message: "duplicate key value violates unique constraint",
 	}
 	sqlErr := dberr.NewSQLError(
 		dberr.BackendPostgres, dberr.ReasonConstraint,
 		driverErr.Code, driverErr,
 	)
+	sqlErr.Constraint = dberr.ConstraintAccountName
 	storeErr := fmt.Errorf("rename account: %w", sqlErr)
 
 	expectAccountNameFree(t, deps, scope, "renamed")

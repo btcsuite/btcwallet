@@ -5,15 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
-)
-
-// The unique indexes the accounts table declares. Both are unique-violation
-// sources, so the classifier has to tell them apart by name.
-const (
-	accountNameIndex   = "uidx_accounts_wallet_scope_account_name"
-	accountNumberIndex = "uidx_accounts_scope_account_number"
 )
 
 // TestIsAccountNameConflictMatchesNameIndex verifies a unique violation on the
@@ -25,12 +19,16 @@ func TestIsAccountNameConflictMatchesNameIndex(t *testing.T) {
 
 	err := &pgconn.PgError{
 		Code:           codeUniqueViolation,
-		ConstraintName: accountNameIndex,
+		ConstraintName: accountNameConstraint,
 	}
 
-	require.True(t, IsAccountNameConflict(err))
-	require.True(t, IsAccountNameConflict(
-		fmt.Errorf("insert account: %w", err),
+	store := &Store{}
+	classified := store.ClassifyError(err)
+
+	require.True(t, dberr.IsAccountNameConflict(classified))
+	require.ErrorIs(t, classified, err)
+	require.True(t, dberr.IsAccountNameConflict(
+		store.ClassifyError(fmt.Errorf("insert account: %w", err)),
 	))
 }
 
@@ -44,19 +42,17 @@ func TestIsAccountNameConflictRejectsOtherFailures(t *testing.T) {
 		name string
 		err  error
 	}{{
-		// A colliding account number is a distinct outcome the wallet
-		// reports separately, even though it shares the SQLSTATE.
-		name: "unique violation on the account-number index",
+		name: "unique violation on an unrelated index",
 		err: &pgconn.PgError{
 			Code:           codeUniqueViolation,
-			ConstraintName: accountNumberIndex,
+			ConstraintName: "other_unique_index",
 		},
 	}, {
 		// The name index appears in errors that are not collisions.
 		name: "foreign-key violation naming the account-name index",
 		err: &pgconn.PgError{
 			Code:           codeForeignKeyViolation,
-			ConstraintName: accountNameIndex,
+			ConstraintName: accountNameConstraint,
 		},
 	}, {
 		// Nothing but the driver's own typed error carries a constraint
@@ -67,9 +63,13 @@ func TestIsAccountNameConflictRejectsOtherFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.False(t, IsAccountNameConflict(tc.err))
-			require.False(t, IsAccountNameConflict(
-				fmt.Errorf("insert account: %w", tc.err),
+			store := &Store{}
+
+			require.False(t, dberr.IsAccountNameConflict(
+				store.ClassifyError(tc.err),
+			))
+			require.False(t, dberr.IsAccountNameConflict(
+				store.ClassifyError(fmt.Errorf("insert account: %w", tc.err)),
 			))
 		})
 	}
@@ -80,5 +80,7 @@ func TestIsAccountNameConflictRejectsOtherFailures(t *testing.T) {
 func TestIsAccountNameConflictRejectsNil(t *testing.T) {
 	t.Parallel()
 
-	require.False(t, IsAccountNameConflict(nil))
+	store := &Store{}
+
+	require.False(t, dberr.IsAccountNameConflict(store.ClassifyError(nil)))
 }

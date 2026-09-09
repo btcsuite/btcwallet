@@ -27,8 +27,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	"github.com/btcsuite/btcwallet/wallet/internal/db/pg"
-	"github.com/btcsuite/btcwallet/wallet/internal/db/sqlite"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
@@ -82,7 +81,7 @@ func accountManagerErr(err error) error {
 
 		mappedErr = ErrAccountNotFound
 
-	case pg.IsAccountNameConflict(err), sqlite.IsAccountNameConflict(err),
+	case dberr.IsAccountNameConflict(err),
 		isAddrMgrErr(err, waddrmgr.ErrDuplicateAccount):
 
 		mappedErr = ErrAccountAlreadyExists
