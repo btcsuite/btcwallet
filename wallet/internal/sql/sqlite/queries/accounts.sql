@@ -245,6 +245,7 @@ ORDER BY a.account_number IS NULL, a.account_number, a.account_name;
 
 -- name: ListAccountsByWalletScope :many
 -- Lists all accounts for a wallet and scope tuple.
+-- Scan callers opt in so ordinary account listing keeps key-only accounts.
 SELECT
     a.id,
     a.account_number,
@@ -265,13 +266,18 @@ FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
 WHERE
-    ks.wallet_id = ?
-    AND ks.purpose = ?
-    AND ks.coin_type = ?
+    ks.wallet_id = sqlc.arg('wallet_id')
+    AND ks.purpose = sqlc.arg('purpose')
+    AND ks.coin_type = sqlc.arg('coin_type')
+    AND (
+        cast(sqlc.arg('chain_sync_only') AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name;
 
 -- name: ListAccountsByWalletAndName :many
 -- Lists all accounts for a wallet filtered by account name.
+-- Scan callers opt in so ordinary account listing keeps key-only accounts.
 SELECT
     a.id,
     a.account_number,
@@ -291,11 +297,17 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE ks.wallet_id = ? AND a.account_name = ?
+WHERE
+    ks.wallet_id = sqlc.arg('wallet_id') AND a.account_name = sqlc.arg('account_name')
+    AND (
+        cast(sqlc.arg('chain_sync_only') AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name;
 
 -- name: ListAccountsByWallet :many
 -- Lists all accounts for a wallet.
+-- Scan callers opt in so ordinary account listing keeps key-only accounts.
 SELECT
     a.id,
     a.account_number,
@@ -315,7 +327,12 @@ SELECT
 FROM accounts AS a
 INNER JOIN key_scopes AS ks ON a.scope_id = ks.id
 INNER JOIN wallets AS w ON a.wallet_id = w.id
-WHERE ks.wallet_id = ?
+WHERE
+    ks.wallet_id = sqlc.arg('wallet_id')
+    AND (
+        cast(sqlc.arg('chain_sync_only') AS BOOLEAN) = FALSE
+        OR a.no_chain_sync = FALSE
+    )
 ORDER BY a.account_number IS NULL, a.account_number, a.account_name;
 
 -- name: UpdateAccountNameByWalletScopeAndNumber :execrows
