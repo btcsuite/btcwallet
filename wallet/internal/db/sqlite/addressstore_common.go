@@ -93,7 +93,7 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 		)
 
 	case sqlc.ListAddressesByAccountRow:
-		return addressFieldsToInfo(
+		info, err := addressFieldsToInfo(
 			base.ID,
 			sql.NullInt64{Int64: base.DerivedAddressID, Valid: true},
 			sql.NullInt64{Int64: base.AccountID, Valid: true},
@@ -110,6 +110,15 @@ func addressRowToInfo[T addressInfoRow](row T) (*db.AddressInfo, error) {
 			base.ScriptPubKey, base.PubKey, base.CreatedAt,
 			base.WalletIsWatchOnly, base.HasScript, base.IsUsed,
 		)
+		if err != nil {
+			return nil, err
+		}
+
+		// The existing account join supplies receiving policy without a
+		// separate lookup or hiding this child from ordinary address lists.
+		info.NoChainSync = base.NoChainSync
+
+		return info, nil
 
 	default:
 		return nil, fmt.Errorf("%w: %T", errUnknownAddressRowType, row)

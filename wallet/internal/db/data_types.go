@@ -700,6 +700,11 @@ type RenameAccountParams struct {
 // AddressInfo represents a wallet-managed address, including its properties and
 // derivation information.
 type AddressInfo struct {
+	// NoChainSync carries the owning account's stored policy in account
+	// address listings, allowing receiving admission without another lookup.
+	// Other address results do not populate this field.
+	NoChainSync bool
+
 	// ID is the database unique identifier for the address.
 	//
 	// NOTE: uint32 is used to ensure compatibility with standard SQL
@@ -837,6 +842,11 @@ type NewDerivedAddressParams struct {
 	// Change indicates whether to create a change address (true) or an
 	// external address (false).
 	Change bool
+
+	// RequireChainSync rejects NoChainSync accounts before allocating a
+	// receiving address. The false default preserves internal key and change
+	// allocation; this requirement never changes the stored account policy.
+	RequireChainSync bool
 }
 
 // NewImportedAddressParams defines the input required to import a single

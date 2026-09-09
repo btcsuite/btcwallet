@@ -168,7 +168,8 @@ type OutputScriptInfo struct {
 // addresses and scripts.
 type AddressManager interface {
 	// NewAddress returns a new address for the given account and address
-	// type.
+	// type. NoChainSync accounts return ErrAccountOperationUnsupported
+	// because receiving requires automatic chain tracking.
 	//
 	// NOTE: This method should be used with caution. Unlike
 	// GetUnusedAddress, it does not scan for previously derived but unused
@@ -180,11 +181,10 @@ type AddressManager interface {
 		addrType waddrmgr.AddressType,
 		change bool) (address.Address, error)
 
-	// GetUnusedAddress returns the first, oldest, unused address by
-	// scanning forward from the start of the derivation path. This method
-	// is the recommended default for obtaining a new receiving address, as
-	// it prevents address reuse and avoids creating gaps in the address
-	// chain that could impact wallet recovery.
+	// GetUnusedAddress returns the oldest address not recorded as used by
+	// the wallet, or allocates one if none remains. NoChainSync accounts
+	// return ErrAccountOperationUnsupported because their address use is not
+	// tracked automatically.
 	GetUnusedAddress(ctx context.Context, accountName string,
 		addrType waddrmgr.AddressType, change bool) (
 		address.Address, error)
@@ -572,6 +572,8 @@ type derivationInfoResp struct {
 // NewAddress returns a new address for the given account and address type.
 // This method is a low-level primitive that will always derive a new, unused
 // address from the end of the address chain.
+// NoChainSync accounts return ErrAccountOperationUnsupported before allocation
+// because receiving requires automatic chain tracking.
 //
 // It returns the next external or internal address for the wallet dictated by
 // the value of the `change` parameter. If change is true, then an internal
@@ -676,15 +678,26 @@ func (w *Wallet) newAddress(ctx context.Context, accountName string,
 		return nil, fmt.Errorf("%w: %v", ErrUnknownAddrType, addrType)
 	}
 
+	// Require receiving admission during the allocation's existing account
+	// read, so excluded accounts consume no child and need no extra lookup.
 	addrInfo, err := w.store.NewDerivedAddress(
 		ctx, db.NewDerivedAddressParams{
-			WalletID:    w.id,
-			AccountName: accountName,
-			Scope:       db.KeyScope(keyScope),
-			Change:      change,
+			WalletID:         w.id,
+			AccountName:      accountName,
+			Scope:            db.KeyScope(keyScope),
+			Change:           change,
+			RequireChainSync: true,
 		},
 	)
 	if err != nil {
+		// Keep the Store identity internal while exposing the established
+		// public unsupported-operation error with the refusal diagnostic.
+		if errors.Is(err, db.ErrAccountOperationUnsupported) {
+			return nil, fmt.Errorf(
+				"%w: %s", ErrAccountOperationUnsupported, err.Error(),
+			)
+		}
+
 		return nil, err
 	}
 
@@ -705,13 +718,15 @@ func (w *Wallet) newAddress(ctx context.Context, accountName string,
 
 // GetUnusedAddress returns the first, oldest, unused address by scanning
 // forward from the start of the derivation path. The address is considered
-// "unused" if it has never appeared in a transaction. This method is the
-// recommended default for obtaining a new receiving address. It prevents
-// address reuse and avoids creating gaps in the address chain, which is
-// critical for reliable wallet recovery under standards like BIP44 that
-// enforce a gap limit of 20 unused addresses. If all previously derived
-// addresses have been used, this method will delegate to NewAddress to
-// generate a new one.
+// "unused" if the wallet has not recorded it as used. For accounts that track
+// address use, this is the recommended default for obtaining a receiving
+// address: it avoids reuse and gaps in the address chain, supporting recovery
+// under standards like BIP44 that enforce a gap limit of 20 unused addresses.
+// If all previously derived addresses have been used, this method delegates
+// to NewAddress to generate a new one.
+// NoChainSync accounts return ErrAccountOperationUnsupported because their
+// address use is not tracked automatically. Rejection does not allocate a child
+// or register a chain watch.
 //
 // TODO(yy): The current implementation of GetUnusedAddress is inefficient for
 // wallets with a large number of used addresses. It iterates from the first
@@ -803,6 +818,18 @@ func (w *Wallet) handleGetUnusedAddress(r getUnusedAddressReq) {
 	for storeAddr, err := range addresses {
 		if err != nil {
 			r.respChan <- addressResp{err: err}
+
+			return
+		}
+
+		// Read the policy from the existing account join before treating a
+		// locally unused child as a receiving address.
+		if storeAddr.NoChainSync {
+			r.respChan <- addressResp{
+				err: fmt.Errorf("%w: account %q has chain "+
+					"synchronization disabled",
+					ErrAccountOperationUnsupported, r.accountName),
+			}
 
 			return
 		}

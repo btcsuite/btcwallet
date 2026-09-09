@@ -68,7 +68,10 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 		return db.DerivedAddressAccount{}, err
 	}
 
+	// Receiving admission uses this same account read before allocating,
+	// avoiding a separate policy lookup in the public API.
 	return db.DerivedAddressAccount{
+		NoChainSync:       row.NoChainSync,
 		AccountID:         row.ID,
 		AccountNumber:     row.AccountNumber,
 		AccountName:       row.AccountName,
