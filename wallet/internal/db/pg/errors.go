@@ -8,6 +8,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// accountNameConstraint is the migrated unique index for account names
+// within a wallet and key scope.
+const accountNameConstraint = "uidx_accounts_wallet_scope_account_name"
+
 // SQLSTATE helper constants support PostgreSQL error classification.
 const (
 	// connectionExceptionClass identifies PostgreSQL SQLSTATE class 08,
@@ -76,13 +80,13 @@ var reasonByCode = map[string]dberr.Reason{
 	codeExclusionViolation:   dberr.ReasonConstraint,
 }
 
-// IsAccountNameConflict identifies the account-name unique constraint without
+// isAccountNameConflict identifies the account-name unique constraint without
 // classifying unrelated uniqueness violations as duplicate accounts.
-func IsAccountNameConflict(err error) bool {
+func isAccountNameConflict(err error) bool {
 	var pgErr *pgconn.PgError
 
 	return errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation &&
-		pgErr.ConstraintName == "uidx_accounts_wallet_scope_account_name"
+		pgErr.ConstraintName == accountNameConstraint
 }
 
 // mapErr maps PostgreSQL driver and transport errors into SQLError.
@@ -92,7 +96,12 @@ func mapErr(err error) *dberr.SQLError {
 	// transport fallback.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		return mapCode(pgErr.Code, err)
+		sqlErr := mapCode(pgErr.Code, err)
+		if isAccountNameConflict(err) {
+			sqlErr.Constraint = dberr.ConstraintAccountName
+		}
+
+		return sqlErr
 	}
 
 	var connectErr *pgconn.ConnectError
