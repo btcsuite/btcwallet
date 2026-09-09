@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/stretchr/testify/require"
 )
 
@@ -247,6 +248,7 @@ func TestCreateDerivedAccountDuplicateName(t *testing.T) {
 	)
 	require.Error(t, err)
 	requireConstraintSQLError(t, err)
+	require.True(t, dberr.IsAccountNameConflict(err))
 
 	after := store.StatsSnapshot()
 	require.Equal(t, before.Unhealthy, after.Unhealthy)
