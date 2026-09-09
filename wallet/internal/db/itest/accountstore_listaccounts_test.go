@@ -14,6 +14,100 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestListAccountsChainSyncOnly verifies the opt-in SQL filter excludes
+// NoChainSync accounts for each selector while default listing stays inclusive.
+func TestListAccountsChainSyncOnly(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: exercise each existing SQL selector with the same persisted
+	// policy pair so filtering cannot accidentally apply to only one query.
+	scope := db.KeyScopeBIP0084
+	ordinaryName, excludedName := "ordinary", "key-only"
+	tests := []struct {
+		name         string
+		query        db.ListAccountsQuery
+		wantDefault  []string
+		wantFiltered []string
+	}{
+		{
+			name:         "all accounts",
+			wantDefault:  []string{ordinaryName, excludedName},
+			wantFiltered: []string{ordinaryName},
+		},
+		{
+			name: "scope accounts",
+			query: db.ListAccountsQuery{
+				Scope: &scope,
+			},
+			wantDefault:  []string{ordinaryName, excludedName},
+			wantFiltered: []string{ordinaryName},
+		},
+		{
+			name: "ordinary name",
+			query: db.ListAccountsQuery{
+				Name: &ordinaryName,
+			},
+			wantDefault:  []string{ordinaryName},
+			wantFiltered: []string{ordinaryName},
+		},
+		{
+			name: "excluded name",
+			query: db.ListAccountsQuery{
+				Name: &excludedName,
+			},
+			wantDefault: []string{excludedName},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: each subtest owns its database lifecycle and creates
+			// an ordinary account plus one used only for key derivation.
+			store := NewTestStore(t)
+			walletID := newWallet(t, store, "chain-sync-list")
+
+			for _, name := range []string{ordinaryName, excludedName} {
+				_, err := store.CreateDerivedAccount(
+					t.Context(), db.CreateDerivedAccountParams{
+						WalletID:    walletID,
+						Scope:       scope,
+						Name:        name,
+						NoChainSync: name == excludedName,
+					}, SpendableDeriveFn(),
+				)
+				require.NoError(t, err)
+			}
+
+			// Act: run the same public selector with its inclusive default,
+			// then opt into scan-account filtering without changing identity.
+			query := test.query
+			query.WalletID = walletID
+			inclusive, inclusiveErr := store.ListAccounts(t.Context(), query)
+			query.ChainSyncOnly = true
+			filtered, filteredErr := store.ListAccounts(t.Context(), query)
+
+			// Assert: compare account membership, including the empty named
+			// result, to prove ordinary reads retain the excluded account.
+			require.NoError(t, inclusiveErr)
+			require.NoError(t, filteredErr)
+
+			var defaultNames, filteredNames []string
+			for _, account := range inclusive {
+				defaultNames = append(defaultNames, account.AccountName)
+			}
+
+			for _, account := range filtered {
+				filteredNames = append(filteredNames, account.AccountName)
+			}
+
+			require.ElementsMatch(t, test.wantDefault, defaultNames)
+			require.ElementsMatch(t, test.wantFiltered, filteredNames)
+		})
+	}
+}
+
 // TestListAccountsReturnsPublicKey verifies that the bulk read path
 // also surfaces the persisted PublicKey on every returned account.
 func TestListAccountsReturnsPublicKey(t *testing.T) {
