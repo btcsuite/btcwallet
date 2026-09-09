@@ -1966,17 +1966,20 @@ func (s *syncer) storeScanHorizons(ctx context.Context,
 	return s.storeTargetedScanHorizons(ctx, targets)
 }
 
-// storeFullScanHorizons loads full recovery horizon accounts from the Store,
-// skipping only the keyless raw-import bucket. The scan selects no account by
+// storeFullScanHorizons loads eligible recovery accounts from the Store,
+// skipping the keyless raw-import bucket. The scan selects no account by
 // number here, so each one is keyed on its durable store row ID and an imported
 // account cannot overwrite a derived account owning the same BIP44 number in
 // the same scope.
 func (s *syncer) storeFullScanHorizons(
 	ctx context.Context) ([]storeScanAccount, error) {
 
+	// Select eligible accounts in SQL before building recovery horizons;
+	// key-only accounts must never seed lookahead derivation.
 	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
-		WalletID:    s.walletID,
-		SkipBalance: true,
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list scan accounts: %w", err)
@@ -2182,9 +2185,12 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 func (s *syncer) storeScanAddresses(
 	ctx context.Context) ([]address.Address, error) {
 
+	// Apply the account policy before paging addresses so key-only scripts
+	// never become scan watches, even when the recovery window is zero.
 	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
-		WalletID:    s.walletID,
-		SkipBalance: true,
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list scan accounts: %w", err)
@@ -2486,9 +2492,12 @@ func (s *syncer) resolveScanTargets(ctx context.Context,
 func (s *syncer) scanTargetNames(
 	ctx context.Context) (map[waddrmgr.AccountScope]string, error) {
 
+	// Resolve targets only from eligible SQL rows. An excluded explicit
+	// target then follows the existing missing-account error path.
 	accounts, err := s.store.ListAccounts(ctx, db.ListAccountsQuery{
-		WalletID:    s.walletID,
-		SkipBalance: true,
+		WalletID:      s.walletID,
+		SkipBalance:   true,
+		ChainSyncOnly: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list scan accounts: %w", err)

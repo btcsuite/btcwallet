@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -472,9 +473,11 @@ func TestSyncerLoadScanState(t *testing.T) {
 	// The store returns one derived BIP0084 account, used for both the
 	// horizon and address loads.
 	accountNumber0 := uint32(0)
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return([]db.AccountInfo{{
 		AccountID:     &accountNumber0,
@@ -2095,9 +2098,11 @@ func TestFullScanRecoverySeparatesStoreIDAndAccountNumber(t *testing.T) {
 		},
 	}
 
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Once()
 
@@ -2181,9 +2186,11 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 		IsWatchOnly:          true,
 	}}
 
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Once()
 
@@ -2202,6 +2209,194 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 	require.Equal(t, waddrmgr.KeyScopeBIP0084, props[0].KeyScope)
 	require.True(t, props[0].IsWatchOnly)
 	store.AssertExpectations(t)
+}
+
+// newSQLRecoverySyncer creates ordinary and NoChainSync accounts with one
+// persisted address each. Accounts and scripts are returned in that order so
+// tests can observe recovery policy without background synchronization.
+func newSQLRecoverySyncer(t *testing.T) (*syncer, []db.AccountInfo, [][]byte) {
+	t.Helper()
+
+	// Reuse the SQL Manager's real vault and derivation callbacks so the
+	// persisted account keys and scripts exercise the normal recovery path.
+	m := testSQLiteManager(t)
+	params := sqliteCreateParams(t)
+	params.Name = t.Name()
+	w, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, w.keyVault.Unlock(t.Context(), params.PrivatePassphrase))
+	derive, err := w.buildAccountDeriveFn(t.Context())
+	require.NoError(t, err)
+
+	// Both accounts have identical setup except for the persisted policy;
+	// materializing an address also tests the non-lookahead watch source.
+	configs := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "ordinary",
+			noChainSync: false,
+		},
+		{
+			name:        "recovery-key-only",
+			noChainSync: true,
+		},
+	}
+
+	accounts := make([]db.AccountInfo, 0, len(configs))
+	scripts := make([][]byte, 0, len(configs))
+
+	for _, config := range configs {
+		_, err := w.store.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:    w.id,
+				Scope:       db.KeyScopeBIP0084,
+				Name:        config.name,
+				NoChainSync: config.noChainSync,
+			}, derive,
+		)
+		require.NoError(t, err)
+		addr, err := w.store.NewDerivedAddress(
+			t.Context(), db.NewDerivedAddressParams{
+				WalletID:    w.id,
+				Scope:       db.KeyScopeBIP0084,
+				AccountName: config.name,
+			},
+		)
+		require.NoError(t, err)
+
+		// Snapshot the post-derivation counts for the rejection test's
+		// before/after comparison through the same Store read boundary.
+		account, err := w.store.GetAccount(t.Context(), db.GetAccountQuery{
+			WalletID:    w.id,
+			Scope:       db.KeyScopeBIP0084,
+			Name:        &config.name,
+			SkipBalance: true,
+		})
+		require.NoError(t, err)
+
+		accounts = append(accounts, *account)
+		scripts = append(scripts, addr.ScriptPubKey)
+	}
+
+	// A positive window forces recovery to derive beyond stored addresses;
+	// nil legacy stores select the existing SQL recovery derivation path.
+	s := newSyncer(Config{
+		RecoveryWindow: testScanRecoveryWindow,
+		ChainParams:    &chainParams,
+	}, nil, nil, &mockTxPublisher{}, w.store, w.id)
+
+	return s, accounts, scripts
+}
+
+// TestSyncerRecoveryExcludesNoChainSyncAccounts verifies that full SQL recovery
+// watches only the ordinary account, with the same count as ordinary targeting.
+func TestSyncerRecoveryExcludesNoChainSyncAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Check the same admission policy at both lookahead depths, using a
+	// separate fixture so each subtest starts from independent account
+	// data.
+	for _, window := range []uint32{0, testScanRecoveryWindow} {
+		t.Run(fmt.Sprintf("window %d", window), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Persist both policies and their addresses so
+			// full recovery must filter horizon admission as well
+			// as already-materialized watches.
+			s, accounts, scripts := newSQLRecoverySyncer(t)
+			s.cfg.RecoveryWindow = window
+			targets := []waddrmgr.AccountScope{
+				{
+					Scope:   waddrmgr.KeyScopeBIP0084,
+					Account: *accounts[0].AccountNumber,
+				},
+			}
+
+			// Act: Initialize full recovery and the ordinary target
+			// separately from the same persisted snapshot, then
+			// obtain their observable filter scripts.
+			full, err := s.loadFullScanState(t.Context())
+			require.NoError(t, err)
+			targeted, err := s.loadTargetedScanState(
+				t.Context(), targets,
+			)
+			require.NoError(t, err)
+			fullScripts, err := full.BuildCFilterData()
+			require.NoError(t, err)
+			targetedScripts, err := targeted.BuildCFilterData()
+			require.NoError(t, err)
+
+			// Assert: Each ordinary branch retains its complete
+			// lookahead beyond its stored count, while the
+			// forbidden account contributes no watched script.
+			wantCount := int(
+				2*window + accounts[0].ExternalKeyCount +
+					accounts[0].InternalKeyCount,
+			)
+			require.Equal(t, wantCount, full.WatchListSize())
+			require.Equal(t, wantCount, targeted.WatchListSize())
+			require.Contains(t, fullScripts, scripts[0])
+			require.NotContains(t, fullScripts, scripts[1])
+			require.ElementsMatch(t, fullScripts, targetedScripts)
+		})
+	}
+}
+
+// TestSyncerRecoveryRejectsPersistedNoChainSync verifies SQL exclusion uses
+// normal target resolution without changing persisted recovery horizons.
+func TestSyncerRecoveryRejectsPersistedNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Check the same admission policy at both lookahead depths, using a
+	// separate fixture so each subtest starts from independent account
+	// data.
+	for _, window := range []uint32{0, testScanRecoveryWindow} {
+		t.Run(fmt.Sprintf("window %d", window), func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Use the real stored policy and retain the
+			// key counts after fixture derivation, so a partial
+			// recovery mutation remains observable.
+			s, accounts, _ := newSQLRecoverySyncer(t)
+			s.cfg.RecoveryWindow = window
+			before := accounts[1]
+			targets := []waddrmgr.AccountScope{
+				{
+					Scope:   waddrmgr.KeyScopeBIP0084,
+					Account: *before.AccountNumber,
+				},
+			}
+
+			// Act: Request recovery for the excluded account at
+			// this window size.
+			state, err := s.loadTargetedScanState(
+				t.Context(), targets,
+			)
+
+			// Assert: SQL excludes the account from target resolution,
+			// which returns the normal missing-account error without
+			// exposing state or advancing either stored branch count.
+			require.ErrorIs(t, err, db.ErrAccountNotFound)
+			require.Nil(t, state)
+			after, err := s.store.GetAccount(
+				t.Context(), db.GetAccountQuery{
+					WalletID:    s.walletID,
+					Scope:       before.KeyScope,
+					Name:        &before.AccountName,
+					SkipBalance: true,
+				},
+			)
+			require.NoError(t, err)
+			require.Equal(
+				t, before.ExternalKeyCount, after.ExternalKeyCount,
+			)
+			require.Equal(
+				t, before.InternalKeyCount, after.InternalKeyCount,
+			)
+		})
+	}
 }
 
 // TestStoreScanHorizonsGetAccount verifies targeted scan horizon reads resolve
@@ -2710,9 +2905,11 @@ func TestResolveScanTargetsDoesNotUseSQLAccountID(t *testing.T) {
 
 	id := importedID
 	number := otherNum
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return([]db.AccountInfo{{
 		AccountID:     &id,
@@ -2809,9 +3006,11 @@ func TestStoreScanAddresses(t *testing.T) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Once()
 
@@ -2869,9 +3068,11 @@ func TestStoreScanAddressesIncludesImportedAlias(t *testing.T) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Once()
 
@@ -2923,9 +3124,11 @@ func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
 	pkScript, err := txscript.PayToAddrScript(addr)
 	require.NoError(t, err)
 
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return([]db.AccountInfo(nil), nil).Once()
 
@@ -2982,9 +3185,11 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 		AccountName: "custom",
 		KeyScope:    nonDefault,
 	}}
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Once()
 
@@ -3098,9 +3303,11 @@ func TestLoadWalletScanDataStore(t *testing.T) {
 		InternalKeyCount: 5,
 		KeyScope:         db.KeyScopeBIP0084,
 	}}
+	// Require scan-only selection at the Store boundary before loading rows.
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+			return query.WalletID == walletID && query.SkipBalance &&
+				query.ChainSyncOnly
 		},
 	)).Return(accounts, nil).Twice()
 
