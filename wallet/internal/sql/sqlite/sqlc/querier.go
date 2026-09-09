@@ -342,10 +342,13 @@ type Querier interface {
 	// Lists all accounts in a scope. Accounts without BIP44 numbers appear last.
 	ListAccountsByScope(ctx context.Context, scopeID int64) ([]ListAccountsByScopeRow, error)
 	// Lists all accounts for a wallet.
-	ListAccountsByWallet(ctx context.Context, walletID int64) ([]ListAccountsByWalletRow, error)
+	// Scan callers opt in so ordinary account listing keeps key-only accounts.
+	ListAccountsByWallet(ctx context.Context, arg ListAccountsByWalletParams) ([]ListAccountsByWalletRow, error)
 	// Lists all accounts for a wallet filtered by account name.
+	// Scan callers opt in so ordinary account listing keeps key-only accounts.
 	ListAccountsByWalletAndName(ctx context.Context, arg ListAccountsByWalletAndNameParams) ([]ListAccountsByWalletAndNameRow, error)
 	// Lists all accounts for a wallet and scope tuple.
+	// Scan callers opt in so ordinary account listing keeps key-only accounts.
 	ListAccountsByWalletScope(ctx context.Context, arg ListAccountsByWalletScopeParams) ([]ListAccountsByWalletScopeRow, error)
 	// Lists active wallet transaction rows and their raw transaction bytes.
 	//
