@@ -386,3 +386,68 @@ func TestValidatePacketUnclassifiedFields(t *testing.T) {
 		})
 	}
 }
+
+// TestValidatePacketParentTxMismatch verifies that a parent transaction that
+// is not the one the input names is refused. Every later stage reads the spent
+// output from these records, so a caller must not be able to substitute one.
+func TestValidatePacketParentTxMismatch(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a parent that hashes to something other than the outpoint.
+	packet := testPacket(t)
+	packet.Inputs[0].NonWitnessUtxo = &wire.MsgTx{
+		Version: 2,
+		TxIn:    []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{{
+			Value: 1, PkScript: []byte{0x51},
+		}},
+	}
+
+	// Act.
+	err := validatePacket(packet)
+
+	// Assert.
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
+
+// TestValidatePacketParentIndexOutOfRange verifies that an input spending an
+// output its own parent transaction does not have is refused rather than
+// indexing past the parent's outputs.
+func TestValidatePacketParentIndexOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: the parent has one output; name its second.
+	parent, outPoint, _ := testParentTx(t)
+	outPoint.Index = 1
+
+	packet := testPacket(t)
+	packet.UnsignedTx.TxIn[0].PreviousOutPoint = outPoint
+	packet.Inputs[0].NonWitnessUtxo = parent
+	packet.Inputs[0].WitnessUtxo = nil
+
+	// Act.
+	err := validatePacket(packet)
+
+	// Assert.
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
+
+// TestValidatePacketUtxoViewsDisagree verifies that a packet carrying both
+// views of the spent output is refused when they are not the same output,
+// since nothing could tell which one the caller meant.
+func TestValidatePacketUtxoViewsDisagree(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a witness UTXO that is not the parent's output.
+	packet := testPacket(t)
+	packet.Inputs[0].WitnessUtxo = &wire.TxOut{
+		Value:    99999,
+		PkScript: bytes.Repeat([]byte{0x51}, 22),
+	}
+
+	// Act.
+	err := validatePacket(packet)
+
+	// Assert.
+	require.ErrorIs(t, err, ErrConflictingUtxo)
+}
