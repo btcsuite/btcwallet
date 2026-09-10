@@ -787,7 +787,7 @@ func TestGetAccountLifecycle(t *testing.T) {
 	// Act: Attempt a lookup before Start, then make the Wallet terminal and
 	// attempt the same lookup through the retained pointer.
 	_, initializedErr := w.GetAccount(t.Context(), scope, testAccountName)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 	_, stoppedErr := w.GetAccount(t.Context(), scope, testAccountName)
 
 	// Assert: Initialized retains the broad state error, terminal access
@@ -844,7 +844,7 @@ func TestGetAccountConcurrentDrain(t *testing.T) {
 	// a third lookup after lifetime cancellation has closed admission.
 	stopResult := make(chan error, 1)
 	go func() {
-		stopResult <- w.Stop(t.Context())
+		stopResult <- w.stop()
 	}()
 
 	<-w.lifetimeCtx.Done()
@@ -912,7 +912,7 @@ func TestGetAccountCanceledCallerDrains(t *testing.T) {
 
 	stopResult := make(chan error, 1)
 	go func() {
-		stopResult <- w.Stop(t.Context())
+		stopResult <- w.stop()
 	}()
 
 	<-w.lifetimeCtx.Done()
@@ -1731,7 +1731,7 @@ func TestNewAccountRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet before startup so no request handler or
 	// Store expectation exists for the attempted account creation.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt to create an account through the terminal Wallet.
 	_, err := w.NewAccount(t.Context(), NewAccountParams{
@@ -1752,7 +1752,7 @@ func TestListAccountsRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet with no Store expectations because the
 	// list request must be rejected before reaching the cache.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt to list every account through the terminal Wallet.
 	_, err := w.ListAccounts(t.Context())
@@ -1769,7 +1769,7 @@ func TestListAccountsByScopeRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet without Store expectations so any admitted
 	// scope query would fail the fixture's mock verification.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt the filtered listing through the terminal Wallet.
 	_, err := w.ListAccountsByScope(
@@ -1788,7 +1788,7 @@ func TestListAccountsByNameRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet without Store expectations so the name
 	// filter cannot reach the account cache after shutdown.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt the name-filtered listing through the terminal Wallet.
 	_, err := w.ListAccountsByName(t.Context(), testAccountName)
@@ -1805,7 +1805,7 @@ func TestRenameAccountRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet without Store expectations so validation
 	// and persistence remain behind the terminal request boundary.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt to rename an account through the terminal Wallet.
 	err := w.RenameAccount(
@@ -1825,7 +1825,7 @@ func TestImportAccountRejectsStopped(t *testing.T) {
 	// Arrange: Stop a fresh Wallet and intentionally provide no key or Store
 	// expectation so lifecycle rejection must precede argument validation.
 	w, _ := createTestWalletWithMocks(t)
-	require.NoError(t, w.Stop(t.Context()))
+	require.NoError(t, w.stop())
 
 	// Act: Attempt to import the invalid key through the terminal Wallet.
 	_, err := w.ImportAccount(
@@ -2241,7 +2241,7 @@ func TestNewAccountScopeReadDrains(t *testing.T) {
 	// Act: close admission while the scope read remains blocked. Stop must
 	// retain this request even though it has not prepared secrets or written.
 	stopped := make(chan error, 1)
-	go func() { stopped <- w.Stop(t.Context()) }()
+	go func() { stopped <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 
