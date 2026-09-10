@@ -20,9 +20,6 @@ var (
 	// is inactive after its owned resources have closed.
 	ErrManagerStopped = errors.New("manager stopped")
 
-	// ErrWalletNotFound is returned when a wallet is not found by Manager.Load.
-	ErrWalletNotFound = errors.New("wallet not found")
-
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
 
@@ -115,21 +112,6 @@ type CreateWalletParams struct {
 	// require it for every wallet; legacy kvdb permits it to be empty when
 	// creating a watch-only wallet.
 	PrivatePassphrase []byte
-}
-
-// LoadWalletParams identifies an existing Wallet and carries inputs needed
-// only while its backend opens durable state.
-type LoadWalletParams struct {
-	// Name is the required runtime identity used by the Manager cache and SQL
-	// wallet lookup. The legacy kvdb backend also uses it for the one Wallet
-	// instance it can serve, but does not persist it as an alias.
-	Name string
-
-	// PubPassphrase opens the legacy kvdb wallet. SQL backends ignore it
-	// because they have no public encryption passphrase.
-	//
-	// Remove this field with kvdb support.
-	PubPassphrase []byte
 }
 
 // Manager owns the lifecycle and shared database of its Wallet set.
@@ -334,14 +316,6 @@ func translateDatabaseIdentityError(err error) error {
 	default:
 		return err
 	}
-}
-
-// Close releases the database this Manager owns.
-//
-// The caller must have stopped every wallet first. There is no close fence and
-// no use-after-close guarantee beyond that contract.
-func (m *Manager) Close() error {
-	return m.backend.close()
 }
 
 // Start starts every durable Wallet and returns the complete active set in
@@ -611,56 +585,6 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 	}
 
 	return nil
-}
-
-// Load opens the requested durable Wallet and assembles it from Manager-owned
-// runtime policy. If it does not exist, Load returns ErrWalletNotFound.
-func (m *Manager) Load(params LoadWalletParams) (*Wallet, error) {
-	// Validate identity before cache or backend work so every backend reports
-	// the same caller error for an empty name.
-	err := validateManagedWalletName(params.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	name := params.Name
-
-	m.Lock()
-	defer m.Unlock()
-
-	// Serializing the cache check through installation ensures concurrent cold
-	// Loads share the one Wallet assembled by the first caller.
-	existingW, ok := m.wallets[name]
-	if ok {
-		return existingW, nil
-	}
-
-	// A cache miss receives a fresh Wallet-local policy assembled from the
-	// Manager's immutable configuration snapshot.
-	walletCfg, err := m.config.walletConfig(name)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only the narrow request reaches the backend. The assembled Wallet never
-	// retains a legacy public passphrase.
-	data, err := m.backend.load(context.Background(), params)
-	if err != nil {
-		// Hide the database sentinel at the public Manager boundary while
-		// retaining the requested wallet name for caller diagnostics.
-		if errors.Is(err, db.ErrWalletNotFound) {
-			return nil, fmt.Errorf(
-				"wallet %q: %w", name, ErrWalletNotFound,
-			)
-		}
-
-		return nil, err
-	}
-
-	w := newManagedWallet(walletCfg, data)
-	m.wallets[walletCfg.Name] = w
-
-	return w, nil
 }
 
 // deriveRootKey resolves the master extended key after creation parameters have
