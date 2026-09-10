@@ -27,6 +27,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 )
 
@@ -114,7 +115,13 @@ func newAccountErr(err error) error {
 	var publicErr error
 
 	switch {
-	case isAccountNameConflict(err):
+	// A failed commit may wrap cancellation after persistence; report
+	// uncertainty before the ordinary caller-error boundary can mask it.
+	case errors.Is(err, dbruntime.ErrAmbiguousTxCommit):
+		return fmt.Errorf("%w: %s", ErrIndeterminateCommit, err.Error())
+
+	case isAccountNameConflict(err),
+		errors.Is(err, db.ErrAccountNumberConflict):
 		publicErr = ErrAccountAlreadyExists
 
 	case errors.Is(err, errWatchOnlyAccountDerivation),
@@ -291,6 +298,8 @@ type AccountManager interface {
 	// NewAccount creates a new account for a given key scope and name. The
 	// provided name must be unique within that key scope. NoChainSync=true
 	// is currently rejected with ErrAccountOperationUnsupported.
+	// ErrIndeterminateCommit means persistence may have succeeded; callers
+	// must inspect stored state before retrying, never blindly repeat it.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
 		error)
 

@@ -573,3 +573,73 @@ func TestCreateDerivedAccountExactConcurrent(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, largest+1, *next.AccountNumber)
 }
+
+// TestCreateDerivedAccountExactRollback verifies that either uniqueness
+// constraint rolls back the complete account write and its cursor update.
+func TestCreateDerivedAccountExactRollback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		number uint32
+		want   error
+	}{
+		{
+			name:   "taken",
+			number: 7,
+			want:   db.ErrAccountNameConflict,
+		},
+		{
+			name:   "occupied number",
+			number: 0,
+			want:   db.ErrAccountNumberConflict,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: each constraint gets an independent account zero;
+			// exact seven collides by name, while zero collides by number.
+			store := NewTestStore(t)
+			params := db.CreateDerivedAccountParams{
+				WalletID: newWallet(t, store, "exact-rollback"),
+				Scope:    db.KeyScopeBIP0084,
+				Name:     "taken",
+			}
+			_, err := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
+			require.NoError(t, err)
+
+			params.Name = test.name
+			params.AccountNumber = &test.number
+
+			// Act: attempt the conflicting exact creation in a real write
+			// transaction, including derivation and secret persistence.
+			info, err := store.CreateDerivedAccount(
+				t.Context(), params, SpendableDeriveFn(),
+			)
+
+			// Assert: the conflict returns no account and leaves the one
+			// original account, secret and scope cursor unchanged.
+			requireConstraintSQLError(t, err)
+			require.ErrorIs(t, err, test.want)
+			require.Nil(t, info)
+
+			// Raw counts expose orphan secrets and the allocation cursor,
+			// which normal account reads cannot observe independently.
+			var accounts, secrets, next int
+
+			err = store.DB().QueryRowContext(t.Context(), `
+				SELECT (SELECT count(*) FROM accounts),
+				       (SELECT count(*) FROM account_secrets),
+				       (SELECT next_account_number FROM key_scopes)
+			`).Scan(&accounts, &secrets, &next)
+			require.NoError(t, err)
+			require.Equal(t, 1, accounts)
+			require.Equal(t, 1, secrets)
+			require.Equal(t, 1, next)
+		})
+	}
+}
