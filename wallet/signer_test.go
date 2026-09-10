@@ -314,7 +314,7 @@ func TestPublicKeyDerivationRejectsInvalidSelector(t *testing.T) {
 	)
 
 	// Assert: Selector validation failed locally and the Store was untouched.
-	require.ErrorIs(t, err, errInvalidAccountSelector)
+	require.ErrorIs(t, err, ErrInvalidAccountSelector)
 	mocks.store.AssertNotCalled(t, "GetAccount", mock.Anything, mock.Anything)
 }
 
