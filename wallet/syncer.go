@@ -1199,6 +1199,12 @@ func (s *syncer) newStoreScanState(accounts []storeScanAccount,
 		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
 	)
 
+	// Existing child counts also cause horizon initialization to derive.
+	// Omit horizons entirely at zero; persisted targets need no deriver.
+	if s.cfg.RecoveryWindow == 0 {
+		accounts = nil
+	}
+
 	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
 	for _, account := range accounts {
 		err := scanState.setStoreAccount(
@@ -1512,8 +1518,8 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 	// "header-only" scan to advance the wallet's sync state without
 	// downloading full blocks or filters.
 	//
-	// NOTE: For targeted rescans, the state will never be empty as it is
-	// initialized with specific targets.
+	// NOTE: A targeted rescan can also be empty when neither eligible
+	// horizons nor persisted addresses or outputs remain.
 	if scanState.Empty() {
 		log.Debugf("Performing header-only scan for %d blocks",
 			endHeight-startHeight+1)
@@ -1975,10 +1981,11 @@ func (s *syncer) storeScanHorizons(ctx context.Context,
 }
 
 // storeFullScanHorizons loads full recovery horizon accounts from the Store,
-// skipping only the keyless raw-import bucket. The scan selects no account by
+// skipping the keyless raw-import bucket. The scan selects no account by
 // number here, so each one is keyed on its durable store row ID and an imported
 // account cannot overwrite a derived account owning the same BIP44 number in
 // the same scope.
+// NoChainSync accounts are also excluded from recovery horizons.
 func (s *syncer) storeFullScanHorizons(
 	ctx context.Context) ([]storeScanAccount, error) {
 
@@ -1995,7 +2002,8 @@ func (s *syncer) storeFullScanHorizons(
 		// The keyless imported-address bucket has no xpub to derive
 		// lookahead addresses from. Its materialized addresses are still
 		// watched by storeScanAddresses.
-		if keylessImportedAccount(accounts[i]) {
+		// NoChainSync accounts opt out of recovery derivation as well.
+		if accounts[i].NoChainSync || keylessImportedAccount(accounts[i]) {
 			continue
 		}
 
@@ -2020,6 +2028,7 @@ func (s *syncer) storeFullScanHorizons(
 // storeTargetedScanHorizons loads recovery horizon accounts for already
 // resolved scan targets. Each target keeps the account number the caller named
 // as its recovery key, while the Store lookup itself prefers the durable name.
+// NoChainSync accounts are excluded from recovery horizons.
 func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 	targets []scanTarget) ([]storeScanAccount, error) {
 
@@ -2043,7 +2052,8 @@ func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 		// The keyless imported-address bucket has no xpub to derive
 		// lookahead addresses from. Its materialized addresses are still
 		// watched by storeScanAddresses.
-		if keylessImportedAccount(*info) {
+		// NoChainSync accounts opt out of recovery derivation as well.
+		if info.NoChainSync || keylessImportedAccount(*info) {
 			continue
 		}
 
@@ -2180,13 +2190,15 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 
 // storeScanAddresses loads active scan addresses through the store, paging per
 // (key scope, account) pair because ListAddresses is scoped to a single pair.
+// Accounts marked NoChainSync are omitted from this wallet-wide read.
 //
-// This reproduces the legacy ForEachRelevantActiveAddress filtering used by
-// the old scan-data reader: for default key scopes every active address is
+// For KVDB, this reproduces the legacy ForEachRelevantActiveAddress filtering
+// used by the old scan-data reader: for default scopes every active address is
 // watched, while for non-default key scopes only internal-branch (change)
 // addresses are watched. The non-default external branches are intentionally
 // skipped because they only ever existed due to a since-fixed bug, and
 // watching them would diverge from the legacy recovery set.
+// SQL watches persisted addresses from both branches in every eligible scope.
 func (s *syncer) storeScanAddresses(
 	ctx context.Context) ([]address.Address, error) {
 
@@ -2200,7 +2212,8 @@ func (s *syncer) storeScanAddresses(
 
 	var addrs []address.Address
 	for i := range accounts {
-		if keylessImportedAccount(accounts[i]) {
+		// Opted-out accounts must not supply persisted recovery addresses.
+		if accounts[i].NoChainSync || keylessImportedAccount(accounts[i]) {
 			continue
 		}
 
@@ -2237,10 +2250,11 @@ func (s *syncer) storeImportedScanAddresses(
 
 // storeScanAddressRelevant reports whether a stored address row belongs in the
 // recovery scan set for its account shape and key scope.
-func storeScanAddressRelevant(isRawImported, isDefaultScope bool,
+func (s *syncer) storeScanAddressRelevant(isRawImported, isDefaultScope bool,
 	info db.AddressInfo) bool {
 
-	if isRawImported || isDefaultScope {
+	// SQL has no legacy branch restriction on persisted account addresses.
+	if s.addrStore == nil || isRawImported || isDefaultScope {
 		return true
 	}
 
@@ -2248,7 +2262,7 @@ func storeScanAddressRelevant(isRawImported, isDefaultScope bool,
 }
 
 // storeAccountScanAddresses pages through a single account's addresses,
-// converting each stored script into its wallet address. It mirrors the legacy
+// converting each stored script into its wallet address. KVDB mirrors legacy
 // ForEachRelevantActiveAddress filtering: addresses in default key scopes are
 // all relevant, while non-default key scopes only contribute their
 // internal-branch (change) addresses.
@@ -2260,9 +2274,9 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 		return nil, err
 	}
 
-	// Outside the default key scopes only the internal (change) branch is
-	// relevant, matching ForEachRelevantActiveAddress's handling of change
-	// addresses that a since-fixed bug created in non-default scopes.
+	// In KVDB, outside the default key scopes only the internal (change)
+	// branch is relevant, matching ForEachRelevantActiveAddress's handling of
+	// change addresses that a since-fixed bug created in non-default scopes.
 	isDefaultScope := waddrmgr.IsDefaultScope(
 		waddrmgr.KeyScope(account.KeyScope),
 	)
@@ -2288,12 +2302,12 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 		}
 
 		for _, info := range result.Items {
-			// Skip non-default-scope external addresses to match
-			// the legacy relevant-address set.
-			relevant := storeScanAddressRelevant(
+			// Retain legacy branch relevance only for KVDB. SQL must
+			// watch persisted external children in custom scopes too.
+			if !s.storeScanAddressRelevant(
 				isRawImported, isDefaultScope, info,
-			)
-			if !relevant {
+			) {
+
 				continue
 			}
 
