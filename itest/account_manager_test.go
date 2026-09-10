@@ -368,19 +368,20 @@ func testAccountManagerEnforceAccountCreationLifecycle(h *bwtest.HarnessTest) {
 	})
 
 	require.Error(h, err, "locked wallet created an account")
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
 
 	_, err = w.NewAccount(ctx, wallet.NewAccountParams{
 		Scope: scope,
 		Name:  stoppedName,
 	})
 
-	require.ErrorIs(h, err, wallet.ErrWalletStopped)
-
 	// An admission rejected before or after the wallet stops must leave no
 	// partial account, so neither name resolves across a reopen and the
 	// account set is unchanged.
-	w = h.ReloadWallet(w)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, scope, lockedName)
 	require.Error(h, err, "locked rejection created an account")
 	_, err = w.GetAccount(ctx, scope, stoppedName)
@@ -699,15 +700,16 @@ func testAccountManagerEnforceAccountRenameLifecycle(h *bwtest.HarnessTest) {
 	durableInfo := *durable
 	durableInfo.PublicKey = canonicalAccountKey(h, durableInfo.PublicKey)
 	require.Equal(h, wantLockedRename, durableInfo)
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
 
 	err = w.RenameAccount(ctx, scope, lockedName, stoppedName)
 
-	require.ErrorIs(h, err, wallet.ErrWalletStopped)
-
 	// The rejected rename must not move the account, so the source keeps
 	// its complete result and the target stays absent across a reopen.
-	w = h.ReloadWallet(w)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, scope, stoppedName)
 	require.Error(h, err, "stopped rename created a target account")
 	unchanged, err := w.GetAccount(ctx, scope, lockedName)
@@ -1045,18 +1047,19 @@ func testAccountManagerEnforceAccountImportLifecycle(h *bwtest.HarnessTest) {
 
 	wantCount := len(accounts)
 
-	require.NoError(h, w.Stop(ctx), "failed to stop wallet")
+	// Retain the stopped pointer for the rejected call; the live replacement
+	// remains registered and provides the next durability boundary.
+	live := h.ReloadWallet(w)
 
 	_, err = w.ImportAccount(
 		ctx, accountName, keys.accountKey, keys.masterKeyFingerprint,
 		keys.addrType, false,
 	)
 
-	require.ErrorIs(h, err, wallet.ErrWalletStopped)
-
 	// A rejected import must leave no partial account, so the target stays
 	// absent across a reopen and the account set is unchanged.
-	w = h.ReloadWallet(w)
+	require.ErrorIs(h, err, wallet.ErrWalletStopped)
+	w = h.ReloadWallet(live)
 	_, err = w.GetAccount(ctx, keys.scope, accountName)
 	require.Error(h, err, "stopped import created an account")
 
