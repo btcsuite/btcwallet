@@ -215,7 +215,7 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	params, err := cloneChainParams(chainParams)
 	require.NoError(t, err)
 
-	chainSource := &bwmock.Chain{}
+	chainSource := createTestChain(t)
 	cfg := ManagerConfig{
 		Backend:          DBBackendKVDB,
 		DataSource:       testKVDBPath(t),
@@ -232,11 +232,20 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	// consume only the retained immutable snapshot.
 	m, err := NewManager(t.Context(), cfg)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = m.Stop()
+	})
 
 	zeroCfg := cfg
 	zeroCfg.DataSource = testKVDBPath(t)
 	zeroCfg.AutoLockDuration = 0
 	zeroManager, err := NewManager(t.Context(), zeroCfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = zeroManager.Stop()
+	})
+
+	_, err = m.Start(t.Context())
 	require.NoError(t, err)
 
 	params.Name = "mutated"
@@ -271,8 +280,8 @@ func TestManagerRetainsRuntimeSnapshot(t *testing.T) {
 	require.Equal(t, m.config.RecoveryWindow, w.cfg.RecoveryWindow)
 	require.Equal(t, m.config.AutoLockDuration, w.cfg.AutoLockDuration)
 	require.Equal(t, m.config.MaxCFilterItems, w.cfg.MaxCFilterItems)
-	require.NoError(t, m.Close())
-	require.NoError(t, zeroManager.Close())
+	require.NoError(t, m.Stop())
+	require.NoError(t, zeroManager.Stop())
 }
 
 // TestNewManagerRejectsInvalidSQLIdentity proves identity precedes SQL setup.
