@@ -1154,8 +1154,8 @@ func TestNewAccountLocked(t *testing.T) {
 	require.NotErrorIs(t, err, keyvault.ErrVaultLocked)
 }
 
-// TestNewAccountNoChainSyncUnsupported verifies the common Wallet boundary
-// refuses exclusion before any backend can prepare secrets or mutate accounts.
+// TestNewAccountNoChainSyncUnsupported verifies sequential creation refuses
+// exclusion before preparing secrets or mutating accounts.
 func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
 	t.Parallel()
 
@@ -1163,12 +1163,13 @@ func TestNewAccountNoChainSyncUnsupported(t *testing.T) {
 	// with an available name. Strict mocks have no secret or write
 	// expectations, so crossing into creation would fail this test.
 	w, deps := createUnlockedWalletWithMocks(t)
+	w.addrStore = nil
 	scope := waddrmgr.KeyScopeBIP0084
 
 	expectAccountNameAvailable(deps, scope, testAccountName)
 
-	// Act: request exclusion through the public API while its receiving and
-	// recovery support is unavailable.
+	// Act: request exclusion without an exact account number through the
+	// admitted public API, which otherwise selects sequential allocation.
 	account, err := w.NewAccount(t.Context(), NewAccountParams{
 		Scope:       scope,
 		Name:        testAccountName,
