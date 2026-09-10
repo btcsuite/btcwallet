@@ -104,7 +104,9 @@ func (b *kvdbManagerBackend) create(ctx context.Context,
 func (b *kvdbManagerBackend) listWallets(
 	ctx context.Context) ([]*walletData, error) {
 
-	data, err := b.load(ctx, LoadWalletParams{
+	data, err := b.open(ctx, "", kvdb.Config{
+		DB:            b.db,
+		ChainParams:   b.chainParams,
 		PubPassphrase: b.pubPass,
 	})
 	// Missing durable state is kvdb's only zero-Wallet representation. Every
@@ -120,23 +122,6 @@ func (b *kvdbManagerBackend) listWallets(
 	}
 
 	return []*walletData{data}, nil
-}
-
-// load opens the one existing legacy wallet served by the backend.
-func (b *kvdbManagerBackend) load(ctx context.Context,
-	params LoadWalletParams) (*walletData, error) {
-
-	if b.store != nil {
-		return nil, fmt.Errorf("%w: kvdb serves one wallet per "+
-			"database; %q is already loaded", ErrInvalidParam,
-			b.walletName)
-	}
-
-	return b.open(ctx, params.Name, kvdb.Config{
-		DB:            b.db,
-		ChainParams:   b.chainParams,
-		PubPassphrase: params.PubPassphrase,
-	})
 }
 
 // open binds the legacy managers and validates all wallet metadata before the
