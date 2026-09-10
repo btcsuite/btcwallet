@@ -191,6 +191,10 @@ var allTestCases = []*testCase{
 		TestFunc: testSignerECDHRejectAccount,
 	},
 	{
+		Name:     "signer ecdh watchonly",
+		TestFunc: testSignerECDHWatchOnly,
+	},
+	{
 		Name:     "utxomanager list unspent",
 		TestFunc: testListUnspent,
 	},
