@@ -65,9 +65,8 @@ type WalletFixture struct {
 	// This field is always honored, including its zero value, PubKeyHash.
 	AddrType waddrmgr.AddressType
 
-	// Amounts funds the wallet with one confirmed output per amount, in
-	// the order given. Funding needs a running wallet, so it cannot be
-	// combined with Unstarted.
+	// Amounts funds the wallet with one confirmed output per amount, in the
+	// order given.
 	Amounts []btcutil.Amount
 
 	// WatchOnly creates a rootless watch-only shell wallet when
@@ -81,10 +80,6 @@ type WalletFixture struct {
 
 	// Unlocked unlocks the wallet once it has started.
 	Unlocked bool
-
-	// Unstarted returns the wallet before Start, for cases asserting
-	// behavior that is only observable while the wallet is not running.
-	Unstarted bool
 }
 
 // NewWallet creates, registers and prepares a wallet as the fixture describes,
@@ -106,29 +101,16 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	}
 
 	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 
-	// Register before Start, and only register: teardownWallets is the single
-	// cleanup owner. Registering after Start would leave a wallet whose Start
-	// failed unregistered, and a second direct Stop callback here would stop a
-	// successful one twice, out of order with the Manager close.
-	reloadParams := &wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	}
-	h.registerWallet(manager, w, reloadParams)
-
-	if fixture.Unstarted {
-		require.Empty(
-			h, fixture.Amounts, "funding needs a started wallet",
-		)
-
-		return w, WalletFunding{}
-	}
-
 	err = w.Start(h.Context())
 	require.NoError(h, err, "failed to start wallet")
+
+	h.RegisterWallet(manager, w)
 
 	if fixture.Unlocked {
 		h.UnlockWallet(w)
@@ -155,18 +137,16 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 
 	var (
 		manager           *wallet.Manager
-		reloadParams      *wallet.LoadWalletParams
 		registeredWallets int
 	)
 
 	for candidate, registration := range h.wallets {
-		params, ok := registration[current]
+		_, ok := registration[current]
 		if !ok {
 			continue
 		}
 
 		manager = candidate
-		reloadParams = params
 		registeredWallets = len(registration)
 
 		break
@@ -175,7 +155,6 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 	h.mu.Unlock()
 
 	require.NotNil(h, manager, "wallet is not registered with this harness")
-	require.NotNil(h, reloadParams, "wallet is not reloadable")
 	require.Equal(
 		h, 1, registeredWallets,
 		"wallet manager has sibling registered wallets",
@@ -183,25 +162,23 @@ func (h *HarnessTest) ReloadWallet(current *wallet.Wallet) *wallet.Wallet {
 
 	ctx := h.Context()
 	require.NoError(
-		h, current.Stop(ctx), "failed to stop wallet before reload",
+		h, manager.Stop(), "failed to stop wallet manager before reload",
 	)
 	require.True(
 		h, h.DeregisterWallet(current), "failed to deregister wallet",
-	)
-	require.NoError(
-		h, manager.Close(), "failed to close wallet manager",
 	)
 	require.True(
 		h, h.ReleaseManager(manager), "failed to release wallet manager",
 	)
 
 	manager = h.NewWalletManager()
-	w, err := manager.Load(*reloadParams)
+	wallets, err := manager.Start(ctx)
 	require.NoError(h, err, "failed to reload wallet")
+	require.Len(h, wallets, 1, "reload returned an unexpected wallet set")
+	w := wallets[0]
 	require.NotSame(h, current, w, "reload returned the original wallet")
 
-	h.registerWallet(manager, w, reloadParams)
-	require.NoError(h, w.Start(ctx), "failed to start reloaded wallet")
+	h.RegisterWallet(manager, w)
 
 	return w
 }
