@@ -132,7 +132,7 @@ func TestSignerKeepsTweakerLifetime(t *testing.T) {
 	cancel()
 
 	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.Stop(t.Context()) }()
+	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 
@@ -200,7 +200,7 @@ func TestUnsafeSignerDeliversCanceledKey(t *testing.T) {
 	cancel()
 
 	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.Stop(t.Context()) }()
+	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 

@@ -403,7 +403,8 @@ func TestStateStartStop(t *testing.T) {
 		state.lifecycle.Store(uint32(lifecycleStarted))
 
 		err := state.toStarting()
-		require.ErrorIs(t, err, ErrWalletAlreadyStarted)
+
+		require.ErrorIs(t, err, errWalletAlreadyStarted)
 	})
 
 	t.Run("start fail terminally stopped", func(t *testing.T) {
