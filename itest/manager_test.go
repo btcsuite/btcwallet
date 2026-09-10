@@ -12,20 +12,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testManagerLoadConcurrent verifies that every supported Manager backend gives
-// concurrent cold Loads one exact runtime Wallet pointer.
-func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
-	// Arrange. The setup Manager creates durable state, then closes so the
-	// test Manager opens the same backend with an empty runtime cache. Using
-	// two Managers is required to exercise a true cold Load on kvdb as well
-	// as SQL.
-	params := h.TestWalletParams()
+// testManagerStartConcurrent verifies that every supported Manager backend
+// admits one concurrent Start and rejects the others without rebuilding it.
+func testManagerStartConcurrent(h *bwtest.HarnessTest) {
+	// Arrange. The setup Manager creates durable state, then stops so the test
+	// Manager opens the same backend with no runtime Wallets.
+	firstParams := h.TestWalletParams()
+	firstParams.Name += "-z"
 	setupManager := h.NewWalletManager()
+	loaded, err := setupManager.Start(h.Context())
+	require.NoError(h, err, "failed to start setup manager")
+	require.Empty(h, loaded, "empty store loaded wallets")
 
-	created, err := setupManager.Create(params)
+	firstWallet, err := setupManager.Create(firstParams)
 	require.NoError(h, err, "failed to create wallet")
-	require.NoError(h, created.Stop(h.Context()), "failed to stop wallet")
-	require.NoError(h, setupManager.Close(), "failed to close setup manager")
+
+	expectedIDs := []uint32{firstWallet.ID()}
+
+	// Legacy kvdb has a documented one-Wallet limit. SQL backends create a
+	// second Wallet with a lexically earlier name but a later durable ID.
+	if *dbBackend != "kvdb" {
+		secondParams := h.TestWalletParams()
+		secondParams.Name += "-a"
+		secondWallet, err := setupManager.Create(secondParams)
+		require.NoError(h, err, "failed to create second wallet")
+
+		expectedIDs = append(expectedIDs, secondWallet.ID())
+	}
+
+	require.NoError(h, setupManager.Stop(), "failed to stop manager")
 	require.True(
 		h, h.ReleaseManager(setupManager),
 		"failed to release setup manager",
@@ -33,15 +48,15 @@ func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
 
 	manager := h.NewWalletManager()
 
-	// Multiple callers contend for cold assembly. The exact number is not
+	// Multiple callers contend for startup. The exact number is not
 	// significant as long as it is greater than one.
 	const numCallers = 8
 
 	type result struct {
-		// wallet is the exact runtime returned to one caller.
-		wallet *wallet.Wallet
+		// wallets is the exact ordered runtime set returned to one caller.
+		wallets []*wallet.Wallet
 
-		// err is the Load result returned with wallet.
+		// err is the Start result returned with wallets.
 		err error
 	}
 
@@ -57,11 +72,11 @@ func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
 			ready.Done()
 			<-start
 
-			w, err := manager.Load(wallet.LoadWalletParams{
-				Name:          params.Name,
-				PubPassphrase: params.PubPassphrase,
-			})
-			results <- result{wallet: w, err: err}
+			wallets, err := manager.Start(h.Context())
+			results <- result{
+				wallets: wallets,
+				err:     err,
+			}
 		}()
 	}
 
@@ -69,17 +84,27 @@ func testManagerLoadConcurrent(h *bwtest.HarnessTest) {
 	ready.Wait()
 	close(start)
 
-	// Assert. One caller assembles the runtime and every other caller returns
-	// that exact installed pointer.
-	first := <-results
-	require.NoError(h, first.err, "failed to load wallet")
-	installed := first.wallet
-	h.RegisterWallet(manager, installed)
-
-	for range numCallers - 1 {
+	var installed []*wallet.Wallet
+	for range numCallers {
 		result := <-results
-		require.NoError(h, result.err, "failed to load wallet")
-		require.Same(h, installed, result.wallet, "load rebuilt wallet")
+		if result.err != nil {
+			require.ErrorIs(h, result.err, wallet.ErrStateForbidden)
+			require.Nil(h, result.wallets)
+
+			continue
+		}
+
+		require.Nil(h, installed, "more than one Start succeeded")
+		installed = result.wallets
+	}
+
+	require.Len(h, installed, len(expectedIDs),
+		"unexpected startup wallet count")
+
+	for i, w := range installed {
+		require.Equal(h, expectedIDs[i], w.ID(),
+			"wallets not returned in durable ID order")
+		h.RegisterWallet(manager, w)
 	}
 }
 
@@ -89,18 +114,14 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	// rather than the harness's CreateEmptyWallet convenience helper.
 	params := h.TestWalletParams()
 	manager := h.NewWalletManager()
+	loaded, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+	require.Empty(h, loaded, "empty store loaded wallets")
 
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
-
-	// Register before Start so teardown owns the wallet even if Start fails.
-	// The harness stops every registered wallet and then closes every
-	// Manager. Do not add another Stop cleanup here; it would only stop the
-	// wallet early and duplicate the harness-owned teardown.
 	h.RegisterWallet(manager, w)
-
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	// Wait for the wallet to catch up to the existing tip before mining new
 	// blocks.
@@ -116,26 +137,29 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	params := h.TestWalletParams()
 
 	manager := h.NewWalletManager()
+	loaded, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+	require.Empty(h, loaded, "empty store loaded wallets")
+
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
-
-	// Creating a duplicate while the original is still cached must fail before
-	// the manager consults the durable store.
 	duplicate, err := manager.Create(params)
+
 	require.Error(h, err, "duplicate create not rejected by live wallet cache")
 	require.Nil(h, duplicate, "duplicate create returned a wallet")
 
-	// Keep both resources registered until shutdown succeeds, then open a new
-	// Manager over the durable store.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	// Stop the aggregate, then open a new Manager over the durable store.
+	require.NoError(h, manager.Stop(), "failed to stop manager")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 	manager = h.NewWalletManager()
+	loaded, err = manager.Start(h.Context())
+	require.NoError(h, err, "failed to start replacement manager")
+	require.Len(h, loaded, 1, "replacement manager lost durable wallet")
+	h.RegisterWallet(manager, loaded[0])
 
 	// A fresh manager must reject creation over the completed durable wallet.
 	duplicate, err = manager.Create(params)
@@ -143,9 +167,9 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	require.Nil(h, duplicate, "duplicate create returned a wallet")
 }
 
-// testManagerLoadReload verifies Manager cache identity, durable reload, and
-// birthday metadata while preserving lifecycle ownership.
-func testManagerLoadReload(h *bwtest.HarnessTest) {
+// testManagerStartReopen verifies durable startup and birthday metadata while
+// preserving lifecycle ownership.
+func testManagerStartReopen(h *bwtest.HarnessTest) {
 	params := h.TestWalletParams()
 
 	// Keep the effective birthday five days ahead of the chain after the
@@ -154,12 +178,14 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	params.Birthday = time.Now().Add(7 * 24 * time.Hour)
 
 	manager := h.NewWalletManager()
+	loaded, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+	require.Empty(h, loaded, "empty store loaded wallets")
+
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
+	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	firstInfo, err := w.Info(h.Context())
 	require.NoError(h, err, "failed to query initial wallet info")
@@ -174,35 +200,20 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	// harness waits for the wallet to synchronize to the new tip.
 	h.MineBlocks(1)
 
-	// Loading an already-loaded wallet returns the same live instance
-	// without rebuilding.
-	wCached, err := manager.Load(wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
-	require.NoError(h, err, "failed to load cached wallet")
-	require.Same(h, w, wCached, "load of cached wallet rebuilt the instance")
-
-	// Keep both resources registered until shutdown succeeds, then reload from
-	// their durable state with a fresh Manager.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	require.NoError(h, manager.Stop(), "failed to stop manager")
+	_, err = w.Info(h.Context())
+	require.ErrorIs(h, err, wallet.ErrWalletStopped,
+		"stopped wallet accepted maintained access")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 	manager = h.NewWalletManager()
-
-	// Reload a fresh instance from the same durable store.
-	reloaded, err := manager.Load(wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
+	loaded, err = manager.Start(h.Context())
 	require.NoError(h, err, "failed to reload wallet")
+	require.Len(h, loaded, 1, "unexpected reloaded wallet count")
+	reloaded := loaded[0]
 	h.RegisterWallet(manager, reloaded)
+
 	require.NotSame(h, w, reloaded, "reload returned the torn-down instance")
-
-	err = reloaded.Start(h.Context())
-	require.NoError(h, err, "failed to start reloaded wallet")
-
 	reloadedInfo, err := reloaded.Info(h.Context())
 	require.NoError(h, err, "failed to query reloaded wallet info")
 	require.Equal(
@@ -220,27 +231,6 @@ func testManagerLoadReload(h *bwtest.HarnessTest) {
 	)
 }
 
-// testManagerLoadMissing verifies that loading a wallet that was never created
-// fails rather than silently returning an empty wallet.
-func testManagerLoadMissing(h *bwtest.HarnessTest) {
-	// Arrange a manager whose durable store has never contained the named
-	// wallet from the standard test configuration.
-	params := h.TestWalletParams()
-	manager := h.NewWalletManager()
-
-	// Act by asking the manager to load the never-created wallet.
-	w, err := manager.Load(wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
-
-	// Assert that the public missing-wallet contract is returned without a
-	// partially assembled wallet.
-	require.ErrorIs(h, err, wallet.ErrWalletNotFound,
-		"load of never-created wallet should report wallet not found")
-	require.Nil(h, w, "load of never-created wallet should return no wallet")
-}
-
 // testManagerCreateWatchOnly verifies that a watch-only wallet is created,
 // starts, syncs like a spendable wallet, and stays watch-only across a reload
 // from the durable store.
@@ -253,11 +243,15 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	params.WatchOnly = true
 
 	manager := h.NewWalletManager()
+	loaded, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+	require.Empty(h, loaded, "empty store loaded wallets")
+
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create watch-only wallet")
 	h.RegisterWallet(manager, w)
-
 	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+
 	h.AssertWalletSynced(w)
 
 	require.True(h, w.IsWatchOnly(), "created wallet is not watch-only")
@@ -265,24 +259,19 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	// A watch-only wallet tracks the chain like any other wallet.
 	h.MineBlocks(1)
 
-	// Keep both resources registered until shutdown succeeds, then reload from
-	// the durable store with a fresh Manager.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	// Stop the aggregate, then reload from the durable store with a fresh
+	// Manager.
+	require.NoError(h, manager.Stop(), "failed to stop manager")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-	require.NoError(h, manager.Close(), "failed to close wallet manager")
 	require.True(h, h.ReleaseManager(manager), "failed to release manager")
 
 	manager = h.NewWalletManager()
-	reloaded, err := manager.Load(wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
+	loaded, err = manager.Start(h.Context())
 	require.NoError(h, err, "failed to reload watch-only wallet")
+	require.Len(h, loaded, 1, "unexpected reloaded wallet count")
+	reloaded := loaded[0]
 	h.RegisterWallet(manager, reloaded)
 
-	require.NoError(
-		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
-	)
 	require.True(
 		h, reloaded.IsWatchOnly(),
 		"reloaded wallet lost its watch-only state",

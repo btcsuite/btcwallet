@@ -24,16 +24,12 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateDuplicate,
 	},
 	{
-		Name:     "manager load reload",
-		TestFunc: testManagerLoadReload,
+		Name:     "manager start reopen",
+		TestFunc: testManagerStartReopen,
 	},
 	{
-		Name:     "manager load concurrent",
-		TestFunc: testManagerLoadConcurrent,
-	},
-	{
-		Name:     "manager load missing",
-		TestFunc: testManagerLoadMissing,
+		Name:     "manager start concurrent",
+		TestFunc: testManagerStartConcurrent,
 	},
 	{
 		Name:     "manager create watchonly",
