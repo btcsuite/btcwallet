@@ -2017,3 +2017,140 @@ func TestExtractAddrFromPKScript(t *testing.T) {
 		})
 	}
 }
+
+// TestNewAccountInvalidPath verifies Wallet runs shared path validation before
+// loading secrets or invoking Store operations.
+func TestNewAccountInvalidPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: use an invalid exact number and strict mocks with no expected
+	// calls. The shared validator's tests own the complete path-input matrix.
+	w, _ := createStartedWalletWithMocks(t)
+	w.addrStore = nil
+	number := AccountNumber(db.MaxAccountNumber + 1)
+
+	// Act: enter creation through the public boundary with a malformed path.
+	info, err := w.NewAccount(t.Context(), NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          testAccountName,
+		AccountNumber: &number,
+	})
+
+	// Assert: validation exposes only the public identity and no account,
+	// without making a secret or Store call before refusing the request.
+	require.ErrorIs(t, err, ErrInvalidParam)
+	require.NotErrorIs(t, err, db.ErrInvalidParam)
+	require.Nil(t, info)
+}
+
+// TestNewAccountExactUnsupported verifies kvdb rejects exact creation with
+// either policy after admission and before root preparation or Store mutation.
+func TestNewAccountExactUnsupported(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: vary the unsupported mode with identical read-only admission
+	// expectations. Any secret or creation call would fail the strict mocks.
+	tests := []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name: "kvdb exact",
+		},
+		{
+			name:        "kvdb no chain sync",
+			noChainSync: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, deps := createUnlockedWalletWithMocks(t)
+			scope := waddrmgr.KeyScopeBIP0084
+			number := AccountNumber(7)
+
+			expectAccountNameAvailable(deps, scope, testAccountName)
+
+			// Act: submit a valid path with the unsupported backend/policy.
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
+				Scope:         scope,
+				Name:          testAccountName,
+				AccountNumber: &number,
+				NoChainSync:   test.noChainSync,
+			})
+
+			// Assert: both forms preserve the public unsupported outcome
+			// and stop after the required admission reads.
+			require.ErrorIs(t, err, ErrAccountOperationUnsupported)
+			require.Nil(t, info)
+		})
+	}
+}
+
+// TestNewAccountCancellationPreservesCommitError verifies cancellation cannot
+// hide an uncertain commit after the exact-account request has been admitted.
+func TestNewAccountCancellationPreservesCommitError(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: hold an admitted Store write until explicitly released with
+	// an ambiguous result. Cleanup releases it before the fixture drains Stop.
+	w, deps := createUnlockedWalletWithMocks(t)
+	w.addrStore = nil
+	scope := waddrmgr.KeyScopeBIP0084
+	number := AccountNumber(7)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	resumeCtx, resume := context.WithCancel(t.Context())
+	t.Cleanup(resume)
+
+	entered := make(chan struct{})
+	infos := make(chan *AccountInfo, 1)
+	result := make(chan error, 1)
+
+	expectAccountNameAvailable(deps, scope, testAccountName)
+	expectAccountDeriveSetup(t, deps, newStubAccountDeriveFn(t))
+	deps.store.On("CreateDerivedAccount", ctx,
+		db.CreateDerivedAccountParams{
+			WalletID:      w.id,
+			Scope:         db.KeyScope(scope),
+			Name:          testAccountName,
+			AccountNumber: (*uint32)(&number),
+		}, mock.Anything).Run(func(mock.Arguments) {
+		close(entered)
+		<-resumeCtx.Done()
+	}).Return(&db.AccountInfo{}, &dbruntime.AmbiguousTxCommitError{
+		Err: context.Canceled,
+	}).Once()
+
+	// Act: cancel after admission, while the write's outcome is still held.
+	go func() {
+		info, err := w.NewAccount(ctx, NewAccountParams{
+			Scope:         scope,
+			Name:          testAccountName,
+			AccountNumber: &number,
+		})
+		infos <- info
+
+		result <- err
+	}()
+
+	<-entered
+	cancel()
+
+	// Assert: the bounded observation window detects premature cancellation;
+	// only explicit Store release may supply the authoritative public result.
+	select {
+	case err := <-result:
+		t.Fatalf("NewAccount returned before the Store outcome: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	resume()
+
+	err := <-result
+	require.ErrorIs(t, err, ErrIndeterminateCommit)
+	require.NotErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, dbruntime.ErrAmbiguousTxCommit)
+	require.Nil(t, <-infos)
+}
