@@ -252,18 +252,6 @@ func (r Reason) Valid() bool {
 	return r <= ReasonCorrupt
 }
 
-// Constraint identifies a backend-neutral constraint violation.
-type Constraint uint8
-
-const (
-	// ConstraintUnknown leaves an unrecognized constraint unclassified.
-	ConstraintUnknown Constraint = iota
-
-	// ConstraintAccountName identifies a duplicate account name within a
-	// wallet and key scope, not an account-number or other unique violation.
-	ConstraintAccountName
-)
-
 // SQLError wraps a backend or transport error with stable SQL classification
 // metadata.
 //
@@ -276,10 +264,6 @@ type SQLError struct {
 
 	// Reason identifies the specific backend failure bucket.
 	Reason Reason
-
-	// Constraint refines a constraint failure without changing its runtime
-	// policy or statistics bucket. Its zero value means unclassified.
-	Constraint Constraint
 
 	// Code stores the raw backend code used for classification.
 	Code string
@@ -336,14 +320,6 @@ func (e *SQLError) Unwrap() error {
 	}
 
 	return e.Err
-}
-
-// IsAccountNameConflict reports whether err carries a classified account-name
-// constraint violation, including through caller-added wrappers.
-func IsAccountNameConflict(err error) bool {
-	sqlErr := extractSQLError(err)
-
-	return sqlErr != nil && sqlErr.Constraint == ConstraintAccountName
 }
 
 // Normalize converts one backend error into the shared SQL error model.

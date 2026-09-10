@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
-	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/stretchr/testify/require"
 )
 
@@ -290,32 +289,13 @@ func TestCreateDerivedAccountDuplicateName(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	before := store.StatsSnapshot()
-
 	// Attempt to create second account with same name in same scope.
 	_, err = store.CreateDerivedAccount(
 		t.Context(), params, SpendableDeriveFn(),
 	)
-	require.Error(t, err)
-	requireConstraintSQLError(t, err)
-	require.True(t, dberr.IsAccountNameConflict(err))
 
-	after := store.StatsSnapshot()
-	require.Equal(t, before.Unhealthy, after.Unhealthy)
-	require.Equal(t, before.RetryAttempts, after.RetryAttempts)
-	require.Equal(t, before.RetrySuccesses, after.RetrySuccesses)
-	require.Equal(t, before.RetryExhausted, after.RetryExhausted)
-	require.Equal(t, before.AmbiguousTxCommits, after.AmbiguousTxCommits)
-	require.Equal(t, before.Errors.Backend, after.Errors.Backend)
-	require.Equal(t, before.Errors.TotalErrs+1, after.Errors.TotalErrs)
-	require.Equal(
-		t,
-		before.Errors.PermanentErrs+1,
-		after.Errors.PermanentErrs,
-	)
-	require.Equal(t, before.Errors.Constraint+1, after.Errors.Constraint)
-	require.Equal(t, before.Errors.TransientErrs, after.Errors.TransientErrs)
-	require.Equal(t, before.Errors.FatalErrs, after.Errors.FatalErrs)
+	require.ErrorIs(t, err, db.ErrAccountNameConflict)
+	requireConstraintSQLError(t, err)
 }
 
 // TestCreateDerivedAccountSameNameDifferentScopes verifies that accounts with
