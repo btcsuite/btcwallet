@@ -552,8 +552,11 @@ SELECT
 FROM utxos AS u
 INNER JOIN transactions AS t ON u.tx_id = t.id
 LEFT JOIN transactions AS spend ON u.spent_by_tx_id = spend.id
+LEFT JOIN derived_addresses AS da ON u.address_id = da.address_id
+LEFT JOIN accounts AS acc ON da.account_id = acc.id
 WHERE
     t.wallet_id = ?1
+    AND (acc.id IS NULL OR NOT acc.no_chain_sync)
     AND t.tx_status IN (0, 1)
     AND (
         u.spent_by_tx_id IS NULL
@@ -591,6 +594,8 @@ type ListOutputsToWatchRow struct {
 //     dropping outputs already spent by a confirmed transaction.
 //   - Locked (leased) outputs are intentionally retained because leasing is
 //     modelled separately from existence and the rescan must still watch them.
+//   - Excludes credited accounts that opt out of chain synchronization while
+//     retaining accountless imports through nullable account joins.
 func (q *Queries) ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error) {
 	rows, err := q.query(ctx, q.listOutputsToWatchStmt, ListOutputsToWatch, walletID)
 	if err != nil {
