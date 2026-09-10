@@ -107,9 +107,6 @@ func (h *HarnessTest) NewWallet(fixture WalletFixture) (*wallet.Wallet,
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 
-	err = w.Start(h.Context())
-	require.NoError(h, err, "failed to start wallet")
-
 	h.RegisterWallet(manager, w)
 
 	if fixture.Unlocked {

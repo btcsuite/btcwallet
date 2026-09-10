@@ -16,11 +16,8 @@ import (
 )
 
 // TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
-// Wallet from the row Store.CreateWallet returned and never reads it back. A
-// post-create GetWallet would be a failure with no recovery: the row is already
-// durable, so surfacing the read error would strand a wallet a retry could no
-// longer create. The store mock is strict, so an unexpected GetWallet fails the
-// test.
+// Wallet identity from the row Store.CreateWallet returned. The later runtime
+// birthday read must not replace the committed identity during assembly.
 func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	t.Parallel()
 
@@ -42,15 +39,25 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 			MasterPubKey: []byte(masterPubKey.String()),
 		}, nil).Once()
 
-	// Act: Create through Manager so a forbidden readback would reach the
-	// strict Store mock as an unexpected call.
+	// Runtime startup reads the birthday after assembly; the committed ID
+	// remains authoritative even if this later read carries no identity.
+	store.On("GetWallet", mock.Anything, params.Name).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 7,
+	}).
+		Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(7)).Return(nil).Once()
+
+	// Act: Create through Manager, including its mandatory runtime startup,
+	// with a birthday row that cannot supply the committed identity.
 	w, err := testSQLManager(t, store).Create(params)
 
 	// Assert: Verify the returned Wallet uses the committed row ID and the
 	// required Store call was consumed exactly once.
 	require.NoError(t, err)
 	require.Equal(t, uint32(7), w.ID())
-	store.AssertExpectations(t)
 }
 
 // sqliteCreateParams returns a spendable seed-import request with a durable
@@ -93,6 +100,26 @@ func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 	require.NotEmpty(t, got.EncryptedCryptoPrivKey)
 	require.NotEmpty(t, got.EncryptedCryptoScriptKey)
 	require.NotEmpty(t, got.EncryptedMasterPrivKey)
+}
+
+// TestManagerSQLiteCreatePublishes verifies that Create returns an active
+// Wallet while another Start correctly rejects the already running Manager.
+func TestManagerSQLiteCreatePublishes(t *testing.T) {
+	t.Parallel()
+
+	params := sqliteCreateParams(t)
+	m := testSQLiteManager(t)
+
+	w, err := m.Create(params)
+	repeated, startErr := m.Start(t.Context())
+
+	require.NoError(t, err)
+	require.NotNil(t, w)
+	require.ErrorIs(t, startErr, ErrStateForbidden)
+	require.Nil(t, repeated)
+
+	// A successful public operation proves the returned pointer is active.
+	require.NoError(t, w.Lock(t.Context()))
 }
 
 // TestNewManagerClassifiesDatabaseIdentityMismatch proves public callers can

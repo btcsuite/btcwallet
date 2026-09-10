@@ -121,7 +121,6 @@ func testCreateWallet(h *bwtest.HarnessTest) {
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	// Wait for the wallet to catch up to the existing tip before mining new
 	// blocks.
@@ -144,7 +143,6 @@ func testManagerCreateDuplicate(h *bwtest.HarnessTest) {
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	duplicate, err := manager.Create(params)
 
@@ -185,7 +183,6 @@ func testManagerStartReopen(h *bwtest.HarnessTest) {
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	firstInfo, err := w.Info(h.Context())
 	require.NoError(h, err, "failed to query initial wallet info")
@@ -250,7 +247,6 @@ func testManagerCreateWatchOnly(h *bwtest.HarnessTest) {
 	w, err := manager.Create(params)
 	require.NoError(h, err, "failed to create watch-only wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	h.AssertWalletSynced(w)
 
