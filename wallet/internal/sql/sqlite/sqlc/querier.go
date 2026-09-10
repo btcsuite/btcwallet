@@ -402,6 +402,8 @@ type Querier interface {
 	//   dropping outputs already spent by a confirmed transaction.
 	// - Locked (leased) outputs are intentionally retained because leasing is
 	//   modelled separately from existence and the rescan must still watch them.
+	// - Excludes credited accounts that opt out of chain synchronization while
+	//   retaining accountless imports through nullable account joins.
 	ListOutputsToWatch(ctx context.Context, walletID int64) ([]ListOutputsToWatchRow, error)
 	// ListOwnedInputPrevOutputsByTxHashes lists wallet-owned previous outputs that
 	// may be spent by selected transaction inputs.

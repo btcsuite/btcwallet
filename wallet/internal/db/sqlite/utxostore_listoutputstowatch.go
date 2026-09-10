@@ -11,7 +11,7 @@ import (
 // ListOutputsToWatch returns UTXOs that recovery scans should watch.
 //
 // The result mirrors the legacy wtxmgr OutputsToWatch contract: it returns
-// every known output (unspent, locked, or spent only by an unmined
+// every eligible output (unspent, locked, or spent only by an unmined
 // transaction) but populates just the OutPoint and PkScript, since those are
 // the only fields a rescan consumes.
 func (s *Store) ListOutputsToWatch(ctx context.Context,

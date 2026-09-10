@@ -543,6 +543,7 @@ type UTXOStore interface {
 	DeleteExpiredLeases(ctx context.Context, walletID uint32) error
 
 	// ListOutputsToWatch returns UTXOs that recovery scans should watch.
+	// Accounts marked NoChainSync do not contribute recovery outputs.
 	ListOutputsToWatch(ctx context.Context, walletID uint32) ([]UtxoInfo,
 		error)
 
