@@ -3023,6 +3023,39 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
+// TestStoreScanStateZeroLookahead verifies that persisted child counts do not
+// trigger rederivation when recovery is restricted to already stored targets.
+func TestStoreScanStateZeroLookahead(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Supply nonzero child counts with no expected address-manager
+	// calls, so reconstructing existing account horizons would fail the mock.
+	addrStore := &bwmock.AddrStore{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, addrStore, nil,
+		&mockTxPublisher{}, &walletmock.Store{}, 0,
+	)
+
+	accounts := []storeScanAccount{
+		{
+			props: &waddrmgr.AccountProperties{
+				KeyScope:         waddrmgr.KeyScopeBIP0084,
+				ExternalKeyCount: 3,
+				InternalKeyCount: 2,
+			},
+		},
+	}
+
+	// Act: Initialize zero-lookahead recovery with persisted child counts
+	// through the same recovery-state constructor used by scan loading.
+	_, err := s.newStoreScanState(accounts, nil, nil)
+
+	// Assert: Initialization succeeds without consulting the deriver, even
+	// though the existing account children would normally seed its horizons.
+	require.NoError(t, err)
+	addrStore.AssertExpectations(t)
+}
+
 // TestStoreScanUnspent verifies scan UTXO reads use the store watch-output API.
 func TestStoreScanUnspent(t *testing.T) {
 	t.Parallel()

@@ -1199,6 +1199,12 @@ func (s *syncer) newStoreScanState(accounts []storeScanAccount,
 		s.cfg.RecoveryWindow, s.cfg.ChainParams, s.addrStore,
 	)
 
+	// Existing child counts also cause horizon initialization to derive.
+	// Omit horizons entirely at zero; persisted targets need no deriver.
+	if s.cfg.RecoveryWindow == 0 {
+		accounts = nil
+	}
+
 	props := make([]*waddrmgr.AccountProperties, 0, len(accounts))
 	for _, account := range accounts {
 		err := scanState.setStoreAccount(
