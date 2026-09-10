@@ -44,6 +44,10 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerCreateAccount,
 	},
 	{
+		Name:     "account manager fill account hole",
+		TestFunc: testAccountManagerFillAccountHole,
+	},
+	{
 		Name:     "account manager create account sequence",
 		TestFunc: testAccountManagerCreateAccountSequence,
 	},

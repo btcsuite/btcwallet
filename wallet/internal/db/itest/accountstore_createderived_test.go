@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	"github.com/stretchr/testify/require"
 )
@@ -642,4 +643,82 @@ func TestCreateDerivedAccountExactRollback(t *testing.T) {
 			require.Equal(t, 1, next)
 		})
 	}
+}
+
+// TestCreateDerivedAccountExactInvalidChildRollback verifies that derivation
+// failure preserves both stored key material and the pre-request cursor.
+func TestCreateDerivedAccountExactInvalidChildRollback(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: account zero fixes the durable cursor at one before an exact
+	// request would speculatively advance it beyond a failed child at seven.
+	store := NewTestStore(t)
+	params := db.CreateDerivedAccountParams{
+		WalletID: newWallet(t, store, "invalid-child"),
+		Scope:    db.KeyScopeBIP0084,
+		Name:     "existing",
+	}
+	_, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+	require.NoError(t, err)
+
+	number := uint32(7)
+	params.Name = "invalid child"
+	params.AccountNumber = &number
+
+	// Act: fail derivation after allocation so rollback must undo the cursor
+	// update as well as avoid persisting a partial derived account.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), params,
+		func(context.Context, db.KeyScope, uint32,
+			bool) (*db.DerivedAccountData, error) {
+
+			return nil, hdkeychain.ErrInvalidChild
+		},
+	)
+
+	// Assert: preserve the callback error and return no account. Physical
+	// counts and cursor reads expose partial writes hidden by account reads.
+	require.ErrorIs(t, err, hdkeychain.ErrInvalidChild)
+	require.Nil(t, info)
+
+	var accounts, secrets, next int
+
+	err = store.DB().QueryRowContext(t.Context(), `
+		SELECT (SELECT count(*) FROM accounts),
+		       (SELECT count(*) FROM account_secrets),
+		       (SELECT next_account_number FROM key_scopes)
+	`).Scan(&accounts, &secrets, &next)
+	require.NoError(t, err)
+	require.Equal(t, 1, accounts)
+	require.Equal(t, 1, secrets)
+	require.Equal(t, 1, next)
+}
+
+// TestCreateDerivedAccountExactMaxNumber checks the last accepted account.
+func TestCreateDerivedAccountExactMaxNumber(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: request the accepted maximum in an unused scope so no existing
+	// identity or allocation can hide an off-by-one admission failure.
+	store := NewTestStore(t)
+	number := db.MaxAccountNumber
+	params := db.CreateDerivedAccountParams{
+		WalletID:      newWallet(t, store, "max-account"),
+		Scope:         db.KeyScopeBIP0084,
+		Name:          "last",
+		AccountNumber: &number,
+	}
+
+	// Act: create the boundary account through the same transactional Store
+	// path as other exact requests, with valid spendable material.
+	info, err := store.CreateDerivedAccount(
+		t.Context(), params, SpendableDeriveFn(),
+	)
+
+	// Assert: the accepted maximum is returned without truncation or a
+	// sequential fallback; path-validation tests cover the first rejection.
+	require.NoError(t, err)
+	require.Equal(t, number, *info.AccountNumber)
 }
