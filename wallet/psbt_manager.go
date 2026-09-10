@@ -277,21 +277,25 @@ type SignPsbtResult struct {
 // change output in the `fundedPacket.UnsignedTx.TxOut` slice, or -1 if
 // no change output was added.
 //
+// FundPsbt does not modify `barePacket`. It returns a funded packet of its
+// own, so every step below works on `fundedPacket`; `barePacket` still
+// describes the unfunded template it did before the call.
+//
 // 3. Sign the PSBT:
 // The wallet signs all inputs it has the keys for.
 //
-//	signParams := &wallet.SignPsbtParams{Packet: barePacket}
+//	signParams := &wallet.SignPsbtParams{Packet: fundedPacket}
 //	result, err := psbtManager.SignPsbt(ctx, signParams)
 //
 // 4. Finalize the PSBT:
 // The final scriptSig and/or witness for each input is constructed.
 //
-//	err = psbtManager.FinalizePsbt(ctx, barePacket)
+//	err = psbtManager.FinalizePsbt(ctx, fundedPacket)
 //
 // 5. Extract and Broadcast:
 // The final, network-ready transaction is extracted and broadcast.
 //
-//	finalTx, err := psbt.Extract(barePacket)
+//	finalTx, err := psbt.Extract(fundedPacket)
 //	err = broadcaster.Broadcast(ctx, finalTx, "payment")
 //
 // For more detailed examples, including multi-party collaborative workflows,
