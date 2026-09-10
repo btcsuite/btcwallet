@@ -1510,8 +1510,8 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 	// "header-only" scan to advance the wallet's sync state without
 	// downloading full blocks or filters.
 	//
-	// NOTE: For targeted rescans, the state will never be empty as it is
-	// initialized with specific targets.
+	// NOTE: A targeted rescan can also be empty when neither eligible
+	// horizons nor persisted addresses or outputs remain.
 	if scanState.Empty() {
 		log.Debugf("Performing header-only scan for %d blocks",
 			endHeight-startHeight+1)
