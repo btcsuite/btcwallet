@@ -21,6 +21,7 @@ import (
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	"github.com/btcsuite/btcwallet/wallet/internal/addresstype"
 	"github.com/btcsuite/btcwallet/wallet/internal/db"
+	dbruntime "github.com/btcsuite/btcwallet/wallet/internal/db/runtime"
 	"github.com/btcsuite/btcwallet/wallet/internal/keyvault"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -1007,6 +1008,18 @@ func TestNewAccountStoreErrors(t *testing.T) {
 			want:     ErrAccountAlreadyExists,
 		},
 		{
+			name:     "occupied number",
+			storeErr: db.ErrAccountNumberConflict,
+			want:     ErrAccountAlreadyExists,
+		},
+		{
+			name: "indeterminate cancellation",
+			storeErr: &dbruntime.AmbiguousTxCommitError{
+				Err: context.Canceled,
+			},
+			want: ErrIndeterminateCommit,
+		},
+		{
 			name:     "sql exhaustion",
 			storeErr: db.ErrMaxAccountNumberReached,
 			want:     ErrAccountDerivationExhausted,
@@ -1034,7 +1047,8 @@ func TestNewAccountStoreErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Arrange: Let derivation reach the Store outcome under test.
+			// Arrange: A failed Store write also supplies a candidate account;
+			// the public boundary must discard it when exposing the failure.
 			w, deps := createUnlockedWalletWithMocks(t)
 			stub := newStubAccountDeriveFn(t)
 			scope := waddrmgr.KeyScopeBIP0084
@@ -1044,15 +1058,16 @@ func TestNewAccountStoreErrors(t *testing.T) {
 			deps.store.On(
 				"CreateDerivedAccount", mock.Anything, mock.Anything,
 				mock.Anything,
-			).Return((*db.AccountInfo)(nil), test.storeErr).Once()
+			).Return(&db.AccountInfo{}, test.storeErr).Once()
 
 			// Act: Create through the public boundary, not the mapper.
-			_, err := w.NewAccount(t.Context(), NewAccountParams{
+			info, err := w.NewAccount(t.Context(), NewAccountParams{
 				Scope: scope,
 				Name:  testAccountName,
 			})
 
 			// Assert: Expose the public outcome and strip the Store cause.
+			require.Nil(t, info)
 			require.ErrorIs(t, err, test.want)
 			require.NotErrorIs(t, err, test.storeErr)
 		})
