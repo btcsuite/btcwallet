@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -137,6 +138,10 @@ type LoadWalletParams struct {
 type Manager struct {
 	sync.RWMutex
 
+	// started rejects another Start while starting, running or stopping.
+	// The Manager lock serializes resource changes and terminal admission.
+	started atomic.Bool
+
 	// wallets holds the active wallets keyed by their unique name. The
 	// Manager lock serializes runtime assembly, Store access, and cache
 	// installation. A ModeShell Create imports its initial accounts after
@@ -220,6 +225,43 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
+// stopWallets stops all Wallets before closing storage. The slice holds Wallets
+// from failed Start/Create calls that are not in m.wallets.
+// The caller holds the write lock and must have a non-nil backend.
+func (m *Manager) stopWallets(wallets []*Wallet) error {
+	for _, wallet := range m.wallets {
+		wallets = append(wallets, wallet)
+	}
+
+	// Keep shutdown errors in Wallet-ID order.
+	sort.Slice(wallets, func(i, j int) bool {
+		return wallets[i].id < wallets[j].id
+	})
+
+	// Private stop joins accepted requests and workers before their shared
+	// storage closes. Preserve each Wallet's identity in any teardown error.
+	errs := make([]error, 0, len(wallets))
+	for _, wallet := range wallets {
+		err := wallet.stop()
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"stop wallet %q: %w", wallet.cfg.Name, err,
+			))
+		}
+	}
+
+	// Clear runtime ownership after shutdown has settled. The nil backend
+	// keeps later Start calls from reopening a terminal Manager.
+	err := errors.Join(errs...)
+	err = errors.Join(err, m.backend.close())
+	m.backend = nil
+
+	clear(m.wallets)
+	m.started.Store(false)
+
+	return err
+}
+
 // newManagerDatabaseIdentity validates the owned network snapshot before a SQL
 // connection is opened while leaving the legacy kvdb startup path unchanged.
 func newManagerDatabaseIdentity(
@@ -260,6 +302,25 @@ func translateDatabaseIdentityError(err error) error {
 // no use-after-close guarantee beyond that contract.
 func (m *Manager) Close() error {
 	return m.backend.close()
+}
+
+// Stop terminally drains every Wallet and closes the owned database.
+// It waits for startup, accepted creation, and any other Stop to finish.
+// After shutdown, Stop is a no-op.
+func (m *Manager) Stop() error {
+	m.Lock()
+	defer m.Unlock()
+
+	// Preserve terminal admission on repeated no-op shutdown calls.
+	if m.backend == nil {
+		return nil
+	}
+
+	// Construction already owns an open backend, so shutdown must reject
+	// Start even when no startup attempt has claimed the guard yet.
+	m.started.Store(true)
+
+	return m.stopWallets(nil)
 }
 
 // String returns a summary of the active wallets managed by the Manager.

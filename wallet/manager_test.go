@@ -484,6 +484,100 @@ func (b *managerBackendMock) close() error {
 	return args.Error(0)
 }
 
+// newManagerLifecycleTest supplies strict backend and chain dependencies;
+// fixture cleanup joins runtime work before verifying their expected calls.
+func newManagerLifecycleTest(t *testing.T,
+	backend *managerBackendMock) *Manager {
+
+	t.Helper()
+
+	chain := &bwmock.Chain{}
+	manager := &Manager{
+		wallets: make(map[string]*Wallet),
+		backend: backend,
+		config: ManagerConfig{
+			ChainSource: chain,
+			ChainParams: chainParams,
+		},
+	}
+
+	// LIFO cleanup keeps the mocked dependencies alive until shutdown joins.
+	t.Cleanup(func() {
+		backend.AssertExpectations(t)
+		chain.AssertExpectations(t)
+	})
+	t.Cleanup(func() {
+		_ = manager.Stop()
+	})
+
+	return manager
+}
+
+// TestManagerStopWaitsForCleanup verifies shutdown blocks through backend
+// closure, and a repeated Stop has no remaining work.
+func TestManagerStopWaitsForCleanup(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Hold closure of the database opened by construction, before
+	// startup, so no Wallet activity can obscure backend closure.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	closeErr := errors.New("backend close")
+	backend := &managerBackendMock{}
+	backend.On("close").Run(func(mock.Arguments) {
+		close(entered)
+		<-release
+	}).Return(closeErr).Once()
+	manager := newManagerLifecycleTest(t, backend)
+
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	callingStop := make(chan struct{})
+
+	// Act: Cancel during held shutdown and overlap another
+	// Stop. Both Stop callers check the shared completion boundary directly.
+	go func() {
+		err := manager.Stop()
+
+		select {
+		case <-release:
+		default:
+			t.Error("Stop returned before cleanup was released")
+		}
+
+		first <- err
+	}()
+
+	<-entered
+
+	go func() {
+		close(callingStop)
+
+		err := manager.Stop()
+
+		select {
+		case <-release:
+		default:
+			t.Error("concurrent Stop returned before cleanup was released")
+		}
+
+		second <- err
+	}()
+
+	<-callingStop
+	close(release)
+
+	firstErr := <-first
+	secondErr := <-second
+	repeatedErr := manager.Stop()
+
+	// Assert: Only the call doing cleanup returns its failure. Neither
+	// overlapping nor repeated calls create detached work or replay errors.
+	require.ErrorIs(t, firstErr, closeErr)
+	require.NoError(t, secondErr)
+	require.NoError(t, repeatedErr)
+}
+
 // TestSQLManagerBackendListsWallets verifies ordered complete listing and
 // all-or-nothing iterator failures.
 func TestSQLManagerBackendListsWallets(t *testing.T) {
