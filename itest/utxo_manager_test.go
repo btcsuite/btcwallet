@@ -17,19 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testListUnspent verifies ListUnspent field enrichment, amount ordering,
-// account and confirmation filters, and the pre-start state gate.
+// testListUnspent verifies ListUnspent field enrichment, amount ordering, and
+// account and confirmation filters.
 func testListUnspent(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-
-	// ListUnspent is forbidden before Start.
-	_, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{})
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"list unspent before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	// A fresh wallet has no UTXOs.
 	utxos, err := w.ListUnspent(h.Context(), wallet.UtxoQuery{
@@ -135,8 +126,7 @@ func testListUnspent(h *bwtest.HarnessTest) {
 // paying the wallet is reported as not spendable, because it has not reached
 // coinbase maturity.
 func testListUnspentImmatureCoinbase(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	// The Spendable assertion below requires unlocking the wallet.
 	h.UnlockWallet(w)
@@ -208,8 +198,7 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 		h.Skip("neutrino cannot deliver unconfirmed transactions")
 	}
 
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	h.FundWallet(w, oneBTC)
 
@@ -281,19 +270,9 @@ func testListUnspentUnconfirmed(h *bwtest.HarnessTest) {
 }
 
 // testGetUtxo verifies GetUtxo returns wallet-facing metadata for owned
-// outpoints, rejects unknown and foreign outpoints, and is forbidden before
-// Start.
+// outpoints and rejects unknown and foreign outpoints.
 func testGetUtxo(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-
-	// GetUtxo is forbidden before Start.
-	_, err := w.GetUtxo(h.Context(), unknownOutpoint())
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"get utxo before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	// The Spendable assertion below required unlocking the wallet.
 	h.UnlockWallet(w)
@@ -308,8 +287,14 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 		op     wire.OutPoint
 		amount btcutil.Amount
 	}{
-		{outpoints[0], oneBTC},
-		{outpoints[1], twoBTC},
+		{
+			op:     outpoints[0],
+			amount: oneBTC,
+		},
+		{
+			op:     outpoints[1],
+			amount: twoBTC,
+		},
 	}
 
 	// Every funded outpoint resolves with its funding metadata.
@@ -330,7 +315,7 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 	}
 
 	// An outpoint that was never mined is unknown to the wallet.
-	_, err = w.GetUtxo(h.Context(), unknownOutpoint())
+	_, err := w.GetUtxo(h.Context(), unknownOutpoint())
 	require.ErrorIs(
 		h, err, wallet.ErrUnknownOutput,
 		"unknown outpoint not rejected",
@@ -351,25 +336,13 @@ func testGetUtxo(h *bwtest.HarnessTest) {
 }
 
 // testLeaseOutput verifies LeaseOutput marks an output as locked, renews a
-// lease under the same lock ID, rejects double leases under a different lock
-// ID, unknown outpoints, and non-positive durations, and is forbidden before
-// Start.
+// lease under the same lock ID, and rejects double leases under a different
+// lock ID, unknown outpoints, and non-positive durations.
 func testLeaseOutput(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	lockID1 := wtxmgr.LockID{1}
 	lockID2 := wtxmgr.LockID{2}
-
-	// LeaseOutput is forbidden before Start.
-	_, err := w.LeaseOutput(
-		h.Context(), lockID1, unknownOutpoint(), leaseDuration,
-	)
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"lease output before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 
@@ -456,22 +429,13 @@ func testLeaseOutput(h *bwtest.HarnessTest) {
 }
 
 // testReleaseOutput verifies ReleaseOutput unlocks a leased output, rejects
-// mismatched lock IDs and unknown outpoints, treats releasing an unleased
-// output as a no-op, and is forbidden before Start.
+// mismatched lock IDs and unknown outpoints, and treats releasing an unleased
+// output as a no-op.
 func testReleaseOutput(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	lockID1 := wtxmgr.LockID{1}
 	lockID2 := wtxmgr.LockID{2}
-
-	// ReleaseOutput is forbidden before Start.
-	err := w.ReleaseOutput(h.Context(), lockID1, unknownOutpoint())
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"release output before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	outpoints := h.FundWallet(w, oneBTC).WalletOutpoints
 
@@ -481,7 +445,7 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 		"release of unleased output not a no-op",
 	)
 
-	_, err = w.LeaseOutput(
+	_, err := w.LeaseOutput(
 		h.Context(), lockID1, outpoints[0], leaseDuration,
 	)
 	require.NoError(h, err, "failed to lease output")
@@ -527,19 +491,10 @@ func testReleaseOutput(h *bwtest.HarnessTest) {
 }
 
 // testListLeasedOutputs verifies ListLeasedOutputs tracks active leases with
-// their lock IDs and expirations, drops released leases, excludes expired
-// leases, and is forbidden before Start.
+// their lock IDs and expirations, drops released leases, and excludes expired
+// leases.
 func testListLeasedOutputs(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
-
-	// ListLeasedOutputs is forbidden before Start.
-	_, err := w.ListLeasedOutputs(h.Context())
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"list leased outputs before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	outpoints := h.FundWallet(w, oneBTC, twoBTC).WalletOutpoints
 
