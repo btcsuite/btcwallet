@@ -425,7 +425,6 @@ func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
 
 	w, err := manager.Create(h.TestWalletParams())
 	require.NoError(h, err, "failed to create wallet")
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
@@ -451,7 +450,6 @@ func testBroadcastWalletState(h *bwtest.HarnessTest) {
 
 	w, err := manager.Create(h.TestWalletParams())
 	require.NoError(h, err, "failed to create wallet")
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 

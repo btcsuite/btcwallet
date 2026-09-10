@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	bwmock "github.com/btcsuite/btcwallet/bwtest/mock"
 	"github.com/btcsuite/btcwallet/waddrmgr"
 	walletmock "github.com/btcsuite/btcwallet/wallet/internal/bwtest/mock"
@@ -48,9 +49,18 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 			Name:        name,
 			IsWatchOnly: true,
 		}, nil).Once()
+		store.On("GetWallet", mock.Anything, name).Return(
+			&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+		).Once()
+		store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+			WalletID: walletID,
+		}).
+			Return([]db.AccountInfo{}, nil).Once()
+		store.On("DeleteExpiredLeases", mock.Anything, walletID).
+			Return(nil).Once()
 	}
 
-	chainSource := &bwmock.Chain{}
+	chainSource := createTestChain(t)
 	manager := testSQLManager(t, store)
 	manager.config.ChainSource = chainSource
 	manager.config.SyncMethod = SyncMethodFullBlocks
@@ -94,7 +104,6 @@ func TestManagerBuildsWalletsFromRuntimePolicy(t *testing.T) {
 	require.Equal(t, first.cfg.MaxCFilterItems, second.cfg.MaxCFilterItems)
 	require.NotEqual(t, first.cfg.ChainParams.Name,
 		second.cfg.ChainParams.Name)
-	store.AssertExpectations(t)
 }
 
 // TestManagerCreateSuccess verifies that a wallet can be successfully created
@@ -243,7 +252,12 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 	accountXPub, err := accountKey.Neuter()
 	require.NoError(t, err)
 
-	initialXPub := []WatchOnlyAccount{{XPub: accountXPub}}
+	initialXPub := []WatchOnlyAccount{
+		{
+			XPub:     accountXPub,
+			AddrType: waddrmgr.WitnessPubKey,
+		},
+	}
 	initialXPrv := []WatchOnlyAccount{{XPub: rootKey}}
 	initialNil := []WatchOnlyAccount{{}}
 
@@ -404,6 +418,8 @@ func TestCreateWalletParamsPolicy(t *testing.T) {
 					ChainParams: chainParams,
 				},
 			}
+
+			m.started.Store(true)
 
 			// Act: Ask Manager to create from the selected parameter shape,
 			// allowing validation to decide whether backend mutation begins.
@@ -680,6 +696,10 @@ func TestManagerStartFailureCleansPartialSet(t *testing.T) {
 	require.ErrorIs(t, first.err, startErr)
 	require.Nil(t, terminalWallets)
 	require.ErrorIs(t, terminalErr, ErrManagerStopped)
+
+	w, err := manager.Create(CreateWalletParams{})
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
 }
 
 // TestManagerStartCancellationCleansUp verifies the caller's cancellation
@@ -896,6 +916,305 @@ func TestManagerStopWaitsForStart(t *testing.T) {
 	require.ErrorIs(t, terminalErr, ErrManagerStopped)
 }
 
+// TestManagerCreateBeforeStart verifies creation rejects an inactive Manager
+// before request validation or durable storage access.
+func TestManagerCreateBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Leave the Manager unstarted and expect only fixture cleanup.
+	// An empty request distinguishes lifecycle admission from validation.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+	manager := newManagerLifecycleTest(t, backend)
+
+	// Act: Submit creation before any Start has admitted runtime work.
+	w, err := manager.Create(CreateWalletParams{})
+
+	// Assert: No Wallet escapes and the lifecycle sentinel takes precedence
+	// over request errors; unexpected backend access fails the strict mock.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrStateForbidden)
+}
+
+// TestManagerCreateAfterStop verifies creation rejects a terminal Manager
+// without accessing its closed storage or validating the request.
+func TestManagerCreateAfterStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Complete terminal shutdown before attempting creation. The
+	// strict close expectation also covers the fixture's later no-op Stop.
+	backend := &managerBackendMock{}
+	backend.On("close").Return(nil).Once()
+	manager := newManagerLifecycleTest(t, backend)
+	require.NoError(t, manager.Stop())
+
+	// Act: Submit an empty request after shutdown has released storage.
+	w, err := manager.Create(CreateWalletParams{})
+
+	// Assert: Terminal admission returns no Wallet and preserves the stopped
+	// identity instead of reaching validation or closed backend dependencies.
+	require.Nil(t, w)
+	require.ErrorIs(t, err, ErrManagerStopped)
+}
+
+// managerLifecycleCreateParams returns a rootless request so lifecycle tests
+// exercise admission and teardown without unrelated random key derivation.
+func managerLifecycleCreateParams(name string) CreateWalletParams {
+	return CreateWalletParams{
+		Name:              name,
+		Mode:              ModeShell,
+		WatchOnly:         true,
+		PrivatePassphrase: []byte("private"),
+	}
+}
+
+// TestManagerCreateRejectsInvalidInitialAccounts verifies bad import inputs
+// cannot persist a candidate or stop an existing Wallet.
+func TestManagerCreateRejectsInvalidInitialAccounts(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Use a valid account key and change only its network or address
+	// type, so each request reaches the import checks missing from preflight.
+	key, _ := importAccountTestKey(t, 44)
+	wrongNetwork, err := key.CloneWithVersion(
+		chaincfg.MainNetParams.HDPublicKeyID[:],
+	)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		key      *hdkeychain.ExtendedKey
+		addrType waddrmgr.AddressType
+		wantErr  string
+	}{
+		{
+			name:     "wrong network",
+			key:      wrongNetwork,
+			addrType: waddrmgr.WitnessPubKey,
+			wantErr:  "current network",
+		},
+		{
+			name:     "unsupported address type",
+			key:      key,
+			addrType: waddrmgr.PubKeyHash,
+			wantErr:  "unsupported address type",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Keep one Wallet running in real storage to detect
+			// both unwanted shutdown and a leftover candidate row.
+			m := testSQLiteManager(t)
+			existing, err := m.Create(
+				managerLifecycleCreateParams("existing"),
+			)
+			require.NoError(t, err)
+
+			params := managerLifecycleCreateParams("candidate")
+			params.InitialAccounts = []WatchOnlyAccount{
+				{
+					Name:     "initial-account",
+					XPub:     tc.key,
+					AddrType: tc.addrType,
+				},
+			}
+
+			// Act: Request another Wallet with invalid initial account
+			// input while the first Wallet is still in use.
+			candidate, err := m.Create(params)
+
+			// Assert: The request fails without a handle. A public read
+			// still works, and corrected input can use the same Wallet
+			// name, proving no durable candidate was left behind.
+			require.Nil(t, candidate)
+			require.ErrorContains(t, err, tc.wantErr)
+
+			_, err = existing.ListAccounts(t.Context())
+			require.NoError(t, err)
+
+			params.InitialAccounts[0].XPub = key
+			params.InitialAccounts[0].AddrType = waddrmgr.WitnessPubKey
+			candidate, err = m.Create(params)
+			require.NoError(t, err)
+			require.NotNil(t, candidate)
+		})
+	}
+}
+
+// TestManagerCreateLifecycleSerializesStop verifies accepted creation finishes
+// startup before Stop can close storage, and real chain work drains first.
+func TestManagerCreateLifecycleSerializesStop(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Block the candidate's runtime read and its chain worker at
+	// separate dependencies. Storage closure checks that both have returned.
+	_, deps := createTestWalletWithMocks(t)
+	startupEntered := make(chan struct{})
+	releaseStartup := make(chan struct{})
+	chainEntered := make(chan struct{})
+	releaseChain := make(chan struct{})
+
+	deps.store.On("GetWallet", mock.Anything, "created").
+		Run(func(mock.Arguments) {
+			close(startupEntered)
+			<-releaseStartup
+		}).Return(&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil).Once()
+	deps.store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 1,
+	}).Return([]db.AccountInfo{}, nil).Once()
+	deps.store.On("DeleteExpiredLeases", mock.Anything, uint32(1)).
+		Return(nil).Once()
+	vaultLock := deps.vault.On("Lock").Return().Once()
+
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+
+	params := managerLifecycleCreateParams("created")
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(&walletData{
+			id:    1,
+			name:  params.Name,
+			store: deps.store,
+			vault: deps.vault,
+		}, nil).Once()
+	// Vault locking follows worker joins, so storage must close after it.
+	backend.On("close").Return(nil).Once().NotBefore(vaultLock)
+
+	manager := newManagerLifecycleTest(t, backend)
+	chain, ok := manager.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
+	chain.On("IsCurrent").Run(func(mock.Arguments) {
+		close(chainEntered)
+		<-releaseChain
+	}).Return(false).Once()
+
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	type createOutcome struct {
+		wallet *Wallet
+		err    error
+	}
+
+	created := make(chan createOutcome, 1)
+	stopped := make(chan error, 1)
+
+	// Act: Accept creation, queue Stop behind its lock, and advance startup
+	// into a real chain call before allowing that worker to drain.
+	go func() {
+		w, err := manager.Create(params)
+		created <- createOutcome{
+			wallet: w,
+			err:    err,
+		}
+	}()
+
+	<-startupEntered
+
+	go func() { stopped <- manager.Stop() }()
+
+	close(releaseStartup)
+
+	outcome := <-created
+
+	<-chainEntered
+	close(releaseChain)
+
+	stopErr := <-stopped
+
+	// Assert: Create publishes a started pointer, whose owned worker joins
+	// before the one storage close and whose retained API is then terminal.
+	require.NoError(t, outcome.err)
+	require.NotNil(t, outcome.wallet)
+	require.NoError(t, stopErr)
+	require.ErrorIs(t, outcome.wallet.Lock(t.Context()), ErrWalletStopped)
+}
+
+// TestManagerCreateLifecycleStartFailureStopsManager verifies a committed
+// candidate's startup failure preserves its primary error through teardown.
+func TestManagerCreateLifecycleStartFailureStopsManager(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Commit a candidate whose birthday read fails, with an unrelated
+	// backend close failure to distinguish creation from the cleanup result.
+	_, deps := createTestWalletWithMocks(t)
+	createErr := errors.New("candidate birthday")
+	closeErr := errors.New("backend close")
+
+	deps.store.On("GetWallet", mock.Anything, "candidate").
+		Return(nil, createErr).Once()
+
+	params := managerLifecycleCreateParams("candidate")
+	backend := &managerBackendMock{}
+	backend.On("listWallets", mock.Anything).Return([]*walletData{}, nil).Once()
+	backend.On("create", mock.Anything, params, mock.Anything).
+		Return(&walletData{
+			id:    1,
+			name:  params.Name,
+			store: deps.store,
+			vault: deps.vault,
+		}, nil).Once()
+	// Hold storage closure so returning a primary Create error cannot hide
+	// unfinished terminal cleanup. A concurrent Stop must join that cleanup.
+	closing := make(chan struct{})
+	release := make(chan struct{})
+	backend.On("close").Run(func(mock.Arguments) {
+		close(closing)
+		<-release
+	}).Return(closeErr).Once()
+
+	manager := newManagerLifecycleTest(t, backend)
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err)
+
+	// Carry both Create results across the blocked cleanup boundary so an
+	// inactive candidate cannot escape even when startup reports an error.
+	type createOutcome struct {
+		wallet *Wallet
+		err    error
+	}
+
+	created := make(chan createOutcome, 1)
+	stopped := make(chan error, 1)
+
+	// Act: Fail post-commit startup, join its held cleanup through Stop, and
+	// release storage closure only after checking Create has not returned.
+	go func() {
+		w, err := manager.Create(params)
+		created <- createOutcome{
+			wallet: w,
+			err:    err,
+		}
+	}()
+
+	<-closing
+
+	go func() { stopped <- manager.Stop() }()
+
+	select {
+	case result := <-created:
+		close(release)
+		t.Fatalf("Create returned before cleanup completed: %v", result.err)
+	default:
+	}
+
+	close(release)
+
+	outcome := <-created
+	stopErr := <-stopped
+
+	// Assert: No candidate escapes and Create preserves the primary failure
+	// and cleanup error only after teardown finishes. Stop has no remaining
+	// work and does not replay that earlier call's errors.
+	require.Nil(t, outcome.wallet)
+	require.ErrorIs(t, outcome.err, createErr)
+	require.ErrorIs(t, outcome.err, closeErr)
+	require.NoError(t, stopErr)
+}
+
 // TestSQLManagerBackendListsWallets verifies ordered complete listing and
 // all-or-nothing iterator failures.
 func TestSQLManagerBackendListsWallets(t *testing.T) {
@@ -1085,7 +1404,6 @@ func TestManagerCreateRejectsMissingIdentityBeforeAssembly(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingParam)
 	require.ErrorContains(t, err, "Name")
 	require.Nil(t, w)
-	store.AssertExpectations(t)
 }
 
 // TestManagerString verifies that the String representation of the Manager

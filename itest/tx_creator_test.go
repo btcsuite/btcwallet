@@ -960,7 +960,6 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 	w, err := manager.Create(h.TestWalletParams())
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	// A fixed witness program supplies a valid destination without changing
 	// the fixture lock state through address derivation.
