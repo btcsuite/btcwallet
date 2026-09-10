@@ -260,7 +260,8 @@ type NewAccountParams struct {
 	AccountNumber *AccountNumber
 
 	// NoChainSync requests exclusion from automatic chain synchronization.
-	// True is currently rejected with ErrAccountOperationUnsupported.
+	// True requires exact SQL selection; other requests return
+	// ErrAccountOperationUnsupported.
 	NoChainSync bool
 }
 
@@ -302,7 +303,8 @@ type NewAccountParams struct {
 type AccountManager interface {
 	// NewAccount creates the next or requested exact root-derived account. The
 	// provided name must be unique within that key scope. NoChainSync=true
-	// is currently rejected with ErrAccountOperationUnsupported.
+	// is supported only for exact SQL selection; other requests return
+	// ErrAccountOperationUnsupported.
 	// ErrIndeterminateCommit means persistence may have succeeded; callers
 	// must inspect stored state before retrying, never blindly repeat it.
 	NewAccount(ctx context.Context, params NewAccountParams) (*AccountInfo,
@@ -469,8 +471,9 @@ func (w *Wallet) requireAccountNameAvailable(ctx context.Context,
 // NewAccount creates the next or requested exact root-derived account and
 // returns its persisted info. The name and number must be unused in the scope.
 // Exact selection supports canonical SQL scopes and leaves lower holes free.
-// Exact kvdb requests and NoChainSync=true return
-// ErrAccountOperationUnsupported after admission and before secret preparation.
+// NoChainSync=true excludes automatic synchronization and recovery only with
+// exact SQL selection. Sequential exclusion and exact kvdb requests return
+// ErrAccountOperationUnsupported before preparing secrets.
 // Failures return no account; ErrIndeterminateCommit means persistence may
 // have succeeded. Once admitted, the call waits for the Store outcome even
 // after cancellation; the Store still receives the caller context.
@@ -561,20 +564,22 @@ func (w *Wallet) handleNewAccount(req newAccountReq) {
 		return
 	}
 
-	// Keep exclusion unavailable until receiving and recovery honor it.
-	// Refuse after admission so no backend prepares secrets or mutates state.
-	if req.params.NoChainSync {
-		req.resp <- accountResp{
-			err: fmt.Errorf("no-chain-sync account creation: %w",
-				ErrAccountOperationUnsupported),
-		}
+	// When an account does not watch for on-chain synchronization, its
+	// account number must be specified; sequential allocation is unsupported.
+	switch {
+	case req.params.AccountNumber == nil:
+		if req.params.NoChainSync {
+			req.resp <- accountResp{
+				err: fmt.Errorf("no-chain-sync account creation: %w",
+					ErrAccountOperationUnsupported),
+			}
 
-		return
-	}
+			return
+		}
 
 	// Wallet assembly supplies addrStore only for the sequential kvdb subset.
 	// Reject exact selection after admission but before root preparation.
-	if req.params.AccountNumber != nil && w.addrStore != nil {
+	case w.addrStore != nil:
 		req.resp <- accountResp{
 			err: fmt.Errorf("kvdb exact account creation: %w",
 				ErrAccountOperationUnsupported),
