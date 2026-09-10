@@ -163,6 +163,9 @@ func testSQLiteManager(tb testing.TB) *Manager {
 		_ = m.Stop()
 	})
 
+	_, err = m.Start(context.Background())
+	require.NoError(tb, err)
+
 	return m
 }
 
@@ -243,6 +246,9 @@ func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 	tb.Cleanup(func() {
 		_ = m.Stop()
 	})
+
+	_, err = m.Start(context.Background())
+	require.NoError(tb, err)
 
 	return m
 }
