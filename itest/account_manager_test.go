@@ -104,17 +104,22 @@ func deterministicImportedAccountKeys(
 // testAccountManagerCreateAccount verifies that a new derived account's
 // returned view matches an immediate read and survives a wallet reload.
 func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
+	// Arrange: create an unlocked wallet with the harness so this ordinary
+	// sequential request exercises the same contract on every backend.
 	const accountName = "account manager created"
 
 	scope := waddrmgr.KeyScopeBIP0084
 	ctx := h.Context()
 	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
 
+	// Act: create one root-derived account through the public operation.
 	created, err := w.NewAccount(ctx, wallet.NewAccountParams{
 		Scope: scope,
 		Name:  accountName,
 	})
 
+	// Assert: compare returned key facts and the complete account view with
+	// immediate and reopened reads to prove durable sequential creation.
 	require.NoError(h, err, "failed to create derived account")
 	require.Equal(h, accountName, created.AccountName)
 	require.NotNil(
@@ -167,6 +172,56 @@ func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
 	require.Equal(h, want, durableInfo)
 }
 
+// testAccountManagerCreateExactAccount verifies an exact account's disabled
+// chain synchronization and complete account facts survive reopening.
+func testAccountManagerCreateExactAccount(h *bwtest.HarnessTest) {
+	// Exact selection is SQL-only; the sequential case covers kvdb.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: a sparse, excluded account exercises exact activation; the
+	// harness owns the unlocked wallet and its cleanup.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "sparse exact",
+		AccountNumber: &number,
+		NoChainSync:   true,
+	}
+
+	// Act: create publicly through both derivation and storage.
+	created, err := w.NewAccount(h.Context(), params)
+
+	// Assert: compare exact identity and full facts after reopen,
+	// normalizing key prefixes with the existing comparison helper.
+	require.NoError(h, err)
+	require.Equal(h, number, *created.AccountNumber)
+	require.True(h, created.NoChainSync)
+	require.Zero(h, created.ExternalKeyCount)
+	require.Zero(h, created.InternalKeyCount)
+
+	// Account creation alone must leave child addresses unallocated.
+	addresses, err := w.ListAddresses(
+		h.Context(), params.Name, waddrmgr.WitnessPubKey,
+	)
+	require.NoError(h, err)
+	require.Empty(h, addresses)
+
+	want := *created
+	want.PublicKey = canonicalAccountKey(h, want.PublicKey)
+	w = h.ReloadWallet(w)
+	durable, err := w.GetAccount(
+		h.Context(), params.Scope, params.Name,
+	)
+	require.NoError(h, err)
+	durable.PublicKey = canonicalAccountKey(h, durable.PublicKey)
+	require.Equal(h, want, *durable)
+}
+
 // testAccountManagerFillAccountHole verifies that reopening after sparse
 // allocation leaves lower exact account numbers available.
 func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
@@ -201,6 +256,48 @@ func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
 	// Assert: earlier sparse creation did not consume the requested hole.
 	require.NoError(h, err)
 	require.Equal(h, hole, *filled.AccountNumber)
+}
+
+// testAccountManagerAdvanceAccountCursor checks durable sparse allocation.
+func testAccountManagerAdvanceAccountCursor(h *bwtest.HarnessTest) {
+	// kvdb rejects exact requests, so this SQL cursor contract is inapplicable.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: persist excluded seven and ordinary two, then reopen so the
+	// next request observes only the durable cursor left by both writes.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "excluded sparse",
+		AccountNumber: &number,
+		NoChainSync:   true,
+	}
+	_, err := w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+
+	hole := wallet.AccountNumber(2)
+	params.Name = "lower hole"
+	params.AccountNumber = &hole
+	params.NoChainSync = false
+	_, err = w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	params.Name = "next sequential"
+	params.AccountNumber = nil
+
+	// Act: allocate the next account without an exact selector.
+	next, err := w.NewAccount(h.Context(), params)
+
+	// Assert: the cursor advanced past seven and did not retreat for two.
+	require.NoError(h, err)
+	require.Equal(h, wallet.AccountNumber(8), *next.AccountNumber)
 }
 
 // testAccountManagerCreateAccountSequence verifies that derived account numbers
