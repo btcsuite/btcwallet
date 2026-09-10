@@ -945,9 +945,8 @@ func (w *Wallet) verifyBirthday(ctx context.Context) error {
 		return fmt.Errorf("block from stamp: %w", err)
 	}
 
-	// Use walletInfo.ID instead of w.cfg's cached value: Manager.Load
-	// currently initializes the in-memory id to zero, but the store row
-	// we just read carries the authoritative wallet ID.
+	// Persist the located birthday and sync origin together so the next
+	// startup can reuse the verified block without another chain search.
 	err = w.store.UpdateWallet(
 		ctx, db.UpdateWalletParams{
 			WalletID:      walletInfo.ID,
