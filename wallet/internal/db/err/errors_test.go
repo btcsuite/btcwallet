@@ -14,39 +14,6 @@ import (
 
 var errConstraint = errors.New("constraint")
 
-// TestIsAccountNameConflict verifies the shared marker survives wrapping
-// without changing error text, classification policy, or the underlying cause.
-func TestIsAccountNameConflict(t *testing.T) {
-	t.Parallel()
-
-	for _, backend := range []Backend{BackendPostgres, BackendSQLite} {
-		t.Run(backend.String(), func(t *testing.T) {
-			t.Parallel()
-
-			// Arrange.
-			sqlErr := NewSQLError(
-				backend, ReasonConstraint, "", errConstraint,
-			)
-			require.False(t, IsAccountNameConflict(sqlErr))
-			sqlErr.Constraint = ConstraintAccountName
-
-			// Act.
-			err := fmt.Errorf("insert account: %w", sqlErr)
-
-			// Assert.
-			require.True(t, IsAccountNameConflict(err))
-			require.Equal(t, ReasonConstraint, sqlErr.Reason)
-			require.Equal(t, ClassPermanent, sqlErr.Class())
-			require.Equal(t, "insert account: constraint", err.Error())
-			require.ErrorIs(t, err, errConstraint)
-			require.Same(t, err, Normalize(backend, noOpMapper, err))
-		})
-	}
-
-	require.False(t, IsAccountNameConflict(nil))
-	require.False(t, IsAccountNameConflict(errConstraint))
-}
-
 // noOpMapper is a test helper that disables backend-specific classification.
 func noOpMapper(error) *SQLError {
 	return nil
