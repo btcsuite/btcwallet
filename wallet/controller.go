@@ -29,13 +29,8 @@ const (
 )
 
 var (
-	// ErrWalletNotStopped is returned when an attempt is made to start the
-	// wallet when it is not in the stopped state.
-	ErrWalletNotStopped = errors.New("wallet not in stopped state")
-
-	// ErrWalletAlreadyStarted is returned when an attempt is made to start
-	// the wallet when it is already started.
-	ErrWalletAlreadyStarted = errors.New("wallet already started")
+	// errWalletAlreadyStarted reports a repeated private start attempt.
+	errWalletAlreadyStarted = errors.New("wallet already started")
 
 	// ErrStateChanged is returned when the wallet state changes
 	// unexpectedly during an operation, such as a rescan setup.
@@ -133,8 +128,7 @@ type ChangePassphraseRequest struct {
 	PrivateNew []byte
 }
 
-// Controller provides an interface for managing the wallet's lifecycle and
-// state.
+// Controller provides an interface for querying and changing Wallet state.
 type Controller interface {
 	// Unlock unlocks the wallet with a passphrase. The wallet will remain
 	// unlocked until explicitly locked or the provided lock duration
@@ -153,15 +147,6 @@ type Controller interface {
 	// if the chain source's observed tip cannot be read.
 	Info(ctx context.Context) (*Info, error)
 
-	// Start starts the background processes necessary to manage the wallet.
-	// It returns an error if the wallet is already started.
-	Start(ctx context.Context) error
-
-	// Stop synchronously shuts down the wallet. The context remains in this
-	// temporary public interface for compatibility but is not consulted,
-	// because terminal teardown cannot be abandoned after it begins.
-	Stop(ctx context.Context) error
-
 	// Resync rewinds the wallet's synchronization state to a specific
 	// block height.
 	Resync(ctx context.Context, startHeight uint32) error
@@ -174,12 +159,9 @@ type Controller interface {
 		targets []waddrmgr.AccountScope) error
 }
 
-// Start starts the background processes necessary to manage the wallet.
-// The Manager owns lifecycle sequencing and calls Start at most once for a
-// Wallet instance; a stopped Wallet must be loaded as a new instance.
-//
-// This is part of the Controller interface.
-func (w *Wallet) Start(startCtx context.Context) error {
+// start starts the background processes owned by a Wallet. Manager is its sole
+// caller and invokes it at most once for each Wallet instance.
+func (w *Wallet) start(startCtx context.Context) error {
 	// 1. Attempt to transition from Stopped to Starting.
 	err := w.state.toStarting()
 	if err != nil {
@@ -356,20 +338,9 @@ func (w *Wallet) performRuntimeSetup(startCtx context.Context) error {
 	return nil
 }
 
-// Stop synchronously shuts down the Wallet through its private lifecycle
-// operation. The context remains only for Controller compatibility and is not
-// consulted, because terminal teardown cannot be abandoned after it begins.
-// The Manager serializes Stop with Start, so Stop can transition an
-// Initialized Wallet directly to its terminal Stopped state.
-//
-// This is part of the Controller interface.
-func (w *Wallet) Stop(_ context.Context) error {
-	return w.stop()
-}
-
 // stop performs the Wallet's complete terminal teardown synchronously. The
 // Manager serializes lifecycle operations, so this method never runs alongside
-// Start or another stop and needs no additional synchronization primitive.
+// start or another stop and needs no additional synchronization primitive.
 func (w *Wallet) stop() error {
 	// A Wallet stopped before its first Start has no workers to cancel or
 	// join, but it must still become terminal so a retained pointer cannot

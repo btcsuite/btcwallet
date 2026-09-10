@@ -225,7 +225,7 @@ func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
 		wallet := newManagedWallet(cfg, walletData)
 		wallets = append(wallets, wallet)
 
-		err = wallet.Start(ctx)
+		err = wallet.start(ctx)
 		if err != nil {
 			return wallets, err
 		}
@@ -437,7 +437,7 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		}
 	}
 
-	err = w.Start(context.Background())
+	err = w.start(context.Background())
 	if err != nil {
 		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
 	}
