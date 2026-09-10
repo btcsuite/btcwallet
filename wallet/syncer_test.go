@@ -2224,7 +2224,6 @@ func newSQLRecoverySyncer(t *testing.T) (*syncer, []db.AccountInfo, [][]byte) {
 	params.Name = t.Name()
 	w, err := m.Create(params)
 	require.NoError(t, err)
-	startLoadedWalletForTest(t, w)
 	require.NoError(t, w.keyVault.Unlock(t.Context(), params.PrivatePassphrase))
 	// Admit signing requests while background synchronization stays disabled.
 	w.state.toUnlocked()
