@@ -2192,12 +2192,13 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 // (key scope, account) pair because ListAddresses is scoped to a single pair.
 // Accounts marked NoChainSync are omitted from this wallet-wide read.
 //
-// This reproduces the legacy ForEachRelevantActiveAddress filtering used by
-// the old scan-data reader: for default key scopes every active address is
+// For KVDB, this reproduces the legacy ForEachRelevantActiveAddress filtering
+// used by the old scan-data reader: for default scopes every active address is
 // watched, while for non-default key scopes only internal-branch (change)
 // addresses are watched. The non-default external branches are intentionally
 // skipped because they only ever existed due to a since-fixed bug, and
 // watching them would diverge from the legacy recovery set.
+// SQL watches persisted addresses from both branches in every eligible scope.
 func (s *syncer) storeScanAddresses(
 	ctx context.Context) ([]address.Address, error) {
 
@@ -2249,10 +2250,11 @@ func (s *syncer) storeImportedScanAddresses(
 
 // storeScanAddressRelevant reports whether a stored address row belongs in the
 // recovery scan set for its account shape and key scope.
-func storeScanAddressRelevant(isRawImported, isDefaultScope bool,
+func (s *syncer) storeScanAddressRelevant(isRawImported, isDefaultScope bool,
 	info db.AddressInfo) bool {
 
-	if isRawImported || isDefaultScope {
+	// SQL has no legacy branch restriction on persisted account addresses.
+	if s.addrStore == nil || isRawImported || isDefaultScope {
 		return true
 	}
 
@@ -2260,7 +2262,7 @@ func storeScanAddressRelevant(isRawImported, isDefaultScope bool,
 }
 
 // storeAccountScanAddresses pages through a single account's addresses,
-// converting each stored script into its wallet address. It mirrors the legacy
+// converting each stored script into its wallet address. KVDB mirrors legacy
 // ForEachRelevantActiveAddress filtering: addresses in default key scopes are
 // all relevant, while non-default key scopes only contribute their
 // internal-branch (change) addresses.
@@ -2272,9 +2274,9 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 		return nil, err
 	}
 
-	// Outside the default key scopes only the internal (change) branch is
-	// relevant, matching ForEachRelevantActiveAddress's handling of change
-	// addresses that a since-fixed bug created in non-default scopes.
+	// In KVDB, outside the default key scopes only the internal (change)
+	// branch is relevant, matching ForEachRelevantActiveAddress's handling of
+	// change addresses that a since-fixed bug created in non-default scopes.
 	isDefaultScope := waddrmgr.IsDefaultScope(
 		waddrmgr.KeyScope(account.KeyScope),
 	)
@@ -2300,12 +2302,12 @@ func (s *syncer) storeAccountScanAddresses(ctx context.Context,
 		}
 
 		for _, info := range result.Items {
-			// Skip non-default-scope external addresses to match
-			// the legacy relevant-address set.
-			relevant := storeScanAddressRelevant(
+			// Retain legacy branch relevance only for KVDB. SQL must
+			// watch persisted external children in custom scopes too.
+			if !s.storeScanAddressRelevant(
 				isRawImported, isDefaultScope, info,
-			)
-			if !relevant {
+			) {
+
 				continue
 			}
 

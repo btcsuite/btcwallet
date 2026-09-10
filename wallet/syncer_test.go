@@ -2971,20 +2971,14 @@ func TestStoreScanAddressesIncludesRawImportOnlyScope(t *testing.T) {
 }
 
 // TestStoreScanAddressesNonDefaultScope verifies that, for non-default key
-// scopes, only internal-branch (change) addresses are watched, matching the
-// legacy ForEachRelevantActiveAddress filtering.
+// scopes, KVDB watches only internal-branch (change) addresses, matching the
+// legacy ForEachRelevantActiveAddress filtering; SQL watches both branches.
 func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: a store-backed syncer with one non-default-scope account
-	// holding one external and one internal address.
+	// Arrange: Reuse one external and one internal address in a custom scope
+	// to compare SQL recovery with KVDB's preserved legacy branch rule.
 	const walletID uint32 = 23
-
-	store := &walletmock.Store{}
-	s := newSyncer(
-		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
-		store, walletID,
-	)
 
 	// A purpose outside waddrmgr.DefaultKeyScopes is a non-default scope.
 	nonDefault := db.KeyScope{Purpose: 1017, Coin: 0}
@@ -3003,48 +2997,83 @@ func TestStoreScanAddressesNonDefaultScope(t *testing.T) {
 	internalScript, err := txscript.PayToAddrScript(internalAddr)
 	require.NoError(t, err)
 
-	accounts := []db.AccountInfo{{
-		AccountName: "custom",
-		KeyScope:    nonDefault,
-	}}
-	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
-		func(query db.ListAccountsQuery) bool {
-			return query.WalletID == walletID && query.SkipBalance
+	// Each backend gets fresh mocks while using the same persisted scripts.
+	for _, test := range []struct {
+		name string
+		kvdb bool
+		want []address.Address
+	}{
+		{
+			name: "KVDB",
+			kvdb: true,
+			want: []address.Address{internalAddr},
 		},
-	)).Return(accounts, nil).Once()
-
-	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
-		func(query db.ListAddressesQuery) bool {
-			return query.WalletID == walletID &&
-				query.AccountName != nil &&
-				*query.AccountName == "custom" &&
-				query.Scope != nil &&
-				*query.Scope == nonDefault
+		{
+			name: "SQL",
+			want: []address.Address{externalAddr, internalAddr},
 		},
-	)).Return(page.Result[db.AddressInfo, uint32]{
-		Items: []db.AddressInfo{
-			{
-				ScriptPubKey: externalScript,
-				Branch:       waddrmgr.ExternalBranch,
-			},
-			{
-				ScriptPubKey: internalScript,
-				Branch:       waddrmgr.InternalBranch,
-			},
-		},
-	}, nil).Once()
-	expectImportedScanAddressPage(
-		store, walletID, page.Result[db.AddressInfo, uint32]{},
-	)
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Act: load scan addresses from the store.
-	addrs, err := s.storeScanAddresses(t.Context())
+			store := &walletmock.Store{}
+			addrStore := &bwmock.AddrStore{}
+			s := newSyncer(
+				Config{ChainParams: &chainParams}, nil, nil,
+				&mockTxPublisher{}, store, walletID,
+			)
 
-	// Assert: only the internal-branch address survived the filter.
-	require.NoError(t, err)
-	require.Len(t, addrs, 1)
-	require.Equal(t, internalAddr.EncodeAddress(), addrs[0].EncodeAddress())
-	store.AssertExpectations(t)
+			// KVDB retains an address manager; SQL derives via Store.
+			if test.kvdb {
+				s.addrStore = addrStore
+			}
+
+			accounts := []db.AccountInfo{{
+				AccountName: "custom",
+				KeyScope:    nonDefault,
+			}}
+			store.On("ListAccounts", mock.Anything, mock.MatchedBy(
+				func(query db.ListAccountsQuery) bool {
+					return query.WalletID == walletID && query.SkipBalance
+				},
+			)).Return(accounts, nil).Once()
+
+			store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+				func(query db.ListAddressesQuery) bool {
+					return query.WalletID == walletID &&
+						query.AccountName != nil &&
+						*query.AccountName == "custom" &&
+						query.Scope != nil &&
+						*query.Scope == nonDefault
+				},
+			)).Return(page.Result[db.AddressInfo, uint32]{
+				Items: []db.AddressInfo{
+					{
+						ScriptPubKey: externalScript,
+						Branch:       waddrmgr.ExternalBranch,
+					},
+					{
+						ScriptPubKey: internalScript,
+						Branch:       waddrmgr.InternalBranch,
+					},
+				},
+			}, nil).Once()
+			expectImportedScanAddressPage(
+				store, walletID, page.Result[db.AddressInfo, uint32]{},
+			)
+
+			// Act: Load persisted addresses through the same wallet-wide
+			// entry point using the selected backend.
+			addrs, err := s.storeScanAddresses(t.Context())
+
+			// Assert: SQL retains both children while KVDB preserves its
+			// internal-only recovery set; each expected Store read occurs.
+			require.NoError(t, err)
+			require.ElementsMatch(t, test.want, addrs)
+			store.AssertExpectations(t)
+			addrStore.AssertExpectations(t)
+		})
+	}
 }
 
 // TestStoreScanStateZeroLookahead verifies that persisted child counts do not
