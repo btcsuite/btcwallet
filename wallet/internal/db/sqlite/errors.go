@@ -2,9 +2,11 @@ package sqlite
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -37,20 +39,6 @@ var reasonByCode = map[int]dberr.Reason{
 	sqlite3.SQLITE_CANTOPEN:   dberr.ReasonUnknown,
 }
 
-// isAccountNameConflict identifies the account-name unique constraint without
-// classifying unrelated uniqueness violations as duplicate accounts.
-func isAccountNameConflict(err error) bool {
-	var sqliteErr *sqlite.Error
-
-	return errors.As(err, &sqliteErr) &&
-		sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE &&
-		strings.Contains(
-			sqliteErr.Error(),
-			"UNIQUE constraint failed: accounts.wallet_id, "+
-				"accounts.scope_id, accounts.account_name",
-		)
-}
-
 // mapErr maps SQLite result codes into SQLError.
 func mapErr(err error) *dberr.SQLError {
 	// Start by extracting the SQLite driver error so the backend package can
@@ -72,12 +60,17 @@ func mapErr(err error) *dberr.SQLError {
 		reason = dberr.ReasonUnknown
 	}
 
-	sqlErr := dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
-	if isAccountNameConflict(err) {
-		sqlErr.Constraint = dberr.ConstraintAccountName
+	// SQLite reports columns rather than index names; match the account-name
+	// key while preserving other unique failures as ordinary SQL errors.
+	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+		err.Error(), "UNIQUE constraint failed: accounts.wallet_id, "+
+			"accounts.scope_id, accounts.account_name",
+	) {
+
+		err = fmt.Errorf("%w: %w", db.ErrAccountNameConflict, err)
 	}
 
-	return sqlErr
+	return dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
 }
 
 // codeString formats a SQLite numeric result code for logs and stats.
