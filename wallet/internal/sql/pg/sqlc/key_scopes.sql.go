@@ -9,6 +9,28 @@ import (
 	"context"
 )
 
+const AdvanceNextAccountNumber = `-- name: AdvanceNextAccountNumber :exec
+UPDATE key_scopes
+SET
+    next_account_number = greatest(
+        next_account_number, $1::BIGINT
+    )
+WHERE id = $2
+`
+
+type AdvanceNextAccountNumberParams struct {
+	MinimumNextAccount int64
+	ScopeID            int64
+}
+
+// Reserves the cursor past an exact account without consuming lower holes.
+// Updating this row serializes exact and sequential allocation in the caller's
+// account transaction, including when the cursor already exceeds the minimum.
+func (q *Queries) AdvanceNextAccountNumber(ctx context.Context, arg AdvanceNextAccountNumberParams) error {
+	_, err := q.exec(ctx, q.advanceNextAccountNumberStmt, AdvanceNextAccountNumber, arg.MinimumNextAccount, arg.ScopeID)
+	return err
+}
+
 const CreateKeyScope = `-- name: CreateKeyScope :one
 INSERT INTO key_scopes (
     wallet_id,
