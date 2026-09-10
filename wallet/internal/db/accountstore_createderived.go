@@ -115,8 +115,10 @@ type CreateDerivedAccountOps interface {
 		scope KeyScope) (int64, ScopeAddrSchema, error)
 
 	// AllocateAccountNumber reserves the next or requested account number
-	// and advances the scope cursor without consuming lower holes.
-	AllocateAccountNumber(ctx context.Context, scopeID int64) (int64, error)
+	// and advances the scope cursor without consuming lower holes. A nil
+	// selector requests the next account; a value requests that exact number.
+	AllocateAccountNumber(ctx context.Context, scopeID int64,
+		accountNumber *uint32) (int64, error)
 
 	// CreateDerivedAccount inserts the derived account row using the provided
 	// scope ID, allocated account number, public account name, requested
@@ -186,9 +188,10 @@ func deriveAndValidate(ctx context.Context, scope KeyScope, accNum uint32,
 // the cyclop budget and the "allocate then preview" pair is described
 // in one place.
 func allocateAndPreviewAccountNumber(ctx context.Context,
-	ops CreateDerivedAccountOps, scopeID int64) (int64, uint32, error) {
+	ops CreateDerivedAccountOps, scopeID int64,
+	accountNumber *uint32) (int64, uint32, error) {
 
-	allocated, err := ops.AllocateAccountNumber(ctx, scopeID)
+	allocated, err := ops.AllocateAccountNumber(ctx, scopeID, accountNumber)
 	if err != nil {
 		return 0, 0, fmt.Errorf("allocate account number: %w", err)
 	}
@@ -256,7 +259,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 	}
 
 	allocated, accNumPreview, err := allocateAndPreviewAccountNumber(
-		ctx, ops, scopeID,
+		ctx, ops, scopeID, params.AccountNumber,
 	)
 	if err != nil {
 		return nil, err

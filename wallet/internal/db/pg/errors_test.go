@@ -120,8 +120,8 @@ func TestMapErr(t *testing.T) {
 	require.Equal(t, dberr.ClassFatal, err.Class())
 }
 
-// TestMapErrAccountNameConflict verifies only the account-name unique index is
-// marked as an account conflict.
+// TestMapErrAccountNameConflict keeps name and number collision identities
+// distinct without classifying unrelated unique failures.
 func TestMapErrAccountNameConflict(t *testing.T) {
 	t.Parallel()
 
@@ -129,11 +129,17 @@ func TestMapErrAccountNameConflict(t *testing.T) {
 		name       string
 		constraint string
 		want       bool
+		wantNumber bool
 	}{
 		{
 			name:       "account name",
 			constraint: accountNameConstraint,
 			want:       true,
+		},
+		{
+			name:       "account number",
+			constraint: accountNumberConstraint,
+			wantNumber: true,
 		},
 		{
 			name:       "other unique index",
@@ -154,10 +160,13 @@ func TestMapErrAccountNameConflict(t *testing.T) {
 			// Act: Classify the driver failure through the backend mapper.
 			err := mapErr(cause)
 
-			// Assert: Only the name index gains the Store conflict identity.
+			// Assert: Each known index gains only its matching Store identity.
 			require.ErrorIs(t, err, cause)
 			require.Equal(t, test.want, errors.Is(
 				err, db.ErrAccountNameConflict,
+			))
+			require.Equal(t, test.wantNumber, errors.Is(
+				err, db.ErrAccountNumberConflict,
 			))
 		})
 	}

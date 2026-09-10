@@ -35,7 +35,7 @@ func TestMapErrConstraint(t *testing.T) {
 	)`)
 	require.NoError(t, err)
 
-	// Match the migrated partial index so the negative control produces the
+	// Match the migrated partial index so the number collision produces the
 	// same account-number diagnostic as a persisted derived account.
 	_, err = dbConn.ExecContext(ctx, `CREATE UNIQUE INDEX
 		uidx_accounts_scope_account_number
@@ -60,6 +60,7 @@ func TestMapErrConstraint(t *testing.T) {
 	require.Equal(t, dberr.ReasonConstraint, sqlErr.Reason)
 	require.Equal(t, dberr.ClassPermanent, sqlErr.Class())
 	require.ErrorIs(t, sqlErr, db.ErrAccountNameConflict)
+	require.NotErrorIs(t, sqlErr, db.ErrAccountNumberConflict)
 
 	// Act: Violate the other unique key with a different account name.
 	_, err = dbConn.ExecContext(
@@ -67,8 +68,11 @@ func TestMapErrConstraint(t *testing.T) {
 	)
 	require.Error(t, err)
 
-	// Assert: A number collision must not claim the name is occupied.
-	require.NotErrorIs(t, mapErr(err), db.ErrAccountNameConflict)
+	sqlErr = mapErr(err)
+
+	// Assert: The number collision preserves its distinct Store identity.
+	require.NotErrorIs(t, sqlErr, db.ErrAccountNameConflict)
+	require.ErrorIs(t, sqlErr, db.ErrAccountNumberConflict)
 }
 
 // TestMapErrReadOnly verifies that SQLite query-only failures are mapped to
