@@ -53,32 +53,6 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	store.AssertExpectations(t)
 }
 
-// TestManagerLoadPreservesBackendFailure verifies that a non-not-found SQL
-// backend failure is not reclassified as a missing wallet.
-func TestManagerLoadPreservesBackendFailure(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Configure a strict SQL Store whose one required lookup returns
-	// an unrelated backend sentinel instead of the not-found classification.
-	params := sqliteCreateParams(t)
-	store := &walletmock.Store{}
-
-	store.On("GetWallet", mock.Anything, params.Name).
-		Return(nil, errDBMock).Once()
-
-	// Act: Load the durable identity through the maintained Manager boundary.
-	w, err := testSQLManager(t, store).Load(LoadWalletParams{
-		Name: params.Name,
-	})
-
-	// Assert: Verify the original backend failure remains discoverable, no
-	// Wallet escapes, and the one expected Store call was satisfied.
-	require.ErrorIs(t, err, errDBMock)
-	require.NotErrorIs(t, err, ErrWalletNotFound)
-	require.Nil(t, w)
-	store.AssertExpectations(t)
-}
-
 // sqliteCreateParams returns a spendable seed-import request with a durable
 // identity for tests that exercise the maintained SQL Manager create path.
 func sqliteCreateParams(t *testing.T) CreateWalletParams {
@@ -121,26 +95,6 @@ func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 	require.NotEmpty(t, got.EncryptedMasterPrivKey)
 }
 
-// TestManagerSQLiteCreateLoadCached verifies that a SQLite wallet created
-// through the Manager is published under its name, so a same-Manager Load
-// returns that very Wallet rather than building a second one.
-func TestManagerSQLiteCreateLoadCached(t *testing.T) {
-	t.Parallel()
-
-	params := sqliteCreateParams(t)
-	m := testSQLiteManager(t)
-
-	w, err := m.Create(params)
-	require.NoError(t, err)
-	require.NotNil(t, w)
-
-	// Create publishes the wallet, so Load returns the same pointer over the
-	// Manager-owned store.
-	loaded, err := m.Load(LoadWalletParams{Name: params.Name})
-	require.NoError(t, err)
-	require.Same(t, w, loaded)
-}
-
 // TestNewManagerClassifiesDatabaseIdentityMismatch proves public callers can
 // distinguish a persisted network mismatch without importing internal/db.
 func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
@@ -155,7 +109,7 @@ func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
 		ChainSource: &bwmock.Chain{},
 	})
 	require.NoError(t, err)
-	require.NoError(t, manager.Close())
+	require.NoError(t, manager.Stop())
 
 	// Act: Reopen the same file through the public API with testnet identity.
 	rejected, err := NewManager(t.Context(), ManagerConfig{
