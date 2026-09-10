@@ -3553,6 +3553,73 @@ func TestListOutputsToWatchBareMultisigUsesOutputScript(t *testing.T) {
 	require.NotEqual(t, memberScript, utxos[0].PkScript)
 }
 
+// TestListOutputsToWatchExcludesNoChainSync verifies recovery keeps eligible
+// credits while omitting outputs owned by accounts that opt out of chain sync.
+func TestListOutputsToWatchExcludesNoChainSync(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Persist one credit for each flag value in the existing SQL
+	// harness, so the watch read must select by the credited account's policy.
+	store := NewTestStore(t)
+	walletID := newWallet(t, store, "wallet-watch-no-chain-sync")
+
+	outputs := make([]*wire.TxOut, 0, 2)
+	for _, account := range []struct {
+		name        string
+		noChainSync bool
+	}{
+		{
+			name:        "eligible",
+			noChainSync: false,
+		},
+		{
+			name:        "excluded",
+			noChainSync: true,
+		},
+	} {
+		_, err := store.CreateDerivedAccount(
+			t.Context(), db.CreateDerivedAccountParams{
+				WalletID:    walletID,
+				Scope:       db.KeyScopeBIP0084,
+				Name:        account.name,
+				NoChainSync: account.noChainSync,
+			}, SpendableDeriveFn(),
+		)
+		require.NoError(t, err)
+
+		addr := newDerivedAddress(
+			t, store, walletID, db.KeyScopeBIP0084, account.name, false,
+		)
+		outputs = append(outputs, wire.NewTxOut(5000, addr.ScriptPubKey))
+	}
+
+	// Explicit transaction ingestion records both credits; the recovery query
+	// must exclude the opted-out credit even though it exists in the wallet.
+	tx := newRegularTx([]wire.OutPoint{randomOutPoint()}, outputs)
+	err := store.CreateTx(t.Context(), db.CreateTxParams{
+		WalletID: walletID,
+		Tx:       tx,
+		Received: time.Unix(1710004500, 0),
+		Status:   db.TxStatusPublished,
+		Credits:  map[uint32]address.Address{0: nil, 1: nil},
+	})
+	require.NoError(t, err)
+	require.True(t, walletUtxoExists(t, store, walletID, wire.OutPoint{
+		Hash: tx.TxHash(), Index: 1,
+	}))
+
+	// Act: Read the same wallet-wide output set used by both recovery modes.
+	utxos, err := store.ListOutputsToWatch(t.Context(), walletID)
+
+	// Assert: Exactly the eligible credit remains; the existing conformance
+	// tests separately cover leases, unmined spends, and accountless imports.
+	require.NoError(t, err)
+	require.Len(t, utxos, 1)
+	require.Equal(
+		t, wire.OutPoint{Hash: tx.TxHash(), Index: 0}, utxos[0].OutPoint,
+	)
+}
+
 // TestApplyTxBatchChildBeforeParent verifies that ApplyTxBatch records the
 // parent->child spend edge even when the child transaction is listed before
 // the in-batch parent whose output it spends. Each transaction claims its spent
