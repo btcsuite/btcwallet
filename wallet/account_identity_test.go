@@ -87,7 +87,7 @@ func TestAccountIdentitySelectorValidate(t *testing.T) {
 			err := test.selector.validate()
 
 			if test.wantError {
-				require.ErrorIs(t, err, errInvalidAccountSelector)
+				require.ErrorIs(t, err, ErrInvalidAccountSelector)
 				return
 			}
 
