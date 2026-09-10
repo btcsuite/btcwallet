@@ -61,6 +61,10 @@ var (
 	// within a wallet and key scope.
 	ErrAccountNameConflict = errors.New("account name conflict")
 
+	// ErrAccountNumberConflict reports an occupied derived account number
+	// within a key scope, distinct from an occupied name.
+	ErrAccountNumberConflict = errors.New("account number conflict")
+
 	// ErrAddressNotFound is returned when an address is not found in the
 	// database.
 	ErrAddressNotFound = errors.New("address not found")

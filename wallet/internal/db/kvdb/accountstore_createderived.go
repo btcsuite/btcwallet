@@ -120,9 +120,11 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	return 0, addrSchema, nil
 }
 
-// AllocateAccountNumber implements db.CreateDerivedAccountOps.
+// AllocateAccountNumber implements db.CreateDerivedAccountOps. The selector
+// is unused because CreateDerivedAccount rejects exact requests before opening
+// the transaction; this adapter retains sequential allocation.
 func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
-	_ int64) (int64, error) {
+	_ int64, _ *uint32) (int64, error) {
 
 	if o.scopedMgr == nil {
 		return 0, errScopedMgrUninitialized
