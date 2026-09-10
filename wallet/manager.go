@@ -126,11 +126,9 @@ type Manager struct {
 	// The Manager lock serializes resource changes and terminal admission.
 	started atomic.Bool
 
-	// wallets holds the active wallets keyed by their unique name. The
-	// Manager lock serializes runtime assembly, Store access, and cache
-	// installation. A ModeShell Create imports its initial accounts after
-	// installation, so a wallet can be observed here before that import
-	// finishes.
+	// wallets holds fully initialized and started Wallets keyed by unique
+	// name. The Manager lock serializes Store access, runtime assembly, and
+	// publication after initial-account import and private startup complete.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -405,8 +403,53 @@ func validateManagedWalletName(name string) error {
 	return nil
 }
 
-// Create persists and assembles a Wallet with Manager-owned runtime policy.
+// Create persists, starts, and publishes one Wallet while Manager is running.
+//
+// TODO(yy): Add a context parameter once wallet creation uses a single atomic
+// database transaction.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	if !m.started.Load() {
+		err := ErrStateForbidden
+		if m.backend == nil {
+			err = ErrManagerStopped
+		}
+
+		return nil, err
+	}
+
+	// Durable preparation and private startup stay under the admission lock;
+	// Stop cannot close storage until the accepted creation has settled.
+	w, err := m.createWallet(params)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we are in shell mode and have initial accounts, we import them now.
+	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
+		err = w.importInitialAccounts(
+			context.Background(), params.InitialAccounts,
+		)
+		if err != nil {
+			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+		}
+	}
+
+	err = w.Start(context.Background())
+	if err != nil {
+		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+	}
+
+	m.wallets[w.cfg.Name] = w
+
+	return w, nil
+}
+
+// createWallet prepares a durable candidate while Create holds the Manager
+// lock. A returned Wallet must be started or cleaned up before releasing it.
+func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 	// Validate identity before key derivation or Store work can produce a less
 	// useful error or side effect.
 	err := validateManagedWalletName(params.Name)
@@ -424,39 +467,19 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	m.Lock()
-
 	// The Manager mutex keeps runtime assembly, Store mutation, and cache
 	// publication atomic so no partial Wallet becomes observable.
 	walletCfg, err := m.config.walletConfig(params.Name)
 	if err != nil {
-		m.Unlock()
-
 		return nil, err
 	}
 
 	data, err := m.backend.create(context.Background(), params, rootKey)
 	if err != nil {
-		m.Unlock()
-
 		return nil, err
 	}
 
-	w := newManagedWallet(walletCfg, data)
-	m.wallets[walletCfg.Name] = w
-	m.Unlock()
-
-	// If we are in shell mode and have initial accounts, we import them now.
-	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return w, nil
+	return newManagedWallet(walletCfg, data), nil
 }
 
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
