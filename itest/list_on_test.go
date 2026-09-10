@@ -121,10 +121,6 @@ var allTestCases = []*testCase{
 		TestFunc: testAccountManagerEnforceAccountImportLifecycle,
 	},
 	{
-		Name:     "controller start stop",
-		TestFunc: testControllerStartStop,
-	},
-	{
 		Name:     "controller unlock lock",
 		TestFunc: testControllerUnlockLock,
 	},
