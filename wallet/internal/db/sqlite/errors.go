@@ -70,6 +70,16 @@ func mapErr(err error) *dberr.SQLError {
 		err = fmt.Errorf("%w: %w", db.ErrAccountNameConflict, err)
 	}
 
+	// Number collisions use the migrated column tuple; other unique
+	// violations must not masquerade as an occupied exact account.
+	if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE && strings.Contains(
+		sqliteErr.Error(), "UNIQUE constraint failed: accounts.scope_id, "+
+			"accounts.account_number",
+	) {
+
+		err = fmt.Errorf("%w: %w", db.ErrAccountNumberConflict, err)
+	}
+
 	return dberr.NewSQLError(dberr.BackendSQLite, reason, codeString, err)
 }
 

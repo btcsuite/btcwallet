@@ -61,7 +61,7 @@ func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
 func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
-	scopeID int64) (int64, error) {
+	scopeID int64, accountNumber *uint32) (int64, error) {
 
 	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
 }
