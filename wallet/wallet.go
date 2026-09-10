@@ -187,7 +187,7 @@ type Config struct {
 
 	// Chain is the interface to the blockchain (e.g. bitcoind,
 	// neutrino). If set, the wallet will automatically synchronize with
-	// the chain upon Start.
+	// the chain when its Manager starts it.
 	Chain chain.Interface
 
 	// ChainParams defines the network parameters (e.g. mainnet, testnet).

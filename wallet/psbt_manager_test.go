@@ -103,7 +103,7 @@ func TestDecorateInputsPartialError(t *testing.T) {
 	// Act: Begin Stop before releasing the first dependency. The nested
 	// address lookup must finish inside the already admitted operation.
 	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.Stop(t.Context()) }()
+	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 	unblock()
@@ -166,7 +166,7 @@ func TestFundPsbtPopulationError(t *testing.T) {
 	// Act: Start shutdown while funding is paused, then let the Store
 	// report its error so accepted work can complete before vault teardown.
 	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.Stop(t.Context()) }()
+	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 	unblock()
