@@ -465,19 +465,6 @@ func (b *managerBackendMock) create(ctx context.Context,
 	return args.Get(0).(*walletData), args.Error(1)
 }
 
-// load returns the identity lookup configured by the current test.
-func (b *managerBackendMock) load(ctx context.Context,
-	params LoadWalletParams) (*walletData, error) {
-
-	args := b.Called(ctx, params)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-
-	//nolint:forcetypeassert // The strict expectation owns this return type.
-	return args.Get(0).(*walletData), args.Error(1)
-}
-
 // close returns the configured backend ownership-release result.
 func (b *managerBackendMock) close() error {
 	args := b.Called()
@@ -1047,7 +1034,7 @@ func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
 			Birthday:          time.Now(),
 		})
 		require.NoError(t, err)
-		require.NoError(t, creator.Close())
+		require.NoError(t, creator.Stop())
 
 		manager, err := NewManager(t.Context(), ManagerConfig{
 			Backend:           DBBackendKVDB,
@@ -1057,7 +1044,9 @@ func TestKVDBManagerBackendListsZeroOrOneWallet(t *testing.T) {
 			KVDBPubPassphrase: pubPassphrase,
 		})
 		require.NoError(t, err)
-		t.Cleanup(func() { _ = manager.Close() })
+		t.Cleanup(func() {
+			_ = manager.Stop()
+		})
 
 		pubPassphrase[0] ^= 0xff
 
@@ -1097,158 +1086,6 @@ func TestManagerCreateRejectsMissingIdentityBeforeAssembly(t *testing.T) {
 	require.ErrorContains(t, err, "Name")
 	require.Nil(t, w)
 	store.AssertExpectations(t)
-}
-
-// TestManagerLoadSuccess verifies that an existing KVDB wallet can be reopened
-// with the empty public passphrase supported by the legacy address manager.
-func TestManagerLoadSuccess(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Use one database path for both Managers and deliberately omit
-	// the public passphrase from the creation request. The private passphrase
-	// remains non-empty because spendable wallets require it.
-	dbPath := testKVDBPath(t)
-
-	m := testKVDBManagerAt(t, dbPath)
-	params := CreateWalletParams{
-		Name:              testWalletName,
-		Mode:              ModeGenSeed,
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
-	}
-
-	// Act: Create the wallet through the first Manager using the empty public
-	// credential that the underlying KVDB format accepts.
-	wCreated, err := m.Create(params)
-
-	// Assert: Creation succeeds and returns the live wallet that will later be
-	// compared with the reopened metadata.
-	require.NoError(t, err)
-	require.NotNil(t, wCreated)
-
-	// Act: Release the first bbolt handle, then open the same wallet through a
-	// second Manager while again supplying the empty public passphrase.
-	require.NoError(t, m.Close())
-	m2 := testKVDBManagerAt(t, dbPath)
-	w, err := m2.Load(LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
-
-	// Assert: Reopening succeeds, registers the Wallet under its durable name,
-	// and restores the same persisted master fingerprint.
-	require.NoError(t, err)
-	require.NotNil(t, w)
-
-	m2.RLock()
-	loadedW, ok := m2.wallets[testWalletName]
-	m2.RUnlock()
-	require.True(t, ok)
-	require.Same(t, w, loadedW)
-	require.Zero(t, w.ID())
-
-	require.NotZero(t, w.masterFingerprint)
-	require.Equal(t, wCreated.masterFingerprint, w.masterFingerprint)
-}
-
-// TestManagerLoadExistingWallet verifies that if Load is called for a wallet
-// that is already managed in memory, the Manager detects this.
-func TestManagerLoadExistingWallet(t *testing.T) {
-	t.Parallel()
-
-	dbPath := testKVDBPath(t)
-
-	m := testKVDBManagerAt(t, dbPath)
-	params := CreateWalletParams{
-		Name:              testWalletName,
-		Mode:              ModeGenSeed,
-		PubPassphrase:     []byte("public"),
-		PrivatePassphrase: []byte("private"),
-		Birthday:          time.Now(),
-	}
-
-	wCreated, err := m.Create(params)
-	require.NoError(t, err)
-
-	// Attempt to load the same wallet again using the same manager instance.
-	// Since it's already loaded in memory, the manager should return the
-	// existing instance rather than reloading from disk.
-	wLoaded, err := m.Load(LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
-
-	// Verify that we got the same wallet instance back.
-	require.NoError(t, err)
-	require.Same(t, wCreated, wLoaded)
-}
-
-// TestManagerLoadError verifies that Load properly handles invalid
-// configurations and corrupted or uninitialized databases.
-func TestManagerLoadError(t *testing.T) {
-	t.Parallel()
-
-	t.Run("Invalid Config", func(t *testing.T) {
-		t.Parallel()
-
-		// Arrange: Use a valid kvdb Manager so the empty request name is the
-		// only invalid input observed before cache or backend lookup.
-		m := testKVDBManager(t)
-
-		// Act: Attempt to load without the required durable identity.
-		w, err := m.Load(LoadWalletParams{})
-
-		// Assert: The shared request boundary rejects the call before backend
-		// lookup and does not expose a partial Wallet.
-		require.ErrorIs(t, err, ErrMissingParam)
-		require.ErrorContains(t, err, "missing config parameter")
-		require.ErrorContains(t, err, "Name")
-		require.Nil(t, w)
-	})
-
-	t.Run("Missing Wallet", func(t *testing.T) {
-		t.Parallel()
-
-		// Arrange a fresh kvdb-backed Manager whose database has never
-		// contained wallet state. This distinguishes absence from a
-		// partially initialized or corrupt wallet.
-		m := testKVDBManager(t)
-		// Act by loading the never-created wallet through the public
-		// Manager boundary.
-		w, err := m.Load(LoadWalletParams{
-			Name:          "test",
-			PubPassphrase: []byte("public"),
-		})
-
-		// Assert that the Manager replaces the internal database sentinel
-		// with its public missing-wallet contract and returns no partial
-		// Wallet.
-		require.ErrorIs(t, err, ErrWalletNotFound)
-		require.NotErrorIs(t, err, db.ErrWalletNotFound)
-		require.Nil(t, w)
-	})
-}
-
-// TestManagerLoadMissingSQLite verifies that a real SQLite wallet miss obeys
-// the public Manager contract without exposing its internal database sentinel.
-func TestManagerLoadMissingSQLite(t *testing.T) {
-	t.Parallel()
-
-	// Arrange a Manager over a fresh real SQLite database with a wallet name
-	// that has never been created.
-	m := testSQLiteManager(t)
-
-	const walletName = "no-such-wallet"
-
-	// Act by loading the absent wallet through the public Manager method.
-	w, err := m.Load(LoadWalletParams{Name: walletName})
-
-	// Assert that callers receive only the wallet-owned sentinel, retain the
-	// requested name for context, and never receive a partial Wallet.
-	require.ErrorIs(t, err, ErrWalletNotFound)
-	require.NotErrorIs(t, err, db.ErrWalletNotFound)
-	require.ErrorContains(t, err, walletName)
-	require.Nil(t, w)
 }
 
 // TestManagerString verifies that the String representation of the Manager
@@ -1431,21 +1268,24 @@ func TestManagerKVDBRejectsSecondCreate(t *testing.T) {
 // TestManagerCreateFailureLeavesManagerReusable verifies that a failed Create
 // leaves no durable trace in the Manager: the wallet is not published, the name
 // is still free, and the database the Manager opened is released exactly once
-// by Close. The harness relies on this — it registers the Manager before any
-// Create so that a failing Create still closes the database it opened.
+// by Stop. The harness relies on this — it registers the Manager before any
+// Create so that a failing Create still releases the database it opened.
 func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
 		name    string
 		manager func(testing.TB) *Manager
-	}{{
-		name:    "kvdb",
-		manager: testKVDBManager,
-	}, {
-		name:    "sqlite",
-		manager: testSQLiteManager,
-	}}
+	}{
+		{
+			name:    "kvdb",
+			manager: testKVDBManager,
+		},
+		{
+			name:    "sqlite",
+			manager: testSQLiteManager,
+		},
+	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1484,9 +1324,9 @@ func TestManagerCreateFailureLeavesManagerReusable(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, w)
 
-			// Close releases the one database the Manager owns. It is
+			// Stop releases the one database the Manager owns. It is
 			// called once, after quiescence.
-			require.NoError(t, m.Close())
+			require.NoError(t, m.Stop())
 		})
 	}
 }
