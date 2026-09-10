@@ -41,6 +41,10 @@ type Querier interface {
 	// - Locks the target utxo row during resolution so concurrent spend updates on
 	//   that row serialize with lease acquisition.
 	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	// Reserves the cursor past an exact account without consuming lower holes.
+	// Updating this row serializes exact and sequential allocation in the caller's
+	// account transaction, including when the cursor already exceeds the minimum.
+	AdvanceNextAccountNumber(ctx context.Context, arg AdvanceNextAccountNumberParams) error
 	// Advances the external branch's next index to the supplied value during
 	// recovery horizon extension. The GREATEST guard keeps the counter monotonic
 	// so a slower concurrent writer cannot regress it below an already-recorded

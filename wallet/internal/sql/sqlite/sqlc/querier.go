@@ -41,6 +41,10 @@ type Querier interface {
 	// - SQLite executes the resolution and lease write atomically inside one
 	//   statement, which avoids stale-ID races between separate helper calls.
 	AcquireUtxoLease(ctx context.Context, arg AcquireUtxoLeaseParams) (time.Time, error)
+	// Reserves the cursor past an exact account without consuming lower holes.
+	// The existing immediate transaction keeps this update and the account/key
+	// inserts atomic, including when the cursor already exceeds the minimum.
+	AdvanceNextAccountNumber(ctx context.Context, arg AdvanceNextAccountNumberParams) error
 	// Advances the external branch's next index to the supplied value during
 	// recovery horizon extension. The MAX guard keeps the counter monotonic so a
 	// slower concurrent writer cannot regress it below an already-recorded index.
