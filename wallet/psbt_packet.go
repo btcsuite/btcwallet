@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/psbt/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -33,7 +34,14 @@ var (
 	// carries disagree with each other or with the outpoint they claim to
 	// describe.
 	ErrConflictingUtxo = errors.New("conflicting psbt utxo records")
+
+	// ErrUnsafeSighash is returned when an input asks for a sighash form
+	// this operation cannot honour.
+	ErrUnsafeSighash = errors.New("unsafe psbt sighash type")
 )
+
+// sighashBaseMask isolates the base sighash type from any modifier flags.
+const sighashBaseMask = txscript.SigHashType(0x1f)
 
 // validatePacket checks that a caller's packet describes one coherent
 // transaction and that every record it carries can be read without guessing.
@@ -267,6 +275,11 @@ func validatePacketInputs(packet *psbt.Packet) error {
 		if err != nil {
 			return err
 		}
+
+		err = validateInputSighash(pIn, i)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -331,4 +344,47 @@ func validateInputUtxos(pIn *psbt.PInput, outPoint wire.OutPoint,
 	}
 
 	return nil
+}
+
+// validateInputSighash checks that an input asks for a sighash type that
+// exists.
+//
+// The base type is the low five bits and the only modifier defined on top of
+// it is ANYONECANPAY, so anything outside that shape is a value no signer
+// could honour. Whether a well-formed type is appropriate for a given
+// operation is that operation's question, not this one's.
+func validateInputSighash(pIn *psbt.PInput, idx int) error {
+	sigHash := pIn.SighashType
+	base := sigHash & sighashBaseMask
+	modifiers := sigHash &^ sighashBaseMask
+
+	if modifiers&^txscript.SigHashAnyOneCanPay != 0 {
+		return fmt.Errorf("%w: input %d requests unknown sighash "+
+			"flags %#x", ErrUnsafeSighash, idx, uint32(sigHash))
+	}
+
+	anyoneCanPay := modifiers&txscript.SigHashAnyOneCanPay != 0
+
+	// The default type is the absence of a sighash type, so there is
+	// nothing for a modifier to modify. No spending path defines an
+	// ANYONECANPAY form of it.
+	if base == txscript.SigHashDefault && anyoneCanPay {
+		return fmt.Errorf("%w: input %d requests ANYONECANPAY with a "+
+			"default sighash type", ErrUnsafeSighash, idx)
+	}
+
+	//nolint:exhaustive // ANYONECANPAY is masked off above, so it cannot
+	// appear in base.
+	switch base {
+	// SigHashDefault is only meaningful for taproot inputs, but it is
+	// indistinguishable from an unset field, so it is admitted for all.
+	case txscript.SigHashDefault, txscript.SigHashAll,
+		txscript.SigHashNone, txscript.SigHashSingle:
+
+		return nil
+
+	default:
+		return fmt.Errorf("%w: input %d requests unknown sighash "+
+			"type %#x", ErrUnsafeSighash, idx, uint32(sigHash))
+	}
 }

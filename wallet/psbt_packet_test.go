@@ -451,3 +451,84 @@ func TestValidatePacketUtxoViewsDisagree(t *testing.T) {
 	// Assert.
 	require.ErrorIs(t, err, ErrConflictingUtxo)
 }
+
+// TestValidateInputSighash verifies which sighash types an input may ask for.
+//
+// The base type is the low five bits and ANYONECANPAY is the only modifier
+// defined on top of it, so the admissible set is small and fully enumerable.
+func TestValidateInputSighash(t *testing.T) {
+	t.Parallel()
+
+	const (
+		unknownModifier = txscript.SigHashType(0x40)
+		unknownBase     = txscript.SigHashType(0x05)
+	)
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+		wantErr error
+	}{{
+		// Indistinguishable from an unset field, so it is admitted
+		// for every input type.
+		name:    "the default type",
+		sigHash: txscript.SigHashDefault,
+	}, {
+		name:    "sighash all",
+		sigHash: txscript.SigHashAll,
+	}, {
+		name:    "sighash none",
+		sigHash: txscript.SigHashNone,
+	}, {
+		// Well formed here. Whether funding can honour it is
+		// funding's own question.
+		name:    "sighash single",
+		sigHash: txscript.SigHashSingle,
+	}, {
+		name:    "sighash all with anyonecanpay",
+		sigHash: txscript.SigHashAll | txscript.SigHashAnyOneCanPay,
+	}, {
+		name:    "sighash none with anyonecanpay",
+		sigHash: txscript.SigHashNone | txscript.SigHashAnyOneCanPay,
+	}, {
+		name:    "sighash single with anyonecanpay",
+		sigHash: txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+	}, {
+		// The default type is the absence of a type, so there is
+		// nothing for a modifier to modify. Taproot spells the
+		// ANYONECANPAY variant as 0x81, never 0x80.
+		name:    "anyonecanpay on its own",
+		sigHash: txscript.SigHashAnyOneCanPay,
+		wantErr: ErrUnsafeSighash,
+	}, {
+		name:    "an unknown modifier flag",
+		sigHash: txscript.SigHashAll | unknownModifier,
+		wantErr: ErrUnsafeSighash,
+	}, {
+		name:    "an unknown base type",
+		sigHash: unknownBase,
+		wantErr: ErrUnsafeSighash,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			packet := testPacket(t)
+			packet.Inputs[0].SighashType = tc.sigHash
+
+			// Act.
+			err := validatePacket(packet)
+
+			// Assert.
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
