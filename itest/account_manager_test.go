@@ -167,6 +167,42 @@ func testAccountManagerCreateAccount(h *bwtest.HarnessTest) {
 	require.Equal(h, want, durableInfo)
 }
 
+// testAccountManagerFillAccountHole verifies that reopening after sparse
+// allocation leaves lower exact account numbers available.
+func testAccountManagerFillAccountHole(h *bwtest.HarnessTest) {
+	// Exact lower-hole creation is unavailable on kvdb.
+	if *dbBackend != string(wallet.DBBackendSQLite) &&
+		*dbBackend != string(wallet.DBBackendPostgres) {
+
+		h.Skip("exact account creation requires SQL")
+	}
+
+	// Arrange: persist sparse seven and reopen before requesting lower two,
+	// so the hole must remain available in durable allocation state.
+	w, _ := h.NewWallet(bwtest.WalletFixture{Unlocked: true})
+	number := wallet.AccountNumber(7)
+	params := wallet.NewAccountParams{
+		Scope:         waddrmgr.KeyScopeBIP0084,
+		Name:          "sparse before hole",
+		AccountNumber: &number,
+	}
+	_, err := w.NewAccount(h.Context(), params)
+	require.NoError(h, err)
+	w = h.ReloadWallet(w)
+	h.UnlockWallet(w)
+
+	hole := wallet.AccountNumber(2)
+	params.Name = "lower hole"
+	params.AccountNumber = &hole
+
+	// Act: fill the lower hole through public creation after reopening.
+	filled, err := w.NewAccount(h.Context(), params)
+
+	// Assert: earlier sparse creation did not consume the requested hole.
+	require.NoError(h, err)
+	require.Equal(h, hole, *filled.AccountNumber)
+}
+
 // testAccountManagerCreateAccountSequence verifies that derived account numbers
 // are allocated contiguously within a key scope, that each scope allocates from
 // its own counter, and that the counter survives a wallet reload.
