@@ -1518,8 +1518,8 @@ func (s *syncer) fetchAndFilterBlocks(ctx context.Context,
 	// "header-only" scan to advance the wallet's sync state without
 	// downloading full blocks or filters.
 	//
-	// NOTE: For targeted rescans, the state will never be empty as it is
-	// initialized with specific targets.
+	// NOTE: A targeted rescan can also be empty when neither eligible
+	// horizons nor persisted addresses or outputs remain.
 	if scanState.Empty() {
 		log.Debugf("Performing header-only scan for %d blocks",
 			endHeight-startHeight+1)
@@ -1981,10 +1981,11 @@ func (s *syncer) storeScanHorizons(ctx context.Context,
 }
 
 // storeFullScanHorizons loads full recovery horizon accounts from the Store,
-// skipping only the keyless raw-import bucket. The scan selects no account by
+// skipping the keyless raw-import bucket. The scan selects no account by
 // number here, so each one is keyed on its durable store row ID and an imported
 // account cannot overwrite a derived account owning the same BIP44 number in
 // the same scope.
+// NoChainSync accounts are also excluded from recovery horizons.
 func (s *syncer) storeFullScanHorizons(
 	ctx context.Context) ([]storeScanAccount, error) {
 
@@ -2001,7 +2002,8 @@ func (s *syncer) storeFullScanHorizons(
 		// The keyless imported-address bucket has no xpub to derive
 		// lookahead addresses from. Its materialized addresses are still
 		// watched by storeScanAddresses.
-		if keylessImportedAccount(accounts[i]) {
+		// NoChainSync accounts opt out of recovery derivation as well.
+		if accounts[i].NoChainSync || keylessImportedAccount(accounts[i]) {
 			continue
 		}
 
@@ -2026,6 +2028,7 @@ func (s *syncer) storeFullScanHorizons(
 // storeTargetedScanHorizons loads recovery horizon accounts for already
 // resolved scan targets. Each target keeps the account number the caller named
 // as its recovery key, while the Store lookup itself prefers the durable name.
+// NoChainSync accounts are excluded from recovery horizons.
 func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 	targets []scanTarget) ([]storeScanAccount, error) {
 
@@ -2049,7 +2052,8 @@ func (s *syncer) storeTargetedScanHorizons(ctx context.Context,
 		// The keyless imported-address bucket has no xpub to derive
 		// lookahead addresses from. Its materialized addresses are still
 		// watched by storeScanAddresses.
-		if keylessImportedAccount(*info) {
+		// NoChainSync accounts opt out of recovery derivation as well.
+		if info.NoChainSync || keylessImportedAccount(*info) {
 			continue
 		}
 
@@ -2186,6 +2190,7 @@ func keylessImportedAccount(info db.AccountInfo) bool {
 
 // storeScanAddresses loads active scan addresses through the store, paging per
 // (key scope, account) pair because ListAddresses is scoped to a single pair.
+// Accounts marked NoChainSync are omitted from this wallet-wide read.
 //
 // This reproduces the legacy ForEachRelevantActiveAddress filtering used by
 // the old scan-data reader: for default key scopes every active address is
@@ -2206,7 +2211,8 @@ func (s *syncer) storeScanAddresses(
 
 	var addrs []address.Address
 	for i := range accounts {
-		if keylessImportedAccount(accounts[i]) {
+		// Opted-out accounts must not supply persisted recovery addresses.
+		if accounts[i].NoChainSync || keylessImportedAccount(accounts[i]) {
 			continue
 		}
 

@@ -714,39 +714,45 @@ func TestScanBatch(t *testing.T) {
 	).Twice()
 	store.On("ListAddresses", mock.Anything, mock.Anything).Return(
 		page.Result[db.AddressInfo, uint32]{}, nil,
-	).Maybe()
+	).Twice()
 	store.On("ListOutputsToWatch", mock.Anything, mock.Anything).Return(
 		[]db.UtxoInfo(nil), nil,
 	).Once()
 
-	// The recovery state resolves the account's branches through the legacy
-	// address manager.
-	scopedMgr := &bwmock.AccountStore{}
-	mockAddrStore.On(
-		"FetchScopedKeyManager", mock.Anything,
-	).Return(scopedMgr, nil).Maybe()
-
 	// Mock expectations for header-only scanning when no targets are
 	// present.
 	hashes := []chainhash.Hash{{0x01}}
+	timestamp := time.Unix(123456, 0).UTC()
+
 	mockChain.On(
 		"GetBlockHashes", int64(11), int64(11),
 	).Return(hashes, nil).Once()
 	mockChain.On(
 		"GetBlockHeaders", hashes,
-	).Return([]*wire.BlockHeader{{}}, nil).Once()
+	).Return([]*wire.BlockHeader{{Timestamp: timestamp}}, nil).Once()
 
-	// Expect the scan batch to be written through the store, advancing the
-	// synced tip.
-	store.On("ApplyScanBatch", mock.Anything, mock.Anything).Return(
-		nil).Once()
+	// Even without matches the full scan must retain the complete block
+	// identity and advance synchronization without transaction/horizon writes.
+	store.On("ApplyScanBatch", mock.Anything, db.ScanBatchParams{
+		Horizons: []db.ScanHorizon{},
+		SyncedBlocks: []db.Block{
+			{
+				Hash:      hashes[0],
+				Height:    11,
+				Timestamp: timestamp,
+			},
+		},
+	}).Return(nil).Once()
 
 	// Act: Perform a batch scan from height 10 to 11.
 	err := s.scanBatch(t.Context(), waddrmgr.BlockStamp{Height: 10}, 11)
 
-	// Assert: Verify that the batch scan completed successfully.
+	// Assert: The exact Store batch proves no-match blocks retain their
+	// hash, height, and timestamp despite having no relevant transactions.
 	require.NoError(t, err)
 	store.AssertExpectations(t)
+	mockChain.AssertExpectations(t)
+	mockAddrStore.AssertExpectations(t)
 }
 
 // TestFetchAndFilterBlocks verifies the block fetching and filtering helper.
@@ -2182,6 +2188,16 @@ func TestStoreScanHorizonsListAccounts(t *testing.T) {
 		IsWatchOnly:          true,
 	}}
 
+	// An opted-out account must not seed a horizon despite having the same
+	// derivation metadata available as the eligible account.
+	excludedID, excludedNumber := uint32(42), uint32(3)
+	excluded := accounts[0]
+	excluded.AccountID = &excludedID
+	excluded.AccountNumber = &excludedNumber
+	excluded.AccountName = "excluded"
+	excluded.NoChainSync = true
+	accounts = append(accounts, excluded)
+
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
 			return query.WalletID == walletID && query.SkipBalance
@@ -2810,6 +2826,14 @@ func TestStoreScanAddresses(t *testing.T) {
 		AccountName: waddrmgr.DefaultAccountName,
 		KeyScope:    db.KeyScopeBIP0084,
 	}}
+	// The second account opts out, so its persisted children must not enter
+	// the address set returned for recovery.
+	accounts = append(accounts, db.AccountInfo{
+		AccountName: "excluded",
+		KeyScope:    db.KeyScopeBIP0084,
+		NoChainSync: true,
+	})
+
 	store.On("ListAccounts", mock.Anything, mock.MatchedBy(
 		func(query db.ListAccountsQuery) bool {
 			return query.WalletID == walletID && query.SkipBalance
@@ -3096,6 +3120,107 @@ func TestStoreScanUnspent(t *testing.T) {
 	require.Equal(t, received, credits[0].Received)
 	require.Equal(t, int32(42), credits[0].Height)
 	require.True(t, credits[0].FromCoinBase)
+	store.AssertExpectations(t)
+}
+
+// TestLoadStoreScanDataTargetedWalletWide verifies excluding a requested
+// horizon does not exclude eligible wallet addresses or watched outputs.
+func TestLoadStoreScanDataTargetedWalletWide(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: Request an opted-out account while the wallet also owns an
+	// eligible account address, a raw import, and an output needing recovery.
+	const walletID uint32 = 18
+
+	store := &walletmock.Store{}
+	s := newSyncer(
+		Config{ChainParams: &chainParams}, nil, nil, &mockTxPublisher{},
+		store, walletID,
+	)
+	target := scanTarget{
+		Scope:       waddrmgr.KeyScopeBIP0084,
+		Account:     7,
+		AccountName: "excluded",
+	}
+	excluded := db.AccountInfo{
+		AccountName: target.AccountName,
+		KeyScope:    db.KeyScopeBIP0084,
+		NoChainSync: true,
+	}
+	store.On("GetAccount", mock.Anything, db.GetAccountQuery{
+		WalletID:    walletID,
+		Scope:       db.KeyScopeBIP0084,
+		Name:        &target.AccountName,
+		SkipBalance: true,
+	}).Return(&excluded, nil).Once()
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID:    walletID,
+		SkipBalance: true,
+	}).Return([]db.AccountInfo{
+		{
+			AccountName: "eligible",
+			KeyScope:    db.KeyScopeBIP0084,
+		},
+		excluded,
+	}, nil).Once()
+
+	// Distinct scripts identify the eligible account address and raw import.
+	var addresses []address.Address
+
+	var scripts [][]byte
+
+	for i := byte(1); i <= 2; i++ {
+		addr, err := address.NewAddressPubKeyHash(
+			bytes.Repeat([]byte{i}, 20), &chainParams,
+		)
+		require.NoError(t, err)
+		script, err := txscript.PayToAddrScript(addr)
+		require.NoError(t, err)
+
+		addresses = append(addresses, addr)
+		scripts = append(scripts, script)
+	}
+
+	store.On("ListAddresses", mock.Anything, mock.MatchedBy(
+		func(query db.ListAddressesQuery) bool {
+			return query.WalletID == walletID &&
+				query.AccountName != nil &&
+				*query.AccountName == "eligible" &&
+				query.Scope != nil && *query.Scope == db.KeyScopeBIP0084
+		},
+	)).Return(page.Result[db.AddressInfo, uint32]{
+		Items: []db.AddressInfo{{ScriptPubKey: scripts[0]}},
+	}, nil).Once()
+	expectImportedScanAddressPage(
+		store, walletID, page.Result[db.AddressInfo, uint32]{
+			Items: []db.AddressInfo{{ScriptPubKey: scripts[1]}},
+		},
+	)
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x18}, Index: 1}
+	store.On("ListOutputsToWatch", mock.Anything, walletID).Return(
+		[]db.UtxoInfo{
+			{
+				OutPoint: outpoint,
+				PkScript: scripts[0],
+				Height:   db.UnminedHeight,
+			},
+		}, nil,
+	).Once()
+
+	// Act: Load persisted scan inputs with the resolved account selection;
+	// NoChainSync removes its horizon but must not narrow the other reads.
+	horizons, addrs, unspent, err := s.loadStoreScanData(
+		t.Context(), []scanTarget{target},
+	)
+
+	// Assert: Both wallet addresses and the watched output survive despite
+	// there being no eligible requested horizon to drive address derivation.
+	require.NoError(t, err)
+	require.Empty(t, horizons)
+	require.ElementsMatch(t, addresses, addrs)
+	require.Len(t, unspent, 1)
+	require.Equal(t, outpoint, unspent[0].OutPoint)
 	store.AssertExpectations(t)
 }
 
