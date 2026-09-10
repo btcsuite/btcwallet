@@ -38,6 +38,10 @@ var (
 	// ErrUnsafeSighash is returned when an input asks for a sighash form
 	// this operation cannot honour.
 	ErrUnsafeSighash = errors.New("unsafe psbt sighash type")
+
+	// ErrPacketSigned is returned when a packet already carries signature
+	// material in an operation that is only defined for unsigned packets.
+	ErrPacketSigned = errors.New("psbt already carries signatures")
 )
 
 // sighashBaseMask isolates the base sighash type from any modifier flags.
@@ -387,4 +391,49 @@ func validateInputSighash(pIn *psbt.PInput, idx int) error {
 		return fmt.Errorf("%w: input %d requests unknown sighash "+
 			"type %#x", ErrUnsafeSighash, idx, uint32(sigHash))
 	}
+}
+
+// validateFundPacket checks that a packet is structurally sound and that
+// funding may proceed on it.
+//
+// Funding rewrites the transaction, adding inputs, appending a change output
+// and reordering everything. That is why an existing signature is refused
+// rather than silently invalidated, and why SIGHASH_SINGLE cannot be honoured:
+// it commits an input to the output at its own index.
+func validateFundPacket(packet *psbt.Packet) error {
+	err := validatePacket(packet)
+	if err != nil {
+		return err
+	}
+
+	for i := range packet.Inputs {
+		pIn := &packet.Inputs[i]
+
+		if inputIsSigned(pIn) {
+			return fmt.Errorf("%w: input %d, funding is only "+
+				"defined on unsigned packets", ErrPacketSigned,
+				i)
+		}
+
+		if pIn.SighashType&sighashBaseMask ==
+			txscript.SigHashSingle {
+
+			return fmt.Errorf("%w: input %d requests "+
+				"SIGHASH_SINGLE, which funding cannot "+
+				"preserve across added outputs and sorting",
+				ErrUnsafeSighash, i)
+		}
+	}
+
+	return nil
+}
+
+// inputIsSigned reports whether an input carries any signature material, in
+// any of the forms a PSBT can hold it.
+func inputIsSigned(pIn *psbt.PInput) bool {
+	return len(pIn.PartialSigs) > 0 ||
+		len(pIn.TaprootKeySpendSig) > 0 ||
+		len(pIn.TaprootScriptSpendSig) > 0 ||
+		len(pIn.FinalScriptSig) > 0 ||
+		len(pIn.FinalScriptWitness) > 0
 }

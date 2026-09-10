@@ -532,3 +532,161 @@ func TestValidateInputSighash(t *testing.T) {
 		})
 	}
 }
+
+// TestValidatePacketLeavesPacketUnchanged verifies that validation is
+// side-effect free.
+//
+// It runs before the wallet commits to anything, and callers rely on being
+// handed back exactly what they passed in when it refuses, so it must not
+// touch the packet even on the paths that accept one.
+func TestValidatePacketLeavesPacketUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: a packet carrying something in every field validation
+	// looks at, plus a signature so the funding gate has something to
+	// reject.
+	packet := testPacket(t)
+	packet.Inputs[0].PartialSigs = []*psbt.PartialSig{{
+		PubKey:    bytes.Repeat([]byte{0x02}, 33),
+		Signature: bytes.Repeat([]byte{0x30}, 71),
+	}}
+	packet.Inputs[0].Bip32Derivation = []*psbt.Bip32Derivation{{
+		PubKey:               bytes.Repeat([]byte{0x02}, 33),
+		MasterKeyFingerprint: 0x11223344,
+		Bip32Path:            []uint32{84, 0, 0, 0, 1},
+	}}
+	packet.Outputs[0].WitnessScript = []byte{0x51, 0x52}
+
+	before, err := packet.B64Encode()
+	require.NoError(t, err)
+
+	// Act: run both the structural core and the funding gate, which
+	// rejects this packet for its signature.
+	require.NoError(t, validatePacket(packet))
+	require.ErrorIs(t, validateFundPacket(packet), ErrPacketSigned)
+
+	// Assert: neither call altered a byte of it.
+	after, err := packet.B64Encode()
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+// TestValidateFundPacketAcceptsUnsigned verifies that an ordinary unsigned
+// packet passes the funding gate.
+func TestValidateFundPacketAcceptsUnsigned(t *testing.T) {
+	t.Parallel()
+
+	// Arrange.
+	packet := testPacket(t)
+
+	// Act.
+	err := validateFundPacket(packet)
+
+	// Assert.
+	require.NoError(t, err)
+}
+
+// TestValidateFundPacketRejectsSignatures verifies that funding refuses a
+// packet that already carries signature material, in any of the forms a PSBT
+// can hold it.
+//
+// Funding rewrites the very transaction those signatures commit to, so one
+// present here is either already void or about to be. Saying so is more use to
+// the caller than silently invalidating it.
+func TestValidateFundPacketRejectsSignatures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input psbt.PInput
+	}{{
+		name: "an ecdsa partial signature",
+		input: psbt.PInput{
+			PartialSigs: []*psbt.PartialSig{{
+				PubKey:    bytes.Repeat([]byte{0x02}, 33),
+				Signature: bytes.Repeat([]byte{0x30}, 71),
+			}},
+		},
+	}, {
+		name: "a taproot key spend signature",
+		input: psbt.PInput{
+			TaprootKeySpendSig: bytes.Repeat([]byte{0x01}, 64),
+		},
+	}, {
+		name: "a taproot script spend signature",
+		input: psbt.PInput{
+			TaprootScriptSpendSig: []*psbt.TaprootScriptSpendSig{{
+				XOnlyPubKey: bytes.Repeat([]byte{0x02}, 32),
+				LeafHash:    bytes.Repeat([]byte{0x03}, 32),
+				Signature:   bytes.Repeat([]byte{0x01}, 64),
+			}},
+		},
+	}, {
+		name: "a finalized script signature",
+		input: psbt.PInput{
+			FinalScriptSig: []byte{0x51},
+		},
+	}, {
+		name: "a finalized witness",
+		input: psbt.PInput{
+			FinalScriptWitness: []byte{0x01, 0x01, 0x51},
+		},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: keep the input's UTXO records, so the only
+			// thing wrong with the packet is the signature.
+			packet := testPacket(t)
+			input := tc.input
+			input.NonWitnessUtxo = packet.Inputs[0].NonWitnessUtxo
+			input.WitnessUtxo = packet.Inputs[0].WitnessUtxo
+			packet.Inputs[0] = input
+
+			// Act.
+			err := validateFundPacket(packet)
+
+			// Assert.
+			require.ErrorIs(t, err, ErrPacketSigned)
+		})
+	}
+}
+
+// TestValidateFundPacketRejectsSighashSingle verifies that funding refuses
+// SIGHASH_SINGLE, with or without ANYONECANPAY.
+//
+// It commits an input to the output at its own index, and funding appends a
+// change output and re-sorts, so it cannot keep outputs where the caller put
+// them.
+func TestValidateFundPacketRejectsSighashSingle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		sigHash txscript.SigHashType
+	}{{
+		name:    "on its own",
+		sigHash: txscript.SigHashSingle,
+	}, {
+		name:    "with anyonecanpay",
+		sigHash: txscript.SigHashSingle | txscript.SigHashAnyOneCanPay,
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange.
+			packet := testPacket(t)
+			packet.Inputs[0].SighashType = tc.sigHash
+
+			// Act.
+			err := validateFundPacket(packet)
+
+			// Assert.
+			require.ErrorIs(t, err, ErrUnsafeSighash)
+		})
+	}
+}
