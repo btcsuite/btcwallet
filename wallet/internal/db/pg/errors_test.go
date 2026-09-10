@@ -1,9 +1,12 @@
 package pg
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"testing"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
@@ -115,4 +118,47 @@ func TestMapErr(t *testing.T) {
 	require.Equal(t, dberr.BackendPostgres, err.Backend)
 	require.Equal(t, dberr.ReasonReadOnly, err.Reason)
 	require.Equal(t, dberr.ClassFatal, err.Class())
+}
+
+// TestMapErrAccountNameConflict verifies only the account-name unique index is
+// marked as an account conflict.
+func TestMapErrAccountNameConflict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		constraint string
+		want       bool
+	}{
+		{
+			name:       "account name",
+			constraint: accountNameConstraint,
+			want:       true,
+		},
+		{
+			name:       "other unique index",
+			constraint: "uidx_accounts_wallet_scope_account_number",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Wrap a unique violation as Store operations do.
+			cause := fmt.Errorf("write: %w", &pgconn.PgError{
+				Code:           codeUniqueViolation,
+				ConstraintName: test.constraint,
+			})
+
+			// Act: Classify the driver failure through the backend mapper.
+			err := mapErr(cause)
+
+			// Assert: Only the name index gains the Store conflict identity.
+			require.ErrorIs(t, err, cause)
+			require.Equal(t, test.want, errors.Is(
+				err, db.ErrAccountNameConflict,
+			))
+		})
+	}
 }

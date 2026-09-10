@@ -3,13 +3,15 @@ package pg
 
 import (
 	"errors"
+	"fmt"
 
+	"github.com/btcsuite/btcwallet/wallet/internal/db"
 	dberr "github.com/btcsuite/btcwallet/wallet/internal/db/err"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// accountNameConstraint is the migrated unique index for account names
-// within a wallet and key scope.
+// accountNameConstraint is the unique account-name index within a wallet and
+// key scope.
 const accountNameConstraint = "uidx_accounts_wallet_scope_account_name"
 
 // SQLSTATE helper constants support PostgreSQL error classification.
@@ -80,15 +82,6 @@ var reasonByCode = map[string]dberr.Reason{
 	codeExclusionViolation:   dberr.ReasonConstraint,
 }
 
-// isAccountNameConflict identifies the account-name unique constraint without
-// classifying unrelated uniqueness violations as duplicate accounts.
-func isAccountNameConflict(err error) bool {
-	var pgErr *pgconn.PgError
-
-	return errors.As(err, &pgErr) && pgErr.Code == codeUniqueViolation &&
-		pgErr.ConstraintName == accountNameConstraint
-}
-
 // mapErr maps PostgreSQL driver and transport errors into SQLError.
 func mapErr(err error) *dberr.SQLError {
 	// Prefer SQLSTATE-based mapping first so a completed PostgreSQL statement
@@ -96,12 +89,15 @@ func mapErr(err error) *dberr.SQLError {
 	// transport fallback.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		sqlErr := mapCode(pgErr.Code, err)
-		if isAccountNameConflict(err) {
-			sqlErr.Constraint = dberr.ConstraintAccountName
+		// Only the account-name index identifies a caller name conflict;
+		// preserve the driver cause for SQL classification and diagnostics.
+		if pgErr.Code == codeUniqueViolation &&
+			pgErr.ConstraintName == accountNameConstraint {
+
+			err = fmt.Errorf("%w: %w", db.ErrAccountNameConflict, err)
 		}
 
-		return sqlErr
+		return mapCode(pgErr.Code, err)
 	}
 
 	var connectErr *pgconn.ConnectError
