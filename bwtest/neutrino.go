@@ -112,6 +112,11 @@ func (n *NeutrinoBackend) NewChainClient(ctx context.Context) (chain.Interface,
 		client.Stop()
 		client.WaitForShutdown()
 
+		// NeutrinoClient.Stop only shuts down the wallet-facing client.
+		// Stop the owned chain service and its goroutines before closing
+		// the filter store they access.
+		_ = chainService.Stop()
+
 		_ = spvdb.Close()
 		_ = os.RemoveAll(dataDir)
 	}
