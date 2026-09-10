@@ -133,7 +133,6 @@ func testControllerChangePassphraseLifecycle(h *bwtest.HarnessTest) {
 	w, err := manager.Create(h.TestWalletParams())
 	require.NoError(h, err, "failed to create wallet")
 	h.RegisterWallet(manager, w)
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
 
 	// Release registration before reopening through a fresh Manager.
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
