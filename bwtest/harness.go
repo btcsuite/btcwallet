@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"slices"
 	"sync"
 	"testing"
 
@@ -39,10 +38,8 @@ const (
 	defaultChainReconnectAttempts = 5
 )
 
-// walletRegistration tracks every wallet owned by one Manager. Each map value
-// is a copied reload request, or nil for wallets registered only for lifecycle
-// ownership.
-type walletRegistration map[*wallet.Wallet]*wallet.LoadWalletParams
+// walletRegistration tracks every wallet owned by one Manager.
+type walletRegistration map[*wallet.Wallet]struct{}
 
 // HarnessTest is the integration test harness.
 type HarnessTest struct {
@@ -209,9 +206,8 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 // NewWalletManager builds a Manager for the backend the harness was started
 // with and registers it for teardown.
 //
-// The Manager is registered before any wallet is created, so a failed Create
-// still releases the database it opened. Cleanup stops every wallet first and
-// then closes every Manager.
+// The Manager is registered before it is started, so cleanup owns it even if
+// startup or wallet creation fails.
 func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	h.Helper()
 
@@ -366,16 +362,6 @@ func (h *HarnessTest) RegisterWallet(manager *wallet.Manager,
 
 	h.Helper()
 
-	h.registerWallet(manager, w, nil)
-}
-
-// registerWallet records a wallet under manager and owns a copy of optional
-// reloadParams so fixture mutations cannot alter a later reload credential.
-func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
-	reloadParams *wallet.LoadWalletParams) {
-
-	h.Helper()
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -391,16 +377,7 @@ func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
 		)
 	}
 
-	var params *wallet.LoadWalletParams
-	if reloadParams != nil {
-		copiedParams := *reloadParams
-		copiedParams.PubPassphrase = slices.Clone(
-			reloadParams.PubPassphrase,
-		)
-		params = &copiedParams
-	}
-
-	registration[w] = params
+	registration[w] = struct{}{}
 }
 
 // DeregisterWallet releases a wallet from harness ownership.
