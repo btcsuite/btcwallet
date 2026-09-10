@@ -528,3 +528,61 @@ func testSignerECDHRejectAccount(h *bwtest.HarnessTest) {
 		h, [32]byte{}, secret, "a refused ECDH returned secret material",
 	)
 }
+
+// testSignerECDHWatchOnly verifies that a wallet holding only public account
+// material serves the public half of an exchange and refuses the secret half,
+// so the two Signer operations do not share an availability boundary.
+func testSignerECDHWatchOnly(h *bwtest.HarnessTest) {
+	const accountName = "signer ecdh watchonly account"
+
+	// Arrange: A started watch-only shell wallet whose one account was seeded
+	// from an extended public key. The wallet is left in the state every
+	// backend can reach: kvdb has no private material to unlock at all.
+	ctx := h.Context()
+	keys := deterministicImportedAccountKeys(h)
+	w, _ := h.NewWallet(bwtest.WalletFixture{
+		InitialAccounts: []wallet.WatchOnlyAccount{{
+			Scope:                keys.scope,
+			XPub:                 keys.accountKey,
+			MasterKeyFingerprint: keys.masterKeyFingerprint,
+			Name:                 accountName,
+			AddrType:             keys.addrType,
+		}},
+	})
+
+	account, err := w.GetAccount(ctx, keys.scope, accountName)
+	require.NoError(h, err, "failed to read the watch-only account")
+	require.True(h, account.IsWatchOnly, "account is not watch-only")
+
+	peerKey, err := btcec.NewPrivateKey()
+	require.NoError(h, err, "failed to generate the peer key")
+
+	// Act: Ask the same wallet for the public half of the exchange.
+	_, err = w.DerivePubKey(ctx, wallet.DerivePubKeyParams{
+		Account: wallet.NewAccountSelectorByName(keys.scope, accountName),
+	})
+
+	// Assert: The public half is available, so the account itself is
+	// reachable and the refusal below is not a lookup failure.
+	require.NoError(h, err, "watch-only wallet refused public derivation")
+
+	// Act: Ask for the secret half over the same account.
+	secret, err := w.ECDH(ctx, wallet.BIP32Path{
+		KeyScope: keys.scope,
+	}, peerKey.PubKey())
+
+	// Assert: The exchange is refused and hands back nothing, while the public
+	// half above stays available. The identity here is the lock gate, not a
+	// signing-material check: a watch-only wallet has no private material to
+	// unlock, and kvdb refuses to unlock one at all, so this is the furthest
+	// state every backend can reach. That is the point of the pairing rather
+	// than a weaker assertion: one wallet, public derivation served and the
+	// shared secret refused.
+	require.ErrorIs(
+		h, err, wallet.ErrStateForbidden,
+		"ECDH on a watch-only wallet not rejected",
+	)
+	require.Equal(
+		h, [32]byte{}, secret, "a refused ECDH returned secret material",
+	)
+}
