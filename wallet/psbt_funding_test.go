@@ -617,3 +617,50 @@ func TestChangeSwappedOutputsRejectsBadIndex(t *testing.T) {
 	_, err := changeSwappedOutputs(caller, 2)
 	require.ErrorIs(t, err, ErrPacketMalformed)
 }
+
+// TestChangeIndexAfterSortUsesIdentity verifies that the change output is
+// found by identity, not by what it holds: every output here is identical in
+// value and script, so anything comparing contents would have no way to pick
+// the right one.
+func TestChangeIndexAfterSortUsesIdentity(t *testing.T) {
+	t.Parallel()
+
+	const numOutputs = 4
+
+	for change := range numOutputs {
+		tx := wire.NewMsgTx(2)
+		for range numOutputs {
+			tx.AddTxOut(&wire.TxOut{
+				Value:    1000,
+				PkScript: bytes.Repeat([]byte{0xab}, 22),
+			})
+		}
+
+		packet, err := psbt.NewFromUnsignedTx(tx)
+		require.NoError(t, err)
+
+		want := packet.UnsignedTx.TxOut[change]
+
+		// Act: sort the packet, then look the change output up.
+		require.NoError(t, psbt.InPlaceSort(packet))
+
+		idx, err := changeIndexAfterSort(packet, want)
+		require.NoError(t, err)
+		require.Same(t, want, packet.UnsignedTx.TxOut[idx])
+	}
+}
+
+// TestChangeIndexAfterSortMissing verifies that a change output that is not in
+// the packet at all is reported rather than passed off as index zero.
+func TestChangeIndexAfterSortMissing(t *testing.T) {
+	t.Parallel()
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{Value: 1000, PkScript: []byte{0x51}})
+
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+
+	_, err = changeIndexAfterSort(packet, &wire.TxOut{Value: 2000})
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}

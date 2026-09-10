@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/btcsuite/btcd/psbt/v2"
@@ -293,4 +294,67 @@ func changeSwappedOutputs(callerOutputs []psbt.POutput,
 		outputs[changeIndex]
 
 	return outputs, nil
+}
+
+// sortPacketAndFindChange sorts a packet into the canonical BIP69 order and
+// reports where the change output ended up, or -1 if there is none.
+//
+// changeIndex is where the change output sits before sorting.
+func sortPacketAndFindChange(packet *psbt.Packet,
+	changeIndex int) (int32, error) {
+
+	// Take hold of the change output before sorting moves it. Sorting
+	// reorders the outputs but does not rebuild them, so it is the same
+	// object afterwards wherever it lands.
+	var changeOutput *wire.TxOut
+
+	if changeIndex >= 0 {
+		if changeIndex >= len(packet.UnsignedTx.TxOut) {
+			return 0, fmt.Errorf("%w: change output at %d of %d "+
+				"outputs", ErrPacketMalformed, changeIndex,
+				len(packet.UnsignedTx.TxOut))
+		}
+
+		changeOutput = packet.UnsignedTx.TxOut[changeIndex]
+	}
+
+	err := psbt.InPlaceSort(packet)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrPacketMalformed, err)
+	}
+
+	// A packet with no change output has no change index to report.
+	if changeOutput == nil {
+		return -1, nil
+	}
+
+	return changeIndexAfterSort(packet, changeOutput)
+}
+
+// changeIndexAfterSort reports where changeOutput sits in the packet's
+// outputs, by identity rather than by value.
+//
+// Sorting reorders the outputs without rebuilding them, so the change output
+// is still the same object. Comparing values would not do: two outputs paying
+// the same amount to the same script are indistinguishable that way.
+func changeIndexAfterSort(packet *psbt.Packet,
+	changeOutput *wire.TxOut) (int32, error) {
+
+	for i, txOut := range packet.UnsignedTx.TxOut {
+		if txOut != changeOutput {
+			continue
+		}
+
+		if i > math.MaxInt32 {
+			return 0, ErrChangeIndexOutOfRange
+		}
+
+		// The bound above makes this conversion safe.
+		//
+		//nolint:gosec
+		return int32(i), nil
+	}
+
+	return 0, fmt.Errorf("%w: change output is missing after sorting",
+		ErrPacketMalformed)
 }
