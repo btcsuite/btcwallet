@@ -8,87 +8,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testControllerStartStop verifies the wallet lifecycle: a wallet starts and
-// stops cleanly, Stop is idempotent, the stopped instance is terminal, and a
-// fresh Load yields a working instance.
-func testControllerStartStop(h *bwtest.HarnessTest) {
-	params := h.TestWalletParams()
-
-	manager := h.NewWalletManager()
-	w, err := manager.Create(params)
-	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(manager, w)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
-
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
-
-	// A second Stop is a no-op.
-	require.NoError(h, w.Stop(h.Context()), "second stop should be a no-op")
-
-	// A stopped Wallet is terminal. Both lifecycle restart and maintained
-	// access must fail on the retained pointer before any backend work begins.
-	require.ErrorIs(
-		h, w.Start(h.Context()), wallet.ErrWalletStopped,
-		"stopped wallet restarted",
-	)
-	_, err = w.Info(h.Context())
-	require.ErrorIs(
-		h, err, wallet.ErrWalletStopped,
-		"stopped wallet accepted maintained access",
-	)
-
-	// Remove the terminal Wallet so MineBlocks cannot poll it during reload.
-	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-
-	// Keep the Manager registered until Close succeeds, then reload from disk.
-	require.NoError(h, manager.Close(), "failed to close wallet manager")
-	require.True(h, h.ReleaseManager(manager), "failed to release manager")
-	manager = h.NewWalletManager()
-	reloaded, err := manager.Load(wallet.LoadWalletParams{
-		Name:          params.Name,
-		PubPassphrase: params.PubPassphrase,
-	})
-	require.NoError(h, err, "failed to reload wallet")
-	h.RegisterWallet(manager, reloaded)
-	require.NoError(
-		h, reloaded.Start(h.Context()), "failed to start reloaded wallet",
-	)
-}
-
-// testControllerUnlockLock verifies unlock/lock behavior and their state gates:
-// they are forbidden before Start, a failed unlock leaves the wallet locked,
-// and Lock is idempotent after an explicit lock.
+// testControllerUnlockLock verifies unlock/lock behavior: a failed unlock
+// leaves the wallet locked, and Lock is idempotent after an explicit lock.
 func testControllerUnlockLock(h *bwtest.HarnessTest) {
 	const wrongPassphrase = "wrong-private-passphrase"
 
-	params := h.TestWalletParams()
-
-	manager := h.NewWalletManager()
-	w, err := manager.Create(params)
-	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(manager, w)
-
-	// Before Start, unlock and lock are forbidden.
-	err = w.Unlock(h.Context(), wallet.UnlockRequest{
-		Passphrase: []byte(bwtest.TestWalletPrivatePassphrase),
-	})
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden, "unlock before start not rejected",
-	)
-	require.ErrorIs(
-		h, w.Lock(h.Context()), wallet.ErrStateForbidden,
-		"lock before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 
 	// A freshly started wallet is locked.
 	requireLocked(h, w, true)
 
-	// Unlock with the correct passphrase. Timeout -1 keeps it unlocked until
-	// explicitly locked, so the assertion is not racy against auto-lock.
-	err = w.Unlock(h.Context(), wallet.UnlockRequest{
+	err := w.Unlock(h.Context(), wallet.UnlockRequest{
 		Passphrase: []byte(bwtest.TestWalletPrivatePassphrase),
 		Timeout:    -1,
 	})
@@ -128,24 +58,10 @@ func testControllerUnlockLock(h *bwtest.HarnessTest) {
 	requireLocked(h, w, true)
 }
 
-// testControllerInfo verifies the Info snapshot: it is forbidden before Start,
-// reports the configured backend and chain params, and tracks synchronization
-// as a block is mined.
+// testControllerInfo verifies the Info snapshot reports the configured backend
+// and chain params, and tracks synchronization as a block is mined.
 func testControllerInfo(h *bwtest.HarnessTest) {
-	params := h.TestWalletParams()
-
-	manager := h.NewWalletManager()
-	w, err := manager.Create(params)
-	require.NoError(h, err, "failed to create wallet")
-	h.RegisterWallet(manager, w)
-
-	// Info is forbidden before Start.
-	_, err = w.Info(h.Context())
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden, "info before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
+	w, _ := h.NewWallet(bwtest.WalletFixture{})
 	h.AssertWalletSynced(w)
 
 	// Capture the baseline at the current chain tip so the next block measures

@@ -243,6 +243,7 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 		ChainSource:             h.ChainClient,
 		RecoveryWindow:          defaultWalletRecoveryWindow,
 		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
+		KVDBPubPassphrase:       []byte(defaultPubPass),
 	}
 
 	manager, err := wallet.NewManager(h.Context(), managerCfg)
