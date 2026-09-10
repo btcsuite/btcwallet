@@ -14,6 +14,9 @@ import (
 // key scope.
 const accountNameConstraint = "uidx_accounts_wallet_scope_account_name"
 
+// accountNumberConstraint identifies the derived-number index within a scope.
+const accountNumberConstraint = "uidx_accounts_scope_account_number"
+
 // SQLSTATE helper constants support PostgreSQL error classification.
 const (
 	// connectionExceptionClass identifies PostgreSQL SQLSTATE class 08,
@@ -95,6 +98,14 @@ func mapErr(err error) *dberr.SQLError {
 			pgErr.ConstraintName == accountNameConstraint {
 
 			err = fmt.Errorf("%w: %w", db.ErrAccountNameConflict, err)
+		}
+
+		// Exact allocation needs the occupied-number identity while the
+		// original driver cause retains normal SQL classification.
+		if pgErr.Code == codeUniqueViolation &&
+			pgErr.ConstraintName == accountNumberConstraint {
+
+			err = fmt.Errorf("%w: %w", db.ErrAccountNumberConflict, err)
 		}
 
 		return mapCode(pgErr.Code, err)
