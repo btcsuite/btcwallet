@@ -16,6 +16,10 @@ import (
 )
 
 var (
+	// ErrManagerStopped is returned when an operation targets a Manager that
+	// is inactive after its owned resources have closed.
+	ErrManagerStopped = errors.New("manager stopped")
+
 	// ErrWalletNotFound is returned when a wallet is not found by Manager.Load.
 	ErrWalletNotFound = errors.New("wallet not found")
 
@@ -128,9 +132,7 @@ type LoadWalletParams struct {
 	PubPassphrase []byte
 }
 
-// Manager is a high-level manager that handles the lifecycle of multiple
-// wallets. It acts as a factory for creating and loading wallets, and can
-// optionally track the active wallets.
+// Manager owns the lifecycle and shared database of its Wallet set.
 //
 // The Manager enables a one-to-many relationship, allowing a single application
 // to manage multiple distinct wallets (e.g., for different coins or different
@@ -160,9 +162,9 @@ type Manager struct {
 // NewManager opens the one database described by cfg and returns a Manager that
 // owns it.
 //
-// Every wallet the Manager serves shares that database. The legacy kvdb
-// backend remains single-wallet until it is removed; SQL stores distinguish
-// wallets by ID. The caller stops its wallets and then calls Close.
+// Every Wallet the Manager serves shares that database. NewManager does not
+// start durable Wallets; callers use Start and eventually Stop. The legacy kvdb
+// backend remains single-wallet until it is removed.
 func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	err := cfg.validate()
 	if err != nil {
@@ -223,6 +225,44 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 		backend: backend,
 		config:  cfg,
 	}, nil
+}
+
+// startWallets assembles and starts durable Wallets in stable identifier order.
+// It publishes only the complete set while the caller holds the write lock.
+func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
+	data, err := m.backend.listWallets(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	wallets := make([]*Wallet, 0, len(data))
+	for _, walletData := range data {
+		cfg, err := m.config.walletConfig(walletData.name)
+		if err != nil {
+			return wallets, err
+		}
+
+		wallet := newManagedWallet(cfg, walletData)
+		wallets = append(wallets, wallet)
+
+		err = wallet.Start(ctx)
+		if err != nil {
+			return wallets, err
+		}
+	}
+
+	// Cancellation must settle before publication so failed startup leaves
+	// only local candidates for the caller to drain.
+	err = ctx.Err()
+	if err != nil {
+		return wallets, err
+	}
+
+	for _, wallet := range wallets {
+		m.wallets[wallet.cfg.Name] = wallet
+	}
+
+	return wallets, nil
 }
 
 // stopWallets stops all Wallets before closing storage. The slice holds Wallets
@@ -302,6 +342,49 @@ func translateDatabaseIdentityError(err error) error {
 // no use-after-close guarantee beyond that contract.
 func (m *Manager) Close() error {
 	return m.backend.close()
+}
+
+// Start starts every durable Wallet and returns the complete active set in
+// stable Wallet-ID order. Another Start while starting, running, or stopping
+// returns ErrStateForbidden. Stop and admitted startup failure are terminal;
+// construct a fresh Manager to reopen the database.
+// Cancellation or failure cleans up all candidates before returning an error.
+func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
+	// Reject without waiting for the lock held by startup or shutdown. Claim
+	// under that lock below so Stop cannot overtake an admitted startup.
+	if m.started.Load() {
+		return nil, fmt.Errorf(
+			"manager already started: %w", ErrStateForbidden,
+		)
+	}
+
+	m.Lock()
+	defer m.Unlock()
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	// Cleanup closes and clears the backend, making this Manager terminal.
+	if m.backend == nil {
+		return nil, ErrManagerStopped
+	}
+
+	if m.started.Swap(true) {
+		return nil, fmt.Errorf(
+			"manager already started: %w", ErrStateForbidden,
+		)
+	}
+
+	wallets, err := m.startWallets(ctx)
+	if err != nil {
+		// No candidate is published on failure; join its work before closing
+		// shared storage and making the Manager terminal.
+		return nil, errors.Join(err, m.stopWallets(wallets))
+	}
+
+	return wallets, nil
 }
 
 // Stop terminally drains every Wallet and closes the owned database.
