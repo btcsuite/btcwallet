@@ -537,3 +537,83 @@ func TestRestoreInputMetadataSkipsWalletInputs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, testDecoratedInput(), packet.Inputs[0])
 }
+
+// TestChangeSwappedOutputs verifies that the records follow the change
+// output's swap, so each caller's metadata is still on the caller's own
+// output wherever authoring moved it to.
+func TestChangeSwappedOutputs(t *testing.T) {
+	t.Parallel()
+
+	caller := []psbt.POutput{
+		{WitnessScript: []byte{0xa0}},
+		{WitnessScript: []byte{0xa1}},
+		{WitnessScript: []byte{0xa2}},
+	}
+
+	tests := []struct {
+		name        string
+		changeIndex int
+		want        [][]byte
+	}{{
+		// Change was swapped with the first output, which has
+		// therefore moved to the end.
+		name:        "change at the front",
+		changeIndex: 0,
+		want:        [][]byte{nil, {0xa1}, {0xa2}, {0xa0}},
+	}, {
+		name:        "change in the middle",
+		changeIndex: 1,
+		want:        [][]byte{{0xa0}, nil, {0xa2}, {0xa1}},
+	}, {
+		// The change output stayed where it was appended, so nothing
+		// moves.
+		name:        "change left at the end",
+		changeIndex: 3,
+		want:        [][]byte{{0xa0}, {0xa1}, {0xa2}, nil},
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			outputs, err := changeSwappedOutputs(
+				caller, tc.changeIndex,
+			)
+			require.NoError(t, err)
+
+			got := make([][]byte, 0, len(outputs))
+			for _, out := range outputs {
+				got = append(got, out.WitnessScript)
+			}
+
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestChangeSwappedOutputsWithoutChange verifies that a transaction authored
+// without a change output leaves the caller's records exactly as they were.
+func TestChangeSwappedOutputsWithoutChange(t *testing.T) {
+	t.Parallel()
+
+	caller := []psbt.POutput{
+		{WitnessScript: []byte{0xa0}},
+		{WitnessScript: []byte{0xa1}},
+	}
+
+	outputs, err := changeSwappedOutputs(caller, -1)
+	require.NoError(t, err)
+	require.Equal(t, caller, outputs)
+}
+
+// TestChangeSwappedOutputsRejectsBadIndex verifies that a change index past
+// the outputs it could have been swapped into is refused rather than panicking
+// or silently attaching metadata to the wrong output.
+func TestChangeSwappedOutputsRejectsBadIndex(t *testing.T) {
+	t.Parallel()
+
+	caller := []psbt.POutput{{WitnessScript: []byte{0xa0}}}
+
+	_, err := changeSwappedOutputs(caller, 2)
+	require.ErrorIs(t, err, ErrPacketMalformed)
+}

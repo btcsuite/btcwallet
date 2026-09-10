@@ -261,3 +261,36 @@ func taprootDerivationAgrees(a, b *psbt.TaprootBip32Derivation) bool {
 		a.MasterKeyFingerprint == b.MasterKeyFingerprint &&
 		slices.Equal(a.Bip32Path, b.Bip32Path)
 }
+
+// changeSwappedOutputs builds a packet's output records in the order the
+// authored transaction now holds its outputs.
+//
+// Authoring leaves the caller's outputs in their own order and appends its
+// change output past them, then swaps it into a random position, so mirroring
+// that one exchange is enough. changeIndex is where the change ended up, or
+// negative if there is none; its own record starts empty and is filled in from
+// the address the wallet derived.
+func changeSwappedOutputs(callerOutputs []psbt.POutput,
+	changeIndex int) ([]psbt.POutput, error) {
+
+	if changeIndex < 0 {
+		return callerOutputs, nil
+	}
+
+	// Change was appended past the caller's outputs, so it can only have
+	// been swapped to a position that existed once it was there.
+	if changeIndex > len(callerOutputs) {
+		return nil, fmt.Errorf("%w: change output at %d of %d outputs",
+			ErrPacketMalformed, changeIndex, len(callerOutputs)+1)
+	}
+
+	outputs := make([]psbt.POutput, len(callerOutputs)+1)
+	copy(outputs, callerOutputs)
+
+	// The change record is the empty one the copy left at the end.
+	last := len(outputs) - 1
+	outputs[changeIndex], outputs[last] = outputs[last],
+		outputs[changeIndex]
+
+	return outputs, nil
+}
