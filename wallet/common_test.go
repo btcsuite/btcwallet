@@ -118,6 +118,31 @@ func testKVDBManager(tb testing.TB) *Manager {
 	return testKVDBManagerAt(tb, testKVDBPath(tb))
 }
 
+// createTestChain supplies a genesis-only chain for real Wallet startup.
+// Keeping the backend unsynced lets workers wait for owned cancellation without
+// doing unrelated block synchronization. Birthday queries are optional because
+// empty Managers and reopened verified Wallets do not need them.
+func createTestChain(tb testing.TB) *bwmock.Chain {
+	tb.Helper()
+
+	chain := &bwmock.Chain{}
+	chain.On("IsCurrent").Return(false).Maybe()
+	chain.On("GetBestBlock").Return(
+		chainParams.GenesisHash, int32(0), nil,
+	).Maybe()
+	chain.On("GetBlockHash", int64(0)).Return(
+		chainParams.GenesisHash, nil,
+	).Maybe()
+	chain.On("GetBlockHeader", chainParams.GenesisHash).Return(
+		&chainParams.GenesisBlock.Header, nil,
+	).Maybe()
+	tb.Cleanup(func() {
+		chain.AssertExpectations(tb)
+	})
+
+	return chain
+}
+
 // testSQLiteManager opens a Manager over a real SQLite database at a fresh temp
 // path, for tests that exercise the SQL path end to end rather than against a
 // mock store.
@@ -128,33 +153,51 @@ func testSQLiteManager(tb testing.TB) *Manager {
 		Backend:     DBBackendSQLite,
 		DataSource:  filepath.Join(tb.TempDir(), "runtime.sqlite"),
 		ChainParams: chainParams,
-		ChainSource: &bwmock.Chain{},
+		ChainSource: createTestChain(tb),
 	})
 	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = m.Close() })
+
+	// Register shutdown before startup can fail; mock assertions run after
+	// this cleanup has joined every real Wallet worker.
+	tb.Cleanup(func() {
+		_ = m.Stop()
+	})
 
 	return m
 }
 
 // testSQLManager builds a Manager whose SQL store is the supplied one, so a
 // test can drive the SQL path against a mock without a package-level injection
-// point. The Manager does not own the store, so Close releases nothing.
-func testSQLManager(tb testing.TB, store db.Store) *Manager {
+// point. Stop drains its Wallets while the caller retains Store ownership.
+func testSQLManager(tb testing.TB, store *walletmock.Store) *Manager {
 	tb.Helper()
 
-	return &Manager{
+	m := &Manager{
 		wallets: make(map[string]*Wallet),
 		backend: &sqlManagerBackend{
 			store:   store,
 			closeFn: func() error { return nil },
 		},
 		config: ManagerConfig{
-			ChainSource:             &bwmock.Chain{},
+			ChainSource:             createTestChain(tb),
 			ChainParams:             chainParams,
 			WalletSyncRetryInterval: initialBackoff,
 			AutoLockDuration:        defaultLockDuration,
 		},
 	}
+
+	m.started.Store(true)
+
+	// The fixture owns required-call verification. Stop joins workers before
+	// assertions run, while the caller retains ownership of the mock Store.
+	tb.Cleanup(func() {
+		store.AssertExpectations(tb)
+	})
+	tb.Cleanup(func() {
+		_ = m.Stop()
+	})
+
+	return m
 }
 
 // startLoadedWalletForTest starts the request loop for a loaded wallet without
@@ -181,19 +224,25 @@ func startLoadedWalletForTest(t *testing.T, w *Wallet) {
 }
 
 // testKVDBManagerAt opens a Manager over an existing kvdb path, so a test can
-// simulate a restart by closing one Manager and opening another over the same
+// simulate a restart by stopping one Manager and opening another over the same
 // database.
 func testKVDBManagerAt(tb testing.TB, dbPath string) *Manager {
 	tb.Helper()
 
 	m, err := NewManager(context.Background(), ManagerConfig{
-		Backend:     DBBackendKVDB,
-		DataSource:  dbPath,
-		ChainParams: chainParams,
-		ChainSource: &bwmock.Chain{},
+		Backend:           DBBackendKVDB,
+		DataSource:        dbPath,
+		ChainParams:       chainParams,
+		ChainSource:       createTestChain(tb),
+		KVDBPubPassphrase: []byte(InsecurePubPassphrase),
 	})
 	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = m.Close() })
+
+	// Register shutdown before startup can fail; mock assertions run after
+	// this cleanup has joined every real Wallet worker.
+	tb.Cleanup(func() {
+		_ = m.Stop()
+	})
 
 	return m
 }

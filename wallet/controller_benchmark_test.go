@@ -44,7 +44,7 @@ const (
 
 // BenchmarkSyncEmpty benchmarks the wallet synchronization performance against
 // empty blocks and an empty wallet by comparing the legacy SynchronizeRPC with
-// the new Controller.Start API across different block depths.
+// the new Manager-owned Wallet startup path across different block depths.
 func BenchmarkSyncEmpty(b *testing.B) {
 	scenarios := []struct {
 		blocks int
@@ -260,15 +260,17 @@ func runNewSync(b *testing.B, miner *rpctest.Harness, method SyncMethod) {
 		// Setup a fresh modern wallet.
 		seed, err := hdkeychain.GenerateSeed(hdkeychain.MinSeedBytes)
 		require.NoError(b, err)
-		w := setupNewWallet(b, seed, chainClient, method)
+		manager := setupNewWallet(b, seed, chainClient, method)
 
 		stopProfile := startProfiling(b)
 
 		b.StartTimer()
 
-		// Start modern controller and syncing.
-		err = w.Start(b.Context())
+		// Time aggregate startup of the durable Wallet through its owner.
+		wallets, err := manager.Start(b.Context())
 		require.NoError(b, err)
+
+		w := wallets[0]
 
 		// Poll until the controller reports it is synced.
 		//
@@ -305,16 +307,18 @@ func runNewSyncData(b *testing.B, miner *rpctest.Harness, seed []byte,
 		b.StopTimer()
 
 		chainClient := setupChainClient(b, miner)
-		w := setupNewWallet(b, seed, chainClient, method)
+		manager := setupNewWallet(b, seed, chainClient, method)
 
 		stopProfile := startProfiling(b)
 
 		// Start the timer for the actual synchronization phase.
 		b.StartTimer()
 
-		// Start modern controller and syncing.
-		err := w.Start(b.Context())
+		// Time aggregate startup of the durable Wallet through its owner.
+		wallets, err := manager.Start(b.Context())
 		require.NoError(b, err)
+
+		w := wallets[0]
 
 		// Poll until the controller reports it is synced.
 		for {
@@ -377,10 +381,10 @@ func setupLegacyWallet(tb testing.TB, seed []byte) *Wallet {
 	return w
 }
 
-// setupNewWallet initializes a modern benchmark Wallet with runtime inputs on
-// its Manager and automatically registers ordered resource cleanup.
+// setupNewWallet persists a benchmark Wallet and reopens its Manager before
+// startup, allowing the timed phase to measure aggregate loading and sync.
 func setupNewWallet(tb testing.TB, seed []byte, chainSource chain.Interface,
-	method SyncMethod) *Wallet {
+	method SyncMethod) *Manager {
 
 	tb.Helper()
 
@@ -396,7 +400,7 @@ func setupNewWallet(tb testing.TB, seed []byte, chainSource chain.Interface,
 
 	// The Manager retains every runtime input, including the shared chain
 	// source; the request below carries only durable initialization data.
-	manager, err := NewManager(tb.Context(), ManagerConfig{
+	cfg := ManagerConfig{
 		Backend:                 DBBackendKVDB,
 		DataSource:              testKVDBPath(tb),
 		ChainParams:             chaincfg.RegressionNetParams,
@@ -404,20 +408,29 @@ func setupNewWallet(tb testing.TB, seed []byte, chainSource chain.Interface,
 		SyncMethod:              method,
 		WalletSyncRetryInterval: 10 * time.Millisecond,
 		RecoveryWindow:          testRecoveryWindow,
-	})
+		KVDBPubPassphrase:       params.PubPassphrase,
+	}
+	manager, err := NewManager(tb.Context(), cfg)
 	require.NoError(tb, err)
-
-	w, err := manager.Create(params)
-	require.NoError(tb, err)
-
-	// Cleanup follows ownership order: stop the Wallet before closing the
-	// Manager-owned database handle used by its storage dependencies.
 	tb.Cleanup(func() {
-		_ = w.Stop(tb.Context())
-		_ = manager.Close()
+		_ = manager.Stop()
 	})
 
-	return w
+	_, err = manager.Start(tb.Context())
+	require.NoError(tb, err)
+
+	_, err = manager.Create(params)
+	require.NoError(tb, err)
+
+	// Startup is one-shot, so a fresh owner is required for the timed run.
+	require.NoError(tb, manager.Stop())
+	reopened, err := NewManager(tb.Context(), cfg)
+	require.NoError(tb, err)
+	tb.Cleanup(func() {
+		_ = reopened.Stop()
+	})
+
+	return reopened
 }
 
 // setupChain prepares a btcd node and generates the required blocks.
@@ -457,12 +470,14 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 	miner := setupChain(tb, 0)
 
 	// 1. Setup a template wallet to extract addresses for the chain.
-	templateW := setupNewWallet(
+	templateManager := setupNewWallet(
 		tb, seed, setupChainClient(tb, miner), SyncMethodAuto,
 	)
 
-	err := templateW.Start(tb.Context())
+	wallets, err := templateManager.Start(tb.Context())
 	require.NoError(tb, err)
+
+	templateW := wallets[0]
 
 	// Unlock template wallet to derive addresses.
 	err = templateW.Unlock(tb.Context(), UnlockRequest{
@@ -496,9 +511,8 @@ func setupChainWithWalletData(tb testing.TB, seed []byte,
 		}
 	}
 
-	// Stop the template wallet now that setup is complete. The Manager keeps
-	// the store open until test cleanup.
-	_ = templateW.Stop(tb.Context())
+	// Release the template runtime and its database before mining test data.
+	require.NoError(tb, templateManager.Stop())
 
 	// Ensure we selected the correct number of targets.
 	require.Len(tb, targetAddrs, numUTXOs,
