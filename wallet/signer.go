@@ -98,7 +98,7 @@ type Signer interface {
 	// signature, which can then be manually assembled into the final
 	// witness.
 	//
-	// Nil params return ErrNilArguments.
+	// Nil params, or params with no Output, return ErrNilArguments.
 	ComputeUnlockingScript(ctx context.Context,
 		params *UnlockingScriptParams) (*UnlockingScript, error)
 
@@ -113,7 +113,7 @@ type Signer interface {
 	// final witness is created. For most common, single-signature spends,
 	// ComputeUnlockingScript should be used instead.
 	//
-	// Nil params return ErrNilArguments.
+	// Nil params, or params with no Details, return ErrNilArguments.
 	ComputeRawSig(ctx context.Context, params *RawSigParams) (
 		RawSignature, error)
 }
@@ -882,6 +882,14 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 		)
 	}
 
+	// Output is dereferenced unconditionally by the handler and is documented
+	// as required, so its absence is the same fault as a nil params.
+	if params.Output == nil {
+		return nil, fmt.Errorf(
+			"%w: unlocking script output is nil", ErrNilArguments,
+		)
+	}
+
 	// Admission keeps dependency access joined through concurrent Stop.
 	r := unlockingScriptReq{
 		reqCtx:   reqCtx{ctx: ctx},
@@ -1432,6 +1440,15 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	if params == nil {
 		return nil, fmt.Errorf(
 			"%w: raw signature params are nil", ErrNilArguments,
+		)
+	}
+
+	// Details carries the version-specific signing behavior and its own
+	// documentation requires it to be set. The handler calls through it
+	// unconditionally, so an unset interface faults there.
+	if params.Details == nil {
+		return nil, fmt.Errorf(
+			"%w: raw signature details are nil", ErrNilArguments,
 		)
 	}
 
