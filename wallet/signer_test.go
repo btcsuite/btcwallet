@@ -3289,3 +3289,35 @@ func TestECDHRejectsNilRemoteKey(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilArguments)
 	require.Equal(t, [32]byte{}, secret)
 }
+
+// TestSignerRejectsNilArguments verifies that every Signer method taking a
+// pointer argument refuses a nil one before the request is admitted, rather
+// than faulting inside the handler goroutine that serves it.
+func TestSignerRejectsNilArguments(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet, so each call clears the signing-state gate
+	// and reaches the argument check under test.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	// Act: Sign a digest with no intent.
+	_, err := w.SignDigest(t.Context(), path, nil)
+
+	// Assert: The absent intent is reported, not dereferenced.
+	require.ErrorIs(t, err, ErrNilArguments)
+
+	// Act: Assemble an unlocking script with no params.
+	script, err := w.ComputeUnlockingScript(t.Context(), nil)
+
+	// Assert: The absent params are reported before admission.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, script)
+
+	// Act: Produce a raw signature with no params.
+	rawSig, err := w.ComputeRawSig(t.Context(), nil)
+
+	// Assert: The same contract holds for the low-level signing entry point.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, rawSig)
+}
