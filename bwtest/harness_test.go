@@ -152,7 +152,7 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 
 	// Assert: teardown succeeds without a second close and the database
 	// reopened.
-	require.NoError(t, h.teardownWallets(t.Context()))
+	require.NoError(t, h.teardownWallets())
 	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
 		//nolint:staticcheck // This test intentionally reopens legacy kvdb.
 		Backend:     wallet.DBBackendKVDB,
@@ -234,7 +234,7 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	// Bound teardown so a missing Manager close fails instead of hanging.
 	done := make(chan error, 1)
 	go func() {
-		done <- h.teardownWallets(t.Context())
+		done <- h.teardownWallets()
 	}()
 
 	select {
