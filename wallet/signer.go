@@ -72,7 +72,8 @@ type Signer interface {
 	// will be the raw 32-byte shared secret (the X-coordinate of the
 	// result point).
 	//
-	// A nil remote key returns ErrNilArguments without deriving a wallet key.
+	// A nil remote key returns ErrNilArguments, and one that is not a curve
+	// point returns ErrInvalidSignParam; neither derives a wallet key.
 	ECDH(ctx context.Context, path BIP32Path, pub *btcec.PublicKey) (
 		[32]byte, error)
 
@@ -668,6 +669,17 @@ func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	if pub == nil {
 		return [32]byte{}, fmt.Errorf(
 			"%w: remote public key is nil", ErrNilArguments,
+		)
+	}
+
+	// A key that is not a curve point multiplies to the point at infinity,
+	// whose X coordinate is zero. That is a valid-looking 32-byte secret both
+	// sides could agree on without either holding a private key, so it has to
+	// be an error rather than a result.
+	if !pub.IsOnCurve() {
+		return [32]byte{}, fmt.Errorf(
+			"%w: remote public key is not a curve point",
+			ErrInvalidSignParam,
 		)
 	}
 
