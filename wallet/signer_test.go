@@ -3290,6 +3290,33 @@ func TestECDHRejectsNilRemoteKey(t *testing.T) {
 	require.Equal(t, [32]byte{}, secret)
 }
 
+// TestECDHRejectsOffCurveRemoteKey verifies that a remote key which is not a
+// curve point is refused rather than multiplied to the point at infinity,
+// whose X coordinate would be returned as an all-zero shared secret.
+func TestECDHRejectsOffCurveRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet and a structurally valid but degenerate
+	// public key, the shape a caller gets by forgetting to parse one. No
+	// store expectation is registered, so a derivation attempt fails the test.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+	offCurve := &btcec.PublicKey{}
+
+	require.False(t, offCurve.IsOnCurve(), "probe key is a curve point")
+
+	// Act: Ask for a shared secret with the degenerate key.
+	secret, err := w.ECDH(t.Context(), path, offCurve)
+
+	// Assert: The key is refused before the account secret is read, which the
+	// strict mock enforces by failing on an unexpected call. Reaching the
+	// multiplication instead yields a nil error and 32 zero bytes: the X
+	// coordinate of the point at infinity, which both sides could agree on
+	// while holding no key at all.
+	require.ErrorIs(t, err, ErrInvalidSignParam)
+	require.Equal(t, [32]byte{}, secret)
+}
+
 // TestSignerRejectsNilArguments verifies that every Signer method taking a
 // pointer argument refuses a nil one before the request is admitted, rather
 // than faulting inside the handler goroutine that serves it.
