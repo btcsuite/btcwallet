@@ -176,6 +176,8 @@ SELECT
     da.account_id,
     acc.account_number,
     acc.account_name,
+    -- Receiving admission uses the account already joined by this query.
+    acc.no_chain_sync,
     ks.purpose,
     ks.coin_type,
     a.script_type_id,
