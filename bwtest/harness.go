@@ -179,7 +179,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 		// If a test fails, we still try to stop wallets to avoid leaking
 		// goroutines into the next test, but we skip assertions.
 		if st.Failed() {
-			err := st.teardownWallets(context.Background())
+			err := st.teardownWallets()
 			if err != nil {
 				st.Logf("failed to stop wallets during failed-test cleanup: %v",
 					err)
@@ -192,7 +192,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 			return
 		}
 
-		err := st.teardownWallets(context.Background())
+		err := st.teardownWallets()
 		require.NoError(st, err, "failed to stop wallets")
 
 		mempool, err := st.getRawMempool()
@@ -264,10 +264,8 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	return manager
 }
 
-// teardownWallets stops registered wallets and then closes their Managers.
-func (h *HarnessTest) teardownWallets(ctx context.Context) error {
-	err := h.stopActiveWallets(ctx)
-
+// teardownWallets stops every harness-owned Manager and its Wallets.
+func (h *HarnessTest) teardownWallets() error {
 	h.mu.Lock()
 
 	managers := make([]*wallet.Manager, 0, len(h.wallets))
@@ -277,15 +275,16 @@ func (h *HarnessTest) teardownWallets(ctx context.Context) error {
 
 	h.mu.Unlock()
 
+	var stopErr error
 	for _, manager := range managers {
-		err = errors.Join(err, manager.Close())
+		stopErr = errors.Join(stopErr, manager.Stop())
 	}
 
 	h.mu.Lock()
 	h.wallets = nil
 	h.mu.Unlock()
 
-	return err
+	return stopErr
 }
 
 // assertBackendArtifact verifies the Manager created the requested database.
@@ -548,32 +547,6 @@ func (h *HarnessTest) Stop() {
 	h.finalizeLogs()
 
 	require.NoError(h, shutdownErr, "failed to stop harness")
-}
-
-// stopActiveWallets stops all wallets registered with the harness.
-//
-// This is used as part of the per-subtest cleanup to avoid leaking background
-// goroutines into the next test.
-func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
-	h.Helper()
-
-	var stopErr error
-
-	for _, w := range h.ActiveWallets() {
-		// The modern Wallet controller's Stop method is idempotent.
-		//
-		// NOTE: We intentionally don't call the deprecated WaitForShutdown/
-		// ShuttingDown methods here, as modern wallets might not have the
-		// legacy fields initialized.
-		err := w.Stop(ctx)
-		if err != nil {
-			stopErr = errors.Join(
-				stopErr, fmt.Errorf("stop wallet: %w", err),
-			)
-		}
-	}
-
-	return stopErr
 }
 
 // setUpChainClient creates and starts a chain client for the active harness
