@@ -71,6 +71,8 @@ type Signer interface {
 	// a key from the wallet and a remote public key. The output returned
 	// will be the raw 32-byte shared secret (the X-coordinate of the
 	// result point).
+	//
+	// A nil remote key returns ErrNilArguments without deriving a wallet key.
 	ECDH(ctx context.Context, path BIP32Path, pub *btcec.PublicKey) (
 		[32]byte, error)
 
@@ -652,6 +654,15 @@ func (w *Wallet) ECDH(ctx context.Context, path BIP32Path,
 	err := w.state.canSign()
 	if err != nil {
 		return [32]byte{}, err
+	}
+
+	// Reject the remote key before admission. The computation runs on its own
+	// goroutine, where a nil key would fault with no caller to recover it, and
+	// it would do so only after the leaf private key had been derived.
+	if pub == nil {
+		return [32]byte{}, fmt.Errorf(
+			"%w: remote public key is nil", ErrNilArguments,
+		)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.

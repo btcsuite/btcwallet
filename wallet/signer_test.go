@@ -3267,3 +3267,25 @@ func TestSignDigestLocked(t *testing.T) {
 	// Assert: Check for forbidden/locked error.
 	require.ErrorIs(t, err, ErrStateForbidden)
 }
+
+// TestECDHRejectsNilRemoteKey verifies that a nil remote public key is refused
+// before the operation is admitted, so no leaf private key is derived for a
+// request that cannot succeed.
+func TestECDHRejectsNilRemoteKey(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet whose store would serve the account secret
+	// if the request reached it. No expectation is registered for that read,
+	// so the mock fails the test if the derivation is attempted.
+	w, _ := createUnlockedWalletWithMocks(t)
+	path := BIP32Path{KeyScope: waddrmgr.KeyScopeBIP0084}
+
+	// Act: Ask for a shared secret with no counterparty key.
+	secret, err := w.ECDH(t.Context(), path, nil)
+
+	// Assert: The request is refused with the package's nil-argument identity,
+	// and returns the zero secret rather than faulting on the handler
+	// goroutine.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Equal(t, [32]byte{}, secret)
+}
