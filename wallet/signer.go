@@ -79,6 +79,8 @@ type Signer interface {
 	// SignDigest signs a message digest based on the provided intent. The
 	// returned Signature is a marker interface that can be asserted to the
 	// concrete signature types, ECDSASignature or SchnorrSignature.
+	//
+	// A nil intent returns ErrNilArguments.
 	SignDigest(ctx context.Context, path BIP32Path,
 		intent *SignDigestIntent) (Signature, error)
 
@@ -94,6 +96,8 @@ type Signer interface {
 	// multisig, the ComputeRawSig method should be used to generate the raw
 	// signature, which can then be manually assembled into the final
 	// witness.
+	//
+	// Nil params return ErrNilArguments.
 	ComputeUnlockingScript(ctx context.Context,
 		params *UnlockingScriptParams) (*UnlockingScript, error)
 
@@ -107,6 +111,8 @@ type Signer interface {
 	// where signatures may need to be exchanged and combined before the
 	// final witness is created. For most common, single-signature spends,
 	// ComputeUnlockingScript should be used instead.
+	//
+	// Nil params return ErrNilArguments.
 	ComputeRawSig(ctx context.Context, params *RawSigParams) (
 		RawSignature, error)
 }
@@ -712,6 +718,12 @@ func (w *Wallet) ecdh(ctx context.Context, path BIP32Path,
 
 // validateSignDigestIntent validates the parameters of a SignDigestIntent.
 func validateSignDigestIntent(intent *SignDigestIntent) error {
+	// Every field below is read through the intent, so its absence has to be
+	// answered before any of them are.
+	if intent == nil {
+		return fmt.Errorf("%w: intent is nil", ErrNilArguments)
+	}
+
 	// The digest must be exactly 32 bytes.
 	if len(intent.Digest) != chainhash.HashSize {
 		return ErrInvalidDigestSize
@@ -848,6 +860,14 @@ func (w *Wallet) ComputeUnlockingScript(ctx context.Context,
 	err := w.state.canSign()
 	if err != nil {
 		return nil, err
+	}
+
+	// The handler dereferences these params on its own goroutine, where a nil
+	// would fault with no caller to recover it.
+	if params == nil {
+		return nil, fmt.Errorf(
+			"%w: unlocking script params are nil", ErrNilArguments,
+		)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
@@ -1393,6 +1413,14 @@ func (w *Wallet) ComputeRawSig(ctx context.Context, params *RawSigParams) (
 	err := w.state.canSign()
 	if err != nil {
 		return nil, err
+	}
+
+	// The handler dereferences these params on its own goroutine, where a nil
+	// would fault with no caller to recover it.
+	if params == nil {
+		return nil, fmt.Errorf(
+			"%w: raw signature params are nil", ErrNilArguments,
+		)
 	}
 
 	// Admission keeps dependency access joined through concurrent Stop.
