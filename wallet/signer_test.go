@@ -3348,3 +3348,30 @@ func TestSignerRejectsNilArguments(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilArguments)
 	require.Nil(t, rawSig)
 }
+
+// TestSignerRejectsUnsetRequiredParams verifies that a params struct missing a
+// field the handler dereferences unconditionally is refused at the boundary,
+// which is the likelier caller mistake than passing no params at all.
+func TestSignerRejectsUnsetRequiredParams(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: An unlocked wallet, so each call reaches the field check.
+	w, _ := createUnlockedWalletWithMocks(t)
+
+	// Act: Assemble an unlocking script for no output.
+	script, err := w.ComputeUnlockingScript(
+		t.Context(), &UnlockingScriptParams{},
+	)
+
+	// Assert: The absent output is reported rather than dereferenced on the
+	// handler goroutine.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, script)
+
+	// Act: Produce a raw signature with no version-specific details.
+	rawSig, err := w.ComputeRawSig(t.Context(), &RawSigParams{})
+
+	// Assert: The unset interface is reported before any key is derived.
+	require.ErrorIs(t, err, ErrNilArguments)
+	require.Nil(t, rawSig)
+}
