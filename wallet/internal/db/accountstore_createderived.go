@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 )
 
 var (
@@ -46,7 +48,32 @@ func (params *CreateDerivedAccountParams) Validate() error {
 		return ErrMissingAccountName
 	}
 
-	return requireUnreservedAccountName(params.Name)
+	err := requireUnreservedAccountName(params.Name)
+	if err != nil {
+		return err
+	}
+
+	// Validate before adding hardened offsets so malformed path components
+	// cannot wrap into a different derivation path or consume a scope cursor.
+	if params.Scope.Purpose >= hdkeychain.HardenedKeyStart ||
+		params.Scope.Coin >= hdkeychain.HardenedKeyStart {
+
+		return fmt.Errorf("hardened scope component: %w", ErrInvalidParam)
+	}
+
+	// Exact selection is restricted to canonical scopes and excludes the
+	// imported-account sentinel; nil retains the existing sequential subset.
+	if params.AccountNumber != nil {
+		if *params.AccountNumber > MaxAccountNumber {
+			return fmt.Errorf("exact account number: %w", ErrInvalidParam)
+		}
+
+		if _, ok := ScopeAddrMap[params.Scope]; !ok {
+			return fmt.Errorf("exact account scope: %w", ErrInvalidParam)
+		}
+	}
+
+	return nil
 }
 
 // CreateDerivedAccountRow contains the backend-independent fields the shared
@@ -65,7 +92,7 @@ type CreateDerivedAccountRow struct {
 //   - load the wallet watch-only mode so the returned AccountInfo matches the
 //     stored wallet state
 //   - ensure the requested key scope exists before allocating from its counter
-//   - allocate the next derived account number for that scope
+//   - reserve the next or requested derived account number for that scope
 //   - insert the derived account row with the allocated number and requested
 //     synchronization policy
 //   - normalize the inserted row into the public AccountInfo result
@@ -87,9 +114,11 @@ type CreateDerivedAccountOps interface {
 	EnsureScope(ctx context.Context, walletID uint32,
 		scope KeyScope) (int64, ScopeAddrSchema, error)
 
-	// AllocateAccountNumber advances and returns the next derived account
-	// number for the provided scope row.
-	AllocateAccountNumber(ctx context.Context, scopeID int64) (int64, error)
+	// AllocateAccountNumber reserves the next or requested account number
+	// and advances the scope cursor without consuming lower holes. A nil
+	// selector requests the next account; a value requests that exact number.
+	AllocateAccountNumber(ctx context.Context, scopeID int64,
+		accountNumber *uint32) (int64, error)
 
 	// CreateDerivedAccount inserts the derived account row using the provided
 	// scope ID, allocated account number, public account name, requested
@@ -159,9 +188,10 @@ func deriveAndValidate(ctx context.Context, scope KeyScope, accNum uint32,
 // the cyclop budget and the "allocate then preview" pair is described
 // in one place.
 func allocateAndPreviewAccountNumber(ctx context.Context,
-	ops CreateDerivedAccountOps, scopeID int64) (int64, uint32, error) {
+	ops CreateDerivedAccountOps, scopeID int64,
+	accountNumber *uint32) (int64, uint32, error) {
 
-	allocated, err := ops.AllocateAccountNumber(ctx, scopeID)
+	allocated, err := ops.AllocateAccountNumber(ctx, scopeID, accountNumber)
 	if err != nil {
 		return 0, 0, fmt.Errorf("allocate account number: %w", err)
 	}
@@ -229,7 +259,7 @@ func CreateDerivedAccountWithOps(ctx context.Context,
 	}
 
 	allocated, accNumPreview, err := allocateAndPreviewAccountNumber(
-		ctx, ops, scopeID,
+		ctx, ops, scopeID, params.AccountNumber,
 	)
 	if err != nil {
 		return nil, err

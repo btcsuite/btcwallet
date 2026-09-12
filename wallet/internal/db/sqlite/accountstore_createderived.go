@@ -61,7 +61,21 @@ func (o createDerivedAccountOps) EnsureScope(ctx context.Context,
 
 // AllocateAccountNumber implements db.CreateDerivedAccountOps.
 func (o createDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
-	scopeID int64) (int64, error) {
+	scopeID int64, accountNumber *uint32) (int64, error) {
+
+	// Both request forms update the same scope row in the account write
+	// transaction, serializing allocation and rolling it back on failure.
+	if accountNumber != nil {
+		number := int64(*accountNumber)
+		err := o.q.AdvanceNextAccountNumber(
+			ctx, sqlc.AdvanceNextAccountNumberParams{
+				MinimumNextAccount: number + 1,
+				ScopeID:            scopeID,
+			},
+		)
+
+		return number, err
+	}
 
 	return o.q.GetAndIncrementNextAccountNumber(ctx, scopeID)
 }

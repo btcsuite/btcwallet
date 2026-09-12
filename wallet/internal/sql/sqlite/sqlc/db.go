@@ -33,6 +33,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.acquireUtxoLeaseStmt, err = db.PrepareContext(ctx, AcquireUtxoLease); err != nil {
 		return nil, fmt.Errorf("error preparing query AcquireUtxoLease: %w", err)
 	}
+	if q.advanceNextAccountNumberStmt, err = db.PrepareContext(ctx, AdvanceNextAccountNumber); err != nil {
+		return nil, fmt.Errorf("error preparing query AdvanceNextAccountNumber: %w", err)
+	}
 	if q.advanceNextExternalIndexStmt, err = db.PrepareContext(ctx, AdvanceNextExternalIndex); err != nil {
 		return nil, fmt.Errorf("error preparing query AdvanceNextExternalIndex: %w", err)
 	}
@@ -336,6 +339,11 @@ func (q *Queries) Close() error {
 	if q.acquireUtxoLeaseStmt != nil {
 		if cerr := q.acquireUtxoLeaseStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing acquireUtxoLeaseStmt: %w", cerr)
+		}
+	}
+	if q.advanceNextAccountNumberStmt != nil {
+		if cerr := q.advanceNextAccountNumberStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing advanceNextAccountNumberStmt: %w", cerr)
 		}
 	}
 	if q.advanceNextExternalIndexStmt != nil {
@@ -855,6 +863,7 @@ type Queries struct {
 	accountBalanceStmt                          *sql.Stmt
 	accountBalancesByIDsStmt                    *sql.Stmt
 	acquireUtxoLeaseStmt                        *sql.Stmt
+	advanceNextAccountNumberStmt                *sql.Stmt
 	advanceNextExternalIndexStmt                *sql.Stmt
 	advanceNextInternalIndexStmt                *sql.Stmt
 	balanceStmt                                 *sql.Stmt
@@ -959,6 +968,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		accountBalanceStmt:                          q.accountBalanceStmt,
 		accountBalancesByIDsStmt:                    q.accountBalancesByIDsStmt,
 		acquireUtxoLeaseStmt:                        q.acquireUtxoLeaseStmt,
+		advanceNextAccountNumberStmt:                q.advanceNextAccountNumberStmt,
 		advanceNextExternalIndexStmt:                q.advanceNextExternalIndexStmt,
 		advanceNextInternalIndexStmt:                q.advanceNextInternalIndexStmt,
 		balanceStmt:                                 q.balanceStmt,

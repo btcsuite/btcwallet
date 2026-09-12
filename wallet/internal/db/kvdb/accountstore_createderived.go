@@ -20,6 +20,12 @@ func (s *Store) CreateDerivedAccount(ctx context.Context,
 	params db.CreateDerivedAccountParams,
 	deriveFn db.AccountDerivationFunc) (*db.AccountInfo, error) {
 
+	// waddrmgr owns sequential allocation in the legacy store. Refuse exact
+	// selection before a transaction can allocate or derive any account.
+	if params.AccountNumber != nil {
+		return nil, fmt.Errorf("kvdb exact account: %w", db.ErrInvalidParam)
+	}
+
 	// The legacy format has no per-account synchronization policy. Normalize
 	// the by-value request so the shared workflow also returns the stored false
 	// value while kvdb silently retains its historical behavior.
@@ -114,9 +120,11 @@ func (o *createDerivedAccountOps) EnsureScope(_ context.Context, _ uint32,
 	return 0, addrSchema, nil
 }
 
-// AllocateAccountNumber implements db.CreateDerivedAccountOps.
+// AllocateAccountNumber implements db.CreateDerivedAccountOps. The selector
+// is unused because CreateDerivedAccount rejects exact requests before opening
+// the transaction; this adapter retains sequential allocation.
 func (o *createDerivedAccountOps) AllocateAccountNumber(_ context.Context,
-	_ int64) (int64, error) {
+	_ int64, _ *uint32) (int64, error) {
 
 	if o.scopedMgr == nil {
 		return 0, errScopedMgrUninitialized

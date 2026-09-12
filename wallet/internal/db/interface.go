@@ -61,6 +61,10 @@ var (
 	// within a wallet and key scope.
 	ErrAccountNameConflict = errors.New("account name conflict")
 
+	// ErrAccountNumberConflict reports an occupied derived account number
+	// within a key scope, distinct from an occupied name.
+	ErrAccountNumberConflict = errors.New("account number conflict")
+
 	// ErrAddressNotFound is returned when an address is not found in the
 	// database.
 	ErrAddressNotFound = errors.New("address not found")
@@ -241,7 +245,9 @@ type WalletStore interface {
 // AccountStore defines the database actions for managing accounts.
 type AccountStore interface {
 	// CreateDerivedAccount creates a new derived account with the given
-	// name and scope. After allocating the account number, the store
+	// name and scope. SQL stores honor an optional exact AccountNumber and
+	// advance the cursor without consuming lower holes; kvdb rejects exact
+	// selection. After allocating the account number, the store
 	// invokes deriveFn to obtain the wallet-derived account material
 	// and persists it with the row.
 	//

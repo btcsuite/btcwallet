@@ -35,27 +35,85 @@ func TestCreateDerivedAccountParamsValidate(t *testing.T) {
 	require.ErrorIs(t, err, ErrReservedAccountName)
 }
 
+// TestCreateDerivedAccountRejectsInvalidPath verifies malformed derivation
+// components and unsupported exact scopes fail before backend operations.
+func TestCreateDerivedAccountRejectsInvalidPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: isolate each invalid path component with no expected backend
+	// calls, so entering the allocation stages fails the test.
+	tests := []struct {
+		name   string
+		scope  KeyScope
+		number uint32
+	}{
+		{
+			name:  "hardened purpose",
+			scope: KeyScope{Purpose: 1 << 31},
+		},
+		{
+			name:  "hardened coin",
+			scope: KeyScope{Purpose: 84, Coin: 1 << 31},
+		},
+		{
+			name:   "reserved number",
+			scope:  KeyScopeBIP0084,
+			number: MaxAccountNumber + 1,
+		},
+		{
+			name:  "custom scope",
+			scope: KeyScope{Purpose: 1017},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ops := &mockCreateDerivedAccountOps{}
+			params := CreateDerivedAccountParams{
+				Scope:         test.scope,
+				Name:          "invalid-path",
+				AccountNumber: &test.number,
+			}
+
+			// Act: enter the same validation path SQL transactions use.
+			info, err := CreateDerivedAccountWithOps(
+				t.Context(), params, ops, testValidDeriveFn(),
+			)
+
+			// Assert: no backend stage ran and no partial result escaped.
+			require.ErrorIs(t, err, ErrInvalidParam)
+			require.Nil(t, info)
+			ops.AssertExpectations(t)
+		})
+	}
+}
+
 // TestCreateDerivedAccountWithOps verifies that the shared helper owns the
 // common derived-account workflow and returns the normalized AccountInfo.
 func TestCreateDerivedAccountWithOps(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: configure every backend stage for one successful derived account
-	// with the non-default synchronization policy. The exact insert expectation
-	// proves the shared workflow forwards the policy once and in order.
+	// Arrange: request a sparse exact number and bind that same selector to
+	// the allocator expectation, so shared orchestration cannot drop it.
+	number := uint32(12)
 	params := CreateDerivedAccountParams{
 		WalletID: 7,
 		Scope: KeyScope{
 			Purpose: 49,
 			Coin:    0,
 		},
-		Name:        "savings",
-		NoChainSync: true,
+		Name:          "savings",
+		AccountNumber: &number,
+		NoChainSync:   true,
 	}
 	createdAt := time.Unix(123, 0)
 	expectedRow := CreateDerivedAccountRow{
-		AccountNumber: sql.NullInt64{Int64: 12, Valid: true},
-		CreatedAt:     createdAt,
+		AccountNumber: sql.NullInt64{
+			Int64: 12,
+			Valid: true,
+		},
+		CreatedAt: createdAt,
 	}
 
 	ops := &mockCreateDerivedAccountOps{}
@@ -67,6 +125,7 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 	).Return(int64(11), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
 	allocateCall := ops.On(
 		"AllocateAccountNumber", mock.Anything, int64(11),
+		params.AccountNumber,
 	).Return(int64(12), nil).Once()
 	createCall := ops.On(
 		"CreateDerivedAccount", mock.Anything, int64(11), int64(12),
@@ -75,16 +134,15 @@ func TestCreateDerivedAccountWithOps(t *testing.T) {
 
 	mock.InOrder(walletCall, ensureScopeCall, allocateCall, createCall)
 
-	// Act: run the backend-independent workflow with the configured operations
-	// and valid watch-only derivation result.
+	// Act: use the shared workflow with valid derived material so the
+	// allocator result reaches the persisted account and returned view.
 	ctx := t.Context()
 	info, err := CreateDerivedAccountWithOps(
 		ctx, params, ops, testValidWatchOnlyDeriveFn(),
 	)
 
-	// Assert: the normalized result retains all existing account properties and
-	// the requested policy, while every expected backend stage runs exactly
-	// once.
+	// Assert: the exact identity and normalized account facts survive the
+	// complete workflow; expectations verify each required adapter call once.
 	require.NoError(t, err)
 	require.NotNil(t, info.AccountNumber)
 	require.Equal(t, uint32(12), *info.AccountNumber)
@@ -142,7 +200,10 @@ func TestCreateDerivedAccountWithOpsNilAccountNumber(t *testing.T) {
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 	ops.On(
@@ -182,7 +243,10 @@ func TestCreateDerivedAccountWithOpsMaxAccountNumber(t *testing.T) {
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(^uint32(0))+1, nil,
 	).Once()
 
@@ -254,7 +318,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 				).Return(
 					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
 				).Once()
-				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+				ops.On(
+					"AllocateAccountNumber", mock.Anything, int64(8),
+					(*uint32)(nil),
+				).Return(
 					int64(0), errTestBoom,
 				).Once()
 
@@ -276,7 +343,10 @@ func TestCreateDerivedAccountWithOpsWrapsStageErrors(t *testing.T) {
 				}).Return(
 					int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil,
 				).Once()
-				ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+				ops.On(
+					"AllocateAccountNumber", mock.Anything, int64(8),
+					(*uint32)(nil),
+				).Return(
 					int64(9), nil,
 				).Once()
 				ops.On("CreateDerivedAccount", mock.Anything, int64(8),
@@ -341,7 +411,10 @@ func TestCreateDerivedAccountWithOpsDeriveFnInvokedOnce(t *testing.T) {
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 	ops.On(
@@ -388,7 +461,10 @@ func TestCreateDerivedAccountWithOpsRollsBackOnDeriveFnError(t *testing.T) {
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 
@@ -446,7 +522,10 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataNil(t *testing.T) {
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 
@@ -485,7 +564,10 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPublicKey(
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 
@@ -524,7 +606,10 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataMissingPrivateKey(
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 
@@ -563,7 +648,10 @@ func TestCreateDerivedAccountWithOpsRejectsInvalidDerivedDataWatchOnlyHasPriv(
 			Coin:    0,
 		},
 	).Return(int64(8), ScopeAddrMap[KeyScopeBIP0049Plus], nil).Once()
-	ops.On("AllocateAccountNumber", mock.Anything, int64(8)).Return(
+	ops.On(
+		"AllocateAccountNumber", mock.Anything, int64(8),
+		(*uint32)(nil),
+	).Return(
 		int64(9), nil,
 	).Once()
 
@@ -635,9 +723,9 @@ func (m *mockCreateDerivedAccountOps) EnsureScope(ctx context.Context,
 
 // AllocateAccountNumber implements CreateDerivedAccountOps.
 func (m *mockCreateDerivedAccountOps) AllocateAccountNumber(ctx context.Context,
-	scopeID int64) (int64, error) {
+	scopeID int64, accountNumber *uint32) (int64, error) {
 
-	args := m.Called(ctx, scopeID)
+	args := m.Called(ctx, scopeID, accountNumber)
 
 	accountNum, ok := args.Get(0).(int64)
 	if !ok {
