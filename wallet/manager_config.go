@@ -41,7 +41,7 @@ var errUnsupportedBackend = errors.New("unsupported database backend")
 //
 // Every wallet a Manager owns shares that database and that network, which is
 // why the backend selection and the chain parameters live here rather than on
-// the per-wallet Config. Create and Load take no database or network selection.
+// the per-wallet Config. Create takes no database or network selection.
 //
 // The struct is flat on purpose: there are no per-backend sub-structs to
 // populate at once, so it cannot describe a backend it is not set to. Some

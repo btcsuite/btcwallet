@@ -182,12 +182,12 @@ type Config struct {
 	//
 	// Deprecated: the Manager owns its database, configured once through
 	// ManagerConfig.DataSource. This field serves the deprecated
-	// constructors only and is ignored by Manager.Create and Manager.Load.
+	// constructors only and is ignored by Manager.Create.
 	DB walletdb.DB
 
 	// Chain is the interface to the blockchain (e.g. bitcoind,
 	// neutrino). If set, the wallet will automatically synchronize with
-	// the chain upon Start.
+	// the chain when its Manager starts it.
 	Chain chain.Interface
 
 	// ChainParams defines the network parameters (e.g. mainnet, testnet).
@@ -223,8 +223,8 @@ type Config struct {
 	AutoLockDuration time.Duration
 
 	// Name is the durable identity attached during internal Wallet assembly.
-	// Maintained callers supply it through CreateWalletParams or
-	// LoadWalletParams.
+	// Maintained callers supply it through CreateWalletParams or Manager
+	// startup.
 	Name string
 
 	// MaxCFilterItems is the threshold of watched items (addresses +
@@ -411,7 +411,7 @@ type Wallet struct {
 
 	// masterFingerprint is the cached BIP32 master-key fingerprint for
 	// this wallet, computed from the wallet's master HD pubkey at
-	// Manager.Load time. The value is the canonical source for derived-
+	// Manager startup. The value is the canonical source for derived-
 	// account fingerprints exposed via AccountProperties — the db
 	// layer's per-row value for derived rows is ignored in favor of
 	// this cache. Shell / watch-only wallets that lack a stored master

@@ -77,7 +77,7 @@ func TestAddressManagerFallbackDuringStop(t *testing.T) {
 	// Act: Begin shutdown while the accepted scan is paused. Its fallback
 	// must still derive and register an address without another admission.
 	stoppedChan := make(chan error, 1)
-	go func() { stoppedChan <- w.Stop(t.Context()) }()
+	go func() { stoppedChan <- w.stop() }()
 
 	<-w.lifetimeCtx.Done()
 

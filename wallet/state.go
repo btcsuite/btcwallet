@@ -141,7 +141,7 @@ func (s *walletState) toStarting() error {
 		uint32(lifecycleInitialized), uint32(lifecycleStarting)) {
 
 		return fmt.Errorf("%w: current state is %v",
-			ErrWalletAlreadyStarted, lifecycle(s.lifecycle.Load()))
+			errWalletAlreadyStarted, lifecycle(s.lifecycle.Load()))
 	}
 
 	// 2. Authentication (Security State): Reset to Locked. This ensures

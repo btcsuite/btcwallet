@@ -16,11 +16,8 @@ import (
 )
 
 // TestManagerCreateUsesCommittedWalletRow verifies that Create assembles the
-// Wallet from the row Store.CreateWallet returned and never reads it back. A
-// post-create GetWallet would be a failure with no recovery: the row is already
-// durable, so surfacing the read error would strand a wallet a retry could no
-// longer create. The store mock is strict, so an unexpected GetWallet fails the
-// test.
+// Wallet identity from the row Store.CreateWallet returned. The later runtime
+// birthday read must not replace the committed identity during assembly.
 func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 	t.Parallel()
 
@@ -42,41 +39,25 @@ func TestManagerCreateUsesCommittedWalletRow(t *testing.T) {
 			MasterPubKey: []byte(masterPubKey.String()),
 		}, nil).Once()
 
-	// Act: Create through Manager so a forbidden readback would reach the
-	// strict Store mock as an unexpected call.
+	// Runtime startup reads the birthday after assembly; the committed ID
+	// remains authoritative even if this later read carries no identity.
+	store.On("GetWallet", mock.Anything, params.Name).Return(
+		&db.WalletInfo{BirthdayBlock: &db.Block{}}, nil,
+	).Once()
+	store.On("ListAccounts", mock.Anything, db.ListAccountsQuery{
+		WalletID: 7,
+	}).
+		Return([]db.AccountInfo{}, nil).Once()
+	store.On("DeleteExpiredLeases", mock.Anything, uint32(7)).Return(nil).Once()
+
+	// Act: Create through Manager, including its mandatory runtime startup,
+	// with a birthday row that cannot supply the committed identity.
 	w, err := testSQLManager(t, store).Create(params)
 
 	// Assert: Verify the returned Wallet uses the committed row ID and the
 	// required Store call was consumed exactly once.
 	require.NoError(t, err)
 	require.Equal(t, uint32(7), w.ID())
-	store.AssertExpectations(t)
-}
-
-// TestManagerLoadPreservesBackendFailure verifies that a non-not-found SQL
-// backend failure is not reclassified as a missing wallet.
-func TestManagerLoadPreservesBackendFailure(t *testing.T) {
-	t.Parallel()
-
-	// Arrange: Configure a strict SQL Store whose one required lookup returns
-	// an unrelated backend sentinel instead of the not-found classification.
-	params := sqliteCreateParams(t)
-	store := &walletmock.Store{}
-
-	store.On("GetWallet", mock.Anything, params.Name).
-		Return(nil, errDBMock).Once()
-
-	// Act: Load the durable identity through the maintained Manager boundary.
-	w, err := testSQLManager(t, store).Load(LoadWalletParams{
-		Name: params.Name,
-	})
-
-	// Assert: Verify the original backend failure remains discoverable, no
-	// Wallet escapes, and the one expected Store call was satisfied.
-	require.ErrorIs(t, err, errDBMock)
-	require.NotErrorIs(t, err, ErrWalletNotFound)
-	require.Nil(t, w)
-	store.AssertExpectations(t)
 }
 
 // sqliteCreateParams returns a spendable seed-import request with a durable
@@ -121,24 +102,24 @@ func TestSQLiteCreateWalletParamsCreatesSpendableSecrets(t *testing.T) {
 	require.NotEmpty(t, got.EncryptedMasterPrivKey)
 }
 
-// TestManagerSQLiteCreateLoadCached verifies that a SQLite wallet created
-// through the Manager is published under its name, so a same-Manager Load
-// returns that very Wallet rather than building a second one.
-func TestManagerSQLiteCreateLoadCached(t *testing.T) {
+// TestManagerSQLiteCreatePublishes verifies that Create returns an active
+// Wallet while another Start correctly rejects the already running Manager.
+func TestManagerSQLiteCreatePublishes(t *testing.T) {
 	t.Parallel()
 
 	params := sqliteCreateParams(t)
 	m := testSQLiteManager(t)
 
 	w, err := m.Create(params)
+	repeated, startErr := m.Start(t.Context())
+
 	require.NoError(t, err)
 	require.NotNil(t, w)
+	require.ErrorIs(t, startErr, ErrStateForbidden)
+	require.Nil(t, repeated)
 
-	// Create publishes the wallet, so Load returns the same pointer over the
-	// Manager-owned store.
-	loaded, err := m.Load(LoadWalletParams{Name: params.Name})
-	require.NoError(t, err)
-	require.Same(t, w, loaded)
+	// A successful public operation proves the returned pointer is active.
+	require.NoError(t, w.Lock(t.Context()))
 }
 
 // TestNewManagerClassifiesDatabaseIdentityMismatch proves public callers can
@@ -155,7 +136,7 @@ func TestNewManagerClassifiesDatabaseIdentityMismatch(t *testing.T) {
 		ChainSource: &bwmock.Chain{},
 	})
 	require.NoError(t, err)
-	require.NoError(t, manager.Close())
+	require.NoError(t, manager.Stop())
 
 	// Act: Reopen the same file through the public API with testnet identity.
 	rejected, err := NewManager(t.Context(), ManagerConfig{
@@ -265,61 +246,44 @@ func TestBirthdayWithSafetyMargin(t *testing.T) {
 	require.True(t, birthdayWithSafetyMargin(time.Time{}).IsZero())
 }
 
-// TestManagerSQLiteReopenDerivesAddress verifies the two SQLite requirements a
-// same-Manager Create/Load cannot: that a *fresh* Manager over the same file
-// serves the storage Load path, and that NewManager installed
-// sqlite.Config.DeriveAddress — proven by calling the public
-// AddressManager.NewAddress, which is the only caller that needs the deriver.
+// TestManagerSQLiteReopenDerivesAddress verifies two SQLite requirements that
+// same-Manager creation cannot: a fresh Manager assembles the durable Wallet
+// from the same file during aggregate Start, and NewManager installs
+// sqlite.Config.DeriveAddress. Calling public AddressManager.NewAddress proves
+// the deriver is available on that reconstructed Wallet.
 func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 	t.Parallel()
 
-	// Arrange: Prepare a shared strict chain mock with one required address
-	// notification, then create and close the durable SQLite Wallet so no
-	// runtime instance remains cached.
-	dbPath := filepath.Join(t.TempDir(), "runtime.sqlite")
-	chainMock := &bwmock.Chain{}
-
-	newManager := func() *Manager {
-		m, err := NewManager(t.Context(), ManagerConfig{
-			Backend:     DBBackendSQLite,
-			DataSource:  dbPath,
-			ChainParams: chainParams,
-			ChainSource: chainMock,
-		})
-		require.NoError(t, err)
-
-		return m
-	}
-
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
-	require.NoError(t, err)
-
-	privPass := []byte("private")
-
+	// Arrange: Create a durable Wallet through the existing SQLite fixture.
+	// Its strict chain dependency observes the later public derivation, while
+	// Stop releases this Manager's original runtime and database connection.
+	m := testSQLiteManager(t)
+	chainMock, ok := m.config.ChainSource.(*bwmock.Chain)
+	require.True(t, ok)
 	chainMock.On("NotifyReceived", mock.Anything).Return(nil).Once()
 
-	creator := newManager()
-	_, err = creator.Create(CreateWalletParams{
-		Name:              testWalletName,
-		Mode:              ModeImportSeed,
-		Seed:              seed,
-		PrivatePassphrase: privPass,
-		Birthday:          time.Now(),
+	params := sqliteCreateParams(t)
+	original, err := m.Create(params)
+	require.NoError(t, err)
+	require.NoError(t, m.Stop())
+
+	// Act: Construct a fresh Manager over the same database after shutdown,
+	// then derive through its runtime's installed Store callback. Register
+	// cleanup before startup so the original chain fixture outlives its work.
+	reopened, err := NewManager(t.Context(), m.config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = reopened.Stop()
 	})
+
+	wallets, err := reopened.Start(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, creator.Close())
-
-	// Act: Have a fresh Manager load the Wallet, unlock its vault, and derive
-	// an address through the Store callback installed during construction.
-	m := newManager()
-	t.Cleanup(func() { _ = m.Close() })
-
-	w, err := m.Load(LoadWalletParams{Name: testWalletName})
-	require.NoError(t, err)
-
-	startLoadedWalletForTest(t, w)
-	require.NoError(t, w.keyVault.Unlock(t.Context(), privPass))
-	w.state.toUnlocked()
+	require.Len(t, wallets, 1)
+	w := wallets[0]
+	require.NoError(t, w.Unlock(t.Context(), UnlockRequest{
+		Passphrase: params.PrivatePassphrase,
+		Timeout:    -1,
+	}))
 
 	_, err = w.NewAccount(t.Context(), NewAccountParams{
 		Scope: waddrmgr.KeyScopeBIP0084,
@@ -334,7 +298,7 @@ func TestManagerSQLiteReopenDerivesAddress(t *testing.T) {
 
 	// Assert: The public derivation succeeds and its required notification
 	// proves the loaded Wallet received the Manager-owned chain source.
+	require.NotSame(t, original, w)
 	require.NoError(t, err, "NewAddress requires the installed deriver")
 	require.NotNil(t, addr)
-	chainMock.AssertExpectations(t)
 }

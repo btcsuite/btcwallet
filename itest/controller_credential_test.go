@@ -117,52 +117,27 @@ func testControllerChangePassphraseUnlocked(h *bwtest.HarnessTest) {
 	requireLocked(h, w, false)
 }
 
-// testControllerChangePassphraseLifecycle verifies lifecycle state gates for
-// passphrase rotation.
+// testControllerChangePassphraseLifecycle verifies a rejected rotation on a
+// stopped Wallet leaves its durable private passphrase unchanged.
 func testControllerChangePassphraseLifecycle(h *bwtest.HarnessTest) {
 	const (
 		oldPassphrase  = bwtest.TestWalletPrivatePassphrase
 		nextPassphrase = "controller-next-private-passphrase"
 	)
 
-	w, _ := h.NewWallet(bwtest.WalletFixture{Unstarted: true})
+	// Retain lifecycle ownership to reject rotation on the stopped Wallet.
+	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
 
-	err := w.ChangePassphrase(h.Context(), wallet.ChangePassphraseRequest{
-		ChangePrivate: true,
-		PrivateOld:    []byte(oldPassphrase),
-		PrivateNew:    []byte(nextPassphrase),
-	})
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"change passphrase before start not rejected",
-	)
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+	h.RegisterWallet(manager, w)
 
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
-	requireLocked(h, w, true)
-
-	err = w.Unlock(h.Context(), wallet.UnlockRequest{
-		Passphrase: []byte(nextPassphrase),
-		Timeout:    -1,
-	})
-	require.ErrorIs(
-		h, err, wallet.ErrInvalidPassphrase,
-		"pre-start rejection should not install new passphrase",
-	)
-	requireLocked(h, w, true)
-
-	err = w.Unlock(h.Context(), wallet.UnlockRequest{
-		Passphrase: []byte(oldPassphrase),
-		Timeout:    -1,
-	})
-	require.NoError(
-		h, err, "old passphrase should survive pre-start rejection",
-	)
-	requireLocked(h, w, false)
-
-	require.NoError(h, w.Lock(h.Context()), "failed to lock wallet")
-	requireLocked(h, w, true)
-
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	// Release registration before reopening through a fresh Manager.
+	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
+	require.True(h, h.ReleaseManager(manager), "failed to release manager")
+	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
 	err = w.ChangePassphrase(h.Context(), wallet.ChangePassphraseRequest{
 		ChangePrivate: true,
@@ -176,7 +151,12 @@ func testControllerChangePassphraseLifecycle(h *bwtest.HarnessTest) {
 
 	// Reload through the Manager because a stopped Wallet instance is
 	// terminal; the fresh instance also exposes any persisted mutation.
-	w = h.ReloadWallet(w)
+	manager = h.NewWalletManager()
+	loaded, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to reopen wallet manager")
+	require.Len(h, loaded, 1, "reopen lost the durable wallet")
+	w = loaded[0]
+	h.RegisterWallet(manager, w)
 	requireLocked(h, w, true)
 
 	err = w.Unlock(h.Context(), wallet.UnlockRequest{

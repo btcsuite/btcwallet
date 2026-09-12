@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
@@ -15,8 +16,9 @@ import (
 )
 
 var (
-	// ErrWalletNotFound is returned when a wallet is not found by Manager.Load.
-	ErrWalletNotFound = errors.New("wallet not found")
+	// ErrManagerStopped is returned when an operation targets a Manager that
+	// is inactive after its owned resources have closed.
+	ErrManagerStopped = errors.New("manager stopped")
 
 	// ErrWalletParams is returned when the creation parameters are invalid.
 	ErrWalletParams = errors.New("invalid wallet params")
@@ -112,24 +114,7 @@ type CreateWalletParams struct {
 	PrivatePassphrase []byte
 }
 
-// LoadWalletParams identifies an existing Wallet and carries inputs needed
-// only while its backend opens durable state.
-type LoadWalletParams struct {
-	// Name is the required runtime identity used by the Manager cache and SQL
-	// wallet lookup. The legacy kvdb backend also uses it for the one Wallet
-	// instance it can serve, but does not persist it as an alias.
-	Name string
-
-	// PubPassphrase opens the legacy kvdb wallet. SQL backends ignore it
-	// because they have no public encryption passphrase.
-	//
-	// Remove this field with kvdb support.
-	PubPassphrase []byte
-}
-
-// Manager is a high-level manager that handles the lifecycle of multiple
-// wallets. It acts as a factory for creating and loading wallets, and can
-// optionally track the active wallets.
+// Manager owns the lifecycle and shared database of its Wallet set.
 //
 // The Manager enables a one-to-many relationship, allowing a single application
 // to manage multiple distinct wallets (e.g., for different coins or different
@@ -137,11 +122,13 @@ type LoadWalletParams struct {
 type Manager struct {
 	sync.RWMutex
 
-	// wallets holds the active wallets keyed by their unique name. The
-	// Manager lock serializes runtime assembly, Store access, and cache
-	// installation. A ModeShell Create imports its initial accounts after
-	// installation, so a wallet can be observed here before that import
-	// finishes.
+	// started rejects another Start while starting, running or stopping.
+	// The Manager lock serializes resource changes and terminal admission.
+	started atomic.Bool
+
+	// wallets holds fully initialized and started Wallets keyed by unique
+	// name. The Manager lock serializes Store access, runtime assembly, and
+	// publication after initial-account import and private startup complete.
 	wallets map[string]*Wallet
 
 	// backend owns the database and resolves the storage dependencies for
@@ -155,9 +142,9 @@ type Manager struct {
 // NewManager opens the one database described by cfg and returns a Manager that
 // owns it.
 //
-// Every wallet the Manager serves shares that database. The legacy kvdb
-// backend remains single-wallet until it is removed; SQL stores distinguish
-// wallets by ID. The caller stops its wallets and then calls Close.
+// Every Wallet the Manager serves shares that database. NewManager does not
+// start durable Wallets; callers use Start and eventually Stop. The legacy kvdb
+// backend remains single-wallet until it is removed.
 func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	err := cfg.validate()
 	if err != nil {
@@ -220,6 +207,81 @@ func NewManager(ctx context.Context, cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
+// startWallets assembles and starts durable Wallets in stable identifier order.
+// It publishes only the complete set while the caller holds the write lock.
+func (m *Manager) startWallets(ctx context.Context) ([]*Wallet, error) {
+	data, err := m.backend.listWallets(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	wallets := make([]*Wallet, 0, len(data))
+	for _, walletData := range data {
+		cfg, err := m.config.walletConfig(walletData.name)
+		if err != nil {
+			return wallets, err
+		}
+
+		wallet := newManagedWallet(cfg, walletData)
+		wallets = append(wallets, wallet)
+
+		err = wallet.start(ctx)
+		if err != nil {
+			return wallets, err
+		}
+	}
+
+	// Cancellation must settle before publication so failed startup leaves
+	// only local candidates for the caller to drain.
+	err = ctx.Err()
+	if err != nil {
+		return wallets, err
+	}
+
+	for _, wallet := range wallets {
+		m.wallets[wallet.cfg.Name] = wallet
+	}
+
+	return wallets, nil
+}
+
+// stopWallets stops all Wallets before closing storage. The slice holds Wallets
+// from failed Start/Create calls that are not in m.wallets.
+// The caller holds the write lock and must have a non-nil backend.
+func (m *Manager) stopWallets(wallets []*Wallet) error {
+	for _, wallet := range m.wallets {
+		wallets = append(wallets, wallet)
+	}
+
+	// Keep shutdown errors in Wallet-ID order.
+	sort.Slice(wallets, func(i, j int) bool {
+		return wallets[i].id < wallets[j].id
+	})
+
+	// Private stop joins accepted requests and workers before their shared
+	// storage closes. Preserve each Wallet's identity in any teardown error.
+	errs := make([]error, 0, len(wallets))
+	for _, wallet := range wallets {
+		err := wallet.stop()
+		if err != nil {
+			errs = append(errs, fmt.Errorf(
+				"stop wallet %q: %w", wallet.cfg.Name, err,
+			))
+		}
+	}
+
+	// Clear runtime ownership after shutdown has settled. The nil backend
+	// keeps later Start calls from reopening a terminal Manager.
+	err := errors.Join(errs...)
+	err = errors.Join(err, m.backend.close())
+	m.backend = nil
+
+	clear(m.wallets)
+	m.started.Store(false)
+
+	return err
+}
+
 // newManagerDatabaseIdentity validates the owned network snapshot before a SQL
 // connection is opened while leaving the legacy kvdb startup path unchanged.
 func newManagerDatabaseIdentity(
@@ -254,12 +316,66 @@ func translateDatabaseIdentityError(err error) error {
 	}
 }
 
-// Close releases the database this Manager owns.
-//
-// The caller must have stopped every wallet first. There is no close fence and
-// no use-after-close guarantee beyond that contract.
-func (m *Manager) Close() error {
-	return m.backend.close()
+// Start starts every durable Wallet and returns the complete active set in
+// stable Wallet-ID order. Another Start while starting, running, or stopping
+// returns ErrStateForbidden. Stop and admitted startup failure are terminal;
+// construct a fresh Manager to reopen the database.
+// Cancellation or failure cleans up all candidates before returning an error.
+func (m *Manager) Start(ctx context.Context) ([]*Wallet, error) {
+	// Reject without waiting for the lock held by startup or shutdown. Claim
+	// under that lock below so Stop cannot overtake an admitted startup.
+	if m.started.Load() {
+		return nil, fmt.Errorf(
+			"manager already started: %w", ErrStateForbidden,
+		)
+	}
+
+	m.Lock()
+	defer m.Unlock()
+
+	err := ctx.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	// Cleanup closes and clears the backend, making this Manager terminal.
+	if m.backend == nil {
+		return nil, ErrManagerStopped
+	}
+
+	if m.started.Swap(true) {
+		return nil, fmt.Errorf(
+			"manager already started: %w", ErrStateForbidden,
+		)
+	}
+
+	wallets, err := m.startWallets(ctx)
+	if err != nil {
+		// No candidate is published on failure; join its work before closing
+		// shared storage and making the Manager terminal.
+		return nil, errors.Join(err, m.stopWallets(wallets))
+	}
+
+	return wallets, nil
+}
+
+// Stop terminally drains every Wallet and closes the owned database.
+// It waits for startup, accepted creation, and any other Stop to finish.
+// After shutdown, Stop is a no-op.
+func (m *Manager) Stop() error {
+	m.Lock()
+	defer m.Unlock()
+
+	// Preserve terminal admission on repeated no-op shutdown calls.
+	if m.backend == nil {
+		return nil
+	}
+
+	// Construction already owns an open backend, so shutdown must reject
+	// Start even when no startup attempt has claimed the guard yet.
+	m.started.Store(true)
+
+	return m.stopWallets(nil)
 }
 
 // String returns a summary of the active wallets managed by the Manager.
@@ -287,8 +403,53 @@ func validateManagedWalletName(name string) error {
 	return nil
 }
 
-// Create persists and assembles a Wallet with Manager-owned runtime policy.
+// Create persists, starts, and publishes one Wallet while Manager is running.
+//
+// TODO(yy): Add a context parameter once wallet creation uses a single atomic
+// database transaction.
 func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
+	m.Lock()
+	defer m.Unlock()
+
+	if !m.started.Load() {
+		err := ErrStateForbidden
+		if m.backend == nil {
+			err = ErrManagerStopped
+		}
+
+		return nil, err
+	}
+
+	// Durable preparation and private startup stay under the admission lock;
+	// Stop cannot close storage until the accepted creation has settled.
+	w, err := m.createWallet(params)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we are in shell mode and have initial accounts, we import them now.
+	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
+		err = w.importInitialAccounts(
+			context.Background(), params.InitialAccounts,
+		)
+		if err != nil {
+			return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+		}
+	}
+
+	err = w.start(context.Background())
+	if err != nil {
+		return nil, errors.Join(err, m.stopWallets([]*Wallet{w}))
+	}
+
+	m.wallets[w.cfg.Name] = w
+
+	return w, nil
+}
+
+// createWallet prepares a durable candidate while Create holds the Manager
+// lock. A returned Wallet must be started or cleaned up before releasing it.
+func (m *Manager) createWallet(params CreateWalletParams) (*Wallet, error) {
 	// Validate identity before key derivation or Store work can produce a less
 	// useful error or side effect.
 	err := validateManagedWalletName(params.Name)
@@ -306,39 +467,19 @@ func (m *Manager) Create(params CreateWalletParams) (*Wallet, error) {
 		return nil, err
 	}
 
-	m.Lock()
-
 	// The Manager mutex keeps runtime assembly, Store mutation, and cache
 	// publication atomic so no partial Wallet becomes observable.
 	walletCfg, err := m.config.walletConfig(params.Name)
 	if err != nil {
-		m.Unlock()
-
 		return nil, err
 	}
 
 	data, err := m.backend.create(context.Background(), params, rootKey)
 	if err != nil {
-		m.Unlock()
-
 		return nil, err
 	}
 
-	w := newManagedWallet(walletCfg, data)
-	m.wallets[walletCfg.Name] = w
-	m.Unlock()
-
-	// If we are in shell mode and have initial accounts, we import them now.
-	if params.Mode == ModeShell && len(params.InitialAccounts) > 0 {
-		err = w.importInitialAccounts(
-			context.Background(), params.InitialAccounts,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return w, nil
+	return newManagedWallet(walletCfg, data), nil
 }
 
 // importInitialAccounts imports a list of watch-only accounts into the wallet.
@@ -467,56 +608,6 @@ func validateInitialAccountKeys(accounts []WatchOnlyAccount) error {
 	}
 
 	return nil
-}
-
-// Load opens the requested durable Wallet and assembles it from Manager-owned
-// runtime policy. If it does not exist, Load returns ErrWalletNotFound.
-func (m *Manager) Load(params LoadWalletParams) (*Wallet, error) {
-	// Validate identity before cache or backend work so every backend reports
-	// the same caller error for an empty name.
-	err := validateManagedWalletName(params.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	name := params.Name
-
-	m.Lock()
-	defer m.Unlock()
-
-	// Serializing the cache check through installation ensures concurrent cold
-	// Loads share the one Wallet assembled by the first caller.
-	existingW, ok := m.wallets[name]
-	if ok {
-		return existingW, nil
-	}
-
-	// A cache miss receives a fresh Wallet-local policy assembled from the
-	// Manager's immutable configuration snapshot.
-	walletCfg, err := m.config.walletConfig(name)
-	if err != nil {
-		return nil, err
-	}
-
-	// Only the narrow request reaches the backend. The assembled Wallet never
-	// retains a legacy public passphrase.
-	data, err := m.backend.load(context.Background(), params)
-	if err != nil {
-		// Hide the database sentinel at the public Manager boundary while
-		// retaining the requested wallet name for caller diagnostics.
-		if errors.Is(err, db.ErrWalletNotFound) {
-			return nil, fmt.Errorf(
-				"wallet %q: %w", name, ErrWalletNotFound,
-			)
-		}
-
-		return nil, err
-	}
-
-	w := newManagedWallet(walletCfg, data)
-	m.wallets[walletCfg.Name] = w
-
-	return w, nil
 }
 
 // deriveRootKey resolves the master extended key after creation parameters have

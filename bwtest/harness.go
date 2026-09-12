@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"slices"
 	"sync"
 	"testing"
 
@@ -39,10 +38,8 @@ const (
 	defaultChainReconnectAttempts = 5
 )
 
-// walletRegistration tracks every wallet owned by one Manager. Each map value
-// is a copied reload request, or nil for wallets registered only for lifecycle
-// ownership.
-type walletRegistration map[*wallet.Wallet]*wallet.LoadWalletParams
+// walletRegistration tracks every wallet owned by one Manager.
+type walletRegistration map[*wallet.Wallet]struct{}
 
 // HarnessTest is the integration test harness.
 type HarnessTest struct {
@@ -179,7 +176,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 		// If a test fails, we still try to stop wallets to avoid leaking
 		// goroutines into the next test, but we skip assertions.
 		if st.Failed() {
-			err := st.teardownWallets(context.Background())
+			err := st.teardownWallets()
 			if err != nil {
 				st.Logf("failed to stop wallets during failed-test cleanup: %v",
 					err)
@@ -192,7 +189,7 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 			return
 		}
 
-		err := st.teardownWallets(context.Background())
+		err := st.teardownWallets()
 		require.NoError(st, err, "failed to stop wallets")
 
 		mempool, err := st.getRawMempool()
@@ -209,9 +206,8 @@ func (h *HarnessTest) Subtest(t *testing.T) *HarnessTest {
 // NewWalletManager builds a Manager for the backend the harness was started
 // with and registers it for teardown.
 //
-// The Manager is registered before any wallet is created, so a failed Create
-// still releases the database it opened. Cleanup stops every wallet first and
-// then closes every Manager.
+// The Manager is registered before it is started, so cleanup owns it even if
+// startup or wallet creation fails.
 func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	h.Helper()
 
@@ -243,6 +239,7 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 		ChainSource:             h.ChainClient,
 		RecoveryWindow:          defaultWalletRecoveryWindow,
 		WalletSyncRetryInterval: defaultWalletSyncRetryInterval,
+		KVDBPubPassphrase:       []byte(defaultPubPass),
 	}
 
 	manager, err := wallet.NewManager(h.Context(), managerCfg)
@@ -264,10 +261,8 @@ func (h *HarnessTest) NewWalletManager() *wallet.Manager {
 	return manager
 }
 
-// teardownWallets stops registered wallets and then closes their Managers.
-func (h *HarnessTest) teardownWallets(ctx context.Context) error {
-	err := h.stopActiveWallets(ctx)
-
+// teardownWallets stops every harness-owned Manager and its Wallets.
+func (h *HarnessTest) teardownWallets() error {
 	h.mu.Lock()
 
 	managers := make([]*wallet.Manager, 0, len(h.wallets))
@@ -277,15 +272,16 @@ func (h *HarnessTest) teardownWallets(ctx context.Context) error {
 
 	h.mu.Unlock()
 
+	var stopErr error
 	for _, manager := range managers {
-		err = errors.Join(err, manager.Close())
+		stopErr = errors.Join(stopErr, manager.Stop())
 	}
 
 	h.mu.Lock()
 	h.wallets = nil
 	h.mu.Unlock()
 
-	return err
+	return stopErr
 }
 
 // assertBackendArtifact verifies the Manager created the requested database.
@@ -366,16 +362,6 @@ func (h *HarnessTest) RegisterWallet(manager *wallet.Manager,
 
 	h.Helper()
 
-	h.registerWallet(manager, w, nil)
-}
-
-// registerWallet records a wallet under manager and owns a copy of optional
-// reloadParams so fixture mutations cannot alter a later reload credential.
-func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
-	reloadParams *wallet.LoadWalletParams) {
-
-	h.Helper()
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -391,16 +377,7 @@ func (h *HarnessTest) registerWallet(manager *wallet.Manager, w *wallet.Wallet,
 		)
 	}
 
-	var params *wallet.LoadWalletParams
-	if reloadParams != nil {
-		copiedParams := *reloadParams
-		copiedParams.PubPassphrase = slices.Clone(
-			reloadParams.PubPassphrase,
-		)
-		params = &copiedParams
-	}
-
-	registration[w] = params
+	registration[w] = struct{}{}
 }
 
 // DeregisterWallet releases a wallet from harness ownership.
@@ -548,32 +525,6 @@ func (h *HarnessTest) Stop() {
 	h.finalizeLogs()
 
 	require.NoError(h, shutdownErr, "failed to stop harness")
-}
-
-// stopActiveWallets stops all wallets registered with the harness.
-//
-// This is used as part of the per-subtest cleanup to avoid leaking background
-// goroutines into the next test.
-func (h *HarnessTest) stopActiveWallets(ctx context.Context) error {
-	h.Helper()
-
-	var stopErr error
-
-	for _, w := range h.ActiveWallets() {
-		// The modern Wallet controller's Stop method is idempotent.
-		//
-		// NOTE: We intentionally don't call the deprecated WaitForShutdown/
-		// ShuttingDown methods here, as modern wallets might not have the
-		// legacy fields initialized.
-		err := w.Stop(ctx)
-		if err != nil {
-			stopErr = errors.Join(
-				stopErr, fmt.Errorf("stop wallet: %w", err),
-			)
-		}
-	}
-
-	return stopErr
 }
 
 // setUpChainClient creates and starts a chain client for the active harness

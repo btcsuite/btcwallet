@@ -25,8 +25,8 @@ func TestDeregisterWalletRemovesRegisteredWallet(t *testing.T) {
 		T: t,
 		wallets: map[*wallet.Manager]walletRegistration{
 			manager: {
-				removed: nil,
-				sibling: nil,
+				removed: {},
+				sibling: {},
 			},
 		}}
 
@@ -67,8 +67,6 @@ func TestRegisterWalletSupportsMultipleWalletsPerManager(t *testing.T) {
 	active := h.ActiveWallets()
 	require.ElementsMatch(t, []*wallet.Wallet{first, second}, active)
 	require.Len(t, h.wallets[manager], 2)
-	require.Nil(t, h.wallets[manager][first])
-	require.Nil(t, h.wallets[manager][second])
 }
 
 // TestReleaseManagerRejectsRegisteredWallet verifies that Manager ownership
@@ -83,7 +81,7 @@ func TestReleaseManagerRejectsRegisteredWallet(t *testing.T) {
 		T: t,
 		wallets: map[*wallet.Manager]walletRegistration{
 			manager: {
-				w: nil,
+				w: {},
 			},
 		},
 	}
@@ -128,8 +126,8 @@ func TestReleaseManagerRemovesRegisteredManager(t *testing.T) {
 	require.False(t, h.ReleaseManager(nil))
 }
 
-// TestReleaseManagerTransfersTeardownOwnership verifies that a successfully
-// closed Manager can be removed from teardown without a second close.
+// TestReleaseManagerTransfersTeardownOwnership verifies that a stopped
+// Manager can be removed from teardown without a second stop.
 func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	t.Parallel()
 
@@ -146,24 +144,25 @@ func TestReleaseManagerTransfersTeardownOwnership(t *testing.T) {
 	manager := h.NewWalletManager()
 	require.NotNil(t, h.wallets[manager])
 
-	// Act: the test closes the Manager before releasing teardown ownership.
-	require.NoError(t, manager.Close())
+	// Act: the test stops the Manager before releasing teardown ownership.
+	require.NoError(t, manager.Stop())
 	require.True(t, h.ReleaseManager(manager))
 
 	// Assert: teardown succeeds without a second close and the database
 	// reopened.
-	require.NoError(t, h.teardownWallets(t.Context()))
+	require.NoError(t, h.teardownWallets())
 	reopened, err := wallet.NewManager(t.Context(), wallet.ManagerConfig{
 		//nolint:staticcheck // This test intentionally reopens legacy kvdb.
-		Backend:     wallet.DBBackendKVDB,
-		DataSource:  h.WalletDBSource,
-		ChainParams: *h.NetParams(),
-		ChainSource: h.ChainClient,
+		Backend:           wallet.DBBackendKVDB,
+		DataSource:        h.WalletDBSource,
+		ChainParams:       *h.NetParams(),
+		ChainSource:       h.ChainClient,
+		KVDBPubPassphrase: []byte(defaultPubPass),
 	})
 	require.NoError(
 		t, err, "released Manager must leave the database available",
 	)
-	require.NoError(t, reopened.Close())
+	require.NoError(t, reopened.Stop())
 	chainSource.AssertExpectations(t)
 }
 
@@ -220,6 +219,8 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 
 	manager := h.NewWalletManager()
 	require.NotNil(t, manager)
+	_, err := manager.Start(t.Context())
+	require.NoError(t, err, "failed to start wallet manager")
 
 	// Act: force Create to fail after the Manager has opened its database,
 	// then run centralized teardown through the same path used by the
@@ -231,10 +232,10 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 	require.ErrorIs(t, err, wallet.ErrMissingParam)
 	require.Nil(t, w)
 
-	// Bound teardown so a missing Manager close fails instead of hanging.
+	// Bound teardown so a missing Manager stop fails instead of hanging.
 	done := make(chan error, 1)
 	go func() {
-		done <- h.teardownWallets(t.Context())
+		done <- h.teardownWallets()
 	}()
 
 	select {
@@ -255,9 +256,14 @@ func testManagerTeardownAfterFailedCreate(t *testing.T, dbType string,
 		ChainParams: *h.NetParams(),
 		ChainSource: h.ChainClient,
 	}
+	//nolint:staticcheck // This test intentionally reopens legacy kvdb.
+	if backend == wallet.DBBackendKVDB {
+		reopenCfg.KVDBPubPassphrase = []byte(defaultPubPass)
+	}
+
 	reopened, err := wallet.NewManager(t.Context(), reopenCfg)
 	require.NoError(t, err, "teardown must release the database")
-	require.NoError(t, reopened.Close())
+	require.NoError(t, reopened.Stop())
 	chainSource.AssertExpectations(t)
 }
 

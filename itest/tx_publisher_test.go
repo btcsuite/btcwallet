@@ -415,66 +415,50 @@ func testBroadcastRejected(h *bwtest.HarnessTest) {
 	require.True(h, utxo.Spendable, "coin is no longer spendable")
 }
 
-// testCheckMempoolAcceptanceWalletState verifies the lifecycle gate on the
-// acceptance check: it is unavailable before the wallet starts and after it
-// stops, so a caller asking during startup or shutdown is told the wallet is
-// not running rather than something about its transaction.
+// testCheckMempoolAcceptanceWalletState verifies rejection of a retained
+// Wallet pointer after its owning runtime has stopped.
 func testCheckMempoolAcceptanceWalletState(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{
-		AddrType:  txPublisherFundingType,
-		Unstarted: true,
-	})
+	// Retain the Manager so this case can stop its Wallet directly.
+	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+
+	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
 	// The gate refuses the transaction before anything looks at its
 	// content, so this only has to be non-nil. It is never published.
 	tx := wire.NewMsgTx(wire.TxVersion)
 
-	err := w.CheckMempoolAcceptance(h.Context(), tx)
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"acceptance check before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
-
-	// Stop the wallet, then deregister it so the harness does not drive a
-	// stopped wallet during teardown.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
-	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-
 	err = w.CheckMempoolAcceptance(h.Context(), tx)
+
 	require.ErrorIs(
 		h, err, wallet.ErrWalletStopped,
 		"acceptance check after stop not rejected",
 	)
 }
 
-// testBroadcastWalletState verifies the same lifecycle gate on Broadcast, which
-// enforces it separately from the acceptance check.
+// testBroadcastWalletState verifies the public operation rejects a retained
+// Wallet pointer after its owning runtime has stopped.
 func testBroadcastWalletState(h *bwtest.HarnessTest) {
-	w, _ := h.NewWallet(bwtest.WalletFixture{
-		AddrType:  txPublisherFundingType,
-		Unstarted: true,
-	})
+	// Retain the Manager so this case can stop its Wallet directly.
+	manager := h.NewWalletManager()
+	_, err := manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
+
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+
+	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 
 	// The gate refuses the transaction before anything looks at its
 	// content, so this only has to be non-nil. It is never published.
 	tx := wire.NewMsgTx(wire.TxVersion)
 
-	err := w.Broadcast(h.Context(), tx, "")
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"broadcast before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
-
-	// Stop the wallet, then deregister it so the harness does not drive a
-	// stopped wallet during teardown.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
-	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
-
 	err = w.Broadcast(h.Context(), tx, "")
+
 	require.ErrorIs(
 		h, err, wallet.ErrWalletStopped,
 		"broadcast after stop not rejected",

@@ -943,9 +943,8 @@ func testCreateTransactionRejectInputs(h *bwtest.HarnessTest) {
 	require.Equal(h, outpoints[0], leases[0].OutPoint, "unexpected lease")
 }
 
-// testCreateTransactionWalletState verifies the lifecycle gate on transaction
-// creation: it is forbidden before Start and after Stop, and a locked wallet
-// still authors, since an unsigned transaction needs no private key.
+// testCreateTransactionWalletState verifies locked wallets can author
+// unsigned transactions while stopped pointers reject the same intent.
 func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 	// witnessProgramSize is the length of a witness pubkey hash program.
 	const witnessProgramSize = 20
@@ -953,16 +952,17 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 	scope, err := txCreatorFundingType.KeyScope()
 	require.NoError(h, err, "failed to resolve funding scope")
 
-	w, _ := h.NewWallet(bwtest.WalletFixture{
-		AddrType:  txCreatorFundingType,
-		Unstarted: true,
-	})
+	// Retain the Manager so this case can stop its Wallet directly.
+	manager := h.NewWalletManager()
+	_, err = manager.Start(h.Context())
+	require.NoError(h, err, "failed to start wallet manager")
 
-	// A wallet that has not started cannot derive an address, so this
-	// payment goes to an arbitrary witness program. The intent is otherwise
-	// well formed, which keeps the assertion below about the state gate
-	// alone rather than about the order in which the gate and intent
-	// validation run.
+	w, err := manager.Create(h.TestWalletParams())
+	require.NoError(h, err, "failed to create wallet")
+	h.RegisterWallet(manager, w)
+
+	// A fixed witness program supplies a valid destination without changing
+	// the fixture lock state through address derivation.
 	addr, err := address.NewAddressWitnessPubKeyHash(
 		make([]byte, witnessProgramSize), h.NetParams(),
 	)
@@ -988,14 +988,6 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 		FeeRate:      relayFeeRate,
 	}
 
-	_, err = w.CreateTransaction(h.Context(), intent)
-	require.ErrorIs(
-		h, err, wallet.ErrStateForbidden,
-		"create transaction before start not rejected",
-	)
-
-	require.NoError(h, w.Start(h.Context()), "failed to start wallet")
-
 	funding := h.FundWalletOfType(w, txCreatorFundingType, oneBTC)
 	outpoints := funding.WalletOutpoints
 
@@ -1015,9 +1007,8 @@ func testCreateTransactionWalletState(h *bwtest.HarnessTest) {
 		"unexpected selected input",
 	)
 
-	// Stop the wallet, then deregister it so the harness does not drive a
-	// stopped wallet during teardown.
-	require.NoError(h, w.Stop(h.Context()), "failed to stop wallet")
+	// Stop joins the runtime before the retained pointer is exercised.
+	require.NoError(h, manager.Stop(), "failed to stop wallet manager")
 	require.True(h, h.DeregisterWallet(w), "failed to deregister wallet")
 
 	_, err = w.CreateTransaction(h.Context(), intent)

@@ -24,16 +24,12 @@ var allTestCases = []*testCase{
 		TestFunc: testManagerCreateDuplicate,
 	},
 	{
-		Name:     "manager load reload",
-		TestFunc: testManagerLoadReload,
+		Name:     "manager start reopen",
+		TestFunc: testManagerStartReopen,
 	},
 	{
-		Name:     "manager load concurrent",
-		TestFunc: testManagerLoadConcurrent,
-	},
-	{
-		Name:     "manager load missing",
-		TestFunc: testManagerLoadMissing,
+		Name:     "manager start concurrent",
+		TestFunc: testManagerStartConcurrent,
 	},
 	{
 		Name:     "manager create watchonly",
@@ -102,10 +98,6 @@ var allTestCases = []*testCase{
 	{
 		Name:     "account manager enforce account import lifecycle",
 		TestFunc: testAccountManagerEnforceAccountImportLifecycle,
-	},
-	{
-		Name:     "controller start stop",
-		TestFunc: testControllerStartStop,
 	},
 	{
 		Name:     "controller unlock lock",
