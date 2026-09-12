@@ -334,6 +334,13 @@ type DerivedAccountData struct {
 
 // AddressStore defines the database actions for managing addresses.
 type AddressStore interface {
+	// NewDerivedAddresses atomically allocates count fresh children in order.
+	// Errors return no addresses; exhaustion may commit consumed invalid
+	// indexes, and an ambiguous commit must never be retried automatically.
+	// RequireChainSync applies before mutation. Kvdb is unsupported.
+	NewDerivedAddresses(ctx context.Context, params NewDerivedAddressParams,
+		count uint32) ([]AddressInfo, error)
+
 	// NewDerivedAddress creates a new HD-derived address for the specified
 	// account and key scope. The concrete backend owns address derivation:
 	// SQL backends use their configured AddressDerivationFunc, while kvdb
