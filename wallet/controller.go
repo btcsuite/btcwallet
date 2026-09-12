@@ -785,6 +785,9 @@ func (w *Wallet) handleReq(req any) {
 	case rescanReq:
 		w.handleRescanReq(r)
 
+	case newBulkAddressesReq:
+		w.handleNewBulkAddresses(r)
+
 	case newAddressReq:
 		w.handleNewAddress(r)
 

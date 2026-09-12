@@ -1575,3 +1575,167 @@ func TestScriptForOutputNestedWitness(t *testing.T) {
 	require.Equal(t, witnessProgram, scriptInfo.RedeemScript)
 	require.Equal(t, expectedSigScript, scriptInfo.SigScript)
 }
+
+// TestNewBulkAddressesReturnsWatchedBatch checks the minimum and maximum batch
+// sizes, preserving order for both semantic selectors and address branches.
+func TestNewBulkAddressesReturnsWatchedBatch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		count    uint32
+		internal bool
+		numbered bool
+	}{
+		{
+			name:  "single external by name",
+			count: 1,
+		},
+		{
+			name:     "maximum internal by number",
+			count:    MaxBulkAddressCount,
+			internal: true,
+			numbered: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Start a SQL-mode wallet with one complete Store batch
+			// and one ordered registration expectation on its lifetime context.
+			w, deps := createTestWalletWithMocks(t)
+			w.addrStore = nil
+			startLoadedWalletForTest(t, w)
+
+			scope := waddrmgr.KeyScopeBIP0084
+			selector := NewAccountSelectorByName(scope, "batch")
+
+			params := db.NewDerivedAddressParams{
+				WalletID:         w.id,
+				AccountName:      "batch",
+				Scope:            db.KeyScope(scope),
+				Change:           tc.internal,
+				RequireChainSync: true,
+			}
+			if tc.numbered {
+				selector = NewAccountSelectorByNumber(scope, 0)
+				params.AccountName = ""
+				params.AccountNumber = new(uint32)
+			}
+
+			key := storeDerivationAccountPubKey(t)
+
+			var branch uint32
+			if tc.internal {
+				branch = 1
+			}
+
+			stored := make([]db.AddressInfo, 0, tc.count)
+
+			watched := make([]address.Address, 0, tc.count)
+			for index := range tc.count {
+				addr, script, pubKey := expectedStoreAddress(
+					t, key, db.WitnessPubKey, branch, index,
+				)
+				stored = append(stored, db.AddressInfo{
+					AddrType:          db.WitnessPubKey,
+					HasDerivationPath: true,
+					Branch:            branch,
+					Index:             index,
+					ScriptPubKey:      script,
+					PubKey:            pubKey,
+				})
+				watched = append(watched, addr)
+			}
+
+			deps.store.On("NewDerivedAddresses", t.Context(), params,
+				tc.count).Return(stored, nil).Once()
+			deps.chain.On("WatchAddrsFromTip", w.lifetimeCtx, watched).
+				Return(nil).Once()
+
+			// Act: Allocate through public admission, letting the handler
+			// finish persistence and watching before the result is published.
+			batch, err := w.NewBulkAddresses(
+				t.Context(), selector, tc.internal, tc.count,
+			)
+
+			// Assert: Every result retains its ordered destination and branch.
+			// Shared cleanup checks the single allocation and registration.
+			require.NoError(t, err)
+			require.Len(t, batch, int(tc.count))
+
+			for i := range batch {
+				require.Equal(t, watched[i], batch[i].Addr)
+				require.Equal(t, tc.internal, batch[i].Internal)
+			}
+		})
+	}
+}
+
+// TestNewBulkAddressesRejectsAdmission checks invalid requests and modern kvdb
+// without registering any expected Store or chain mutation.
+func TestNewBulkAddressesRejectsAdmission(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		count   uint32
+		invalid bool
+		kvdb    bool
+		wantErr error
+	}{
+		{
+			name:    "zero count",
+			count:   0,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "over maximum",
+			count:   MaxBulkAddressCount + 1,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "missing selector",
+			count:   1,
+			invalid: true,
+			wantErr: ErrInvalidParam,
+		},
+		{
+			name:    "unsupported kvdb",
+			count:   1,
+			kvdb:    true,
+			wantErr: ErrAccountOperationUnsupported,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange: Leave strict Store/chain mocks without expectations;
+			// any dependency call would fail this pre-mutation guard test.
+			w, _ := createTestWalletWithMocks(t)
+			if !tc.kvdb {
+				w.addrStore = nil
+			}
+
+			startLoadedWalletForTest(t, w)
+
+			selector := NewAccountSelectorByName(
+				waddrmgr.KeyScopeBIP0084, "batch",
+			)
+			if tc.invalid {
+				selector = AccountSelector{}
+			}
+
+			// Act: Submit the invalid count/selector or unsupported backend
+			// through the same public method used for successful allocation.
+			batch, err := w.NewBulkAddresses(
+				t.Context(), selector, false, tc.count,
+			)
+
+			// Assert: Admission refuses the call with no result. Strict mocks
+			// and shared cleanup prove no allocation or registration occurred.
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Nil(t, batch)
+		})
+	}
+}
