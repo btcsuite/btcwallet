@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/btcsuite/btcd/btcutil/v2/hdkeychain"
 )
 
 var (
@@ -83,9 +85,9 @@ type CreateDerivedAddressRow struct {
 }
 
 // NewDerivedAddressOps is the backend adapter the shared NewDerivedAddress
-// workflow uses.
+// and NewDerivedAddresses workflows use.
 //
-// The shared derived-address algorithm is intentionally ordered:
+// The single-address workflow is intentionally ordered:
 //   - reject a nil derivation callback before any backend step runs
 //   - load the owning account, mapping a miss to ErrAccountNotFound
 //   - resolve the optional BIP44 account number, enforcing the
@@ -94,6 +96,13 @@ type CreateDerivedAddressRow struct {
 //     the next index (with an overflow check), and derive the address
 //   - insert the address row and its derivation path
 //   - assemble the AddressInfo and attach the owning account metadata
+//
+// The batch workflow uses the same preflight checks, then collects the full
+// requested count before inserting any rows. Unavailable children are skipped
+// while advancing the counter. If the normal-child range ends before the batch
+// is complete, no rows are inserted, but every attempted index is consumed,
+// including valid candidates. The caller commits that progress before reporting
+// exhaustion.
 //
 // The adapter methods map directly to those stages so the shared helper keeps
 // the sequencing and invariants while each backend keeps its sqlc query types,
@@ -133,34 +142,7 @@ func NewDerivedAddressWithOps(ctx context.Context,
 			errNilAddressDerivationFunc)
 	}
 
-	key := AccountKeyFromParams(params)
-
-	account, err := ops.GetAccount(ctx, key)
-	if err != nil {
-		if errors.Is(err, ErrAccountNotFound) {
-			return nil, fmt.Errorf("account %q in scope %d/%d: %w",
-				key.AccountName, key.Purpose, key.CoinType, ErrAccountNotFound)
-		}
-
-		return nil, fmt.Errorf("get account: %w", err)
-	}
-
-	// A receiving request needs chain tracking. Enforce it using the account
-	// already loaded, while leaving internal allocation free of this promise.
-	if params.RequireChainSync && account.NoChainSync {
-		return nil, fmt.Errorf("%w: account %q has chain synchronization "+
-			"disabled", ErrAccountOperationUnsupported, key.AccountName)
-	}
-
-	// Non-derived accounts have a NULL account_number; their derivation uses
-	// AccountPubKey directly so a BIP44 number is not available.
-	accountNumValue, errAccount := DerivedAddressAccountNumber(
-		account.AccountNumber,
-	)
-
-	accountNumber, err := resolveAccountNumber(
-		account.IsDerived, accountNumValue, errAccount,
-	)
+	account, accountNumber, err := derivedAddressAccount(ctx, params, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +164,158 @@ func NewDerivedAddressWithOps(ctx context.Context,
 	}
 
 	return info, nil
+}
+
+// derivedAddressAccount resolves ownership and receiving policy before either
+// allocation path consumes children. Sharing this preflight preserves the
+// count-one account-shape checks and error context for batches as well.
+func derivedAddressAccount(ctx context.Context, params NewDerivedAddressParams,
+	ops NewDerivedAddressOps) (DerivedAddressAccount, *uint32, error) {
+
+	key := AccountKeyFromParams(params)
+
+	account, err := ops.GetAccount(ctx, key)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return account, nil, fmt.Errorf("account %q in scope %d/%d: %w",
+				key.AccountName, key.Purpose, key.CoinType, ErrAccountNotFound)
+		}
+
+		return account, nil, fmt.Errorf("get account: %w", err)
+	}
+
+	// A receiving request needs chain tracking. Enforce it using the account
+	// already loaded, while leaving internal allocation free of this promise.
+	if params.RequireChainSync && account.NoChainSync {
+		return account, nil, fmt.Errorf(
+			"%w: account %q has chain synchronization disabled",
+			ErrAccountOperationUnsupported, key.AccountName,
+		)
+	}
+
+	// Non-derived accounts have a NULL account_number; their derivation uses
+	// AccountPubKey directly so a BIP44 number is not available.
+	accountNumValue, errAccount := DerivedAddressAccountNumber(
+		account.AccountNumber,
+	)
+
+	accountNumber, err := resolveAccountNumber(
+		account.IsDerived, accountNumValue, errAccount,
+	)
+	if err != nil {
+		return account, nil, err
+	}
+
+	return account, accountNumber, nil
+}
+
+// NewDerivedAddressesWithOps derives a complete batch within the caller's write
+// transaction. Exhausted reports all attempted indexes to commit without rows,
+// including valid candidates from the incomplete batch; other errors require
+// rollback. The caller must discard all results on a commit error and must
+// never retry an ambiguous commit.
+func NewDerivedAddressesWithOps(ctx context.Context,
+	params NewDerivedAddressParams, count uint32, ops NewDerivedAddressOps,
+	deriveFn AddressDerivationFunc) ([]AddressInfo, bool, error) {
+
+	if deriveFn == nil {
+		return nil, false, errNilAddressDerivationFunc
+	}
+
+	account, number, err := derivedAddressAccount(ctx, params, ops)
+	if err != nil {
+		return nil, false, err
+	}
+
+	candidates, exhausted, err := derivedAddressCandidates(
+		ctx, params, count, account, number, ops, deriveFn,
+	)
+	if err != nil || exhausted {
+		return nil, exhausted, err
+	}
+
+	// Use count-one insertion and metadata assembly for every candidate.
+	// Any insert failure rolls back all rows and counter advances together.
+	addresses := make([]AddressInfo, 0, count)
+	for _, candidate := range candidates {
+		info, err := insertDerivedAddress(
+			ctx, candidate, number, account.WalletWatchOnly, ops,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+
+		err = ApplyAddressAccountMetadata(
+			info, account.AccountNumber, account.AccountName,
+			account.MasterFingerprint, account.Purpose, account.CoinType,
+			!account.IsDerived,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+
+		addresses = append(addresses, *info)
+	}
+
+	return addresses, false, nil
+}
+
+// derivedAddressCandidates collects children before inserting any address rows.
+// Separating this loop makes exhausted progress distinct from a partial batch
+// and retains the existing derivation callback and counter-locking mechanism.
+func derivedAddressCandidates(ctx context.Context,
+	params NewDerivedAddressParams, count uint32, account DerivedAddressAccount,
+	number *uint32, ops NewDerivedAddressOps,
+	deriveFn AddressDerivationFunc) (
+	[]CreateDerivedAddressRequest, bool, error) {
+
+	// The callback sees even invalid leaf indexes. Remember the last attempt
+	// to stop at the normal-child boundary without incrementing past it.
+	var lastIndex uint32
+
+	derive := func(ctx context.Context,
+		input AddressDerivationParams) (*DerivedAddressData, error) {
+
+		lastIndex = input.Index
+		if lastIndex >= hdkeychain.HardenedKeyStart {
+			return nil, ErrMaxAddressIndexReached
+		}
+
+		return deriveFn(ctx, input)
+	}
+
+	// Hold candidates until the requested count exists. Exhaustion must not
+	// persist a prefix; all attempted indexes, including valid ones, stay
+	// consumed so the counter cannot reuse unavailable children.
+	candidates := make([]CreateDerivedAddressRequest, 0, count)
+	for len(candidates) < int(count) {
+		addrType, branch, index, script, pubKey, err := derivedAddressInput(
+			ctx, params, account, number, ops, derive,
+		)
+		switch {
+		case err == nil:
+			candidates = append(candidates, CreateDerivedAddressRequest{
+				WalletID:     int64(params.WalletID),
+				AccountID:    account.AccountID,
+				AddrType:     addrType,
+				Branch:       branch,
+				Index:        index,
+				ScriptPubKey: script,
+				PubKey:       pubKey,
+			})
+
+		case errors.Is(err, ErrAddressChildUnavailable):
+			// The counter advances even though this child is not returned.
+		default:
+			return nil, false, err
+		}
+
+		if lastIndex == hdkeychain.HardenedKeyStart-1 {
+			break
+		}
+	}
+
+	return candidates, len(candidates) < int(count), nil
 }
 
 // createDerivedAddress prepares the derivation inputs, inserts the address
