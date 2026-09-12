@@ -119,6 +119,12 @@ type NewDerivedAddressOps interface {
 	// external counter is used.
 	NextIndex(ctx context.Context, accountID int64, change bool) (int64, error)
 
+	// AddressOwned reports whether the wallet already owns a script. Batch
+	// allocation uses this transaction-bound check to consume collisions
+	// without replacing existing address metadata.
+	AddressOwned(ctx context.Context, walletID int64,
+		scriptPubKey []byte) (bool, error)
+
 	// CreateDerivedAddress inserts the derived address row and its derivation
 	// path, returning the backend-independent identity fields.
 	CreateDerivedAddress(ctx context.Context,
@@ -294,6 +300,21 @@ func derivedAddressCandidates(ctx context.Context,
 		)
 		switch {
 		case err == nil:
+			owned, err := ops.AddressOwned(
+				ctx, int64(params.WalletID), script,
+			)
+			if err != nil {
+				return nil, false, fmt.Errorf(
+					"check address ownership: %w", err,
+				)
+			}
+
+			// The allocated index remains consumed when an existing row owns
+			// the script, preserving that row's metadata and secret material.
+			if owned {
+				break
+			}
+
 			candidates = append(candidates, CreateDerivedAddressRequest{
 				WalletID:     int64(params.WalletID),
 				AccountID:    account.AccountID,

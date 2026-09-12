@@ -32,6 +32,37 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 	return info, nil
 }
 
+// NewDerivedAddresses commits batches under the counter lock, skipping owned
+// scripts in the same transaction to preserve raw-import metadata.
+func (s *Store) NewDerivedAddresses(ctx context.Context,
+	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo, error) {
+
+	var (
+		addresses []db.AddressInfo
+		exhausted bool
+	)
+
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		var err error
+
+		addresses, exhausted, err = db.NewDerivedAddressesWithOps(
+			ctx, params, count, newDerivedAddressOps{q: qtx},
+			s.deriveAddress,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if exhausted {
+		return nil, db.ErrMaxAddressIndexReached
+	}
+
+	return addresses, nil
+}
+
 // newDerivedAddressOps adapts PostgreSQL sqlc queries to the shared
 // NewDerivedAddress workflow.
 type newDerivedAddressOps struct {
@@ -105,6 +136,30 @@ func (o newDerivedAddressOps) GetAccount(ctx context.Context,
 		AddrSchema:        addrSchema,
 		PubKey:            row.PublicKey,
 	}, nil
+}
+
+// AddressOwned implements db.NewDerivedAddressOps. The query uses the same
+// transaction as index allocation so a collision is consumed without
+// overwriting the existing address row.
+func (o newDerivedAddressOps) AddressOwned(ctx context.Context, walletID int64,
+	scriptPubKey []byte) (bool, error) {
+
+	_, err := o.q.GetAddressByScriptPubKey(
+		ctx, sqlc.GetAddressByScriptPubKeyParams{
+			WalletID:     walletID,
+			ScriptPubKey: scriptPubKey,
+		},
+	)
+	switch {
+	case err == nil:
+		return true, nil
+
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+
+	default:
+		return false, err
+	}
 }
 
 // NextIndex implements db.NewDerivedAddressOps.
