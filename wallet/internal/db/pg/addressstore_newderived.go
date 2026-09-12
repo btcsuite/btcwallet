@@ -32,6 +32,70 @@ func (s *Store) NewDerivedAddress(ctx context.Context,
 	return info, nil
 }
 
+// NewDerivedAddresses commits batches under the counter lock, skipping owned
+// scripts in the same transaction to preserve raw-import metadata.
+func (s *Store) NewDerivedAddresses(ctx context.Context,
+	params db.NewDerivedAddressParams, count uint32) ([]db.AddressInfo, error) {
+
+	// Derivation is optional for Stores used only for other operations.
+	// Reject a receiving allocation before opening a write transaction.
+	if s.deriveAddress == nil {
+		return nil, errors.New("address derivation callback is nil")
+	}
+
+	var (
+		addresses []db.AddressInfo
+		exhausted bool
+	)
+
+	err := s.execWrite(ctx, func(qtx *sqlc.Queries) error {
+		// Skip scripts already owned in this transaction without changing
+		// their rows or secrets; the shared loop consumes the collided child.
+		derive := func(ctx context.Context,
+			input db.AddressDerivationParams) (
+			*db.DerivedAddressData, error) {
+
+			data, err := s.deriveAddress(ctx, input)
+			if err != nil || data == nil {
+				return data, err
+			}
+
+			_, err = qtx.GetAddressByScriptPubKey(
+				ctx, sqlc.GetAddressByScriptPubKeyParams{
+					WalletID:     int64(params.WalletID),
+					ScriptPubKey: data.ScriptPubKey,
+				},
+			)
+			if err == nil {
+				return nil, db.ErrAddressChildUnavailable
+			}
+
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+
+			return data, nil
+		}
+
+		var err error
+
+		addresses, exhausted, err = db.NewDerivedAddressesWithOps(
+			ctx, params, count, newDerivedAddressOps{q: qtx}, derive,
+		)
+
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if exhausted {
+		return nil, db.ErrMaxAddressIndexReached
+	}
+
+	return addresses, nil
+}
+
 // newDerivedAddressOps adapts PostgreSQL sqlc queries to the shared
 // NewDerivedAddress workflow.
 type newDerivedAddressOps struct {
